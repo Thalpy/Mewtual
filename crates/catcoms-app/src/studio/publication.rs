@@ -13,15 +13,23 @@ pub(super) struct StudioSavedPacket {
 
 pub(crate) struct StudioSavedTransaction {
     pub(crate) view: Option<StudioView>,
+    pub(crate) preview: Option<StudioPreview>,
     pub(super) packets: Vec<StudioSavedPacket>,
     // Checked by the just-finished transaction, including actual absence. Never peer-supplied.
     pub(super) observed: Vec<(StudioTarget, u128)>,
 }
 impl StudioSavedTransaction {
+    fn read(self) -> Option<StudioRead> {
+        self.preview
+            .map(StudioRead::AwaitingTenureReceipt)
+            .or_else(|| self.view.map(StudioRead::Document))
+    }
+
     /// No publication or implicit watch change for metadata-only recovery controls.
     pub(crate) fn empty() -> Self {
         Self {
             view: None,
+            preview: None,
             packets: Vec::new(),
             observed: Vec::new(),
         }
@@ -40,8 +48,8 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
         &mut self,
         lease: &mut StudioVaultLease,
         reply: &mut StudioReply,
-        saved: StudioSavedTransaction,
-    ) -> Option<StudioView> {
+        mut saved: StudioSavedTransaction,
+    ) -> Option<StudioRead> {
         let clock = self.runtime_clock();
         let deadline = clock.monotonic_ms().saturating_add(2_000);
         // Successful Read/Save also establishes desired watches. Reconcile before returning so
@@ -56,13 +64,13 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
             };
             tokio::select! {
                 biased;
-                _ = reply.closed() => return saved.view,
-                _ = cancelled => return saved.view,
-                _ = clock.sleep(Duration::from_millis(2_000)) => return saved.view,
+                _ = reply.closed() => return saved.read(),
+                _ = cancelled => return saved.read(),
+                _ = clock.sleep(Duration::from_millis(2_000)) => return saved.read(),
                 _ = self.flush_studio_subscriptions() => {}
             }
         }
-        for packet in saved.packets {
+        for packet in std::mem::take(&mut saved.packets) {
             if reply.is_closed() || lease.is_cancelled() || clock.monotonic_ms() >= deadline {
                 break;
             }
@@ -81,6 +89,6 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
                 _ = self.sync.publish_local_studio_once(packet.target, packet.epoch_id, packet.sealed) => {}
             }
         }
-        saved.view
+        saved.read()
     }
 }

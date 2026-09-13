@@ -18,12 +18,14 @@ pub struct ProvisionalStudioSeedCompletion {
     scope: Scope,
 }
 pub struct ServerProvisionalStudioSeedPreparation {
+    clock: Arc<dyn catcoms_rt::Clock + Send>,
     inner: ProvisionalStudioSeedPreparation,
     scope: Scope,
 }
 pub struct ServerPreparedProvisionalStudioSeed {
     pub(super) inner: PreparedProvisionalStudioSeed,
     pub(super) scope: Scope,
+    pub(super) clock: Arc<dyn catcoms_rt::Clock + Send>,
 }
 impl<T: MeshTransport> ProvisionalStudioSeedAttempt<T> {
     pub async fn fetch(self) -> ProvisionalStudioSeedCompletion {
@@ -39,6 +41,7 @@ impl ServerProvisionalStudioSeedPreparation {
     pub fn prepare(self) -> Result<ServerPreparedProvisionalStudioSeed, AppError> {
         Ok(ServerPreparedProvisionalStudioSeed {
             inner: self.inner.prepare()?,
+            clock: self.clock,
             scope: self.scope,
         })
     }
@@ -102,6 +105,7 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
             .sync
             .complete_provisional_studio_seed(completed.inner)?
             .map(|inner| ServerProvisionalStudioSeedPreparation {
+                clock: self.runtime_clock(),
                 inner,
                 scope: completed.scope,
             }))
@@ -122,6 +126,17 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
     }
 }
 impl ServerPreparedProvisionalStudioSeed {
+    pub(crate) fn unconfirmed_projection(&self) -> &catcoms_replication::studio::StudioProjection {
+        self.inner.unconfirmed_projection()
+    }
+    pub(crate) fn unconfirmed_doc_id(&self) -> u128 {
+        self.inner.unconfirmed_doc_id()
+    }
+    pub(crate) fn unconfirmed_is_unexpired(&self) -> bool {
+        self.inner
+            .unconfirmed_is_unexpired(self.clock.monotonic_ms())
+    }
+
     pub fn tail_complete(&self) -> bool {
         self.inner.tail_complete()
     }

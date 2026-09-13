@@ -1,7 +1,6 @@
 //! A genuine post-succession join recycles the departed founder's low MLS leaf and changes
 //! ownership AGAIN. Held PIX bytes remain fetchable, but a former owner's checkpoint hint must
-//! not become current-owner installation authority. The ignored acceptance cases expose the
-//! missing provisional metadata read without relaxing that boundary.
+//! not become current-owner installation authority. Preview reads retain that boundary.
 use super::*;
 
 #[tokio::test]
@@ -17,13 +16,11 @@ async fn studio_actor_post_succession_joiner_fetches_closing_source_pixels_witho
 }
 
 #[tokio::test]
-#[ignore = "Gate 4: provisional reads of former-owner checkpoint hints are not implemented"]
 async fn studio_actor_post_succession_joiner_reads_open_history_provisionally() {
     newcomer(false, true).await;
 }
 
 #[tokio::test]
-#[ignore = "Gate 4: provisional reads of former-owner checkpoint hints are not implemented"]
 async fn studio_actor_post_succession_joiner_reads_closing_history_provisionally() {
     newcomer(true, true).await;
 }
@@ -396,9 +393,29 @@ async fn newcomer(closing: bool, require_preview: bool) {
             "metadata discovery must not invent pixel possession"
         );
     }
-    let provisional_read = save(&b, &b_store, StudioRequest::Read { target: target() })
+    let provisional_read = b
+        .studio_begin(StudioRequest::Read { target: target() })
         .await
-        .unwrap();
+        .unwrap()
+        .execute_read(StudioVaultLease::new(
+            b_store.clone().try_lock_owned().unwrap(),
+            SERVER,
+            (),
+        ))
+        .await
+        .unwrap()
+        .map(|read| match read {
+            crate::studio::StudioRead::AwaitingTenureReceipt(preview) => {
+                assert!(preview.delivery().is_current());
+                // Test-only snapshot for assertions after the native handoff has released.
+                preview
+                    .inspect(|epoch_id, projection| (epoch_id, projection.clone()))
+                    .unwrap()
+            }
+            crate::studio::StudioRead::Document(_) => {
+                panic!("a hint must never produce an ordinary view")
+            }
+        });
     {
         let guard = b_store.lock().await;
         assert_unconfirmed(
@@ -406,6 +423,24 @@ async fn newcomer(closing: bool, require_preview: bool) {
             guard.as_ref().unwrap(),
             &logical,
             &registry_before,
+        );
+    }
+    if require_preview {
+        b.clear_studio_previews();
+        let cleared = b
+            .studio_begin(StudioRequest::Read { target: target() })
+            .await
+            .unwrap()
+            .execute_read(StudioVaultLease::new(
+                b_store.clone().try_lock_owned().unwrap(),
+                SERVER,
+                (),
+            ))
+            .await
+            .unwrap();
+        assert!(
+            cleared.is_none(),
+            "lock/reset must clear the actual actor preview before the next read"
         );
     }
     let refused = title(100, "a preview cannot authorize this Apply");
@@ -477,19 +512,14 @@ async fn newcomer(closing: bool, require_preview: bool) {
         Some(pix)
     );
     if require_preview {
-        // This is an opt-in, currently failing gate-acceptance oracle. Even once a preview is
-        // implemented, the assertions above still prohibit promoting a hint into authority.
+        // The actor/native read type explicitly awaits tenure; all authority and byte guards
+        // above remain unchanged after the real signed tail has entered the volatile preview.
         let read =
             provisional_read.expect("Gate 4 requires a provisional read of the hinted history");
-        assert_eq!(read.epoch_id, successor_id);
-        assert_eq!(read.projection, saved.projection);
-        assert_title(
-            &read.projection,
-            new_owner,
-            &tail,
-            "pixels after owner succession",
-        );
-        assert_frame(&read.projection, &frame, old_owner, &cid, fetched.len());
+        assert_eq!(read.0, successor_id);
+        assert_eq!(read.1, saved.projection);
+        assert_title(&read.1, new_owner, &tail, "pixels after owner succession");
+        assert_frame(&read.1, &frame, old_owner, &cid, fetched.len());
     }
 }
 

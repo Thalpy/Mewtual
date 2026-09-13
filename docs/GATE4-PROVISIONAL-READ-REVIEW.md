@@ -1,5 +1,24 @@
 # Gate 4: post-succession newcomer review
 
+**Actor/native preview checkpoint (2026-09-13, implementation awaiting review).** TAIL-TEST-001
+is closed by the user's PASS of `2a1814e` against `47bf098`. The existing receiver now schedules
+provisional discovery, seed fetching and finite signed tails outside vault custody; cold workers
+hold their process permits through cancellation and release them on completion. Ready results
+and native delivery share the original seed reservation. Native Read/List expose a separate
+`awaitingTenureReceipt: true` result with `provisional: true`; installed sources take precedence,
+and ordinary Apply cannot use a preview epoch. Native uses request/session/instance checks plus
+a bounded actor handoff for final conversion. Lock clears the volatile cache. No frontend layout
+or editor implementation is changed.
+
+The two previously ignored newcomer preview cases now pass, together with both known-CID PIX
+fetch/reopen cases. Runtime custody tests cover three real ready previews, native delivery retaining
+a slot, authoritative Hint release, and handoff cancellation/expiry. Exact final checks are in
+HANDOVER. This does not yet close the combined owner-reachability/competing-installation regression
+or all of block 1. Blocks 2?4 remain durable Closing overlays/repeated tenure, runtime signed repair,
+and combined Gate 4 acceptance. Earlier statements below describing missing actor/native delivery
+record the boundaries of those earlier checkpoints, not the current implementation.
+
+
 Status: user re-review of `7393165` passed. TEST-001 and TEST-002 are closed for the tests and
 instrumentation; PR-001 is closed as a design finding. No further closure changes were requested.
 The reviewer inspected source and did not execute Cargo. The approved provisional-read path

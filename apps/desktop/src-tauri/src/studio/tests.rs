@@ -7,6 +7,38 @@ mod receiver;
 mod recovery;
 mod recovery_restore;
 
+#[tokio::test]
+async fn native_studio_superseded_view_is_rejected_after_conversion() {
+    let (_root, state, actor, task, drain) = fixture().await;
+    let target = StudioTarget::Index {
+        channel: channel_id(&channel()).unwrap(),
+    };
+    let result = invoke_custody(
+        &state,
+        7,
+        InvokeRequest::Document(StudioRequest::Read { target }),
+        |response| {
+            let InvokeResponse::Document(Some(read)) = response else {
+                panic!("empty Index read");
+            };
+            let value = read_view(read)?;
+            // Admit the next native request after the old conversion has actually succeeded.
+            // Dropping it cannot revive the older response; the session/actor remain unchanged.
+            let newer = requests::ViewRequest::begin(&state, 7, target);
+            assert!(newer.is_current());
+            Ok(value)
+        },
+    )
+    .await;
+    assert_eq!(
+        result.unwrap_err(),
+        "Studio view request was superseded; refresh"
+    );
+    actor.shutdown().await;
+    task.await.unwrap();
+    drain.await.unwrap();
+}
+
 fn rng() -> ChaCha20Rng {
     ChaCha20Rng::seed_from_u64(81)
 }

@@ -42,17 +42,18 @@ impl CatchupRuntime {
             peer,
         });
         self.checkpoint_retry = 0;
-        self.registry_attempts = 1;
     }
     pub(in crate::studio::receiver) fn take_binding(&mut self) -> Option<(StudioTarget, u128)> {
         self.binding.take()
     }
     pub(super) fn retry_discovery(&mut self, now: u64) {
         self.checkpoint = None;
-        self.discovery_plan = None;
-        self.after_registry = None;
+        // Registry failure/expiry yields the paired Studio target; Studio failure yields the
+        // next watched target. Retrying one unresponsive key must not reset the rotation.
+        self.discovery_plan = self.after_registry.take();
         self.checkpoint_sealed = false;
-        self.discovery_needed = self.target;
+        self.discovery_needed = None;
+        self.checkpoint_retry = now.saturating_add(5_000);
         self.next_at = now.saturating_add(5_000);
     }
     /// A verified receipt is saved even before its seed is available. A fetched seed has
@@ -88,7 +89,6 @@ impl CatchupRuntime {
         }
         if let Some(completed) = self.head_result.take() {
             let target = completed.target();
-            #[cfg(test)]
             let peer = completed.peer;
             let registry = matches!(target, CheckpointTarget::Registry(_));
             let result = server.complete_checkpoint_discovery(store, id, *completed);
@@ -119,22 +119,18 @@ impl CatchupRuntime {
                             },
                         ));
                     }
-                    self.next_at = now.saturating_add(5_000);
-                }
-                _ if registry && self.registry_attempts < 3 => {
-                    // Cold verification may outlive the original request. Keep its checked
-                    // preparation useful via a NEW nonce/charge, never extend an expired proof.
-                    // Optional Registry bootstrap must not indefinitely block the known key.
-                    self.registry_attempts += 1;
-                    if let Some(next) = &self.after_registry {
-                        self.discovery_plan = Some(DiscoveryPlan {
-                            mount: next.mount.clone(),
-                            server: next.server,
-                            peer: next.peer,
+                    if let (CheckpointTarget::Studio(target), Some(inner)) =
+                        (target, &self.discovery_watch)
+                    {
+                        let watch = ServerStudioWatch {
+                            inner: inner.copy_binding(),
+                            mount: store.registry_mount(),
+                            server: id,
                             target,
-                        });
-                        self.checkpoint_retry = now.saturating_add(5_000);
+                        };
+                        self.preview.queue(&watch, peer);
                     }
+                    self.next_at = now.saturating_add(5_000);
                 }
                 _ if registry => self.discovery_plan = self.after_registry.take(),
                 _ => self.retry_discovery(now),

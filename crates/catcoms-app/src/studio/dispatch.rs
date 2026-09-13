@@ -7,11 +7,11 @@ pub(crate) enum StudioDispatch {
     Control(StudioControlRequest),
 }
 pub(crate) enum StudioResponse {
-    Document(Option<StudioView>),
+    Document(Option<StudioRead>),
     Control(StudioControlResponse),
 }
 pub(crate) enum StudioReply {
-    Document(oneshot::Sender<Result<Option<StudioView>, String>>),
+    Document(oneshot::Sender<Result<Option<StudioRead>, String>>),
     Control(oneshot::Sender<Result<StudioControlResponse, String>>),
 }
 impl StudioReply {

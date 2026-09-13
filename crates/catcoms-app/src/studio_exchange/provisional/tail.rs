@@ -14,6 +14,7 @@ pub struct ProvisionalStudioTailCompletion {
     scope: seed::Scope,
 }
 pub struct ServerProvisionalStudioTailPreparation {
+    clock: Arc<dyn catcoms_rt::Clock + Send>,
     inner: ProvisionalStudioTailPreparation,
     scope: seed::Scope,
 }
@@ -31,6 +32,7 @@ impl ServerProvisionalStudioTailPreparation {
     pub fn prepare(self) -> Result<ServerPreparedProvisionalStudioSeed, AppError> {
         Ok(ServerPreparedProvisionalStudioSeed {
             inner: self.inner.prepare()?,
+            clock: self.clock,
             scope: self.scope,
         })
     }
@@ -74,6 +76,7 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
             .sync
             .complete_provisional_studio_tail(completed.inner)?
             .map(|inner| ServerProvisionalStudioTailPreparation {
+                clock: self.runtime_clock(),
                 inner,
                 scope: completed.scope,
             }))

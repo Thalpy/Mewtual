@@ -7,6 +7,8 @@ use catcoms_replication::Admission;
 use std::collections::VecDeque;
 use std::sync::Arc;
 mod catchup;
+#[cfg(test)]
+pub(crate) use catchup::PreviewHarness;
 mod replay;
 pub(crate) use catchup::StudioBackgroundResult;
 
@@ -24,6 +26,10 @@ pub(crate) struct StudioReceiver {
     replay_turn: bool,
 }
 impl StudioReceiver {
+    pub(crate) fn clear_previews(&mut self) {
+        self.catchup.preview = Default::default();
+    }
+
     #[cfg(test)]
     pub(crate) fn observe_hints_for_test(
         &mut self,
@@ -35,7 +41,7 @@ impl StudioReceiver {
     }
     /// Recovery writes deliberately reuse ordinary Save's watch, storage and one-shot
     /// publication path. Read-only controls carry no fake document or saved packets.
-    pub(crate) fn control<T: MeshTransport, R: CryptoRngCore>(
+    pub(crate) fn control<T: MeshTransport + 'static, R: CryptoRngCore>(
         &mut self,
         server: &mut Server<T, R>,
         store: &mut ServerStore,
@@ -126,7 +132,7 @@ impl StudioReceiver {
         receiver.catchup.registry_cache_for_test(provider, until);
         receiver
     }
-    fn catchup_step<T: MeshTransport, R: CryptoRngCore>(
+    fn catchup_step<T: MeshTransport + 'static, R: CryptoRngCore>(
         &mut self,
         server: &mut Server<T, R>,
         store: &mut ServerStore,
@@ -138,12 +144,12 @@ impl StudioReceiver {
             // The old subscription and queued concrete-epoch packets are revoked together.
             self.observe(server, store, id, target, epoch)?;
         }
-        Ok(updated)
+        Ok(updated.or_else(|| self.catchup.preview.take_notice()))
     }
     /// The same fair background turn services catch-up and at most one own replay operation.
     /// Sustained gossip must not postpone recovery indefinitely, and replay must not steal a
     /// source that a fetched page/seed still needs.
-    fn background_step<T: MeshTransport, R: CryptoRngCore>(
+    fn background_step<T: MeshTransport + 'static, R: CryptoRngCore>(
         &mut self,
         server: &mut Server<T, R>,
         store: &mut ServerStore,
@@ -242,7 +248,7 @@ impl StudioReceiver {
 
     /// Executed only inside the same off-executor Server/vault/native lease as ordinary Save.
     /// A busy/locked caller never reaches this method; one pass consumes at most one packet.
-    pub(crate) fn run<T: MeshTransport, R: CryptoRngCore>(
+    pub(crate) fn run<T: MeshTransport + 'static, R: CryptoRngCore>(
         &mut self,
         server: &mut Server<T, R>,
         store: &mut ServerStore,
@@ -263,9 +269,11 @@ impl StudioReceiver {
             return Err(invalid("Studio receive mount or numeric server changed"));
         }
         self.catchup.lifecycle(server, store, id);
+        self.catchup.preview.maintain(server, store, id);
         let mls = server.sync.with_registry_context(|g, _, _, _| g.epoch());
         self.replay.lifecycle(store, id, mls);
         if let Some(request) = request {
+            let read_target = (!request.changes_state()).then(|| request.target());
             let updated = request.changes_state().then(|| request.target());
             let result = server.studio_transaction_with_publication(store, id, request);
             if let Some(target) = updated {
@@ -281,7 +289,7 @@ impl StudioReceiver {
                     },
                 );
             }
-            let saved = result?;
+            let mut saved = result?;
             // Only explicit successful access retries a failed/over-budget background pass.
             // More inbound traffic cannot repeatedly restart expensive failed disk work.
             self.paused = false;
@@ -294,10 +302,30 @@ impl StudioReceiver {
                     tracing::warn!("Studio watch admission unavailable; saved state unchanged");
                 }
             }
+            if let Some(target) = read_target {
+                // An absent Index's synthetic empty epoch zero must not hide a ready preview.
+                // A stored source always wins, including a stored but empty document.
+                if self
+                    .catchup
+                    .preview
+                    .read(server, store, id, target)
+                    .is_some()
+                {
+                    let absent = server.sync.with_registry_context(|g, d, _, _| {
+                        store
+                            .load_studio_epoch(id, g, target, d)
+                            .map(|source| source.is_none())
+                    })?;
+                    if absent {
+                        saved.preview = self.catchup.preview.read(server, store, id, target);
+                    }
+                }
+            }
             return Ok((saved, updated));
         }
         let empty = || StudioSavedTransaction {
             view: None,
+            preview: None,
             packets: vec![],
             observed: vec![],
         };

@@ -85,6 +85,17 @@ impl ProvisionalStudioSeedPreparation {
     }
 }
 impl PreparedProvisionalStudioSeed {
+    /// Unconfirmed data only; runtime delivery must separately fence current lifecycle.
+    pub fn unconfirmed_projection(&self) -> &StudioProjection {
+        self.seed.projection()
+    }
+    pub fn unconfirmed_doc_id(&self) -> u128 {
+        self.seed.doc_id()
+    }
+    pub fn unconfirmed_is_unexpired(&self, now: u64) -> bool {
+        now < self.hint.expires
+    }
+
     /// A finite authenticated provider prefix has been checked, not proof of a current owner.
     pub fn tail_complete(&self) -> bool {
         self.tail.complete

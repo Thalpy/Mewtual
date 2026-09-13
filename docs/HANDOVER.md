@@ -10,6 +10,68 @@ and ranks the live hazards in that path.
 
 ## Status (latest entry: 2026-09-13)
 
+- **Gate 4 actor scheduling and native previews (2026-09-13; awaiting adversarial review).**
+  The receiver now queues a bounded target retry when authoritative discovery yields a Studio
+  Hint, releases that discovery's reservation, then separately prepares provisional head/seed/tail
+  jobs. Network waits and cold parsing leave native vault custody; generation fencing discards
+  delayed results after reset or replacement. Ready previews share the original retained seed
+  slot with native delivery, release parser permits, and expire at the original discovery deadline.
+  A separate three-permit subset inside the existing four process parser permits also leaves room
+  for authoritative preparation. Duplicate triggers preserve queue order. Authoritative work has
+  priority; Registry failure yields its paired Studio target, and failed Studio discovery advances
+  watched-target rotation. Ready previews yield for authoritative refresh after 30 seconds.
+
+  `StudioReady::execute_read` returns `StudioRead::Document` or the distinct
+  `StudioRead::AwaitingTenureReceipt(StudioPreview)`. The compatibility `execute` API still returns
+  ordinary views. Native Read/List serialize `awaitingTenureReceipt: true` and `provisional: true`
+  for preview content, without a current phase/publication claim or any new confirmed flag.
+  Stored sources take precedence, including empty ones; an absent Index's synthetic empty view
+  does not mask an available preview. No hint creates an epoch source, pointer or durable journal.
+  Native view-request generations suppress stale conversion results. A cancellable five-second
+  handoff retains the actor's checked state through native conversion/final fences after the vault
+  lease is dropped. Expiry/cancellation revokes delivery but does not refund a still-owned seed.
+  Explicit UI lock signals preview reset without awaiting actor command capacity; late results
+  from the old generation are discarded. Frontend files/layout were not changed.
+
+  Local validation uses Rust 1.89 with `_LINK_=/DEBUG:NONE`, `CARGO_INCREMENTAL=0` and:
+  `cargo test --locked -j 4 --config 'profile.test.package.catcoms-app.debug=0'
+  -p catcoms-app --lib FILTER -- --test-threads=4`.
+  The 16 `studio_exchange::tests::succession::` cases pass (145.39s), including both previously
+  ignored preview cases and the two known-CID PIX fetch/reopen cases. Seven
+  `studio_exchange::tests::unopened::` cases pass (72.91s); four
+  `studio::receiver::catchup::tests` pass (37.11s). After adding the reset fence, all four
+  `studio_actor_post_succession_joiner_` cases pass again (24.02s), including clearing an actual
+  actor preview before the next read. Four `studio_preview_` runtime/custody tests pass (5.07s):
+  real head/seed/parse/tail/parse jobs for three ready Index/art previews; original-slot retention
+  through late native delivery and authoritative Hint release; paused actual blocking-worker
+  cancellation/expiry; handoff cancellation, timeout, seed expiry and last-copy release; and
+  absent-Index fallback with installed-source precedence. Fixture parser pools are private to
+  avoid interference from parallel actor tests; they use the same scheduling and worker code.
+  Logs: `logs/gate4-preview-{succession,unopened,catchup,newcomers,runtime}-final.log`.
+  App/sync library/test Clippy and root/native formatting pass.
+
+  Local native Cargo checking stopped before compilation because uncached crates (including
+  `image`) could not be fetched through the restricted network. `.github/workflows/studio-native.yml`
+  runs native Studio regressions on GitHub independently of frontend packaging/strict lint gating;
+  it preserves the existing CI workflow. The previous head's strict CI already failed on the
+  app queue-kind test and unused future APIs in `security_intent.rs`; no full-CI pass is claimed.
+  Native execution status belongs to that workflow, not the local app results above.
+
+  This is meaningful block 1 implementation, not Gate 4 completion. The combined regression with
+  an owner becoming reachable without MLS churn and competing authoritative Studio/Registry
+  installations under three preview/cancelled-owner slots still needs completion. Durable Closing
+  overlays/repeated-tenure evidence, runtime signed repair and combined gate acceptance remain.
+  The next review should focus on the actor/native handoff, current-scope and generation fencing,
+  capacity lifetime, scheduling priority, trust-state serialization and the acceptance assertions.
+
+
+- **TAIL-TEST-001 closed; actor/native preview integration in progress (2026-09-13).**
+  The user's re-review passes `2a1814efc9fa1f22aed3c7ca5bbed627ae92f5d6` against
+  `47bf09860accb3e8c2bbba5eb72d2b4d8d05d26c`, with no further changes required.
+  The reviewer inspected the fixture and recorded validation, without rerunning Cargo or the
+  mutation. This closes the test finding only. Work now continues on scheduling and native
+  previews; Gate 4 remains open.
+
 - **Gate 4 signed-tail review and TAIL-TEST-001 (2026-09-13).** The user-provided review accepts
   `47bf09860accb3e8c2bbba5eb72d2b4d8d05d26c` against `b3e54dc493d46ea7663533244561ababfc569ad4`
   with no blocking production defect. The previous canonical-encoding P3 is closed. The reviewer

@@ -182,6 +182,25 @@ Remaining for Gate 4: running-app succession, signed fault/repair, and full-gate
 
 #### Gate 4 progress audit (2026-09-13)
 
+**Actor/native preview checkpoint (2026-09-13, implementation awaiting review).** TAIL-TEST-001
+is closed by the user's PASS of `2a1814e` against `47bf098`. The existing receiver now schedules
+provisional discovery, seed fetching and finite signed tails outside vault custody; cold workers
+hold their process permits through cancellation and release them on completion. Ready results
+and native delivery share the original seed reservation. Native Read/List expose a separate
+`awaitingTenureReceipt: true` result with `provisional: true`; installed sources take precedence,
+and ordinary Apply cannot use a preview epoch. Native uses request/session/instance checks plus
+a bounded actor handoff for final conversion. Lock clears the volatile cache. No frontend layout
+or editor implementation is changed.
+
+The two previously ignored newcomer preview cases now pass, together with both known-CID PIX
+fetch/reopen cases. Runtime custody tests cover three real ready previews, native delivery retaining
+a slot, authoritative Hint release, and handoff cancellation/expiry. Exact final checks are in
+HANDOVER. This does not yet close the combined owner-reachability/competing-installation regression
+or all of block 1. Blocks 2?4 remain durable Closing overlays/repeated tenure, runtime signed repair,
+and combined Gate 4 acceptance. Earlier statements below describing missing actor/native delivery
+record the boundaries of those earlier checkpoints, not the current implementation.
+
+
 Most rotation/recovery plumbing is connected; the gate remains unaccepted. The rows below
 describe observable boundaries, not equal portions of work or a percentage of time remaining.
 The table audits the implementation checkpoints; fresh test evidence follows it. Full-gate suites and

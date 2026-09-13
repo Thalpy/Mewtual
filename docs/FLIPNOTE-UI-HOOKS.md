@@ -1,82 +1,25 @@
 # Flipnote UI hook guide
 
-Last checked: 2026-09-13; user review passed discovery `0b32bad`, interruption `2f5a8a0`
-and seed transport/typed inspection `b3e54dc`, plus signed tails `47bf098`.
-TAIL-TEST-001 is corrected and mutation-checked. Native previews remain pending.
-Behavioral checkpoint: `39ceb76`
-(`fix(studio): bound the recovery hold and make replay slot-order proof`). Owner rotation and recovery
-inspection landed in `cbed5b7`; recovery controls, own-intent replay and settlement events are
-committed in `ccddd23`, not worktree-only; the eviction grace is now actually enforced and replay
-is slot-order independent as of `39ceb76`. Frozen-owner takeover core/store paths also landed
-in `dba52e5`. Two actor tests in `d7ea514` cover header-only Flipnote takeover from
-Open/Closing epoch zero after restart, including recovery and Registry pointer persistence;
-the source review requested stronger Save/refusal assertions (SUC-001/SUC-002). Both revised
-cases pass and reject the review's counterexamples. The re-review closes both findings with
-no further code changes requested. These assertion changes add no native hook or production behavior.
-The current slice expands this to eight Index/Flipnote Open/Closing cases, including an
-installed old-owner checkpoint and editing through a newly restored actor after takeover.
-All eight cases pass; the user accepted `e3f6669`. This adds backend evidence without changing callable
-commands, events or UI layout. Repeated owner changes, post-succession joining/PIX availability,
-signed repair and full Gate 4 acceptance
-remain pending.
-The user accepted `48fcc2e` for ownership transitions and known-CID byte persistence, while
-requesting PR-001 changes to the proposed preview capacity and TEST-001/TEST-002 acceptance
-assertions. The revised proposal reserves authoritative capacity and permits preview eviction;
-generation fencing and lower-layer keepalives are explicit. TEST-001 now compares the Registry
-source and both documents' journals after discovery, Read, refused Apply and reopen. TEST-002
-requires a bounded observation of the authenticated completed hint with exact provider/receipt.
-These are test observations, not events or callable UI hooks. The user re-review of `7393165`
-closes TEST-001/TEST-002 and PR-001 (design only), with no further closure changes requested.
-The capacity checkpoint adds a shared three-of-four provisional reservation and exercises
-existing authenticated seed paths alongside it. It adds no preview result, confirmation field,
-native command or event. Scheduler, lifecycle and provisional-read integration remain pending.
-Refused-Apply guards cover specified document/journal state; server snapshot writes may still occur.
-The user review of `1c90c41` passed without requested changes. The next discovery checkpoint
-connects provisional reservations to authenticated head requests and opaque candidate metadata.
-Its sync/app inspection seam checks the original watch, request, membership, provider and
-mount/server bindings. It supplies no seed, Studio view, native command or confirmation field.
-Receipt signer/tenure claims remain unverified. Preview fetch/parsing, actor scheduling and late
-native delivery are still pending; this metadata inspection seam is not a renderer hook.
-The adapters are currently exercised directly; the actor receiver does not schedule them yet.
-The independent successor-installation slice adds four passing actor tests covering eight
-failures before/after recovery and successor writes. They require fresh-mount resume of the
-exact receipt, preserved recovery, Registry pointer completion and editing after another restart.
-These are test-only I/O hooks and accepted backend evidence, with no new callable hook,
-returned field or UI layout change. The user accepted both bounded checkpoints with no required
-changes; the reviewer inspected source without running Cargo. They do not claim process-abort
-or power-loss coverage. The current seed slice adds one-shot member-authenticated fetching and
-detached Index/Flipnote validation, retaining the hint's original deadline and capacity through
-the parsed result. Its scoped app inspection returns unconfirmed typed content only. Receipt
-self-signature verifies the named key, not its claimed owner tenure or seed authors. Canonical
-Read, Apply, journals and pointers remain unchanged; no native preview or confirmation field
-is callable yet. Tail validation, actor scheduling and delivery still need integration.
-The seed review found no blocking code defect. Its optional P3 follow-up is implemented: a
-raw-valid, typed-readable seed with noncanonical operation order is rejected, and removing the
-final encoding comparison makes the regression fail. Restored source passes.
-The current tail slice adds bounded, current-member signed page fetching and detached typed
-replay over the unconfirmed seed. Its app adapters retain the original mount/server/watch,
-membership and deadline checks. `tail_complete()` means a checked finite provider prefix;
-it supplies no tenure confirmation. These adapters are still outside the actor scheduler and
-native read path. No new native command, event, confirmation field or frontend change is callable.
-The user review accepts `47bf098`'s bounded implementation and closes the previous canonical-
-encoding P3. Its new P3, TAIL-TEST-001, identified a negative fixture that failed at decryption
-before reaching the intended inner-document check. The corrected test signs an operation for B
-but pads/encrypts it with A's key and outer routing, proves successful decryption/signature
-verification, and requires `EpochScope` during preparation. It fails when only the inner-ID
-guard is removed. This follow-up changes tests and documentation only, with no hook change.
-Authoritative and provisional head requests share one latest
-attempt per target, so the future scheduler must coordinate them.
-A direct A-to-B-to-A rejoin also encounters the Unknown-tenure dependency described below:
-returning with the same owner key does not establish the start of its new tenure.
-The joining fixture exposed an additional owner change: a new invitee can reuse the removed
-founder's low MLS leaf. The newcomer then has Unknown tenure and cannot load the previous owner's
-checkpoint through the current read seam. Two cases pass for known-CID PIX fetch and offline reopen;
-the provisional metadata cases remain explicit expected failures. The proposed fallback and its
-unconfirmed-history signal are in [the review note](GATE4-PROVISIONAL-READ-REVIEW.md). They are not
-callable hooks yet. No existing `provisional: true` field supplies that missing confirmation state.
-This is the maintained frontend integration map, not a replacement UI design. The user's
-canonical HTML/mockups remain authoritative for layout and interaction. Update this guide in
-the same slice that adds or changes a native command, event or returned state.
+Last checked: 2026-09-13. Actor scheduling and native preview delivery are implemented in the
+current checkpoint and awaiting adversarial review. TAIL-TEST-001 is closed by the user's PASS
+for `2a1814e` against `47bf098`; no further changes were required for that finding.
+
+The actor now schedules the reviewed provisional head, seed and signed-tail adapters through
+its detached job queue. A ready preview owns its shared seed reservation, releases its parser
+permit, and remains separate from installed Studio history. The two former-owner newcomer
+preview cases are enabled and pass alongside the two known-CID PIX fetch/reopen cases.
+Local native checking requires uncached dependencies; the focused Studio native workflow validates
+the native workspace on GitHub.
+See [HANDOVER](HANDOVER.md) for exact commands and current validation status.
+
+Gate 4 remains open. Remaining acceptance includes competing authoritative Studio/Registry
+installations under preview/cancellation pressure and owner reachability changes without MLS
+churn, then durable Closing overlays/repeated tenure, runtime signed repair and combined review.
+The accepted foundations and earlier review closures are recorded in
+[the provisional review note](GATE4-PROVISIONAL-READ-REVIEW.md) and HANDOVER.
+
+This guide describes native contracts. The user's frontend and visual design remain independently
+owned; the in-memory Studio editor is not connected end to end by this backend checkpoint.
 
 ## Available now
 
@@ -88,6 +31,46 @@ forwarding are in [lib.rs](../apps/desktop/src-tauri/src/lib.rs). These are real
 paths, not fixture functions. The current frontend `studio-store.ts` is still an in-memory
 editor model; its presence does not mean it calls these commands.
 
+`studio_list` and `studio_read` can now return a distinct unconfirmed-history result:
+
+```json
+{
+  "v": 1,
+  "epochId": "<32 lowercase hex>",
+  "epoch": "<decimal>",
+  "channel": "<decimal>",
+  "provisional": true,
+  "awaitingTenureReceipt": true,
+  "content": { "kind": "flipnote" }
+}
+```
+
+`content` uses the existing complete Index/Flipnote projection schema, including conflicts,
+claimed authors, frame CIDs and declared byte lengths. The example abbreviates that content.
+This result has no current `phase` or `publication` claim. Display it as read-only and awaiting
+a tenure receipt. Its `epochId` cannot authorize ordinary Apply; durable overlays remain pending.
+An installed source takes precedence. An absent Index's synthetic empty epoch zero does not hide
+a ready preview. Ordinary view fields remain unchanged; there is no new `confirmed` flag.
+
+A preview is eligible only after a finite authenticated tail finishes. That does not establish
+owner tenure, historical attribution or completeness beyond the returned provider prefix. Reads
+never create canonical sources, Registry pointers or durable intent/recovery/owner journals.
+PIX fetching still uses the existing bounded CID API and does not imply local possession.
+
+The original discovery lifetime remains 60 seconds. The receiver retries authoritative discovery
+on its existing paced schedule, with a ready preview yielding for refresh after 30 seconds.
+`studio-updated` also invalidates a preview when it becomes ready, expires or is evicted. Re-read
+and accept absence after eviction. Do not retain an undisclosed projection cache to hide it.
+Lock signals the actor to clear volatile previews; mount, server, watch and membership changes
+also invalidate use. Keep renderer request/navigation/session generations and discard stale
+results even after IPC has delivered them.
+
+Native additionally suppresses a superseded request for the same target after JSON conversion.
+For a preview it holds a cancellable, at-most-five-second actor handoff across conversion and
+final native fences, after releasing the vault lease. This keeps the checked actor state stable
+without a lease across network or cold parsing. Timeout suppresses delivery; the seed reservation
+stays charged until every actual native/worker/transport owner releases its data.
+
 Tauri invoke argument names are camelCase. `server` is the existing local numeric server id,
 not the MLS group id. `channel` is a canonical decimal string; do not convert a channel u128
 through a JavaScript Number. Object, frame and nonce ids are 32 lowercase hex characters;
@@ -96,8 +79,8 @@ are 64 lowercase hex. A four-byte display fingerprint is never an authority key.
 
 | UI action | Native command and invoke arguments | Result |
 |---|---|---|
-| Load sidebar | `studio_list({server, channel})` | Index view below; a missing local file yields an empty epoch-zero Index view |
-| Open flipnote | `studio_read({server, channel, object})` | Flipnote view, or `null` for locally absent epoch zero |
+| Load sidebar | `studio_list({server, channel})` | Installed Index view, awaiting-tenure preview, or an empty epoch-zero Index view if neither exists |
+| Open flipnote | `studio_read({server, channel, object})` | Installed Flipnote view, awaiting-tenure preview, or `null` if neither exists |
 | New flipnote | `studio_create({server, channel, object, nonce, title, createdAtMs})` | Flipnote view after durable local create/index work |
 | Edit art/metadata | `studio_apply({server, channel, object, epochId, nonce, body})` | Updated flipnote view |
 | Edit sidebar entry | `studio_apply_index({server, channel, epochId, nonce, body})` | Updated Index view |

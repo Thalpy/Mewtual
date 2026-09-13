@@ -1,9 +1,12 @@
 //! Nonvisual Studio IPC. Ready first; all subsequent lock acquisition is fail-fast to avoid
 //! parking the actor behind native work that itself needs that actor (lock cleanup/persistence).
 use super::*;
-use catcoms_app::studio::{types::*, EpochPhase, StudioRequest, StudioVaultLease, StudioView};
+use catcoms_app::studio::{
+    types::*, EpochPhase, StudioRead, StudioRequest, StudioVaultLease, StudioView,
+};
 use serde_json::{json, Value};
 pub(crate) mod recovery;
+mod requests;
 pub(crate) mod settlement;
 
 enum InvokeRequest {
@@ -15,7 +18,7 @@ enum InvokeReady {
     Control(catcoms_app::studio::StudioControlReady),
 }
 enum InvokeResponse {
-    Document(Option<StudioView>),
+    Document(Option<StudioRead>),
     Control(catcoms_app::studio::StudioControlResponse),
 }
 
@@ -77,7 +80,7 @@ async fn invoke(
         server,
         InvokeRequest::Document(request),
         |response| match response {
-            InvokeResponse::Document(response) => response.map(view).transpose(),
+            InvokeResponse::Document(response) => response.map(read_view).transpose(),
             _ => Err("mismatched Studio response".into()),
         },
     )
@@ -98,6 +101,14 @@ async fn invoke_custody<V>(
     let generation = unlocked_ui_session_generation(state).await?;
     // Reuse the existing four bounded native operation slots and cancellation-on-lock seam.
     let (slot, signal) = claim_internal_inline_download(state)?;
+    let view_request = match &request {
+        InvokeRequest::Document(request) => Some(requests::ViewRequest::begin(
+            state,
+            server,
+            request.target(),
+        )),
+        _ => None,
+    };
     let (actor, instance) = actor_instance_of(state, server).await?;
     let mut cancellation = RequestCancellation::new(signal, Some(slot.request_keepalive()));
     let clock = SystemClock;
@@ -115,8 +126,14 @@ async fn invoke_custody<V>(
     // After lease transfer the finite worker owns ALL fences, even if this invoke is dropped.
     // Cancellation can suppress its result, not roll back a save that already began.
     let response = match ready {
-        InvokeReady::Document(ready) => InvokeResponse::Document(ready.execute(lease).await?),
+        InvokeReady::Document(ready) => InvokeResponse::Document(ready.execute_read(lease).await?),
         InvokeReady::Control(ready) => InvokeResponse::Control(ready.execute(lease).await?),
+    };
+    let preview_delivery = match &response {
+        InvokeResponse::Document(Some(StudioRead::AwaitingTenureReceipt(preview))) => {
+            Some(preview.delivery())
+        }
+        _ => None,
     };
     if cancellation.is_cancelled() {
         return Err("Studio request cancelled; its local save may have completed".into());
@@ -133,7 +150,16 @@ async fn invoke_custody<V>(
     // completion fences until it is finished, and suppress even a lock request that arrived
     // during conversion before the actual lock task can acquire this commit guard.
     let value = convert(response)?;
-    if cancellation.is_cancelled()
+    if view_request
+        .as_ref()
+        .is_some_and(|request| !request.is_current())
+    {
+        return Err("Studio view request was superseded; refresh".into());
+    }
+    if preview_delivery
+        .as_ref()
+        .is_some_and(|delivery| !delivery.is_current())
+        || cancellation.is_cancelled()
         || state.session_lock_requested.load(Ordering::Acquire)
         || state.ui_session_generation.load(Ordering::Acquire) != generation
     {
@@ -423,6 +449,21 @@ fn objects(v: &std::collections::BTreeMap<[u8; 16], IndexEntry>) -> Value {
 fn blob(v: &FrameBlob) -> Value {
     json!({"cid":hex::encode(v.cid),"bytes":v.bytes})
 }
+fn read_view(read: StudioRead) -> Result<Value, String> {
+    match read {
+        StudioRead::Document(document) => view(document),
+        StudioRead::AwaitingTenureReceipt(preview) => preview.inspect(|epoch_id, projection| {
+            bounded_view(json!({
+                "v": 1, "epochId": format!("{epoch_id:032x}"),
+                "epoch": projection.epoch().to_string(),
+                "channel": u128::from_be_bytes(projection.channel()).to_string(),
+                "provisional": true, "awaitingTenureReceipt": true,
+                "content": projection_content(projection),
+            }))
+        })?,
+    }
+}
+
 fn view(v: StudioView) -> Result<Value, String> {
     let content = projection_content(&v.projection);
     let value = json!({"v":1,"epochId":format!("{:032x}",v.epoch_id),"epoch":v.epoch.to_string(),

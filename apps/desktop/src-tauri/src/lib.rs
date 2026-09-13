@@ -13781,6 +13781,9 @@ async fn lock_session_with_generation_inner(
     // checks `session_lock_requested` while holding the cancellation table, but this post-commit
     // drain also retires any future registration path that was already inside the UI commit seam.
     cancel_all_inline_downloads(state);
+    for entry in state.servers.lock().await.values() {
+        entry.actor.clear_studio_previews();
+    }
     // Save the final draft/read snapshot and close IPC as one ordered native operation. Two
     // separate fire-and-forget commands could race, causing the save to arrive after the lock and
     // be correctly rejected by the new session gate.

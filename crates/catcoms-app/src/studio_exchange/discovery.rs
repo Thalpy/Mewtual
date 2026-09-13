@@ -32,7 +32,6 @@ pub struct CheckpointDiscoveryAttempt<T: MeshTransport> {
     mount: Arc<()>,
     server: u64,
     target: CheckpointTarget,
-    #[cfg(test)]
     peer: PeerId,
 }
 pub struct CheckpointDiscoveryCompletion {
@@ -40,7 +39,6 @@ pub struct CheckpointDiscoveryCompletion {
     mount: Arc<()>,
     server: u64,
     target: CheckpointTarget,
-    #[cfg(test)]
     pub(crate) peer: PeerId,
 }
 impl CheckpointDiscoveryCompletion {
@@ -55,7 +53,6 @@ impl<T: MeshTransport> CheckpointDiscoveryAttempt<T> {
             mount: self.mount,
             server: self.server,
             target: self.target,
-            #[cfg(test)]
             peer: self.peer,
         }
     }
@@ -217,7 +214,6 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
             mount,
             server,
             target,
-            #[cfg(test)]
             peer,
         })
     }
