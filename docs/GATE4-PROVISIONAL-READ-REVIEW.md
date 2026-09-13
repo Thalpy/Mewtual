@@ -16,10 +16,22 @@ mutations, formatting and Clippy pass. The user review accepts seed checkpoint `
 the real raw-change and typed-schema gates accept a correctly signed seed with noncanonical root
 operation order, while the final comparison rejects it. Both target types pass; disabling that
 comparison fails the test and restored source passes. The reviewer did not run Cargo or mutations.
-The current signed-tail checkpoint awaits adversarial review. It adds one-shot authenticated pages
-and detached typed replay over a private unconfirmed graph, with no actor or native integration yet.
+The user review passes signed-tail checkpoint `47bf098` against `b3e54dc`, with no blocking
+production defect. It closes the prior canonical-encoding P3 and requests one P3 test correction,
+TAIL-TEST-001, described below. The review was source-only; Cargo and mutations were not run by
+the reviewer. Actor/native integration remains pending.
 
-## Current signed-tail checkpoint (review pending)
+## Signed-tail checkpoint (`47bf098`; bounded implementation passed review)
+
+TAIL-TEST-001 identified a false-positive inner-document fixture: signing and sealing for B,
+then changing outer routing to A, exercised failed decryption with A's key. The new dedicated
+regression covers both Index and Flipnote. It manually pads the correctly signed B operation,
+encrypts under A's key, and supplies A's valid outer envelope. Before receiver preparation it
+requires successful open, byte-equivalent decoded operation, valid signature and a mismatched
+inner ID. It then requires `ReplError::EpochScope` directly from `prepare_tail`. Removing only
+the inner-ID guard makes the regression fail; production source is restored byte-for-byte and
+all six provisional core tests pass. This is a test/documentation correction, not a production
+logic change or a claim that actor/native integration is accepted.
 
 The seed now retains its private parsed graph and bounded volatile operation metadata. It never
 constructs an `EncryptedDoc`, `CheckpointOrigin`, epoch gate or verified receipt. At most 32
@@ -44,6 +56,9 @@ parsing and inspection preserve the original deadline and hint generation; app c
 numeric server and channel. Tests exercise genuine Index/Flipnote multi-page providers, stale
 membership/watch/attempt/provider/runtime, deadlines, cancelled lower custody, and the app's
 unchanged canonical reads, refused Apply and empty documents/journals after reopen.
+The reviewer accepted these bounded paths by source inspection. The existing tests exercise
+per-page operation-count and retained-byte guards directly and real multi-page continuation, but do not drive
+every aggregate traffic counter to its limit. Those counters' acceptance is inspection evidence.
 
 This remains block 1 of the four remaining Gate 4 blocks. The scheduler, process worker permits,
 reserved-lane fairness, periodic revalidation, native delivery custody and ignored newcomer reads

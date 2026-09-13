@@ -396,7 +396,7 @@ signed seed with noncanonical root operation order, but the final comparison rej
 Index and Flipnote. Removing that comparison fails the regression; byte-restored source passes.
 The reviewer inspected the preceding checkpoint without running Rust tests or mutations.
 
-**Current signed-tail checkpoint (adversarial review pending):** distinct sync/app tail attempts
+**Signed-tail checkpoint (`47bf098`; bounded implementation passed review):** distinct sync/app tail attempts
 consume the unconfirmed seed and reuse authenticated Studio page framing without replacing the
 ordinary watch or constructing an installed epoch. Current membership, inner signature, physical
 and logical scope, actor identity, known seed ancestry, typed semantics and operation markers are
@@ -409,6 +409,15 @@ preserve ordinary reads and document/journal absence after refused Apply and vau
 The actor scheduler, shared worker priority/fairness, native preview result and delivery fences
 are still pending. Block 1 remains in progress; Closing overlays/repeated tenure, runtime signed
 repair, and combined Gate 4 acceptance remain the other three blocks. Validation is in HANDOVER.
+The reviewer found no blocking production defect and closed the prior canonical-encoding P3.
+TAIL-TEST-001 (P3) requested a stronger inner-document mismatch fixture: the original changed
+outer routing after encrypting with the wrong document's key, so it failed before scope checking.
+The dedicated Index/Flipnote regression now manually encrypts the validly signed B operation
+with A's key, proves that decryption/signature verification succeed, and requires the specific
+`EpochScope` from `prepare_tail`. Removing only the inner-ID comparison makes that assertion
+fail. The restored six-test provisional suite passes. No production change was requested or
+made for this finding. The review was source-only; its aggregate traffic-limit assessment was
+inspection evidence, not execution of every 16 MiB / 20,000-operation boundary.
 
 #### Landed on the way: Studio owner settlement preparation (`9799c6f`)
 

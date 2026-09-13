@@ -10,7 +10,33 @@ and ranks the live hazards in that path.
 
 ## Status (latest entry: 2026-09-13)
 
-- **Gate 4 signed-tail checkpoint (2026-09-13; adversarial review pending).** Continued the first
+- **Gate 4 signed-tail review and TAIL-TEST-001 (2026-09-13).** The user-provided review accepts
+  `47bf09860accb3e8c2bbba5eb72d2b4d8d05d26c` against `b3e54dc493d46ea7663533244561ababfc569ad4`
+  with no blocking production defect. The previous canonical-encoding P3 is closed. The reviewer
+  inspected source without running Cargo/mutations; aggregate traffic guards were accepted by
+  inspection, not by tests independently driving every counter to its limit.
+  TAIL-TEST-001 (P3) correctly found that the old inner-document fixture encrypted with B's key
+  before changing outer routing to A, so decryption failed before the intended comparison.
+  The misleading case is removed from the generic error matrix. A dedicated test now covers
+  Index and Flipnote with a correctly signed B operation manually padded/encrypted under A's
+  key and valid outer A routing. It first proves successful decryption, decoded-operation
+  equality, signature validity and the differing inner ID, then requires `EpochScope` directly
+  from `prepare_tail`. This correction changes tests/docs only. The bounded implementation's
+  PASS stands; it does not extend to actor/native integration or Gate 4 completion.
+
+  Validation with the existing environment (`_LINK_=/DEBUG:NONE`, `CARGO_INCREMENTAL=0`):
+  `cargo test --locked -j 4 --config 'profile.test.package.catcoms-replication.debug=0'
+  -p catcoms-replication --lib provisional_tail_rejects_inner_document -- --test-threads=1`
+  passes for both targets (one test, 0.26s; `logs/gate4-tail-test-001.log`). Temporarily replacing
+  only `if op.doc_type != doc_type || op.doc_id != self.doc_id` with the type-only check makes
+  the specific preparation assertion fail (0.14s; `logs/gate4-tail-test-001-mutation.log`).
+  The production file is restored byte-for-byte in `finally`. The restored `studio::provisional`
+  filter passes all six tests (1.02s; `logs/gate4-tail-test-001-restored.log`). Root formatting
+  and replication library/test Clippy pass. No sync/app suite rerun or packaging is claimed for
+  this test-only follow-up. Remaining block 1 work is actor scheduling, parser permits/fairness,
+  periodic revalidation and native preview delivery; the other three blocks remain open.
+
+- **Gate 4 signed-tail checkpoint (`47bf098`, 2026-09-13; bounded implementation passed review).** Continued the first
   of the four remaining blocks. Distinct sync/app tail types consume an unconfirmed seed and
   retain its original watch/attempt/member/provider/mount/server scope, fixed lifetime and seed
   reservation through authenticated page I/O, detached typed parsing and scoped inspection.

@@ -193,7 +193,6 @@ fn provisional_tail_rejects_authenticated_relay_forgery_scope_and_typed_semantic
         "outsider",
         "actor",
         "outer",
-        "inner",
         "epoch",
         "logical",
         "body",
@@ -220,16 +219,6 @@ fn provisional_tail_rejects_authenticated_relay_forgery_scope_and_typed_semantic
                     &f.peer,
                     op.doc_type,
                     op.doc_id,
-                    op.delta.clone(),
-                    &domain,
-                )
-                .unwrap()
-            }
-            "inner" => {
-                op = SignedOp::sign_domain(
-                    &f.owner,
-                    op.doc_type,
-                    op.doc_id + 1,
                     op.delta.clone(),
                     &domain,
                 )
@@ -264,9 +253,6 @@ fn provisional_tail_rejects_authenticated_relay_forgery_scope_and_typed_semantic
         if bad == "outer" {
             sealed.doc_id += 1;
         }
-        if bad == "inner" {
-            sealed.doc_id = f.source.doc_id();
-        }
         if bad == "epoch" {
             sealed.epoch -= 1;
         }
@@ -275,6 +261,48 @@ fn provisional_tail_rejects_authenticated_relay_forgery_scope_and_typed_semantic
             .prepare_tail(vec![sealed], &f.group, &f.owner)
             .and_then(|p| p.prepare());
         assert!(result.is_err(), "accepted {bad}");
+    }
+}
+
+#[test]
+fn provisional_tail_rejects_inner_document_after_valid_decryption_and_signature() {
+    use catcoms_storage::pad::{self, OP_PAD_CEILING, OP_PAD_FLOOR};
+    for art in [false, true] {
+        let mut f = Fixture::new(art);
+        let valid = f.edit(1);
+        let original = f.open(&valid);
+        let wrong = SignedOp::sign_domain(
+            &f.owner,
+            original.doc_type,
+            original.doc_id + 1,
+            original.delta.clone(),
+            &original.parsed_domain_op().unwrap().unwrap(),
+        )
+        .unwrap();
+        // Deliberately seal the signed B operation with A's key and outer routing. A member
+        // can produce this envelope; changing only routing after SealedOp::seal would instead
+        // exercise an AEAD failure and never reach the inner-document guard (TAIL-TEST-001).
+        let key = f
+            .group
+            .channel_secret(&f.owner, original.doc_type, original.doc_id)
+            .unwrap();
+        let padded = pad::pad(&wrong.encode(), OP_PAD_FLOOR, OP_PAD_CEILING).unwrap();
+        let envelope = SealedOp {
+            doc_type: original.doc_type,
+            doc_id: original.doc_id,
+            epoch: f.group.epoch(),
+            blob: catcoms_crypto::seal(&key, &padded, &mut f.rng).unwrap(),
+        };
+        let opened = envelope.open(&key).unwrap();
+        assert_eq!(opened, wrong);
+        assert!(opened.verify());
+        assert_eq!(envelope.doc_id, f.source.doc_id());
+        assert_ne!(opened.doc_id, envelope.doc_id);
+        assert!(matches!(
+            f.candidate()
+                .prepare_tail(vec![envelope], &f.group, &f.owner),
+            Err(ReplError::EpochScope)
+        ));
     }
 }
 

@@ -1,7 +1,8 @@
 # Flipnote UI hook guide
 
 Last checked: 2026-09-13; user review passed discovery `0b32bad`, interruption `2f5a8a0`
-and seed transport/typed inspection `b3e54dc`. Native previews remain pending.
+and seed transport/typed inspection `b3e54dc`, plus signed tails `47bf098`.
+TAIL-TEST-001 is corrected and mutation-checked. Native previews remain pending.
 Behavioral checkpoint: `39ceb76`
 (`fix(studio): bound the recovery hold and make replay slot-order proof`). Owner rotation and recovery
 inspection landed in `cbed5b7`; recovery controls, own-intent replay and settlement events are
@@ -57,6 +58,12 @@ replay over the unconfirmed seed. Its app adapters retain the original mount/ser
 membership and deadline checks. `tail_complete()` means a checked finite provider prefix;
 it supplies no tenure confirmation. These adapters are still outside the actor scheduler and
 native read path. No new native command, event, confirmation field or frontend change is callable.
+The user review accepts `47bf098`'s bounded implementation and closes the previous canonical-
+encoding P3. Its new P3, TAIL-TEST-001, identified a negative fixture that failed at decryption
+before reaching the intended inner-document check. The corrected test signs an operation for B
+but pads/encrypts it with A's key and outer routing, proves successful decryption/signature
+verification, and requires `EpochScope` during preparation. It fails when only the inner-ID
+guard is removed. This follow-up changes tests and documentation only, with no hook change.
 Authoritative and provisional head requests share one latest
 attempt per target, so the future scheduler must coordinate them.
 A direct A-to-B-to-A rejoin also encounters the Unknown-tenure dependency described below:

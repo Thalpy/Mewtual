@@ -77,7 +77,11 @@ one optional P3 follow-up to independently test canonical seed re-encoding. That
 passes for Index and Flipnote and fails when the final comparison is removed; source is restored.
 The current signed-tail checkpoint adds authenticated bounded pages and detached typed replay
 over the private unconfirmed graph, with unchanged watch/tenure authority and original capacity,
-deadline and lifecycle checks. It awaits adversarial review. A checked finite tail is still only
+deadline and lifecycle checks. The user review accepts `47bf098` with no blocking production defect
+and closes the prior canonical-encoding P3. TAIL-TEST-001's inner-document fixture is corrected:
+successful decryption and signature verification now precede its specific scope-error assertion,
+and removing only the inner-ID check makes it fail. No production change accompanies this test
+follow-up. A checked finite tail is still only
 unconfirmed content; it supplies no editable source or ordinary Read result. Block 1 still needs
 actor scheduling, worker/capacity fairness and native preview delivery. The other three blocks
 remain Closing overlays/repeated-owner tenure, runtime signed repair and combined acceptance.
