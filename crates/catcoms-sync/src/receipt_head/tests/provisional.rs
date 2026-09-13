@@ -366,6 +366,31 @@ async fn provisional_head_candidate_rechecks_membership_endpoint_attempt_instanc
 }
 
 #[tokio::test]
+async fn provisional_head_delayed_completion_preserves_preparation_deadline() {
+    let (mut provider, mut client, clock) = pair().await;
+    let target = target(7);
+    let watch = watch(&mut client, target);
+    let receipt = candidate(&provider, target);
+    let pending = client
+        .prepare_provisional_studio_discovery(provider.local_peer(), &watch)
+        .unwrap();
+    let completed = reply(&mut provider, pending, target, Some(&receipt), false).await;
+    clock.advance_ms(9_000);
+    let hint = client
+        .complete_provisional_studio_discovery(completed)
+        .unwrap()
+        .unwrap();
+    clock.advance_ms(50_999);
+    client
+        .with_provisional_studio_hint(&hint, |value| assert_eq!(value.receipt, &receipt))
+        .unwrap();
+    clock.advance_ms(1);
+    assert!(client
+        .with_provisional_studio_hint(&hint, |_| panic!("preparation deadline was extended"))
+        .is_err());
+}
+
+#[tokio::test]
 async fn provisional_head_rejects_late_head_and_superseded_completion() {
     for superseded in [false, true] {
         let (mut provider, mut client, clock) = pair().await;

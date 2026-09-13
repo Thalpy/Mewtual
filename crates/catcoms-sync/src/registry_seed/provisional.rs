@@ -1,11 +1,16 @@
 //! A fresh authenticated member hint with provisional-only capacity and copied watch custody.
-//! This path does not fetch a seed, validate its attribution or select an authoritative epoch.
+//! Seed validation is detached; attribution and epoch authority remain unconfirmed.
 use super::*;
 use crate::receipt_head::{
     AuthenticatedCheckpointHint, CompletedCheckpointHead, PendingCheckpointHead,
 };
 use crate::StudioWatch;
 use catcoms_replication::studio::StudioTarget;
+mod seed;
+pub use seed::{
+    CompletedProvisionalStudioSeed, PendingProvisionalStudioSeed, PreparedProvisionalStudioSeed,
+    ProvisionalStudioSeedPreparation, ProvisionalStudioSeedUse,
+};
 
 pub struct PendingProvisionalStudioDiscovery<T: MeshTransport> {
     head: PendingCheckpointHead<T>,

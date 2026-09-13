@@ -1,10 +1,15 @@
-//! App mount/server custody for provisional head discovery. Scheduling, seed parsing and
+//! App mount/server custody for provisional head and seed discovery. Scheduling and
 //! native preview delivery are separate; these candidates are never canonical Studio views.
 use super::*;
 use catcoms_rt::PeerId;
 use catcoms_sync::registry_seed::{
     CompletedProvisionalStudioDiscovery, PendingProvisionalStudioDiscovery, ProvisionalStudioHint,
     ProvisionalStudioHintUse,
+};
+mod seed;
+pub use seed::{
+    ProvisionalStudioSeedAttempt, ProvisionalStudioSeedCompletion,
+    ServerPreparedProvisionalStudioSeed, ServerProvisionalStudioSeedPreparation,
 };
 
 pub struct ProvisionalStudioDiscoveryAttempt<T: MeshTransport> {

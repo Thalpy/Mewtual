@@ -5,8 +5,13 @@ instrumentation; PR-001 is closed as a design finding. No further closure change
 The reviewer inspected source and did not execute Cargo. The approved provisional-read path
 remains unfinished. The user accepted the capacity foundation in `1c90c41` without requested
 changes. Published checkpoint `0b32bad` connects real provisional head discovery and candidate
-custody; its user adversarial review is pending. The separate interrupted-successor tests do
-not imply acceptance of this discovery boundary.
+custody; the user adversarial review passes both this checkpoint and the separate interrupted-
+successor tests in `2f5a8a0`. Neither requires code changes. The reviewer inspected source without
+running Cargo and suggested a stronger delayed-completion expiry test, included in the current
+seed slice. That slice adds one-shot transport and detached typed validation, with unconfirmed
+results retaining their original capacity and deadline. It does not yet connect the actor's
+scheduler, authenticated tail or native preview delivery. Focused regressions, three deliberate
+mutations, formatting and Clippy pass; the new seed checkpoint awaits user adversarial review.
 
 ## Reproduced boundary
 
@@ -85,7 +90,7 @@ Source restoration and local toolchain/disk workarounds are recorded in [HANDOVE
 Root formatting and sync/app library/test Clippy pass. The reviewer inspected source without
 running Cargo and accepted this allocation-only scope with no new finding or requested change.
 
-## Provisional head discovery (checkpoint; awaiting user review)
+## Provisional head discovery (`0b32bad`; user review passed)
 
 Distinct sync and app prepare/fetch/complete types now acquire provisional capacity before a
 real head request, pass its keepalive to the existing cancellation-aware transport and retain it
@@ -122,8 +127,11 @@ pass on restored source (69 total). The 2 preview cases remain ignored; this che
 claim a new explicit run of those known failures. Three temporary mutations fail at the intended
 guards: skipped response-signature checking, candidate use after same-key rewatch and unaccounted
 lower transport custody. Sources were restored byte-for-byte. Commands and logs are in HANDOVER.
-Root formatting and sync/app library/test Clippy pass. User adversarial review is requested for
-this discovery/custody boundary before seed validation and preview integration continue.
+Root formatting and sync/app library/test Clippy pass. User adversarial review passes this
+discovery/custody boundary. Seed validation and preview integration can continue.
+The two head paths share latest-attempt state: newer provisional discovery can supersede an
+in-flight authoritative head for the same target. The future scheduler must coordinate them;
+reserved capacity alone does not prevent this interference.
 
 ## Approved implementation boundary
 

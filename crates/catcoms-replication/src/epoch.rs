@@ -1123,6 +1123,25 @@ impl Receipt {
     /// This deliberately does not assert present-day owner authority. Never use it on network
     /// receipts: succession must not erase locally verified history, nor authorize new history.
     pub(crate) fn restore_verified_from_vault(&self) -> Result<VerifiedReceipt, ReplError> {
+        self.verify_signature_only()?;
+        Ok(VerifiedReceipt {
+            document: self.document.clone(),
+            closed_epoch: self.closed_epoch,
+            close_record_hash: self.close_record_hash,
+            receipt_hash: self.hash(),
+            seed_change_hash: self.seed_change_hash,
+        })
+    }
+
+    /// Check self-consistency and the named key's signature, without asserting that key was
+    /// ever a member or owner. In particular this does not mint a VerifiedReceipt capability.
+    pub(crate) fn verify_signature_only(&self) -> Result<(), ReplError> {
+        if self.document.server_id.len() > MAX_SERVER_ID_BYTES
+            || self.document.logical_key.len() > MAX_LOGICAL_KEY_BYTES
+            || self.owner_public_key.len() != 32
+        {
+            return Err(ReplError::EpochBound);
+        }
         if self.tenure_id
             != tenure_id(
                 &self.document.server_id,
@@ -1139,13 +1158,7 @@ impl Receipt {
         {
             return Err(ReplError::EpochAuthority);
         }
-        Ok(VerifiedReceipt {
-            document: self.document.clone(),
-            closed_epoch: self.closed_epoch,
-            close_record_hash: self.close_record_hash,
-            receipt_hash: self.hash(),
-            seed_change_hash: self.seed_change_hash,
-        })
+        Ok(())
     }
 
     /// Canonical receipt bytes.

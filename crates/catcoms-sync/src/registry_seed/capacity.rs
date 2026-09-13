@@ -7,8 +7,8 @@ const PROVISIONAL_SLOTS: usize = 3;
 /// One of the three preview-eligible slots inside this sync instance's four retained slots.
 ///
 /// This is only a memory reservation, not a hint, owner selection or installation capability.
-/// Provisional head discovery retains this through its transport and candidate result. Seed
-/// fetching, parsing and preview delivery must keep the same reservation when implemented.
+/// Provisional discovery/fetch retains this through transport, detached parsing and its ready
+/// seed result. Future native preview delivery must keep the same reservation too.
 /// Dropping or expiring an operation must not recycle the slot while another owner holds it.
 pub struct ProvisionalCheckpointCapacity {
     _capacity: Arc<()>,

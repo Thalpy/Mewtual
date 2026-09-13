@@ -1,5 +1,6 @@
 //! Shared detached checkpoint discovery/fetch. The opaque handle's retained slot follows jobs
 //! and results as well as the handle, so dropping a caller never refunds bytes still in flight.
+use super::transfer::{CompletedSeedTransfer, PendingSeedTransfer, SeedTransferContext};
 use super::*;
 use crate::receipt_head::{CompletedCheckpointHead, PendingCheckpointHead};
 
@@ -34,31 +35,16 @@ impl fmt::Debug for CompletedCheckpointDiscovery {
 }
 
 struct Context {
-    instance: RegistrySyncInstance,
-    query: ScopedQuery,
     selection: Arc<()>,
     attempt: Arc<()>,
-    peer: PeerId,
-    provider: DeviceId,
-    requester: Vec<u8>,
-    group: Vec<u8>,
-    inner: Vec<u8>,
-    auth: RequestAuth,
-    expires: u64,
 }
 pub struct PendingCheckpointSeed<T: MeshTransport> {
-    transport: Arc<T>,
-    clock: Arc<dyn Clock + Send>,
     context: Context,
-    request: Vec<u8>,
-    outbound: Arc<()>,
-    retained: Arc<()>,
+    transfer: PendingSeedTransfer<T>,
 }
 pub struct CompletedCheckpointSeed {
     context: Context,
-    response: Result<Bytes, TransportError>,
-    _outbound: Arc<()>,
-    _retained: Arc<()>,
+    transfer: CompletedSeedTransfer,
 }
 impl<T: MeshTransport> fmt::Debug for PendingCheckpointSeed<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -72,26 +58,9 @@ impl fmt::Debug for CompletedCheckpointSeed {
 }
 impl<T: MeshTransport> PendingCheckpointSeed<T> {
     pub async fn fetch(self) -> CompletedCheckpointSeed {
-        let (signal, cancelled) = tokio::sync::watch::channel(false);
-        let _cancel = CancelOnDrop(signal);
-        let response = if self.clock.monotonic_ms() >= self.context.expires {
-            Err(TransportError::Unreachable(self.context.peer))
-        } else {
-            // Retained seed capacity must follow the lower stream too: cancelling this job
-            // and dropping the pass does not mean the transport released its response buffer.
-            let keepalive = Arc::new((self.outbound.clone(), self.retained.clone()));
-            let cancellation = RequestCancellation::new(cancelled, Some(keepalive));
-            tokio::select! {
-                biased;
-                _ = self.clock.sleep(std::time::Duration::from_millis(self.context.expires.saturating_sub(self.clock.monotonic_ms()))) => Err(TransportError::Unreachable(self.context.peer)),
-                response = self.transport.request_connected_cancellable(self.context.peer, ProtocolId(RR_PROTOCOL), Bytes::from(self.request), cancellation) => response,
-            }
-        };
         CompletedCheckpointSeed {
             context: self.context,
-            response,
-            _outbound: self.outbound,
-            _retained: self.retained,
+            transfer: self.transfer.fetch().await,
         }
     }
 }
@@ -178,14 +147,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             hash: verified.seed_change_hash(),
         };
         let inner = encode_scoped_query(&query, &self.group.group_id())?;
-        let slot = self
-            .registry_seeds
-            .outbound
-            .iter_mut()
-            .find(|s| s.strong_count() == 0)
-            .ok_or(SyncError::Malformed)?;
-        let outbound = Arc::new(());
-        *slot = Arc::downgrade(&outbound);
+        let outbound = self.reserve_seed_outbound()?;
         pass.attempts += 1;
         pass.next_at = now.checked_add(1000).ok_or(SyncError::Malformed)?;
         let (request, auth) = self.build_authed_request(query.target.seed_kind(), &inner)?;
@@ -196,23 +158,27 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         let attempt = Arc::new(());
         pass.attempt = Some(attempt.clone());
         Ok(Some(PendingCheckpointSeed {
-            transport: self.transport.clone(),
-            clock: self.clock.clone(),
-            request,
-            outbound,
-            retained: pass._capacity.clone(),
             context: Context {
-                instance: self.registry_instance(),
-                query,
                 selection: pass.selection.generation.clone(),
                 attempt,
-                peer,
-                provider,
-                requester: self.device.public_key_bytes(),
-                group: self.group.group_id(),
-                inner,
-                auth,
-                expires,
+            },
+            transfer: PendingSeedTransfer {
+                transport: self.transport.clone(),
+                clock: self.clock.clone(),
+                request,
+                outbound,
+                retained: pass._capacity.clone(),
+                context: SeedTransferContext {
+                    instance: self.registry_instance(),
+                    query,
+                    peer,
+                    provider,
+                    requester: self.device.public_key_bytes(),
+                    group: self.group.group_id(),
+                    inner,
+                    auth,
+                    expires,
+                },
             },
         }))
     }
@@ -222,14 +188,10 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         completed: CompletedCheckpointSeed,
     ) -> Result<bool, SyncError> {
         let c = completed.context;
+        let query = completed.transfer.context.query.clone();
+        let expires = completed.transfer.context.expires;
         if !self.registry_seed_fetch_is_current(pass)
-            || !self.matches_registry_instance(&c.instance)
-            || self.group.group_id() != c.group
-            || self.group.epoch() != c.auth.epoch
-            || self.device.public_key_bytes() != c.requester
-            || self.registry_page_peer_device(c.peer) != Some(c.provider)
-            || self.clock.monotonic_ms() >= c.expires
-            || pass.selection.target != c.query.target
+            || pass.selection.target != query.target
             || !Arc::ptr_eq(&pass.selection.generation, &c.selection)
             || !pass
                 .attempt
@@ -238,39 +200,12 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         {
             return Err(SyncError::Unauthorized);
         }
-        let response = completed.response?;
-        if response.is_empty() {
+        let Some(raw) = self.complete_seed_transfer(completed.transfer)? else {
             return Ok(false);
-        }
-        let (key, signature, body) = decode_response(&response)?;
-        if DeviceId::from_public_key_bytes(key) != c.provider
-            || !self.seed_member(key)
-            || !verify_with_public_bytes(
-                key,
-                &scoped_transcript(
-                    c.query.target.seed_domain(),
-                    &c.group,
-                    &c.requester,
-                    &c.auth,
-                    c.peer,
-                    &c.inner,
-                    body,
-                ),
-                &signature,
-            )
-        {
-            return Err(SyncError::Unauthorized);
-        }
-        if body.is_empty() {
-            return Ok(false);
-        }
-        let key =
-            self.group
-                .channel_secret(&self.device, c.query.target.doc_type(), c.query.doc_id)?;
-        let raw = open_seed(body, &key)?;
+        };
         // Exact receipted Automerge hash before decode, then typed root/channel/schema checks.
-        let seed = c.query.target.verify_seed(&pass.selection.verified, &raw)?;
-        if !self.registry_seed_fetch_is_current(pass) || self.clock.monotonic_ms() >= c.expires {
+        let seed = query.target.verify_seed(&pass.selection.verified, &raw)?;
+        if !self.registry_seed_fetch_is_current(pass) || self.clock.monotonic_ms() >= expires {
             return Err(SyncError::Unauthorized);
         }
         pass.seed = Some(seed);

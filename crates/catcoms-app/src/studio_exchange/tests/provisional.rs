@@ -4,6 +4,7 @@ use catcoms_replication::registry::{registry_document, PointerKey};
 use catcoms_replication::{InheritedCheckpoint, Receipt};
 use catcoms_sync::checkpoint_exchange::CheckpointTarget;
 use catcoms_sync::receipt_head::ReceiptHeadSelection;
+mod seed;
 
 fn receipt(p: &mut Pair, target: StudioTarget) -> Receipt {
     p.alice.sync.with_registry_context(|g, d, _, _| {

@@ -10,10 +10,64 @@ and ranks the live hazards in that path.
 
 ## Status (latest entry: 2026-09-13)
 
-- **Gate 4 successor interruption acceptance (2026-09-13; awaiting user review).** Remote branch
+- **Gate 4 provisional seed checkpoint (2026-09-13; awaiting user review).** The user review
+  passes `0b32bad` against `1c90c41` and `2f5a8a0` against `0b32bad`, with no required code changes.
+  The reviewer inspected source and did not execute Rust tests. The suggested non-blocking
+  deadline regression now delays head completion to T+9s, allows inspection at T+59.999s and
+  rejects it at T+60s. Its deadline-reset mutation is caught. Future scheduling must coordinate authoritative
+  and provisional heads: a newer preparation of either class supersedes an in-flight head for
+  the same target, although it cannot revoke an already completed owner selection.
+  The current slice connects one-shot provisional seed transport and separate cold typed
+  validation. Consuming the opaque hint pins its member provider and preserves the original
+  60-second candidate expiry and capacity. The authoritative and provisional paths share
+  request cancellation, outbound slots, signed response authentication and bounded AEAD framing;
+  the response still must complete within its 10-second request deadline. Parsing verifies the
+  receipt's self-declared signature and bounded exact raw seed hash/actor/encoding, then typed
+  Index/Flipnote scope, channel/schema and byte-identical compact encoding. No network receipt
+  goes through vault restoration or produces VerifiedReceipt/VerifiedCheckpoint authority.
+  The separate unconfirmed projection retains claimed authorship without proving it. Preparation
+  owns raw bytes and capacity outside sync/store borrows; completion and each use recheck original
+  watch/attempt/member/endpoint/instance, with app mount/server/channel checks on top.
+  These direct adapters do not schedule actor workers or deliver native previews. Future worker
+  permits must survive cancellation independently of the retained seed slot; fairness and
+  competing Studio/Registry installation under preview pressure remain unproved. Authenticated
+  tails, delivery generations, overlays, tenure/repair work and full Gate 4 remain open.
+  Four app provisional tests pass (two new, including sixteen seed lifecycle combinations;
+  `logs/gate4-provisional-seed-app-final.log`, 22.34 seconds). They compare the complete ordinary Read
+  result and the absent Studio/Registry sources and owner/intent/recovery journals before/after
+  parsing, inspection and reopen. An absent Index's existing empty epoch-zero Read is preserved;
+  an absent Flipnote still reads None. A draft assertion incorrectly expected None for both and
+  was corrected without changing production logic. The raw/parsed holders and the existing
+  authoritative RegistrySeedFetch declare capacity last so field destruction frees content
+  before returning the slot, including an off-thread drop or unwind.
+  Final focused suites pass: sync `registry_seed::` 30 (six new, 4.54s), `receipt_head::` 25
+  (one new, 2.49s), replication `checkpoint` 10 (44.80s) and `receipt` 12 (6.11s), app
+  `studio_provisional` 4 and `studio_discovery` 7 (14.16s). The new seed tests include nonempty
+  Index/Flipnote content delivered by a proven non-owner, authenticated malformed receipt/raw
+  seed cases, original-deadline checks before/after parsing, lifecycle revocation at completion
+  and ready use, and cancellation/preparation/result custody with reserved authoritative capacity.
+  Three deliberate mutations are killed at assertions: resetting the hint deadline at completion
+  (0.28s), omitting the receipt self-signature (0.42s), and donating an unrelated lower-transport
+  capacity token (0.35s). Every source was restored byte-for-byte with SHA-256 verification by
+  `logs/gate4-provisional-seed-mutations.ps1`; logs use the `gate4-provisional-seed-mutation-` prefix.
+  Root formatting and replication/sync/app library/test Clippy pass (58.93s). A final fixture
+  refinement gives the wrong-actor case a valid typed schema; its focused rerun and sync Clippy
+  are recorded separately in `gate4-provisional-seed-negative-final.log` and
+  `gate4-provisional-seed-sync-clippy-final.log`.
+  Test commands use `cargo test --locked -j 4 --config 'profile.test.package.<crate>.debug=0'
+  -p <crate> --lib <filter> -- --test-threads=4` with the named crate/filter (the final negative
+  case uses one thread). Clippy uses `cargo clippy --locked -j 4 -p catcoms-replication
+  -p catcoms-sync -p catcoms-app --lib --tests -- -D warnings`; format uses
+  `cargo fmt --all -- --check`. All commands set process-only `CARGO_INCREMENTAL=0` and
+  `_LINK_=/DEBUG:NONE`. No dependency, build profile, installation or native/UI contract changed.
+  Before editing, obsolete generated `target/debug/deps/*.rcgu.o` files were removed after
+  verifying their exact workspace paths and absence of compiler processes, freeing about 1.2GB.
+  The two unfinished newcomer preview cases remain ignored and were not re-run in this slice.
+
+- **Gate 4 successor interruption acceptance (`2f5a8a0`, 2026-09-13; user review passed).** Remote branch
   `Create-suite-2` now contains exact local discovery commit `0b32bad`; the earlier publishing
   block is resolved. Its adversarial review has been requested from the user with a copyable
-  message; no discovery PASS has been received. Independent work now extends the accepted
+  message; the subsequent review passes both checkpoints. Independent work extends the accepted
   succession harness with real actor I/O interruptions before/after recovery and successor
   writes. Four new tests cover eight Index/Flipnote scenarios with an installed epoch-one
   old-owner checkpoint and a later Closing source. Only old history and the observed MLS
@@ -54,7 +108,7 @@ and ranks the live hazards in that path.
   dependency; neither the Welcome nor the old owner's reused key establishes its new tenure.
   No authority inference or native/UI contract change is introduced.
 
-- **Gate 4 provisional head discovery (`0b32bad`, 2026-09-12; published, awaiting user review).**
+- **Gate 4 provisional head discovery (`0b32bad`, 2026-09-12; user review passed on 2026-09-13).**
   The user accepted `1c90c41`'s allocation foundation without requested changes; the reviewer
   inspected source and did not run Cargo. The next sync/app slice uses that quota for real
   provisional head requests and opaque, volatile candidate metadata. Shared response

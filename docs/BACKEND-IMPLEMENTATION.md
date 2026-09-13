@@ -192,7 +192,7 @@ acceptance have not been rerun or closed by this audit.
 | Ordinary owner rotation | Watched Index/art rotation, durable decisions, recovery-first installation and solo installed-head completion are connected. | Full production-adapter acceptance across owner absence, partitions and lifecycle failures. |
 | Registry maintenance | Derived pointers, current-tail paging and Create after Index rotation are connected. | Include these in succession/restart acceptance; preserve per-bucket Fault isolation. |
 | Recovery and own-intent replay | Seven native recovery commands, settlement invalidations, conservative replay/manual disposition and persisted eviction deadlines are connected. | Final combined acceptance and remaining fairness/backpressure/cold-source follow-ups in HANDOVER. |
-| Owner succession | `dba52e5` supplies core/store frozen-source takeover. User-accepted `e3f6669` covers eight Index/Flipnote Open/Closing cases, installed-checkpoint inheritance and restored-actor editing. The joining fixture checks known-CID PIX fetch/reopen and reproduces missing provisional metadata reads when the join recycles the founder's leaf. The new interruption slice adds actor recovery/successor write failures and restart; review is pending. | A-to-B-to-A, provisional newcomer metadata/editing, review of the bounded interruption slice and combined acceptance. Known-CID bytes alone do not close joining acceptance. |
+| Owner succession | `dba52e5` supplies core/store frozen-source takeover. User-accepted `e3f6669` covers eight Index/Flipnote Open/Closing cases, installed-checkpoint inheritance and restored-actor editing. The joining fixture checks known-CID PIX fetch/reopen and reproduces missing provisional metadata reads when the join recycles the founder's leaf. User-accepted `2f5a8a0` adds eight actor recovery/successor write interruptions and restart. | A-to-B-to-A, provisional newcomer metadata/editing and combined acceptance. Known-CID bytes alone do not close joining acceptance. |
 | Signed fault/repair | ReceiptRepair v2 and bounded receipt-book loser screening have protocol regressions. | Durable repair issuance/application, recovery-before-replacement, distribution, owner-journal handling and runtime exit from Fault. Restore/Copy does not supply these. |
 | Remaining UI state and gate acceptance | Current phase/recovery invalidations exist; every current view is provisional. | Persisted Closing overlays, provisional old-owner newcomer reads and specialized tenure/repair observations still need integration evidence. Then run the complete gate scenarios, required suites and user-provided adversarial review. |
 
@@ -339,7 +339,7 @@ multiple parser/delivery keepalives; these lower provisional paths do not yet ex
 not implement previews, actor fairness, lifecycle invalidation or native delivery, nor complete
 the required competing-class actor installation regression. No callable UI hook changes.
 
-**Provisional head discovery (`0b32bad`; published, awaiting user review):** the accepted capacity guard
+**Provisional head discovery (`0b32bad`; user review passed):** the accepted capacity guard
 now follows a real detached head request through completion and an opaque candidate result.
 Preparation requires a current Studio watch and acquires one of the three eligible slots before
 requesting. The existing authenticated response decoder is shared with authoritative discovery;
@@ -355,7 +355,7 @@ parsed preview. Seed/tail fetching, parser bounds, scheduler fairness and native
 remain separate work. No UI layout, command, event or returned StudioView changed.
 The adapters are exercised directly; the actor receiver does not yet schedule this discovery path.
 
-**Independent successor interruption slice (awaiting user review):** four tests cover eight
+**Independent successor interruption slice (`2f5a8a0`; user review passed):** four tests cover eight
 Index/Flipnote cases with an installed old-owner checkpoint and later Closing source. A
 per-mount, one-shot `cfg(test)` hook fails the actual actor's rotation before/after recovery or
 successor writes. The tests check the durable prefix immediately, discard actor/store custody,
@@ -370,8 +370,26 @@ No production policy, native hook, schema or UI layout changes.
 The direct A-to-B-to-A rejoin route shares the known Unknown-tenure dependency: the returned
 device's Welcome and reused owner key do not prove the beginning of its new tenure. No test may
 fill that gap with a caller-supplied tenure or a receipt's own claim. Repeated succession remains
-open alongside provisional-read integration. Discovery checkpoint `0b32bad` still needs its own
-user review before the dependent seed/preview slice proceeds.
+open alongside provisional-read integration. The 2026-09-13 review passes both checkpoints with
+no required code changes; the reviewer inspected source without running Cargo. The suggested
+deadline test delays head completion until T+9s and checks expiry at T+60s from preparation.
+Authoritative and provisional head preparations share the same per-target attempt generation:
+a newer provisional preparation can invalidate an in-flight authoritative head, although it
+cannot invalidate an already completed owner selection. Scheduler work must coordinate them.
+
+**Provisional seed transport and validation (checkpoint; awaiting user review):** a
+one-shot fetch consumes the authenticated hint, pins its provider and carries its original
+60-second deadline and three-of-four capacity through the shared seed transport, detached
+parsing and ready result. Transport still checks its own 10-second response deadline, member
+signature, scope and AEAD framing. The cold parser checks receipt self-signature, exact bounded
+raw seed hash/actor/encoding, typed Index/Flipnote channel/schema and canonical compact bytes.
+Its separate `UnconfirmedStudioSeed` contains typed claims only: no membership or historical
+ownership is inferred from its signing key, and no `VerifiedReceipt`/`VerifiedCheckpoint` is minted.
+App preparation/completion/use checks mount/server/channel, and sync completion/use checks the
+original watch/attempt/member/endpoint/instance. Neither layer writes a source, pointer or journal.
+This is a direct adapter boundary, not actor scheduling or a native preview. Tail authentication,
+worker permits/cancellation fairness, authoritative retry scheduling, lifecycle-safe delivery and
+the ignored newcomer preview cases remain open. See HANDOVER for validation results.
 
 #### Landed on the way: Studio owner settlement preparation (`9799c6f`)
 

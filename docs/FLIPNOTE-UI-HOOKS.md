@@ -1,6 +1,7 @@
 # Flipnote UI hook guide
 
-Last checked: 2026-09-13; published discovery checkpoint `0b32bad` is awaiting review.
+Last checked: 2026-09-13; user review passed discovery `0b32bad` and interruption `2f5a8a0`;
+the seed transport/typed-inspection checkpoint awaits review. Native previews remain pending.
 Behavioral checkpoint: `39ceb76`
 (`fix(studio): bound the recovery hold and make replay slot-order proof`). Owner rotation and recovery
 inspection landed in `cbed5b7`; recovery controls, own-intent replay and settlement events are
@@ -15,7 +16,7 @@ The current slice expands this to eight Index/Flipnote Open/Closing cases, inclu
 installed old-owner checkpoint and editing through a newly restored actor after takeover.
 All eight cases pass; the user accepted `e3f6669`. This adds backend evidence without changing callable
 commands, events or UI layout. Repeated owner changes, post-succession joining/PIX availability,
-review of successor-installation interruption evidence, signed repair and full Gate 4 acceptance
+signed repair and full Gate 4 acceptance
 remain pending.
 The user accepted `48fcc2e` for ownership transitions and known-CID byte persistence, while
 requesting PR-001 changes to the proposed preview capacity and TEST-001/TEST-002 acceptance
@@ -39,8 +40,17 @@ The adapters are currently exercised directly; the actor receiver does not sched
 The independent successor-installation slice adds four passing actor tests covering eight
 failures before/after recovery and successor writes. They require fresh-mount resume of the
 exact receipt, preserved recovery, Registry pointer completion and editing after another restart.
-These are test-only I/O hooks and backend evidence awaiting review, with no new callable hook,
-returned field or UI layout change. They do not claim process-abort or power-loss coverage.
+These are test-only I/O hooks and accepted backend evidence, with no new callable hook,
+returned field or UI layout change. The user accepted both bounded checkpoints with no required
+changes; the reviewer inspected source without running Cargo. They do not claim process-abort
+or power-loss coverage. The current seed slice adds one-shot member-authenticated fetching and
+detached Index/Flipnote validation, retaining the hint's original deadline and capacity through
+the parsed result. Its scoped app inspection returns unconfirmed typed content only. Receipt
+self-signature verifies the named key, not its claimed owner tenure or seed authors. Canonical
+Read, Apply, journals and pointers remain unchanged; no native preview or confirmation field
+is callable yet. Tail validation, actor scheduling and delivery still need integration.
+Authoritative and provisional head requests share one latest
+attempt per target, so the future scheduler must coordinate them.
 A direct A-to-B-to-A rejoin also encounters the Unknown-tenure dependency described below:
 returning with the same owner key does not establish the start of its new tenure.
 The joining fixture exposed an additional owner change: a new invitee can reuse the removed

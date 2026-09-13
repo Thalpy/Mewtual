@@ -22,7 +22,9 @@ pub use index::{
     IndexSource, IndexValue, StudioIndexProjection, MAX_INDEX_OBJECTS,
 };
 mod frames;
+mod provisional;
 mod recovery;
+pub use provisional::UnconfirmedStudioSeed;
 mod snapshot;
 pub use recovery::{StudioProjection, StudioRecovery};
 mod admission;
