@@ -1,7 +1,7 @@
 # Flipnote UI hook guide
 
-Last checked: 2026-09-13; user review passed discovery `0b32bad` and interruption `2f5a8a0`;
-the seed transport/typed-inspection checkpoint awaits review. Native previews remain pending.
+Last checked: 2026-09-13; user review passed discovery `0b32bad`, interruption `2f5a8a0`
+and seed transport/typed inspection `b3e54dc`. Native previews remain pending.
 Behavioral checkpoint: `39ceb76`
 (`fix(studio): bound the recovery hold and make replay slot-order proof`). Owner rotation and recovery
 inspection landed in `cbed5b7`; recovery controls, own-intent replay and settlement events are
@@ -49,6 +49,14 @@ the parsed result. Its scoped app inspection returns unconfirmed typed content o
 self-signature verifies the named key, not its claimed owner tenure or seed authors. Canonical
 Read, Apply, journals and pointers remain unchanged; no native preview or confirmation field
 is callable yet. Tail validation, actor scheduling and delivery still need integration.
+The seed review found no blocking code defect. Its optional P3 follow-up is implemented: a
+raw-valid, typed-readable seed with noncanonical operation order is rejected, and removing the
+final encoding comparison makes the regression fail. Restored source passes.
+The current tail slice adds bounded, current-member signed page fetching and detached typed
+replay over the unconfirmed seed. Its app adapters retain the original mount/server/watch,
+membership and deadline checks. `tail_complete()` means a checked finite provider prefix;
+it supplies no tenure confirmation. These adapters are still outside the actor scheduler and
+native read path. No new native command, event, confirmation field or frontend change is callable.
 Authoritative and provisional head requests share one latest
 attempt per target, so the future scheduler must coordinate them.
 A direct A-to-B-to-A rejoin also encounters the Unknown-tenure dependency described below:

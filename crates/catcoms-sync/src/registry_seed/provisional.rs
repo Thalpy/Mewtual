@@ -7,9 +7,13 @@ use crate::receipt_head::{
 use crate::StudioWatch;
 use catcoms_replication::studio::StudioTarget;
 mod seed;
+mod tail;
 pub use seed::{
     CompletedProvisionalStudioSeed, PendingProvisionalStudioSeed, PreparedProvisionalStudioSeed,
     ProvisionalStudioSeedPreparation, ProvisionalStudioSeedUse,
+};
+pub use tail::{
+    CompletedProvisionalStudioTail, PendingProvisionalStudioTail, ProvisionalStudioTailPreparation,
 };
 
 pub struct PendingProvisionalStudioDiscovery<T: MeshTransport> {

@@ -10,7 +10,68 @@ and ranks the live hazards in that path.
 
 ## Status (latest entry: 2026-09-13)
 
-- **Gate 4 provisional seed checkpoint (2026-09-13; awaiting user review).** The user review
+- **Gate 4 signed-tail checkpoint (2026-09-13; adversarial review pending).** Continued the first
+  of the four remaining blocks. Distinct sync/app tail types consume an unconfirmed seed and
+  retain its original watch/attempt/member/provider/mount/server scope, fixed lifetime and seed
+  reservation through authenticated page I/O, detached typed parsing and scoped inspection.
+  The shared page transport adds a distinct unconfirmed binding and a lower-transport seed
+  keepalive; ordinary Studio and Registry framing/completion remain separate. The parsed graph
+  stays private and never becomes an EncryptedDoc, checkpoint origin, epoch gate or receipt
+  capability. Current author keys/signatures, scope, actor, seed ancestry, typed semantics and
+  domain markers are checked, with bounded pages, aggregate traffic/content and existing exact
+  checkpoint/recovery preflight. A failed page consumes its candidate. `tail_complete()` marks
+  a finite provider prefix only. No canonical source, pointer or journal is written by these
+  adapters, and ordinary reads/Apply remain unchanged. UI implementation remains user-owned.
+  The P3 canonical-encoding follow-up is also complete: both target schemas accept the alternate
+  raw-valid ordering before the final comparison rejects it; removing that comparison fails
+  the regression, and byte-restored source passes.
+
+  Local validation uses Rust 1.89 / the existing Build Tools, without new installs or packaging:
+  `PATH=C:\Users\phaso\.cargo\bin;%PATH%`, `_LINK_=/DEBUG:NONE`, `CARGO_INCREMENTAL=0`.
+  Run `cargo test --locked -j 4 --config 'profile.test.package.<package>.debug=0'
+  -p <package> --lib <filter> -- --test-threads=4` with:
+  replication / `studio::provisional` (5 pass, 1.16s), sync / `registry_seed` (35 pass, 6.40s),
+  sync / `registry_catchup` (13 pass, 2.38s), app / `studio_provisional_tail` (2 pass, 20.89s).
+  These are 55 focused tests, including 12 new tests: P3 plus four core tail, five sync tail
+  and two app tail cases. The real multi-page test covers Index and Flipnote fixed-prefix
+  service; app cases preserve full ordinary views, refused-Apply behavior and document/journal
+  absence after vault reopen. Lifecycle matrices cover completion and detached preparation/use.
+  `cargo clippy --locked -j 4 -p catcoms-replication -p catcoms-sync -p catcoms-app --lib --tests
+  -- -D warnings` and root formatting pass. Logs are `logs/gate4-preview-tail-{core,app,
+  seed-regressions,page-regressions,clippy}.log`.
+
+  Mutation harness: `logs/gate4-preview-tail-mutations.ps1`; assertions reject omitted current
+  membership checking, omitted inner signature verification, omitted post-parse expiry and lost
+  lower-transport seed custody. Every source is restored byte-for-byte in `finally`, followed
+  by the focused core/sync tail checks. P3's separate mutation/restored evidence is in
+  `logs/gate4-preview-canonical-order-{mutation,restored}.log`. These deliberate failures do
+  not represent failures on the restored implementation.
+
+  This is a review boundary before actor/native integration, not completion of block 1.
+  Scheduling, shared process worker permits/fairness, authoritative progress under three held
+  preview slots, periodic revalidation and native delivery fences remain pending. The two
+  newcomer preview cases remain ignored; no new run or pass is claimed. The other three blocks
+  remain Closing overlays/repeated-owner tenure, runtime signed repair and combined Gate 4
+  acceptance. See `logs/gate4-pending-reviews.md` for the published SHA and copyable request.
+
+- **Gate 4 seed review closure and progress (2026-09-13).** The user-provided review accepts
+  `b3e54dc` against `2f5a8a0` with no blocking implementation defect or required production
+  change. The reviewer inspected source and did not run Cargo or mutations. Its P3 coverage
+  follow-up was to independently challenge the canonical re-encoding comparison with a
+  correctly signed/hash-bound seed whose deterministic actor and complete typed schema are
+  valid, but whose root operations use a different order from the canonical writer. First
+  establish raw-change and typed-schema acceptance, then require provisional parsing to reject
+  it; removing the final comparison should make this regression fail. The earlier root fixture
+  fails earlier schema validation and does not isolate this check. This follow-up is completed
+  in the signed-tail entry above and did not block acceptance of the committed parser.
+  Gate 4 still requires substantial integration: actor scheduling, authenticated tails and
+  native newcomer previews with lifecycle/capacity/fairness evidence; persisted Closing overlays
+  and repeated-owner tenure handling; runtime signed fault/repair issuance, application and
+  distribution; then combined gate scenarios and final review. The reviewed rotation/recovery,
+  takeover/interruption and provisional discovery/seed foundations are complete at their stated
+  boundaries. Gate 4 is not yet at final acceptance, and commit counts are not a completion percentage.
+
+- **Gate 4 provisional seed checkpoint (`b3e54dc`, 2026-09-13; user review passed).** The user review
   passes `0b32bad` against `1c90c41` and `2f5a8a0` against `0b32bad`, with no required code changes.
   The reviewer inspected source and did not execute Rust tests. The suggested non-blocking
   deadline regression now delays head completion to T+9s, allows inspection at T+59.999s and

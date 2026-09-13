@@ -3,6 +3,7 @@ use crate::studio_exchange::provisional::{
     ProvisionalStudioSeedAttempt, ProvisionalStudioSeedCompletion,
 };
 use catcoms_replication::{studio::StudioEpoch, CheckpointSeed};
+mod tail;
 
 fn candidate(p: &mut Pair, target: StudioTarget) -> (Receipt, CheckpointSeed) {
     p.alice.sync.with_registry_context(|g, d, _, _| {

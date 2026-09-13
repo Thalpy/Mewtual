@@ -7,7 +7,7 @@ use crate::registry_seed::transfer::{
 use catcoms_replication::studio::{StudioProjection, UnconfirmedStudioSeed};
 use zeroize::Zeroizing;
 #[cfg(test)]
-mod tests;
+pub(in crate::registry_seed::provisional) mod tests;
 
 pub struct PendingProvisionalStudioSeed<T: MeshTransport> {
     hint: ProvisionalStudioHint,
@@ -27,8 +27,9 @@ pub struct ProvisionalStudioSeedPreparation {
     hint: ProvisionalStudioHint,
 }
 pub struct PreparedProvisionalStudioSeed {
-    seed: UnconfirmedStudioSeed,
-    hint: ProvisionalStudioHint,
+    pub(super) seed: UnconfirmedStudioSeed,
+    pub(super) tail: super::tail::TailProgress,
+    pub(super) hint: ProvisionalStudioHint,
 }
 /// Scoped, explicitly unconfirmed data. There is no owner capability or ordinary StudioView.
 #[derive(Debug)]
@@ -79,7 +80,14 @@ impl ProvisionalStudioSeedPreparation {
         Ok(PreparedProvisionalStudioSeed {
             hint: self.hint,
             seed,
+            tail: super::tail::TailProgress::default(),
         })
+    }
+}
+impl PreparedProvisionalStudioSeed {
+    /// A finite authenticated provider prefix has been checked, not proof of a current owner.
+    pub fn tail_complete(&self) -> bool {
+        self.tail.complete
     }
 }
 impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {

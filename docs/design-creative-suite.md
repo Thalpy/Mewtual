@@ -65,14 +65,22 @@ resume the exact journaled decision, preserve typed recovery and finish the Regi
 another restart must remain editable. This bounded I/O-error/restart evidence passed review and
 does not close Gate 4. Direct A-to-B-to-A by rejoining still shares the Unknown-tenure gap:
 the same returned owner key and a Welcome cannot establish its new tenure's start.
-The next worktree slice consumes an authenticated hint for a bounded seed fetch and detached
+The user-accepted `b3e54dc` slice consumes an authenticated hint for a bounded seed fetch and detached
 typed validation. Receipt self-signature and canonical seed validation produce only unconfirmed
 content; they establish no owner tenure, canonical source or editable epoch. Original capacity,
 deadline and lifecycle custody survive through the prepared result. Actor scheduling, tail
 validation and native preview delivery remain pending, and no new frontend hook is callable.
 Authoritative/provisional head preparations share a per-target latest attempt, which the future
 scheduler must coordinate. Both previous reviews passed with no required changes; the optional
-head-deadline regression is included in this slice. Gate 4 remains open.
+head-deadline regression is included in this slice. Its review found no blocking code defect and
+one optional P3 follow-up to independently test canonical seed re-encoding. That regression now
+passes for Index and Flipnote and fails when the final comparison is removed; source is restored.
+The current signed-tail checkpoint adds authenticated bounded pages and detached typed replay
+over the private unconfirmed graph, with unchanged watch/tenure authority and original capacity,
+deadline and lifecycle checks. It awaits adversarial review. A checked finite tail is still only
+unconfirmed content; it supplies no editable source or ordinary Read result. Block 1 still needs
+actor scheduling, worker/capacity fairness and native preview delivery. The other three blocks
+remain Closing overlays/repeated-owner tenure, runtime signed repair and combined acceptance.
 
 UI reference (2026-09-05): the owner's `Main.html`, `Inspector.html`, `Timeline.html`,
 `Palette.html` and `Tools.html`, with matching PNGs, were drafted as a scratch preview outside

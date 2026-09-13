@@ -1237,7 +1237,7 @@ fn is_epoch_managed(doc_type: DocType) -> bool {
     )
 }
 
-fn domain_marker_key(op_id: &[u8; 32]) -> String {
+pub(crate) fn domain_marker_key(op_id: &[u8; 32]) -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut key = String::with_capacity(7 + 64);
     key.push_str("_p1/op/");

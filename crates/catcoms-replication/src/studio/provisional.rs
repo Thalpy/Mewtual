@@ -2,9 +2,21 @@
 //! this projection is authenticated by checking the receipt's self-declared signing key.
 use super::{StudioProjection, StudioTarget};
 use crate::{Receipt, ReplError};
+use automerge::AutoCommit;
+use std::collections::{BTreeMap, HashSet};
+mod tail;
+pub use tail::UnconfirmedStudioTailPreparation;
+#[cfg(test)]
+mod tests;
 
 pub struct UnconfirmedStudioSeed {
     projection: StudioProjection,
+    target: StudioTarget,
+    doc: AutoCommit,
+    doc_id: u128,
+    applied: HashSet<[u8; 32]>,
+    operations: BTreeMap<[u8; 32], crate::LocalIntent>,
+    encoded_bytes: usize,
 }
 impl std::fmt::Debug for UnconfirmedStudioSeed {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -34,10 +46,27 @@ impl UnconfirmedStudioSeed {
             StudioProjection::Index(p) => p.epoch = epoch,
             StudioProjection::Flipnote(p) => p.epoch = epoch,
         }
-        Ok(Self { projection })
+        let doc_id = crate::epoch_id(
+            receipt.document.doc_type,
+            &receipt.document.logical_key,
+            epoch,
+            &receipt.close_record_hash,
+        );
+        Ok(Self {
+            projection,
+            target,
+            doc,
+            doc_id,
+            applied: HashSet::new(),
+            operations: BTreeMap::new(),
+            encoded_bytes: 0,
+        })
     }
     /// Typed content only; seed authors, receipt signer membership and tenure remain unconfirmed.
     pub fn projection(&self) -> &StudioProjection {
         &self.projection
+    }
+    pub fn doc_id(&self) -> u128 {
+        self.doc_id
     }
 }

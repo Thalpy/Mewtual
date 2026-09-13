@@ -24,7 +24,7 @@ pub use index::{
 mod frames;
 mod provisional;
 mod recovery;
-pub use provisional::UnconfirmedStudioSeed;
+pub use provisional::{UnconfirmedStudioSeed, UnconfirmedStudioTailPreparation};
 mod snapshot;
 pub use recovery::{StudioProjection, StudioRecovery};
 mod admission;

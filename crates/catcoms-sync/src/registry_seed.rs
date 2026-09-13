@@ -22,9 +22,10 @@ pub use detached::{
 };
 pub use provisional::{
     CompletedProvisionalStudioDiscovery, CompletedProvisionalStudioSeed,
-    PendingProvisionalStudioDiscovery, PendingProvisionalStudioSeed, PreparedProvisionalStudioSeed,
+    CompletedProvisionalStudioTail, PendingProvisionalStudioDiscovery,
+    PendingProvisionalStudioSeed, PendingProvisionalStudioTail, PreparedProvisionalStudioSeed,
     ProvisionalStudioHint, ProvisionalStudioHintUse, ProvisionalStudioSeedPreparation,
-    ProvisionalStudioSeedUse,
+    ProvisionalStudioSeedUse, ProvisionalStudioTailPreparation,
 };
 use wire::*;
 

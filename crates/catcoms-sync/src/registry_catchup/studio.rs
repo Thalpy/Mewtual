@@ -42,18 +42,21 @@ impl fmt::Debug for StudioReceivePermit {
 enum PageBinding {
     Studio(StudioWatch),
     Registry(RegistryWatch),
+    UnconfirmedStudio(StudioWatch, u128),
 }
 impl PageBinding {
     fn scope(&self) -> PageScope {
         match self {
             Self::Studio(w) => PageScope::Studio(w.target),
             Self::Registry(w) => PageScope::Registry(w.bucket),
+            Self::UnconfirmedStudio(w, _) => PageScope::Studio(w.target),
         }
     }
     fn doc_id(&self) -> u128 {
         match self {
             Self::Studio(w) => w.doc_id,
             Self::Registry(w) => w.doc_id,
+            Self::UnconfirmedStudio(_, doc_id) => *doc_id,
         }
     }
 }
@@ -77,11 +80,13 @@ pub struct PendingStudioPage<T: MeshTransport> {
     context: Context,
     request: Vec<u8>,
     capacity: Arc<()>,
+    retained: Option<Arc<()>>,
 }
 pub struct CompletedStudioPage {
     context: Context,
     response: Result<Bytes, TransportError>,
     _capacity: Arc<()>,
+    _retained: Option<Arc<()>>,
 }
 /// Registry-specific wrapper prevents completing one kind as the other at the public seam.
 #[derive(Debug)]
@@ -112,7 +117,8 @@ impl<T: MeshTransport> PendingStudioPage<T> {
         let response = if self.clock.monotonic_ms() >= self.context.expires {
             Err(TransportError::Unreachable(self.context.peer))
         } else {
-            let cancellation = RequestCancellation::new(cancelled, Some(self.capacity.clone()));
+            let keepalive = Arc::new((self.capacity.clone(), self.retained.clone()));
+            let cancellation = RequestCancellation::new(cancelled, Some(keepalive));
             tokio::select! {
                 biased;
                 _ = self.clock.sleep(std::time::Duration::from_millis(self.context.expires.saturating_sub(self.clock.monotonic_ms()))) => Err(TransportError::Unreachable(self.context.peer)),
@@ -123,6 +129,7 @@ impl<T: MeshTransport> PendingStudioPage<T> {
             context: self.context,
             response,
             _capacity: self.capacity,
+            _retained: self.retained,
         }
     }
 }
@@ -231,6 +238,44 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             query.cursor,
         )
     }
+    /// Crate-private transport seam for the opaque provisional seed adapter. The original
+    /// ordinary watch remains unchanged; this distinct binding can never complete as a normal
+    /// Studio page. Its retained seed slot also follows a cancelled lower transport.
+    pub(crate) fn prepare_unconfirmed_studio_page(
+        &mut self,
+        watch: &StudioWatch,
+        peer: PeerId,
+        query: StudioPageQuery<'_>,
+        retained: Arc<()>,
+        expires: u64,
+    ) -> Result<PendingStudioPage<T>, SyncError> {
+        if !self.studio_watch_is_current(watch)
+            || watch.target != query.target
+            || !self.registry_page_member(&self.device.public_key_bytes())
+            || self.clock.monotonic_ms() >= expires
+        {
+            return Err(SyncError::Unauthorized);
+        }
+        let mut pending = self.prepare_bound_page(
+            PageBinding::UnconfirmedStudio(watch.copy_binding(), query.doc_id),
+            peer,
+            query.heads,
+            query.seed,
+            query.cursor,
+        )?;
+        pending.context.expires = pending.context.expires.min(expires);
+        pending.retained = Some(retained);
+        Ok(pending)
+    }
+    pub(crate) fn complete_unconfirmed_studio_page(
+        &mut self,
+        completed: CompletedStudioPage,
+    ) -> Result<Option<RegistryPageOutcome>, SyncError> {
+        if !matches!(&completed.context.watch, PageBinding::UnconfirmedStudio(..)) {
+            return Err(SyncError::Unauthorized);
+        }
+        self.complete_bound_page(completed)
+    }
     /// Registry tail fetch uses the existing receive permit and the same connected-only
     /// detached I/O engine as Studio, including cancellation-retained capacity.
     pub fn prepare_registry_receive_page(
@@ -287,6 +332,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             clock: self.clock.clone(),
             request,
             capacity,
+            retained: None,
             context: Context {
                 instance: self.registry_instance(),
                 watch,
@@ -325,6 +371,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         let current = match &c.watch {
             PageBinding::Studio(w) => self.studio_watch_is_current(w),
             PageBinding::Registry(w) => self.registry_watch_is_current(w),
+            PageBinding::UnconfirmedStudio(w, _) => self.studio_watch_is_current(w),
         };
         if !self.matches_registry_instance(&c.instance)
             || !current

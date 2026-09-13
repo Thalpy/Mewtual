@@ -377,7 +377,7 @@ Authoritative and provisional head preparations share the same per-target attemp
 a newer provisional preparation can invalidate an in-flight authoritative head, although it
 cannot invalidate an already completed owner selection. Scheduler work must coordinate them.
 
-**Provisional seed transport and validation (checkpoint; awaiting user review):** a
+**Provisional seed transport and validation (`b3e54dc`; user review passed):** a
 one-shot fetch consumes the authenticated hint, pins its provider and carries its original
 60-second deadline and three-of-four capacity through the shared seed transport, detached
 parsing and ready result. Transport still checks its own 10-second response deadline, member
@@ -390,6 +390,25 @@ original watch/attempt/member/endpoint/instance. Neither layer writes a source, 
 This is a direct adapter boundary, not actor scheduling or a native preview. Tail authentication,
 worker permits/cancellation fairness, authoritative retry scheduling, lifecycle-safe delivery and
 the ignored newcomer preview cases remain open. See HANDOVER for validation results.
+The user review found no blocking implementation defect or required production change. Its
+P3 coverage follow-up is now implemented: raw-change and typed-schema checks accept a correctly
+signed seed with noncanonical root operation order, but the final comparison rejects it for both
+Index and Flipnote. Removing that comparison fails the regression; byte-restored source passes.
+The reviewer inspected the preceding checkpoint without running Rust tests or mutations.
+
+**Current signed-tail checkpoint (adversarial review pending):** distinct sync/app tail attempts
+consume the unconfirmed seed and reuse authenticated Studio page framing without replacing the
+ordinary watch or constructing an installed epoch. Current membership, inner signature, physical
+and logical scope, actor identity, known seed ancestry, typed semantics and operation markers are
+checked. Detached parsing applies a whole page or discards its candidate, with existing exact
+checkpoint/recovery size preflight and aggregate tail limits. No historical tenure or author
+authority is inferred. Original 60-second custody and per-request 10-second limits survive page
+fetch, parser and scoped inspection; cancelled lower transport retains the seed reservation.
+`tail_complete()` marks a checked finite provider prefix, not owner confirmation. The app tests
+preserve ordinary reads and document/journal absence after refused Apply and vault reopen.
+The actor scheduler, shared worker priority/fairness, native preview result and delivery fences
+are still pending. Block 1 remains in progress; Closing overlays/repeated tenure, runtime signed
+repair, and combined Gate 4 acceptance remain the other three blocks. Validation is in HANDOVER.
 
 #### Landed on the way: Studio owner settlement preparation (`9799c6f`)
 

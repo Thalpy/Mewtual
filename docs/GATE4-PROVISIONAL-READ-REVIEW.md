@@ -11,7 +11,43 @@ running Cargo and suggested a stronger delayed-completion expiry test, included 
 seed slice. That slice adds one-shot transport and detached typed validation, with unconfirmed
 results retaining their original capacity and deadline. It does not yet connect the actor's
 scheduler, authenticated tail or native preview delivery. Focused regressions, three deliberate
-mutations, formatting and Clippy pass; the new seed checkpoint awaits user adversarial review.
+mutations, formatting and Clippy pass. The user review accepts seed checkpoint `b3e54dc` against
+`2f5a8a0` with no blocking implementation defect. Its non-blocking P3 follow-up is now implemented:
+the real raw-change and typed-schema gates accept a correctly signed seed with noncanonical root
+operation order, while the final comparison rejects it. Both target types pass; disabling that
+comparison fails the test and restored source passes. The reviewer did not run Cargo or mutations.
+The current signed-tail checkpoint awaits adversarial review. It adds one-shot authenticated pages
+and detached typed replay over a private unconfirmed graph, with no actor or native integration yet.
+
+## Current signed-tail checkpoint (review pending)
+
+The seed now retains its private parsed graph and bounded volatile operation metadata. It never
+constructs an `EncryptedDoc`, `CheckpointOrigin`, epoch gate or verified receipt. At most 32
+operations / 512 KiB enter each page, with ciphertext checked before encoding copies. Current MLS
+sealing, exact admitted author key and inner signature are checked before cold parsing. The
+parser requires physical/logical/channel scope, matching Automerge actor, known predecessors
+descending from the seed, typed operation semantics and the exact domain marker. Its aggregate
+limits are 20,000 distinct operations / 4 MiB of signed content, with the existing exact Studio
+checkpoint/recovery preflight. These are bounded preview checks, not owner quota/admission grants.
+Any rejected page consumes the candidate; no partially checked page becomes a ready result.
+
+Sync owns fixed-prefix cursors and limits aggregate page traffic to 20,001 pages, 20,000 transmitted
+operations and 16 MiB. Restart, checkpoint-required and historical-authorization-required outcomes
+discard the pass. A repeated cursor is refused. `tail_complete()` means the supplied finite prefix
+ended; the future runtime must require it before exposing a read fallback. Scoped seed inspection
+remains a backend data seam and is not a native preview. No renderer hook has been added.
+
+The distinct page binding preserves the original installed/absent-epoch watch while requesting
+the candidate's concrete successor epoch. It cannot complete through ordinary Studio page APIs.
+The lower transport retains both outbound and provisional seed capacity. Completion, detached
+parsing and inspection preserve the original deadline and hint generation; app checks add mount,
+numeric server and channel. Tests exercise genuine Index/Flipnote multi-page providers, stale
+membership/watch/attempt/provider/runtime, deadlines, cancelled lower custody, and the app's
+unchanged canonical reads, refused Apply and empty documents/journals after reopen.
+
+This remains block 1 of the four remaining Gate 4 blocks. The scheduler, process worker permits,
+reserved-lane fairness, periodic revalidation, native delivery custody and ignored newcomer reads
+are still outstanding. The allocator tests here do not establish runtime install progress.
 
 ## Reproduced boundary
 

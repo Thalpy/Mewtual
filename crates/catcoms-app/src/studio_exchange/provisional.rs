@@ -7,9 +7,14 @@ use catcoms_sync::registry_seed::{
     ProvisionalStudioHintUse,
 };
 mod seed;
+mod tail;
 pub use seed::{
     ProvisionalStudioSeedAttempt, ProvisionalStudioSeedCompletion,
     ServerPreparedProvisionalStudioSeed, ServerProvisionalStudioSeedPreparation,
+};
+pub use tail::{
+    ProvisionalStudioTailAttempt, ProvisionalStudioTailCompletion,
+    ServerProvisionalStudioTailPreparation,
 };
 
 pub struct ProvisionalStudioDiscoveryAttempt<T: MeshTransport> {

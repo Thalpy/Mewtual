@@ -8,8 +8,8 @@ use catcoms_rt::{Hub, ManualClock, MemNetwork};
 use rand_chacha::ChaCha20Rng;
 use rand_core::SeedableRng;
 
-type Node = ChannelSync<MemNetwork, ChaCha20Rng>;
-fn target(art: bool) -> StudioTarget {
+pub(in crate::registry_seed::provisional) type Node = ChannelSync<MemNetwork, ChaCha20Rng>;
+pub(in crate::registry_seed::provisional) fn target(art: bool) -> StudioTarget {
     if art {
         StudioTarget::Flipnote {
             channel: [3; 16],
@@ -19,7 +19,7 @@ fn target(art: bool) -> StudioTarget {
         StudioTarget::Index { channel: [3; 16] }
     }
 }
-async fn pair() -> (Node, Node, ManualClock) {
+pub(in crate::registry_seed::provisional) async fn pair() -> (Node, Node, ManualClock) {
     let (_, mut nodes, ids) = build_members(2).await;
     let mut provider = nodes.pop().unwrap(); // A current member who is NOT the designated owner.
     let mut client = nodes.pop().unwrap();
@@ -34,7 +34,10 @@ async fn pair() -> (Node, Node, ManualClock) {
     );
     (provider, client, clock)
 }
-fn seed(provider: &Node, target: StudioTarget) -> (Receipt, CheckpointSeed) {
+pub(in crate::registry_seed::provisional) fn seed(
+    provider: &Node,
+    target: StudioTarget,
+) -> (Receipt, CheckpointSeed) {
     let mut source =
         StudioEpoch::new(&provider.group, target, provider.device.device_id()).unwrap();
     let body = match target {
@@ -85,7 +88,7 @@ fn signed(provider: &Node, target: StudioTarget, hash: [u8; 32]) -> Receipt {
     )
     .unwrap()
 }
-async fn hint(
+pub(in crate::registry_seed::provisional) async fn hint(
     provider: &mut Node,
     client: &mut Node,
     target: StudioTarget,
@@ -122,7 +125,7 @@ async fn hint(
         .unwrap()
         .unwrap()
 }
-async fn response(
+pub(in crate::registry_seed::provisional) async fn response(
     provider: &mut Node,
     pending: PendingProvisionalStudioSeed<MemNetwork>,
     target: StudioTarget,
@@ -141,7 +144,7 @@ async fn response(
     });
     completed
 }
-fn retained(client: &Node) -> usize {
+pub(in crate::registry_seed::provisional) fn retained(client: &Node) -> usize {
     client
         .registry_seeds
         .retained
@@ -378,10 +381,10 @@ async fn provisional_seed_completion_and_prepared_use_recheck_lifecycle() {
 }
 
 #[derive(Debug)]
-struct ParseDeadlineClock {
-    base: ManualClock,
-    expiry: u64,
-    reads: std::sync::atomic::AtomicUsize,
+pub(in crate::registry_seed::provisional) struct ParseDeadlineClock {
+    pub(in crate::registry_seed::provisional) base: ManualClock,
+    pub(in crate::registry_seed::provisional) expiry: u64,
+    pub(in crate::registry_seed::provisional) reads: std::sync::atomic::AtomicUsize,
 }
 impl Clock for ParseDeadlineClock {
     fn now_ms(&self) -> u64 {

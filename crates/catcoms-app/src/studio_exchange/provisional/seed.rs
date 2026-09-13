@@ -4,7 +4,7 @@ use catcoms_sync::registry_seed::{
     ProvisionalStudioSeedPreparation, ProvisionalStudioSeedUse,
 };
 
-struct Scope {
+pub(super) struct Scope {
     mount: Arc<()>,
     server: u64,
     target: StudioTarget,
@@ -22,8 +22,8 @@ pub struct ServerProvisionalStudioSeedPreparation {
     scope: Scope,
 }
 pub struct ServerPreparedProvisionalStudioSeed {
-    inner: PreparedProvisionalStudioSeed,
-    scope: Scope,
+    pub(super) inner: PreparedProvisionalStudioSeed,
+    pub(super) scope: Scope,
 }
 impl<T: MeshTransport> ProvisionalStudioSeedAttempt<T> {
     pub async fn fetch(self) -> ProvisionalStudioSeedCompletion {
@@ -61,7 +61,7 @@ redacted_debug!(
     ServerPreparedProvisionalStudioSeed
 );
 impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
-    fn check_provisional_seed_scope(
+    pub(super) fn check_provisional_seed_scope(
         &self,
         store: &ServerStore,
         server: u64,
@@ -119,5 +119,10 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
         Ok(self
             .sync
             .with_provisional_studio_seed(&prepared.inner, inspect)?)
+    }
+}
+impl ServerPreparedProvisionalStudioSeed {
+    pub fn tail_complete(&self) -> bool {
+        self.inner.tail_complete()
     }
 }
