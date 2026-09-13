@@ -1,12 +1,12 @@
-// The studio's in-memory projection: every StudioIndex and StudioObject document the client
-// would materialize from P1, kept as plain data and edited only through the closed domain
-// operation set (design-creative-suite.md 2.9). Each edit becomes a `DomainOpEnvelope` in `ops`,
-// which is exactly what the transport will send once Studio save/load is wired; until then the
-// projection is the only copy, and this class is the boundary.
+// The studio's FIXTURE projection: an in-memory model of StudioIndex and StudioObject documents,
+// edited through the closed domain operation set (design-creative-suite.md 2.9). It is not the
+// connected path. The surfaces read the native views through studio-native.ts (typed adapter)
+// and studio-session.ts (saves, fetching, refresh, recovery); native responses are never cast
+// into the roots below, and `localCid` is never a published blob's name.
 //
-// What is deliberately NOT here: blob publication (`publish_pix`), bounded fetch, claim frames on
-// the draw channel, settlement and recovery actions, export. Their inputs and outputs exist as
-// fixtures so the surface can render every state; the verbs are stubs that say so.
+// What survives from here in the connected app: the default palette and its labels, and the
+// cat-scene fixture the store tests and visual checks still use. The claims, sfx, export and
+// settlement fields model design states that the backend does not expose yet (Gates 5 and 6).
 
 import { encodePix, localCid } from "./pix.ts";
 import {

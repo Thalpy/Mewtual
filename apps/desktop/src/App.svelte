@@ -5170,6 +5170,17 @@
 
   let cur = $derived(servers.find((s) => s.id === activeServerId) ?? null);
   let myFp = $derived(roster.find((r) => r.you)?.fingerprint ?? "");
+  // The full device identity, as the studio's native views name authors. A fingerprint is
+  // display only and never compared against an author field.
+  let myIdentity = $derived(roster.find((r) => r.you)?.identity ?? "");
+  function nameOfIdentity(identity: string): string {
+    const m = roster.find((r) => r.identity === identity);
+    return m ? nameOf(m.fingerprint) : identity.slice(0, 8);
+  }
+  function colorOfIdentity(identity: string): string {
+    const m = roster.find((r) => r.identity === identity);
+    return (m && profiles[m.fingerprint]?.color) || "var(--muted)";
+  }
   // My display name in the active server (per-server identity): drives @mention self-highlight
   // and detection of mentions aimed at me. `myMentionName` is the form that round-trips through the
   // `@[Name]` marker (see `mentionName`), so insertion + detection + self-highlight all agree.
@@ -6309,6 +6320,7 @@
     navAt = -1;
     tickerItems = []; // and so is anything the ticker was naming
     tickerReceipts = new Set(); // receipts can include wiki/page ids; do not retain them behind lock
+    studioReset?.(); // and the studio's views, held pixels and unsaved strokes
     servers = [];
     beginViewSwitch(); // a read still in flight must not land behind the lock
     activeServerId = null;
@@ -8233,13 +8245,17 @@
   let StudioSurface = $state<StudioSurfaceComponent | null>(null);
   let StudioNav = $state<StudioNavComponent | null>(null);
   let studioLoading = false;
+  // Lock must clear the studio's in-memory session (views, held pixels, unsaved work) the same
+  // instant it clears everything else; the chunk owns the reset, this keeps a handle to it.
+  let studioReset: (() => void) | null = null;
   async function loadStudio() {
     if ((StudioSurface && StudioNav) || studioLoading) return;
     studioLoading = true;
     try {
-      const [s, n] = await Promise.all([import("./Studio.svelte"), import("./StudioNav.svelte")]);
+      const [s, n, st] = await Promise.all([import("./Studio.svelte"), import("./StudioNav.svelte"), import("./studio-state.svelte.ts")]);
       StudioSurface = s.default;
       StudioNav = n.default;
+      studioReset = st.resetStudio;
     } catch (cause) {
       toast(`The studio failed to load: ${String(cause)}`, "err");
     } finally {
@@ -23519,7 +23535,7 @@
     <button class="ghost small ctx-action" disabled={finishedTransfers === 0} onclick={clearFinishedTransfers}>Clear finished</button>
   {:else if view === "studio"}
     {#if StudioNav}
-      <StudioNav me={myFp} onopen={() => (view = "studio")} />
+      <StudioNav me={myIdentity} server={activeServerId} channel={cur?.active ?? ""} onopen={() => (view = "studio")} onnotice={studioNotice} />
     {:else}
       <h3><span>Studio</span></h3>
       <p class="muted small">Loading the studio…</p>
@@ -25060,7 +25076,7 @@
               <span class="sb-ico">⧗</span>events
               {#if upcomingEvents.length}<span class="tab-count">{upcomingEvents.length}</span>{/if}
             </button>
-            <button type="button" class:active={view === "studio"} onclick={() => switchView("studio")} title="Flipnotes and scores made together (in-memory preview)">
+            <button type="button" class:active={view === "studio"} onclick={() => switchView("studio")} title="Flipnotes made together in this channel">
               <span class="sb-ico">◫</span>studio
             </button>
             <button type="button" class:active={view === "downloads"} onclick={() => switchView("downloads")}>
@@ -26487,7 +26503,7 @@
           </div>
         {:else if view === "studio"}
           {#if StudioSurface}
-            <StudioSurface me={myFp} nameOf={nameOf} colorOf={(fp) => profiles[fp]?.color || "var(--muted)"} onnotice={studioNotice} />
+            <StudioSurface me={myIdentity} server={activeServerId} channel={cur?.active ?? ""} nameOf={nameOfIdentity} colorOf={colorOfIdentity} onnotice={studioNotice} />
           {:else}
             <h2>Studio</h2>
             <p class="muted">Loading the studio…</p>

@@ -1,69 +1,95 @@
 <script lang="ts">
-  // The studio's contextual sidebar: this channel's flipnotes, scores and exports with their
-  // settlement state (design-creative-suite.md section 5, "Studio").
-  import { bump, ensureStudio, studio } from "./studio-state.svelte.ts";
+  // The studio's contextual sidebar: this channel's flipnotes and scores with what is actually
+  // known about each (design-creative-suite.md section 5, "Studio"), read from the connected
+  // session's Index view. Overflow and deleted entries stay visible as what they are.
+  import { ensureStudio, setStudioScope, studio } from "./studio-state.svelte.ts";
   import { PixRaster } from "./pix-canvas.ts";
   import { DEFAULT_PALETTE } from "./studio-store.ts";
-  import { FLIPNOTE_H, FLIPNOTE_W, type Settlement } from "./studio-contract.ts";
+  import { FLIPNOTE_H, FLIPNOTE_W } from "./studio-contract.ts";
+  import { reason, type KnownView } from "./studio-session.ts";
+  import type { NativeExpiry } from "./studio-native.ts";
 
-  let { me, onopen } = $props<{ me: string; onopen: () => void }>();
+  let { me, server, channel, onopen, onnotice } = $props<{
+    me: string;
+    server: number | null;
+    channel: string;
+    onopen: () => void;
+    onnotice?: (text: string, kind: "info" | "warn" | "error") => void;
+  }>();
 
   // At init, not in a derived: it writes shared state once, keyed on the identity at mount.
   // svelte-ignore state_referenced_locally
-  const store = ensureStudio(me);
-  const objects = $derived.by(() => {
-    void studio.rev;
-    return Object.entries(store.index.objects)
-      .filter(([, o]) => !o.deleted)
-      .map(([id, o]) => ({ id, ...o, settlement: store.settlement.get(id) ?? null, root: store.objects.get(id) ?? null }));
-  });
-  const exportsList = $derived.by(() => {
-    void studio.rev;
-    const out: { id: string; title: string; bytes: number; expiry: number }[] = [];
-    for (const [oid, root] of store.objects) {
-      for (const [eid, e] of Object.entries(root.exports)) if (!e.deleted) out.push({ id: eid, title: `${root.title}.pixa`, bytes: e.bytes, expiry: e.expiry });
-      void oid;
-    }
-    return out;
-  });
+  const session = ensureStudio(me);
+  $effect(() => { setStudioScope(server, channel); });
 
-  function chip(s: Settlement | null): { text: string; tone: "ok" | "warn" | "danger" } {
-    if (!s) return { text: "new", tone: "ok" };
-    if (s.gate === "fault") return { text: "fault", tone: "danger" };
-    if (s.label === "settled") return { text: "settled", tone: "ok" };
-    if (s.label === "rotating" || s.label.startsWith("local edits")) return { text: "rotating", tone: "warn" };
-    if (s.label.startsWith("current owner")) return { text: "unconfirmed", tone: "warn" };
-    if (s.label === "document full" || s.label === "storage limit reached") return { text: "full", tone: "warn" };
-    return { text: s.gate, tone: "warn" };
+  const model = $derived.by(() => { void studio.rev; return session.indexModel; });
+  const indexView = $derived.by(() => { void studio.rev; return session.index; });
+  const indexError = $derived.by(() => { void studio.rev; return session.indexError; });
+  const loading = $derived.by(() => { void studio.rev; return session.indexLoading && !session.index; });
+  const pendingCreates = $derived.by(() => { void studio.rev; return session.saves.filter((s) => s.kind === "create"); });
+
+  function known(id: string): KnownView | null {
+    void studio.rev;
+    return session.known.get(id) ?? null;
+  }
+
+  function chip(k: KnownView | null): { text: string; tone: "ok" | "warn" | "danger" | "" } {
+    if (!k) return { text: "", tone: "" };
+    if (k.awaiting) return { text: "preview", tone: "warn" };
+    if (k.phase === "fault") return { text: "fault", tone: "danger" };
+    if (k.phase === "settled") return { text: "settled", tone: "ok" };
+    if (k.phase === "closing") return { text: "rotating", tone: "warn" };
+    return { text: "open", tone: "ok" };
+  }
+
+  function indexNote(): { text: string; tone: "warn" | "danger" | "" } {
+    if (!indexView) return { text: "", tone: "" };
+    if (indexView.awaitingTenureReceipt) return { text: "read-only preview · owner has not confirmed this channel's history", tone: "warn" };
+    if (indexView.phase === "fault") return { text: "index history fault", tone: "danger" };
+    if (indexView.phase === "closing") return { text: "index rotating · new entries wait for the owner", tone: "warn" };
+    return { text: "", tone: "" };
   }
 
   function open(id: string) {
     studio.selected = id;
+    session.open(id);
     onopen();
   }
 
   function newFlipnote() {
-    const id = store.createFlipnote(`flipnote ${objects.length + 1}`);
-    // A flipnote opens on a blank first frame, never on nothing.
-    store.insertFrame(id, null, new PixRaster(FLIPNOTE_W, FLIPNOTE_H, DEFAULT_PALETTE.map((e) => ({ ...e }))).encode());
-    bump();
-    open(id);
+    if (!session.scope) return;
+    if (indexView?.awaitingTenureReceipt) { onnotice?.("read-only preview: the current owner has not confirmed this channel's history yet", "warn"); return; }
+    try {
+      const n = (model?.entries.length ?? 0) + (model?.overflow.length ?? 0) + 1;
+      const id = session.createFlipnote(`flipnote ${n}`);
+      session.open(id, { read: false });
+      // A flipnote opens on a blank first frame, never on nothing: the frame follows the create
+      // through the same queue and keeps its own retry identity if either step is uncertain.
+      session.insertFrame(id, null, new PixRaster(FLIPNOTE_W, FLIPNOTE_H, DEFAULT_PALETTE.map((e) => ({ ...e }))).encode());
+      studio.selected = id;
+      onopen();
+    } catch (e) {
+      onnotice?.(reason(e), "warn");
+    }
   }
 
-  function fmtBytes(n: number): string {
-    return n >= 1024 * 1024 ? `${(n / 1024 / 1024).toFixed(1)} mib` : `${Math.round(n / 1024)} kib`;
-  }
-
-  function relDays(ts: number): string {
-    if (!ts) return "keeps";
-    const d = Math.ceil((ts - Date.now()) / 86_400_000);
+  function expiryText(e: NativeExpiry): string {
+    if (e.kind === "never") return "keeps";
+    if (e.kind === "unrecorded") return "";
+    const d = Math.ceil((e.ms - Date.now()) / 86_400_000);
     return d <= 0 ? "expired" : `expires ${d}d`;
   }
 </script>
 
 <h3><span>Studio</span></h3>
+{#if indexNote().text}
+  <p class="studio-note {indexNote().tone}">{indexNote().text}</p>
+{/if}
+{#if indexError}
+  <p class="studio-note danger">{indexError}</p>
+{/if}
 <ul class="channel-list studio-nav">
-  {#each objects as o (o.id)}
+  {#each model?.entries ?? [] as o (o.id)}
     <li>
       <button type="button" class="studio-obj" class:active={studio.selected === o.id} onclick={() => open(o.id)}>
         <span class="studio-obj-name">
@@ -72,35 +98,47 @@
           {:else}
             <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M6 12.5V4l6-1.5V11"></path><circle cx="4.5" cy="12.5" r="1.8"></circle><circle cx="10.5" cy="11" r="1.8"></circle></svg>
           {/if}
-          <span class="nm">{o.title}</span>
+          <span class="nm">{o.title || "untitled"}</span>
+          {#if o.titleConflicts}<span class="studio-mark" title="another title was set at the same time; nothing resolved silently">!</span>{/if}
         </span>
         <span class="studio-obj-meta">
-          <span class="micro">
-            {#if o.root}{o.root.frames.length} fr · {o.root.fps} fps{:else}score{/if}
-          </span>
-          <span class="studio-chip {chip(o.settlement).tone}">{chip(o.settlement).text}</span>
+          <span class="micro">{o.kind}{#if expiryText(o.expiry)} · {expiryText(o.expiry)}{/if}{#if o.creations > 1} · created twice{/if}</span>
+          {#if chip(known(o.id)).text}<span class="studio-chip {chip(known(o.id)).tone}">{chip(known(o.id)).text}</span>{/if}
         </span>
       </button>
     </li>
   {/each}
+  {#each pendingCreates as s (s.id)}
+    <li>
+      <button type="button" class="studio-obj pending" class:active={studio.selected === s.object} onclick={() => { studio.selected = s.object; onopen(); }}>
+        <span class="studio-obj-name"><span class="nm">{s.kind === "create" ? s.request.title : ""}</span></span>
+        <span class="studio-obj-meta"><span class="micro">{s.status === "uncertain" ? "create uncertain · retry in the editor" : "creating…"}</span></span>
+      </button>
+    </li>
+  {/each}
+  {#if loading}
+    <li><p class="muted small">Reading this channel's studio…</p></li>
+  {:else if model && !model.entries.length && !pendingCreates.length}
+    <li><p class="muted small">Nothing here yet.</p></li>
+  {/if}
 </ul>
-{#if exportsList.length}
-  <h3><span>Exports</span></h3>
+{#if model?.overflow.length}
+  <h3><span>Beyond the 64 shown</span></h3>
   <ul class="channel-list studio-nav">
-    {#each exportsList as e (e.id)}
+    {#each model.overflow as o (o.id)}
       <li>
-        <button type="button" class="studio-obj" title="Export records are listed; fetching one is not connected yet">
-          <span class="studio-obj-name">
-            <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M3 9v4h10V9M8 2.5V10M5 7l3 3 3-3"></path></svg>
-            <span class="nm">{e.title}</span>
-          </span>
-          <span class="studio-obj-meta"><span class="micro">{fmtBytes(e.bytes)} · {relDays(e.expiry)}</span></span>
+        <button type="button" class="studio-obj over" class:active={studio.selected === o.id} onclick={() => open(o.id)} title="Past the index display cap; still readable and kept for recovery">
+          <span class="studio-obj-name"><span class="nm">{o.title || "untitled"}</span></span>
+          <span class="studio-obj-meta"><span class="micro">{o.kind} · overflow</span></span>
         </button>
       </li>
     {/each}
   </ul>
 {/if}
-<button type="button" class="ghost small ctx-action studio-new" onclick={newFlipnote}>+ new flipnote</button>
+{#if model?.deleted.length}
+  <p class="muted small studio-deleted">{model.deleted.length} deleted {model.deleted.length === 1 ? "entry is" : "entries are"} kept in history</p>
+{/if}
+<button type="button" class="ghost small ctx-action studio-new" disabled={!session.scope || !indexView} onclick={newFlipnote}>+ new flipnote</button>
 <p class="muted small">Any member can edit. The owner settles history.</p>
 
 <style>
@@ -117,6 +155,8 @@
     background: var(--accent-dim);
     border-left-color: var(--accent);
   }
+  .studio-nav .studio-obj.over { opacity: 0.6; }
+  .studio-nav .studio-obj.pending .nm { font-style: italic; color: var(--muted); }
   .studio-obj-name {
     display: flex;
     align-items: center;
@@ -136,6 +176,19 @@
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+  }
+  .studio-mark {
+    font-family: var(--mono);
+    font-size: 0.6rem;
+    color: var(--warn);
+    border: 1px solid var(--warn-brd);
+    border-radius: 999px;
+    width: 13px;
+    height: 13px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    flex: none;
   }
   .studio-obj-meta {
     display: flex;
@@ -168,6 +221,18 @@
   .studio-chip.ok { color: var(--ok); border-color: var(--ok-brd); background: var(--ok-dim); }
   .studio-chip.warn { color: var(--warn); border-color: var(--warn-brd); background: var(--warn-dim); }
   .studio-chip.danger { color: var(--danger); border-color: var(--danger-brd); background: var(--danger-dim); }
+  .studio-note {
+    margin: 0 0 6px;
+    padding: 4px 8px;
+    border-radius: var(--r);
+    font-size: 0.72rem;
+    line-height: 1.4;
+    color: var(--text-2);
+    border: 1px solid var(--border);
+  }
+  .studio-note.warn { background: var(--warn-dim); border-color: var(--warn-brd); }
+  .studio-note.danger { background: var(--danger-dim); border-color: var(--danger-brd); }
+  .studio-deleted { margin: 2px 8px 6px; }
   .studio-new {
     border-style: dashed;
     text-align: left;

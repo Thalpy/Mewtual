@@ -1,9 +1,10 @@
 <script lang="ts">
   // The flipnote editor surface (design-creative-suite.md 2.2, 2.10; mockups "Flipnote Editor",
-  // "Timeline States", "Art / Sound / Music"). Everything on screen runs against the in-memory
-  // studio store; the shared behaviours (save/load through P1, claims on the draw channel,
-  // settlement and recovery actions, blob fetch, .pix/.pixa export) are the boundary and say so
-  // where a button would otherwise pretend.
+  // "Timeline States", "Art / Sound / Music"), connected to the native Studio through the shared
+  // session: reads are typed views, edits are publish-then-apply saves that keep their identity
+  // across retries, and what the backend does not offer yet (claims, sound, linked Music, .pixa
+  // export, durable edits while rotating, signed repair) is shown as unavailable rather than
+  // pretended.
   import { onDestroy, onMount } from "svelte";
   import { decodePix, pixToRgba } from "./pix.ts";
   import {
@@ -32,45 +33,68 @@
   import {
     BRUSH_MAX,
     BRUSH_MIN,
-    CLAIM_RESEND_MS,
     FLIPNOTE_FPS_MAX,
     FLIPNOTE_FPS_MIN,
     FLIPNOTE_FRAME_BYTES_PROMISE,
+    FLIPNOTE_H,
     FLIPNOTE_MAX_FRAMES,
     FLIPNOTE_MAX_PATCHES,
+    FLIPNOTE_W,
     LAYER_NAMES,
     PIX_ROLE_NAMES,
-    randomElementId,
     type PixPaletteEntry,
   } from "./studio-contract.ts";
-  import { DEFAULT_PALETTE, PALETTE_LABELS, StudioError } from "./studio-store.ts";
-  import { bump, ensureStudio, fixtureColor, fixtureName, studio } from "./studio-state.svelte.ts";
+  import { DEFAULT_PALETTE, PALETTE_LABELS } from "./studio-store.ts";
+  import { base64ToBytes, type FrameConflictValue, type FrameView, type NativeExpiry, type RecoveryMode, type RecoveryVersion } from "./studio-native.ts";
+  import { reason, type RecoveryItem, type SaveRecord } from "./studio-session.ts";
+  import { ensureStudio, setStudioScope, studio } from "./studio-state.svelte.ts";
 
-  let { me, nameOf, colorOf, adapt = true, onnotice } = $props<{
+  let { me, server, channel, nameOf, colorOf, adapt = true, onnotice } = $props<{
     me: string;
-    nameOf: (id: string) => string;
-    colorOf: (id: string) => string;
+    server: number | null;
+    channel: string;
+    nameOf: (identity: string) => string;
+    colorOf: (identity: string) => string;
     adapt?: boolean;
     onnotice: (text: string, kind: "info" | "warn" | "error") => void;
   }>();
 
   // Built once per mount (state may be written during init, never inside a derived); the
-  // surface remounts with the tab, and the identity is settled by the time the tab can open.
+  // surface remounts with the tab, and the session outlives it.
   // svelte-ignore state_referenced_locally
-  const store = ensureStudio(me);
-  const objectId = $derived(studio.selected);
-  const root = $derived.by(() => { void studio.rev; return store.objects.get(objectId) ?? null; });
-  const isScore = $derived.by(() => { void studio.rev; return store.index.objects[objectId]?.kind === "score"; });
-  const settlement = $derived.by(() => { void studio.rev; return store.settlement.get(objectId) ?? null; });
-  const recovery = $derived.by(() => { void studio.rev; return store.recovery.get(objectId) ?? null; });
-  const overCap = $derived.by(() => { void studio.rev; return root ? store.overCap(root) : new Set<string>(); });
+  const session = ensureStudio(me);
+  $effect(() => { setStudioScope(server, channel); });
+  // The sidebar selects; the surface follows the selection (and re-opens after a remount).
+  $effect(() => {
+    const id = studio.selected;
+    if (id && session.doc?.object !== id) session.open(id);
+    else if (!id && session.doc) session.open(null);
+  });
 
-  function who(id: string): string { return id === me ? "you" : fixtureName(id) ?? nameOf(id); }
-  function tint(id: string): string { return id === me ? "var(--accent)" : fixtureColor(id) ?? colorOf(id); }
+  const objectId = $derived(studio.selected);
+  const doc = $derived.by(() => { void studio.rev; return session.doc?.object === objectId ? session.doc : null; });
+  const view = $derived(doc?.view ?? null);
+  const model = $derived(doc?.model ?? null);
+  const entry = $derived.by(() => {
+    void studio.rev;
+    const m = session.indexModel;
+    return m ? [...m.entries, ...m.overflow].find((e) => e.id === objectId) ?? null : null;
+  });
+  const isScore = $derived(entry?.kind === "score");
+  const readOnlyWhy = $derived.by(() => { void studio.rev; if (!objectId) return ""; const ep = session.editableEpoch(objectId); return "refused" in ep ? ep.refused : ""; });
+  const pending = $derived.by(() => { void studio.rev; return objectId ? session.pendingFor(objectId) : []; });
+  const uncertain = $derived(pending.filter((s) => s.status === "uncertain"));
+  const inflight = $derived(pending.some((s) => s.status !== "uncertain"));
+  const pendingInserts = $derived(pending.filter((s): s is Extract<SaveRecord, { kind: "frame" }> => s.kind === "frame" && s.op === "insert"));
+  const receivePaused = $derived.by(() => { void studio.rev; return session.receivePaused; });
+
+  function who(id: string): string { return id === me ? "you" : nameOf(id); }
+  function tint(id: string): string { return id === me ? "var(--accent)" : colorOf(id); }
 
   // --- Editor state ------------------------------------------------------------------------------
   let frameId = $state("");
   let raster = $state.raw<PixRaster | null>(null);
+  let rasterCid = $state(""); // which selected value the raster was loaded from (or "unsaved")
   const undo = new UndoStack();
   let tool = $state<Tool>("pen");
   let shape = $state<Shape>("ellipse");
@@ -101,21 +125,26 @@
   let tick = $state(0); // 1 Hz for countdowns
   let paintRev = $state(0); // bumped after every raster edit so overlays repaint
 
-  // A copy, re-read on every store revision: inserts splice the root's list in place, and a
-  // derived that returned the same array reference would never tell the timeline.
-  const frames = $derived.by(() => { void studio.rev; return [...(root?.frames ?? [])]; });
-  const frameIndex = $derived(frames.indexOf(frameId));
-  const frameRec = $derived(root && frameId ? root.frame[frameId] : null);
-  const claim = $derived.by(() => { void studio.rev; void tick; return frameId ? store.claimOn(frameId) : null; });
-  const claimLeft = $derived.by(() => { void tick; void studio.rev; return frameId ? store.claimSecondsLeft(frameId) : 0; });
-  const conflict = $derived.by(() => { void studio.rev; return frameId ? store.conflicts.get(frameId) ?? null : null; });
-  const frameState = $derived.by(() => { void studio.rev; return frameId ? store.frameState.get(frameId) ?? "held" : "held"; });
-  const sfxHere = $derived.by(() => { void studio.rev; return root ? Object.entries(root.sfx).filter(([, s]) => s.fr === frameId) : []; });
-  const allSfx = $derived.by(() => { void studio.rev; return root ? Object.entries(root.sfx).sort((a, b) => frames.indexOf(a[1].fr) - frames.indexOf(b[1].fr)) : []; });
-  const totalBytes = $derived.by(() => { void studio.rev; return root ? store.frameBytesTotal(root) : 0; });
-  const scoreTitle = $derived.by(() => { void studio.rev; return root?.score ? store.index.objects[root.score]?.title ?? "" : ""; });
-  const patchCount = $derived.by(() => { void studio.rev; return root ? Object.keys(root.patches).length : 0; });
-  const canEdit = $derived(!!root && !isScore && overCap.size === 0 && frameState === "held" && settlement?.gate !== "fault");
+  const frames = $derived<FrameView[]>(model?.frames ?? []);
+  const frameIds = $derived(frames.map((f) => f.id));
+  const frameIndex = $derived(frameIds.indexOf(frameId));
+  const frameRec = $derived(frames.find((f) => f.id === frameId) ?? null);
+  const pendingHere = $derived(pendingInserts.find((s) => s.frame === frameId) ?? null);
+  const frameKnown = $derived(frameIndex >= 0 || pendingHere !== null);
+  const totalBytes = $derived(model?.declaredFrameBytes ?? 0);
+  const overCapCount = $derived(model?.overCapCount ?? 0);
+  const canEdit = $derived(!!raster && !!model && !isScore && !readOnlyWhy && overCapCount === 0);
+  const hasScope = $derived.by(() => { void studio.rev; return session.scope !== null; });
+  // Blob state is session data, not part of the model: read it through the revision so the
+  // strip and the veil follow a fetch as it lands.
+  function blobStateOf(cid: string) { void studio.rev; return session.blobState(cid); }
+  function blobProblemOf(cid: string) { void studio.rev; return session.blobProblem(cid); }
+  const blobStateHere = $derived(frameRec ? blobStateOf(frameRec.cid) : "held");
+  function sameBytes(a: Uint8Array | undefined, b: Uint8Array): boolean {
+    if (!a || a.length !== b.length) return false;
+    for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
+    return true;
+  }
 
   // Built-in stamps (the emoji/ folder's pix stamps are the real source once C1 lands): palette
   // indices straight from the default palette, CLEAR where the stamp leaves the frame alone.
@@ -165,44 +194,48 @@
   }
 
   // --- Frame open / commit --------------------------------------------------------------------
-  function openFrame(id: string, force = false) {
-    if (!root) return;
+  function openFrame(id: string) {
+    if (!model) return;
     commit();
-    if (frameId && frameId !== id) store.releaseClaim(frameId);
-    const other = store.claimOn(id);
-    if (other && other.by !== me && !force) {
-      // Advisory: opening warns, never blocks. The frame card offers "open anyway".
-      pendingOpen = id;
-      frameId = id;
+    frameId = id;
+    loadRaster();
+  }
+
+  /// Load the raster from the newest unsaved pixels for this frame, else from the held blob for
+  /// its selected value; ask for the blob (top priority) when neither is here yet.
+  function loadRaster() {
+    const rec = frames.find((f) => f.id === frameId) ?? null;
+    const unsaved = objectId && frameId ? session.unsavedPix(objectId, frameId) : null;
+    const bytes = unsaved ?? (rec ? session.blob(rec.cid) : undefined);
+    if (!bytes) {
       raster = null;
+      rasterCid = "";
+      if (rec) session.want(rec.cid, rec.bytes, 0);
       return;
     }
-    pendingOpen = "";
-    frameId = id;
-    const bytes = store.frameBytes(objectId, id);
-    const r = new PixRaster(root.w, root.h, (bytes ? decodePix(bytes).palette : DEFAULT_PALETTE.map((e) => ({ ...e }))));
-    if (bytes) r.loadFlat(decodePix(bytes).pixels);
+    let img;
+    try { img = decodePix(bytes); } catch (e) { raster = null; rasterCid = ""; onnotice(`frame pixels rejected: ${reason(e)}`, "warn"); return; }
+    const r = new PixRaster(img.w, img.h, img.palette);
+    r.loadFlat(img.pixels);
     raster = r;
+    rasterCid = unsaved ? "unsaved" : rec?.cid ?? "";
     undo.clear();
     dirty = false;
-    if (!other) store.claim(id, me);
-    bump();
     paintRev++;
   }
-  let pendingOpen = $state("");
 
-  /// Write the raster back as a replace_frame op if anything changed (2.9: an op only when a
-  /// value changed; bursts are coalesced by committing on stroke end, not per cell).
+  /// Write the raster back as a replace_frame save if anything changed (2.9: an op only when a
+  /// value changed; bursts are coalesced by committing on stroke end, not per cell). The save
+  /// keeps the pixels until it lands; a failure shows up in the save card, never as lost work.
   function commit() {
-    if (!raster || !frameId || !dirty || !root) return;
+    if (!raster || !frameId || !dirty || !model || !objectId) return;
     try {
-      const changed = store.replaceFrame(objectId, frameId, raster.encode());
-      if (changed) store.renewClaim(frameId);
+      session.saveFrame(objectId, frameId, raster.encode());
+      rasterCid = "unsaved";
     } catch (e) {
-      onnotice(e instanceof StudioError ? e.reason : String(e), "warn");
+      onnotice(reason(e), "warn");
     }
     dirty = false;
-    bump();
   }
 
   function edited(changedCells: number) {
@@ -222,10 +255,10 @@
   let previewCells = $state.raw<Cell[]>([]);
 
   function cellAt(e: PointerEvent): Cell | null {
-    if (!canvasEl || !root) return null;
+    if (!canvasEl || !raster) return null;
     const rect = canvasEl.getBoundingClientRect();
-    const x = Math.floor(((e.clientX - rect.left) / rect.width) * root.w);
-    const y = Math.floor(((e.clientY - rect.top) / rect.height) * root.h);
+    const x = Math.floor(((e.clientX - rect.left) / rect.width) * raster.w);
+    const y = Math.floor(((e.clientY - rect.top) / rect.height) * raster.h);
     return [x, y];
   }
 
@@ -325,10 +358,10 @@
   }
 
   function drawFrame() {
-    if (!canvasEl || !root) return;
+    if (!canvasEl || !model) return;
     const ctx = canvasEl.getContext("2d");
     if (!ctx) return;
-    const { w, h } = root;
+    const w = raster?.w ?? FLIPNOTE_W, h = raster?.h ?? FLIPNOTE_H;
     canvasEl.width = w * zoom;
     canvasEl.height = h * zoom;
     ctx.imageSmoothingEnabled = false;
@@ -353,26 +386,30 @@
     // paper cells cut out so only its marks show through. Under the frame it would be hidden by
     // the current frame's opaque paper.
     if (onion && frameIndex > 0) {
-      const prev = store.frameBytes(objectId, frames[frameIndex - 1]);
-      if (prev) {
-        const img = decodePix(prev);
-        const rgba = pixToRgba(img, resolve);
-        const paper = 0;
-        for (let i = 0; i < img.pixels.length; i++) if (img.pixels[i] === paper) rgba[i * 4 + 3] = 0;
-        const s = scratchCanvas(img.w, img.h);
-        s.putImageData(new ImageData(rgba, img.w, img.h), 0, 0);
-        ctx.globalAlpha = 0.3;
-        ctx.drawImage(scratch!, 0, 0, canvasEl.width, canvasEl.height);
-        ctx.globalAlpha = 1;
+      const prevRec = frames[frameIndex - 1];
+      const prev = session.blob(prevRec.cid);
+      if (!prev) session.want(prevRec.cid, prevRec.bytes, 1);
+      else {
+        try {
+          const img = decodePix(prev);
+          const rgba = pixToRgba(img, resolve);
+          const paper = 0;
+          for (let i = 0; i < img.pixels.length; i++) if (img.pixels[i] === paper) rgba[i * 4 + 3] = 0;
+          const s = scratchCanvas(img.w, img.h);
+          s.putImageData(new ImageData(rgba, img.w, img.h), 0, 0);
+          ctx.globalAlpha = 0.3;
+          ctx.drawImage(scratch!, 0, 0, canvasEl.width, canvasEl.height);
+          ctx.globalAlpha = 1;
+        } catch { /* an invalid neighbour is reported on its own thumbnail */ }
       }
     }
   }
 
   function drawOverlay() {
-    if (!overlayEl || !root) return;
+    if (!overlayEl || !model) return;
     const ctx = overlayEl.getContext("2d");
     if (!ctx) return;
-    const { w, h } = root;
+    const w = raster?.w ?? FLIPNOTE_W, h = raster?.h ?? FLIPNOTE_H;
     const z = zoom;
     overlayEl.width = w * z;
     overlayEl.height = h * z;
@@ -429,141 +466,238 @@
   });
   $effect(() => {
     // A new object, or a frame list that no longer holds the open frame: open the first frame.
-    if (root && (!frameId || !root.frames.includes(frameId))) {
-      const first = root.frames[0];
+    if (model && (!frameId || !frameKnown)) {
+      const first = frameIds[0] ?? pendingInserts[0]?.frame;
       if (first) openFrame(first);
-      else { frameId = ""; raster = null; }
-    }
+      else { frameId = ""; raster = null; rasterCid = ""; }
+    } else if (!model && frameId) { frameId = ""; raster = null; rasterCid = ""; }
+  });
+  $effect(() => {
+    // Pixels arrived for the open frame, or its selected value changed under us while we were
+    // not drawing: load them. A dirty raster keeps the member's strokes; the save decides.
+    void studio.rev;
+    if (!frameId || dirty || !objectId) return;
+    const rec = frames.find((f) => f.id === frameId);
+    const unsaved = session.unsavedPix(objectId, frameId);
+    const wanted = unsaved ? "unsaved" : rec?.cid ?? "";
+    if (!wanted || wanted === rasterCid) return;
+    // Our own save just landed: the selected value now names the bytes this raster already
+    // holds, so adopt the cid and keep the undo history instead of reloading.
+    if (rasterCid === "unsaved" && raster && rec && sameBytes(session.blob(rec.cid), raster.encode())) { rasterCid = rec.cid; return; }
+    if (unsaved || (rec && session.blob(rec.cid))) loadRaster();
+    else if (rec) session.want(rec.cid, rec.bytes, 0);
+  });
+  $effect(() => {
+    // The recovery rail follows the open document.
+    if (objectId && !isScore) session.watchRecovery(objectId);
   });
 
-  /// Thumbnail action: decode the frame's bytes into a small canvas.
-  function thumb(node: HTMLCanvasElement, cid: string) {
-    const draw = (c: string) => {
-      const bytes = store.blobs.get(c);
+  /// Thumbnail action: decode the frame's held bytes into a small canvas, or ask for them.
+  function thumb(node: HTMLCanvasElement, arg: { cid: string; bytes: number; rev: number }) {
+    const draw = (a: { cid: string; bytes: number; rev: number }) => {
       const ctx = node.getContext("2d");
       if (!ctx) return;
       ctx.imageSmoothingEnabled = false;
       ctx.clearRect(0, 0, node.width, node.height);
-      if (!bytes) return;
-      const img = decodePix(bytes);
-      const s = scratchCanvas(img.w, img.h);
-      s.putImageData(new ImageData(pixToRgba(img, resolve), img.w, img.h), 0, 0);
-      ctx.drawImage(scratch!, 0, 0, node.width, node.height);
+      const bytes = session.blob(a.cid);
+      if (!bytes) { session.want(a.cid, a.bytes, 2); return; }
+      try {
+        const img = decodePix(bytes);
+        const s = scratchCanvas(img.w, img.h);
+        s.putImageData(new ImageData(pixToRgba(img, resolve), img.w, img.h), 0, 0);
+        ctx.drawImage(scratch!, 0, 0, node.width, node.height);
+      } catch { /* shown as invalid by the frame's state */ }
     };
-    draw(cid);
+    draw(arg);
+    return { update: draw };
+  }
+
+  /// A pending insert's thumbnail comes from its own unsaved pixels.
+  function thumbBytes(node: HTMLCanvasElement, arg: { bytes: Uint8Array; rev: number }) {
+    const draw = (a: { bytes: Uint8Array; rev: number }) => {
+      const ctx = node.getContext("2d");
+      if (!ctx) return;
+      ctx.imageSmoothingEnabled = false;
+      try {
+        const img = decodePix(a.bytes);
+        const s = scratchCanvas(img.w, img.h);
+        s.putImageData(new ImageData(pixToRgba(img, resolve), img.w, img.h), 0, 0);
+        ctx.drawImage(scratch!, 0, 0, node.width, node.height);
+      } catch { /* nothing to show */ }
+    };
+    draw(arg);
     return { update: draw };
   }
 
   // --- Timeline actions ------------------------------------------------------------------------
   function guard(fn: () => void) {
-    try { fn(); bump(); } catch (e) { onnotice(e instanceof StudioError ? e.reason : String(e), "warn"); }
+    try { fn(); } catch (e) { onnotice(reason(e), "warn"); }
+  }
+
+  function blankPix(): Uint8Array {
+    return new PixRaster(FLIPNOTE_W, FLIPNOTE_H, raster?.palette.map((e) => ({ ...e })) ?? DEFAULT_PALETTE.map((e) => ({ ...e }))).encode();
   }
 
   function addFrameAfter(copy: boolean) {
-    if (!root) return;
+    if (!model || !objectId) return;
     commit();
     guard(() => {
-      const bytes = copy && frameId ? store.frameBytes(objectId, frameId) : null;
-      const blank = new PixRaster(root.w, root.h, raster?.palette.map((e) => ({ ...e })) ?? DEFAULT_PALETTE.map((e) => ({ ...e }))).encode();
-      const id = store.insertFrame(objectId, frameId || null, bytes ?? blank);
-      openFrame(id);
+      const bytes = copy && raster ? raster.encode() : blankPix();
+      const id = session.insertFrame(objectId, frameIndex >= 0 ? frameId : null, bytes);
+      frameId = id;
+      loadRaster();
     });
   }
 
   function deleteFrame() {
-    if (!root || !frameId) return;
-    const other = store.claimOn(frameId);
-    if (other && other.by !== me) onnotice(`${who(other.by)} is drawing this frame; deleting it anyway (claims are advisory)`, "warn");
+    if (!model || !frameId || !objectId) return;
+    if (pendingHere) { onnotice("this frame is still being saved; wait for it or discard the save below", "info"); return; }
     const idx = frameIndex;
     const gone = frameId;
-    guard(() => store.apply(objectId, { op: "remove_frame", frame: gone }));
+    guard(() => session.removeFrame(objectId, gone));
+    const next = frameIds.filter((f) => f !== gone)[Math.max(0, Math.min(idx, frameIds.length - 2))];
     frameId = "";
     raster = null;
-    const next = root.frames[Math.min(idx, root.frames.length - 1)];
+    rasterCid = "";
     if (next) openFrame(next);
   }
 
   function step(delta: number) {
-    if (!frames.length) return;
-    const n = frames.length;
-    let i = (frameIndex + delta + n) % n;
+    if (!frameIds.length) return;
+    const n = frameIds.length;
+    let i = (Math.max(0, frameIndex) + delta + n) % n;
     // Playback skips frames that are over the cap or not held; stepping does not.
     if (playing) {
       let guardN = n;
-      while (guardN-- && (overCap.has(frames[i]) || !store.frameBytes(objectId, frames[i]))) i = (i + delta + n) % n;
+      while (guardN-- && (frames[i].overCap || !session.blob(frames[i].cid))) i = (i + delta + n) % n;
     }
     if (!loop && playing && i === 0 && delta > 0) { playing = false; return; }
-    openFrame(frames[i], true);
+    openFrame(frameIds[i]);
   }
 
   let playTimer: ReturnType<typeof setInterval> | null = null;
   $effect(() => {
     if (playTimer) { clearInterval(playTimer); playTimer = null; }
-    if (playing && root) playTimer = setInterval(() => step(1), 1000 / Math.max(FLIPNOTE_FPS_MIN, Math.min(FLIPNOTE_FPS_MAX, root.fps)));
+    const fps = model?.fps ?? 12;
+    if (playing && model) playTimer = setInterval(() => step(1), 1000 / Math.max(FLIPNOTE_FPS_MIN, Math.min(FLIPNOTE_FPS_MAX, fps)));
     return () => { if (playTimer) clearInterval(playTimer); };
   });
 
-  function setFps(v: number) { guard(() => store.apply(objectId, { op: "set_header", field: "fps", value: v })); }
-  function setTitle(v: string) { if (root && v.trim() && v.trim() !== root.title) guard(() => store.apply(objectId, { op: "set_header", field: "title", value: v.trim() })); }
+  function setFps(v: number) {
+    if (!objectId || !Number.isInteger(v) || v < FLIPNOTE_FPS_MIN || v > FLIPNOTE_FPS_MAX) { onnotice("fps is 1 to 24", "warn"); return; }
+    guard(() => session.setFps(objectId, v));
+  }
+  function setTitle(v: string) {
+    if (!objectId || !model) return;
+    const t = v.trim();
+    if (t && t !== model.title) guard(() => session.setTitle(objectId, t));
+  }
 
-  // --- Sound tab ---------------------------------------------------------------------------------
-  const NOTE_CHOICES = [["c4", 60], ["c5", 72], ["g5", 79], ["c2", 36]] as const;
-  function noteName(n: number): string {
-    const names = ["c", "c#", "d", "d#", "e", "f", "f#", "g", "g#", "a", "a#", "b"];
-    return `${names[n % 12]}${Math.floor(n / 12) - 1}`;
-  }
-  function addSfx(note = 72) {
-    if (!root || !frameId) return;
-    guard(() => {
-      if (!root.patches.meow) store.apply(objectId, { op: "set_patch", patch: "meow", descriptor: { v: 1, name: "meow" } });
-      store.apply(objectId, { op: "set_sfx", sfx: randomElementId(), frame: frameId, patch: "meow", note });
-    });
-  }
-  function setSfxNote(sfx: string, note: number) {
-    if (!root) return;
-    const s = root.sfx[sfx];
-    guard(() => store.apply(objectId, { op: "set_sfx", sfx, frame: s.fr, patch: s.p, note }));
-  }
-  function removeSfx(sfx: string) { guard(() => store.apply(objectId, { op: "remove_sfx", sfx })); }
-  function unlinkScore() { guard(() => store.apply(objectId, { op: "set_header", field: "score", value: null })); }
-
-  // --- Claims -------------------------------------------------------------------------------------
-  function pass() {
-    if (!frameId || !claim) return;
-    const asker = studio.people?.mika ?? "";
-    store.passClaim(frameId, asker);
+  // --- Conflicts: every live value of a frame's pixels, each usable on purpose -----------------
+  async function useVersion(alt: FrameConflictValue, how: "replace" | "insertAfter") {
+    if (!objectId || !frameId) return;
     commit();
-    onnotice(`passed frame ${frameIndex + 1} to ${who(asker)}`, "info");
-    bump();
-  }
-  function askFor() {
-    if (!frameId || !claim) return;
-    onnotice(`asked ${who(claim.by)} for frame ${frameIndex + 1} (claim frames are not on the wire yet)`, "info");
-  }
-  function takeConflict(theirs: boolean) {
-    if (!conflict || !root) return;
-    guard(() => {
-      if (theirs) store.apply(objectId, { op: "replace_frame", frame: conflict.frame, cid: conflict.theirs.cid, bytes: conflict.theirs.bytes });
-      store.conflicts.delete(conflict.frame);
-    });
-    if (theirs) onnotice(`${who(conflict.by)}'s version is now frame ${frameIndex + 1}; its pixels arrive when blob fetch is connected`, "info");
-    frameId = "";
-  }
-  function keepBoth() {
-    if (!conflict || !root) return;
-    guard(() => {
-      store.apply(objectId, { op: "insert_frame", frame: randomElementId(), after: conflict.frame, cid: conflict.theirs.cid, bytes: conflict.theirs.bytes });
-      store.conflicts.delete(conflict.frame);
-    });
+    try { await session.useVersion(objectId, frameId, alt, how); } catch (e) { onnotice(reason(e), "warn"); }
   }
 
-  let claimTimer: ReturnType<typeof setInterval> | null = null;
+  // --- Saves: retry the same request, re-author on purpose, or discard on purpose ---------------
+  function retrySave(s: SaveRecord) { guard(() => session.retry(s.id)); }
+  function reauthorSave(s: SaveRecord) { guard(() => session.reauthor(s.id)); }
+  let discardArmed = $state(0);
+  function discardSave(s: SaveRecord) {
+    if (discardArmed !== s.id) { discardArmed = s.id; return; }
+    discardArmed = 0;
+    session.discard(s.id);
+    if (s.kind === "frame" && s.frame === frameId) { rasterCid = ""; loadRaster(); }
+  }
+
+  // --- Index entry: expiry and deletion are Index operations ------------------------------------
+  function setExpiry(e: NativeExpiry) { if (objectId) guard(() => session.setEntryExpiry(objectId, e)); }
+  let deleteArmed = $state(false);
+  function deleteFlipnote() {
+    if (!objectId) return;
+    commit();
+    guard(() => { session.deleteEntry(objectId); deleteArmed = false; studio.selected = ""; });
+  }
+  function expiryDate(e: NativeExpiry): string {
+    if (e.kind !== "at") return "";
+    const d = new Date(e.ms);
+    return Number.isFinite(d.getTime()) ? d.toISOString().slice(0, 10) : "";
+  }
+  function expiryText(e: NativeExpiry): string {
+    if (e.kind === "never") return "keeps forever";
+    if (e.kind === "unrecorded") return "no expiry recorded";
+    const d = Math.ceil((e.ms - Date.now()) / 86_400_000);
+    return d <= 0 ? `expired ${new Date(e.ms).toLocaleDateString()}` : `expires in ${d}d`;
+  }
+
+  // --- Recovery rail -------------------------------------------------------------------------------
+  const listing = $derived.by(() => { void studio.rev; return session.recoveryTarget === objectId ? session.recoveryListing : null; });
+  const recoveryError = $derived.by(() => { void studio.rev; return session.recoveryError; });
+  const run = $derived.by(() => { void studio.rev; return session.recoveryRun; });
+  const pointer = $derived.by(() => { void studio.rev; return session.pointer; });
+  let inspected = $state("");
+  let copyConfirm = $state("");
+  const inspectedVersion = $derived.by(() => { void studio.rev; return inspected ? session.versions.get(inspected) ?? null : null; });
+  function exportFor(snapshot: string) { void studio.rev; return session.exports.get(snapshot) ?? null; }
+  async function inspect(v: RecoveryVersion) {
+    inspected = inspected === v.snapshot ? "" : v.snapshot;
+    if (!inspected) return;
+    try { await session.readVersion(v.snapshot); } catch (e) { onnotice(reason(e), "warn"); }
+  }
+  async function startRecovery(v: RecoveryVersion, mode: RecoveryMode) {
+    if (mode === "copy" && copyConfirm !== v.snapshot) { copyConfirm = v.snapshot; return; }
+    copyConfirm = "";
+    commit();
+    try { await session.runRecovery(v.snapshot, mode); } catch (e) { onnotice(reason(e), "warn"); }
+  }
+  async function exportVersion(v: RecoveryVersion) {
+    try { await session.exportVersion(v.snapshot); onnotice("backup ready below · p1-recovery-v1, not a .pixa", "info"); } catch (e) { onnotice(reason(e), "warn"); }
+  }
+  function saveExport(snapshot: string) {
+    const x = session.exports.get(snapshot);
+    if (!x) return;
+    try {
+      const url = URL.createObjectURL(new Blob([base64ToBytes(x.bytesB64)], { type: "application/octet-stream" }));
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `${(model?.title || "index").replace(/[^\w.-]+/g, "_")}-epoch-${listing?.versions.find((v) => v.snapshot === snapshot)?.epoch ?? "x"}.p1-recovery-v1.bin`;
+      a.click();
+      setTimeout(() => URL.revokeObjectURL(url), 10_000);
+    } catch (e) { onnotice(`could not hand the file to the browser: ${reason(e)}; copy it instead`, "warn"); }
+  }
+  async function copyExport(snapshot: string) {
+    const x = session.exports.get(snapshot);
+    if (!x) return;
+    try { await navigator.clipboard.writeText(x.bytesB64); onnotice("backup copied as base64", "info"); } catch (e) { onnotice(reason(e), "warn"); }
+  }
+  async function acknowledge() {
+    try { await session.acknowledgeEviction(); onnotice("eviction acknowledged: the named oldest version is removed at the next settlement pass", "info"); } catch (e) { onnotice(reason(e), "warn"); }
+  }
+  function deadlineText(deadlineMs: string): string {
+    // Display only: the lossless decimal stays in the listing; the request never carries it.
+    const ms = Number(deadlineMs);
+    if (!Number.isFinite(ms)) return `at receiver clock ${deadlineMs}`;
+    const left = ms - Date.now();
+    if (left <= 0) return "at the next settlement pass";
+    const d = Math.floor(left / 86_400_000), h = Math.floor((left % 86_400_000) / 3_600_000);
+    return d ? `in ${d}d ${h}h` : `in ${h}h`;
+  }
+  function reasonText(r: RecoveryVersion["reason"]): string {
+    return r === "excluded" ? "left out by a checkpoint" : r === "rewound" ? "rewound" : r === "conflictOverflow" ? "conflict overflow" : "repair";
+  }
+  function itemTone(s: RecoveryItem["state"]): string {
+    if (s === "applied" || s === "alreadySaved" || s === "unchanged") return "ok";
+    if (s === "error" || s === "deleted" || s === "missingTarget") return "danger";
+    if (s === "conflict" || s === "full") return "warn";
+    return "info";
+  }
+
   onMount(() => {
-    claimTimer = setInterval(() => { tick++; if (frameId && dirty) store.renewClaim(frameId); }, 1000);
-    const renew = setInterval(() => { if (frameId) store.renewClaim(frameId); }, CLAIM_RESEND_MS);
-    return () => { if (claimTimer) clearInterval(claimTimer); clearInterval(renew); };
+    const t = setInterval(() => { tick++; }, 1000);
+    return () => clearInterval(t);
   });
-  onDestroy(() => { commit(); if (frameId) store.releaseClaim(frameId); });
+  onDestroy(() => { commit(); });
 
   // --- Keys --------------------------------------------------------------------------------------
   function onKey(e: KeyboardEvent) {
@@ -587,20 +721,25 @@
 
   function fmtKib(n: number): string { return n >= 1024 * 1024 ? `${(n / 1024 / 1024).toFixed(1)} mib` : `${(n / 1024).toFixed(1)} kib`; }
   function rel(ts: number): string {
+    void tick;
     const d = Date.now() - ts;
     if (d < 60_000) return "just now";
     if (d < 3_600_000) return `${Math.round(d / 60_000)} min ago`;
     if (d < 86_400_000) return `${Math.round(d / 3_600_000)}h ago`;
     return `${Math.round(d / 86_400_000)}d ago`;
   }
-  function settlementChip(): { text: string; tone: string } {
-    const s = settlement;
-    if (!s) return { text: "new · on this device only", tone: "warn" };
-    if (s.gate === "fault") return { text: "history fault", tone: "danger" };
-    if (s.label === "settled") return { text: `settled · epoch ${s.epoch}`, tone: "ok" };
-    if (s.label === "rotating") return { text: "rotating", tone: "warn" };
-    if (s.label.startsWith("current owner")) return { text: "owner has not confirmed history", tone: "warn" };
-    return { text: s.label, tone: "warn" };
+  function settlementChip(): { text: string; tone: string; title: string } {
+    if (!doc) return { text: "", tone: "", title: "" };
+    if (!view) {
+      if (doc.error) return { text: "read failed", tone: "danger", title: doc.error };
+      if (doc.absent && !pending.some((s) => s.kind === "create")) return { text: "not on this device", tone: "warn", title: "studio_read found no local copy; this is not a deletion and not proof nobody has it" };
+      return { text: "reading…", tone: "", title: "" };
+    }
+    if (view.awaitingTenureReceipt) return { text: "read-only preview", tone: "warn", title: "current owner has not yet confirmed this document's history; no phase, receipt or publication is claimed" };
+    if (view.phase === "fault") return { text: "history fault", tone: "danger", title: "history fault: conflicting owner receipts" };
+    if (view.phase === "closing") return { text: "rotating", tone: "warn", title: "rotating: durable edits resume when the owner settles this rotation" };
+    if (view.phase === "settled") return { text: `settled · epoch ${view.epoch}`, tone: "ok", title: "stored phase settled; a settled phase is not a receipt for every displayed edit" };
+    return { text: `open · epoch ${view.epoch}`, tone: "", title: "open: edits save locally and provisionally; an owner receipt settles them later" };
   }
 </script>
 
@@ -609,40 +748,81 @@
 <svelte:window onkeydown={(e) => { if (rootEl && rootEl.contains(document.activeElement)) onKey(e); }} />
 <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
 <div class="studio" bind:this={rootEl} role="application" aria-label="Flipnote editor" tabindex="0">
-  {#if !root}
+  {#if !objectId || (!model && !doc)}
     <div class="studio-empty">
-      {#if isScore}
-        <p class="muted">The score editor is not built yet. This entry lives in the studio index as a score; open a flipnote on the left to draw.</p>
+      {#if !hasScope}
+        <p class="muted">Open a channel to see its studio.</p>
       {:else}
         <p class="muted">Pick a flipnote on the left, or start a new one.</p>
+      {/if}
+    </div>
+  {:else if isScore}
+    <div class="studio-empty">
+      <p class="muted">The score editor is not built yet. This entry lives in the studio index as a score; open a flipnote on the left to draw.</p>
+    </div>
+  {:else if !model}
+    <div class="studio-empty">
+      {#if doc?.error}
+        <div class="st-banner danger">could not read this flipnote: {doc.error} <button type="button" class="st-btn" onclick={() => session.open(objectId)}>retry</button></div>
+      {:else if doc?.absent && !pending.length}
+        <p class="muted">This flipnote is not on this device yet. Absence is not a deletion: it may still arrive from another member.</p>
+        <button type="button" class="st-btn" onclick={() => session.open(objectId)}>read again</button>
+      {:else}
+        <p class="muted">{pending.some((s) => s.kind === "create") ? "Creating…" : "Reading…"}</p>
+        {#each uncertain as s (s.id)}
+          <div class="st-card warn">
+            <span>{s.label} · uncertain</span>
+            <span class="micro wrap">{s.error}</span>
+            <span class="st-card-acts">
+              <button type="button" class="st-btn primary" onclick={() => retrySave(s)}>retry same request</button>
+              <button type="button" class="st-btn ghost" onclick={() => discardSave(s)}>{discardArmed === s.id ? "discard for real" : "discard"}</button>
+            </span>
+          </div>
+        {/each}
       {/if}
     </div>
   {:else}
     <!-- Header -->
     <div class="st-head">
-      <input class="st-title" value={root.title} onchange={(e) => setTitle(e.currentTarget.value)} aria-label="Flipnote title" />
-      <span class="micro">flipnote · {root.w}×{root.h}</span>
-      <label class="st-chip" title="Frames per second, 1 to 24">
-        <input type="number" min={FLIPNOTE_FPS_MIN} max={FLIPNOTE_FPS_MAX} value={root.fps} onchange={(e) => setFps(Number(e.currentTarget.value))} />
+      <input class="st-title" value={model.title} placeholder="untitled" disabled={!!readOnlyWhy} onchange={(e) => setTitle(e.currentTarget.value)} aria-label="Flipnote title" />
+      {#if model.titleConflicts.length}<span class="st-chip warn" title="another title was set at the same time by {model.titleConflicts.map((c) => who(c.source.author)).join(', ')}: {model.titleConflicts.map((c) => c.value).join(' / ')}"><i></i><span class="micro">title conflict</span></span>{/if}
+      <span class="micro">flipnote · {raster?.w ?? FLIPNOTE_W}×{raster?.h ?? FLIPNOTE_H}</span>
+      <label class="st-chip" title="Frames per second, 1 to 24{model.fpsConflicts.length ? ' · another value was set concurrently' : ''}">
+        <input type="number" min={FLIPNOTE_FPS_MIN} max={FLIPNOTE_FPS_MAX} value={model.fps} disabled={!!readOnlyWhy} onchange={(e) => setFps(Number(e.currentTarget.value))} />
         <span class="micro">fps</span>
       </label>
-      <span class="st-chip {settlementChip().tone}" title={settlement?.label ?? "not saved to the studio yet"}><i></i><span class="micro">{settlementChip().text}</span></span>
+      <span class="st-chip {settlementChip().tone}" title={settlementChip().title}><i></i><span class="micro">{settlementChip().text}</span></span>
+      {#if inflight}<span class="st-chip" title="a save is in flight; unsaved pixels stay here until it lands"><i class="pulse"></i><span class="micro">saving…</span></span>{/if}
       <span class="grow"></span>
       <button type="button" class="st-tg" class:on={adaptOn} onclick={() => (adaptOn = !adaptOn)} title="Role colours follow your theme; literals never move"><i></i><span class="micro">adapt to my theme</span></button>
       <button type="button" class="st-btn" onclick={() => (playing = !playing)}>{playing ? "pause" : "play"}</button>
-      <button type="button" class="st-btn" title="Post this frame into the channel as a doodle (not connected yet)" disabled={!frameId} onclick={() => { commit(); onnotice(store.postToChat(objectId, frameId), "info"); }}>
+      <button type="button" class="st-btn" title="Posting a frame into the channel as a doodle is not connected yet" disabled>
         <svg viewBox="0 0 16 16" style="width: 11px; height: 11px"><path d="M2 8l12-6-4 12-2.5-4.5z"></path></svg>
         post to chat
       </button>
-      <button type="button" class="st-btn primary" title="Not connected yet" onclick={() => onnotice(store.exportPixa(objectId), "info")}>export .pixa</button>
+      <button type="button" class="st-btn primary" title=".pixa export arrives with the backend's Gate 6; recovery backups are exported from the music tab" disabled>export .pixa</button>
     </div>
 
-    {#if overCap.size}
-      <div class="st-banner warn">document full: {overCap.size} frame{overCap.size === 1 ? "" : "s"} past the {FLIPNOTE_MAX_FRAMES}-frame list or the 8 MiB promise. Editing is refused until they are trimmed; playback skips them.</div>
-    {:else if settlement?.gate === "fault"}
-      <div class="st-banner danger">history fault: conflicting owner receipts. This document is read-only until the owner repairs it.</div>
-    {:else if settlement?.label === "rotating"}
-      <div class="st-banner warn">rotating: local edits only until the owner settles this rotation.</div>
+    {#if uncertain.length}
+      <div class="st-banner warn st-save">
+        <span><b>save uncertain</b> · {uncertain[0].label}{#if uncertain.length > 1} · and {uncertain.length - 1} more{/if}</span>
+        <span class="micro wrap">{uncertain[0].error}{#if uncertain[0].epochChanged} · the document moved to a newer epoch since; a retry resends the original request and the backend decides{/if} · attempt {uncertain[0].attempts} · your work is kept</span>
+        <span class="st-card-acts">
+          <button type="button" class="st-btn primary" onclick={() => retrySave(uncertain[0])}>retry same request</button>
+          {#if uncertain[0].kind === "frame" || uncertain[0].kind === "apply" || uncertain[0].kind === "applyIndex"}
+            <button type="button" class="st-btn" title="a new operation with a fresh nonce against the current epoch; only if you are sure the first never committed" disabled={!!readOnlyWhy} onclick={() => reauthorSave(uncertain[0])}>save again as a new edit</button>
+          {/if}
+          <button type="button" class="st-btn ghost" onclick={() => discardSave(uncertain[0])}>{discardArmed === uncertain[0].id ? "discard for real" : "discard"}</button>
+        </span>
+      </div>
+    {/if}
+    {#if overCapCount}
+      <div class="st-banner warn">document full: {overCapCount} frame{overCapCount === 1 ? "" : "s"} past the {FLIPNOTE_MAX_FRAMES}-frame list or the 8 MiB promise. Editing is refused until they are trimmed; playback skips them.</div>
+    {:else if readOnlyWhy}
+      <div class="st-banner {view?.phase === 'fault' ? 'danger' : 'warn'}">{readOnlyWhy}</div>
+    {/if}
+    {#if receivePaused}
+      <div class="st-banner info">receiving is paused for this server after a storage or scan problem. Nothing local is lost and nothing is settled or unsettled by this; a successful read or save resumes it. <button type="button" class="st-btn" onclick={() => session.open(objectId)}>read again</button></div>
     {/if}
 
     <!-- Editor row -->
@@ -670,7 +850,7 @@
 
       <div class="st-canvas-card">
         <div class="st-canvas-scroll">
-        <div class="st-canvas-wrap" class:locked={!canEdit} style="width: {root.w * zoom}px; aspect-ratio: {root.w} / {root.h}" onwheel={(e) => { if (e.ctrlKey) { e.preventDefault(); setZoom(zoom + (e.deltaY < 0 ? 1 : -1)); } }}>
+        <div class="st-canvas-wrap" class:locked={!canEdit} style="width: {(raster?.w ?? FLIPNOTE_W) * zoom}px; aspect-ratio: {raster?.w ?? FLIPNOTE_W} / {raster?.h ?? FLIPNOTE_H}" onwheel={(e) => { if (e.ctrlKey) { e.preventDefault(); setZoom(zoom + (e.deltaY < 0 ? 1 : -1)); } }}>
           <canvas bind:this={canvasEl} class="st-canvas"></canvas>
           <canvas
             bind:this={overlayEl}
@@ -682,23 +862,19 @@
             onpointerleave={onLeave}
             oncontextmenu={(e) => e.preventDefault()}
           ></canvas>
-          {#if pendingOpen && claim && claim.by !== me}
-            <div class="st-veil">
-              <span class="who" style="--c: {tint(claim.by)}"></span>
-              <span>{who(claim.by)} is drawing this frame · {claimLeft}s</span>
-              <span class="micro">courtesy claim · not a lock</span>
-              <span class="st-veil-acts">
-                <button type="button" class="st-btn" onclick={askFor}>ask</button>
-                <button type="button" class="st-btn" onclick={() => openFrame(pendingOpen, true)}>open anyway</button>
-              </span>
-            </div>
-          {:else if frameState === "fetching"}
-            <div class="st-veil"><span>fetching {fmtKib(frameRec?.bytes ?? 0)}</span><span class="micro">bounded by the declared size · blob fetch is not connected yet</span></div>
-          {:else if frameState === "replaying"}
-            <div class="st-veil soft"><span class="micro">replaying your edit after the owner's checkpoint left it out</span></div>
+          {#if !frameId}
+            <div class="st-veil"><span>no frames yet</span><span class="micro">add one below to start drawing</span></div>
+          {:else if !raster && frameRec}
+            {#if blobStateHere === "invalid" || blobStateHere === "unavailable"}
+              <div class="st-veil"><span>{blobStateHere === "invalid" ? "these pixels were rejected" : "pixels not available yet"}</span><span class="micro">{blobProblemOf(frameRec.cid) || "bounded by the declared size"} · {fmtKib(frameRec.bytes)}</span><span class="st-veil-acts"><button type="button" class="st-btn" onclick={() => { session.invalidate({ objects: [objectId] }); }}>ask again</button></span></div>
+            {:else}
+              <div class="st-veil"><span>fetching {fmtKib(frameRec.bytes)}</span><span class="micro">bounded by the declared size · validated before it is shown</span></div>
+            {/if}
+          {:else if pendingHere}
+            <div class="st-veil soft"><span class="micro">{pendingHere.status === "uncertain" ? "this frame's save is uncertain · see the card above" : "saving this frame…"}</span></div>
           {/if}
           <span class="st-readout left">{zoom}× · {hover ? `${hover[0]},${hover[1]}` : "…"}{#if tool === "shape"} · {shape}{/if}</span>
-          <span class="st-readout right">layer · {LAYER_NAMES[layer]}{#if dirty} · unsaved{/if}</span>
+          <span class="st-readout right">layer · {LAYER_NAMES[layer]}{#if dirty} · unsaved{:else if rasterCid === "unsaved"} · saving{/if}</span>
         </div>
         </div>
         <div class="st-canvas-foot">
@@ -800,99 +976,127 @@
             {/each}
             <p class="micro wrap">three local layers · flattened into one pix frame on save</p>
 
-            <div class="st-sec nxt">frame {frameIndex + 1}</div>
-            {#if conflict}
+            <div class="st-sec nxt">frame {frameIndex >= 0 ? frameIndex + 1 : "·"}</div>
+            {#if frameRec?.conflicts.length}
               <div class="st-card warn">
-                <span>another version by <b style="color: {tint(conflict.by)}">{who(conflict.by)}</b></span>
-                <span class="micro">both replaced this frame at once · nothing resolved silently</span>
-                <span class="st-card-acts">
-                  <button type="button" class="st-btn" onclick={() => takeConflict(false)}>keep mine</button>
-                  <button type="button" class="st-btn" onclick={() => takeConflict(true)}>take theirs</button>
-                  <button type="button" class="st-btn ghost" onclick={keepBoth}>keep both</button>
-                </span>
-              </div>
-            {/if}
-            {#if claim && claim.by === me}
-              <div class="st-card accent">
-                <span>You're editing{#if dirty} · unsaved{/if}</span>
-                {#if claim.ask}<span class="sub">{who(studio.people?.mika ?? "")} asked for a turn</span>{/if}
-                <span class="micro it">courtesy claim · not a lock</span>
-                {#if claim.ask}<span class="st-card-acts"><button type="button" class="st-btn primary" onclick={pass}>pass</button></span>{/if}
-              </div>
-            {:else if claim}
-              <div class="st-card" style="--c: {tint(claim.by)}">
-                <span><b style="color: var(--c)">{who(claim.by)}</b> is drawing this frame · {claimLeft}s</span>
-                <span class="micro it">courtesy claim · not a lock</span>
-                <span class="st-card-acts">
-                  <button type="button" class="st-btn" onclick={askFor}>ask</button>
-                  {#if pendingOpen}<button type="button" class="st-btn" onclick={() => openFrame(pendingOpen, true)}>open anyway</button>{/if}
-                </span>
-              </div>
-            {:else}
-              <p class="micro">by {frameRec ? who(frameRec.author) : "nobody"} · {frameRec ? rel(frameRec.ts) : ""} · {fmtKib(frameRec?.bytes ?? 0)}</p>
-            {/if}
-          {:else if inspectorTab === "sound"}
-            <div class="st-sec">frame {frameIndex + 1}</div>
-            {#each sfxHere as [sid, s] (sid)}
-              <div class="st-card accent row">
-                <span class="mono">{s.p} · {noteName(s.n)}</span>
-                <span class="micro">from :cat: · 180 ms</span>
-                <span class="grow"></span>
-                <button type="button" class="st-link danger" onclick={() => removeSfx(sid)}>remove</button>
-              </div>
-              <div class="st-opt"><span class="lb">note</span>
-                {#each NOTE_CHOICES as [nm, n]}
-                  <button type="button" class="st-tile txt" class:on={s.n === n} onclick={() => setSfxNote(sid, n)}>{nm}</button>
+                <span>another version by {#each frameRec.conflicts as c, i}{i ? ", " : ""}<b style="color: {tint(c.author)}">{who(c.author)}</b>{/each}</span>
+                <span class="micro">replaced this frame at the same time · nothing resolved silently · pick one on purpose</span>
+                <span class="st-alt"><i style="background: {tint(frameRec.author)}"></i><span>showing {who(frameRec.author)} · {rel(frameRec.ts)} · {fmtKib(frameRec.bytes)}</span><span class="grow"></span><button type="button" class="st-link" disabled={!!readOnlyWhy} onclick={() => useVersion({ cid: frameRec!.cid, bytes: frameRec!.bytes, author: frameRec!.author, ts: frameRec!.ts, opId: frameRec!.opId }, "replace")}>keep this</button></span>
+                {#each frameRec.conflicts as c (c.opId)}
+                  <span class="st-alt"><i style="background: {tint(c.author)}"></i><span>{who(c.author)} · {rel(c.ts)} · {fmtKib(c.bytes)}</span><span class="grow"></span><button type="button" class="st-link" disabled={!!readOnlyWhy} onclick={() => useVersion(c, "replace")}>use this</button><button type="button" class="st-link" disabled={!!readOnlyWhy} onclick={() => useVersion(c, "insertAfter")}>keep both</button></span>
                 {/each}
               </div>
-            {:else}
-              <p class="muted small">No sound on this frame.</p>
-              <button type="button" class="st-btn ghost dashed" onclick={() => addSfx()}>+ add emoji sound</button>
-            {/each}
-            <p class="micro wrap">a sound is a jam patch on an emoji, played by your own synth · playback arrives with the emoji sounds slice</p>
-            <div class="st-sec nxt">all sfx · {allSfx.length}</div>
-            {#each allSfx as [sid, s] (sid)}
-              <button type="button" class="st-sfx" class:cur={s.fr === frameId} onclick={() => openFrame(s.fr)}>
-                <span class="fr">{frames.indexOf(s.fr) + 1}</span>
-                <i style="background: {tint(root.frame[s.fr]?.author ?? me)}"></i>
-                <span class="mono">{s.p} · {noteName(s.n)}</span>
-                <span class="grow"></span>
-                <span class="micro">{who(root.frame[s.fr]?.author ?? me)}</span>
-              </button>
-            {/each}
+            {/if}
+            {#if pendingHere}
+              <div class="st-card accent">
+                <span>New frame{#if pendingHere.status === "uncertain"} · save uncertain{:else} · saving{/if}</span>
+                <span class="micro it">it joins the timeline when the save lands</span>
+              </div>
+            {:else if frameRec}
+              <p class="micro">by {who(frameRec.author)} · {rel(frameRec.ts)} · {fmtKib(frameRec.bytes)}{#if frameRec.insertions > 1} · inserted {frameRec.insertions}× concurrently{/if}{#if frameRec.overCap} · over cap{/if}</p>
+            {/if}
+            <p class="micro wrap it">claims (who is drawing what) arrive with the call draw channel; nothing here is a lock</p>
+          {:else if inspectorTab === "sound"}
+            <div class="st-sec">frame {frameIndex >= 0 ? frameIndex + 1 : "·"}</div>
+            <p class="muted small">No sound on this frame.</p>
+            <button type="button" class="st-btn ghost dashed" disabled title="Emoji sounds on frames arrive with the backend's Gate 6">+ add emoji sound</button>
+            <p class="micro wrap">a sound is a jam patch on an emoji, played by your own synth · not accepted by the studio yet</p>
           {:else}
             <div class="st-sec">soundtrack</div>
-            {#if scoreTitle}
-              <div class="st-card accent row">
-                <span class="mono">{scoreTitle}</span>
-                <span class="micro">score · linked</span>
-                <span class="grow"></span>
-                <button type="button" class="st-link" onclick={unlinkScore}>unlink</button>
-              </div>
-            {:else}
-              <p class="muted small">No score linked. The score editor is a later slice.</p>
-            {/if}
-            <p class="micro wrap">patches {patchCount} of {FLIPNOTE_MAX_PATCHES} · score patches first, then sfx</p>
+            <p class="muted small">No score linked. Linked Music arrives with the backend's Gate 6.</p>
+            <p class="micro wrap">patches 0 of {FLIPNOTE_MAX_PATCHES} · score patches first, then sfx</p>
             <div class="st-sec nxt">size</div>
             <div class="st-bar"><i style="width: {Math.min(100, (totalBytes / FLIPNOTE_FRAME_BYTES_PROMISE) * 100)}%"></i></div>
-            <p class="micro wrap">{fmtKib(totalBytes)} of 8 mib · {frames.length} of {FLIPNOTE_MAX_FRAMES} frames</p>
+            <p class="micro wrap">{fmtKib(totalBytes)} of 8 mib declared · {frames.length} of {FLIPNOTE_MAX_FRAMES} frames{#if model.deletedFrames.length} · {model.deletedFrames.length} deleted kept in history{/if}</p>
+
+            <div class="st-sec nxt">entry</div>
+            {#if entry}
+              <div class="st-opt"><span class="lb">expiry</span>
+                <button type="button" class="st-tile txt" class:on={entry.expiry.kind === "never"} disabled={!!readOnlyWhy} onclick={() => setExpiry({ kind: "never" })}>keeps</button>
+                <button type="button" class="st-tile txt" class:on={entry.expiry.kind === "unrecorded"} disabled={!!readOnlyWhy} onclick={() => setExpiry({ kind: "unrecorded" })}>unset</button>
+                <input type="date" class="st-input date" class:on={entry.expiry.kind === "at"} value={expiryDate(entry.expiry)} disabled={!!readOnlyWhy} onchange={(e) => { const ms = Date.parse(e.currentTarget.value); if (Number.isFinite(ms)) setExpiry({ kind: "at", ms }); }} aria-label="expiry date" />
+              </div>
+              <p class="micro wrap">{expiryText(entry.expiry)}{#if entry.expiryConflicts} · another expiry was set at the same time{/if} · recorded now, enforced later</p>
+              <div class="st-opt"><span class="lb">delete</span>
+                {#if deleteArmed}
+                  <button type="button" class="st-btn danger" onclick={deleteFlipnote}>delete this flipnote</button>
+                  <button type="button" class="st-btn ghost" onclick={() => (deleteArmed = false)}>cancel</button>
+                {:else}
+                  <button type="button" class="st-btn ghost" disabled={!!readOnlyWhy} onclick={() => (deleteArmed = true)}>delete…</button>
+                {/if}
+              </div>
+              <p class="micro wrap">a deletion is a tombstone in the channel index: the entry leaves the list, its history stays in recovery</p>
+            {:else}
+              <p class="micro wrap">this flipnote has no entry in the channel index on this device{#if pending.some((s) => s.kind === "create")} · it appears when the create lands{/if}</p>
+            {/if}
+
             <div class="st-sec nxt">history</div>
-            {#if settlement}
-              <p class="st-hist"><i class={settlement.gate === "settled" ? "ok" : settlement.gate === "fault" ? "danger" : "warn"}></i>
-                {#if settlement.receiptBy}settled by {who(settlement.receiptBy)} · {rel(settlement.receiptTs)}{:else}no owner receipt yet{/if}
+            {#if view}
+              <p class="st-hist"><i class={view.awaitingTenureReceipt ? "warn" : view.phase === "settled" ? "ok" : view.phase === "fault" ? "danger" : view.phase === "closing" ? "warn" : "info"}></i>
+                {#if view.awaitingTenureReceipt}awaiting the owner's tenure receipt · epoch {view.epoch}{:else}{view.phase} · epoch {view.epoch} · saved locally, provisional{/if}
               </p>
-              <p class="micro wrap">{settlement.label}</p>
+              <p class="micro wrap">{view.awaitingTenureReceipt ? "current owner has not yet confirmed this document's history" : view.phase === "closing" ? "rotating: local edits only until the owner settles this rotation" : view.phase === "fault" ? "history fault: conflicting owner receipts" : view.phase === "settled" ? "the owner settled this epoch; later edits are provisional until the next receipt" : "an owner receipt settles these edits later"}</p>
             {/if}
-            {#if recovery?.retained.length}
-              <p class="st-hist"><i class="info"></i>previous version available · epoch {recovery.retained[0].epoch}</p>
-              <span class="st-card-acts">
-                <button type="button" class="st-btn" onclick={() => onnotice(store.recoveryAction(objectId, "restore"), "info")}>restore</button>
-                <button type="button" class="st-btn" onclick={() => onnotice(store.recoveryAction(objectId, "copy"), "info")}>copy</button>
-                <button type="button" class="st-btn ghost" onclick={() => onnotice(store.recoveryAction(objectId, "export"), "info")}>export</button>
-              </span>
-            {/if}
-            {#if recovery?.evictionDeadline}
-              <p class="st-hist"><i class="warn"></i>a previous version will be removed in {Math.max(0, Math.ceil((recovery.evictionDeadline - Date.now()) / 86_400_000))}d unless exported</p>
+            {#if listing}
+              {#if listing.pendingIntents}<p class="micro wrap">{listing.pendingIntents} of your saves await an owner receipt · not lost, not excluded</p>{/if}
+              {#if listing.evictionPending}
+                <div class="st-card warn">
+                  <span>a previous version will be removed {deadlineText(listing.evictionPending.deadlineMs)} unless exported</span>
+                  <span class="micro wrap">oldest {listing.evictionPending.oldestSnapshot.slice(0, 8)} makes room for staged {listing.evictionPending.stagedSnapshot.slice(0, 8)} · acknowledging removes it now instead of at the deadline</span>
+                  <span class="st-card-acts"><button type="button" class="st-btn" onclick={acknowledge}>acknowledge · remove now</button></span>
+                </div>
+              {/if}
+              {#each listing.versions as v (v.snapshot)}
+                <div class="st-ver" class:staged={v.staged}>
+                  <p class="st-hist"><i class="info"></i>{v.staged ? "staged" : "previous"} version · epoch {v.epoch} · {reasonText(v.reason)} · {fmtKib(v.bytes)}</p>
+                  <span class="st-card-acts">
+                    <button type="button" class="st-btn ghost" onclick={() => inspect(v)}>{inspected === v.snapshot ? "hide" : "inspect"}</button>
+                    <button type="button" class="st-btn" disabled={!!readOnlyWhy || run?.status === "running"} title="add what is missing; never overwrites" onclick={() => startRecovery(v, "restore")}>restore</button>
+                    <button type="button" class="st-btn" disabled={!!readOnlyWhy || run?.status === "running"} title="replace current title/fps and apply the fork's deletions; asks first" onclick={() => startRecovery(v, "copy")}>{copyConfirm === v.snapshot ? "confirm copy" : "copy"}</button>
+                    <button type="button" class="st-btn ghost" onclick={() => exportVersion(v)}>export</button>
+                  </span>
+                  {#if copyConfirm === v.snapshot}<p class="micro wrap">copy replaces the current title and fps with this version's and applies deletions recorded on that fork · nothing deleted here is resurrected · press confirm copy</p>{/if}
+                  {#if inspected === v.snapshot}
+                    {#if inspectedVersion}
+                      {@const c = inspectedVersion.content}
+                      <p class="micro wrap">{#if c.kind === "flipnote"}title "{c.title?.selected.value ?? ""}" · {c.fps?.selected.value ?? 12} fps · {c.timeline.length} frames · {Object.keys(c.tombstones).length} deleted · {fmtKib(c.declaredFrameBytes)} declared{:else}index · {Object.keys(c.objects).length} entries · {Object.keys(c.overflow).length} overflow · {Object.keys(c.deletedObjects).length} deleted{/if} · historical, not the current view</p>
+                    {:else}
+                      <p class="micro wrap">reading…</p>
+                    {/if}
+                  {/if}
+                  {#if exportFor(v.snapshot)}
+                    {@const x = exportFor(v.snapshot)!}
+                    <div class="st-card">
+                      <span>backup ready · {fmtKib(x.bytes)}</span>
+                      <span class="micro wrap">{x.format} · private history and operation evidence for recovery, not playable media or a .pixa</span>
+                      <span class="st-card-acts"><button type="button" class="st-btn" onclick={() => saveExport(v.snapshot)}>save file</button><button type="button" class="st-btn ghost" onclick={() => copyExport(v.snapshot)}>copy base64</button></span>
+                    </div>
+                  {/if}
+                </div>
+              {:else}
+                <p class="micro wrap">no previous versions retained for this document{#if listing.source === null} · no local source{/if}</p>
+              {/each}
+              {#if run && run.object === objectId}
+                <div class="st-card">
+                  <span>{run.mode} from epoch {listing.versions.find((v) => v.snapshot === run.snapshot)?.epoch ?? "?"} · {run.status === "running" ? "in progress" : run.status === "stopped" ? "stopped" : "walked"}</span>
+                  <span class="micro wrap">each choice is previewed, applied only when ready, then the document is re-read · what was applied is saved content, not an all-or-nothing restore</span>
+                  <ul class="st-run">
+                    {#each run.items as it, i (i)}
+                      <li><i class={itemTone(it.state)}></i><span>{it.label}</span><span class="grow"></span><span class="micro">{it.state}{#if it.error} · {it.error}{/if}</span></li>
+                    {/each}
+                  </ul>
+                  {#if run.status === "running"}<span class="st-card-acts"><button type="button" class="st-btn ghost" onclick={() => session.stopRecovery()}>stop after this item</button></span>{/if}
+                </div>
+                {#if run.status !== "running"}
+                  <div class="st-card">
+                    <span>registry pointer · {pointer.status === "done" ? "restored" : pointer.status === "blocked" ? "blocked" : pointer.status === "running" ? "restoring…" : "pending"}</span>
+                    <span class="micro wrap">{#if pointer.status === "done" && pointer.result}checkpoint epoch {pointer.result.checkpointEpoch} · registry epoch {pointer.result.registryEpochId.slice(0, 8)} · provisional{:else if pointer.status === "blocked"}{pointer.error} · content already saved stays saved; retry separately{:else}a separate step that makes the saved document discoverable again; retryable on its own{/if}</span>
+                    <span class="st-card-acts"><button type="button" class="st-btn" disabled={pointer.status === "running"} onclick={() => session.restorePointer(objectId)}>{pointer.status === "blocked" ? "retry pointer" : "restore pointer"}</button></span>
+                  </div>
+                {/if}
+              {/if}
+            {:else if recoveryError}
+              <p class="micro wrap">recovery listing failed: {recoveryError}</p>
             {/if}
           {/if}
         </div>
@@ -902,48 +1106,56 @@
     <!-- Timeline -->
     <div class="st-timeline">
       <div class="st-transport">
-        <button type="button" class="st-tool sm" title="first frame" onclick={() => frames[0] && openFrame(frames[0], true)}><svg viewBox="0 0 16 16" class="solid"><path d="M8 3 2 8l6 5zM14 3 8 8l6 5z"></path></svg></button>
+        <button type="button" class="st-tool sm" title="first frame" onclick={() => frameIds[0] && openFrame(frameIds[0])}><svg viewBox="0 0 16 16" class="solid"><path d="M8 3 2 8l6 5zM14 3 8 8l6 5z"></path></svg></button>
         <button type="button" class="st-tool sm" title="previous frame [,]" onclick={() => step(-1)}><svg viewBox="0 0 16 16" class="solid"><path d="M3 3h1.5v10H3zM12.5 3 6 8l6.5 5z"></path></svg></button>
         <button type="button" class="st-tool play" class:on={playing} title={playing ? "pause [space]" : "play [space]"} onclick={() => (playing = !playing)}>
           {#if playing}<svg viewBox="0 0 16 16" class="solid"><path d="M3.5 2.5h3.5v11H3.5zM9 2.5h3.5v11H9z"></path></svg>{:else}<svg viewBox="0 0 16 16" class="solid"><path d="M4 2.5 13 8 4 13.5z"></path></svg>{/if}
         </button>
         <button type="button" class="st-tool sm" title="next frame [.]" onclick={() => step(1)}><svg viewBox="0 0 16 16" class="solid"><path d="M3.5 3 10 8l-6.5 5zM11.5 3H13v10h-1.5z"></path></svg></button>
-        <button type="button" class="st-tool sm" title="last frame" onclick={() => frames.length && openFrame(frames[frames.length - 1], true)}><svg viewBox="0 0 16 16" class="solid"><path d="M2 3l6 5-6 5zM8 3l6 5-6 5z"></path></svg></button>
+        <button type="button" class="st-tool sm" title="last frame" onclick={() => frameIds.length && openFrame(frameIds[frameIds.length - 1])}><svg viewBox="0 0 16 16" class="solid"><path d="M2 3l6 5-6 5zM8 3l6 5-6 5z"></path></svg></button>
         <button type="button" class="st-tool sm" class:on={loop} title="loop" onclick={() => (loop = !loop)}><svg viewBox="0 0 16 16"><path d="M3 8a5 5 0 015-5h4M13 8a5 5 0 01-5 5H4"></path><path d="M10.5 1.5 12 3l-1.5 1.5M5.5 11.5 4 13l1.5 1.5"></path></svg></button>
-        <span class="mono strong">{frameIndex + 1} / {frames.length}</span>
-        <span class="micro">{((frameIndex + 1) / Math.max(1, root.fps)).toFixed(2)} s of {(frames.length / Math.max(1, root.fps)).toFixed(2)} s</span>
+        <span class="mono strong">{frameIndex >= 0 ? frameIndex + 1 : "·"} / {frames.length}</span>
+        <span class="micro">{((Math.max(0, frameIndex) + 1) / Math.max(1, model.fps)).toFixed(2)} s of {(frames.length / Math.max(1, model.fps)).toFixed(2)} s</span>
         <span class="grow"></span>
-        {#each frames.filter((f) => { const c = store.claimOn(f); return c && c.by !== me; }).slice(0, 2) as f (f)}
-          {@const c = store.claimOn(f)}
-          {#if c}<span class="st-chip" style="--c: {tint(c.by)}; border-color: color-mix(in oklab, var(--c) 40%, var(--panel)); background: color-mix(in oklab, var(--c) 16%, var(--panel))"><i style="background: var(--c)"></i><span class="micro" style="color: var(--c)">{who(c.by)} is drawing {frames.indexOf(f) + 1}</span></span>{/if}
-        {/each}
-        <button type="button" class="st-btn ghost" disabled={!canEdit && frames.length > 0} onclick={() => addFrameAfter(false)}>+ frame after</button>
+        <button type="button" class="st-btn ghost" disabled={!!readOnlyWhy || overCapCount > 0} onclick={() => addFrameAfter(false)}>+ frame after</button>
         <button type="button" class="st-btn ghost" disabled={!canEdit} onclick={() => addFrameAfter(true)}>duplicate</button>
-        <button type="button" class="st-btn ghost" disabled={!frameId} onclick={deleteFrame}>delete</button>
+        <button type="button" class="st-btn ghost" disabled={!frameId || !!readOnlyWhy || !!pendingHere} onclick={deleteFrame}>delete</button>
       </div>
       <div class="st-strip">
-        {#each frames as f, i (f)}
-          {@const rec = root.frame[f]}
-          {@const c = store.claimOn(f)}
-          {@const st = store.frameState.get(f) ?? "held"}
-          <button type="button" class="st-thumb" class:cur={f === frameId} class:over={overCap.has(f)} class:conflict={store.conflicts.has(f)} style="--c: {c ? tint(c.by) : 'transparent'}" onclick={() => openFrame(f)}>
-            <span class="ix" style={c && c.by !== me ? `color: ${tint(c.by)}` : ""}>{i + 1}{#if c && c.by !== me} · {who(c.by)} {store.claimSecondsLeft(f)}s{/if}</span>
-            <span class="fr" class:claimed={!!c && c.by !== me} class:fetching={st === "fetching"} class:replaying={st === "replaying"}>
-              {#if st === "fetching"}
-                <span class="micro">fetching</span>
+        {#each frames as f, i (f.id)}
+          {@const st = blobStateOf(f.cid)}
+          <button type="button" class="st-thumb" class:cur={f.id === frameId} class:over={!!f.overCap} class:conflict={f.conflicts.length > 0} onclick={() => openFrame(f.id)} title={f.overCap ? "over the cap: skipped in playback, greyed until trimmed" : st === "invalid" ? `pixels rejected: ${blobProblemOf(f.cid)}` : st === "unavailable" ? "pixels not available yet" : ""}>
+            <span class="ix">{i + 1}</span>
+            <span class="fr" class:fetching={st === "fetching" || st === "queued"} class:missing={st === "unavailable" || st === "invalid"}>
+              {#if st === "held"}
+                <canvas width="64" height="48" use:thumb={{ cid: f.cid, bytes: f.bytes, rev: studio.rev }}></canvas>
+              {:else if st === "invalid"}
+                <span class="micro">rejected</span>
+              {:else if st === "unavailable"}
+                <span class="micro">not here</span>
               {:else}
-                <canvas width="64" height="48" use:thumb={rec?.cid ?? ""}></canvas>
+                <canvas width="64" height="48" use:thumb={{ cid: f.cid, bytes: f.bytes, rev: studio.rev }}></canvas>
+                <span class="micro tag">fetching</span>
               {/if}
-              <i class="dot" style="background: {tint(rec?.author ?? me)}"></i>
-              {#if store.conflicts.has(f)}<i class="corner"></i>{/if}
+              <i class="dot" style="background: {tint(f.author)}"></i>
+              {#if f.conflicts.length}<i class="corner"></i>{/if}
+            </span>
+          </button>
+        {/each}
+        {#each pendingInserts as s (s.id)}
+          <button type="button" class="st-thumb" class:cur={s.frame === frameId} onclick={() => openFrame(s.frame)} title={s.status === "uncertain" ? `save uncertain: ${s.error}` : "saving this new frame"}>
+            <span class="ix">{s.status === "uncertain" ? "?" : "…"}</span>
+            <span class="fr pending" class:uncertain={s.status === "uncertain"}>
+              <canvas width="64" height="48" use:thumbBytes={{ bytes: s.pix, rev: studio.rev }}></canvas>
+              <i class="dot" style="background: var(--accent)"></i>
             </span>
           </button>
         {/each}
       </div>
       <div class="st-sfxlane">
         <span class="micro lb">sfx</span>
-        {#each frames as f (f)}
-          <span class="cell">{#each allSfx.filter(([, s]) => s.fr === f) as [sid, s] (sid)}<i style="background: {tint(root.frame[s.fr]?.author ?? me)}"></i>{/each}</span>
+        {#each frames as f (f.id)}
+          <span class="cell"></span>
         {/each}
       </div>
     </div>
@@ -952,7 +1164,7 @@
 
 <style>
   .studio { display: flex; flex-direction: column; flex: 1; min-height: 0; outline: none; gap: 0; }
-  .studio-empty { padding: 2rem; }
+  .studio-empty { padding: 2rem; display: flex; flex-direction: column; gap: 10px; align-items: flex-start; }
   .micro { font-family: var(--mono); font-size: 0.62rem; letter-spacing: 0.1em; text-transform: uppercase; color: var(--faint); white-space: nowrap; }
   .micro.wrap { white-space: normal; line-height: 1.5; margin: 4px 0 0; }
   .micro.it { font-style: italic; text-transform: none; letter-spacing: 0.04em; }
@@ -966,8 +1178,11 @@
   .st-head { display: flex; align-items: center; gap: 0.6rem; padding: 0.4rem 0.6rem; background: var(--panel); border-bottom: 1px solid var(--border); margin: -0.3rem -0.5rem 0.2rem; flex-wrap: wrap; }
   .st-title { font-size: 0.95rem; font-weight: 600; color: var(--text); background: transparent; border: 1px solid transparent; padding: 2px 4px; width: 9rem; }
   .st-title:hover, .st-title:focus { border-color: var(--border); background: var(--bg-elev); }
+  .st-title:disabled { color: var(--text-2); }
   .st-chip { display: inline-flex; align-items: center; gap: 5px; border: 1px solid var(--border); border-radius: 999px; padding: 2px 9px; white-space: nowrap; }
   .st-chip i { width: 5px; height: 5px; border-radius: 50%; background: var(--muted); }
+  .st-chip i.pulse { background: var(--accent); animation: st-pulse 1s ease-in-out infinite alternate; }
+  @keyframes st-pulse { from { opacity: 0.3; } to { opacity: 1; } }
   .st-chip.ok { border-color: var(--ok-brd); background: var(--ok-dim); } .st-chip.ok .micro, .st-chip.ok i { color: var(--ok); background: var(--ok); }
   .st-chip.ok .micro { background: none; }
   .st-chip.warn { border-color: var(--warn-brd); background: var(--warn-dim); } .st-chip.warn .micro { color: var(--warn); } .st-chip.warn i { background: var(--warn); }
@@ -982,11 +1197,15 @@
   .st-btn { display: inline-flex; align-items: center; gap: 6px; height: 26px; padding: 0 10px; border: 1px solid var(--border); border-radius: var(--r); background: var(--bg-elev); color: var(--text-2); font-family: var(--mono); font-size: 0.66rem; letter-spacing: 0.06em; text-transform: uppercase; white-space: nowrap; }
   .st-btn.primary { background: var(--accent); border-color: var(--accent); color: var(--on-accent); }
   .st-btn.ghost { background: transparent; border-color: var(--border-soft); color: var(--muted); }
+  .st-btn.danger { background: var(--danger-dim); border-color: var(--danger-brd); color: var(--danger); }
   .st-btn.dashed { border-style: dashed; }
   .st-btn:disabled { opacity: 0.45; }
-  .st-banner { margin: 0.2rem 0; padding: 6px 10px; border-radius: var(--r); font-size: 0.78rem; }
+  .st-banner { margin: 0.2rem 0; padding: 6px 10px; border-radius: var(--r); font-size: 0.78rem; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
   .st-banner.warn { background: var(--warn-dim); border: 1px solid var(--warn-brd); color: var(--text-2); }
   .st-banner.danger { background: var(--danger-dim); border: 1px solid var(--danger-brd); color: var(--text-2); }
+  .st-banner.info { background: var(--bg-elev); border: 1px solid var(--border); color: var(--text-2); }
+  .st-banner.st-save { flex-direction: column; align-items: flex-start; gap: 3px; }
+  .st-banner.st-save .micro.wrap { margin: 0; }
 
   /* Editor row */
   .st-row { flex: 1; min-height: 0; display: flex; gap: 10px; padding: 6px 0; }
@@ -1013,8 +1232,7 @@
   .st-overlay { touch-action: none; }
   .st-veil { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 6px; background: color-mix(in oklab, var(--bg-0) 72%, transparent); color: var(--text); font-size: 0.84rem; line-height: 1.4; text-align: center; }
   .st-veil.soft { justify-content: flex-end; padding-bottom: 28px; background: transparent; }
-  .st-veil .who { width: 8px; height: 8px; border-radius: 2px; background: var(--c); }
-  .st-veil-acts, .st-card-acts { display: flex; gap: 6px; margin-top: 4px; }
+  .st-veil-acts, .st-card-acts { display: flex; gap: 6px; margin-top: 4px; flex-wrap: wrap; }
   .st-readout { position: absolute; bottom: 6px; font-family: var(--mono); font-size: 0.62rem; letter-spacing: 0.1em; text-transform: uppercase; color: var(--muted); background: color-mix(in oklab, var(--bg-0) 70%, transparent); padding: 2px 5px; border-radius: 3px; line-height: 1.3; }
   .st-readout.left { left: 8px; } .st-readout.right { right: 8px; color: var(--accent-hi); }
   .st-canvas-foot { display: flex; align-items: center; gap: 10px; }
@@ -1032,8 +1250,11 @@
   .st-tile { display: inline-flex; align-items: center; justify-content: center; width: 30px; height: 26px; padding: 0; border: 1px solid var(--border-soft); border-radius: var(--r); background: var(--bg-elev); color: var(--muted); font-family: var(--mono); font-size: 0.6rem; text-transform: uppercase; }
   .st-tile.txt { width: auto; padding: 0 8px; }
   .st-tile.on { background: var(--accent-dim); border-color: var(--accent); color: var(--accent-hi); }
+  .st-tile:disabled { opacity: 0.45; }
   .st-tile svg { width: 14px; height: 14px; }
   .st-input { flex: 1; min-width: 0; background: var(--bg-elev); border: 1px solid var(--border); border-radius: var(--r); color: var(--text); font-family: var(--mono); font-size: 0.72rem; padding: 3px 6px; }
+  .st-input.date { flex: 0 1 9rem; height: 26px; box-sizing: border-box; color-scheme: dark; }
+  .st-input.date.on { border-color: var(--accent); background: var(--accent-dim); }
   .st-size { display: inline-flex; gap: 2px; align-items: flex-end; height: 16px; }
   .st-size button { width: 6px; padding: 0; border: none; border-radius: 1px; background: var(--faint); }
   .st-size button.on { background: var(--accent); }
@@ -1057,17 +1278,22 @@
   .st-card.accent { background: var(--accent-dim); border-color: var(--accent); }
   .st-card.warn { background: var(--warn-dim); border-color: var(--warn-brd); }
   .st-card .sub { font-size: 0.72rem; color: var(--text-2); }
+  .st-alt { display: flex; align-items: center; gap: 6px; font-size: 0.74rem; color: var(--text-2); }
+  .st-alt i { width: 7px; height: 7px; border-radius: 2px; flex: none; }
   .st-link { background: transparent; border: none; padding: 0; font-family: var(--mono); font-size: 0.62rem; letter-spacing: 0.1em; text-transform: uppercase; color: var(--muted); text-decoration: underline; }
   .st-link.danger { color: var(--danger); }
-  .st-sfx { display: flex; align-items: center; gap: 8px; padding: 4px 6px; border-radius: var(--r); background: transparent; border: none; color: inherit; width: 100%; text-align: left; }
-  .st-sfx.cur { background: var(--accent-dim); }
-  .st-sfx .fr { font-family: var(--mono); font-size: 0.62rem; color: var(--faint); width: 22px; text-align: right; }
-  .st-sfx i { width: 7px; height: 7px; border-radius: 2px; flex: none; }
+  .st-link:disabled { opacity: 0.45; text-decoration: none; }
   .st-bar { height: 4px; border-radius: 999px; background: var(--bg-elev); overflow: hidden; }
   .st-bar i { display: block; height: 100%; background: var(--accent); }
   .st-hist { display: flex; align-items: center; gap: 6px; margin: 2px 0; font-family: var(--mono); font-size: 0.68rem; color: var(--text-2); }
   .st-hist i { width: 6px; height: 6px; border-radius: 50%; flex: none; }
   .st-hist i.ok { background: var(--ok); } .st-hist i.warn { background: var(--warn); } .st-hist i.danger { background: var(--danger); } .st-hist i.info { background: var(--info); }
+  .st-ver { display: flex; flex-direction: column; gap: 3px; padding: 6px 0; border-top: 1px dashed var(--border-soft); }
+  .st-ver.staged .st-hist { color: var(--warn); }
+  .st-run { list-style: none; margin: 4px 0 0; padding: 0; display: flex; flex-direction: column; gap: 2px; max-height: 160px; overflow-y: auto; }
+  .st-run li { display: flex; align-items: center; gap: 6px; font-size: 0.72rem; color: var(--text-2); }
+  .st-run li i { width: 6px; height: 6px; border-radius: 50%; flex: none; }
+  .st-run li i.ok { background: var(--ok); } .st-run li i.warn { background: var(--warn); } .st-run li i.danger { background: var(--danger); } .st-run li i.info { background: var(--info); }
 
   /* Timeline */
   .st-timeline { flex: none; background: var(--panel); border-top: 1px solid var(--border); margin: 0 -0.5rem; padding: 8px 10px 10px; display: flex; flex-direction: column; gap: 8px; }
@@ -1079,11 +1305,13 @@
   .st-thumb .fr { position: relative; display: block; width: 64px; height: 48px; border: 1px solid var(--border); border-radius: 3px; overflow: hidden; line-height: 0; background: var(--bg-0); }
   .st-thumb .fr canvas { display: block; width: 64px; height: 48px; image-rendering: pixelated; }
   .st-thumb.cur .fr { outline: 2px solid var(--accent); outline-offset: 1px; }
-  .st-thumb .fr.claimed { outline: 2px solid var(--c); outline-offset: 1px; border-color: var(--c); }
-  .st-thumb .fr.claimed::after { content: ""; position: absolute; inset: 0; background: color-mix(in oklab, var(--c) 12%, transparent); }
-  .st-thumb .fr.fetching, .st-thumb .fr.replaying { border-style: dashed; border-color: var(--info); display: flex; align-items: center; justify-content: center; }
-  .st-thumb .fr.fetching .micro { color: var(--info); font-size: 0.5rem; }
-  .st-thumb .fr.replaying canvas { opacity: 0.7; }
+  .st-thumb .fr.fetching, .st-thumb .fr.pending { border-style: dashed; border-color: var(--info); display: flex; align-items: center; justify-content: center; }
+  .st-thumb .fr.missing { border-style: dashed; border-color: var(--warn); display: flex; align-items: center; justify-content: center; }
+  .st-thumb .fr.fetching .micro, .st-thumb .fr.missing .micro { color: var(--info); font-size: 0.5rem; }
+  .st-thumb .fr.missing .micro { color: var(--warn); }
+  .st-thumb .fr .tag { position: absolute; left: 0; right: 0; bottom: 0; text-align: center; background: color-mix(in oklab, var(--bg-0) 70%, transparent); line-height: 1.6; }
+  .st-thumb .fr.pending canvas { opacity: 0.7; }
+  .st-thumb .fr.pending.uncertain { border-color: var(--warn); }
   .st-thumb.over .fr { opacity: 0.45; background: repeating-linear-gradient(135deg, var(--bg-elev) 0 6px, var(--panel) 6px 12px); }
   .st-thumb.conflict .fr { border-color: var(--warn); }
   .st-thumb .dot { position: absolute; left: 3px; bottom: 3px; width: 7px; height: 7px; border-radius: 2px; }
@@ -1091,5 +1319,4 @@
   .st-sfxlane { display: flex; align-items: center; gap: 6px; }
   .st-sfxlane .lb { width: 24px; font-size: 0.5rem; }
   .st-sfxlane .cell { width: 64px; height: 8px; border-bottom: 1px solid var(--border-soft); position: relative; flex: none; }
-  .st-sfxlane .cell i { position: absolute; left: 4px; top: 0; width: 6px; height: 6px; border-radius: 50%; }
 </style>
