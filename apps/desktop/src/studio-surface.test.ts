@@ -243,13 +243,29 @@ test("FETCH-004: a loaded raster follows the frame's reference; a changed declar
     assert.match(veil(), /these pixels were rejected/);
     assert.match(veil(), new RegExp(`held pixels are ${N} bytes, not the ${N - 1}`));
     assert.equal(m.count("request_blob_bounded"), asked, "a known-wrong declaration is not re-asked");
-    // (2) a different cid that is not available: the old raster is gone, the frame waits.
+    // Back to a valid, loaded, unlocked raster: the changed-cid leg must start from one, or it
+    // would only show an empty frame turning into another empty frame.
+    view = frameView(N, cid1);
+    ipc.emit("studio-updated", { server: SERVER, channel: CHANNEL, object: OBJ });
+    await settled(400);
+    assert.equal(wrap()?.classList.contains("locked"), false, "the valid reference is editable again");
+    assert.equal(veil(), "");
+    assert.equal(m.count("request_blob_bounded"), asked, "held bytes for the valid reference were not re-asked");
+    // (2) a different cid whose bytes are still in flight: the loaded raster must go the moment
+    // the reference changes, not once transport has answered.
+    const hold = deferred<unknown>();
+    ipc.on("request_blob_bounded", (a) => (a.cid === cid1 ? { bytes_b64: b64(pix), bytes: N } : hold.promise));
     view = frameView(N, cid2);
     ipc.emit("studio-updated", { server: SERVER, channel: CHANNEL, object: OBJ });
     await settled(400);
+    assert.equal(wrap()?.classList.contains("locked"), true, "a loaded raster does not stand in for a reference whose bytes are not here");
+    assert.match(veil(), /fetching/);
+    assert.equal(m.count("request_blob_bounded"), asked + 1, "the new reference was asked for once");
+    hold.resolve(null);
+    await settled(400);
     assert.equal(wrap()?.classList.contains("locked"), true);
     assert.match(veil(), /pixels not available yet/);
-    assert.equal(m.count("request_blob_bounded"), asked + 1, "the new reference was asked for once");
+    assert.equal(m.count("request_blob_bounded"), asked + 1, "unavailable is not re-asked on repaint");
     // Bytes arrive for the new reference: editable again.
     ipc.on("request_blob_bounded", () => ({ bytes_b64: b64(pix), bytes: N }));
     m.click("button.st-btn", "ask again");
