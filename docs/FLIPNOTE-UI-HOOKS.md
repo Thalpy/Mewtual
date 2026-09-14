@@ -59,8 +59,9 @@ pacing and preservation of queued retries across repeated Reads change no native
 tenure, signed repair and full acceptance remain.
 The [Closing overlay design](GATE4-CLOSING-OVERLAY-REVIEW.md) passed user review at `d576af2`
 on 2026-09-14. Its internal core/store implementation at `b1b0ec9` also passed review, with
-non-blocking source-version coverage finding OVERLAY-TEST-001 now awaiting correction review. It supplies no
-native command. Continue to disable durable overlay
+source-version finding OVERLAY-TEST-001 closed by the re-review of `65db6ac`. The proposed
+[handoff design](GATE4-OVERLAY-HANDOFF-REVIEW.md) now covers transfer into shared pending intents;
+it awaits design review and supplies no native command. Continue to disable durable overlay
 Save in Closing/Fault and awaiting-tenure previews; preserve unsaved editor work without claiming
 it is vault-saved. Its later actor/native integration will update this guide with actual commands.
 The accepted foundations and earlier review closures are recorded in
@@ -262,7 +263,7 @@ installation; the UI should not implement a second catch-up scheduler or derive 
 | Settlement chip / rotation progress | `settlement-changed` invalidates the actual phase/recovery listing. `open` does **not** mean the current edits are receipted. Current responses always say `provisional:true`. Do not synthesize receipt author/time or “settled” from epoch alone. |
 | Current owner has not confirmed history | Native Read/List return the distinct `awaitingTenureReceipt: true` preview documented above. Actor/native implementation and NATIVE-TEST-001 passed review; combined scheduling at `6b71d96` is now accepted. The frontend adapter handles this read-only result; live UI acceptance remains separate. |
 | History fault / repair progress | Actual `phase:"fault"` and `fault` invalidations are available; signed repair has no actor/native command or `repairing` event yet. Restore/Copy saves ordinary content in an Open target and cannot clear Fault. Historical Read/Export remain available. |
-| Local overlay while rotating | Preserve unsaved editor work. The [core/store overlay foundation](GATE4-CLOSING-OVERLAY-REVIEW.md) passed implementation review; OVERLAY-TEST-001 adds source-version regression coverage. No native durable overlay or replay command exists. Shared Apply refuses Closing/Fault. |
+| Local overlay while rotating | Preserve unsaved editor work. The [core/store foundation](GATE4-CLOSING-OVERLAY-REVIEW.md) passed review and OVERLAY-TEST-001 is closed. The [handoff design](GATE4-OVERLAY-HANDOFF-REVIEW.md) is proposed only. No native durable overlay or replay command exists. Shared Apply refuses Closing/Fault. |
 | Recovery rail: Restore / Copy / Export | List/inspect/backup export, per-item Restore/Copy and conservative own-intent replay are connected. Unsafe replay is manual recovery, never settlement. Final Gate 4 acceptance remains pending; backup export is not `.pixa`. |
 | Eviction warning / countdown | Use the listing's actual warning pair/deadline and `studio_recovery_acknowledge`. Refresh after the action and matching `settlement-changed` events. |
 | Claims, Ask, Pass, countdown | Pending Gate 5. Local fixture claims are not peer claims and never locks. |

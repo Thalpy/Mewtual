@@ -10,6 +10,32 @@ and ranks the live hazards in that path.
 
 ## Status (latest entry: 2026-09-14)
 
+- **OVERLAY-TEST-001 closed; next handoff design ready (2026-09-14).**
+  The user accepts `783486d...65db6ac2b1a2bdbad1b97786f9603877dd902e67` with no remaining
+  masking path or required changes. This closes OVERLAY-TEST-001; the foundation implementation
+  PASS stands. The reviewer inspected the successful [overlay workflow](https://github.com/Thalpy/Mewtual/actions/runs/34848383818)
+  and artifact: 12 normal tests, both constant-version assertion failures, byte-exact restoration
+  and passing restored cases at PR merge checkout `ec622a7aaaf193245ded5512c253879d85054e57`.
+  They did not rerun Cargo locally. Native and two-client workflows for `65db6ac` also pass;
+  its broad CI is failed, so no repository-wide green or Gate 4 acceptance is claimed.
+
+  The source audit for the next step is in
+  [GATE4-OVERLAY-HANDOFF-REVIEW.md](GATE4-OVERLAY-HANDOFF-REVIEW.md). Ordinary replay requires
+  signed historical evidence, while local reconstruction requires every accepted annotation.
+  The proposal therefore transfers a complete branch into its pristine verified expected
+  successor, persists a Prepared record before the signed source, and releases only the overlay
+  hold after exact source/manifest verification. Ordinary intents remain pending for receipts.
+  It specifies restart resolution, a fence at real source replacement paths, full signed-operation
+  hashes, bounded completed acknowledgements/retry floor and unchanged storage/reference limits.
+  The proposal awaits user adversarial design review before its implementation; no new runtime
+  behavior is enabled. This documentation checkpoint is checked for whitespace, links and source
+  references; no new Cargo run is claimed for it.
+
+  This continues block 2, not its completion. Actor/native/manual overlay lifecycle, changed-base
+  reconciliation, provisional-preview overlays, repeated-owner tenure, signed repair, the recorded
+  full-suite failures and final combined acceptance remain. UI hooks retain the current native
+  contract and keep durable overlay Save unavailable. No frontend or production Rust files change.
+
 - **Closing overlay implementation accepted; OVERLAY-TEST-001 correction (2026-09-14).**
   The user accepts `ac23429...b1b0ec9` with evidence at `783486d`: no blocking production
   defect and no production change requested. OVERLAY-TEST-001 is a non-blocking P3 regression

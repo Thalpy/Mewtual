@@ -2,9 +2,11 @@
 
 Status: user design review PASS at `d576af2`, 2026-09-14, with no required design changes.
 The core/store implementation at `b1b0ec9` passed user review with one non-blocking P3 test
-finding, OVERLAY-TEST-001, concerning changed-Closing-source coverage. Its test correction is
-implemented with passing focused and mutation/restoration tests; correction review is pending.
-No production change is requested and no native overlay command is enabled.
+finding, OVERLAY-TEST-001, concerning changed-Closing-source coverage. The user's re-review of
+`783486d...65db6ac` closes that finding with no further changes required. The reviewer inspected
+12 passing overlay tests and the mutation/restoration artifact at merge checkout `ec622a7`.
+No native overlay command is enabled. The next proposed checkpoint is
+[atomic handoff into shared history](GATE4-OVERLAY-HANDOFF-REVIEW.md), awaiting design review.
 The original 131 affected local tests, Clippy and three
 isolated mutations pass as recorded in [HANDOVER](HANDOVER.md). The repository-wide ambient
 dependency check still reports six baseline findings; full-repository acceptance remains open.
@@ -190,9 +192,9 @@ following checkpoint; do not report them as covered by foundation tests.
 
 ## Review request
 
-The design and bounded implementation requests are accepted by the user's PASS. The remaining
-request is closure review of OVERLAY-TEST-001 against the correction checkpoint, with base
-`783486db503b835861c53d7507247815e193a41c`. Its exact published head accompanies the review message.
+The design, bounded implementation and OVERLAY-TEST-001 closure requests all passed user review.
+The next live request is the [handoff design review](GATE4-OVERLAY-HANDOFF-REVIEW.md).
+The following closure request is retained as the scope record for `783486d...65db6ac`.
 
 ```text
 Please re-review OVERLAY-TEST-001 only. No production change is requested or included.

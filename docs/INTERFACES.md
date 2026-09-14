@@ -2046,6 +2046,12 @@ require the same eligible Closing source. Failed ordinary Saves are never upgrad
 Ordinary Apply rejects annotated IDs, and both receipt/manual retirement hold annotated entries.
 See [the overlay review record](GATE4-CLOSING-OVERLAY-REVIEW.md) for remaining integration obligations.
 
+The foundation implementation and OVERLAY-TEST-001 correction are accepted at `b1b0ec9` / `65db6ac`.
+[The next handoff proposal](GATE4-OVERLAY-HANDOFF-REVIEW.md) specifies an atomic complete-branch
+transfer, Prepared replacement fence and bounded completed acknowledgements. These are proposed
+internal contracts only: the current encoder remains version 1, ordinary Apply still refuses
+annotations, and no handoff, new save-result variant or native command is implemented yet.
+
 ### Durable registry edits, sealing and checkpoint installation (P1, not yet live-wired)
 
 `ServerStore` now exposes:
