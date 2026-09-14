@@ -10,6 +10,12 @@ pub const MAX_STUDIO_OVERLAY_OPS: usize = 256;
 const MAX_METADATA: usize = 64 * 1024;
 const MAX_EXTENSION: usize = MAX_CHECKPOINT_BYTES + MAX_METADATA;
 
+mod handoff;
+pub use handoff::{
+    StudioHandoffCandidate, StudioHandoffEvidence, StudioHandoffOutcome, StudioOverlaySave,
+    StudioOverlayState,
+};
+
 #[derive(Clone)]
 struct BasisData {
     target: StudioTarget,
@@ -50,7 +56,7 @@ impl StudioClosingOverlayBasis {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq, Eq)]
 struct Entry {
     id: [u8; 32],
     envelope: [u8; 32],
@@ -143,6 +149,25 @@ impl BasisData {
     }
 }
 impl StudioOverlay {
+    pub(in crate::studio) fn receipt(&self) -> &Receipt {
+        &self.base.receipt
+    }
+    pub(in crate::studio) fn seed(&self) -> &[u8] {
+        &self.base.seed
+    }
+    pub(in crate::studio) fn base_projection(&self) -> Result<StudioProjection, ReplError> {
+        Ok(self.base.graph()?.1)
+    }
+    pub(in crate::studio) fn ordered<'a>(
+        &self,
+        ledger: &'a IntentLedger,
+    ) -> Result<Vec<(&'a LocalIntent, u64)>, ReplError> {
+        Ok(self
+            .checked_entries(ledger)?
+            .into_iter()
+            .map(|(e, i)| (i, e.ts))
+            .collect())
+    }
     pub fn new(basis: &StudioClosingOverlayBasis) -> Self {
         Self {
             base: basis.0.clone(),

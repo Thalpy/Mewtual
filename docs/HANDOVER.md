@@ -10,6 +10,13 @@ and ranks the live hazards in that path.
 
 ## Status (latest entry: 2026-09-14)
 
+- **HANDOFF-001 closed; corrected handoff design accepted (2026-09-14).**
+  The user accepts `b546c8d...dd2fbc01ebb8a692964eec0df19dd201b225c936` with no remaining
+  findings or required changes. This closes the retained-target design finding and authorizes
+  implementation of the [accepted core/store handoff](GATE4-OVERLAY-HANDOFF-REVIEW.md).
+  Implementation is in progress. No execution evidence or native command is implied by the
+  design PASS. OVERLAY-TEST-001 remains closed; Gate 4 remains in block 2.
+
 - **HANDOFF-001 design correction ready for re-review (2026-09-14).**
   The user's review of `65db6ac...b546c8d` requests one correction: completed retry metadata
   must retain an independently checkable channel binding after the full base is released.

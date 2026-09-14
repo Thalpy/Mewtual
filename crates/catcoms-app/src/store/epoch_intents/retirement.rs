@@ -154,6 +154,9 @@ impl ServerStore {
             }
         };
         let id = *blake3::hash(&scope).as_bytes();
+        if state.handoff_prepared() {
+            return Err(invalid("overlay handoff must resolve before retirement"));
+        }
         let observed = old
             .map(|n| storage_record(server, document, &scope, n))
             .transpose()?;

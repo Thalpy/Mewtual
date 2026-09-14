@@ -1,9 +1,9 @@
 # Gate 4: atomic handoff of an accepted Closing overlay
 
-Status: proposed core/store design, 2026-09-14; HANDOFF-001 corrected, awaiting design re-review.
-The review of `b546c8d` requested an independently retained channel binding for completed retries;
-it found no other design blocker. This revision makes that binding explicit below.
-No implementation or native command is supplied by this checkpoint. The Closing overlay
+Status: core/store design accepted by the user, 2026-09-14; HANDOFF-001 closed.
+The user accepts `b546c8d...dd2fbc01ebb8a692964eec0df19dd201b225c936` with no remaining
+findings or required changes. Implementation is now in progress; this acceptance covers the
+design, not implementation evidence or a native command. The Closing overlay
 foundation at `b1b0ec9` is accepted; the user's review of `65db6ac` closes OVERLAY-TEST-001.
 See [the foundation record](GATE4-CLOSING-OVERLAY-REVIEW.md) and [HANDOVER](HANDOVER.md).
 

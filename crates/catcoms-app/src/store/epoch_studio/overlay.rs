@@ -1,7 +1,7 @@
 //! No source writes accompany local acceptance. Eligibility is checked under the same
 //! exclusive store/group borrow as the shared intent transaction, with no detached gap.
 use super::*;
-use catcoms_replication::studio::{StudioClosingOverlayBasis, StudioLocalDraft};
+use catcoms_replication::studio::{StudioClosingOverlayBasis, StudioOverlaySave};
 use catcoms_replication::{CloseRecord, LocalIntent};
 
 impl ServerStore {
@@ -19,7 +19,7 @@ impl ServerStore {
         ts: u64,
         rng: &mut impl CryptoRngCore,
         budget: &mut EpochStudioBudget,
-    ) -> Result<StudioLocalDraft, AppError> {
+    ) -> Result<StudioOverlaySave, AppError> {
         self.save_studio_closing_overlay_with_io(
             server,
             group,
@@ -78,7 +78,7 @@ impl ServerStore {
         budget: &mut EpochStudioBudget,
         writer: impl FnOnce(&Path, &[u8]) -> Result<(), AppError>,
         sync: impl FnOnce(&Path, u64) -> Result<(), AppError>,
-    ) -> Result<StudioLocalDraft, AppError> {
+    ) -> Result<StudioOverlaySave, AppError> {
         current_member(group, device)?;
         let logical = target.document(&group.group_id()).map_err(invalid)?;
         // Bound the caller's public Vec before making a LocalIntent copy.
@@ -102,6 +102,28 @@ impl ServerStore {
             author: device.device_id(),
             operation: operation.clone(),
         };
+        if let Some(metadata) = state.handoff_metadata() {
+            if let Some(outcome) = metadata
+                .completed_retry(target, basis, &intent)
+                .map_err(invalid)?
+            {
+                let scope = super::super::epoch_intents::scope_bytes(server, &logical)?;
+                let (_, old) = self.read_epoch_intent_record(&scope, &logical)?;
+                self.write_prepared_intents(
+                    server,
+                    &logical,
+                    state,
+                    old,
+                    true,
+                    rng,
+                    &mut budget.storage,
+                    &mut budget.intents,
+                    writer,
+                    sync,
+                )?;
+                return Ok(StudioOverlaySave::HandedOff(outcome));
+            }
+        }
         let exact = match state.overlay() {
             Some(overlay) if overlay.target() == target => {
                 overlay.exact_retry(basis, &intent).map_err(invalid)?
@@ -151,5 +173,6 @@ impl ServerStore {
             writer,
             sync,
         )
+        .map(StudioOverlaySave::Local)
     }
 }

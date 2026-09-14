@@ -31,7 +31,8 @@ mod admission;
 pub use admission::StudioTarget;
 mod overlay;
 pub use overlay::{
-    StudioClosingOverlayBasis, StudioLocalDraft, StudioOverlay, MAX_STUDIO_OVERLAY_OPS,
+    StudioClosingOverlayBasis, StudioHandoffCandidate, StudioHandoffEvidence, StudioHandoffOutcome,
+    StudioLocalDraft, StudioOverlay, StudioOverlaySave, StudioOverlayState, MAX_STUDIO_OVERLAY_OPS,
 };
 mod epoch;
 pub use epoch::catchup;

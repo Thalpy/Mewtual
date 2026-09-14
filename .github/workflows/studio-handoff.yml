@@ -1,0 +1,42 @@
+name: Studio Closing overlay handoff
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/studio-handoff.yml'
+      - '.github/scripts/check-studio-handoff-mutations.py'
+      - 'crates/catcoms-app/**'
+      - 'crates/catcoms-sync/**'
+      - 'crates/catcoms-replication/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_INCREMENTAL: '0'
+  RUSTFLAGS: '-D warnings'
+
+jobs:
+  handoff:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.89.0
+      - uses: Swatinem/rust-cache@v2
+      - name: Test handoff durability, evidence, scope and replacement boundaries
+        run: >-
+          cargo test --locked -j 4 --config 'profile.test.package.catcoms-app.debug=0'
+          -p catcoms-app --lib studio_overlay_handoff -- --test-threads=4
+      - name: Verify isolated mutations and restored regressions
+        run: python3 .github/scripts/check-studio-handoff-mutations.py
+      - name: Preserve mutation and restoration evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: studio-handoff-mutations
+          path: |
+            logs/gate4-handoff-mutation-*.log
+            logs/gate4-handoff-restored-*.log
+          if-no-files-found: ignore

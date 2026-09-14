@@ -20,6 +20,7 @@ use crate::{
 
 mod adoption;
 pub mod catchup;
+mod handoff;
 mod owner;
 mod settlement;
 pub use adoption::StudioAdoptionPlan;

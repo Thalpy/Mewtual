@@ -2023,9 +2023,10 @@ Rust adapters under caller-owned exclusive Server/store custody. They obtain ten
 `ChannelSync::observed_owner_tenure_start`; request data cannot supply tenure. A checked
 `StudioClosingOverlayBasis` derives from the actual Closing source and its settlement plan.
 Save takes its fingerprint and a canonical domain operation; timestamps come from the runtime
-clock and are preserved on exact retries. The result is a separate `StudioLocalDraft`, never an
-ordinary epoch, a shared-operation publication result or receipt authority. No actor/native
-overlay command or automatic promotion/disposition is enabled by this foundation.
+clock and are preserved on exact retries. The result is now `StudioOverlaySave::Local(StudioLocalDraft)`
+or `StudioOverlaySave::HandedOff(StudioHandoffOutcome)` for a completed exact retry. A handoff is
+shared pending history, not receipt finality. No actor/native overlay command or automatic
+promotion/disposition is enabled by these internal adapters.
 
 `EpochIntentState::overlay()` exposes immutable acceptance metadata and `local_draft()` rebuilds
 the local projection. The existing ledger's encoding is unchanged. Its enclosing record is
@@ -2047,13 +2048,31 @@ Ordinary Apply rejects annotated IDs, and both receipt/manual retirement hold an
 See [the overlay review record](GATE4-CLOSING-OVERLAY-REVIEW.md) for remaining integration obligations.
 
 The foundation implementation and OVERLAY-TEST-001 correction are accepted at `b1b0ec9` / `65db6ac`.
-[The next handoff proposal](GATE4-OVERLAY-HANDOFF-REVIEW.md) specifies an atomic complete-branch
-transfer, Prepared replacement fence and bounded completed acknowledgements. These are proposed
-internal contracts only. The HANDOFF-001 correction requires a complete target in enclosing metadata,
-retained even after the base and pending entries are gone; Active/Prepared and completed targets
-must match it, and completed requests must match before acknowledgement or sync-only retry.
-The correction awaits design re-review: the current encoder remains version 1, ordinary Apply still refuses
-annotations, and no handoff, new save-result variant or native command is implemented yet.
+[The accepted handoff design](GATE4-OVERLAY-HANDOFF-REVIEW.md) is being implemented and tested.
+The user accepts `dd2fbc0` and closes HANDOFF-001. The explicit Rust-only
+`Server::handoff_studio_overlay(store, server, target, basis, budget)` obtains live tenure from sync.
+It transfers the complete branch only into its pristine independently verified installed successor.
+Prepared metadata, one complete signed source replacement, and compact completed metadata cross
+three separate durability barriers. Pending ledger entries remain for ordinary receipt settlement.
+Interrupted attempts resolve complete signed-operation hashes or retain the full branch; an absent
+manifest returns durably to Active. No prefix replay or automatic rebase occurs.
+
+New writes use inner extension version 2: mandatory complete target, optional Active/Prepared
+branch, optional completed acknowledgement with its own matching target, and monotonic retry floor.
+Version 1 remains readable without rewriting on read. The same seed, combined metadata, complete
+record, physical intent and server budgets apply. Completed retries compare the full target before
+source lookup, sync reservation or acknowledgement, including after ordinary ledger retirement.
+
+The local Studio source wrapper additionally accepts a trailing `u8(1)` indicating that its intent
+metadata is required. The common writer retains this link across successor/adoption replacements;
+old wrappers without a link remain byte-compatible. The link counts as ordinary content and makes
+missing handoff metadata an error after restart. It is a local integrity dependency, not network
+authority. Generic page/current-tail service holds Prepared sources, and completed records are
+flushed before publication or normal source rewrites. Rotation/adoption resolve Prepared before
+journal/recovery/retirement work; the common source writer also fences evidence loss.
+
+Actor scheduling, native overlay commands, manual disposition and preview-based overlays remain
+unavailable. Implementation acceptance is still pending adversarial review.
 
 ### Durable registry edits, sealing and checkpoint installation (P1, not yet live-wired)
 

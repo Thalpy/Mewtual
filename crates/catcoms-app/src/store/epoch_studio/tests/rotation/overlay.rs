@@ -4,7 +4,15 @@ use catcoms_replication::studio::{StudioClosingOverlayBasis, StudioLocalDraft};
 use catcoms_replication::CloseRecord;
 use std::collections::BTreeMap;
 
+mod handoff;
 mod source_version;
+
+fn local(saved: catcoms_replication::studio::StudioOverlaySave) -> StudioLocalDraft {
+    match saved {
+        catcoms_replication::studio::StudioOverlaySave::Local(draft) => draft,
+        _ => panic!("expected retained local draft"),
+    }
+}
 
 #[test]
 fn studio_overlay_store_changed_closing_source_refuses_first_acceptance() {
@@ -62,21 +70,23 @@ fn save(
     ts: u64,
 ) -> StudioLocalDraft {
     let mut b = budget(store, f);
-    store
-        .save_studio_closing_overlay(
-            SERVER,
-            &f.group,
-            f.target,
-            &f.device,
-            close,
-            Some(0),
-            basis,
-            op,
-            ts,
-            &mut rng(),
-            &mut b,
-        )
-        .unwrap()
+    local(
+        store
+            .save_studio_closing_overlay(
+                SERVER,
+                &f.group,
+                f.target,
+                &f.device,
+                close,
+                Some(0),
+                basis,
+                op,
+                ts,
+                &mut rng(),
+                &mut b,
+            )
+            .unwrap(),
+    )
 }
 fn canonical(store: &ServerStore) -> BTreeMap<String, Vec<u8>> {
     fs::read_dir(store.dir.join("servers"))
@@ -363,7 +373,7 @@ fn studio_overlay_store_uncertain_writes_and_changed_source_retry_at_physical_ca
                 sync_intent,
             )
             .unwrap();
-        assert_eq!(retry.projection(), expected.projection());
+        assert_eq!(local(retry).projection(), expected.projection());
         let mut changed = f.title();
         changed.nonce = [99; 16];
         let error = store
@@ -603,9 +613,13 @@ fn studio_overlay_store_basis_scope_and_semantics_reject_before_acceptance() {
                     &mut b,
                 )
                 .unwrap_err();
-            assert!(error
-                .to_string()
-                .contains("overlay belongs to another channel"));
+            assert_eq!(
+                error.to_string(),
+                format!(
+                    "epoch studio: {}",
+                    catcoms_replication::ReplError::EpochScope
+                )
+            );
         }
         let conflict = f.receipt(&f.load(&store).unwrap(), 99);
         store

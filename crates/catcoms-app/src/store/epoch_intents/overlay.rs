@@ -1,7 +1,7 @@
 //! Overlay entries share the ordinary writer, budgets and exact-retry flush barrier.
 use super::*;
 use catcoms_replication::studio::{
-    StudioClosingOverlayBasis, StudioLocalDraft, StudioOverlay, StudioTarget,
+    StudioClosingOverlayBasis, StudioLocalDraft, StudioOverlayState, StudioTarget,
 };
 
 impl ServerStore {
@@ -37,10 +37,12 @@ impl ServerStore {
             operation,
         };
         let op_id = intent.operation.id(&intent.author);
-        if let Some(overlay) = &state.overlay {
-            if overlay.target() != target {
+        if let Some(metadata) = &state.overlay {
+            if metadata.target() != target {
                 return Err(invalid("overlay belongs to another channel"));
             }
+        }
+        if let Some(overlay) = state.overlay() {
             if overlay.exact_retry(expected, &intent).map_err(invalid)? {
                 let view = overlay.read(&state.ledger).map_err(invalid)?;
                 self.write_prepared_intents(
@@ -60,7 +62,7 @@ impl ServerStore {
         let mut overlay = state
             .overlay
             .clone()
-            .unwrap_or_else(|| StudioOverlay::new(basis));
+            .unwrap_or_else(|| StudioOverlayState::new(basis));
         state
             .ledger
             .prepare(intent.author, intent.operation.clone())
@@ -71,7 +73,11 @@ impl ServerStore {
         // Conservatively hold base-only and superseded references before any possible write.
         self.hold_creative(
             &document.server_id,
-            overlay.base_blob_cids().map_err(invalid),
+            overlay
+                .overlay()
+                .ok_or_else(|| invalid("overlay base missing"))?
+                .base_blob_cids()
+                .map_err(invalid),
         );
         self.hold_creative_operation(document, &intent.operation);
         state.overlay = Some(overlay);

@@ -12,8 +12,8 @@ explicit local acceptance from an ordinary failed Save, preserves sequence and t
 restart, shares existing storage/reference accounting, and holds annotated entries out of ordinary
 Apply and retirement. The 131 affected local tests, Clippy and three isolated mutations pass;
 implementation review passed and OVERLAY-TEST-001 is closed by the re-review of `65db6ac`.
-The next [atomic handoff design](GATE4-OVERLAY-HANDOFF-REVIEW.md) awaits re-review of HANDOFF-001's
-retained channel binding after base release. Its proposed transaction remains:
+The user accepts the corrected [atomic handoff design](GATE4-OVERLAY-HANDOFF-REVIEW.md) at
+`dd2fbc0` and closes HANDOFF-001. Core/store implementation is in progress. The accepted transaction will:
 persist the whole signed branch before releasing its overlay hold, while ordinary intents stay
 pending for receipt settlement. This is still block 2. No native overlay command,
 overlay replay/disposition, provisional-preview writes or new tenure authority is enabled.

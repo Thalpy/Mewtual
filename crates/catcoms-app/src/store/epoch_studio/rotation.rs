@@ -118,6 +118,7 @@ impl ServerStore {
                 "rotation requires current owner and observed tenure",
             ));
         }
+        self.resolve_studio_handoff(server, group, target, device, rng, budget)?;
         let source::CheckedReceiveSource {
             unit,
             observed,

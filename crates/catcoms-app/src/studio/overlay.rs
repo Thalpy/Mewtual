@@ -1,10 +1,27 @@
 //! Explicit local core/store foundation. No actor command, native Save or replay is enabled.
 use super::*;
 use crate::store::EpochStudioBudget;
-use catcoms_replication::studio::{StudioClosingOverlayBasis, StudioLocalDraft};
+use catcoms_replication::studio::{
+    StudioClosingOverlayBasis, StudioHandoffOutcome, StudioOverlaySave,
+};
 use catcoms_replication::{CloseRecord, DomainOp};
 
 impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
+    /// Explicit internal handoff. Caller owns exclusive store/runtime custody; no actor or
+    /// native command schedules this batch. Live tenure comes only from this sync instance.
+    pub fn handoff_studio_overlay(
+        &mut self,
+        store: &mut ServerStore,
+        server: u64,
+        target: StudioTarget,
+        basis: [u8; 32],
+        budget: &mut EpochStudioBudget,
+    ) -> Result<StudioHandoffOutcome, AppError> {
+        let tenure = self.sync.observed_owner_tenure_start();
+        self.sync.with_registry_context(|group, device, _, rng| {
+            store.handoff_studio_overlay(server, group, target, device, basis, tenure, rng, budget)
+        })
+    }
     /// Prepare against actual observed tenure. Request data cannot supply its own authority.
     pub fn prepare_studio_closing_overlay(
         &mut self,
@@ -33,7 +50,7 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
         basis: [u8; 32],
         operation: DomainOp,
         budget: &mut EpochStudioBudget,
-    ) -> Result<StudioLocalDraft, AppError> {
+    ) -> Result<StudioOverlaySave, AppError> {
         let tenure = self.sync.observed_owner_tenure_start();
         self.sync
             .with_registry_context(|group, device, clock, rng| {
