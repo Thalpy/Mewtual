@@ -1,6 +1,8 @@
 # Gate 4: atomic handoff of an accepted Closing overlay
 
-Status: proposed core/store design, 2026-09-14; awaiting user adversarial review.
+Status: proposed core/store design, 2026-09-14; HANDOFF-001 corrected, awaiting design re-review.
+The review of `b546c8d` requested an independently retained channel binding for completed retries;
+it found no other design blocker. This revision makes that binding explicit below.
 No implementation or native command is supplied by this checkpoint. The Closing overlay
 foundation at `b1b0ec9` is accepted; the user's review of `65db6ac` closes OVERLAY-TEST-001.
 See [the foundation record](GATE4-CLOSING-OVERLAY-REVIEW.md) and [HANDOVER](HANDOVER.md).
@@ -34,6 +36,7 @@ This design does not finish the user-facing overlay lifecycle or enable its Save
 | [Replay worker](../crates/catcoms-app/src/studio/receiver/replay.rs) | Its order is a dependency traversal of ordinary ids, and it calls ordinary Apply one operation per turn. It is not the overlay's saved sequence or a batch committer. Active/prepared overlay ids must be excluded explicitly before future worker integration. |
 | [Studio store](../crates/catcoms-app/src/store/epoch_studio.rs) | Ordinary edit validates before its intent barrier, signs, then persists the source. Reuse those typed checks and the existing source writer in a separate private batch path. |
 | [Intent persistence](../crates/catcoms-app/src/store/epoch_intents.rs) | Keep the same vault namespace, full record accounting and sync-only retry helper. No second operation ledger or extra quota pool. |
+| [Target derivation](../crates/catcoms-replication/src/studio/admission.rs) and [overlay retry](../crates/catcoms-app/src/store/epoch_studio/overlay.rs) | A Flipnote logical key contains its object ID, not its channel. The enclosing intent scope cannot replace the foundation's complete-target check before exact retry. |
 | [Retirement](../crates/catcoms-app/src/store/epoch_intents/retirement.rs) | Active/prepared annotations remain held. After a complete handoff, the unchanged envelopes become ordinary pending intents; handoff itself removes none. |
 | [Recovery disposition](../crates/catcoms-app/src/store/epoch_studio/recovery_disposition.rs) | Requires actual signed historical envelopes. Local draft bytes cannot satisfy it. Manual overlay handling is still a separate obligation. |
 | [Detached source preparation](../crates/catcoms-app/src/store/epoch_studio/preparation.rs) | Captures carry authenticated bytes and public context, not device/MLS secrets. Future batch preparation must preserve this restriction. |
@@ -79,14 +82,43 @@ destination. The handoff does not relax first/append source-version checks or ex
 
 Extend only the local enclosing intent record. Keep the existing ledger codec, outer extension tag
 and original no-extension form. Accept inner overlay version 1 as Active. A new inner version 2 has
-an optional Active/Prepared branch, an optional compact completed-transfer acknowledgement, and a
-monotonic local retry floor. Old readers reject version 2 rather than ignoring its hold state.
+a mandatory canonical complete `StudioTarget`, an optional Active/Prepared branch, an optional
+compact completed-transfer acknowledgement, and a monotonic local retry floor. The target is
+independent of both optional payloads. Old readers reject version 2 rather than ignoring its hold state.
+
+**HANDOFF-001: retain and check the channel after releasing the base.** Encode the target kind,
+channel, and (for Flipnote) object ID in version 2's enclosing metadata. Require its derived
+`LogicalDocument` to match the authenticated outer group/type/logical-key scope and ledger document.
+That derivation alone is insufficient for Flipnote: the object ID is its logical key, so two
+different request channels reach the same intent record. The stored complete target supplies the
+additional comparison. Neither an opaque original basis fingerprint nor a destination epoch ID
+validates a separately supplied request channel.
+
+Before recognising a completed acknowledgement, returning its outcome, reserving a sync-only retry,
+or invoking its sync callback, require `request.target == metadata.target`. Current membership,
+author, basis and full-envelope checks still apply. A target mismatch returns a specific scope
+refusal without acknowledging, syncing or changing the record. This check precedes current-source
+lookup and new-write eligibility; a missing/replaced source must not mask or supply it.
+
+The enclosing target survives removal of the full base, legitimate ordinary ledger retirement,
+completed-manifest rollover and states containing only the retry floor. Active/Prepared retains
+its existing base target. The completed acknowledgement also records its own complete target;
+both must equal the enclosing target during canonical decoding and every transition, including
+when a new Active branch coexists with an older completed acknowledgement. Missing or inconsistent
+bindings reject; no decoder, cleanup or request may retarget the record implicitly. Charge both
+target encodings and their framing to the existing combined metadata and complete-record limits.
+
+Version-1 migration obtains the enclosing target from the authenticated, fully checked existing
+base and validates it against the outer scope. Persist version 2 only through the accounted writer;
+reading version 1 does not rewrite it. A legacy no-overlay record supplies no Flipnote channel:
+its first version-2 branch must obtain the target from a newly checked basis, not infer it from the
+object key or trust a caller field alone. Migration never creates a completed acknowledgement.
 
 | State | Retained content | Permitted next action |
 |---|---|---|
 | Active | Full existing basis, seed, ordered annotations and matching ledger entries | Exact local retry; eligible append; new checked handoff preparation |
 | Prepared | The full Active data plus destination epoch/id, opening receipt hash, source-before fingerprint, branch/ledger digest and expected full-envelope and signed-operation hashes | Resolve this specific handoff before ordinary replay or replacement can erase its evidence |
-| Completed acknowledgement | Original branch fingerprint, author, original per-request id/full-envelope hash/sequence/timestamp, destination epoch/id and handoff outcome; no seed or signed-authority type | Acknowledge exact saved requests as handed to shared history, without a new edit |
+| Completed acknowledgement | Complete target equal to the mandatory enclosing target; original branch fingerprint, author, original per-request id/full-envelope hash/sequence/timestamp, destination epoch/id and handoff outcome; no seed or signed-authority type | After matching the supplied complete target, acknowledge exact saved requests as handed to shared history, without a new edit |
 
 At most one Active/Prepared branch and one completed acknowledgement exist per logical document.
 Each manifest has at most 256 entries. The original 2 MiB seed, combined 64 KiB extension metadata,
@@ -134,7 +166,7 @@ the private candidate before the source and transfer record are durable.
 | Prepared, same destination physical epoch with changed source, no branch ids and no conflicting same-id envelope | The candidate is stale. After authenticating the complete retained signed log, durably return to Active with the full draft; any next attempt starts fresh. Do not block unrelated source progress indefinitely on a candidate that never became current. |
 | Prepared, all exact envelopes and signed-operation hashes in the named destination's current signed log | Flush source, complete step 3 without reapplying; source may now be Closing or contain later operations. This resolves saved evidence rather than authorizing new edits. |
 | Prepared, partial matches, conflicting body/signed digest, missing source or different physical epoch | Retain the full branch, report a hold and do not guess completion, reapply a prefix or clear the record. |
-| Completed acknowledgement after uncertain final sync | Sync the authenticated record without allocating replacement headroom; return the exact stored outcome. |
+| Completed acknowledgement after uncertain final sync | First match the request's complete target against the retained enclosing binding, plus author/basis/envelope checks; then sync the authenticated record without allocating replacement headroom and return the exact stored outcome. |
 
 The Prepared state is a **source replacement fence**. Every path that can replace/prune that target
 source must resolve it first: ordinary owner rotation, frozen-owner takeover, receipt/page installation,
@@ -202,6 +234,8 @@ the separately reviewed extension already required by the foundation.
 | Publication fence | Generic current-tail/page service and ordinary retry sends cannot expose the Prepared batch after restart; all-exact resolution releases the hold only after the final durability barrier |
 | False completion | Missing/partial/conflicting envelope, seed marker, matching projection or receipt hint cannot release Prepared or erase the base |
 | Retry and bounds | Full-cap sync-only completed retry; different body/author/basis cannot acknowledge; old-reader rejection, malformed manifests, combined budgets and replacement/orphan peaks |
+| Completed channel binding (HANDOFF-001) | Complete a real Flipnote handoff in channel A, verify the base is released, legitimately retire its ordinary entries and reopen. The record contains no Active/Prepared branch or matching pending envelope. A correct-channel retry returns the saved outcome without recreating the branch. Change only the request channel to B, preserving server/group/object/author/basis/envelope: require the specific scope refusal before source eligibility or any sync callback, with unchanged record bytes. |
+| Target migration and retention | Version 1 derives the binding from its checked base; missing/malformed version-2 targets, mismatched Active/completed targets and wrong object/type reject. Verify same-target Active plus older completed acknowledgement, metadata-only reopen after rollover, retained retry floor and charged target bytes. |
 | Old retry after rollover | Replace a completed manifest with a later one, then rewind/reopen; an old request cannot create a branch below the persisted floor |
 | References and lifecycle | Base-only, pending, superseded and removed-frame PIX remain enumerable across both source and intent transitions; exact retry does not require released draft data |
 | Ordinary behavior | Existing failed-Save `NoEvidence`, signed replay, retirement and manual recovery tests still pass; the handoff cannot delete ordinary entries in a mixed ledger |
@@ -209,20 +243,27 @@ the separately reviewed extension already required by the foundation.
 Use isolated mutations for completion, replacement fencing, ordering, retry floor and quota guards
 where an earlier failure could mask the intended check. Require executed assertion failures and
 byte-exact restoration. Record core/store checks separately from the later actor/native evidence.
+For HANDOFF-001, remove only the completed-retry request-target comparison while leaving other
+identity/eligibility checks intact. The changed-channel fixture must then expose a false saved
+outcome and fail its intended assertion, rather than pass because another target/source check
+intercepted it. Require the correct-channel positive control and the no-sync observation too.
 
 ## Message for adversarial design review
 
 ```text
-Please review docs/GATE4-OVERLAY-HANDOFF-REVIEW.md as the next Gate 4 design checkpoint.
-The foundation is accepted and OVERLAY-TEST-001 is closed. No handoff implementation exists yet.
+Please re-review HANDOFF-001 in docs/GATE4-OVERLAY-HANDOFF-REVIEW.md against b546c8d.
+This remains a design-only correction; no handoff implementation or new execution evidence exists.
 
-Challenge the pristine verified-successor eligibility rule, atomic whole-branch source write,
-Prepared replacement fence across every restart/installation path, all-exact completion proof,
-transfer to ordinary pending intents, bounded acknowledgement/retry floor, and reference/budget
-accounting. Check whether every crash outcome retains recoverable work without duplicate edits
-or invented owner/receipt authority. Compare the proposed reuse with the linked source seams.
+Version 2 now retains a mandatory complete target independently of the optional branch and
+completed acknowledgement. The completed acknowledgement also retains its target; Active,
+Prepared and completed targets must match the enclosing binding. Check its persistence after
+base release, legitimate ledger retirement, rollover and retry-floor-only states, version-1
+migration from the checked base, and charging to existing metadata limits.
 
-Return PASS or numbered findings with severity and concrete required changes. Distinguish defects
-in this core/store handoff from explicitly deferred actor scheduling/native/manual/reconciliation,
-provisional-preview and repeated-owner-tenure work. A PASS accepts this design only, not Gate 4.
+Require complete request-target equality before completed acknowledgement or sync-only retry,
+without consulting current-source eligibility. Review the required real-handoff/reopen positive
+control and changed-channel-only negative test, plus its isolated target-check mutation.
+
+Return PASS to close HANDOFF-001 and accept the corrected handoff design, or specific remaining
+findings. OVERLAY-TEST-001 and the foundation PASS remain unchanged; full Gate 4 is still open.
 ```

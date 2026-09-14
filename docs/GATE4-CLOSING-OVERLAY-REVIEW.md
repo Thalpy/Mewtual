@@ -6,7 +6,8 @@ finding, OVERLAY-TEST-001, concerning changed-Closing-source coverage. The user'
 `783486d...65db6ac` closes that finding with no further changes required. The reviewer inspected
 12 passing overlay tests and the mutation/restoration artifact at merge checkout `ec622a7`.
 No native overlay command is enabled. The next proposed checkpoint is
-[atomic handoff into shared history](GATE4-OVERLAY-HANDOFF-REVIEW.md), awaiting design review.
+[atomic handoff into shared history](GATE4-OVERLAY-HANDOFF-REVIEW.md). Its HANDOFF-001 correction
+retains channel binding after base release and awaits design re-review; the foundation PASS stands.
 The original 131 affected local tests, Clippy and three
 isolated mutations pass as recorded in [HANDOVER](HANDOVER.md). The repository-wide ambient
 dependency check still reports six baseline findings; full-repository acceptance remains open.

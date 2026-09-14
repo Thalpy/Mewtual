@@ -10,6 +10,31 @@ and ranks the live hazards in that path.
 
 ## Status (latest entry: 2026-09-14)
 
+- **HANDOFF-001 design correction ready for re-review (2026-09-14).**
+  The user's review of `65db6ac...b546c8d` requests one correction: completed retry metadata
+  must retain an independently checkable channel binding after the full base is released.
+  Flipnote logical identity uses the object ID; the enclosing intent scope does not contain
+  its channel. Reusing an opaque basis fingerprint with a different request channel could
+  therefore produce a false exact-retry acknowledgement under the original compact field list.
+  The reviewer found no other design blocker; no production defect or handoff execution is claimed.
+
+  [The revised handoff proposal](GATE4-OVERLAY-HANDOFF-REVIEW.md) now requires a canonical complete
+  target in version-2 enclosing metadata, independently of the optional branch/acknowledgement.
+  Active/Prepared and completed targets must match it. The binding persists through base release,
+  legitimate ordinary retirement, acknowledgement rollover and retry-floor-only states. A completed
+  request must match that target before acknowledgement, source eligibility or sync-only retry.
+  Version-1 migration derives it from the checked base; both target encodings consume the existing
+  metadata limit. No reader or request can implicitly change the record's target.
+
+  The required future regression completes a real Flipnote handoff, releases its base, legitimately
+  retires the ordinary entries and reopens. Correct-channel retry must succeed without recreating
+  a branch; changing only the request channel must return a specific scope refusal without syncing
+  or changing intent bytes. An isolated removal of that request-target comparison must expose the
+  false acknowledgement. These are implementation requirements, not newly executed tests.
+  Documentation links, source references and whitespace are checked; no Rust/frontend code or
+  callable contract changes. HANDOFF-001 awaits user design re-review. OVERLAY-TEST-001 stays closed,
+  the foundation PASS stands, and Gate 4 remains in block 2 with the previously listed work open.
+
 - **OVERLAY-TEST-001 closed; next handoff design ready (2026-09-14).**
   The user accepts `783486d...65db6ac2b1a2bdbad1b97786f9603877dd902e67` with no remaining
   masking path or required changes. This closes OVERLAY-TEST-001; the foundation implementation

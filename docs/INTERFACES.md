@@ -2049,7 +2049,10 @@ See [the overlay review record](GATE4-CLOSING-OVERLAY-REVIEW.md) for remaining i
 The foundation implementation and OVERLAY-TEST-001 correction are accepted at `b1b0ec9` / `65db6ac`.
 [The next handoff proposal](GATE4-OVERLAY-HANDOFF-REVIEW.md) specifies an atomic complete-branch
 transfer, Prepared replacement fence and bounded completed acknowledgements. These are proposed
-internal contracts only: the current encoder remains version 1, ordinary Apply still refuses
+internal contracts only. The HANDOFF-001 correction requires a complete target in enclosing metadata,
+retained even after the base and pending entries are gone; Active/Prepared and completed targets
+must match it, and completed requests must match before acknowledgement or sync-only retry.
+The correction awaits design re-review: the current encoder remains version 1, ordinary Apply still refuses
 annotations, and no handoff, new save-result variant or native command is implemented yet.
 
 ### Durable registry edits, sealing and checkpoint installation (P1, not yet live-wired)
