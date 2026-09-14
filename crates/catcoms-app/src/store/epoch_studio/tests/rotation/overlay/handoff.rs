@@ -7,6 +7,7 @@ mod eligibility;
 mod evidence;
 mod fences;
 mod metadata;
+mod references;
 
 fn transfer(f: &Fixture, store: &mut ServerStore, basis: [u8; 32]) -> StudioHandoffOutcome {
     let mut b = budget(store, f);

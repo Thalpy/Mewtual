@@ -10,6 +10,25 @@ and ranks the live hazards in that path.
 
 ## Status (latest entry: 2026-09-14)
 
+- **HANDOFF-002 (P2): reference inventory correction in validation (2026-09-14).**
+  The user's review of `dd2fbc0...85e7179` requests one implementation correction. The local
+  source-to-intent dependency blocked ordinary reads, but reference inventory discarded it and
+  could install an incomplete pixel pin set after the required metadata disappeared. The review
+  found no additional defect in the other handoff boundaries. Prior finding closures stand.
+
+  The scan now retains bounded source requirements and authenticated metadata targets under full
+  numeric server/group/type/logical scope, then checks target equality before reference installation.
+  It reuses the normal one-record-per-step reads and existing count/byte rails. A new real-PIX
+  regression retains an overlay-only CID through missing metadata, fresh reopen, failed scan and
+  protected deletion, then restores the original metadata. Another regression supplies valid but
+  mismatched metadata or an ordinary ledger. The isolated inventory-check mutation is added to
+  the existing handoff harness. Validation is running; HANDOFF-002 is not yet closed.
+
+  [The review note](GATE4-OVERLAY-HANDOFF-IMPLEMENTATION-REVIEW.md) and UI hooks track the correction.
+  The existing crash matrix has one accepted operation; dependent multi-operation replay and
+  partial-manifest cases are separate tests. No physical power-loss experiment is claimed.
+  Actor/native activation and full Gate 4 acceptance remain outside this correction.
+
 - **Closing overlay core/store handoff ready for adversarial implementation review (2026-09-14).**
   Code checkpoint: `bf37cc48c45d09be6b63e97322171e506768fbf4`, pushed to `Create-suite-2`
   ([PR #26](https://github.com/Thalpy/Mewtual/pull/26)); base:

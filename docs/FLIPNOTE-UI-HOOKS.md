@@ -66,7 +66,10 @@ after base removal. The user closes HANDOFF-001 at `dd2fbc0`. The internal hando
 three-step store transaction and distinct local-draft/completed results. The
 [pushed implementation](GATE4-OVERLAY-HANDOFF-IMPLEMENTATION-REVIEW.md) at `bf37cc4` passes 202 local
 Studio tests and the dedicated handoff/mutation workflows; adversarial implementation acceptance
-is pending. These Rust adapters supply no native command. Continue to disable durable overlay
+is pending. The user requests HANDOFF-002 (P2): reference inventory must enforce the linked
+source's required intent metadata before enabling pixel deletion. The scanner correction and
+real-pixel regression are in validation; this changes no UI command or result shape.
+These Rust adapters supply no native command. Continue to disable durable overlay
 Save in Closing/Fault and awaiting-tenure previews; preserve unsaved editor work without claiming
 it is vault-saved. Its later actor/native integration will update this guide with actual commands.
 The accepted foundations and earlier review closures are recorded in

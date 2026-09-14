@@ -791,21 +791,27 @@ pub(super) fn inventory_record(
         .map_err(invalid)?;
     storage_record(server, document, scope, size, protocol)
 }
+pub(super) struct StudioInventoryReferences {
+    pub(super) record: StorageRecord,
+    pub(super) cids: std::collections::BTreeSet<[u8; 32]>,
+    pub(super) required_metadata: Option<StudioTarget>,
+}
 pub(super) fn inventory_references(
     bytes: &[u8],
     server: u64,
     document: &LogicalDocument,
     scope: &[u8],
     size: u64,
-) -> Result<(StorageRecord, std::collections::BTreeSet<[u8; 32]>), AppError> {
-    let (target, snapshot) = decode_record(bytes, scope, document)?;
+) -> Result<StudioInventoryReferences, AppError> {
+    let (target, snapshot, linked) = decode_record_link(bytes, scope, document)?;
     let (protocol, cids) =
         StudioEpoch::inspect_vault_references(snapshot, &document.server_id, target)
             .map_err(invalid)?;
-    Ok((
-        storage_record(server, document, scope, size, protocol)?,
+    Ok(StudioInventoryReferences {
+        record: storage_record(server, document, scope, size, protocol)?,
         cids,
-    ))
+        required_metadata: linked.then_some(target),
+    })
 }
 fn storage_record(
     server: u64,

@@ -1,9 +1,36 @@
 # Gate 4: Closing overlay handoff implementation
 
-Status: implemented and pushed at `bf37cc48c45d09be6b63e97322171e506768fbf4`, 2026-09-14.
-The dedicated normal and mutation checks pass; implementation acceptance awaits user adversarial
-review. The user accepts the corrected design at `dd2fbc0` and closes HANDOFF-001; that design PASS
-does not cover this implementation or full Gate 4. Base: `dd2fbc01ebb8a692964eec0df19dd201b225c936`.
+Status: user implementation review of `dd2fbc0...85e7179` requests changes for HANDOFF-002 (P2),
+2026-09-14. The scanner correction is implemented and validation is in progress. The reviewer
+found no additional defect in the transaction, exact signed evidence, live-owner eligibility,
+restart/write/publication fences, completed binding or retry floors. Implementation acceptance
+remains pending. HANDOFF-001 and the earlier findings stay closed; Gate 4 remains open.
+
+## HANDOFF-002: reference inventory dependency
+
+The linked source previously refused ordinary reads when its required intent metadata was
+missing, but the pixel-reference scan discarded that dependency bit. A scan could therefore
+declare its reference set complete while overlooking an accepted overlay-only pixel CID.
+
+The corrected scan collects required targets from authenticated linked sources and actual
+handoff-metadata targets from authenticated intent records. It matches numeric server, complete
+group/type/logical scope and full target before installing references. Ordinary ledgers do not
+satisfy the dependency. Only metadata from records already read in the normal bounded traversal
+is retained; the one-body-per-step, record-count and byte limits are unchanged. Reference scans
+continue to bypass the pure source-validation cache. Missing/mismatched metadata prevents the
+completed reference installation; the public scan leaves deletion protection unknown.
+
+The new pixel regression accepts a real stored PIX CID only in the overlay, independently checks
+its absence from the pristine successor, overlay seed and recovery files, and interrupts before
+the Source write. After deleting the intent file and reopening, it calls only the reference scan,
+attempts protected deletion and checks that the original bytes remain. Restoring the original
+metadata restores a complete pin set. A healthy-scan unreferenced CID proves real deletion works.
+The second test supplies independently authenticated/decodable records with an ordinary ledger
+or mismatched numeric server, group, logical key, type or channel, then restores the original.
+The added mutation ignores only the final dependency-check result, retaining every other scan
+guard and the deletion wrapper. Its required failure is the missing-metadata scan assertion.
+
+Correction base: `85e71798b4197e8a7ef7d1361e4418bd7ecd32d4`. Results are recorded in HANDOVER.
 
 ## Implemented boundary
 
@@ -94,6 +121,10 @@ publication, missing metadata, retry floor, acceptance order and later source ca
 [The workflow](../.github/workflows/studio-handoff.yml) publishes the mutation/restoration logs.
 Compilation failures and zero-test filters do not count as evidence.
 
+The write-boundary crash matrix carries one accepted operation. Dependent multi-operation
+replay and partial-manifest retention are separate tests; this is not an executed multi-operation
+crash-prefix matrix. Injected I/O failures and vault reopens are not physical power-loss tests.
+
 The existing overlay foundation workflow also passes 12 tests plus five mutations/restored
 regressions. Native and two-client workflows pass. Broad CI remains failed for the recorded
 queue-classification test, Linux desktop unused-code errors and Rustls dependency advisory;
@@ -107,28 +138,29 @@ open. No durable overlay UI Save is enabled. Repeated-owner tenure work, signed 
 combined Gate 4 acceptance remain separately tracked. The existing signed-history replay rules,
 including ordinary failed-Save NoEvidence, are unchanged.
 
-## Message for adversarial implementation review
+## Message for adversarial re-review
 
 ```text
-Please adversarially review the Closing overlay handoff implementation in PR #26.
-Base: dd2fbc01ebb8a692964eec0df19dd201b225c936
-Tested code head: bf37cc48c45d09be6b63e97322171e506768fbf4
-Compare: https://github.com/Thalpy/Mewtual/compare/dd2fbc01ebb8a692964eec0df19dd201b225c936...bf37cc48c45d09be6b63e97322171e506768fbf4
-Read docs/GATE4-OVERLAY-HANDOFF-IMPLEMENTATION-REVIEW.md and docs/HANDOVER.md.
-HANDOFF-001 is closed and the corrected design is accepted; this request covers implementation.
+Please re-review HANDOFF-002 (P2), the source-to-intent dependency in reference inventory.
+Base: 85e71798b4197e8a7ef7d1361e4418bd7ecd32d4
+Use the correction head and validation evidence in the latest docs/HANDOVER.md entry.
 
-Review the three durability barriers, current-owner/pristine-successor eligibility, complete
-signed-operation evidence, sequence/timestamp preservation, actual source/intent rechecks,
-restart resolution, normal replacement/publication paths and existing quota/reference accounting.
+Check that linked-source requirements match actual authenticated handoff metadata by numeric
+server, full group/type/logical scope and complete target before reference protection is installed.
+Ordinary ledgers, missing files and mismatched metadata must leave reclamation disabled. Verify
+that existing count/byte/per-step limits and reference-scan cache bypass remain intact.
 
-Pay particular attention to the new persistent local source-to-intent dependency: missing metadata
-must not expose an unfinished batch after restart or after a later source replacement. Check that
-the private candidate capability cannot be replaced by an ordinary writer or caller-supplied IDs.
+Inspect the real stored overlay-only PIX regression: pristine successor and no recovery/base
+copy, interruption before Source, deletion of metadata, fresh reopen, failed scan, actual protected
+deletion retaining the bytes, and successful restoration of the original metadata. Check the
+healthy-deletion control and all authenticated scope substitutions.
 
-Check completed retry after real receipt retirement, full channel binding before any acknowledgement
-or sync, v1 migration, Active plus older Completed, retry floor retention and old retry after rewind.
-Inspect normal test results and isolated mutation/restoration logs rather than relying on comments.
+Inspect the isolated reference-dependency mutation and restored regression. Ignoring only the
+final dependency result must expose a complete scan and deletion of the overlay-only bytes;
+compilation failures, zero-test filters and unrelated errors must not count as detection.
 
-Return PASS for this bounded core/store implementation or specific findings with independently
-targeted assertions. This does not request actor/native activation or full Gate 4 acceptance.
+Return PASS to close HANDOFF-002 and accept the corrected bounded core/store implementation,
+or concrete remaining findings. Earlier closures stand. Actor/native activation and full Gate 4
+acceptance remain outside this review. The existing write-crash matrix has one accepted operation;
+multi-operation replay/partial-manifest cases are separate tests, not physical power-loss trials.
 ```

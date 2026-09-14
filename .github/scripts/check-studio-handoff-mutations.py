@@ -56,6 +56,10 @@ MUTATIONS = [
      "for step in steps {", "for step in steps.iter().take(0) {",
      "metadata::studio_overlay_handoff_preflights_later_source_peak_before_prepared_write",
      "handoff wrote Prepared before checking the later source peak"),
+    ("reference-dependency", "crates/catcoms-app/src/store/epoch_recovery/inventory.rs",
+     "collected.check_dependencies()?;", "let _ = collected.check_dependencies();",
+     "references::studio_overlay_handoff_reference_scan_keeps_overlay_only_pixels_when_metadata_is_missing",
+     "missing handoff metadata completed a reference scan"),
 ]
 
 
