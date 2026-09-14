@@ -1,11 +1,15 @@
 # Gate 4: durable Closing overlay foundation
 
 Status: user design review PASS at `d576af2`, 2026-09-14, with no required design changes.
-The core/store implementation is complete for this foundation and awaits user implementation
-review; no native overlay command is enabled. The 131 affected local tests, Clippy and three
+The core/store implementation at `b1b0ec9` passed user review with one non-blocking P3 test
+finding, OVERLAY-TEST-001, concerning changed-Closing-source coverage. Its test correction is
+implemented with passing focused and mutation/restoration tests; correction review is pending.
+No production change is requested and no native overlay command is enabled.
+The original 131 affected local tests, Clippy and three
 isolated mutations pass as recorded in [HANDOVER](HANDOVER.md). The repository-wide ambient
 dependency check still reports six baseline findings; full-repository acceptance remains open.
-The review inspected source/design and did not execute overlay tests. Native exposure,
+The implementation reviewer inspected source and successful GitHub overlay/mutation logs,
+without executing Cargo locally. Native exposure,
 replay/disposition, provisional-preview overlays and Gate 4 acceptance remain outside its verdict.
 The scheduling checkpoint `6b71d96`, with evidence
 at `a40909e`, has passed review without required changes.
@@ -186,9 +190,30 @@ following checkpoint; do not report them as covered by foundation tests.
 
 ## Review request
 
-The design request is closed by the user's PASS. The next request is implementation review of
+The design and bounded implementation requests are accepted by the user's PASS. The remaining
+request is closure review of OVERLAY-TEST-001 against the correction checkpoint, with base
+`783486db503b835861c53d7507247815e193a41c`. Its exact published head accompanies the review message.
+
+```text
+Please re-review OVERLAY-TEST-001 only. No production change is requested or included.
+Inspect the two changed-Closing-source tests in rotation/overlay.rs and their shared
+fixture in rotation/overlay/source_version.rs, plus the two source-version cases in
+.github/scripts/check-studio-overlay-mutations.py. Consult HANDOVER for execution evidence.
+
+Check that real store ingest durably quarantines a valid late operation, the vault is
+reopened, and Closing/source identity/receipt/close/expected seed/tenure remain eligible.
+Both first acceptance and append must obtain a different fresh basis, reject the old
+basis at the intended check without changing intents, and preserve accepted exact retry.
+Confirm the constant-source-version mutation fails at the intended executed assertion
+in each regression, restores source bytes, and passes after restoration.
+
+Return PASS to close OVERLAY-TEST-001 or specific remaining coverage findings.
+The existing implementation PASS stands; native/replay/tenure and full Gate 4 remain open.
+```
+
+The accepted foundation comparison was
 [`ac23429...b1b0ec9`](https://github.com/Thalpy/Mewtual/compare/ac23429824ef25ab29c59cdaf2c4c7d99db6161a...b1b0ec9b88f422f5f01cd4deca5cdb463bfe3871).
-Documentation-only follow-ups do not widen that code scope.
+The following original request is retained as the scope record for that PASS.
 
 ```text
 Please adversarially review the durable Closing overlay core/store foundation.

@@ -1,4 +1,4 @@
-"""Require Closing overlay regressions to catch three isolated guard removals.
+"""Require Closing overlay regressions to catch isolated guard removals.
 
 Run from a Rust test environment; no native/UI build is needed. Logs stay local under logs/.
 Restoration is byte-exact and refuses to overwrite an unrelated concurrent source change.
@@ -15,6 +15,20 @@ COMMAND = [
     "profile.test.package.catcoms-app.debug=0", "-p", "catcoms-app", "--lib",
 ]
 MUTATIONS = [
+    (
+        "source-version-first", "crates/catcoms-replication/src/studio/overlay.rs",
+        "source_version,\n            receipt: plan.receipt().clone(),",
+        "source_version: source_version.map(|_| 0),\n            receipt: plan.receipt().clone(),",
+        "changed_closing_source_refuses_first_acceptance",
+        "overlay basis ignored changed persisted Closing source version",
+    ),
+    (
+        "source-version-append", "crates/catcoms-replication/src/studio/overlay.rs",
+        "source_version,\n            receipt: plan.receipt().clone(),",
+        "source_version: source_version.map(|_| 0),\n            receipt: plan.receipt().clone(),",
+        "changed_closing_source_refuses_append_but_keeps_exact_retry",
+        "overlay basis ignored changed persisted Closing source version",
+    ),
     (
         "ordinary-apply", "crates/catcoms-app/src/store/epoch_intents.rs",
         "if state.is_overlay(&operation.id(&device.device_id())) {", "if false {",

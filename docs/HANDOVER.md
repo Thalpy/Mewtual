@@ -10,6 +10,45 @@ and ranks the live hazards in that path.
 
 ## Status (latest entry: 2026-09-14)
 
+- **Closing overlay implementation accepted; OVERLAY-TEST-001 correction (2026-09-14).**
+  The user accepts `ac23429...b1b0ec9` with evidence at `783486d`: no blocking production
+  defect and no production change requested. OVERLAY-TEST-001 is a non-blocking P3 regression
+  gap: flipping a caller fingerprint did not isolate the actual Closing source-version binding.
+  The reviewer independently inspected the successful overlay workflow and all six original
+  mutation/restoration logs at PR merge checkout `dc451e0992d8201503152225a7c79c0eb05ee431`.
+  They did not execute Cargo or the proposed source-version mutation locally.
+
+  Two new regressions exercise first acceptance and append, each for Index and Flipnote. A
+  separate valid sender prepares an operation before sealing; the real store ingest quarantines
+  it after Closing, then the receiver vault is reopened. The tests require changed persisted
+  snapshot/quarantine, unchanged source identity, receipt, close, expected seed and owner-tenure
+  input, successful fresh preparation, a different basis, and exact stale-basis refusal with
+  unchanged intent bytes. Already accepted exact retry still returns the same complete draft
+  with its original timestamp/count. First acceptance has a positive control using the fresh basis.
+  The harness now tests the reviewer's constant-source-version mutation independently against
+  both regressions. The focused pair passes (2 tests, 64.20s). Each constant-version mutation
+  fails at `overlay basis ignored changed persisted Closing source version` with exactly one
+  executed failed test (26.37s / 29.00s); byte-exact restoration is followed by one passing
+  regression per case (61.90s / 63.10s). The initial overly broad mutation anchor was rejected
+  before editing; the final anchor names the constructor's receipt assignment uniquely.
+  The local harness selects only the two `source-version-*` entries; the default GitHub run
+  retains all five cases and uploads the mutation/restoration logs. Local evidence is in
+  `logs/gate4-overlay-source-version-test.log`, `logs/gate4-overlay-source-version-mutations.log`
+  and the corresponding `gate4-overlay-{mutation,restored}-source-version-*.log` files.
+  `cargo clippy --locked -j 4 -p catcoms-app --lib --tests -- -D warnings` passes (36.14s).
+  Formatting and `git diff --check` pass. OVERLAY-TEST-001 awaits correction review.
+  Production Rust bytes are unchanged; no new API, native command or frontend file is added.
+
+  Previous-checkpoint GitHub results are now available: the dedicated overlay, native and
+  two-client workflows all pass. Broader CI is not green: the Windows app suite reports
+  `tests::a_queue_entry_that_claims_to_be_both_kinds_is_not_a_track` failing at `lib.rs:9694`
+  (577 passed, 1 failed, 9 ignored), and the Linux desktop job reports dead-code errors in
+  `media_decode.rs` and `security_intent.rs`. Those files are unchanged by `ac23429...b1b0ec9`.
+  These are separate full-gate follow-ups; the coverage correction does not fix or conceal them.
+
+  The foundation PASS does not enable actor/native overlays, automatic replay/disposition,
+  provisional-preview writes, repeated-owner tenure or signed repair. Gate 4 remains open.
+
 - **Closing overlay design accepted; core/store implementation (2026-09-14).**
   Implementation checkpoint [`b1b0ec9`](https://github.com/Thalpy/Mewtual/commit/b1b0ec9b88f422f5f01cd4deca5cdb463bfe3871)
   is pushed to `Create-suite-2`, based on `ac23429824ef25ab29c59cdaf2c4c7d99db6161a`.

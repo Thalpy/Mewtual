@@ -193,7 +193,8 @@ The [Closing overlay foundation design](GATE4-CLOSING-OVERLAY-REVIEW.md) passed 
 explicit local acceptance from an ordinary failed Save, preserves sequence and timestamps across
 restart, shares existing storage/reference accounting, and holds annotated entries out of ordinary
 Apply and retirement. The 131 affected local tests, Clippy and three isolated mutations pass;
-implementation review is pending. No native overlay command,
+implementation review passed with non-blocking P3 OVERLAY-TEST-001 awaiting test-correction review.
+No native overlay command,
 overlay replay/disposition, provisional-preview writes or new tenure authority is enabled.
 
 **Combined scheduling checkpoint `6b71d96` (2026-09-13; user review PASS).** The three-member actor

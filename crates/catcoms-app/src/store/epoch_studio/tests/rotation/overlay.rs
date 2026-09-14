@@ -4,6 +4,18 @@ use catcoms_replication::studio::{StudioClosingOverlayBasis, StudioLocalDraft};
 use catcoms_replication::CloseRecord;
 use std::collections::BTreeMap;
 
+mod source_version;
+
+#[test]
+fn studio_overlay_store_changed_closing_source_refuses_first_acceptance() {
+    source_version::check(false);
+}
+
+#[test]
+fn studio_overlay_store_changed_closing_source_refuses_append_but_keeps_exact_retry() {
+    source_version::check(true);
+}
+
 fn closing(f: &Fixture, store: &mut ServerStore) -> (CloseRecord, StudioClosingOverlayBasis) {
     eligible(f, store);
     seal_source(f, store)
