@@ -1,12 +1,11 @@
 # Gate 4: Closing overlay handoff implementation
 
-Status: user implementation review of `dd2fbc0...85e7179` requests changes for HANDOFF-002 (P2),
-2026-09-14. The scanner correction is pushed at `62f06d49667d1c2db407cb1def2aef3da2aa01fe`;
-24 focused local tests, Clippy, formatting and the isolated mutation/restored regression pass.
-GitHub checks are running; user re-review is pending. The reviewer
-found no additional defect in the transaction, exact signed evidence, live-owner eligibility,
-restart/write/publication fences, completed binding or retry floors. Implementation acceptance
-remains pending. HANDOFF-001 and the earlier findings stay closed; Gate 4 remains open.
+Status (2026-09-15): **PASS; HANDOFF-002 closed.** The user accepts the corrected bounded
+implementation with no further code or coverage changes required. Comparison:
+`85e71798b4197e8a7ef7d1361e4418bd7ecd32d4...aa0a81f34af6707ab05fd2a437412c38b79a82ff`;
+correction code `62f06d49667d1c2db407cb1def2aef3da2aa01fe`, final head documentation only.
+HANDOFF-001 and earlier closures stand. Actor/native activation and full Gate 4 remain open;
+the user has explicitly kept Gate 4 ahead of Gate 5.
 
 ## HANDOFF-002: reference inventory dependency
 
@@ -36,7 +35,9 @@ Correction base: `85e71798b4197e8a7ef7d1361e4418bd7ecd32d4`. Results are recorde
 The executed local mutation produces a completed scan and actual protected deletion:
 `known=true, deletion=Ok(true), retained=false`. The intended assertion catches it; byte-exact
 restoration is followed by the passing regression. [The correction workflow](https://github.com/Thalpy/Mewtual/actions/runs/34903404377)
-is running and will publish individual mutation/restoration logs.
+passes 24 normal handoff tests, ten isolated mutations and ten restored regressions. The user
+reviewer inspected the job and all individual logs, including the artifact digest, on PR merge
+checkout `a89f90bf685fded1d2e314fd754f2e2afe2de59b`. They did not rerun Cargo locally.
 
 ## Implemented boundary
 
@@ -144,7 +145,7 @@ open. No durable overlay UI Save is enabled. Repeated-owner tenure work, signed 
 combined Gate 4 acceptance remain separately tracked. The existing signed-history replay rules,
 including ordinary failed-Save NoEvidence, are unchanged.
 
-## Message for adversarial re-review
+## Historical re-review message (closed by the PASS above)
 
 ```text
 Please re-review HANDOFF-002 (P2), the source-to-intent dependency in reference inventory.

@@ -1,10 +1,17 @@
 # Gate 4: post-succession newcomer review
 
-**Current Gate 4 position (2026-09-14).** The user accepts the combined scheduling checkpoint
-`6b71d96` with no production or test changes required. This closes block 1 of the four remaining
-work blocks. Three remain: (2) durable Closing overlays and repeated-owner tenure, (3) runtime
-signed fault repair, and (4) combined Gate 4 acceptance. These are unequal work areas, not a
-percentage or time estimate.
+**Current Gate 4 position (2026-09-15).** HANDOFF-002 is closed and the corrected bounded
+Closing-overlay core/store handoff is accepted at `62f06d4` (review/evidence head `aa0a81f`).
+This is implementation acceptance for that boundary, not full Gate 4 acceptance. The user
+clarified that Gate 4 must finish before Gate 5 starts; Gate 5 remains untouched.
+
+Of the four previously listed work areas, block 1 (combined scheduling, `6b71d96`) is accepted.
+Block 2 still needs actor/native overlay integration, bounded preparation/signing custody,
+manual overlay inspection/copy/export/disposition, stale-base and preview-based local-work
+handling, and remaining repeated-owner tenure integration. Blocks 3 (runtime signed fault
+repair) and 4 (combined Gate 4 acceptance and required suites) remain. These are unequal work
+areas, not percentages. The next checkpoint measures existing handoff custody and specifies
+its runtime integration; it does not enable durable overlay Save in native.
 
 The [Closing overlay foundation design](GATE4-CLOSING-OVERLAY-REVIEW.md) passed user review at
 `d576af2` on 2026-09-14 with no required changes. Its core/store implementation now distinguishes
@@ -15,14 +22,19 @@ implementation review passed and OVERLAY-TEST-001 is closed by the re-review of 
 The user accepts the corrected [atomic handoff design](GATE4-OVERLAY-HANDOFF-REVIEW.md) at
 `dd2fbc0` and closes HANDOFF-001. The [core/store implementation](GATE4-OVERLAY-HANDOFF-IMPLEMENTATION-REVIEW.md)
 is pushed at `bf37cc4`; 202 local Studio tests and the dedicated handoff/mutation workflows pass.
-The user requests HANDOFF-002 (P2): reference inventory must honor required intent metadata before
+The user closes HANDOFF-002 (P2): reference inventory now honors required intent metadata before
 installing a complete pixel pin set. The correction at `62f06d4` passes 24 focused local tests,
-Clippy and its isolated mutation/restored regression; GitHub checks and user re-review are pending.
-The other reviewed handoff boundaries have no additional finding. Evidence is in [HANDOVER](HANDOVER.md).
+Clippy and its isolated mutation/restored regression. The reviewer inspected GitHub run
+[34903404377](https://github.com/Thalpy/Mewtual/actions/runs/34903404377): 24 normal handoff tests,
+ten detected mutations and ten passing restored regressions, on merge checkout `a89f90b`.
+No further implementation or coverage change is required for this bounded handoff. The reviewer
+did not rerun Cargo locally. Evidence and broader CI limitations are in [HANDOVER](HANDOVER.md).
 It persists Prepared, the whole signed source, then Completed before releasing the overlay hold;
 ordinary intents remain pending for receipt settlement. A local source dependency also prevents
 missing metadata from exposing an unfinished batch after restart. This is still block 2. No native overlay command,
 overlay replay/disposition, provisional-preview writes or new tenure authority is enabled.
+The next [runtime checkpoint](GATE4-OVERLAY-RUNTIME-REVIEW.md) profiles custody cost and proposes
+detached inspection before enabling the remaining write lifecycle.
 
 **Combined scheduling checkpoint `6b71d96` (2026-09-13; user review PASS).** The three-member actor
 fixture retains three preview reservations: three real deliveries, or two deliveries plus a

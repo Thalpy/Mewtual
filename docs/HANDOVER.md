@@ -8,9 +8,73 @@ the protocol- vs honest-client-enforced boundary and the hardening backlog.
 [`MESSAGE-FLOW.md`](MESSAGE-FLOW.md) traces one message end to end (send, gossip, catch-up)
 and ranks the live hazards in that path.
 
-## Status (latest entry: 2026-09-14)
+## Status (latest entry: 2026-09-15)
 
-- **HANDOFF-002 (P2): correction ready for adversarial re-review (2026-09-14).**
+- **HANDOFF-002 closed; bounded handoff implementation accepted (2026-09-15).**
+  The user's re-review compares `85e7179...aa0a81f`, with correction code at `62f06d4`;
+  `aa0a81f` changes documentation only. No remaining implementation or regression-coverage
+  finding requires a change. The reviewer inspected the actual GitHub job and all 20 individual
+  mutation/restoration logs from [run 34903404377](https://github.com/Thalpy/Mewtual/actions/runs/34903404377),
+  merge checkout `a89f90bf685fded1d2e314fd754f2e2afe2de59b`: **24 normal handoff tests pass,
+  ten isolated mutations are detected, and ten restored regressions pass**. The artifact digest
+  matched. The reviewer did not rerun Cargo locally; the separate local checks below remain
+  their recorded execution evidence.
+
+  The acceptance explicitly excludes actor/native activation and full Gate 4 completion.
+  The user clarified **finish Gate 4 before Gate 5**. Gate 5 code is untouched. Remaining:
+  actor/native Closing-overlay lifecycle and bounded preparation/signing, manual and stale-base
+  handling including preview-based drafts, repeated-owner tenure, runtime signed fault repair,
+  and combined acceptance/required suites. See [BACKEND-IMPLEMENTATION](BACKEND-IMPLEMENTATION.md)
+  and [FLIPNOTE-UI-HOOKS](FLIPNOTE-UI-HOOKS.md). Earlier finding closures stand. The one-operation
+  injected write-crash matrix is distinct from the multi-operation fixtures and is not a
+  physical power-loss experiment.
+
+  Next: the [runtime proposal](GATE4-OVERLAY-RUNTIME-REVIEW.md) and opt-in custody profile identify
+  the required split before actor/native activation.
+  The accepted core/store call cannot simply run a 256-operation batch in the live actor.
+
+  Follow-up GitHub status verification on 2026-09-15 confirms the prior code's handoff,
+  [foundation](https://github.com/Thalpy/Mewtual/actions/runs/34903404540),
+  [native](https://github.com/Thalpy/Mewtual/actions/runs/34903404386) and
+  [two-client](https://github.com/Thalpy/Mewtual/actions/runs/34903404376) workflows succeeded.
+  The broader [CI run](https://github.com/Thalpy/Mewtual/actions/runs/34903404402) failed.
+  Its inspected Linux application log repeats the queue-entry regression at `lib.rs:9694`
+  (`e_unknown` included; 608 passed, one failed, ten ignored). Windows test, Linux desktop
+  and cargo-deny jobs also failed; their detailed earlier baseline findings remain below.
+  This status check is separate from the reviewer's inspection of all handoff artifacts.
+
+- **Overlay runtime proposal and custody profile ready for review (2026-09-15).**
+  [GATE4-OVERLAY-RUNTIME-REVIEW](GATE4-OVERLAY-RUNTIME-REVIEW.md) specifies capture, detached
+  inspection, complete-record currency and final native delivery ownership, followed by the
+  required private preparation/signing/commit split. It preserves the accepted handoff barriers.
+  No production behavior, actor/native command or Gate 5 code changes in this checkpoint.
+
+  The new opt-in profile passes **both tests**, exercising Index and Flipnote with 1, 32 and
+  256 typed accepted operations each, successful durable handoff, full projection/count after
+  reopen, retained pending intents and exact byte-preserving completed retry. Run:
+  `cargo test --locked -j 4 --config profile.test.package.catcoms-app.debug=0 -p catcoms-app
+  --lib profile_studio_overlay_handoff -- --ignored --test-threads=1 --nocapture`.
+  Log: `logs/gate4-overlay-custody-profile.log`; test execution 767.21 seconds. The initial
+  build reported two redundant `mut` bindings, removed without behavioral changes before the
+  final lint/regression checks. Measurements are from that otherwise identical test binary.
+
+  At 256 operations, measured warm handoff custody is **177,252 ms for Flipnote** and
+  **133,461 ms for Index**. Read/decode plus separate draft reconstruction is 26,227 / 19,539 ms.
+  These are unoptimized Windows test-profile observations on small bases, not release latency,
+  maximal-byte coverage, heap qualification or actor fairness evidence. Initial fixture intent
+  writes are batched; the measured decoding/candidate/handoff/retry paths use production adapters.
+  [P1-PERFORMANCE](P1-PERFORMANCE.md) records all six samples, exact scope and limitations.
+
+  Final `cargo fmt --all -- --check` and `cargo clippy --locked -j 4 -p catcoms-app --lib
+  --tests -- -D warnings` pass (Clippy: 35.76 seconds). The unchanged regression
+  `studio_overlay_handoff_signs_the_whole_branch_once_and_keeps_pending_intents` passes for
+  both Index and Flipnote in its one executed test (57.53 seconds), compiled after the `mut`
+  cleanup. Logs: `logs/gate4-overlay-runtime-{clippy,regression}.log`. New/changed documentation
+  links and `git diff --check` pass. No full-suite or new-head GitHub result is claimed.
+  The earlier handoff implementation remains accepted; this proposal/instrumentation needs
+  a separate user review. Review base: `aa0a81f34af6707ab05fd2a437412c38b79a82ff`.
+
+- **Historical HANDOFF-002 correction checkpoint (2026-09-14; accepted above on 2026-09-15).**
   The user's review of `dd2fbc0...85e7179` requests one implementation correction. The local
   source-to-intent dependency blocked ordinary reads, but reference inventory discarded it and
   could install an incomplete pixel pin set after the required metadata disappeared. The review
@@ -24,7 +88,7 @@ and ranks the live hazards in that path.
   mismatched metadata or an ordinary ledger. The isolated inventory-check mutation is added to
   the existing handoff harness. Code head: `62f06d49667d1c2db407cb1def2aef3da2aa01fe`, pushed to
   `Create-suite-2` / [PR #26](https://github.com/Thalpy/Mewtual/pull/26). Re-review base:
-  `85e71798b4197e8a7ef7d1361e4418bd7ecd32d4`. HANDOFF-002 awaits user closure.
+  `85e71798b4197e8a7ef7d1361e4418bd7ecd32d4`. HANDOFF-002 is now closed by the 2026-09-15 review above.
 
   Local validation at `62f06d4` passes **24 focused tests**: two new reference-dependency tests,
   seven creative-reference/protected-deletion tests, 13 inventory tests and two Studio inventory
@@ -46,7 +110,8 @@ and ranks the live hazards in that path.
   `logs/gate4-handoff-002-mutation-check.log`.
 
   The [handoff workflow for this code](https://github.com/Thalpy/Mewtual/actions/runs/34903404377)
-  and other GitHub checks are running at this evidence update; no new CI pass is claimed.
+  was running at this historical evidence update; the 2026-09-15 acceptance above records its
+  successful completion. That dedicated result does not establish repository-wide green.
   The existing workflow now includes 24 normal handoff tests and ten isolated mutations/restored
   cases, and uploads their individual logs. Broader baseline CI failures remain recorded below.
   Subsequent evidence-only commits do not change the tested correction code or harness.

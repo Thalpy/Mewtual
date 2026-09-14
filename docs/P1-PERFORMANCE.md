@@ -279,3 +279,75 @@ per-op validation work is far heavier, taken as a non-isolated diagnostic observ
 running alongside it. Different object, different path, different conditions. A reader who has just
 come from the other page should not conclude either figure is wrong by three orders of magnitude,
 and neither number should be quoted as "restore takes X".
+
+
+## Closing-overlay custody profile (2026-09-15)
+
+Purpose: qualify the next Gate 4 actor/native integration step. The accepted core/store handoff
+is synchronous; the existing actor custody arm awaits the worker that owns the sole Server and
+native guards. Moving it to `spawn_blocking` does not make other actor work progress meanwhile.
+See [the runtime proposal](GATE4-OVERLAY-RUNTIME-REVIEW.md).
+
+Harness: [handoff/performance.rs](../crates/catcoms-app/src/store/epoch_studio/tests/rotation/overlay/handoff/performance.rs).
+Run on Windows with Rust 1.89 in the existing **unoptimized test profile**, not release:
+
+```powershell
+$env:_LINK_='/DEBUG:NONE'
+$env:CARGO_INCREMENTAL='0'
+cargo test --locked -j 4 --config 'profile.test.package.catcoms-app.debug=0' -p catcoms-app --lib profile_studio_overlay_handoff -- --ignored --test-threads=1 --nocapture
+```
+
+Both opt-in cases exercise 1, 32 and 256 actual annotated title changes, with distinct nonces
+and timestamps, on an Index or Flipnote. A real signed Closing source produces the basis and
+actual pristine installed successor. Fixture setup batches the initial intent write: each
+annotation first comes from typed append, consecutive records are assembled as in the existing
+operation-cap fixture, then the entire branch must pass production decoding/reconstruction.
+Setup is deliberately not a measurement of 256 separate durable local Saves. The real accounted
+writer persists the fixture; successor installation preserves the local branch.
+
+Each case then measures:
+
+- `decode_ms`: bounded intent-file read, authenticated unseal and full state decode/validation.
+- `draft_ms`: full ordered local reconstruction from the already decoded state.
+- `candidate_ms`: production private candidate construction on an already restored actual source,
+  including validation, signatures, exact preflight and manifest construction. No disk/inventory.
+- `inventory_ms`: a fresh production scan and budget acquisition; no cached inventory token.
+- `handoff_ms`: actual store handoff on the retained warm successor, including its repeated
+  validation, accounting checks, all durability barriers and completed evidence. Inventory
+  acquisition immediately above is excluded, so add it when assessing the whole caller.
+- `retry_ms`: the actual completed handoff retry after fresh store reopen, excluding its separate
+  inventory acquisition. It must return the same outcome and leave signed source bytes unchanged.
+
+Every sampled handoff must succeed, contain the exact requested operation count and full expected
+projection after reopen, release the redundant local base and keep all handed-off intents pending.
+The independently generated private candidate must have the same count/projection. The fixture
+has a small base with one object/frame; 256 is the operation ceiling, **not maximal seed, operation
+body, metadata, projection width or unrelated-vault coverage**. There is one observation per case;
+filesystem caches and other OS work are uncontrolled. These are neither worst-case bounds nor
+release latency, actor fairness or a heap qualification. The original Closing history used to
+obtain an eligible receipt is outside the measured handoff; the source-size column describes
+its actual small installed successor. `SystemClock` is used only for diagnostic elapsed time.
+
+Run log: `logs/gate4-overlay-custody-profile.log`. Both tests pass: six successful measured
+handoffs, each followed by verified reopen and exact completed retry. Total test execution:
+767.21 seconds. All duration columns below are milliseconds; size columns are physical bytes.
+
+| Target | Ops | Intent bytes | Source bytes | Decode | Draft | Candidate | Inventory | Handoff | Retry |
+|---|---|---|---|---|---|---|---|---|---|
+| Flipnote | 1 | 1468 | 1607 | 27 | 25 | 88 | 28 | 535 | 4 |
+| Flipnote | 32 | 8992 | 1607 | 551 | 531 | 1323 | 654 | 7958 | 8 |
+| Flipnote | 256 | 63580 | 1607 | 13171 | 13056 | 33117 | 13171 | 177252 | 47 |
+| Index | 1 | 1397 | 1509 | 22 | 21 | 78 | 23 | 486 | 4 |
+| Index | 32 | 9758 | 1509 | 466 | 419 | 1012 | 403 | 5761 | 8 |
+| Index | 256 | 70394 | 1509 | 9844 | 9695 | 26094 | 9680 | 133461 | 50 |
+
+At 256 operations, just read/decode plus draft reconstruction takes 26,227 ms for Flipnote and
+19,539 ms for Index. The actual warm handoff holds its store borrow for 177,252 ms and 133,461 ms
+respectively. These debug-profile observations do not establish optimized production latency;
+they do establish a concrete baseline for the required runtime split. Directly routing this
+helper through the actor would retain the sole actor/store custody for the whole call. The
+accepted design already requires detached preparation and qualified signing/finalization before
+runtime activation; this checkpoint does not change that requirement.
+The initial compilation reported two redundant `mut` bindings in the profile; both were removed
+without changing its behavior. Final formatting/Clippy and regression evidence is recorded in
+HANDOVER. No production behavior or persistent format changes in this checkpoint.

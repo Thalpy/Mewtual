@@ -196,7 +196,8 @@ following checkpoint; do not report them as covered by foundation tests.
 ## Review request
 
 The design, bounded implementation and OVERLAY-TEST-001 closure requests all passed user review.
-The [handoff design](GATE4-OVERLAY-HANDOFF-REVIEW.md) is accepted; implementation is in progress.
+The [handoff design](GATE4-OVERLAY-HANDOFF-REVIEW.md) and corrected bounded implementation are
+accepted; HANDOFF-001 and HANDOFF-002 are closed. Actor/native and full lifecycle work remain.
 The following closure request is retained as the scope record for `783486d...65db6ac`.
 
 ```text

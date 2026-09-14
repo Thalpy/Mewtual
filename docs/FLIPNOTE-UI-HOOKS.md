@@ -1,7 +1,14 @@
 # Flipnote UI hook guide
 
-Last checked: 2026-09-14. Combined scheduling at `6b71d96` now passes user review without
-required changes. Block 1 of the four remaining Gate 4 work areas is accepted; three remain.
+Last checked: 2026-09-15. **Gate 4 is incomplete; Gate 5 has not started.** The user closes
+HANDOFF-002 and accepts the bounded Closing-overlay core/store handoff, explicitly excluding
+actor/native activation and full Gate 4 acceptance. Finish Gate 4 before starting Gate 5.
+Durable overlay Save is still unavailable in native. The next integration checkpoint addresses
+bounded preparation/signing and the overlay lifecycle; no new command is callable yet. The
+[detached inspection proposal](GATE4-OVERLAY-RUNTIME-REVIEW.md) is awaiting user review.
+
+Earlier accepted scheduling/preview evidence: combined scheduling at `6b71d96` passed user
+review without required changes. Block 1 of the four remaining Gate 4 work areas is accepted; three remain.
 Actor scheduling and native preview implementation passed review
 at `a89bde6`. The user's re-review of `a89bde6...134394e` closes NATIVE-TEST-001 with no further
 changes required, for both Index and Flipnote. The reviewer inspected source and the GitHub job
@@ -65,11 +72,11 @@ HANDOFF-001 adds a retained complete target so completed retries remain bound to
 after base removal. The user closes HANDOFF-001 at `dd2fbc0`. The internal handoff now has a
 three-step store transaction and distinct local-draft/completed results. The
 [pushed implementation](GATE4-OVERLAY-HANDOFF-IMPLEMENTATION-REVIEW.md) at `bf37cc4` passes 202 local
-Studio tests and the dedicated handoff/mutation workflows; adversarial implementation acceptance
-is pending. The user requests HANDOFF-002 (P2): reference inventory must enforce the linked
-source's required intent metadata before enabling pixel deletion. The scanner correction at
-`62f06d4` passes focused local tests and an isolated mutation/restored regression; GitHub checks
-and user re-review are pending. This changes no UI command or result shape.
+Studio tests and the dedicated handoff/mutation workflows. The user accepts the corrected
+bounded implementation at `62f06d4` / evidence head `aa0a81f` and closes HANDOFF-002: reference
+inventory enforces the linked source's required metadata before enabling deletion. The reviewer
+inspected 24 passing handoff tests, ten detected mutations and ten restored passes in GitHub
+run 34903404377. This changes no UI command or result shape.
 These Rust adapters supply no native command. Continue to disable durable overlay
 Save in Closing/Fault and awaiting-tenure previews; preserve unsaved editor work without claiming
 it is vault-saved. Its later actor/native integration will update this guide with actual commands.
@@ -272,7 +279,7 @@ installation; the UI should not implement a second catch-up scheduler or derive 
 | Settlement chip / rotation progress | `settlement-changed` invalidates the actual phase/recovery listing. `open` does **not** mean the current edits are receipted. Current responses always say `provisional:true`. Do not synthesize receipt author/time or “settled” from epoch alone. |
 | Current owner has not confirmed history | Native Read/List return the distinct `awaitingTenureReceipt: true` preview documented above. Actor/native implementation and NATIVE-TEST-001 passed review; combined scheduling at `6b71d96` is now accepted. The frontend adapter handles this read-only result; live UI acceptance remains separate. |
 | History fault / repair progress | Actual `phase:"fault"` and `fault` invalidations are available; signed repair has no actor/native command or `repairing` event yet. Restore/Copy saves ordinary content in an Open target and cannot clear Fault. Historical Read/Export remain available. |
-| Local overlay while rotating | Preserve unsaved editor work. The [core/store foundation](GATE4-CLOSING-OVERLAY-REVIEW.md) passed review and OVERLAY-TEST-001 is closed. The [handoff design](GATE4-OVERLAY-HANDOFF-REVIEW.md) is accepted at `dd2fbc0`; HANDOFF-001 is closed. The [core/store implementation](GATE4-OVERLAY-HANDOFF-IMPLEMENTATION-REVIEW.md) is pushed at `bf37cc4`, with normal/mutation checks passing and adversarial implementation acceptance pending. No native durable overlay or replay command exists. Shared Apply refuses Closing/Fault. |
+| Local overlay while rotating | Preserve unsaved editor work. The [core/store foundation](GATE4-CLOSING-OVERLAY-REVIEW.md) passed review and OVERLAY-TEST-001 is closed. The [handoff design](GATE4-OVERLAY-HANDOFF-REVIEW.md) is accepted at `dd2fbc0`; HANDOFF-001 is closed. The [core/store implementation](GATE4-OVERLAY-HANDOFF-IMPLEMENTATION-REVIEW.md) is pushed at `bf37cc4`, with normal/mutation checks passing; the correction at `62f06d4` is accepted and HANDOFF-002 is closed. No native durable overlay or replay command exists. Shared Apply refuses Closing/Fault. |
 | Recovery rail: Restore / Copy / Export | List/inspect/backup export, per-item Restore/Copy and conservative own-intent replay are connected. Unsafe replay is manual recovery, never settlement. Final Gate 4 acceptance remains pending; backup export is not `.pixa`. |
 | Eviction warning / countdown | Use the listing's actual warning pair/deadline and `studio_recovery_acknowledge`. Refresh after the action and matching `settlement-changed` events. |
 | Claims, Ask, Pass, countdown | Pending Gate 5. Local fixture claims are not peer claims and never locks. |

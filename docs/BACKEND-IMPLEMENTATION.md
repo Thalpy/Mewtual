@@ -42,7 +42,7 @@ for unrelated document types. Tests and review accompany each slice, not only ga
 | 1. Typed Flipnote documents | Rust StudioIndex/Flipnote domain-op validation, deterministic projection, conflict/Restore data and exact checkpoint preflight; frame, byte, sfx and patch caps. Unsupported linked-score behavior stays unavailable until gate 6, never silently accepted. | Tests exercise valid edits, malformed/cross-document operations, both concurrent delivery orders and cap boundaries through the real P1 gate. |
 | 2. Durable one-device Save/Load | **Index/art milestone implemented:** accounted vault/lifecycle ownership, native commands, real PIX CIDs, sealed intents, conservative source/seed/recovery reference protection and three-state expiry. Extend these same seams to actual sound/export records in gate 6. No UI edits. | Actor/native create/edit/restart/reopen uses real CIDs. Failure cases preserve durable state. Fileshare unlisting/upload cleanup cannot delete referenced pixels; full scans/restart include superseded seed/history, pending intents and retained/staged recovery. Open edits remain provisional. |
 | 3. Two-member collaboration and joining | **Index/art milestone implemented:** live sharing, automatic same-epoch repair, unopened saved-key service, keyed Registry/Studio checkpoint discovery and recovery-first Studio adoption through the existing actor/native worker. | Actual actors join after the fixture receipt, install Registry plus Index/art checkpoints, persist the Studio open tail and reopen. Provider restart needs no UI watch. Closing survives expired selection and restart; ordinary Read reestablishes the volatile watch, then no further action is needed. Existing cancellation/authority/durability tests and 70-op paging remain. The 8-MiB input/inventory and 256-KiB unrelated-cold rails remain; this is not arbitrary-size latency qualification. |
-| 4. Rotation and recovery in the running app | **Active:** accounted Studio owner settlement, watched rotation, Registry pointer/tail maintenance, recovery List/Read/backup Export/Ack/Restore/Copy, settlement invalidations and conservative own-intent replay are connected, and the persisted eviction grace is enforced rather than waiting on Acknowledge. Remaining: running-app succession/signed fault repair and full-gate acceptance. | Focused crash/restart, solo three-rotation, Registry paging, Create after Index rotation, native recovery fences, deadline-promotion and replay/manual-disposition regressions pass, each guard confirmed to fail when removed. Full-gate acceptance and final suites remain pending. No pruning before receipt and durable recovery; manual recovery is not settlement. Backup Export is not `.pixa` (gate 6). |
+| 4. Rotation and recovery in the running app | **Active:** accounted Studio owner settlement, watched rotation, Registry pointer/tail maintenance, recovery List/Read/backup Export/Ack/Restore/Copy, settlement invalidations and conservative own-intent replay are connected, and the persisted eviction grace is enforced rather than waiting on Acknowledge. Remaining: actor/native Closing-overlay lifecycle and preparation/signing custody, manual/stale-base/preview handling, repeated-owner tenure, runtime signed fault repair and full-gate acceptance. | Focused crash/restart, solo three-rotation, Registry paging, Create after Index rotation, native recovery fences, deadline-promotion and replay/manual-disposition regressions pass, each guard confirmed to fail when removed. Full-gate acceptance and final suites remain pending. No pruning before receipt and durable recovery; manual recovery is not settlement. Backup Export is not `.pixa` (gate 6). |
 | 5. Collaborative frame claims | Required full-identity signalling and shared channel admission; bounded capability/session-bound claim, Ask and Pass messages with receiver-observed expiry. No game/avatar path or standalone drawing feature. | Two members observe advisory claim/Ask/Pass/expiry; collision, replay and disconnect tests pass. Claims never become edit locks. |
 | 6. Sound and export | Linked-score typed operations/preflight/recovery, sfx/emoji patch sources, 64-patch union, deterministic valid-take export and byte-exact `.pixa` publication with durable export records. Cover the specified local GIF export contract without taking over UI design. | No-score and linked-score golden vectors, maximal accepted exports and malformed/over-cap rejection pass; exported bytes can be read back and validated. Playback-facing contracts preserve Deafen and membership teardown. |
 | 7. Flipnote backend acceptance and UI handoff | Run the complete create/save/restart/share/join/rotate/recover/export flow through production adapters, including failure paths. Publish Markdown for the real commands, events, limits and recovery behavior. | Backend acceptance tests and mandatory suites pass, adversarial blocker/high findings are resolved, and every canonical UI dependency maps to a working command/event or explicitly user-owned rendering work. |
@@ -182,11 +182,18 @@ Remaining for Gate 4: running-app succession, signed fault/repair, and full-gate
 
 #### Gate 4 progress audit (2026-09-13)
 
-**Current Gate 4 position (2026-09-14).** The user accepts the combined scheduling checkpoint
-`6b71d96` with no production or test changes required. This closes block 1 of the four remaining
-work blocks. Three remain: (2) durable Closing overlays and repeated-owner tenure, (3) runtime
-signed fault repair, and (4) combined Gate 4 acceptance. These are unequal work areas, not a
-percentage or time estimate.
+**Current Gate 4 position (2026-09-15).** HANDOFF-002 is closed and the corrected bounded
+Closing-overlay core/store handoff is accepted at `62f06d4` (review/evidence head `aa0a81f`).
+This is implementation acceptance for that boundary, not full Gate 4 acceptance. The user
+clarified that Gate 4 must finish before Gate 5 starts; Gate 5 remains untouched.
+
+Of the four previously listed work areas, block 1 (combined scheduling, `6b71d96`) is accepted.
+Block 2 still needs actor/native overlay integration, bounded preparation/signing custody,
+manual overlay inspection/copy/export/disposition, stale-base and preview-based local-work
+handling, and remaining repeated-owner tenure integration. Blocks 3 (runtime signed fault
+repair) and 4 (combined Gate 4 acceptance and required suites) remain. These are unequal work
+areas, not percentages. The next checkpoint [measures handoff custody and proposes detached
+inspection](GATE4-OVERLAY-RUNTIME-REVIEW.md); it does not enable durable overlay Save in native.
 
 The [Closing overlay foundation design](GATE4-CLOSING-OVERLAY-REVIEW.md) passed user review at
 `d576af2` on 2026-09-14 with no required changes. Its core/store implementation now distinguishes
@@ -197,14 +204,19 @@ implementation review passed and OVERLAY-TEST-001 is closed by the re-review of 
 The user accepts the corrected [atomic handoff design](GATE4-OVERLAY-HANDOFF-REVIEW.md) at
 `dd2fbc0` and closes HANDOFF-001. The [core/store implementation](GATE4-OVERLAY-HANDOFF-IMPLEMENTATION-REVIEW.md)
 is pushed at `bf37cc4`; 202 local Studio tests and the dedicated handoff/mutation workflows pass.
-The user requests HANDOFF-002 (P2): reference inventory must honor required intent metadata before
+The user closes HANDOFF-002 (P2): reference inventory now honors required intent metadata before
 installing a complete pixel pin set. The correction at `62f06d4` passes 24 focused local tests,
-Clippy and its isolated mutation/restored regression; GitHub checks and user re-review are pending.
-The other reviewed handoff boundaries have no additional finding. Evidence is in [HANDOVER](HANDOVER.md).
+Clippy and its isolated mutation/restored regression. The reviewer inspected GitHub run
+[34903404377](https://github.com/Thalpy/Mewtual/actions/runs/34903404377): 24 normal handoff tests,
+ten detected mutations and ten passing restored regressions, on merge checkout `a89f90b`.
+No further implementation or coverage change is required for this bounded handoff. The reviewer
+did not rerun Cargo locally. Evidence and broader CI limitations are in [HANDOVER](HANDOVER.md).
 It persists Prepared, the whole signed source, then Completed before releasing the overlay hold;
 ordinary intents remain pending for receipt settlement. A local source dependency also prevents
 missing metadata from exposing an unfinished batch after restart. This is still block 2. No native overlay command,
 overlay replay/disposition, provisional-preview writes or new tenure authority is enabled.
+The next [runtime checkpoint](GATE4-OVERLAY-RUNTIME-REVIEW.md) profiles custody cost and proposes
+detached inspection before enabling the remaining write lifecycle.
 
 **Combined scheduling checkpoint `6b71d96` (2026-09-13; user review PASS).** The three-member actor
 fixture retains three preview reservations: three real deliveries, or two deliveries plus a
@@ -812,8 +824,9 @@ all managed types are broad-design backlog; the seven gates above close only Fli
 
 Each code slice gets focused regressions, a read-only adversarial review of the actual diff,
 resolution of blocker/high findings, and all checks required by AGENTS.md. Verified slices are
-committed; periodic non-force pushes require the outstanding destination approval for
-`Thalpy/Mewtual`, branch `Create-suite-2`.
+committed; the user has authorized non-force pushes for review checkpoints to
+`Thalpy/Mewtual`, branch `Create-suite-2`. Request adversarial reviews from the user with a
+copyable message and an exact pushed comparison.
 Unrelated work is preserved. This checklist and HANDOVER record actual progress and gaps.
 
 The final UI implementation guide will list real commands, schemas, events, lifecycle/recovery
