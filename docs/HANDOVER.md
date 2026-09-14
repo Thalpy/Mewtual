@@ -11,6 +11,8 @@ and ranks the live hazards in that path.
 ## Status (latest entry: 2026-09-14)
 
 - **Closing overlay design accepted; core/store implementation (2026-09-14).**
+  Implementation checkpoint [`b1b0ec9`](https://github.com/Thalpy/Mewtual/commit/b1b0ec9b88f422f5f01cd4deca5cdb463bfe3871)
+  is pushed to `Create-suite-2`, based on `ac23429824ef25ab29c59cdaf2c4c7d99db6161a`.
   The user accepts `d576af2e1fbe757b4fb6bcebb6326dd1a445b2f0` against `0b6e870`, with no
   actionable design defect or required change. The review inspected the proposal and existing
   source; it did not execute overlay tests. Its approval covers this internal foundation only.
@@ -56,7 +58,12 @@ and ranks the live hazards in that path.
   workflow publishes those logs as an artifact. Locally all three isolated mutations fail at
   their intended assertion with exactly one executed failing test (24.60s / 18.87s / 19.46s).
   Source bytes are restored, then the respective regressions pass (50.63s / 55.63s / 44.22s).
-  Local logs are in ignored `logs/gate4-overlay-*.log`; GitHub execution is pending publication.
+  Local logs are in ignored `logs/gate4-overlay-*.log`.
+  GitHub [overlay checks](https://github.com/Thalpy/Mewtual/actions/runs/34844201389),
+  [native checks](https://github.com/Thalpy/Mewtual/actions/runs/34844201234),
+  [two-client checks](https://github.com/Thalpy/Mewtual/actions/runs/34844201290) and
+  [CI](https://github.com/Thalpy/Mewtual/actions/runs/34844201267) have started for `b1b0ec9`;
+  their result is pending at this evidence update. Local results above are not GitHub results.
 
   The repository-wide `scripts/check-no-ambient.sh` fails on six verified pre-existing findings:
   `apps/desktop/src-tauri/src/media_decode.rs:333,426,444,504`,

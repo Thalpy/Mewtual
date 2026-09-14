@@ -186,10 +186,36 @@ following checkpoint; do not report them as covered by foundation tests.
 
 ## Review request
 
-Review this design's bounded core/store checkpoint before implementation. Focus on accidental
-promotion of a failed ordinary Save, a forged or stale basis, retry acknowledgement after source
-change, unsigned draft content reaching authority-bearing types, codec downgrade behavior,
-aggregate storage/reference accounting, and loss of ordered draft evidence during retirement.
-Return PASS or numbered findings with severity, separating blockers to this foundation from the
-explicitly outstanding native/replay/provisional/tenure/repair work. A PASS clears this design
-checkpoint; it does not claim that the implementation or Gate 4 has passed.
+The design request is closed by the user's PASS. The next request is implementation review of
+[`ac23429...b1b0ec9`](https://github.com/Thalpy/Mewtual/compare/ac23429824ef25ab29c59cdaf2c4c7d99db6161a...b1b0ec9b88f422f5f01cd4deca5cdb463bfe3871).
+Documentation-only follow-ups do not widen that code scope.
+
+```text
+Please adversarially review the durable Closing overlay core/store foundation.
+Base: ac23429824ef25ab29c59cdaf2c4c7d99db6161a
+Head: b1b0ec9b88f422f5f01cd4deca5cdb463bfe3871
+The design was accepted at d576af2; this request concerns its implementation.
+
+Start with docs/GATE4-CLOSING-OVERLAY-REVIEW.md, docs/HANDOVER.md and docs/INTERFACES.md.
+Inspect replication studio/overlay.rs, the app/store overlay adapters, shared intent
+persistence/retirement/inventory, and store/epoch_studio/tests/rotation/overlay.rs.
+
+Challenge actual source/tenure provenance and stale-basis rejection; separation of
+accepted drafts from failed ordinary Saves; full-envelope retry identity after source
+changes; saved order/timestamps and canonical bounded decoding; aggregate budgets,
+uncertain writes and sync-only retry at capacity; seed-only/pending pixel retention;
+and refusal to promote or retire annotated work through ordinary paths.
+
+131 affected local tests, Clippy and three isolated mutation/restoration checks pass.
+Inspect the mutation harness and available GitHub job logs/artifact; do not treat a
+pending GitHub run or a recorded local run as independently executed evidence.
+The ambient-dependency gate has six recorded baseline findings. The seed-reference
+test removes an independent fixture source to isolate enumeration; it does not prove
+a complete runtime reclamation path. The count fixture assembles typed-admitted
+annotations, then exercises full decoding and refusal of entry 257.
+
+Return PASS or numbered findings with severity, exact failing path and required fix.
+Separate implementation defects from the explicitly deferred actor/native lifecycle,
+automatic replay/disposition, provisional-preview writes, repeated-owner tenure,
+signed repair and full Gate 4 acceptance. A PASS accepts this foundation only.
+```

@@ -2011,6 +2011,10 @@ unready after errors/panics, with no guessed refunds. The token does not track o
 their metadata/admission and the sole complete per-server budget remain coordinator work.
 `IntentLedger::document()` exposes its full scope for the enclosing store decoder's equality check.
 
+This is a persist-before-edit prerequisite, not live editing or automatic replay. The registry
+adapter below now invokes it; retirement still requires checkpoint/recovery persistence and no
+actor/network path invokes these adapters yet.
+
 #### Closing overlay foundation (Gate 4, no native command)
 
 The design passed user review at `d576af2` on 2026-09-14. The bounded implementation adds
@@ -2041,10 +2045,6 @@ but still require current local membership and exact target/basis/envelope ident
 require the same eligible Closing source. Failed ordinary Saves are never upgraded into overlays.
 Ordinary Apply rejects annotated IDs, and both receipt/manual retirement hold annotated entries.
 See [the overlay review record](GATE4-CLOSING-OVERLAY-REVIEW.md) for remaining integration obligations.
-
-This is a persist-before-edit prerequisite, not live editing or automatic replay. The registry
-adapter below now invokes it; retirement still requires checkpoint/recovery persistence and no
-actor/network path invokes these adapters yet.
 
 ### Durable registry edits, sealing and checkpoint installation (P1, not yet live-wired)
 
