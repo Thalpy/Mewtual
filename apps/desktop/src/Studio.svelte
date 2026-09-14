@@ -147,9 +147,9 @@
   const hasScope = $derived.by(() => { void studio.rev; return session.scope !== null; });
   // Blob state is session data, not part of the model: read it through the revision so the
   // strip and the veil follow a fetch as it lands.
-  function blobStateOf(cid: string) { void studio.rev; return session.blobState(cid); }
-  function blobProblemOf(cid: string) { void studio.rev; return session.blobProblem(cid); }
-  const blobStateHere = $derived(frameRec ? blobStateOf(frameRec.cid) : "held");
+  function blobStateOf(cid: string, bytes: number) { void studio.rev; return session.blobState(cid, bytes); }
+  function blobProblemOf(cid: string, bytes: number) { void studio.rev; return session.blobProblem(cid, bytes); }
+  const blobStateHere = $derived(frameRec ? blobStateOf(frameRec.cid, frameRec.bytes) : "held");
   function sameBytes(a: Uint8Array | undefined, b: Uint8Array): boolean {
     if (!a || a.length !== b.length) return false;
     for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
@@ -216,7 +216,7 @@
   function loadRaster() {
     const rec = frames.find((f) => f.id === frameId) ?? null;
     const unsaved = objectId && frameId ? session.unsavedPix(objectId, frameId) : null;
-    const bytes = unsaved ?? (rec ? session.blob(rec.cid) : undefined);
+    const bytes = unsaved ?? (rec ? session.blob(rec.cid, rec.bytes) : undefined);
     if (!bytes) {
       raster = null;
       rasterCid = "";
@@ -397,7 +397,7 @@
     // the current frame's opaque paper.
     if (onion && frameIndex > 0) {
       const prevRec = frames[frameIndex - 1];
-      const prev = session.blob(prevRec.cid);
+      const prev = session.blob(prevRec.cid, prevRec.bytes);
       if (!prev) session.want(prevRec.cid, prevRec.bytes, 1);
       else {
         try {
@@ -493,8 +493,8 @@
     if (!wanted || wanted === rasterCid) return;
     // Our own save just landed: the selected value now names the bytes this raster already
     // holds, so adopt the cid and keep the undo history instead of reloading.
-    if (rasterCid === "unsaved" && raster && rec && sameBytes(session.blob(rec.cid), raster.encode())) { rasterCid = rec.cid; return; }
-    if (unsaved || (rec && session.blob(rec.cid))) loadRaster();
+    if (rasterCid === "unsaved" && raster && rec && sameBytes(session.blob(rec.cid, rec.bytes), raster.encode())) { rasterCid = rec.cid; return; }
+    if (unsaved || (rec && session.blob(rec.cid, rec.bytes))) loadRaster();
     else if (rec) session.want(rec.cid, rec.bytes, 0);
   });
   $effect(() => {
@@ -511,7 +511,7 @@
       if (!ctx) return;
       ctx.imageSmoothingEnabled = false;
       ctx.clearRect(0, 0, node.width, node.height);
-      const bytes = session.blob(a.cid);
+      const bytes = session.blob(a.cid, a.bytes);
       if (!bytes) { session.want(a.cid, a.bytes, 2); return; }
       try {
         const img = decodePix(bytes);
@@ -581,7 +581,7 @@
     // Playback skips frames that are over the cap or not held; stepping does not.
     if (playing) {
       let guardN = n;
-      while (guardN-- && (frames[i].overCap || !session.blob(frames[i].cid))) i = (i + delta + n) % n;
+      while (guardN-- && (frames[i].overCap || !session.blob(frames[i].cid, frames[i].bytes))) i = (i + delta + n) % n;
     }
     if (!loop && playing && i === 0 && delta > 0) { playing = false; return; }
     openFrame(frameIds[i]);
@@ -878,7 +878,7 @@
             <div class="st-veil"><span>no frames yet</span><span class="micro">add one below to start drawing</span></div>
           {:else if !raster && frameRec}
             {#if blobStateHere === "invalid" || blobStateHere === "unavailable" || blobStateHere === "failed"}
-              <div class="st-veil"><span>{blobStateHere === "invalid" ? "these pixels were rejected" : blobStateHere === "failed" ? "fetching failed" : "pixels not available yet"}</span><span class="micro">{blobProblemOf(frameRec.cid) || "bounded by the declared size"} · {fmtKib(frameRec.bytes)}</span><span class="st-veil-acts"><button type="button" class="st-btn" onclick={() => session.retryBlob(frameRec!.cid, frameRec!.bytes)}>ask again</button></span></div>
+              <div class="st-veil"><span>{blobStateHere === "invalid" ? "these pixels were rejected" : blobStateHere === "failed" ? "fetching failed" : "pixels not available yet"}</span><span class="micro">{blobProblemOf(frameRec.cid, frameRec.bytes) || "bounded by the declared size"} · {fmtKib(frameRec.bytes)}</span><span class="st-veil-acts"><button type="button" class="st-btn" onclick={() => session.retryBlob(frameRec!.cid, frameRec!.bytes)}>ask again</button></span></div>
             {:else}
               <div class="st-veil"><span>fetching {fmtKib(frameRec.bytes)}</span><span class="micro">bounded by the declared size · validated before it is shown</span></div>
             {/if}
@@ -1135,8 +1135,8 @@
       </div>
       <div class="st-strip">
         {#each frames as f, i (f.id)}
-          {@const st = blobStateOf(f.cid)}
-          <button type="button" class="st-thumb" class:cur={f.id === frameId} class:over={!!f.overCap} class:conflict={f.conflicts.length > 0} onclick={() => openFrame(f.id)} title={f.overCap ? "over the cap: skipped in playback, greyed until trimmed" : st === "invalid" ? `pixels rejected: ${blobProblemOf(f.cid)}` : st === "unavailable" ? "pixels not available yet" : ""}>
+          {@const st = blobStateOf(f.cid, f.bytes)}
+          <button type="button" class="st-thumb" class:cur={f.id === frameId} class:over={!!f.overCap} class:conflict={f.conflicts.length > 0} onclick={() => openFrame(f.id)} title={f.overCap ? "over the cap: skipped in playback, greyed until trimmed" : st === "invalid" ? `pixels rejected: ${blobProblemOf(f.cid, f.bytes)}` : st === "unavailable" ? "pixels not available yet" : ""}>
             <span class="ix">{i + 1}</span>
             <span class="fr" class:fetching={st === "fetching" || st === "queued" || st === "idle"} class:missing={st === "unavailable" || st === "invalid" || st === "failed"}>
               {#if st === "held"}

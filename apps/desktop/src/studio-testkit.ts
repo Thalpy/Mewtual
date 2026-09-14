@@ -109,7 +109,9 @@ export function fakeIpc(): FakeIpc {
     on: (cmd, fn) => { responders[cmd] = fn; },
     emit: (name, payload) => handlers[name]?.({ payload }),
     invoke: async <T>(cmd: string, args: Record<string, unknown> = {}) => {
-      calls.push({ cmd, args });
+      // A snapshot of what was sent: a caller that later mutates its argument object must not
+      // rewrite the recorded history a test compares against.
+      calls.push({ cmd, args: structuredClone(args) });
       const r = responders[cmd];
       if (!r) throw new Error(`unscripted command ${cmd}`);
       return (await r(args)) as T;

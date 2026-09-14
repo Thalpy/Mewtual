@@ -33,6 +33,7 @@ w.HTMLCanvasElement.prototype.getContext = (() => null) as unknown as typeof w.H
 
 const state = await import("./studio-state.svelte.ts");
 const { default: Studio } = await import("./Studio.svelte");
+const { default: StudioNav } = await import("./StudioNav.svelte");
 const { mount, unmount, flushSync } = await import("svelte");
 
 function mountStudio(ipc: FakeIpc) {
@@ -142,6 +143,70 @@ test("UI-002: a pending read becomes the editor, a landed save changes the shown
     assert.equal(items.length, 1);
     assert.match(items[0] ?? "", /frame 1.*conflict/);
     assert.match(m.text(), /walked/);
+  } finally {
+    m.done();
+  }
+});
+
+test("UI-003: a sidebar row rendered while a create is in flight changes when that create goes uncertain", async () => {
+  const ipc = fakeIpc();
+  const create = deferred<unknown>();
+  ipc.on("studio_list", () => ordinaryView(indexContent()));
+  ipc.on("studio_create", () => create.promise);
+  ipc.on("publish_pix", () => ({ cid: id64(3), bytes: pixBytes(0).length }));
+  state.useStudioIpc(ipc);
+  const target = document.createElement("div");
+  document.body.appendChild(target);
+  const app = mount(StudioNav, { target, props: { me: ME, server: SERVER, channel: CHANNEL, onopen: () => {}, onnotice: () => {} } });
+  flushSync();
+  try {
+    await settled();
+    const button = target.querySelector<HTMLButtonElement>("button.studio-new");
+    assert.ok(button && !button.disabled, "the index landed and creating is offered");
+    button.click();
+    flushSync();
+    await settled();
+    const row = () => target.querySelector(".studio-obj.pending");
+    assert.match(row()?.textContent ?? "", /creating…/, "the pending row is on screen while the create is held");
+    create.reject(new Error("Studio actor busy; retry"));
+    await settled();
+    assert.equal(ipc.calls.filter((c) => c.cmd === "studio_create").length, 1);
+    assert.match(row()?.textContent ?? "", /create uncertain · retry in the editor/, "the same keyed row shows the new status");
+    assert.doesNotMatch(row()?.textContent ?? "", /creating…/);
+  } finally {
+    unmount(app);
+    target.remove();
+    state.disposeStudio();
+  }
+});
+
+test("UI-003: a pending frame's thumbnail rendered while its publish is in flight changes when the save goes uncertain", async () => {
+  const ipc = fakeIpc();
+  const publish = deferred<unknown>();
+  ipc.on("studio_list", () => ordinaryView(indexContent({ objects: { [OBJ]: indexEntry({ title: "moon cat" }) } })));
+  ipc.on("studio_read", () => frameView());
+  ipc.on("request_blob_bounded", () => ({ bytes_b64: b64(pix), bytes: pix.length }));
+  ipc.on("studio_recovery_list", () => recoveryListing({ object: OBJ }));
+  ipc.on("publish_pix", () => publish.promise);
+  const m = mountStudio(ipc);
+  try {
+    await settled();
+    state.studio.selected = OBJ;
+    flushSync();
+    await settled(400);
+    const session = state.ensureStudio(ME);
+    session.insertFrame(OBJ, F1, pixBytes(2));
+    await settled();
+    const pendingThumb = () => [...m.target.querySelectorAll(".st-thumb")].find((t) => t.querySelector(".fr.pending"));
+    assert.ok(pendingThumb(), "the pending thumbnail is on screen while the publish is held");
+    assert.equal(pendingThumb()?.querySelector(".ix")?.textContent, "…");
+    assert.equal(pendingThumb()?.querySelector(".fr.pending.uncertain"), null);
+    publish.reject(new Error("Studio storage busy; retry the same request"));
+    await settled();
+    assert.equal(pendingThumb()?.querySelector(".ix")?.textContent, "?", "the same thumbnail now says the save is uncertain");
+    assert.ok(pendingThumb()?.querySelector(".fr.pending.uncertain"));
+    assert.match(m.text(), /save uncertain/);
+    assert.match(m.text(), /Studio storage busy/);
   } finally {
     m.done();
   }

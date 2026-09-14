@@ -279,18 +279,91 @@ test("RECOVERY-001: an uncertain recovery apply keeps its exact payload; retry r
   assert.equal(run.status, "stopped");
   assert.deepEqual(run.items.map((i) => i.state), ["uncertain", "pending"], "the walk stops at the unknown outcome; the second frame is not previewed");
   assert.equal(h.calls("studio_recovery_preview").length, 1);
-  const rec = h.session.saves.find((s) => s.kind === "recoveryApply")!;
-  assert.equal(rec.status, "uncertain");
-  const firstEdit = h.calls("studio_recovery_apply")[0].args.edit;
+  const recId = h.session.saves.find((s) => s.kind === "recoveryApply")!.id;
+  assert.equal(h.session.saves.find((s) => s.id === recId)?.status, "uncertain");
+  // An independent copy: the fake bridge already snapshots arguments, and this must not share
+  // an object with the record under test either way.
+  const firstEdit = structuredClone(h.calls("studio_recovery_apply")[0].args.edit);
+  assert.match(String((firstEdit as { nonce: string }).nonce), /^[0-9a-f]{32}$/);
   // The live projection moves on (another edit lands); the frozen payload must not.
   h.ipc.emit("studio-updated", { server: SERVER, channel: CHANNEL, object: OBJ });
   await h.sync();
   assert.equal(h.session.doc?.view?.epochId, id32(0xe5));
-  assert.equal(rec.epochChanged, true);
+  assert.equal(h.session.saves.find((s) => s.id === recId)?.epochChanged, true, "snapshots are re-read, never held");
   h.ipc.on("studio_recovery_apply", () => ({ v: 1, kind: "recoveryApplied", contentSaved: true, alreadySaved: true, provisional: true, pointerRestored: false }));
-  h.session.retry(rec.id);
+  h.session.retry(recId);
   await h.sync();
   assert.deepEqual(h.calls("studio_recovery_apply")[1].args.edit, firstEdit, "same nonce, body, epoch and expected projection");
   assert.equal(h.calls("studio_recovery_preview").length, 1, "no fresh preview, so no second edit");
   assert.equal(h.session.saves.length, 0);
+});
+
+test("SAVE-003: newer pixels coalesce only into the lane's tail; an intervening conflict choice keeps its place", async () => {
+  const h = await harness();
+  const pixA = pixBytes(1), pixB = pixBytes(2), pixC = pixBytes(3), pixD = pixBytes(4);
+  const cidOf = (p: Uint8Array) => id64(0xa0 + p[80]);
+  const conflict = { cid: cidOf(pixC), bytes: pixC.length, author: ME, ts: 5, opId: id64(0x99) };
+  h.ipc.on("studio_list", () => ordinaryView(indexContent()));
+  h.ipc.on("studio_read", () => docView([{ id: F1, cid: id64(0x10), bytes: pixA.length }]));
+  h.ipc.on("publish_pix", (a) => { const bytes = base64ToBytes(String(a.bytesB64)); return { cid: cidOf(bytes), bytes: bytes.length }; });
+  h.ipc.on("request_blob_bounded", () => ({ bytes_b64: b64(pixC), bytes: pixC.length }));
+  h.ipc.on("studio_apply", () => { throw new Error("Studio request cancelled; its local save may have completed"); });
+  h.session.setScope({ server: SERVER, channel: CHANNEL });
+  h.session.open(OBJ);
+  await h.sync();
+  h.session.saveFrame(OBJ, F1, pixA); // A: goes uncertain with a frozen apply
+  await h.sync();
+  const aId = h.session.saves[0].id;
+  assert.equal(h.session.saves[0].status, "uncertain");
+  h.session.saveFrame(OBJ, F1, pixB); // B: queued, no identity yet
+  await h.session.useVersion(OBJ, F1, conflict, "replace"); // C: an explicit, forced replacement
+  h.session.saveFrame(OBJ, F1, pixD); // D: must not slip into B's slot ahead of C
+  await h.sync();
+  const order = h.session.saves.map((s) => (s.kind === "frame" ? cidOf(s.pix) : s.kind));
+  assert.deepEqual(order, [cidOf(pixA), cidOf(pixB), cidOf(pixC), cidOf(pixD)], "A, B, C, D in the order they were made");
+  assert.deepEqual(h.session.unsavedPix(OBJ, F1), pixD);
+  const firstArgs = h.calls("studio_apply")[0].args;
+  let selected = id64(0x10);
+  h.ipc.on("studio_apply", (a) => { selected = String(JSON.parse(String(a.body)).cid); return docView([{ id: F1, cid: selected, bytes: pixA.length }]); });
+  h.session.retry(aId);
+  await h.sync();
+  const applied = h.calls("studio_apply").slice(1).map((c) => String(JSON.parse(String(c.args.body)).cid));
+  assert.deepEqual(h.calls("studio_apply")[1].args, firstArgs, "the original request retries identically");
+  assert.deepEqual(applied, [cidOf(pixA), cidOf(pixB), cidOf(pixC), cidOf(pixD)]);
+  assert.equal(h.session.doc?.model?.frames[0].cid, cidOf(pixD), "the newest drawing is what the frame ends up showing");
+  assert.equal(h.session.saves.length, 0);
+});
+
+test("FETCH-003: every consumer's declared length is checked, through a shared job and through the cache", async () => {
+  const h = await harness();
+  const pix = pixBytes(8);
+  const cid = id64(0x88);
+  const N = pix.length;
+  h.ipc.on("studio_list", () => ordinaryView(indexContent()));
+  h.ipc.on("studio_read", () => docView([{ id: F1, cid, bytes: N }]));
+  // The backend answers with the real N bytes whatever the caller declared; the adapter's
+  // exact-length check then refuses the answer for the caller that declared N-1.
+  h.ipc.on("request_blob_bounded", () => ({ bytes_b64: b64(pix), bytes: N }));
+  h.session.setScope({ server: SERVER, channel: CHANNEL });
+  h.session.open(OBJ);
+  await h.sync();
+  const asked = h.calls("request_blob_bounded").length;
+  h.session.want(cid, N, 0);
+  const wrong = h.session.fetchNow(cid, N - 1).then(() => "resolved", (e: unknown) => e);
+  await h.sync();
+  assert.equal(h.calls("request_blob_bounded").length - asked, 2, "different declarations do not share one answer");
+  assert.deepEqual(h.calls("request_blob_bounded").slice(asked).map((c) => c.args.maxBytes).sort(), [N - 1, N]);
+  assert.match(String((await wrong as Error).message ?? wrong), /declared size/, "the N-1 consumer is refused, not handed N bytes");
+  assert.deepEqual(h.session.blob(cid, N), pix);
+  assert.equal(h.session.blob(cid, N - 1), undefined, "held bytes of another size are not this record's pixels");
+  assert.equal(h.session.blobState(cid, N), "held");
+  assert.equal(h.session.blobState(cid, N - 1), "invalid");
+  assert.match(h.session.blobProblem(cid, N - 1), /not the/);
+  // Through the cache: an action with the wrong declaration is refused, never handed N bytes.
+  await assert.rejects(h.session.fetchNow(cid, N - 1), /not the/);
+  assert.deepEqual(await h.session.fetchNow(cid, N), pix);
+  const before = h.calls("request_blob_bounded").length;
+  h.session.want(cid, N - 1, 0);
+  await h.sync();
+  assert.equal(h.calls("request_blob_bounded").length, before, "a known-wrong declaration is not re-asked");
 });

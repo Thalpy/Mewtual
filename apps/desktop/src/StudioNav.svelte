@@ -32,6 +32,9 @@
   const indexError = $derived.by(() => { void studio.rev; return session.indexError; });
   const loading = $derived.by(() => { void studio.rev; return session.indexLoading && !session.index; });
   const pendingCreates = $derived.by(() => { void studio.rev; return session.saves.filter((s) => s.kind === "create"); });
+  // Read through the revision, and first in the expression below: a non-reactive read that
+  // short-circuits on the first render would leave the template never subscribed to the rest.
+  const hasScope = $derived.by(() => { void studio.rev; return session.scope !== null; });
 
   function known(id: string): KnownView | null {
     void studio.rev;
@@ -143,7 +146,7 @@
 {#if model?.deleted.length}
   <p class="muted small studio-deleted">{model.deleted.length} deleted {model.deleted.length === 1 ? "entry is" : "entries are"} kept in history</p>
 {/if}
-<button type="button" class="ghost small ctx-action studio-new" disabled={!session.scope || !indexView} onclick={newFlipnote}>+ new flipnote</button>
+<button type="button" class="ghost small ctx-action studio-new" disabled={!indexView || !hasScope} onclick={newFlipnote}>+ new flipnote</button>
 <p class="muted small">Any member can edit. The owner settles history.</p>
 
 <style>

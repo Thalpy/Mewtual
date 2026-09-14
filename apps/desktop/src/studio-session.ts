@@ -90,10 +90,8 @@ type SaveBase = {
   /// Set when a later read of the same document carries a different epoch than the frozen
   /// request: the backend decides on retry; the member may instead re-author explicitly.
   epochChanged: boolean;
-  /// Resolved once, when the record lands, goes uncertain or is discarded (used by callers
-  /// that await one save, such as the recovery walk).
-  settle?: (outcome: SaveOutcome) => void;
 };
+/// What a surface sees of a save: an immutable snapshot, replaced whenever the queue changes.
 export type SaveRecord = SaveBase &
   (
     | { kind: "create"; request: CreateRequest; object: Hex32 }
@@ -102,6 +100,8 @@ export type SaveRecord = SaveBase &
     | { kind: "applyIndex"; request: ApplyIndexRequest; op: IndexOp; object: Hex32 }
     | { kind: "recoveryApply"; object: Hex32 | null; edit: RecoveryApplyEdit; applied: RecoveryApplied | null }
   );
+/// The queue's own mutable entry, with the callback of whoever awaits its first outcome.
+type SaveEntry = SaveRecord & { settle?: (outcome: SaveOutcome) => void };
 
 /// held: decoded bytes are cached. fetching/queued: a job for this scope exists. unavailable:
 /// the backend answered null. failed: the request itself failed (busy, transport); retryable.
@@ -190,7 +190,10 @@ export class StudioSession {
   /// the member moves to another flipnote. Bounded; the open document is always current.
   private readonly views = new Map<Hex32, { view: FlipnoteView; model: FlipnoteModel }>();
 
-  readonly saves: SaveRecord[] = [];
+  /// Mutable queue entries (with their settle callbacks); never handed to a surface.
+  private readonly records: SaveEntry[] = [];
+  /// Immutable snapshots of the queue, rebuilt on every change: what the surfaces read.
+  saves: SaveRecord[] = [];
   private saveSeq = 0;
   /// The token of the worker that owns the save lane right now (0 = none). Only that worker
   /// may release it; a worker from a cleared scope finds a different token and stands down.
@@ -250,6 +253,9 @@ export class StudioSession {
     return () => this.listeners.delete(fn);
   }
   private notify(): void {
+    // The queue entries are mutated in place (their identity is what a retry resends); the
+    // surfaces get fresh copies so a keyed row or a `find` never holds a stale object.
+    this.saves = this.records.map(({ settle: _settle, ...rest }) => rest as SaveRecord);
     for (const fn of this.listeners) fn();
   }
 
@@ -285,8 +291,8 @@ export class StudioSession {
     this.doc = null;
     this.known.clear();
     this.views.clear();
-    for (const s of this.saves) s.settle?.("discarded");
-    this.saves.length = 0;
+    for (const s of this.records) s.settle?.("discarded");
+    this.records.length = 0;
     this.saving = 0;
     this.receivePaused = false;
     // Queued jobs are dropped; started ones keep their slot until they actually finish.
@@ -456,7 +462,7 @@ export class StudioSession {
 
   /// A read carrying a different epoch than an uncertain save used marks that save.
   private noteEpoch(object: Hex32 | null, epochId: Hex32): void {
-    for (const s of this.saves) {
+    for (const s of this.records) {
       if (s.status !== "uncertain") continue;
       const used = usedEpoch(s);
       const scope = s.kind === "applyIndex" ? null : s.object;
@@ -487,10 +493,14 @@ export class StudioSession {
   }
 
   saveFrame(object: Hex32, frame: Hex32, pix: Uint8Array): void {
-    // A newer raster for the same frame replaces an earlier record that has no apply identity
-    // yet (nothing of it can have committed); one with an identity keeps it and the newer
-    // pixels queue behind it in the same lane.
-    const prior = this.saves.find((s) => s.kind === "frame" && s.object === object && s.frame === frame && s.status !== "inflight" && s.apply === null);
+    // A newer raster coalesces only into the lane's TAIL when that is a save of this frame with
+    // no apply identity yet (nothing of it can have committed). Anything else queued after it
+    // in this lane (another frame, a chosen conflict value, an insert) keeps its place: the new
+    // pixels are appended behind it, never moved ahead of it.
+    let tail: SaveEntry | undefined;
+    for (const s of this.records) if (laneOf(s) === object) tail = s;
+    // A forced record is an explicit conflict choice: never fold new strokes into it.
+    const prior = tail && tail.kind === "frame" && tail.frame === frame && !tail.force && tail.status !== "inflight" && tail.apply === null ? tail : undefined;
     if (prior && prior.kind === "frame") {
       prior.pix = pix;
       prior.published = null;
@@ -558,9 +568,9 @@ export class StudioSession {
     this.enqueue({ kind: "applyIndex", object, op, label, request: { epochId: ep.epochId, nonce: this.newId(), body: canonicalJson(op) } });
   }
 
-  private enqueue(rec: NewSave): SaveRecord {
-    const record = { ...rec, id: ++this.saveSeq, status: "queued", attempts: 0, error: "", epochChanged: false } as SaveRecord;
-    this.saves.push(record);
+  private enqueue(rec: NewSave): SaveEntry {
+    const record = { ...rec, id: ++this.saveSeq, status: "queued", attempts: 0, error: "", epochChanged: false } as SaveEntry;
+    this.records.push(record);
     this.notify();
     this.pump();
     return record;
@@ -568,7 +578,7 @@ export class StudioSession {
 
   /// Resend the same complete request.
   retry(id: number): void {
-    const s = this.saves.find((r) => r.id === id);
+    const s = this.records.find((r) => r.id === id);
     if (!s || s.status !== "uncertain") return;
     s.status = "queued";
     s.error = "";
@@ -579,7 +589,7 @@ export class StudioSession {
   /// Explicit re-authoring: a NEW operation with a fresh nonce against the current epoch. Never
   /// automatic; the local save under the old identity may already have committed.
   reauthor(id: number): void {
-    const s = this.saves.find((r) => r.id === id);
+    const s = this.records.find((r) => r.id === id);
     if (!s || s.status !== "uncertain") return;
     if (s.kind === "frame") s.apply = null;
     else if (s.kind === "apply") {
@@ -601,9 +611,9 @@ export class StudioSession {
   /// Drop a save on purpose. For a frame save this discards its unsaved pixels; the saves that
   /// waited behind it in the same lane may then run.
   discard(id: number): void {
-    const at = this.saves.findIndex((r) => r.id === id && r.status !== "inflight");
+    const at = this.records.findIndex((r) => r.id === id && r.status !== "inflight");
     if (at < 0) return;
-    const [s] = this.saves.splice(at, 1);
+    const [s] = this.records.splice(at, 1);
     this.settleRecord(s, "discarded");
     this.notify();
     this.pump();
@@ -612,8 +622,8 @@ export class StudioSession {
   /// The newest unsaved pixels for a frame, so an editor reopens what the member drew rather
   /// than the last saved projection.
   unsavedPix(object: Hex32, frame: Hex32): Uint8Array | null {
-    for (let i = this.saves.length - 1; i >= 0; i--) {
-      const s = this.saves[i];
+    for (let i = this.records.length - 1; i >= 0; i--) {
+      const s = this.records[i];
       if (s.kind === "frame" && s.object === object && s.frame === frame) return s.pix;
     }
     return null;
@@ -625,10 +635,10 @@ export class StudioSession {
 
   /// Queued saves that cannot run until this uncertain save is retried or discarded.
   blockedBehind(id: number): number {
-    const s = this.saves.find((r) => r.id === id);
+    const s = this.records.find((r) => r.id === id);
     if (!s || s.status !== "uncertain") return 0;
     const lane = laneOf(s);
-    return this.saves.filter((r) => r.id !== id && r.status === "queued" && laneOf(r) === lane).length;
+    return this.records.filter((r) => r.id !== id && r.status === "queued" && laneOf(r) === lane).length;
   }
 
   /// One save at a time, in queue order within each lane (a document, or the Index). An
@@ -636,8 +646,8 @@ export class StudioSession {
   private pump(): void {
     if (this.saving) return;
     const blocked = new Set<string>();
-    let next: SaveRecord | undefined;
-    for (const s of this.saves) {
+    let next: SaveEntry | undefined;
+    for (const s of this.records) {
       const lane = laneOf(s);
       if (blocked.has(lane)) continue;
       if (s.status === "queued") { next = s; break; }
@@ -653,7 +663,7 @@ export class StudioSession {
     });
   }
 
-  private async run(s: SaveRecord): Promise<void> {
+  private async run(s: SaveEntry): Promise<void> {
     const gen = this.generation;
     const target = this.target();
     s.status = "inflight";
@@ -737,13 +747,13 @@ export class StudioSession {
     this.views.set(object, { view, model });
     while (this.views.size > RECENT_VIEWS) this.views.delete(this.views.keys().next().value as Hex32);
   }
-  private finish(s: SaveRecord): void {
-    const at = this.saves.indexOf(s);
-    if (at >= 0) this.saves.splice(at, 1);
+  private finish(s: SaveEntry): void {
+    const at = this.records.indexOf(s);
+    if (at >= 0) this.records.splice(at, 1);
     this.settleRecord(s, "landed");
     this.notify();
   }
-  private settleRecord(s: SaveRecord, outcome: SaveOutcome): void {
+  private settleRecord(s: SaveEntry, outcome: SaveOutcome): void {
     const settle = s.settle;
     s.settle = undefined;
     settle?.(outcome);
@@ -751,55 +761,82 @@ export class StudioSession {
 
   // --- Blobs ---------------------------------------------------------------------------------
 
-  blob(cid: Hex64): Uint8Array | undefined {
+  /// Held bytes for a cid, only when they are the size the caller's record declares. A record
+  /// whose declaration disagrees with what this cid actually holds is not shown as that record.
+  blob(cid: Hex64, bytes?: number): Uint8Array | undefined {
     const b = this.blobs.get(cid);
-    if (b) { this.blobs.delete(cid); this.blobs.set(cid, b); } // LRU touch
+    if (!b) return undefined;
+    if (bytes !== undefined && b.length !== bytes) return undefined;
+    this.blobs.delete(cid);
+    this.blobs.set(cid, b); // LRU touch
     return b;
   }
-  blobState(cid: Hex64): BlobState {
-    if (this.blobs.has(cid)) return "held";
-    const job = this.jobs.get(`${this.generation}:${cid}`);
+  /// State for one record's (cid, declared bytes). Availability is per cid; a content rejection
+  /// is per declaration, because another record may declare this cid correctly.
+  blobState(cid: Hex64, bytes?: number): BlobState {
+    const held = this.blobs.get(cid);
+    if (held) return bytes === undefined || held.length === bytes ? "held" : "invalid";
+    const job = bytes === undefined ? this.jobFor(cid) : this.jobs.get(jobKey(this.generation, cid, bytes));
     if (job) return job.started ? "fetching" : "queued";
-    if (this.invalid.has(cid)) return "invalid";
+    if (this.invalidFor(cid, bytes) !== undefined) return "invalid";
     if (this.failed.has(cid)) return "failed";
     if (this.unavailable.has(cid)) return "unavailable";
     return "idle";
   }
-  blobProblem(cid: Hex64): string {
-    return this.invalid.get(cid) ?? this.failed.get(cid) ?? (this.unavailable.has(cid) ? "not available from any reachable member yet" : "");
+  blobProblem(cid: Hex64, bytes?: number): string {
+    const held = this.blobs.get(cid);
+    if (held && bytes !== undefined && held.length !== bytes) return `held pixels are ${held.length} bytes, not the ${bytes} this record declares`;
+    return this.invalidFor(cid, bytes) ?? this.failed.get(cid) ?? (this.unavailable.has(cid) ? "not available from any reachable member yet" : "");
+  }
+  /// The rejection recorded for this declaration, or for any declaration of the cid when the
+  /// caller has none to check against.
+  private invalidFor(cid: Hex64, bytes: number | undefined): string | undefined {
+    if (bytes !== undefined) return this.invalid.get(contentKey(cid, bytes));
+    for (const [key, why] of this.invalid) if (key.startsWith(`${cid}:`)) return why;
+    return undefined;
+  }
+  private jobFor(cid: Hex64): BlobJob | undefined {
+    for (const job of this.jobs.values()) if (job.cid === cid && job.generation === this.generation) return job;
+    return undefined;
   }
 
   /// Ask for a frame's pixels. Lower priority runs first (0 = the frame on screen). A cid that
-  /// answered unavailable, failed or was rejected is not asked again until an invalidation or
-  /// an explicit retry clears it.
+  /// answered unavailable or failed, or a declaration that was rejected, is not asked again
+  /// until an invalidation or an explicit retry clears it.
   want(cid: Hex64, bytes: number, priority = 2): void {
-    if (this.unavailable.has(cid) || this.failed.has(cid) || this.invalid.has(cid)) return;
+    if (this.unavailable.has(cid) || this.failed.has(cid) || this.invalid.has(contentKey(cid, bytes))) return;
     this.scheduleFetch(cid, bytes, priority);
   }
 
-  /// Explicit retry from the member: clears every hold on this cid and asks first.
+  /// Explicit retry from the member: clears every hold on this record and asks first.
   retryBlob(cid: Hex64, bytes: number): void {
     this.unavailable.delete(cid);
     this.failed.delete(cid);
-    this.invalid.delete(cid);
+    this.invalid.delete(contentKey(cid, bytes));
     this.scheduleFetch(cid, bytes, 0);
   }
 
   /// One bounded fetch for an action that needs the bytes now: it takes the front of the same
-  /// queue and the same in-flight slots, and shares an existing job for the cid.
+  /// queue and the same in-flight slots, and shares an existing job for the same (cid, bytes).
+  /// Held bytes of another size than declared are a rejection, not an answer.
   fetchNow(cid: Hex64, bytes: number): Promise<Uint8Array | null> {
     const held = this.blobs.get(cid);
-    if (held) return Promise.resolve(held);
+    if (held) {
+      if (held.length === bytes) return Promise.resolve(held);
+      return Promise.reject(new StudioNativeError(`held pixels are ${held.length} bytes, not the ${bytes} declared`));
+    }
     this.unavailable.delete(cid);
     this.failed.delete(cid);
     const job = this.scheduleFetch(cid, bytes, -1);
-    if (!job) return Promise.resolve(this.blobs.get(cid) ?? null);
+    if (!job) return Promise.resolve(null);
     return new Promise((resolve, reject) => { job.waiters.push({ resolve, reject }); });
   }
 
+  /// One job per (scope, cid, declared bytes): two records that declare one cid differently get
+  /// two bounded requests, each checked against its own declaration, never a shared answer.
   private scheduleFetch(cid: Hex64, bytes: number, priority: number): BlobJob | null {
     if (this.blobs.has(cid) || !this.scope) return null;
-    const key = `${this.generation}:${cid}`;
+    const key = jobKey(this.generation, cid, bytes);
     let job = this.jobs.get(key);
     if (job) {
       if (!job.started && priority < job.priority) job.priority = priority;
@@ -845,7 +882,7 @@ export class StudioSession {
       if (this.current(job.generation)) {
         // Length/base64/PIX1 failures are about the content named by this cid; anything else
         // (busy, cancelled, transport) is about this attempt and may succeed next time.
-        if (e instanceof StudioNativeError || e instanceof PixError) this.invalid.set(job.cid, reason(e));
+        if (e instanceof StudioNativeError || e instanceof PixError) this.invalid.set(contentKey(job.cid, job.bytes), reason(e));
         else this.failed.set(job.cid, reason(e));
       }
     } finally {
@@ -865,7 +902,7 @@ export class StudioSession {
     if (this.blobs.has(cid)) return;
     this.unavailable.delete(cid);
     this.failed.delete(cid);
-    this.invalid.delete(cid);
+    this.invalid.delete(contentKey(cid, bytes.length));
     this.blobs.set(cid, bytes);
     this.cacheBytes += bytes.length;
     while ((this.cacheBytes > this.cacheBytesCap || this.blobs.size > BLOB_CACHE_ENTRIES) && this.blobs.size > 1) {
@@ -1088,6 +1125,9 @@ export class StudioSession {
 function laneOf(s: SaveRecord): string {
   return s.kind === "applyIndex" ? "index" : s.object ?? "index";
 }
+
+const jobKey = (generation: number, cid: Hex64, bytes: number) => `${generation}:${cid}:${bytes}`;
+const contentKey = (cid: Hex64, bytes: number) => `${cid}:${bytes}`;
 
 function usedEpoch(s: SaveRecord): Hex32 | null {
   switch (s.kind) {
