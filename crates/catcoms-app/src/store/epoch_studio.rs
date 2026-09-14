@@ -21,6 +21,7 @@ use std::sync::Arc;
 
 mod adoption;
 mod discovery;
+mod overlay;
 mod preparation;
 mod recovery_disposition;
 mod registry;

@@ -52,7 +52,7 @@ impl StudioSettlementPlan {
         Ok(self.source_version == source_version(source)?)
     }
 }
-fn source_version(source: &mut StudioEpoch) -> Result<[u8; 32], ReplError> {
+pub(super) fn source_version(source: &mut StudioEpoch) -> Result<[u8; 32], ReplError> {
     let mut hash = blake3::Hasher::new_derive_key("catcoms/studio-settlement-source/v1");
     hash.update(&source.snapshot()?);
     Ok(*hash.finalize().as_bytes())

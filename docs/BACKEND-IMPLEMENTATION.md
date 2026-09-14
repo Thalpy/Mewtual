@@ -188,10 +188,13 @@ work blocks. Three remain: (2) durable Closing overlays and repeated-owner tenur
 signed fault repair, and (4) combined Gate 4 acceptance. These are unequal work areas, not a
 percentage or time estimate.
 
-The next bounded core/store proposal is [durable Closing overlay acceptance](GATE4-CLOSING-OVERLAY-REVIEW.md).
-It distinguishes an explicitly saved local branch from a failed ordinary Save's pending intent,
-retains the existing storage ceilings and defines restart/retry evidence. It awaits adversarial
-design review; no overlay command, automatic replay or new tenure authority is implemented.
+The [Closing overlay foundation design](GATE4-CLOSING-OVERLAY-REVIEW.md) passed user review at
+`d576af2` on 2026-09-14 with no required changes. Its core/store implementation now distinguishes
+explicit local acceptance from an ordinary failed Save, preserves sequence and timestamps across
+restart, shares existing storage/reference accounting, and holds annotated entries out of ordinary
+Apply and retirement. The 131 affected local tests, Clippy and three isolated mutations pass;
+implementation review is pending. No native overlay command,
+overlay replay/disposition, provisional-preview writes or new tenure authority is enabled.
 
 **Combined scheduling checkpoint `6b71d96` (2026-09-13; user review PASS).** The three-member actor
 fixture retains three preview reservations: three real deliveries, or two deliveries plus a

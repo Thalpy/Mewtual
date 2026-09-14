@@ -32,6 +32,32 @@ fn intent_retirement_shrink_still_needs_physical_replacement_headroom() {
 }
 
 impl ServerStore {
+    /// Test the shared writer's two dispositions with the same actual recorded envelopes.
+    /// This bypasses only plan selection; production callers remain the typed coordinators.
+    #[cfg(test)]
+    #[allow(clippy::too_many_arguments)]
+    pub(in crate::store) fn retire_overlay_mixture_for_test(
+        &mut self,
+        server: u64,
+        document: &LogicalDocument,
+        included: &BTreeMap<[u8; 32], LocalIntent>,
+        manual: bool,
+        rng: &mut impl CryptoRngCore,
+        budget: &mut EpochStorageBudget,
+        intents: &mut EpochIntentBudget,
+    ) -> Result<(), AppError> {
+        self.retire_included_with_io(
+            server,
+            document,
+            included,
+            manual,
+            rng,
+            budget,
+            intents,
+            atomic_write,
+            sync_intent,
+        )
+    }
     /// Store-internal ordering seam, not an arbitrary-id removal API. The caller must keep the
     /// exclusive store borrow from source verification through successor selection. A retry of
     /// an already installed successor MUST skip this step: its intents belong to newer work.
@@ -146,7 +172,13 @@ impl ServerStore {
                 }));
             }
         }
-        let ids = included.keys().copied().collect();
+        // Foundation hold: only ordinary entries may retire, even in a mixed disposition.
+        // Retain complete annotated envelopes and their ordering/base evidence unconditionally.
+        let ids = included
+            .keys()
+            .filter(|id| !state.is_overlay(id))
+            .copied()
+            .collect();
         let removed = if manual_recovery {
             state.ledger.remove_to_manual_recovery(&ids)
         } else {

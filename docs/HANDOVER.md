@@ -8,7 +8,69 @@ the protocol- vs honest-client-enforced boundary and the hardening backlog.
 [`MESSAGE-FLOW.md`](MESSAGE-FLOW.md) traces one message end to end (send, gossip, catch-up)
 and ranks the live hazards in that path.
 
-## Status (latest entry: 2026-09-13)
+## Status (latest entry: 2026-09-14)
+
+- **Closing overlay design accepted; core/store implementation (2026-09-14).**
+  The user accepts `d576af2e1fbe757b4fb6bcebb6326dd1a445b2f0` against `0b6e870`, with no
+  actionable design defect or required change. The review inspected the proposal and existing
+  source; it did not execute overlay tests. Its approval covers this internal foundation only.
+
+  `studio/overlay.rs` now supplies a separate checked Closing basis and local draft type. The
+  basis derives from a real typed settlement plan and source fingerprint. Draft reconstruction
+  reuses typed writers/validators, a private data graph, exact preflight, saved acceptance order
+  and original timestamps. It creates no editable epoch, signed log, receipt or publication permit.
+  Explicit Server Rust adapters obtain tenure from the actual sync instance; callers cannot put
+  tenure in the request. The store rechecks the actual source before first acceptance/append.
+
+  The shared `.intents` record gains an optional versioned local extension. Ordinary records and
+  the core ledger retain their original encodings. Accepted annotations bind full envelope hashes
+  to original ledger entries; failed ordinary Save cannot acquire an annotation. One branch,
+  256 entries, a 2 MiB seed and 64 KiB metadata must fit the existing complete-record and physical
+  budgets together. Both ordinary and overlay writes now use the same persistence helper and
+  sync-only exact-retry path. Accepted retries survive source/tenure changes after current member,
+  target, basis and full-envelope checks; new appends still require eligible Closing provenance.
+
+  Ordinary Apply refuses annotated operation IDs. Receipt and manual retirement retain them even
+  in mixed selections while ordinary covered entries can retire. Inventory includes base-only
+  pixels and all pending-operation references, and undecodable metadata prevents a successful
+  reference scan. The seed-reference regression removes the independent canonical fixture copy
+  and reopens the vault to isolate the base's contribution; it does not claim a complete runtime
+  reclamation/eviction scenario. The count fixture assembles 256 individually typed-admitted
+  annotations, requires full production decoding, and checks refusal of operation 257.
+
+  Ten new core/store regressions pass on the restored final source (123.37s), including both Index/Flipnote restart, uncertain
+  writes, exact retries after installation at the physical cap, deliberately reversed nonce-hash
+  order, codec/annotation rejection, both mixed retirement modes and orphan/replacement accounting.
+  The source/channel/Fault checks pass as part of that run. Existing intent tests pass (15,
+  8.34s), Studio core tests pass (98, 162.58s), and rotation store tests including the exhaustive
+  write/crash/restart case pass (8, 386.94s): 131 distinct affected tests in total.
+  Local Rust 1.89 commands use `--locked -j 4`; app tests also use
+  `--config 'profile.test.package.catcoms-app.debug=0'`, `CARGO_INCREMENTAL=0` and Windows
+  `_LINK_=/DEBUG:NONE`. The filters are `studio_overlay_store_`, `store::epoch_intents`,
+  `studio::` (replication crate), and `studio_rotation_store_`, each with `--test-threads=4`.
+  `cargo fmt --all -- --check`, `git diff --check`, and core/app library and test Clippy pass;
+  Clippy uses `-- -D warnings` (36.94s).
+  `.github/scripts/check-studio-overlay-mutations.py` checks ordinary Apply admission,
+  sequence validation and base-only CID enumeration independently, requires the intended one-test
+  assertion failure, restores bytes and reruns each regression. The dedicated `studio-overlay.yml`
+  workflow publishes those logs as an artifact. Locally all three isolated mutations fail at
+  their intended assertion with exactly one executed failing test (24.60s / 18.87s / 19.46s).
+  Source bytes are restored, then the respective regressions pass (50.63s / 55.63s / 44.22s).
+  Local logs are in ignored `logs/gate4-overlay-*.log`; GitHub execution is pending publication.
+
+  The repository-wide `scripts/check-no-ambient.sh` fails on six verified pre-existing findings:
+  `apps/desktop/src-tauri/src/media_decode.rs:333,426,444,504`,
+  `crates/catcoms-app/src/studio_exchange/tests/scheduling.rs:150`, and
+  `crates/catcoms-app/tests/support/studio_preview.rs:329`. Each reported call is present in the
+  baseline HEAD, outside this change. No full-repository green or full Gate 4 acceptance is claimed.
+
+  No frontend/native overlay command, automatic overlay replay/disposition, provisional-preview
+  write or new historical-tenure authority is enabled. The UI keeps Closing/Fault/awaiting-tenure
+  work unsaved and visible. Next integration must supply bounded actor/native preparation and a
+  complete replay/manual lifecycle before exposing durable overlay Save. Repeated-owner tenure,
+  signed repair and full Gate 4 acceptance remain open. This implementation awaits user
+  adversarial review; the design PASS does not accept its code. Frontend commits through `ac23429` are
+  preserved; this backend checkpoint changes no `apps/desktop/src` files.
 
 - **Combined scheduling accepted; Closing overlay design checkpoint (2026-09-13).**
   The user's review of `134394e...6b71d96`, with documentation at `a40909e`, passes pacing,

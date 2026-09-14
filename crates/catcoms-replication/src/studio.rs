@@ -29,6 +29,10 @@ mod snapshot;
 pub use recovery::{StudioProjection, StudioRecovery};
 mod admission;
 pub use admission::StudioTarget;
+mod overlay;
+pub use overlay::{
+    StudioClosingOverlayBasis, StudioLocalDraft, StudioOverlay, MAX_STUDIO_OVERLAY_OPS,
+};
 mod epoch;
 pub use epoch::catchup;
 pub use epoch::{

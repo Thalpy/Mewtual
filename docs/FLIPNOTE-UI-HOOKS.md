@@ -1,6 +1,6 @@
 # Flipnote UI hook guide
 
-Last checked: 2026-09-13. Combined scheduling at `6b71d96` now passes user review without
+Last checked: 2026-09-14. Combined scheduling at `6b71d96` now passes user review without
 required changes. Block 1 of the four remaining Gate 4 work areas is accepted; three remain.
 Actor scheduling and native preview implementation passed review
 at `a89bde6`. The user's re-review of `a89bde6...134394e` closes NATIVE-TEST-001 with no further
@@ -57,8 +57,9 @@ Both scheduler changes have isolated mutation failures and restored passes. User
 review accepts this bounded checkpoint with no required corrections. One-second provisional-head
 pacing and preservation of queued retries across repeated Reads change no native commands/result shapes. Durable Closing overlays/repeated
 tenure, signed repair and full acceptance remain.
-The next [Closing overlay proposal](GATE4-CLOSING-OVERLAY-REVIEW.md) awaits design review. It is
-an internal core/store foundation, not a callable command. Continue to disable durable overlay
+The [Closing overlay design](GATE4-CLOSING-OVERLAY-REVIEW.md) passed user review at `d576af2`
+on 2026-09-14. Its internal core/store implementation passes 131 affected tests and awaits
+implementation review. It supplies no native command. Continue to disable durable overlay
 Save in Closing/Fault and awaiting-tenure previews; preserve unsaved editor work without claiming
 it is vault-saved. Its later actor/native integration will update this guide with actual commands.
 The accepted foundations and earlier review closures are recorded in
@@ -260,7 +261,7 @@ installation; the UI should not implement a second catch-up scheduler or derive 
 | Settlement chip / rotation progress | `settlement-changed` invalidates the actual phase/recovery listing. `open` does **not** mean the current edits are receipted. Current responses always say `provisional:true`. Do not synthesize receipt author/time or “settled” from epoch alone. |
 | Current owner has not confirmed history | Native Read/List return the distinct `awaitingTenureReceipt: true` preview documented above. Actor/native implementation and NATIVE-TEST-001 passed review; combined scheduling at `6b71d96` is now accepted. The frontend adapter handles this read-only result; live UI acceptance remains separate. |
 | History fault / repair progress | Actual `phase:"fault"` and `fault` invalidations are available; signed repair has no actor/native command or `repairing` event yet. Restore/Copy saves ordinary content in an Open target and cannot clear Fault. Historical Read/Export remain available. |
-| Local overlay while rotating | Preserve unsaved editor work. The [core/store overlay proposal](GATE4-CLOSING-OVERLAY-REVIEW.md) awaits design review; no durable overlay or replay command exists. Shared Apply refuses Closing/Fault. |
+| Local overlay while rotating | Preserve unsaved editor work. The [core/store overlay design](GATE4-CLOSING-OVERLAY-REVIEW.md) passed review; its implemented foundation passes local tests and awaits implementation review. No native durable overlay or replay command exists. Shared Apply refuses Closing/Fault. |
 | Recovery rail: Restore / Copy / Export | List/inspect/backup export, per-item Restore/Copy and conservative own-intent replay are connected. Unsafe replay is manual recovery, never settlement. Final Gate 4 acceptance remains pending; backup export is not `.pixa`. |
 | Eviction warning / countdown | Use the listing's actual warning pair/deadline and `studio_recovery_acknowledge`. Refresh after the action and matching `settlement-changed` events. |
 | Claims, Ask, Pass, countdown | Pending Gate 5. Local fixture claims are not peer claims and never locks. |

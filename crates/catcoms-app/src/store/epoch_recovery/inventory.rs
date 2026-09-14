@@ -629,6 +629,12 @@ impl EpochStorageScan<'_> {
                                     &plain, scope, &document,
                                 )?;
                                 if let Some((_, refs)) = self.references.as_mut() {
+                                    if let Some(overlay) = state.overlay() {
+                                        refs.add(
+                                            &document.server_id,
+                                            overlay.base_blob_cids().map_err(invalid)?,
+                                        )?;
+                                    }
                                     if matches!(
                                         document.doc_type,
                                         DocType::StudioIndex | DocType::StudioObject

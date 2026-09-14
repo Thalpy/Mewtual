@@ -1,7 +1,13 @@
 # Gate 4: durable Closing overlay foundation
 
-Status: proposed for user adversarial design review, 2026-09-13. No overlay command or
-implementation is enabled by this document. The scheduling checkpoint `6b71d96`, with evidence
+Status: user design review PASS at `d576af2`, 2026-09-14, with no required design changes.
+The core/store implementation is complete for this foundation and awaits user implementation
+review; no native overlay command is enabled. The 131 affected local tests, Clippy and three
+isolated mutations pass as recorded in [HANDOVER](HANDOVER.md). The repository-wide ambient
+dependency check still reports six baseline findings; full-repository acceptance remains open.
+The review inspected source/design and did not execute overlay tests. Native exposure,
+replay/disposition, provisional-preview overlays and Gate 4 acceptance remain outside its verdict.
+The scheduling checkpoint `6b71d96`, with evidence
 at `a40909e`, has passed review without required changes.
 
 ## Problem and next checkpoint
@@ -108,7 +114,7 @@ Run through the existing exclusive store/server coordinator, with no network wai
 4. Prepare the ledger entry and its acceptance annotation in the same replacement plaintext,
    preflight all limits, then seal and atomically persist through the existing writer and sync
    barrier. Only successful durable completion returns a local-saved acknowledgement. No ordinary
-source, recovery, owner or Registry write accompanies this transaction.
+   source, recovery, owner or Registry write accompanies this transaction.
 5. A retry after uncertain post-rename completion reloads the exact authenticated record and
    syncs it and its parent, without requiring replacement headroom at the cap. Membership and
    vault/session checks still apply. If the matching accepted entry already exists, a now-changed

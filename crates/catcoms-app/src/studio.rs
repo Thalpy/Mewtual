@@ -11,6 +11,7 @@ pub use catcoms_replication::{studio as types, EpochPhase, RecoveryReason, Recov
 use catcoms_rt::{CryptoRngCore, MeshTransport};
 use tokio::sync::{oneshot, OwnedMutexGuard};
 
+mod overlay;
 mod preview;
 pub use preview::{StudioPreview, StudioPreviewDelivery, StudioRead};
 mod publication;

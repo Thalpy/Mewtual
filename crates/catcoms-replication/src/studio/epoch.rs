@@ -65,6 +65,27 @@ impl std::fmt::Debug for StudioEpoch {
     }
 }
 impl StudioEpoch {
+    /// Trusted observed-tenure caller only, just like settlement. This derives local draft
+    /// provenance from a real eligible Closing source; no draft bytes can mint this basis.
+    pub fn prepare_closing_overlay(
+        &mut self,
+        close: &crate::CloseRecord,
+        group: &ServerGroup,
+        tenure: u64,
+    ) -> Result<StudioClosingOverlayBasis, ReplError> {
+        if group.member_signature_key(&self.actor).is_none() {
+            return Err(ReplError::EpochAuthority);
+        }
+        let plan = self.prepare_settlement(close, group, tenure)?;
+        Ok(StudioClosingOverlayBasis::from_settlement(
+            self.target,
+            self.actor,
+            self.doc_id(),
+            settlement::source_version(self)?,
+            &plan,
+        ))
+    }
+
     pub fn new(
         group: &ServerGroup,
         target: StudioTarget,

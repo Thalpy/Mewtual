@@ -2011,6 +2011,37 @@ unready after errors/panics, with no guessed refunds. The token does not track o
 their metadata/admission and the sole complete per-server budget remain coordinator work.
 `IntentLedger::document()` exposes its full scope for the enclosing store decoder's equality check.
 
+#### Closing overlay foundation (Gate 4, no native command)
+
+The design passed user review at `d576af2` on 2026-09-14. The bounded implementation adds
+`Server::prepare_studio_closing_overlay` and `Server::save_studio_closing_overlay` as explicit
+Rust adapters under caller-owned exclusive Server/store custody. They obtain tenure from
+`ChannelSync::observed_owner_tenure_start`; request data cannot supply tenure. A checked
+`StudioClosingOverlayBasis` derives from the actual Closing source and its settlement plan.
+Save takes its fingerprint and a canonical domain operation; timestamps come from the runtime
+clock and are preserved on exact retries. The result is a separate `StudioLocalDraft`, never an
+ordinary epoch, a shared-operation publication result or receipt authority. No actor/native
+overlay command or automatic promotion/disposition is enabled by this foundation.
+
+`EpochIntentState::overlay()` exposes immutable acceptance metadata and `local_draft()` rebuilds
+the local projection. The existing ledger's encoding is unchanged. Its enclosing record is
+either the exact original scope/ledger form or that form followed by `u8(2)` and a length-prefixed
+overlay extension. The extension's version 1 encodes target kind/channel, local author, source
+physical ID/version, exact receipt/seed, next sequence and ordered accepted entries. Each entry
+binds operation ID, complete-envelope hash, sequence and original timestamp. The decoder requires
+matching complete ledger entries and canonical reconstruction; unknown/trailing forms reject.
+Older decoders fail closed on extended records. Restoring this data cannot mint a fresh basis.
+
+One branch, at most 256 overlay entries, a 2 MiB seed and 64 KiB metadata must fit together with
+the ledger inside the unchanged 5 MiB + 1024 plaintext record bound. Existing operation, physical
+intent and per-server content ceilings still apply, including replacement peaks and orphan
+temporaries. Inventory protects base-only pixels as well as every pending operation's references.
+Accepted retries can flush the exact final record at full capacity after the source advances,
+but still require current local membership and exact target/basis/envelope identity. New appends
+require the same eligible Closing source. Failed ordinary Saves are never upgraded into overlays.
+Ordinary Apply rejects annotated IDs, and both receipt/manual retirement hold annotated entries.
+See [the overlay review record](GATE4-CLOSING-OVERLAY-REVIEW.md) for remaining integration obligations.
+
 This is a persist-before-edit prerequisite, not live editing or automatic replay. The registry
 adapter below now invokes it; retirement still requires checkpoint/recovery persistence and no
 actor/network path invokes these adapters yet.

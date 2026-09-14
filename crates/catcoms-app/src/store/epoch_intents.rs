@@ -25,12 +25,14 @@ pub(super) const MAX_SEALED_BYTES: usize = MAX_RECORD_BYTES + 40;
 /// full replacement copy at peak. Framing counts too; this is stricter than a payload-only cap.
 pub const MAX_VAULT_INTENT_BYTES: u64 = 64 * 1024 * 1024;
 
+pub(super) mod overlay;
 mod retirement;
 
 /// Read-only replay data, not authority to edit or proof an intent is final. There is deliberately
 /// no public constructor, mutation/retirement method, or content-bearing Debug implementation.
 pub struct EpochIntentState {
     ledger: IntentLedger,
+    overlay: Option<catcoms_replication::studio::StudioOverlay>,
 }
 
 impl std::fmt::Debug for EpochIntentState {
@@ -42,6 +44,20 @@ impl std::fmt::Debug for EpochIntentState {
 }
 
 impl EpochIntentState {
+    pub fn overlay(&self) -> Option<&catcoms_replication::studio::StudioOverlay> {
+        self.overlay.as_ref()
+    }
+    pub fn local_draft(
+        &self,
+    ) -> Result<Option<catcoms_replication::studio::StudioLocalDraft>, AppError> {
+        self.overlay
+            .as_ref()
+            .map(|o| o.read(&self.ledger).map_err(invalid))
+            .transpose()
+    }
+    pub(crate) fn is_overlay(&self, id: &[u8; 32]) -> bool {
+        self.overlay.as_ref().is_some_and(|o| o.contains(id))
+    }
     /// Stable, author-derived operation ids and their original replay instructions.
     pub fn pending(&self) -> impl ExactSizeIterator<Item = (&[u8; 32], &LocalIntent)> {
         self.ledger.pending()
@@ -52,7 +68,16 @@ impl EpochIntentState {
         let mut e = Encoder::new();
         e.put_bytes(scope).map_err(invalid)?;
         e.put_bytes(&ledger).map_err(invalid)?;
-        Ok(Zeroizing::new(e.finish()))
+        if let Some(overlay) = &self.overlay {
+            e.put_u8(2);
+            let extension = Zeroizing::new(overlay.encode_vault(&self.ledger).map_err(invalid)?);
+            e.put_bytes(&extension).map_err(invalid)?;
+        }
+        let bytes = e.finish();
+        if bytes.len() > MAX_RECORD_BYTES {
+            return Err(invalid("record exceeds its bound"));
+        }
+        Ok(Zeroizing::new(bytes))
     }
 
     pub(super) fn decode(
@@ -68,11 +93,25 @@ impl EpochIntentState {
             return Err(invalid("wrong sealed scope"));
         }
         let ledger = IntentLedger::decode(d.get_bytes().map_err(invalid)?).map_err(invalid)?;
+        let overlay = if d.is_empty() {
+            None
+        } else {
+            if d.get_u8().map_err(invalid)? != 2 {
+                return Err(invalid("unknown intent extension"));
+            }
+            Some(
+                catcoms_replication::studio::StudioOverlay::decode_vault(
+                    d.get_bytes().map_err(invalid)?,
+                    &ledger,
+                )
+                .map_err(invalid)?,
+            )
+        };
         d.finish().map_err(invalid)?;
         if ledger.document() != document {
             return Err(invalid("wrong ledger scope"));
         }
-        Ok(Self { ledger })
+        Ok(Self { ledger, overlay })
     }
 }
 
@@ -358,11 +397,45 @@ impl ServerStore {
             return Err(invalid(error));
         }
         let count = state.ledger.len();
+        if state.is_overlay(&operation.id(&device.device_id())) {
+            return Err(invalid("local overlay cannot enter ordinary Apply"));
+        }
         state
             .ledger
             .prepare(device.device_id(), operation)
             .map_err(invalid)?;
-        if state.ledger.len() == count {
+        let unchanged = state.ledger.len() == count;
+        self.write_prepared_intents(
+            server, document, state, old, unchanged, rng, budget, intents, writer, sync,
+        )
+    }
+
+    // Sole persistence path for ordinary intents and explicit overlay acceptance. Caller has
+    // authenticated the actual record and checked its inventory under this exclusive borrow.
+    #[allow(clippy::too_many_arguments)]
+    fn write_prepared_intents(
+        &mut self,
+        server: u64,
+        document: &LogicalDocument,
+        state: EpochIntentState,
+        old: Option<u64>,
+        unchanged: bool,
+        rng: &mut impl CryptoRngCore,
+        budget: &mut EpochStorageBudget,
+        intents: &mut EpochIntentBudget,
+        writer: impl FnOnce(&Path, &[u8]) -> Result<(), AppError>,
+        sync: impl FnOnce(&Path, u64) -> Result<(), AppError>,
+    ) -> Result<EpochIntentState, AppError> {
+        let scope = scope_bytes(server, document)?;
+        let storage_scope = StorageScope::new(server, &document.server_id).map_err(invalid)?;
+        let id = *blake3::hash(&scope).as_bytes();
+        let observed = old
+            .map(|n| storage_record(server, document, &scope, n))
+            .transpose()?;
+        budget
+            .verify_record(&storage_scope, id, observed)
+            .map_err(invalid)?;
+        if unchanged {
             // `prepare` compares all author/body bytes for an existing id. The loaded file is
             // therefore already the exact required ledger, possibly including newer intents.
             let record = observed.ok_or_else(|| invalid("missing retry record"))?;
@@ -436,6 +509,7 @@ impl ServerStore {
             None => Ok((
                 EpochIntentState {
                     ledger: IntentLedger::new(document.clone()),
+                    overlay: None,
                 },
                 None,
             )),

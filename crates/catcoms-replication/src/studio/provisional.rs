@@ -69,4 +69,9 @@ impl UnconfirmedStudioSeed {
     pub fn doc_id(&self) -> u128 {
         self.doc_id
     }
+
+    /// The caller receives only a private data graph, never a checkpoint/epoch capability.
+    pub(super) fn into_local_graph(self) -> (AutoCommit, StudioProjection) {
+        (self.doc, self.projection)
+    }
 }
