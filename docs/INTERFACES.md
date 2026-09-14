@@ -801,6 +801,11 @@ references include current alternatives, the verified seed-only projection, and 
 signed operation. Sequential replacements, hidden/deleted/over-cap frames and old checkpoint
 values still hold their pixels. No blob body is fetched or read during enumeration.
 
+Linked Studio sources additionally require authenticated handoff metadata matching numeric server,
+full group/type/logical scope and complete target. The scan collects these relationships from its
+existing bounded reads and checks them before installing references. A missing file, ordinary
+ledger or mismatched target leaves protection unknown and prevents pixel reclamation (HANDOFF-002).
+
 `CreativeReferences::{len,is_empty,for_group(&[u8])}` reports the full-group union across native
 numeric server aliases. This detached report is not a deletion permit; its Debug shows counts
 only. The current rail is 65,536 distinct `(group,CID)` entries. Overflow, incomplete traversal,

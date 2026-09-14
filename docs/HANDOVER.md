@@ -10,7 +10,7 @@ and ranks the live hazards in that path.
 
 ## Status (latest entry: 2026-09-14)
 
-- **HANDOFF-002 (P2): reference inventory correction in validation (2026-09-14).**
+- **HANDOFF-002 (P2): correction ready for adversarial re-review (2026-09-14).**
   The user's review of `dd2fbc0...85e7179` requests one implementation correction. The local
   source-to-intent dependency blocked ordinary reads, but reference inventory discarded it and
   could install an incomplete pixel pin set after the required metadata disappeared. The review
@@ -22,7 +22,34 @@ and ranks the live hazards in that path.
   regression retains an overlay-only CID through missing metadata, fresh reopen, failed scan and
   protected deletion, then restores the original metadata. Another regression supplies valid but
   mismatched metadata or an ordinary ledger. The isolated inventory-check mutation is added to
-  the existing handoff harness. Validation is running; HANDOFF-002 is not yet closed.
+  the existing handoff harness. Code head: `62f06d49667d1c2db407cb1def2aef3da2aa01fe`, pushed to
+  `Create-suite-2` / [PR #26](https://github.com/Thalpy/Mewtual/pull/26). Re-review base:
+  `85e71798b4197e8a7ef7d1361e4418bd7ecd32d4`. HANDOFF-002 awaits user closure.
+
+  Local validation at `62f06d4` passes **24 focused tests**: two new reference-dependency tests,
+  seven creative-reference/protected-deletion tests, 13 inventory tests and two Studio inventory
+  cache tests. The commands use `cargo test --locked -j 4 --config
+  profile.test.package.catcoms-app.debug=0 -p catcoms-app --lib` with filters
+  `studio_overlay_handoff_reference_scan`, `store::creative_references::`,
+  `store::epoch_recovery::inventory::` and `store::epoch_studio::tests::inventory_cache::`.
+  Logs: `logs/gate4-handoff-002-{regressions,protection,inventory,cache}.log`.
+  `cargo clippy --locked -j 4 -p catcoms-app --lib --tests -- -D warnings` and
+  `cargo fmt --all -- --check` also pass.
+
+  Local `python .github/scripts/check-studio-handoff-mutations.py reference-dependency` detects
+  exactly one executed failing test at the intended scan assertion. Ignoring only the final
+  dependency-check result produces `known=true, deletion=Ok(true), retained=false`: the protected
+  store actually deletes the overlay-only PIX bytes. The harness restores the source byte for
+  byte, then the same regression passes (one executed test). Evidence:
+  `logs/gate4-handoff-mutation-reference-dependency.log`,
+  `logs/gate4-handoff-restored-reference-dependency.log` and
+  `logs/gate4-handoff-002-mutation-check.log`.
+
+  The [handoff workflow for this code](https://github.com/Thalpy/Mewtual/actions/runs/34903404377)
+  and other GitHub checks are running at this evidence update; no new CI pass is claimed.
+  The existing workflow now includes 24 normal handoff tests and ten isolated mutations/restored
+  cases, and uploads their individual logs. Broader baseline CI failures remain recorded below.
+  Subsequent evidence-only commits do not change the tested correction code or harness.
 
   [The review note](GATE4-OVERLAY-HANDOFF-IMPLEMENTATION-REVIEW.md) and UI hooks track the correction.
   The existing crash matrix has one accepted operation; dependent multi-operation replay and

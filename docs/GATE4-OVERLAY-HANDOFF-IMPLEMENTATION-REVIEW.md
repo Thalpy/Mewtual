@@ -1,7 +1,9 @@
 # Gate 4: Closing overlay handoff implementation
 
 Status: user implementation review of `dd2fbc0...85e7179` requests changes for HANDOFF-002 (P2),
-2026-09-14. The scanner correction is implemented and validation is in progress. The reviewer
+2026-09-14. The scanner correction is pushed at `62f06d49667d1c2db407cb1def2aef3da2aa01fe`;
+24 focused local tests, Clippy, formatting and the isolated mutation/restored regression pass.
+GitHub checks are running; user re-review is pending. The reviewer
 found no additional defect in the transaction, exact signed evidence, live-owner eligibility,
 restart/write/publication fences, completed binding or retry floors. Implementation acceptance
 remains pending. HANDOFF-001 and the earlier findings stay closed; Gate 4 remains open.
@@ -31,6 +33,10 @@ The added mutation ignores only the final dependency-check result, retaining eve
 guard and the deletion wrapper. Its required failure is the missing-metadata scan assertion.
 
 Correction base: `85e71798b4197e8a7ef7d1361e4418bd7ecd32d4`. Results are recorded in HANDOVER.
+The executed local mutation produces a completed scan and actual protected deletion:
+`known=true, deletion=Ok(true), retained=false`. The intended assertion catches it; byte-exact
+restoration is followed by the passing regression. [The correction workflow](https://github.com/Thalpy/Mewtual/actions/runs/34903404377)
+is running and will publish individual mutation/restoration logs.
 
 ## Implemented boundary
 
@@ -143,7 +149,9 @@ including ordinary failed-Save NoEvidence, are unchanged.
 ```text
 Please re-review HANDOFF-002 (P2), the source-to-intent dependency in reference inventory.
 Base: 85e71798b4197e8a7ef7d1361e4418bd7ecd32d4
-Use the correction head and validation evidence in the latest docs/HANDOVER.md entry.
+Code head: 62f06d49667d1c2db407cb1def2aef3da2aa01fe
+Compare: https://github.com/Thalpy/Mewtual/compare/85e71798b4197e8a7ef7d1361e4418bd7ecd32d4...62f06d49667d1c2db407cb1def2aef3da2aa01fe
+Read the latest docs/HANDOVER.md entry for local validation and GitHub status.
 
 Check that linked-source requirements match actual authenticated handoff metadata by numeric
 server, full group/type/logical scope and complete target before reference protection is installed.

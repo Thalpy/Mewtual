@@ -16,8 +16,9 @@ The user accepts the corrected [atomic handoff design](GATE4-OVERLAY-HANDOFF-REV
 `dd2fbc0` and closes HANDOFF-001. The [core/store implementation](GATE4-OVERLAY-HANDOFF-IMPLEMENTATION-REVIEW.md)
 is pushed at `bf37cc4`; 202 local Studio tests and the dedicated handoff/mutation workflows pass.
 The user requests HANDOFF-002 (P2): reference inventory must honor required intent metadata before
-installing a complete pixel pin set. The correction is in validation; the other reviewed handoff
-boundaries have no additional finding. Exact evidence and status are in [HANDOVER](HANDOVER.md).
+installing a complete pixel pin set. The correction at `62f06d4` passes 24 focused local tests,
+Clippy and its isolated mutation/restored regression; GitHub checks and user re-review are pending.
+The other reviewed handoff boundaries have no additional finding. Evidence is in [HANDOVER](HANDOVER.md).
 It persists Prepared, the whole signed source, then Completed before releasing the overlay hold;
 ordinary intents remain pending for receipt settlement. A local source dependency also prevents
 missing metadata from exposing an unfinished batch after restart. This is still block 2. No native overlay command,
