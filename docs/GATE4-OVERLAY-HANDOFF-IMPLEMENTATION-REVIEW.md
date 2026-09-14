@@ -1,8 +1,9 @@
 # Gate 4: Closing overlay handoff implementation
 
-Status: implementation and validation in progress, 2026-09-14. Implementation acceptance is
-pending. The user accepts the corrected design at `dd2fbc0` and closes HANDOFF-001; that design
-PASS does not cover this implementation or full Gate 4. Base: `dd2fbc01ebb8a692964eec0df19dd201b225c936`.
+Status: implemented and pushed at `bf37cc48c45d09be6b63e97322171e506768fbf4`, 2026-09-14.
+The dedicated normal and mutation checks pass; implementation acceptance awaits user adversarial
+review. The user accepts the corrected design at `dd2fbc0` and closes HANDOFF-001; that design PASS
+does not cover this implementation or full Gate 4. Base: `dd2fbc01ebb8a692964eec0df19dd201b225c936`.
 
 ## Implemented boundary
 
@@ -70,8 +71,16 @@ to at most two packets. Future delivery of transferred operations uses existing 
 
 ## Evidence
 
-Execution results and exact reviewed/pushed commits will be recorded in [HANDOVER](HANDOVER.md)
-after final validation. The new `studio_overlay_handoff` tests use real signed Closing sources,
+Execution results are recorded in [HANDOVER](HANDOVER.md): 202 local application Studio tests
+pass with one optional profile ignored, and all 98 selected replication Studio tests pass. The
+[handoff workflow](https://github.com/Thalpy/Mewtual/actions/runs/34885437799) passes 22 normal
+tests, nine isolated mutations and nine restored regressions. Its
+[job log](https://github.com/Thalpy/Mewtual/actions/runs/34885437799/job/104114827694) identifies
+PR merge checkout `e37caec550a1e4c80b8b4fc1a5b90bc1366d0c99` for code head `bf37cc4`.
+Artifact `studio-handoff-mutations` contains the individual failing and restored test logs.
+Subsequent documentation updates do not change the tested Rust or harness files.
+
+The new `studio_overlay_handoff` tests use real signed Closing sources,
 installed checkpoints, authenticated store records and actual replacement/retirement paths.
 Coverage includes whole-branch order and signatures, crash/reopen barriers, absent/partial/conflicting
 manifests, actual current-author/old-owner separation, source changes after Prepared, replacement
@@ -85,6 +94,11 @@ publication, missing metadata, retry floor, acceptance order and later source ca
 [The workflow](../.github/workflows/studio-handoff.yml) publishes the mutation/restoration logs.
 Compilation failures and zero-test filters do not count as evidence.
 
+The existing overlay foundation workflow also passes 12 tests plus five mutations/restored
+regressions. Native and two-client workflows pass. Broad CI remains failed for the recorded
+queue-classification test, Linux desktop unused-code errors and Rustls dependency advisory;
+HANDOVER distinguishes those unchanged-source failures from the handoff checks.
+
 ## Still outside this checkpoint
 
 Actor scheduling/detached preparation and measured signing custody, native overlay commands,
@@ -96,7 +110,11 @@ including ordinary failed-Save NoEvidence, are unchanged.
 ## Message for adversarial implementation review
 
 ```text
-Please adversarially review the Closing overlay handoff implementation against dd2fbc0.
+Please adversarially review the Closing overlay handoff implementation in PR #26.
+Base: dd2fbc01ebb8a692964eec0df19dd201b225c936
+Tested code head: bf37cc48c45d09be6b63e97322171e506768fbf4
+Compare: https://github.com/Thalpy/Mewtual/compare/dd2fbc01ebb8a692964eec0df19dd201b225c936...bf37cc48c45d09be6b63e97322171e506768fbf4
+Read docs/GATE4-OVERLAY-HANDOFF-IMPLEMENTATION-REVIEW.md and docs/HANDOVER.md.
 HANDOFF-001 is closed and the corrected design is accepted; this request covers implementation.
 
 Review the three durability barriers, current-owner/pristine-successor eligibility, complete

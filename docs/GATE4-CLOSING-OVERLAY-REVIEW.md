@@ -5,10 +5,11 @@ The core/store implementation at `b1b0ec9` passed user review with one non-block
 finding, OVERLAY-TEST-001, concerning changed-Closing-source coverage. The user's re-review of
 `783486d...65db6ac` closes that finding with no further changes required. The reviewer inspected
 12 passing overlay tests and the mutation/restoration artifact at merge checkout `ec622a7`.
-No native overlay command is enabled. The next proposed checkpoint is
+No native overlay command is enabled. The next checkpoint is
 [atomic handoff into shared history](GATE4-OVERLAY-HANDOFF-REVIEW.md). Its HANDOFF-001 correction
 retains channel binding after base release and is accepted at `dd2fbc0`; HANDOFF-001 is closed.
-Implementation is in progress; the foundation PASS stands.
+The [core/store implementation](GATE4-OVERLAY-HANDOFF-IMPLEMENTATION-REVIEW.md) is pushed at
+`bf37cc4`, with normal/mutation checks passing and adversarial implementation acceptance pending; the foundation PASS stands.
 The original 131 affected local tests, Clippy and three
 isolated mutations pass as recorded in [HANDOVER](HANDOVER.md). The repository-wide ambient
 dependency check still reports six baseline findings; full-repository acceptance remains open.

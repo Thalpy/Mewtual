@@ -10,12 +10,78 @@ and ranks the live hazards in that path.
 
 ## Status (latest entry: 2026-09-14)
 
+- **Closing overlay core/store handoff ready for adversarial implementation review (2026-09-14).**
+  Code checkpoint: `bf37cc48c45d09be6b63e97322171e506768fbf4`, pushed to `Create-suite-2`
+  ([PR #26](https://github.com/Thalpy/Mewtual/pull/26)); base:
+  `dd2fbc01ebb8a692964eec0df19dd201b225c936`. The corrected design is accepted and HANDOFF-001
+  is closed. [The implementation review note](GATE4-OVERLAY-HANDOFF-IMPLEMENTATION-REVIEW.md)
+  describes the concrete boundary and copyable adversarial review request.
+
+  The explicit Rust adapter requires the live member/author, independently observed current-owner
+  tenure and the pristine installed adjacent successor. It privately signs the entire accepted
+  sequence with original timestamps, preflights all replacement peaks, then persists Prepared,
+  the whole source once, and Completed after authenticating/flushing the actual signed source.
+  Pending ledger entries stay pending. Restart resolution completes exact evidence without replay,
+  returns absent same-source evidence durably to Active, and holds partial/conflicting evidence.
+  Rotation/adoption, ordinary writers/retries, retirement and page publication enforce the hold.
+
+  Inner metadata version 2 retains the complete target, older completed acknowledgement and retry
+  floor independently of the base and ordinary ledger. Completed retry checks channel before any
+  acknowledgement or sync. Checked v1 reads preserve original bytes. A new optional local source
+  wrapper byte requires matching intent metadata after restart and later source replacement; it
+  is charged to existing content limits and explicitly called out for implementation review.
+  There is no new network format or actor/native overlay command.
+
+  Local `cargo test --locked -j 4 --config profile.test.package.catcoms-app.debug=0
+  -p catcoms-app --lib studio -- --test-threads=4 --nocapture` passes **202 tests**, with one opt-in
+  profile ignored (`logs/gate4-handoff-studio-regressions.log`). This includes all 22 new handoff
+  tests and the existing overlay, source, rotation, replay, actor, preview and succession tests.
+  [GitHub's dedicated handoff workflow](https://github.com/Thalpy/Mewtual/actions/runs/34885437799)
+  passes all 22 normal tests, **nine isolated mutations and nine restored regressions**. Its
+  [job log](https://github.com/Thalpy/Mewtual/actions/runs/34885437799/job/104114827694) identifies
+  PR merge checkout `e37caec550a1e4c80b8b4fc1a5b90bc1366d0c99` for code head `bf37cc4`.
+  Artifact `studio-handoff-mutations` retains each failing and restored log. Every mutation
+  produced exactly one executed failing test at its intended assertion, and the harness restored
+  exact original source bytes before the passing regressions. The nine targets are completed
+  channel binding, full signed digest, source-version recheck, shared replacement fence,
+  publication fence, required intent metadata, retry floor, acceptance order and later source peak.
+  Mutation execution is from GitHub; no additional local mutation run is claimed.
+
+  [The existing foundation workflow](https://github.com/Thalpy/Mewtual/actions/runs/34885437449)
+  passes 12 tests, five isolated mutations and their restored regressions. Windows and Linux CI
+  format/Clippy steps pass. Local `cargo test --locked -j 4 -p catcoms-replication --lib
+  studio:: -- --test-threads=4` passes **98 tests**, none ignored
+  (`logs/gate4-handoff-replication.log`). All 300 selected local regressions pass. The new evidence
+  links and implementation review note are checked, and `git diff --check` passes.
+
+  The broader [CI run](https://github.com/Thalpy/Mewtual/actions/runs/34885437407) is not green:
+  its [cargo-deny job](https://github.com/Thalpy/Mewtual/actions/runs/34885437407/job/104114827568)
+  reports RUSTSEC-2026-0285 against Rustls 0.23.40 in the unchanged lockfile. It also logs an
+  uninstalled musl toolchain override before continuing to the advisory scan. Neither Cargo.lock,
+  rust-toolchain.toml nor the broad CI workflow changed in this checkpoint. This remains a separate
+  full-gate validation item; no repository-wide green is claimed.
+  Both application test jobs repeat only the existing
+  `tests::a_queue_entry_that_claims_to_be_both_kinds_is_not_a_track` failure at `lib.rs:9694`
+  (two entries including `e_unknown`, expected one): Windows **601 passed / 1 failed / 9 ignored**;
+  Linux **606 passed / 1 failed / 10 ignored**. The test and queue implementation are unchanged here.
+  The Linux desktop job repeats the previously recorded unused-code errors in `media_decode.rs`
+  and `security_intent.rs` under `-D warnings`; its Svelte check passes with zero errors/warnings.
+  Those frontend/native files are unchanged here.
+  [Native regressions](https://github.com/Thalpy/Mewtual/actions/runs/34885437391) and
+  [two-client acceptance](https://github.com/Thalpy/Mewtual/actions/runs/34885437409) pass for `bf37cc4`.
+  Evidence-only commits after `bf37cc4` change documentation, not the tested Rust/harness files.
+
+  Actor/native overlay scheduling, detached preparation and measured signing custody, manual
+  inspect/copy/export/disposition, stale-base and preview overlays remain open. Repeated-owner
+  tenure, signed fault repair and combined acceptance also remain. Gate 4 is still in block 2;
+  implementation acceptance is pending user adversarial review.
+
 - **HANDOFF-001 closed; corrected handoff design accepted (2026-09-14).**
   The user accepts `b546c8d...dd2fbc01ebb8a692964eec0df19dd201b225c936` with no remaining
   findings or required changes. This closes the retained-target design finding and authorizes
   implementation of the [accepted core/store handoff](GATE4-OVERLAY-HANDOFF-REVIEW.md).
-  Implementation is in progress. No execution evidence or native command is implied by the
-  design PASS. OVERLAY-TEST-001 remains closed; Gate 4 remains in block 2.
+  The implementation checkpoint is recorded above. No execution evidence or native command is
+  implied by the design PASS. OVERLAY-TEST-001 remains closed; Gate 4 remains in block 2.
 
 - **HANDOFF-001 design correction ready for re-review (2026-09-14).**
   The user's review of `65db6ac...b546c8d` requests one correction: completed retry metadata

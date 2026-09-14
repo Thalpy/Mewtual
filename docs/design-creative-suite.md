@@ -1,6 +1,6 @@
 # Design: the creative suite (draw, doodle, flipnote, emoji sound, play, knock)
 
-**Current Gate 4 position (2026-09-13).** The user accepts the combined scheduling checkpoint
+**Current Gate 4 position (2026-09-14).** The user accepts the combined scheduling checkpoint
 `6b71d96` with no production or test changes required. This closes block 1 of the four remaining
 work blocks. Three remain: (2) durable Closing overlays and repeated-owner tenure, (3) runtime
 signed fault repair, and (4) combined Gate 4 acceptance. These are unequal work areas, not a
@@ -13,9 +13,12 @@ restart, shares existing storage/reference accounting, and holds annotated entri
 Apply and retirement. The 131 affected local tests, Clippy and three isolated mutations pass;
 implementation review passed and OVERLAY-TEST-001 is closed by the re-review of `65db6ac`.
 The user accepts the corrected [atomic handoff design](GATE4-OVERLAY-HANDOFF-REVIEW.md) at
-`dd2fbc0` and closes HANDOFF-001. Core/store implementation is in progress. The accepted transaction will:
-persist the whole signed branch before releasing its overlay hold, while ordinary intents stay
-pending for receipt settlement. This is still block 2. No native overlay command,
+`dd2fbc0` and closes HANDOFF-001. The [core/store implementation](GATE4-OVERLAY-HANDOFF-IMPLEMENTATION-REVIEW.md)
+is pushed at `bf37cc4`; 202 local Studio tests and the dedicated handoff/mutation workflows pass.
+Adversarial implementation acceptance is pending; exact CI evidence is in [HANDOVER](HANDOVER.md).
+It persists Prepared, the whole signed source, then Completed before releasing the overlay hold;
+ordinary intents remain pending for receipt settlement. A local source dependency also prevents
+missing metadata from exposing an unfinished batch after restart. This is still block 2. No native overlay command,
 overlay replay/disposition, provisional-preview writes or new tenure authority is enabled.
 
 **Combined scheduling checkpoint `6b71d96` (2026-09-13; user review PASS).** The three-member actor
