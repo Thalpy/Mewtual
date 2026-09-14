@@ -211,3 +211,64 @@ test("UI-003: a pending frame's thumbnail rendered while its publish is in fligh
     m.done();
   }
 });
+
+test("FETCH-004: a loaded raster follows the frame's reference; a changed declaration or cid locks the canvas until valid bytes exist", async () => {
+  const ipc = fakeIpc();
+  const N = pix.length;
+  const cid1 = id64(1), cid2 = id64(2);
+  let view = frameView(N, cid1);
+  ipc.on("studio_list", () => ordinaryView(indexContent({ objects: { [OBJ]: indexEntry({ title: "moon cat" }) } })));
+  ipc.on("studio_read", () => view);
+  ipc.on("request_blob_bounded", (a) => (a.cid === cid1 ? { bytes_b64: b64(pix), bytes: N } : null));
+  ipc.on("studio_recovery_list", () => recoveryListing({ object: OBJ }));
+  const m = mountStudio(ipc);
+  const wrap = () => m.target.querySelector(".st-canvas-wrap");
+  const veil = () => m.target.querySelector(".st-veil")?.textContent ?? "";
+  try {
+    await settled();
+    state.studio.selected = OBJ;
+    flushSync();
+    await settled(400);
+    assert.ok(wrap(), "the editor is on screen");
+    assert.equal(wrap()?.classList.contains("locked"), false, "a valid held frame is editable");
+    assert.equal(veil(), "", "no veil over a loaded frame");
+    // (1) same cid, different declaration: the session rejects the reference; the raster must not
+    // keep standing in for it.
+    const asked = m.count("request_blob_bounded");
+    view = frameView(N - 1, cid1);
+    ipc.emit("studio-updated", { server: SERVER, channel: CHANNEL, object: OBJ });
+    await settled(400);
+    assert.equal(m.count("studio_read"), 2);
+    assert.equal(wrap()?.classList.contains("locked"), true, "the canvas is locked, not editable under a rejected reference");
+    assert.match(veil(), /these pixels were rejected/);
+    assert.match(veil(), new RegExp(`held pixels are ${N} bytes, not the ${N - 1}`));
+    assert.equal(m.count("request_blob_bounded"), asked, "a known-wrong declaration is not re-asked");
+    // (2) a different cid that is not available: the old raster is gone, the frame waits.
+    view = frameView(N, cid2);
+    ipc.emit("studio-updated", { server: SERVER, channel: CHANNEL, object: OBJ });
+    await settled(400);
+    assert.equal(wrap()?.classList.contains("locked"), true);
+    assert.match(veil(), /pixels not available yet/);
+    assert.equal(m.count("request_blob_bounded"), asked + 1, "the new reference was asked for once");
+    // Bytes arrive for the new reference: editable again.
+    ipc.on("request_blob_bounded", () => ({ bytes_b64: b64(pix), bytes: N }));
+    m.click("button.st-btn", "ask again");
+    await settled(400);
+    assert.equal(wrap()?.classList.contains("locked"), false, "valid bytes for the current reference unlock the canvas");
+    assert.equal(veil(), "");
+    // (3) pending strokes are the reference until their save lands: a metadata change does not
+    // discard them or lock the member out of their own work.
+    const publish = deferred<unknown>();
+    ipc.on("publish_pix", () => publish.promise);
+    state.ensureStudio(ME).saveFrame(OBJ, F1, pixBytes(2));
+    await settled();
+    view = frameView(N - 1, cid2);
+    ipc.emit("studio-updated", { server: SERVER, channel: CHANNEL, object: OBJ });
+    await settled(400);
+    assert.equal(wrap()?.classList.contains("locked"), false, "unsaved strokes stay editable");
+    assert.match(m.target.querySelector(".st-readout.right")?.textContent ?? "", /saving/);
+    assert.equal(veil(), "", "no rejection veil over the member's own pending strokes");
+  } finally {
+    m.done();
+  }
+});

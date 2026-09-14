@@ -104,7 +104,11 @@
   // --- Editor state ------------------------------------------------------------------------------
   let frameId = $state("");
   let raster = $state.raw<PixRaster | null>(null);
-  let rasterCid = $state(""); // which selected value the raster was loaded from (or "unsaved")
+  // The complete reference the raster was decoded from (object, frame, cid, declared bytes), or
+  // "unsaved" while it holds strokes a save is carrying. A raster is only ever shown for its own
+  // reference; a changed cid OR a changed declaration is a different reference.
+  let rasterRef = $state("");
+  const refKey = (object: string, frame: string, cid: string, bytes: number) => `${object}/${frame}/${cid}/${bytes}`;
   const undo = new UndoStack();
   let tool = $state<Tool>("pen");
   let shape = $state<Shape>("ellipse");
@@ -219,16 +223,16 @@
     const bytes = unsaved ?? (rec ? session.blob(rec.cid, rec.bytes) : undefined);
     if (!bytes) {
       raster = null;
-      rasterCid = "";
+      rasterRef = "";
       if (rec) session.want(rec.cid, rec.bytes, 0);
       return;
     }
     let img;
-    try { img = decodePix(bytes); } catch (e) { raster = null; rasterCid = ""; onnotice(`frame pixels rejected: ${reason(e)}`, "warn"); return; }
+    try { img = decodePix(bytes); } catch (e) { raster = null; rasterRef = ""; onnotice(`frame pixels rejected: ${reason(e)}`, "warn"); return; }
     const r = new PixRaster(img.w, img.h, img.palette);
     r.loadFlat(img.pixels);
     raster = r;
-    rasterCid = unsaved ? "unsaved" : rec?.cid ?? "";
+    rasterRef = unsaved ? "unsaved" : rec ? refKey(objectId, frameId, rec.cid, rec.bytes) : "";
     undo.clear();
     dirty = false;
     paintRev++;
@@ -241,7 +245,7 @@
     if (!raster || !frameId || !dirty || !model || !objectId) return;
     try {
       session.saveFrame(objectId, frameId, raster.encode());
-      rasterCid = "unsaved";
+      rasterRef = "unsaved";
     } catch (e) {
       onnotice(reason(e), "warn");
     }
@@ -479,23 +483,28 @@
     if (model && (!frameId || !frameKnown)) {
       const first = frameIds[0] ?? pendingInserts[0]?.frame;
       if (first) openFrame(first);
-      else { frameId = ""; raster = null; rasterCid = ""; }
-    } else if (!model && frameId) { frameId = ""; raster = null; rasterCid = ""; }
+      else { frameId = ""; raster = null; rasterRef = ""; }
+    } else if (!model && frameId) { frameId = ""; raster = null; rasterRef = ""; }
   });
   $effect(() => {
-    // Pixels arrived for the open frame, or its selected value changed under us while we were
-    // not drawing: load them. A dirty raster keeps the member's strokes; the save decides.
+    // Pixels arrived for the open frame, or its selected reference (cid or declared bytes)
+    // changed under us while we were not drawing: follow it. A dirty raster keeps the member's
+    // strokes, and pending strokes are the reference until their save lands; only a clean
+    // raster whose reference no longer has valid held bytes is dropped, so the veil and the
+    // lock take over instead of an editable canvas of a value the session no longer accepts.
     void studio.rev;
     if (!frameId || dirty || !objectId) return;
     const rec = frames.find((f) => f.id === frameId);
     const unsaved = session.unsavedPix(objectId, frameId);
-    const wanted = unsaved ? "unsaved" : rec?.cid ?? "";
-    if (!wanted || wanted === rasterCid) return;
+    const wanted = unsaved ? "unsaved" : rec ? refKey(objectId, frameId, rec.cid, rec.bytes) : "";
+    if (!wanted || wanted === rasterRef) return;
     // Our own save just landed: the selected value now names the bytes this raster already
-    // holds, so adopt the cid and keep the undo history instead of reloading.
-    if (rasterCid === "unsaved" && raster && rec && sameBytes(session.blob(rec.cid, rec.bytes), raster.encode())) { rasterCid = rec.cid; return; }
-    if (unsaved || (rec && session.blob(rec.cid, rec.bytes))) loadRaster();
-    else if (rec) session.want(rec.cid, rec.bytes, 0);
+    // holds, so adopt the reference and keep the undo history instead of reloading.
+    if (rasterRef === "unsaved" && raster && rec && sameBytes(session.blob(rec.cid, rec.bytes), raster.encode())) { rasterRef = wanted; return; }
+    if (unsaved || (rec && session.blob(rec.cid, rec.bytes))) { loadRaster(); return; }
+    // The current reference has no valid bytes here: a stale raster must not stand in for it.
+    if (raster) { raster = null; rasterRef = ""; undo.clear(); paintRev++; }
+    if (rec) session.want(rec.cid, rec.bytes, 0);
   });
   $effect(() => {
     // The recovery rail follows the open document. Watching is idempotent for the same target,
@@ -570,7 +579,7 @@
     const next = frameIds.filter((f) => f !== gone)[Math.max(0, Math.min(idx, frameIds.length - 2))];
     frameId = "";
     raster = null;
-    rasterCid = "";
+    rasterRef = "";
     if (next) openFrame(next);
   }
 
@@ -620,7 +629,7 @@
     if (discardArmed !== s.id) { discardArmed = s.id; return; }
     discardArmed = 0;
     session.discard(s.id);
-    if (s.kind === "frame" && s.frame === frameId) { rasterCid = ""; loadRaster(); }
+    if (s.kind === "frame" && s.frame === frameId) { rasterRef = ""; loadRaster(); }
   }
 
   // --- Index entry: expiry and deletion are Index operations ------------------------------------
@@ -886,7 +895,7 @@
             <div class="st-veil soft"><span class="micro">{pendingHere.status === "uncertain" ? "this frame's save is uncertain · see the card above" : "saving this frame…"}</span></div>
           {/if}
           <span class="st-readout left">{zoom}× · {hover ? `${hover[0]},${hover[1]}` : "…"}{#if tool === "shape"} · {shape}{/if}</span>
-          <span class="st-readout right">layer · {LAYER_NAMES[layer]}{#if dirty} · unsaved{:else if rasterCid === "unsaved"} · saving{/if}</span>
+          <span class="st-readout right">layer · {LAYER_NAMES[layer]}{#if dirty} · unsaved{:else if rasterRef === "unsaved"} · saving{/if}</span>
         </div>
         </div>
         <div class="st-canvas-foot">
