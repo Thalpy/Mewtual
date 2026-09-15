@@ -10,8 +10,10 @@ Block 2 still needs actor/native overlay integration, bounded preparation/signin
 manual overlay inspection/copy/export/disposition, stale-base and preview-based local-work
 handling, and remaining repeated-owner tenure integration. Blocks 3 (runtime signed fault
 repair) and 4 (combined Gate 4 acceptance and required suites) remain. These are unequal work
-areas, not percentages. The next checkpoint measures existing handoff custody and specifies
-its runtime integration; it does not enable durable overlay Save in native.
+areas, not percentages. The user passes the `0b28f06` custody instrumentation and detached
+inspection proposal with no findings. The next implementation registers read-only
+`studio_overlay_read`, with detached reconstruction and original-context delivery checks;
+its implementation review remains pending. Durable overlay Save is still unavailable.
 
 The [Closing overlay foundation design](GATE4-CLOSING-OVERLAY-REVIEW.md) passed user review at
 `d576af2` on 2026-09-14 with no required changes. Its core/store implementation now distinguishes
@@ -31,10 +33,10 @@ No further implementation or coverage change is required for this bounded handof
 did not rerun Cargo locally. Evidence and broader CI limitations are in [HANDOVER](HANDOVER.md).
 It persists Prepared, the whole signed source, then Completed before releasing the overlay hold;
 ordinary intents remain pending for receipt settlement. A local source dependency also prevents
-missing metadata from exposing an unfinished batch after restart. This is still block 2. No native overlay command,
-overlay replay/disposition, provisional-preview writes or new tenure authority is enabled.
-The next [runtime checkpoint](GATE4-OVERLAY-RUNTIME-REVIEW.md) profiles custody cost and proposes
-detached inspection before enabling the remaining write lifecycle.
+missing metadata from exposing an unfinished batch after restart. This is still block 2.
+The [runtime design](GATE4-OVERLAY-RUNTIME-REVIEW.md) is accepted; its read-only inspection
+implementation now follows it. Overlay writes/replay/disposition, provisional-preview writes
+and new tenure authority remain unavailable. Actual command details are in FLIPNOTE-UI-HOOKS.
 
 **Combined scheduling checkpoint `6b71d96` (2026-09-13; user review PASS).** The three-member actor
 fixture retains three preview reservations: three real deliveries, or two deliveries plus a

@@ -4,7 +4,11 @@ use super::*;
 use catcoms_replication::studio::{StudioOverlay, StudioOverlayState};
 use catcoms_rt::{Clock, SystemClock};
 
-fn fixture(f: &Fixture, store: &mut ServerStore, count: usize) -> ([u8; 32], StudioProjection) {
+pub(super) fn fixture(
+    f: &Fixture,
+    store: &mut ServerStore,
+    count: usize,
+) -> ([u8; 32], StudioProjection) {
     let (close, basis) = closing(f, store);
     let mut state = store.load_epoch_intents(SERVER, &f.logical).unwrap();
     let mut prefix = Vec::new();

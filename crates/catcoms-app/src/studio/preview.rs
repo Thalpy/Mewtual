@@ -60,14 +60,13 @@ impl StudioPreview {
         ))
     }
     pub(crate) fn begin_delivery(&mut self) -> PreviewHandoff {
-        let (ack, done) = oneshot::channel();
-        let valid = Arc::new(AtomicBool::new(true));
+        let (handoff, valid, ack) = PreviewHandoff::new();
         self.delivery = Some(StudioPreviewDelivery(Arc::new(Delivery {
             valid: valid.clone(),
             seed: self.seed.clone(),
             _ack: ack,
         })));
-        PreviewHandoff { done, valid }
+        handoff
     }
 }
 pub(crate) struct PreviewHandoff {
@@ -80,6 +79,18 @@ impl Drop for PreviewHandoff {
     }
 }
 impl PreviewHandoff {
+    pub(super) fn new() -> (Self, Arc<AtomicBool>, oneshot::Sender<()>) {
+        let (ack, done) = oneshot::channel();
+        let valid = Arc::new(AtomicBool::new(true));
+        (
+            Self {
+                done,
+                valid: valid.clone(),
+            },
+            valid,
+            ack,
+        )
+    }
     /// No vault lease or network work here. The actor retains its already checked state until
     /// native finishes conversion, drops its result, cancels, or the fixed handoff timeout.
     pub(crate) async fn finish(

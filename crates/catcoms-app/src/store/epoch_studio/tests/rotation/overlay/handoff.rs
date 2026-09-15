@@ -6,6 +6,7 @@ use catcoms_replication::ReplError;
 mod eligibility;
 mod evidence;
 mod fences;
+mod inspection;
 mod metadata;
 mod performance;
 mod references;

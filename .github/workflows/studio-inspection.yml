@@ -1,0 +1,30 @@
+name: Studio detached inspection
+on:
+  pull_request:
+    paths:
+      - 'crates/catcoms-app/**'
+      - 'crates/catcoms-replication/**'
+      - '.github/scripts/check-studio-inspection-mutations.py'
+      - '.github/workflows/studio-inspection.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  inspection:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.89.0
+      - uses: Swatinem/rust-cache@v2
+      - name: Store, ownership and actor progress regressions
+        run: cargo test --locked -j 4 --config profile.test.package.catcoms-app.debug=0 -p catcoms-app --lib studio_inspection_ -- --test-threads=4
+      - name: Shared native fixture through real actor
+        run: cargo test --locked -j 4 --config profile.test.package.catcoms-app.debug=0 -p catcoms-app --test studio_inspection_fixture
+      - name: Detect isolated mutations and pass restored regressions
+        run: python3 .github/scripts/check-studio-inspection-mutations.py app
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: studio-inspection-app-mutations
+          path: logs/studio-inspection-mutations/

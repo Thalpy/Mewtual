@@ -55,6 +55,9 @@ pub struct StudioRecoveryPreview {
 
 #[derive(Debug)]
 pub enum StudioControlAction {
+    /// Trusted-local two-visit inspection. Renderer input never contains a prepared result.
+    InspectOverlay,
+    FinishOverlayInspection(Box<StudioPreparedInspection>),
     /// Separately retryable discoverability step after restoring content; never guesses an
     /// epoch from the UI or rewinds a pointer to a newer checkpoint.
     RestorePointer,
@@ -116,6 +119,8 @@ pub struct StudioRecoveryVersion {
 }
 
 pub enum StudioControlResponse {
+    OverlayPreparation(StudioInspectionPreparation),
+    OverlayInspection(StudioOverlayInspection),
     PointerRestored {
         target: StudioTarget,
         epoch: u64,
@@ -140,6 +145,8 @@ impl std::fmt::Debug for StudioControlResponse {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         // Export bytes and even a historical title are private vault content.
         f.write_str(match self {
+            Self::OverlayPreparation(_) => "OverlayPreparation { .. }",
+            Self::OverlayInspection(_) => "OverlayInspection { .. }",
             Self::PointerRestored { .. } => "PointerRestored { .. }",
             Self::Preview(_) => "Preview { .. }",
             Self::Applied { .. } => "Applied { .. }",
@@ -185,6 +192,19 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
         {
             return Err(invalid("unknown Studio channel"));
         }
+        let request = match request.action {
+            StudioControlAction::InspectOverlay => {
+                return self
+                    .begin_studio_inspection(store, server, target)
+                    .map(StudioControlResponse::OverlayPreparation)
+            }
+            StudioControlAction::FinishOverlayInspection(prepared) => {
+                return self
+                    .finish_studio_inspection(store, server, target, *prepared)
+                    .map(StudioControlResponse::OverlayInspection)
+            }
+            action => StudioControlRequest { target, action },
+        };
         self.sync
             .with_registry_context(|group, device, clock, rng| {
                 if group.member_signature_key(&device.device_id()).as_deref()
@@ -201,6 +221,10 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
                         .map_err(invalid)?;
                 }
                 match request.action {
+                    StudioControlAction::InspectOverlay
+                    | StudioControlAction::FinishOverlayInspection(_) => {
+                        unreachable!("inspection routed before recovery decoding")
+                    }
                     StudioControlAction::RestorePointer => {
                         let mut scan = store.scan_epoch_storage_with_studio()?;
                         while !scan.step()?.complete {}

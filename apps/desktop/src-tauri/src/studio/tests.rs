@@ -61,7 +61,7 @@ fn create() -> StudioRequest {
         ts: 123,
     }
 }
-async fn install(
+pub(super) async fn install(
     state: &AppState,
     actor: ServerActor,
     group_id: Vec<u8>,

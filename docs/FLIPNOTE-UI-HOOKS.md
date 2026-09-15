@@ -4,8 +4,10 @@ Last checked: 2026-09-15. **Gate 4 is incomplete; Gate 5 has not started.** The 
 HANDOFF-002 and accepts the bounded Closing-overlay core/store handoff, explicitly excluding
 actor/native activation and full Gate 4 acceptance. Finish Gate 4 before starting Gate 5.
 Durable overlay Save is still unavailable in native. The next integration checkpoint addresses
-bounded preparation/signing and the overlay lifecycle; no new command is callable yet. The
-[detached inspection proposal](GATE4-OVERLAY-RUNTIME-REVIEW.md) is awaiting user review.
+bounded preparation/signing and the overlay lifecycle. The user accepts the
+[detached inspection proposal](GATE4-OVERLAY-RUNTIME-REVIEW.md) at `0b28f06`, with no findings.
+Its read-only `studio_overlay_read` implementation is now registered; implementation review
+is pending. This does not enable durable overlay Save or close Gate 4.
 
 Earlier accepted scheduling/preview evidence: combined scheduling at `6b71d96` passed user
 review without required changes. Block 1 of the four remaining Gate 4 work areas is accepted; three remain.
@@ -77,16 +79,46 @@ bounded implementation at `62f06d4` / evidence head `aa0a81f` and closes HANDOFF
 inventory enforces the linked source's required metadata before enabling deletion. The reviewer
 inspected 24 passing handoff tests, ten detected mutations and ten restored passes in GitHub
 run 34903404377. This changes no UI command or result shape.
-These Rust adapters supply no native command. Continue to disable durable overlay
+Those accepted write adapters supply no native Save command. Continue to disable durable overlay
 Save in Closing/Fault and awaiting-tenure previews; preserve unsaved editor work without claiming
-it is vault-saved. Its later actor/native integration will update this guide with actual commands.
+it is vault-saved. The separate read-only inspection command is documented below.
 The accepted foundations and earlier review closures are recorded in
 [the provisional review note](GATE4-PROVISIONAL-READ-REVIEW.md) and HANDOVER.
 
 This guide describes native contracts. Frontend implementation and visual design remain
-independently owned; this backend documentation checkpoint changes no frontend code.
+independently owned; backend work changes command security registration, not the visual surface.
 
 ## Available now
+
+`studio_overlay_read({ server, channel, object? })` reads a retained local Closing draft.
+Use canonical decimal `channel` and optional 32-character lowercase hexadecimal `object`;
+omit `object` for Index. It returns a separate result, never an ordinary `StudioRead`:
+
+```ts
+type OverlayInspection =
+  | { v: 1; kind: "absent"; channel: string; object: string | null }
+  | { v: 1; kind: "local-draft"; channel: string; object: string | null;
+      basis: string; accepted: number; transferState: "active" | "prepared";
+      readOnly: true; content: StudioContent };
+```
+
+`StudioContent` is the existing full Index/Flipnote content representation below, including
+conflicts and deletions. `basis` is a 64-character local identity, not an append capability.
+Prepared is a retained draft awaiting transfer resolution; reading does not resolve it.
+Absent does not imply no pending ordinary edits, no completed transfer or settled content.
+There are no `epochId`, `epoch`, `phase`, publication, receipt or provisional-preview flags.
+Keep this separate from the editor's unsaved work and from awaiting-tenure history previews.
+Durable overlay Save, transfer, copy/export and disposition still have no native command.
+
+Run ordinary and overlay reads sequentially for the same target: they share the latest-view
+request fence, so starting another read supersedes the older result.
+The original native request and session span capture and detached reconstruction. Changed
+records, membership/context, actor, mount or a newer request reject delivery; refresh from
+fresh context. Capacity exhaustion returns a retryable error. The shared four preparation
+slots remain owned until actual worker/result destruction, including cancellation. Complete
+native JSON is capped at 32 MiB; overflow returns an error with no partial result. Neither
+this encoded limit nor the bounded input is a measured heap or latency guarantee. The
+frontend adapter/layout remains separately owned; this adds the backend contract only.
 
 The native entry points are [studio.rs](../apps/desktop/src-tauri/src/studio.rs),
 [studio/recovery.rs](../apps/desktop/src-tauri/src/studio/recovery.rs) (all seven

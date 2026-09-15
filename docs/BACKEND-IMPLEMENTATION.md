@@ -9,6 +9,13 @@ Frontend integration is tracked separately in [FLIPNOTE-UI-HOOKS](FLIPNOTE-UI-HO
 native commands/events, retry rules and explicitly unavailable controls. Update it alongside
 every bridge-facing slice; UI layout and rendering remain user-owned.
 
+Current follow-up (2026-09-15): the user passes `aa0a81f...0b28f06` profiling and detached
+inspection design without findings. Read-only `studio_overlay_read` now implements capture,
+detached reconstruction, full intent-wrapper currency and native delivery under one original
+session/request. Implementation review and final native checks are pending; local store,
+resource ownership, actor checkpoint progress and real Index/Flipnote fixture tests pass.
+This advances block 2 of Gate 4. It does not enable local Save/handoff or complete Gate 4.
+
 ## Scope reset (2026-09-08)
 
 The user paused games and asked to focus on Flipnote. Game-only avatar consent, avatar-profile
@@ -213,10 +220,10 @@ No further implementation or coverage change is required for this bounded handof
 did not rerun Cargo locally. Evidence and broader CI limitations are in [HANDOVER](HANDOVER.md).
 It persists Prepared, the whole signed source, then Completed before releasing the overlay hold;
 ordinary intents remain pending for receipt settlement. A local source dependency also prevents
-missing metadata from exposing an unfinished batch after restart. This is still block 2. No native overlay command,
-overlay replay/disposition, provisional-preview writes or new tenure authority is enabled.
-The next [runtime checkpoint](GATE4-OVERLAY-RUNTIME-REVIEW.md) profiles custody cost and proposes
-detached inspection before enabling the remaining write lifecycle.
+missing metadata from exposing an unfinished batch after restart. This is still block 2.
+The user accepts the [runtime inspection design](GATE4-OVERLAY-RUNTIME-REVIEW.md) at `0b28f06`;
+its separate read-only native implementation is now under validation. Overlay writes,
+replay/disposition, provisional-preview writes and new tenure authority remain unavailable.
 
 **Combined scheduling checkpoint `6b71d96` (2026-09-13; user review PASS).** The three-member actor
 fixture retains three preview reservations: three real deliveries, or two deliveries plus a

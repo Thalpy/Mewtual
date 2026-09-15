@@ -5,6 +5,7 @@ use catcoms_app::studio::{
     types::*, EpochPhase, StudioRead, StudioRequest, StudioVaultLease, StudioView,
 };
 use serde_json::{json, Value};
+pub(crate) mod inspection;
 pub(crate) mod recovery;
 mod requests;
 pub(crate) mod settlement;
@@ -98,19 +99,75 @@ async fn invoke_custody<V>(
     if let InvokeRequest::Document(request) = &request {
         request.validate().map_err(|e| e.to_string())?;
     }
-    let generation = unlocked_ui_session_generation(state).await?;
-    // Reuse the existing four bounded native operation slots and cancellation-on-lock seam.
-    let (slot, signal) = claim_internal_inline_download(state)?;
-    let view_request = match &request {
-        InvokeRequest::Document(request) => Some(requests::ViewRequest::begin(
-            state,
-            server,
-            request.target(),
-        )),
+    let target = match &request {
+        InvokeRequest::Document(request) => Some(request.target()),
         _ => None,
     };
-    let (actor, instance) = actor_instance_of(state, server).await?;
-    let mut cancellation = RequestCancellation::new(signal, Some(slot.request_keepalive()));
+    let context = InvokeContext::new(state, server, target).await?;
+    invoke_with_context(state, &context, request, convert).await
+}
+
+/// One original operation registration/session/request spans every custody visit.
+struct InvokeContext {
+    server: u64,
+    generation: u64,
+    actor: ServerActor,
+    instance: u64,
+    view_request: Option<requests::ViewRequest>,
+    cancellation: RequestCancellation,
+    _slot: InlineDownloadLease,
+}
+impl InvokeContext {
+    async fn new(
+        state: &AppState,
+        server: u64,
+        target: Option<StudioTarget>,
+    ) -> Result<Self, String> {
+        let generation = unlocked_ui_session_generation(state).await?;
+        let (slot, signal) = claim_internal_inline_download(state)?;
+        let view_request = target.map(|target| requests::ViewRequest::begin(state, server, target));
+        let (actor, instance) = actor_instance_of(state, server).await?;
+        let cancellation = RequestCancellation::new(signal, Some(slot.request_keepalive()));
+        Ok(Self {
+            server,
+            generation,
+            actor,
+            instance,
+            view_request,
+            cancellation,
+            _slot: slot,
+        })
+    }
+}
+
+async fn invoke_with_context<V>(
+    state: &AppState,
+    context: &InvokeContext,
+    request: InvokeRequest,
+    convert: impl FnOnce(InvokeResponse) -> Result<V, String>,
+) -> Result<V, String> {
+    let InvokeContext {
+        server,
+        generation,
+        actor,
+        instance,
+        view_request,
+        ..
+    } = context;
+    let (server, generation, instance) = (*server, *generation, *instance);
+    let mut cancellation = context.cancellation.clone();
+    if cancellation.is_cancelled()
+        || state.session_lock_requested.load(Ordering::Acquire)
+        || state.ui_session_generation.load(Ordering::Acquire) != generation
+    {
+        return Err("Studio request belongs to a locked or changed UI session".into());
+    }
+    if view_request
+        .as_ref()
+        .is_some_and(|request| !request.is_current())
+    {
+        return Err("Studio view request was superseded; refresh".into());
+    }
     let clock = SystemClock;
     let ready = tokio::select! {
         biased;
@@ -133,6 +190,12 @@ async fn invoke_custody<V>(
         InvokeResponse::Document(Some(StudioRead::AwaitingTenureReceipt(preview))) => {
             Some(preview.delivery())
         }
+        _ => None,
+    };
+    let inspection_delivery = match &response {
+        InvokeResponse::Control(catcoms_app::studio::StudioControlResponse::OverlayInspection(
+            inspection,
+        )) => Some(inspection.delivery()),
         _ => None,
     };
     if cancellation.is_cancelled() {
@@ -159,6 +222,9 @@ async fn invoke_custody<V>(
     if preview_delivery
         .as_ref()
         .is_some_and(|delivery| !delivery.is_current())
+        || inspection_delivery
+            .as_ref()
+            .is_some_and(|delivery| !delivery.is_current())
         || cancellation.is_cancelled()
         || state.session_lock_requested.load(Ordering::Acquire)
         || state.ui_session_generation.load(Ordering::Acquire) != generation
@@ -488,13 +554,31 @@ fn projection_content(projection: &StudioProjection) -> Value {
         }
     }
 }
+const MAX_STUDIO_VIEW_BYTES: usize = 32 * 1024 * 1024;
 fn bounded_view(value: Value) -> Result<Value, String> {
-    // Typed source/recovery caps bound construction; also refuse an oversized IPC encoding rather
-    // than silently dropping conflict evidence to fit a UI payload.
-    if serde_json::to_vec(&value).map_err(|e| e.to_string())?.len() > 32 * 1024 * 1024 {
-        return Err("Studio view exceeds IPC limit".into());
-    }
+    check_view_size(&value, MAX_STUDIO_VIEW_BYTES)?;
     Ok(value)
+}
+fn check_view_size(value: &Value, limit: usize) -> Result<(), String> {
+    struct Counter {
+        used: usize,
+        limit: usize,
+    }
+    impl std::io::Write for Counter {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            let next = self
+                .used
+                .checked_add(bytes.len())
+                .filter(|n| *n <= self.limit)
+                .ok_or_else(|| std::io::Error::other("Studio view exceeds IPC limit"))?;
+            self.used = next;
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    serde_json::to_writer(Counter { used: 0, limit }, value).map_err(|e| e.to_string())
 }
 
 #[cfg(test)]

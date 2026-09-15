@@ -1,9 +1,14 @@
 # Gate 4: Closing-overlay runtime activation
 
-Status: proposal for user adversarial review, 2026-09-15. Review base: `aa0a81f34af6707ab05fd2a437412c38b79a82ff`. HANDOFF-002 is closed; the bounded
+Status: user **PASS** for profiling instrumentation and this detached-inspection proposal,
+2026-09-15, reviewed `aa0a81f...0b28f06`. No findings or required changes. This accepts the
+design, not its subsequent actor/native implementation, signing/commit integration or Gate 4.
+The reviewer inspected source and recorded evidence without rerunning Cargo locally.
+Review base: `aa0a81f34af6707ab05fd2a437412c38b79a82ff`. HANDOFF-002 is closed; the bounded
 core/store transaction at `62f06d4` is accepted. **Gate 4 is still active and incomplete.**
-The user clarified to finish Gate 4 before starting Gate 5. This checkpoint adds diagnostic
-profiling and this runtime proposal; it does not add an actor/native overlay command.
+The user clarified to finish Gate 4 before starting Gate 5. The accepted `0b28f06` checkpoint
+added diagnostic profiling and this runtime proposal. Its subsequent read-only implementation
+is tracked in [GATE4-INSPECTION-IMPLEMENTATION-REVIEW](GATE4-INSPECTION-IMPLEMENTATION-REVIEW.md).
 
 ## Why direct wiring is insufficient
 

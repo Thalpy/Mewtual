@@ -16002,6 +16002,7 @@ pub fn run() {
             creative_blobs::request_blob_bounded,
             studio::studio_list,
             studio::studio_read,
+            studio::inspection::studio_overlay_read,
             studio::studio_create,
             studio::studio_apply,
             studio::studio_apply_index,

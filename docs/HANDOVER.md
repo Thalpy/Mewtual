@@ -10,6 +10,26 @@ and ranks the live hazards in that path.
 
 ## Status (latest entry: 2026-09-15)
 
+- **Runtime inspection design accepted; implementation in progress (2026-09-15).**
+  The user reviews `aa0a81f...0b28f06` and passes the profiling instrumentation and
+  [detached-inspection proposal](GATE4-OVERLAY-RUNTIME-REVIEW.md) without findings or required
+  changes. They inspected source and recorded evidence, without independently running Cargo.
+  The acceptance excludes actor/native implementation, signing/commit integration and full
+  Gate 4. Work now implements read-only capture/rebuild/currency/delivery through the existing
+  actor and native custody paths. `studio_overlay_read` is registered with the explicit main
+  window capability and account-read policy, returning a separate local-draft/absent result.
+  Native validation and a separate user implementation review remain.
+
+  Local results: five store inspection tests pass (209.74 s), including full-wrapper changes
+  preserving displayed draft/basis, presence/deletion/remount/scope/corruption, author/channel,
+  Prepared/Completed reads and both kinds at 256 operations. Two actor/resource tests pass
+  (41.07 s): a real checkpoint crosses the durable writer while draft reconstruction is paused;
+  cancellation/expiry preserve actual worker/result permit ownership. The shared native fixture
+  passes both real actor-produced Index/Flipnote cases (one test, 51.04 s), full projection and
+  unchanged durable records. Strict app library/test Clippy passes (26.77 s), and all six native
+  command security audit tests pass. Logs: `logs/gate4-inspection-{store,actor,fixture,clippy}.log`.
+  These runs do not claim maximal seed/metadata/heap coverage or repository-wide green.
+
 - **HANDOFF-002 closed; bounded handoff implementation accepted (2026-09-15).**
   The user's re-review compares `85e7179...aa0a81f`, with correction code at `62f06d4`;
   `aa0a81f` changes documentation only. No remaining implementation or regression-coverage

@@ -5,6 +5,7 @@ on:
     paths:
       - '.github/workflows/studio-native.yml'
       - '.github/scripts/check-studio-preview-mutations.py'
+      - '.github/scripts/check-studio-inspection-mutations.py'
       - 'crates/catcoms-app/**'
       - 'crates/catcoms-sync/**'
       - 'crates/catcoms-replication/**'
@@ -17,7 +18,7 @@ permissions:
 jobs:
   studio-native:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.89.0
@@ -45,3 +46,10 @@ jobs:
           cargo test --locked --manifest-path apps/desktop/src-tauri/Cargo.toml --lib studio:: -- --test-threads=4
       - name: Verify preview regression mutations and restore source
         run: python3 .github/scripts/check-studio-preview-mutations.py
+      - name: Verify inspection regression mutations and restore source
+        run: python3 .github/scripts/check-studio-inspection-mutations.py native
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: studio-inspection-native-mutations
+          path: logs/studio-inspection-mutations/

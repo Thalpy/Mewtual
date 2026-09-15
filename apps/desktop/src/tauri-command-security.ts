@@ -122,6 +122,7 @@ export const TAURI_COMMAND_GROUPS = {
       // ceiling is a 32 MiB refusal on the encoded view, which fails rather than quietly dropping
       // the conflict evidence to fit.
       "studio_list", "studio_read",
+      "studio_overlay_read",
       // Retained Studio history, all of it local vault content. `studio_recovery_list` is metadata
       // only: at most three snapshots with their epoch, size and why each was retained.
       // `studio_recovery_read` returns one snapshot's projection, and `studio_recovery_export`

@@ -281,6 +281,9 @@ fn listing(v: StudioRecoveryListing) -> Result<Value, String> {
 }
 pub(super) fn response_value(response: Response) -> Result<Value, String> {
     let value = match response {
+        Response::OverlayPreparation(_) | Response::OverlayInspection(_) => {
+            return Err("mismatched recovery response".into());
+        }
         Response::PointerRestored {
             target,
             epoch,

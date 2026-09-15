@@ -25,6 +25,7 @@ pub(super) const MAX_SEALED_BYTES: usize = MAX_RECORD_BYTES + 40;
 /// full replacement copy at peak. Framing counts too; this is stricter than a payload-only cap.
 pub const MAX_VAULT_INTENT_BYTES: u64 = 64 * 1024 * 1024;
 
+pub(super) mod inspection;
 pub(super) mod overlay;
 mod retirement;
 
@@ -530,12 +531,7 @@ impl ServerStore {
         scope: &[u8],
         document: &LogicalDocument,
     ) -> Result<(EpochIntentState, Option<u64>), AppError> {
-        let parent = fs::symlink_metadata(self.dir.join("servers"))
-            .map_err(|e| AppError::Io(e.to_string()))?;
-        if !parent.is_dir() || is_link(&parent) {
-            return Err(invalid("parent is not a regular directory"));
-        }
-        match self.read_epoch_intent_plain(&self.epoch_intent_path(scope))? {
+        match self.read_scoped_intent_plain(scope)? {
             None => Ok((
                 EpochIntentState {
                     ledger: IntentLedger::new(document.clone()),
@@ -548,6 +544,19 @@ impl ServerStore {
                 Some(bytes.physical_bytes),
             )),
         }
+    }
+
+    /// Authenticate framing under the ordinary directory/file rails, without typed replay.
+    fn read_scoped_intent_plain(
+        &self,
+        scope: &[u8],
+    ) -> Result<Option<AuthenticatedEpochFileBytes>, AppError> {
+        let parent = fs::symlink_metadata(self.dir.join("servers"))
+            .map_err(|e| AppError::Io(e.to_string()))?;
+        if !parent.is_dir() || is_link(&parent) {
+            return Err(invalid("parent is not a regular directory"));
+        }
+        self.read_epoch_intent_plain(&self.epoch_intent_path(scope))
     }
 
     pub(super) fn read_epoch_intent_plain(

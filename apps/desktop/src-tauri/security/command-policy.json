@@ -63,6 +63,7 @@
   { "command": "request_blob_bounded", "risk": "media-local", "surfaces": ["main"] },
   { "command": "studio_list", "risk": "account-read", "surfaces": ["main"] },
   { "command": "studio_read", "risk": "account-read", "surfaces": ["main"] },
+  { "command": "studio_overlay_read", "risk": "account-read", "surfaces": ["main"] },
   { "command": "studio_create", "risk": "account-write", "surfaces": ["main"] },
   { "command": "studio_apply", "risk": "account-write", "surfaces": ["main"] },
   { "command": "studio_apply_index", "risk": "account-write", "surfaces": ["main"] },

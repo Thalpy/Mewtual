@@ -63,6 +63,7 @@
     "allow-get-wiki-pinned-cids",
     "allow-studio-list",
     "allow-studio-read",
+    "allow-studio-overlay-read",
     "allow-studio-recovery-list",
     "allow-studio-recovery-preview",
     "allow-studio-recovery-read",

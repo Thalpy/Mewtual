@@ -65,6 +65,7 @@ tauri-plugin-updater = "2"
 tauri-plugin-process = "2"
 
 [dev-dependencies]
+automerge = "0.10"
 catcoms-replication = { path = "../../../crates/catcoms-replication" }
 tempfile = "3"
 rand_chacha = "0.3"
