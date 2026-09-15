@@ -22,7 +22,7 @@ they are the highest-conflict changes, so they land last. The per-item verdict r
 | Order | Item | State |
 |---|---|---|
 | 1 | C-1 structural decode, with C-2's digest fences and the R4 replay exclusion | **landed on the branch, partial evidence** |
-| 2 | C-4 transient reference holds and the I-3 transfer | not started |
+| 2 | C-4 transient reference holds | **seam landed, verified; the I-3 transfer needs its consumer** |
 | 3 | The runtime: Flows S, H and R, admission, scheduling, commit seams | not started |
 | 4 | I-4 and C-3 | not started |
 
@@ -207,6 +207,42 @@ reviewer raised three times. The test now patches the **branch** encoding and as
 targets held 1 beforehand and that the length is unchanged. Against the mutant it then fails at its
 intended assertion, "structural decode accepted sequence 2 for the first accepted entry"; after
 byte-exact restoration it passes. This is why the guard-breaking step is not optional.
+
+### C-4 transient reference holds
+
+`crates/catcoms-app/src/store/creative_references.rs`: `Protection` gains a `transient` table of
+job-owned holds keyed by a `Weak` owner. `unknown` and `install` leave it untouched and a complete
+scan may subtract only from `pins`, so a reference no durable record names yet survives the scan
+that would otherwise reclaim it. `ProtectedBlobs::delete` reaps dead owners and consults the
+transient table before the installed set, under the same guard it already holds through unlink, so
+a live hold protects even while durable protection is unknown. `hold_creative_transient` checks the
+owner rail and the shared `MAX_CREATIVE_REFERENCES` rail **before** installing anything, and
+refuses rather than marking the store unknown. `CreativeHold` releases on drop.
+
+The existing accepted test
+`transient_preholds_survive_budget_scans_but_only_complete_reference_scans_can_unpin` already
+asserts the hazard this closes: after a complete scan that no durable record informed, the orphan
+CID deletes. Two new regressions:
+
+- `job_owned_transient_holds_survive_a_complete_scan_and_release_with_their_owner`: the CID
+  survives two complete scans while held, an unrelated orphan still deletes, and the CID becomes
+  deletable the moment the owner drops. That last assertion is the point: it is why I-3 must
+  install the ordinary conservative holds before the owner can disappear.
+- `transient_hold_exhaustion_refuses_admission_without_disturbing_existing_protection`: the owner
+  rail refuses one too many, protection stays known, unrelated reclamation still works, and
+  releasing one owner readmits exactly one.
+
+| Check | Result |
+|---|---|
+| `cargo test ... -p catcoms-app --lib creative_references -- --test-threads=1` | **9 passed, 0 failed**, 3.34 s, including the seven pre-existing tests. |
+| M13 mutation, `transient_holds(..) && false` in `ProtectedBlobs::delete` | Fails at "a live job-owned hold did not protect its reference"; restored source passes. |
+| `cargo clippy -j 1 -p catcoms-app --lib --tests -- -D warnings`, `cargo fmt --all -- --check` | Clean. |
+
+**Marker to remove.** Four items carry `#[allow(dead_code)]` because their production consumer is
+the overlay commit path, which lands with the runtime. They expose no callable surface; the
+annotation and its comment must be deleted in the commit that adds the I-3 transfer. I-3 itself is
+**not implemented**: nothing yet installs the ordinary holds before the intent write or releases
+the owner after it.
 
 ### Not yet done for C-1
 
