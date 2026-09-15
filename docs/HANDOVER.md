@@ -32,10 +32,18 @@ and ranks the live hazards in that path.
   The additional real MLS-join and same-snapshot sync-replacement regression passes (0.60 s):
   unchanged intent bytes cannot legitimize a result from either obsolete live context.
   Svelte checking reports zero errors and warnings. Native offline compilation is unavailable
-  because the local Cargo cache lacks `png`; GitHub runs native validation. The expensive local
-  codec-shape run was stopped and is not a pass. Its GitHub result remains pending. The fixture
-  now deliberately keeps `[1; 16]` inside Index's compact 64-object prefix before replaying its
-  local title edit. The initial mutation run detected currency and channel removal, but a later
+  because the local Cargo cache lacks `png`; GitHub runs native validation. Early codec-shape
+  runs with expensive Automerge setup were stopped, without claiming a pass. The final fixture
+  assembles typed baseline bytes and requires full public decoding plus a canonical checkpoint
+  round trip. Both maximum shapes now pass in 2.98 s: 64 Index objects with four creations and
+  four values per title/expiry register, and 999 Flipnote frames with all 1024 conflict fields.
+  Seeds measure 143,360 / 727,709 bytes in the standalone scope. The corresponding full vault
+  inspection test passes in 83.85 s, preserves exact stored bytes and rejects oversized sealed
+  input; its actual-group seeds measure 143,352 / 727,701 bytes. Logs:
+  `logs/gate4-inspection-{shapes-codec,maximal-store-codec}.log`. The fixture deliberately keeps
+  `[1; 16]` in the compact Index before replaying its local title edit. These are codec/input
+  boundaries, not signed-admission, heap or latency qualification. The initial mutation run
+  detected currency and channel removal, but a later
   compile error in the newly added size fixture correctly failed the harness; the code was
   restored and the fixture corrected. Complete mutation success is still pending.
 
