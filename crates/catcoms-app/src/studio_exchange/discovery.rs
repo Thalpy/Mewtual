@@ -16,17 +16,30 @@ use catcoms_sync::registry_seed::{
 pub type ServerCheckpointFetch = ServerRegistrySeedFetch;
 pub type ServerCheckpointDiscovery = ServerRegistrySeedDiscovery;
 
+/// One coalesced observation of a real authenticated completion, never an injected selection.
+#[cfg(test)]
+#[derive(Debug, Clone)]
+pub(crate) struct StudioHintObservation {
+    pub target: CheckpointTarget,
+    pub peer: PeerId,
+    pub provider: catcoms_crypto::DeviceId,
+    pub receipt: Option<catcoms_replication::Receipt>,
+    pub proof_absent: bool,
+}
+
 pub struct CheckpointDiscoveryAttempt<T: MeshTransport> {
     inner: PendingCheckpointDiscovery<T>,
     mount: Arc<()>,
     server: u64,
     target: CheckpointTarget,
+    peer: PeerId,
 }
 pub struct CheckpointDiscoveryCompletion {
     inner: CompletedCheckpointDiscovery,
     mount: Arc<()>,
     server: u64,
     target: CheckpointTarget,
+    pub(crate) peer: PeerId,
 }
 impl CheckpointDiscoveryCompletion {
     pub(crate) fn target(&self) -> CheckpointTarget {
@@ -40,6 +53,7 @@ impl<T: MeshTransport> CheckpointDiscoveryAttempt<T> {
             mount: self.mount,
             server: self.server,
             target: self.target,
+            peer: self.peer,
         }
     }
 }
@@ -200,6 +214,7 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
             mount,
             server,
             target,
+            peer,
         })
     }
     pub fn complete_checkpoint_discovery(

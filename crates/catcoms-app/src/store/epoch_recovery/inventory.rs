@@ -338,10 +338,30 @@ pub struct EpochStorageScan<'a> {
     record_limit: usize,
     byte_limit: u64,
     cold_byte_limit: Option<u64>,
-    references: Option<(
-        std::sync::Arc<()>,
-        super::super::creative_references::CreativeReferences,
-    )>,
+    references: Option<CreativeReferenceScan>,
+}
+
+/// At most one requirement or match per already-counted authenticated record. Full scopes
+/// retain numeric server, group, type and logical key; targets additionally bind the channel.
+/// Bodies are still read only once, and directory order cannot change dependency resolution.
+struct CreativeReferenceScan {
+    generation: std::sync::Arc<()>,
+    refs: super::super::creative_references::CreativeReferences,
+    required: BTreeMap<(u64, LogicalDocument), catcoms_replication::studio::StudioTarget>,
+    metadata: BTreeMap<(u64, LogicalDocument), catcoms_replication::studio::StudioTarget>,
+}
+
+impl CreativeReferenceScan {
+    fn check_dependencies(&self) -> Result<(), AppError> {
+        for (scope, target) in &self.required {
+            if self.metadata.get(scope) != Some(target) {
+                return Err(invalid(
+                    "reference scan required handoff metadata missing or mismatched",
+                ));
+            }
+        }
+        Ok(())
+    }
 }
 
 impl std::fmt::Debug for EpochStorageScan<'_> {
@@ -444,7 +464,12 @@ impl EpochStorageScan<'_> {
             .map_err(|_| invalid("reference protection poisoned"))?
             .generation
             .clone();
-        self.references = Some((generation, Default::default()));
+        self.references = Some(CreativeReferenceScan {
+            generation,
+            refs: Default::default(),
+            required: BTreeMap::new(),
+            metadata: BTreeMap::new(),
+        });
         Ok(())
     }
     pub(in crate::store) fn finish_creative_references(
@@ -456,15 +481,16 @@ impl EpochStorageScan<'_> {
                 "reference scan incomplete or unpublished metadata remains",
             ));
         }
-        let (generation, refs) = self
+        let collected = self
             .references
             .ok_or_else(|| invalid("not a reference scan"))?;
+        collected.check_dependencies()?;
         self.store
             .creative_protection
             .lock()
             .map_err(|_| invalid("reference protection poisoned"))?
-            .install(&generation, refs.clone())?;
-        Ok(refs)
+            .install(&collected.generation, collected.refs.clone())?;
+        Ok(collected.refs)
     }
     /// Fixed coverage for this job, including before it completes.
     pub fn coverage(&self) -> EpochInventoryCoverage {
@@ -608,8 +634,8 @@ impl EpochStorageScan<'_> {
                         let record = match family {
                             EpochRecordKind::Recovery => {
                                 let state = EpochRecoveryState::decode(&plain, scope, &document)?;
-                                if let Some((_, refs)) = self.references.as_mut() {
-                                    refs.add(
+                                if let Some(collected) = self.references.as_mut() {
+                                    collected.refs.add(
                                         &document.server_id,
                                         super::super::creative_references::recovery_cids(
                                             &document, &state,
@@ -628,13 +654,24 @@ impl EpochStorageScan<'_> {
                                 let state = epoch_intents::EpochIntentState::decode(
                                     &plain, scope, &document,
                                 )?;
-                                if let Some((_, refs)) = self.references.as_mut() {
+                                if let Some(collected) = self.references.as_mut() {
+                                    if let Some(metadata) = state.handoff_metadata() {
+                                        collected
+                                            .metadata
+                                            .insert((server, document.clone()), metadata.target());
+                                    }
+                                    if let Some(overlay) = state.overlay() {
+                                        collected.refs.add(
+                                            &document.server_id,
+                                            overlay.base_blob_cids().map_err(invalid)?,
+                                        )?;
+                                    }
                                     if matches!(
                                         document.doc_type,
                                         DocType::StudioIndex | DocType::StudioObject
                                     ) {
                                         for (_, intent) in state.pending() {
-                                            refs.add(
+                                            collected.refs.add(
                                                 &document.server_id,
                                                 catcoms_replication::studio::operation_blob_cid(
                                                     &intent.operation,
@@ -656,13 +693,18 @@ impl EpochStorageScan<'_> {
                                 )?
                             }
                             EpochRecordKind::Studio => {
-                                if let Some((_, refs)) = self.references.as_mut() {
-                                    let (record, cids) =
+                                if let Some(collected) = self.references.as_mut() {
+                                    let inspected =
                                         super::super::epoch_studio::inventory_references(
                                             &plain, server, &document, scope, size,
                                         )?;
-                                    refs.add(&document.server_id, cids)?;
-                                    record
+                                    collected.refs.add(&document.server_id, inspected.cids)?;
+                                    if let Some(target) = inspected.required_metadata {
+                                        collected
+                                            .required
+                                            .insert((server, document.clone()), target);
+                                    }
+                                    inspected.record
                                 } else {
                                     super::super::epoch_studio::inventory_record(
                                         &plain, server, &document, scope, size,

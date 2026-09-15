@@ -5,6 +5,9 @@ use catcoms_replication::studio::StudioRecovery;
 use catcoms_replication::CloseRecord;
 use catcoms_rt::Clock;
 
+#[cfg(test)]
+pub(crate) mod interruption;
+
 /// Local state only. Publication requires the existing current-owner proof handoff, not a
 /// successful disk transaction. Pending recovery keeps the complete source sealed on disk.
 pub use crate::store::RegistryOwnerRotationOutcome as StudioRotationOutcome;
@@ -71,6 +74,8 @@ impl ServerStore {
         rng: &mut impl CryptoRngCore,
         budget: &mut EpochStudioBudget,
     ) -> Result<(StudioRotationOutcome, EpochStudioState), AppError> {
+        #[cfg(test)]
+        let interruption = self.studio_rotation_interruption.clone();
         self.rotate_studio_owner_with_io(
             server,
             group,
@@ -80,7 +85,13 @@ impl ServerStore {
             clock,
             rng,
             budget,
-            &mut |_, p, b| atomic_write(p, b),
+            &mut |_step, p, b| {
+                #[cfg(test)]
+                if let Some(interruption) = &interruption {
+                    interruption.before_write(target, _step, p, b)?;
+                }
+                atomic_write(p, b)
+            },
             &mut |step, p, b| match step {
                 RotationSync::Intents => super::super::epoch_intents::sync_intent(p, b),
                 _ => sync_studio(p, b),
@@ -107,6 +118,7 @@ impl ServerStore {
                 "rotation requires current owner and observed tenure",
             ));
         }
+        self.resolve_studio_handoff(server, group, target, device, rng, budget)?;
         let source::CheckedReceiveSource {
             unit,
             observed,

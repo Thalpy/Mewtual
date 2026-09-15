@@ -187,6 +187,25 @@ impl std::fmt::Debug for EpochStorageBudget {
 }
 
 impl EpochStorageBudget {
+    /// Simulate a bounded transaction's replacement peaks without issuing a second budget.
+    /// The private copy cannot escape; actual writes must still reserve on the sole live owner.
+    pub(super) fn preflight_sequence(
+        &self,
+        scope: &StorageScope,
+        steps: &[Replacement],
+    ) -> Result<(), BudgetError> {
+        let mut simulated = Self {
+            scope: self.scope.clone(),
+            records: self.records.clone(),
+            usage: self.usage,
+            pinned: self.pinned,
+            ready: self.ready,
+        };
+        for step in steps {
+            simulated.reserve(scope, *step)?.commit();
+        }
+        Ok(())
+    }
     /// Internal durability-only retry for an authenticated UNCHANGED final file. No write, rename,
     /// allocation or deletion is permitted under this guard: only file/parent flushes. This lets a
     /// previously committed intent cross its durability barrier even when ordinary storage is full.

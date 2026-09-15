@@ -6,6 +6,7 @@ use rand_chacha::ChaCha20Rng;
 use rand_core::SeedableRng;
 
 type Node = ChannelSync<MemNetwork, ChaCha20Rng>;
+mod provisional;
 mod service;
 mod studio;
 fn node() -> (Node, ManualClock) {

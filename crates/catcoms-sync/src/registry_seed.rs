@@ -9,12 +9,23 @@ use catcoms_rt::Responder;
 use catcoms_storage::pad::{self, OP_PAD_CEILING, OP_PAD_FLOOR};
 use receipt_head::{HeadSelection, ReceiptHeadAnswer};
 use registry_ingress::Rate;
+mod capacity;
 mod detached;
+mod provisional;
 mod service;
+mod transfer;
 mod wire;
+pub use capacity::ProvisionalCheckpointCapacity;
 pub use detached::{
     CompletedCheckpointDiscovery, CompletedCheckpointSeed, PendingCheckpointDiscovery,
     PendingCheckpointSeed,
+};
+pub use provisional::{
+    CompletedProvisionalStudioDiscovery, CompletedProvisionalStudioSeed,
+    CompletedProvisionalStudioTail, PendingProvisionalStudioDiscovery,
+    PendingProvisionalStudioSeed, PendingProvisionalStudioTail, PreparedProvisionalStudioSeed,
+    ProvisionalStudioHint, ProvisionalStudioHintUse, ProvisionalStudioSeedPreparation,
+    ProvisionalStudioSeedUse, ProvisionalStudioTailPreparation,
 };
 use wire::*;
 
@@ -76,7 +87,7 @@ impl Drop for CancelOnDrop {
 }
 
 /// Only an actual fresh owner response can select a checkpoint. Hints remain useful for
-/// provisional reads but never enter the seed-fetch or later durable-install authority path.
+/// provisional reads but never enter the authoritative seed-fetch or durable-install path.
 pub enum RegistrySeedDiscovery {
     Hint(ReceiptHeadAnswer),
     Selected(RegistrySeedFetch),
@@ -94,12 +105,13 @@ impl fmt::Debug for RegistrySeedDiscovery {
 /// paced at one second and a fixed 60-second receiver-clock lifetime; cancellation spends one.
 pub struct RegistrySeedFetch {
     selection: HeadSelection,
-    _capacity: Arc<()>,
     expires: u64,
     attempts: u8,
     next_at: u64,
     seed: Option<VerifiedCheckpoint>,
     attempt: Option<Arc<()>>,
+    // Drop retained bytes before refunding capacity, even when a caller drops off-thread.
+    _capacity: Arc<()>,
 }
 impl fmt::Debug for RegistrySeedFetch {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {

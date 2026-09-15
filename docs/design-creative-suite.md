@@ -1,5 +1,98 @@
 # Design: the creative suite (draw, doodle, flipnote, emoji sound, play, knock)
 
+**Current Gate 4 position (2026-09-15).** HANDOFF-002 is closed and the corrected bounded
+Closing-overlay core/store handoff is accepted at `62f06d4` (review/evidence head `aa0a81f`).
+This is implementation acceptance for that boundary, not full Gate 4 acceptance. The user
+clarified that Gate 4 must finish before Gate 5 starts; Gate 5 remains untouched.
+
+Of the four previously listed work areas, block 1 (combined scheduling, `6b71d96`) is accepted.
+Block 2 still needs actor/native overlay integration, bounded preparation/signing custody,
+manual overlay inspection/copy/export/disposition, stale-base and preview-based local-work
+handling, and remaining repeated-owner tenure integration. Blocks 3 (runtime signed fault
+repair) and 4 (combined Gate 4 acceptance and required suites) remain. These are unequal work
+areas, not percentages. The user passes the `0b28f06` custody instrumentation and detached
+inspection proposal with no findings. Code/test checkpoint `d5ca2ff` registers read-only
+`studio_overlay_read`, with detached reconstruction and original-context delivery checks;
+its implementation review passes at `c47ae0b`. P3 INSPECTION-TEST-001 requests digest-specific
+regression coverage; its correction at `d38df93` passes the focused local regression and
+size-only mutation/restored test, with re-review pending and no production change.
+Durable overlay Save is still unavailable.
+
+The [Closing overlay foundation design](GATE4-CLOSING-OVERLAY-REVIEW.md) passed user review at
+`d576af2` on 2026-09-14 with no required changes. Its core/store implementation now distinguishes
+explicit local acceptance from an ordinary failed Save, preserves sequence and timestamps across
+restart, shares existing storage/reference accounting, and holds annotated entries out of ordinary
+Apply and retirement. The 131 affected local tests, Clippy and three isolated mutations pass;
+implementation review passed and OVERLAY-TEST-001 is closed by the re-review of `65db6ac`.
+The user accepts the corrected [atomic handoff design](GATE4-OVERLAY-HANDOFF-REVIEW.md) at
+`dd2fbc0` and closes HANDOFF-001. The [core/store implementation](GATE4-OVERLAY-HANDOFF-IMPLEMENTATION-REVIEW.md)
+is pushed at `bf37cc4`; 202 local Studio tests and the dedicated handoff/mutation workflows pass.
+The user closes HANDOFF-002 (P2): reference inventory now honors required intent metadata before
+installing a complete pixel pin set. The correction at `62f06d4` passes 24 focused local tests,
+Clippy and its isolated mutation/restored regression. The reviewer inspected GitHub run
+[34903404377](https://github.com/Thalpy/Mewtual/actions/runs/34903404377): 24 normal handoff tests,
+ten detected mutations and ten passing restored regressions, on merge checkout `a89f90b`.
+No further implementation or coverage change is required for this bounded handoff. The reviewer
+did not rerun Cargo locally. Evidence and broader CI limitations are in [HANDOVER](HANDOVER.md).
+It persists Prepared, the whole signed source, then Completed before releasing the overlay hold;
+ordinary intents remain pending for receipt settlement. A local source dependency also prevents
+missing metadata from exposing an unfinished batch after restart. This is still block 2.
+The [runtime design](GATE4-OVERLAY-RUNTIME-REVIEW.md) is accepted; its read-only inspection
+implementation now follows it. Overlay writes/replay/disposition, provisional-preview writes
+and new tenure authority remain unavailable. Actual command details are in FLIPNOTE-UI-HOOKS.
+
+**Combined scheduling checkpoint `6b71d96` (2026-09-13; user review PASS).** The three-member actor
+fixture retains three preview reservations: three real deliveries, or two deliveries plus a
+cancelled parser or a cancelled transport request. It restores only owner transport reachability and
+requires both Registry and Studio checkpoints, exact content and durable reopen within 40 seconds
+of simulated scheduler time. Preview custodians remain retained throughout; no restart, unwatch,
+additional user Read or expiry of all original seeds enables the installations.
+
+This exposed a fast-retry defect: the provider's shared head rail allows a two-request burst, spent
+by Registry and Studio discovery. An immediate provisional head can repeatedly fail before a seed
+is fetched. The bounded preview queue now waits one second before its fresh head attempt, without
+holding a reservation or resetting that deadline on duplicate Hints. Queued targets defer new
+same-target page work so repeated Reads cannot bypass that wait. Authoritative work retains
+priority. Both new conditions have isolated mutation failures and restored-source passes.
+The broad run on `487cb0e` passes 165 tests (one opt-in profile ignored); final `6b71d96` passes
+11 targeted actor tests, the shared native fixture, Clippy and 19 native Studio tests on GitHub,
+including both existing native mutation checks. The native abort regression now waits for actual
+final guard release after its unchanged held-while-paused assertions. Native/UI response shapes
+are unchanged. Exact validation is recorded in HANDOVER. The user's review accepts this bounded
+checkpoint with no actionable production/test finding or required changes. The reviewer inspected
+source and actual GitHub native logs, but did not rerun Cargo locally; local actor/mutation evidence
+remains the recorded execution evidence. The broad 165-test run was on `487cb0e`, not final `6b71d96`.
+The combined authoritative target is Index plus its Registry bucket; Index/Flipnote previews supply
+pressure. Cancelled transport is a controlled lower-layer model, and 40 seconds is simulated scheduler
+time. Priority covers pending authoritative work, not preemption or a universal latency guarantee.
+Closing overlays/repeated tenure, signed repair and full Gate 4 acceptance remain outstanding.
+
+**Actor/native preview checkpoint (2026-09-13, implementation PASS at `a89bde6`).** The user's
+review found no blocking production defect. NATIVE-TEST-001 was a non-blocking P3 regression gap:
+the old native test converted an ordinary Index, so preview serialization and final delivery
+validity needed independent coverage. The test-only follow-up exercises real actor-produced
+Index/Flipnote previews and expiry after successful conversion. All 19 native tests and both
+mutation checks pass on the PR merge checkout for `c60de4e`; source restoration/reruns pass.
+The user re-review of `a89bde6...134394e` closes NATIVE-TEST-001 without further changes.
+This acceptance does not close the combined scheduling regression or Gate 4. TAIL-TEST-001
+is closed by the user's PASS of `2a1814e` against `47bf098`. The existing receiver now schedules
+provisional discovery, seed fetching and finite signed tails outside vault custody; cold workers
+hold their process permits through cancellation and release them on completion. Ready results
+and native delivery share the original seed reservation. Native Read/List expose a separate
+`awaitingTenureReceipt: true` result with `provisional: true`; installed sources take precedence,
+and ordinary Apply cannot use a preview epoch. Native uses request/session/instance checks plus
+a bounded actor handoff for final conversion. Lock clears the volatile cache. No frontend layout
+or editor implementation is changed.
+
+The two previously ignored newcomer preview cases now pass, together with both known-CID PIX
+fetch/reopen cases. Runtime custody tests cover three real ready previews, native delivery retaining
+a slot, authoritative Hint release, and handoff cancellation/expiry. Exact final checks are in
+HANDOVER. This does not yet close the combined owner-reachability/competing-installation regression
+or all of block 1. Blocks 2-4 remain durable Closing overlays/repeated tenure, runtime signed repair,
+and combined Gate 4 acceptance. Earlier statements below describing missing actor/native delivery
+record the boundaries of those earlier checkpoints, not the current implementation.
+
+
 Status: revision 15; the backend has landed through Gate 3 and Gate 4 (owner rotation and
 recovery) is the active gate. Shipped: `crates/catcoms-replication/src/studio/` (admission,
 frames, index, patch, recovery, snapshot and `epoch/{adoption,catchup,owner,settlement}`),
@@ -28,6 +121,63 @@ sound, linked scores, export, advisory claims and recovery; shared identity/chan
 limited to those dependencies. The broader design below is preserved as backlog, not the
 active completion target. `BACKEND-IMPLEMENTATION.md` defines seven evidence-based delivery
 gates, starting with typed documents and durable one-device Save/Load. UI remains user-owned.
+
+Gate 4 audit (2026-09-12, `acdb7f8`): watched owner rotation, Registry maintenance,
+recovery controls, conservative own-intent replay and eviction grace are connected. Frozen-owner
+takeover also has core/store coverage (`dba52e5`); running-app succession and signed repair are
+still pending. ReceiptRepair v2's codec/book support does not implement runtime repair. The
+remaining overlay, provisional newcomer and tenure/repair-label requirements below remain
+acceptance obligations. See the progress audit in `BACKEND-IMPLEMENTATION.md` and the current
+callable/unavailable controls in `FLIPNOTE-UI-HOOKS.md`; no percentage is inferred from commits.
+The subsequent actor test slice (`d7ea514`/`5d65998`) now has user-provided review closure for
+SUC-001/SUC-002. It covers header-only Flipnote Open/Closing takeover after restart and completed
+takeover surviving vault reopen; it does not close the broader succession or Gate 4 obligations.
+The user-accepted `e3f6669` expands the matrix to Index, installed-checkpoint inheritance and
+editing through a freshly restored successor actor; all eight cases pass. It adds
+no native command or UI layout and does not close the remaining runtime succession scenarios.
+The next joining fixture demonstrates that an invite can itself change ownership again by reusing
+the removed founder's low MLS leaf. Known-CID pixel availability and provisional metadata loading
+are separate obligations: the latter currently fails because the receiver discards unconfirmed
+Studio head hints. [The proposed next runtime slice](GATE4-PROVISIONAL-READ-REVIEW.md) adds a bounded,
+explicitly unconfirmed read fallback; its design passed user-provided review and is not implemented.
+The user accepted `48fcc2e`'s transition/byte evidence but requested PR-001 changes to that proposal:
+previews must not retain all capacity needed for authoritative discovery. The revision caps all
+provisional custody at three of the four shared slots, reserves authoritative progress across Studio
+and Registry, and separates preview eviction from successful authoritative replacement. TEST-001/002
+tighten the Registry/refused-Apply and completed-Hint observations. The user re-review of `7393165`
+closes TEST-001/TEST-002 and PR-001 (design only). The capacity checkpoint adds the shared three-of-four
+capacity reservation; fetching, scheduler fairness, lifecycle fencing and provisional native reads
+remain pending. Gate 4 remains active.
+The user accepted `1c90c41`'s capacity foundation without requested changes. Published `0b32bad`
+adds authenticated provisional head discovery and scoped candidate custody, including watch and
+app mount/server checks. It still supplies no parsed preview or native unconfirmed-history state;
+receipt attribution, seed/tail validation and runtime scheduling remain acceptance obligations.
+Its user review passed. Separately, the accepted `2f5a8a0` interruption slice adds four actor tests
+covering eight failures before/after recovery and successor writes. A fresh mount/actor must
+resume the exact journaled decision, preserve typed recovery and finish the Registry pointer;
+another restart must remain editable. This bounded I/O-error/restart evidence passed review and
+does not close Gate 4. Direct A-to-B-to-A by rejoining still shares the Unknown-tenure gap:
+the same returned owner key and a Welcome cannot establish its new tenure's start.
+The user-accepted `b3e54dc` slice consumes an authenticated hint for a bounded seed fetch and detached
+typed validation. Receipt self-signature and canonical seed validation produce only unconfirmed
+content; they establish no owner tenure, canonical source or editable epoch. Original capacity,
+deadline and lifecycle custody survive through the prepared result. Actor scheduling, tail
+validation and native preview delivery remain pending, and no new frontend hook is callable.
+Authoritative/provisional head preparations share a per-target latest attempt, which the future
+scheduler must coordinate. Both previous reviews passed with no required changes; the optional
+head-deadline regression is included in this slice. Its review found no blocking code defect and
+one optional P3 follow-up to independently test canonical seed re-encoding. That regression now
+passes for Index and Flipnote and fails when the final comparison is removed; source is restored.
+The current signed-tail checkpoint adds authenticated bounded pages and detached typed replay
+over the private unconfirmed graph, with unchanged watch/tenure authority and original capacity,
+deadline and lifecycle checks. The user review accepts `47bf098` with no blocking production defect
+and closes the prior canonical-encoding P3. TAIL-TEST-001's inner-document fixture is corrected:
+successful decryption and signature verification now precede its specific scope-error assertion,
+and removing only the inner-ID check makes it fail. No production change accompanies this test
+follow-up. A checked finite tail is still only
+unconfirmed content; it supplies no editable source or ordinary Read result. Block 1 still needs
+actor scheduling, worker/capacity fairness and native preview delivery. The other three blocks
+remain Closing overlays/repeated-owner tenure, runtime signed repair and combined acceptance.
 
 UI reference (2026-09-05): the owner's `Main.html`, `Inspector.html`, `Timeline.html`,
 `Palette.html` and `Tools.html`, with matching PNGs, were drafted as a scratch preview outside

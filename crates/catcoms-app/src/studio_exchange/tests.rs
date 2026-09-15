@@ -19,10 +19,13 @@ mod actor_save;
 mod controls;
 mod discovery;
 mod pages;
+mod provisional;
 mod receiver;
 mod reconnect;
 mod registry_runtime;
 mod replay;
+mod scheduling;
+mod succession;
 mod unopened;
 
 const SERVER: u64 = 83;
@@ -65,6 +68,9 @@ fn title(nonce: u8, text: &str) -> DomainOp {
 #[derive(Clone)]
 struct Net {
     inner: MemNetwork,
+    hidden_peer: Arc<std::sync::Mutex<Option<PeerId>>>,
+    hold_seed: Arc<AtomicBool>,
+    held_seed: Arc<std::sync::Mutex<Option<(Bytes, RequestCancellation)>>>,
     pause: Arc<AtomicBool>,
     attempts: Arc<AtomicUsize>,
     // Optional deterministic test-control permits, used only by the automatic Save regressions.
@@ -76,6 +82,9 @@ impl Net {
     fn new(inner: MemNetwork) -> Self {
         Self {
             inner,
+            hidden_peer: Default::default(),
+            hold_seed: Default::default(),
+            held_seed: Default::default(),
             pause: Arc::new(AtomicBool::new(false)),
             attempts: Arc::new(AtomicUsize::new(0)),
             release: Arc::new(tokio::sync::Semaphore::new(0)),
@@ -90,7 +99,12 @@ impl MeshTransport for Net {
         self.inner.local_peer()
     }
     fn connection_snapshot(&self) -> Vec<catcoms_rt::PeerConnectionSnapshot> {
-        self.inner.connection_snapshot()
+        let hidden = *self.hidden_peer.lock().unwrap();
+        self.inner
+            .connection_snapshot()
+            .into_iter()
+            .filter(|p| Some(p.peer) != hidden)
+            .collect()
     }
     async fn request_connected_cancellable(
         &self,
@@ -99,6 +113,16 @@ impl MeshTransport for Net {
         b: Bytes,
         c: RequestCancellation,
     ) -> Result<Bytes, TransportError> {
+        if *self.hidden_peer.lock().unwrap() == Some(p) {
+            return Err(TransportError::Unreachable(p));
+        }
+        if b.first() == Some(&25) && self.hold_seed.swap(false, Ordering::SeqCst) {
+            // An actual serialized Studio seed request enters the simulated transport's
+            // outbound table. Dropping the caller future leaves bytes/accounting here until
+            // the test explicitly models lower-layer completion, as with a live socket.
+            *self.held_seed.lock().unwrap() = Some((b, c));
+            return std::future::pending().await;
+        }
         self.inner
             .request_connected_cancellable(p, proto, b, c)
             .await
@@ -133,6 +157,9 @@ impl MeshTransport for Net {
         proto: ProtocolId,
         b: Bytes,
     ) -> Result<Bytes, TransportError> {
+        if *self.hidden_peer.lock().unwrap() == Some(p) {
+            return Err(TransportError::Unreachable(p));
+        }
         self.inner.request(p, proto, b).await
     }
     async fn request_cancellable(
@@ -142,10 +169,24 @@ impl MeshTransport for Net {
         b: Bytes,
         c: RequestCancellation,
     ) -> Result<Bytes, TransportError> {
+        if *self.hidden_peer.lock().unwrap() == Some(p) {
+            return Err(TransportError::Unreachable(p));
+        }
         self.inner.request_cancellable(p, proto, b, c).await
     }
     async fn next_event(&self) -> Option<TransportEvent> {
-        self.inner.next_event().await
+        loop {
+            let event = self.inner.next_event().await?;
+            let peer = match &event {
+                TransportEvent::Gossip { from, .. } | TransportEvent::Request { from, .. } => *from,
+                TransportEvent::PeerConnected(peer)
+                | TransportEvent::PeerDisconnected(peer)
+                | TransportEvent::PeerPathsChanged { peer, .. } => *peer,
+            };
+            if *self.hidden_peer.lock().unwrap() != Some(peer) {
+                return Some(event);
+            }
+        }
     }
 }
 type Node = Server<Net, ChaCha20Rng>;

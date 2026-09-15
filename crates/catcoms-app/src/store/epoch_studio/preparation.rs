@@ -84,6 +84,7 @@ impl ServerStore {
         else {
             return Ok(None);
         };
+        self.check_studio_intent_link(server, &logical, &scope, &record.plain)?;
         // Drop a matching stale unit before rebuilding it; never keep two mutable owners for it.
         if self.studio_source_is_warm(server, group, target, device) {
             self.studio_source = None;

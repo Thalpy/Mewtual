@@ -1,5 +1,6 @@
 use super::*;
 use catcoms_replication::studio::{StudioEpoch, StudioTarget};
+mod capacity;
 
 fn target(art: bool) -> CheckpointTarget {
     CheckpointTarget::Studio(if art {

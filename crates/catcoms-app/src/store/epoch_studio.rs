@@ -21,11 +21,15 @@ use std::sync::Arc;
 
 mod adoption;
 mod discovery;
+mod handoff;
+mod overlay;
 mod preparation;
 mod recovery_disposition;
 mod registry;
 mod rotation;
 pub use adoption::StudioAdoptionOutcome;
+#[cfg(test)]
+pub(crate) use rotation::interruption::{StudioRotationBoundary, StudioRotationInterruption};
 pub use rotation::StudioRotationOutcome;
 mod receive;
 pub(crate) use preparation::{PreparedStudioSource, StudioSourceCapture};
@@ -213,6 +217,7 @@ impl ServerStore {
         let scope = scope_bytes(server, &logical)?;
         self.read_studio_record(&scope)?
             .map(|bytes| {
+                self.check_studio_intent_link(server, &logical, &scope, &bytes.plain)?;
                 let (stored, snapshot) = decode_record(&bytes.plain, &scope, &logical)?;
                 if stored != target {
                     return Err(invalid("wrong object channel"));
@@ -446,6 +451,7 @@ impl ServerStore {
             let held = self.read_studio_record(&scope)?;
             let mut unit = match &held {
                 Some(bytes) => {
+                    self.check_studio_intent_link(server, &logical, &scope, &bytes.plain)?;
                     let (stored, snapshot) = decode_record(&bytes.plain, &scope, &logical)?;
                     if stored != target {
                         return Err(invalid("wrong object channel"));
@@ -505,7 +511,7 @@ impl ServerStore {
     fn save_studio_source_reusing(
         &self,
         server: u64,
-        mut unit: StudioEpoch,
+        unit: StudioEpoch,
         observed: Option<StorageRecord>,
         before: &[u8],
         purpose: WritePurpose,
@@ -515,6 +521,26 @@ impl ServerStore {
         sync: impl FnOnce(&Path, u64) -> Result<(), AppError>,
         prior: Option<source::SourceVersion>,
     ) -> Result<EpochStudioState, AppError> {
+        self.save_studio_source_checked(
+            server, unit, observed, before, purpose, rng, budget, writer, sync, prior, None,
+        )
+    }
+    #[allow(clippy::too_many_arguments)]
+    fn save_studio_source_checked(
+        &self,
+        server: u64,
+        mut unit: StudioEpoch,
+        observed: Option<StorageRecord>,
+        before: &[u8],
+        purpose: WritePurpose,
+        rng: &mut impl CryptoRngCore,
+        budget: &mut EpochStorageBudget,
+        writer: impl FnOnce(&Path, &[u8]) -> Result<(), AppError>,
+        sync: impl FnOnce(&Path, u64) -> Result<(), AppError>,
+        prior: Option<source::SourceVersion>,
+        handoff: Option<&handoff::CheckedHandoffWrite>,
+    ) -> Result<EpochStudioState, AppError> {
+        let intent_link = self.check_studio_handoff_write(server, &mut unit, budget, handoff)?;
         let scope = scope_bytes(server, unit.document())?;
         // Add before either write/flush barrier, and keep holds even when persistence is uncertain.
         self.hold_creative(
@@ -539,6 +565,9 @@ impl ServerStore {
             e.put_bytes(&scope).map_err(invalid)?;
             e.put_bytes(&unit.target().channel()).map_err(invalid)?;
             e.put_bytes(&snapshot).map_err(invalid)?;
+            if intent_link {
+                e.put_u8(1);
+            }
             let plain = Zeroizing::new(e.finish());
             let record = storage_record(
                 server,
@@ -684,6 +713,14 @@ fn decode_record<'a>(
     scope: &[u8],
     logical: &LogicalDocument,
 ) -> Result<(StudioTarget, &'a [u8]), AppError> {
+    let (target, snapshot, _) = decode_record_link(bytes, scope, logical)?;
+    Ok((target, snapshot))
+}
+fn decode_record_link<'a>(
+    bytes: &'a [u8],
+    scope: &[u8],
+    logical: &LogicalDocument,
+) -> Result<(StudioTarget, &'a [u8], bool), AppError> {
     if bytes.len() > MAX_RECORD_BYTES {
         return Err(invalid("record exceeds bound"));
     }
@@ -712,8 +749,16 @@ fn decode_record<'a>(
         return Err(invalid("wrong target"));
     }
     let snapshot = d.get_bytes().map_err(invalid)?;
+    let intent_link = if d.is_empty() {
+        false
+    } else {
+        if d.get_u8().map_err(invalid)? != 1 {
+            return Err(invalid("unknown Studio source extension"));
+        }
+        true
+    };
     d.finish().map_err(invalid)?;
-    Ok((target, snapshot))
+    Ok((target, snapshot, intent_link))
 }
 pub(super) fn scope_bytes(server: u64, document: &LogicalDocument) -> Result<Vec<u8>, AppError> {
     if document.server_id.is_empty()
@@ -746,21 +791,27 @@ pub(super) fn inventory_record(
         .map_err(invalid)?;
     storage_record(server, document, scope, size, protocol)
 }
+pub(super) struct StudioInventoryReferences {
+    pub(super) record: StorageRecord,
+    pub(super) cids: std::collections::BTreeSet<[u8; 32]>,
+    pub(super) required_metadata: Option<StudioTarget>,
+}
 pub(super) fn inventory_references(
     bytes: &[u8],
     server: u64,
     document: &LogicalDocument,
     scope: &[u8],
     size: u64,
-) -> Result<(StorageRecord, std::collections::BTreeSet<[u8; 32]>), AppError> {
-    let (target, snapshot) = decode_record(bytes, scope, document)?;
+) -> Result<StudioInventoryReferences, AppError> {
+    let (target, snapshot, linked) = decode_record_link(bytes, scope, document)?;
     let (protocol, cids) =
         StudioEpoch::inspect_vault_references(snapshot, &document.server_id, target)
             .map_err(invalid)?;
-    Ok((
-        storage_record(server, document, scope, size, protocol)?,
+    Ok(StudioInventoryReferences {
+        record: storage_record(server, document, scope, size, protocol)?,
         cids,
-    ))
+        required_metadata: linked.then_some(target),
+    })
 }
 fn storage_record(
     server: u64,

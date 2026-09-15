@@ -228,6 +228,11 @@ impl EventSink {
 /// A command from the UI to a running server actor.
 #[derive(Debug)]
 pub enum AppCommand {
+    #[cfg(test)]
+    StudioSchedulingForTest {
+        pause_parse: Option<(oneshot::Sender<()>, std::sync::mpsc::Receiver<()>)>,
+        reply: oneshot::Sender<(Vec<catcoms_replication::studio::StudioTarget>, usize)>,
+    },
     /// No vault guard may be queued. The dedicated Ready/lease exchange starts only in this arm.
     Studio {
         /// None drives one authenticated inbox packet; it accepts no renderer packet/scope.
@@ -1063,11 +1068,28 @@ pub enum AppEvent {
 pub struct ServerActor {
     cmd_tx: CommandSender,
     studio_pending: tokio::sync::watch::Receiver<bool>,
+    studio_preview_reset: tokio::sync::watch::Sender<bool>,
     #[cfg(test)]
     studio_preparing: tokio::sync::watch::Receiver<bool>,
+    #[cfg(test)]
+    studio_hints: tokio::sync::watch::Receiver<
+        Option<crate::studio_exchange::discovery::StudioHintObservation>,
+    >,
 }
 
 impl ServerActor {
+    #[cfg(test)]
+    pub(crate) async fn studio_scheduling_for_test(
+        &self,
+        pause_parse: Option<(oneshot::Sender<()>, std::sync::mpsc::Receiver<()>)>,
+    ) -> (Vec<catcoms_replication::studio::StudioTarget>, usize) {
+        let (reply, result) = oneshot::channel();
+        self.cmd_tx
+            .send(AppCommand::StudioSchedulingForTest { pause_parse, reply })
+            .await
+            .unwrap();
+        result.await.unwrap()
+    }
     /// Queue only bounded intent metadata, never a vault/lifecycle lock. The receiver must use
     /// fail-fast lock acquisition after Ready. Dropping this future leaves queued work powerless.
     pub async fn studio_begin(
@@ -1097,6 +1119,11 @@ impl ServerActor {
             .map_err(|_| "server stopped or Studio control expired".to_string())
     }
     /// Coalesced scheduling hint with no content; the actor closing terminates its receiver.
+    /// Revokes volatile previews without waiting for a vault lease or actor command capacity.
+    pub fn clear_studio_previews(&self) {
+        self.studio_preview_reset
+            .send_modify(|generation| *generation = !*generation);
+    }
     pub fn studio_pending(&self) -> tokio::sync::watch::Receiver<bool> {
         self.studio_pending.clone()
     }
@@ -1110,6 +1137,12 @@ impl ServerActor {
             .wait_for(|preparing| !*preparing)
             .await
             .expect("Studio actor stopped during preparation");
+    }
+    #[cfg(test)]
+    pub(crate) fn observed_studio_hint_for_test(
+        &self,
+    ) -> Option<crate::studio_exchange::discovery::StudioHintObservation> {
+        self.studio_hints.borrow().clone()
     }
     async fn studio_ready(
         &self,
@@ -1135,8 +1168,11 @@ impl ServerActor {
     pub fn with_trace(&self, trace: u64) -> ServerActor {
         ServerActor {
             studio_pending: self.studio_pending.clone(),
+            studio_preview_reset: self.studio_preview_reset.clone(),
             #[cfg(test)]
             studio_preparing: self.studio_preparing.clone(),
+            #[cfg(test)]
+            studio_hints: self.studio_hints.clone(),
             cmd_tx: CommandSender {
                 tx: self.cmd_tx.tx.clone(),
                 trace: Trace(trace),
@@ -3406,10 +3442,15 @@ where
     let (raw_events, event_rx) = mpsc::channel::<TracedEvent>(256);
     let event_tx = EventSink::new(raw_events);
     let (studio_signal, studio_pending) = tokio::sync::watch::channel(false);
+    let (studio_preview_reset, mut studio_preview_resets) = tokio::sync::watch::channel(false);
     #[cfg(test)]
     let (studio_preparation_signal, studio_preparing) = tokio::sync::watch::channel(false);
+    #[cfg(test)]
+    let (studio_hint_signal, studio_hints) = tokio::sync::watch::channel(None);
     let handle = tokio::spawn(async move {
         let mut studio_receiver = crate::studio::StudioReceiver::default();
+        #[cfg(test)]
+        studio_receiver.observe_hints_for_test(studio_hint_signal);
         let mut studio_jobs = tokio::task::JoinSet::<crate::studio::StudioBackgroundResult>::new();
         // Per open channel: a content signature of its messages, topic and jukebox (see
         // `channel_delta`), so an edit/delete/add all surface a `ChannelUpdated` that says which
@@ -3516,6 +3557,7 @@ where
         // coalesced here and revisited by an injected-clock timer even if the network goes idle.
         let mut delivery_dirty = HashSet::new();
         let mut file_transfers = file_transfers::FileTransfers::new();
+        let mut studio_preview_resets_open = true;
         loop {
             studio_receiver.signal(&server, &studio_signal);
             #[cfg(test)]
@@ -3534,6 +3576,11 @@ where
             tokio::pin!(delivery_wake);
             tokio::select! {
                 biased;
+                reset = studio_preview_resets.changed(), if studio_preview_resets_open => {
+                    event_tx.idle();
+                    if reset.is_ok() { studio_receiver.clear_previews(); }
+                    else { studio_preview_resets_open = false; }
+                },
                 // Consume an already-completed bounded Studio job before granting another
                 // native lease. A continuously ready command queue must not leave a fetched
                 // page/preparation marked in-flight forever. Pending work never blocks commands.
@@ -3974,6 +4021,10 @@ where
                             .map_err(|e| e.to_string());
                         let _ = reply.send(res);
                     }
+                    #[cfg(test)]
+                    Some(AppCommand::StudioSchedulingForTest { pause_parse, reply }) => {
+                        let _ = reply.send(studio_receiver.scheduling_for_test(&mut server, pause_parse));
+                    }
                     Some(command @ (AppCommand::Studio { .. } | AppCommand::StudioControl { .. })) => {
                         use crate::studio::{StudioDispatch, StudioReply, StudioResponse};
                         let (lease_tx, lease_rx) = oneshot::channel::<crate::studio::StudioVaultLease>();
@@ -4023,8 +4074,9 @@ where
                         };
                         server = returned;
                         studio_receiver = returned_receiver;
-                        let (result, updated) = match result {
-                            Ok((saved, updated, control)) => {
+                        let (mut result, updated) = match result {
+                            Ok((mut saved, updated, control)) => {
+                                if !lease.preview_reads { saved.preview = None; }
                                 let view = server.publish_studio_save(&mut lease, &mut reply, saved).await;
                                 (Ok(match control { Some(response) => StudioResponse::Control(response), None => StudioResponse::Document(view) }), updated)
                             },
@@ -4034,12 +4086,25 @@ where
                         // or bounded event backpressure. A send result cannot change Save success.
                         let background = if result.is_ok() && !lease.is_cancelled() { studio_receiver.detach(&mut server) } else { None };
                         let cancellation = lease.background_cancellation();
+                        let handoff = match &mut result {
+                            Ok(StudioResponse::Control(crate::studio::StudioControlResponse::OverlayInspection(inspection))) => Some(inspection.begin_delivery(server.runtime_clock())),
+                            Ok(StudioResponse::Document(Some(crate::studio::StudioRead::AwaitingTenureReceipt(preview)))) => {
+                                // Detaching authoritative discovery above may supersede this
+                                // target's hint. Recheck after every preparation, before handoff.
+                                if lease.store.as_ref().is_some_and(|store| server.with_provisional_studio_seed(store, lease.server, &preview.seed, |_| ()).is_ok()) {
+                                    Some(preview.begin_delivery())
+                                } else { result = Err("Studio preview changed; refresh".into()); None }
+                            },
+                            _ => None,
+                        };
+                        let delivery_cancellation = cancellation.clone();
                         drop(lease);
                         if let Some(job) = background { studio_jobs.spawn(job.run(cancellation)); }
                         studio_receiver.signal(&server, &studio_signal);
                         #[cfg(test)]
                         studio_preparation_signal.send_replace(studio_receiver.preparing_for_test());
                         reply.send(result);
+                        if let Some(handoff) = handoff { handoff.finish(server.runtime_clock(), delivery_cancellation).await; }
                         for (target, state) in studio_receiver.take_settlement_notices() {
                             let _ = event_tx.send(AppEvent::SettlementChanged { target, state }).await;
                         }
@@ -5017,8 +5082,11 @@ where
     (
         ServerActor {
             studio_pending,
+            studio_preview_reset,
             #[cfg(test)]
             studio_preparing,
+            #[cfg(test)]
+            studio_hints,
             cmd_tx: CommandSender {
                 tx: cmd_tx,
                 trace: Trace::NONE,
@@ -5734,7 +5802,9 @@ mod tests {
         let (tx, rx) = mpsc::channel(1);
         drop(rx);
         let actor = ServerActor {
+            studio_hints: tokio::sync::watch::channel(None).1,
             studio_pending: tokio::sync::watch::channel(false).1,
+            studio_preview_reset: tokio::sync::watch::channel(false).0,
             studio_preparing: tokio::sync::watch::channel(false).1,
             cmd_tx: CommandSender {
                 tx,

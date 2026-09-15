@@ -339,6 +339,7 @@ test("every non-bootstrap native command visibly crosses the unlocked-session ga
   const moduleGatekeepers = new Map([
     ["studio.rs", "invoke|invoke_custody"],
     ["studio/recovery.rs", "invoke_control|invoke_custody"],
+    ["studio/inspection.rs", "read"],
   ]);
   for (const [command, { file, segment }] of segments) {
     if (bootstrap.has(command)) continue;
@@ -400,10 +401,13 @@ test("every helper the session-gate audit trusts does the checking itself", () =
   // the fourteen Studio commands would then be classified, counted, and checked against nothing.
   const studio = readFileSync(join(nativeDir, "studio.rs"), "utf8");
   const recovery = readFileSync(join(nativeDir, "studio", "recovery.rs"), "utf8");
+  const inspection = readFileSync(join(nativeDir, "studio", "inspection.rs"), "utf8");
   const chain = [
-    ["studio.rs", studio, "invoke_custody", "unlocked_ui_session_generation"],
+    ["studio.rs", studio, "invoke_custody", "InvokeContext::new"],
     ["studio.rs", studio, "invoke", "invoke_custody"],
     ["studio/recovery.rs", recovery, "invoke_control", "invoke_custody"],
+    ["studio/inspection.rs", inspection, "read(", "read_with"],
+    ["studio/inspection.rs", inspection, "read_with", "InvokeContext::new"],
   ] as const;
   for (const [file, source, helper, reaches] of chain) {
     const start = source.indexOf(`async fn ${helper}`);
@@ -415,6 +419,11 @@ test("every helper the session-gate audit trusts does the checking itself", () =
       `${file}: ${helper} is trusted to gate Studio commands but never reaches ${reaches}`,
     );
   }
+  const contextStart = studio.indexOf("impl InvokeContext {");
+  assert.ok(contextStart > 0, "original Studio operation context exists");
+  const context = studio.slice(contextStart, studio.indexOf("\n}", contextStart));
+  assert.match(context, /unlocked_ui_session_generation\s*\(/,
+    "original operation context must establish the unlocked session");
 });
 
 test("instrumented actor handles can only be trace-bound through Operation", () => {

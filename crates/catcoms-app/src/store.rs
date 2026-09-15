@@ -40,6 +40,9 @@ pub(crate) use epoch_registry::tests::performance::save_inventory_fixture;
 pub(crate) use epoch_registry::{RegistrySourceCapture, RegistrySourceStamp};
 mod epoch_studio;
 pub use creative_references::{CreativeReferences, MAX_CREATIVE_REFERENCES};
+pub(crate) use epoch_intents::inspection::{
+    StudioInspectedDraft, StudioInspectionCapture, StudioInspectionStamp,
+};
 pub use epoch_intents::{EpochIntentBudget, EpochIntentState, MAX_VAULT_INTENT_BYTES};
 pub use epoch_owner::EpochOwnerReceiptState;
 pub use epoch_recovery::cleanup::{
@@ -63,8 +66,10 @@ pub use epoch_registry::{
 pub(crate) use epoch_studio::source::studio_full_restores_for_test;
 #[cfg(test)]
 pub(crate) use epoch_studio::tests::performance::{
-    fill_studio_epoch_fixture, save_studio_source_fixture,
+    fill_studio_epoch_fixture, save_studio_source_fixture, studio_owner_decision_fixture,
 };
+#[cfg(test)]
+pub(crate) use epoch_studio::StudioRotationBoundary;
 pub use epoch_studio::{
     EpochStudioBudget, EpochStudioState, StudioAdoptionOutcome, StudioPageAdmission,
     StudioRotationOutcome,
@@ -417,6 +422,8 @@ pub struct ServerStore {
     // One owned verified Studio graph, never a cloned writable gate. Mount drop releases it.
     // Exact authenticated bytes and live context are rechecked before automatic ingest.
     studio_source: Option<epoch_studio::source::RetainedSource>,
+    #[cfg(test)]
+    studio_rotation_interruption: Option<epoch_studio::StudioRotationInterruption>,
     creative_protection: creative_references::SharedProtection,
     // Stable only for this physical mount, unlike the rotating intent-inventory token. Replay
     // passes are local work cursors, not authority across reopen or the native UI-lock boundary.
@@ -459,6 +466,8 @@ impl ServerStore {
             studio_generation: std::sync::Arc::new(()),
             inventory_cache: Default::default(),
             studio_source: None,
+            #[cfg(test)]
+            studio_rotation_interruption: None,
             replay_mount: std::sync::Arc::new(()),
             _session: session,
         })

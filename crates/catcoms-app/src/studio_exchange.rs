@@ -12,6 +12,7 @@ use std::sync::Arc;
 
 pub mod discovery;
 mod pages;
+pub mod provisional;
 mod rotation;
 pub use pages::{
     ServerStudioPageProvider, ServerStudioReceive, StudioPageAttempt, StudioPageCompletion,

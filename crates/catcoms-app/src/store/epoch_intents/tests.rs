@@ -401,6 +401,7 @@ fn committed_first_save_retries_at_both_caps_without_another_copy() {
     )
     .unwrap();
     let mut next = EpochIntentState {
+        overlay: None,
         ledger: IntentLedger::new(doc.clone()),
     };
     next.ledger
@@ -624,6 +625,7 @@ fn empty_ledger_inner_scope_substitution_and_cross_local_mount_reject() {
     let foreign = doc_with_key(&doc, b"other");
     let scope = scope_bytes(SERVER, &doc).unwrap();
     let bad = EpochIntentState {
+        overlay: None,
         ledger: IntentLedger::new(foreign),
     }
     .encode(&scope)
@@ -635,6 +637,7 @@ fn empty_ledger_inner_scope_substitution_and_cross_local_mount_reject() {
     assert!(scan.step().is_err());
     drop(scan);
     let state = EpochIntentState {
+        overlay: None,
         ledger: IntentLedger::new(doc.clone()),
     };
     let sealed = seal(
@@ -710,7 +713,10 @@ fn per_document_count_and_byte_caps_survive_vault_decode_and_prepare() {
         }
         let mut store = open(root.path());
         let scope = scope_bytes(SERVER, &doc).unwrap();
-        let state = EpochIntentState { ledger };
+        let state = EpochIntentState {
+            ledger,
+            overlay: None,
+        };
         let sealed = seal(
             &store.keys.db_key().unwrap(),
             &state.encode(&scope).unwrap(),
@@ -844,6 +850,7 @@ fn vault_cap_counts_other_servers_and_unknown_orphans_and_reconcile_fails_closed
     let (_, _, foreign_doc) = fixture();
     let final_path = store.epoch_intent_path(&scope_bytes(SERVER + 1, &foreign_doc).unwrap());
     let foreign = EpochIntentState {
+        overlay: None,
         ledger: IntentLedger::new(foreign_doc.clone()),
     };
     let encoded = foreign

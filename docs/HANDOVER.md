@@ -8,7 +8,1108 @@ the protocol- vs honest-client-enforced boundary and the hardening backlog.
 [`MESSAGE-FLOW.md`](MESSAGE-FLOW.md) traces one message end to end (send, gossip, catch-up)
 and ranks the live hazards in that path.
 
-## Status (latest entry: 2026-09-10)
+## Status (latest entry: 2026-09-15)
+
+- **Read-only inspection PASS; INSPECTION-TEST-001 coverage correction (2026-09-15).**
+  The user accepts `0b28f06...c47ae0b`, with code/tests at `d5ca2ff`, finding no blocking
+  production defect. They independently inspected both actual GitHub job logs and all ten
+  mutation/restoration logs and verified artifact digests; they did not rerun Cargo locally.
+  One P3 coverage finding remains: adding an ordinary intent also grows the file, so the original
+  freshness regression does not distinguish full-digest checking from size-only checking.
+  No production correction is requested. Prior closures, including HANDOFF-002, stand.
+
+  The correction adds a separate Index/Flipnote regression with an ordinary pending envelope
+  established before capture, then changes only that unannotated envelope's fixed-width nonce.
+  The existing accounted writer seals the replacement. Both complete records must authenticate
+  and decode, have equal actual file sizes and different plaintext digests, and preserve exact
+  accepted metadata, target, author, basis, count and full projection. A fresh inspection must
+  succeed while the old stamp rejects, without either read/check changing durable bytes.
+  The mutation harness additionally replaces only the digest-sensitive comparison with the
+  reviewer's size-only comparison. The first local compile exhausted memory; a single-job
+  retry reached linking but failed because drive C had no free space. No tests executed in
+  either attempt. Approximately 360 MiB of generated incremental cache was removed from the
+  verified, unlinked `target/debug/incremental` workspace directory. The focused retry passes
+  both Index and Flipnote (one test, 56.20 s) at correction head
+  `d38df93f2ba49b20b632870d38d353e69e2d60d8`, pushed to `Create-suite-2` / PR #26. Command:
+  `cargo test --locked -j 1 --config profile.test.package.catcoms-app.debug=0 -p catcoms-app
+  --lib studio_inspection_same_size_authenticated_replacement_is_stale -- --nocapture`.
+  Log: `logs/gate4-inspection-digest-regression-final.log`. Strict app library/test Clippy
+  passes with one build job in 61 s (`logs/gate4-inspection-digest-clippy.log`); root formatting
+  and diff checks pass. The focused local mutation driver imports the committed harness's
+  fourth app mutation, uses the same exact test with `-j 1`, and detects the intended assertion
+  at `inspection.rs:182` (one executed failure, 27.62 s). It restores source bytes exactly, then
+  the restored test passes both document kinds (one test, 55.18 s). This is the new mutation
+  only; the complete default four-mutation harness runs separately on GitHub. Local logs:
+  `logs/gate4-inspection-digest-mutation-local.log` and
+  `logs/studio-inspection-mutations/app-3-local-{mutated,restored}.log`. No compile/empty-filter
+  failure is counted as mutation success. The finding awaits user re-review; native
+  commands/result shapes and production behavior are unchanged.
+  Gate 4 remains active and incomplete; Gate 5 remains untouched.
+
+  GitHub [native run 34953124271](https://github.com/Thalpy/Mewtual/actions/runs/34953124271)
+  passes at `d38df93`, using PR merge checkout
+  `4f427fc59fd535a7d12ab7031b500f546585cec6`. The actual job log shows 25 native tests passing
+  (83.60 s), both existing preview mutations and both inspection mutations detected, with all
+  restored regressions passing. [Two-client run 34953124337](https://github.com/Thalpy/Mewtual/actions/runs/34953124337)
+  also passes.
+
+  GitHub [inspection run 34953124247](https://github.com/Thalpy/Mewtual/actions/runs/34953124247)
+  passes at the same merge checkout. The inspected actual job log records **10 store/actor
+  tests passing** (199.47 s), **two shared fixture tests passing** (52.31 s), and all **four
+  intended app mutation failures plus four restored passes**. The added size-only comparison
+  fails specifically at `inspection.rs:182` (one executed failure, 28.02 s), restores source
+  byte-for-byte and passes the restored two-kind regression (one test, 56.47 s).
+  The [app mutation artifact](https://github.com/Thalpy/Mewtual/actions/runs/34953124247/artifacts/10390418526)
+  contains eight individual logs, including
+  `app-3-mutated.log` and `app-3-restored.log`; its published SHA-256 is
+  `f3d7d5b6a9c5ce8931226238ae173d091d2a6510252ea9c38153e6653cfc17b0`.
+  The [foundation workflow](https://github.com/Thalpy/Mewtual/actions/runs/34953124188) also
+  passes. These are focused results; the handoff and broad CI workflows are still running at
+  09:48 UTC, and no repository-wide green claim is made. Evidence updates after `d38df93`
+  change documentation only. Review base: `c47ae0b61b9b8adc0ab5e4bf798199413bfff73c`.
+
+- **Read-only inspection implementation checkpoint (2026-09-15; accepted above).**
+  The user reviews `aa0a81f...0b28f06` and passes the profiling instrumentation and
+  [detached-inspection proposal](GATE4-OVERLAY-RUNTIME-REVIEW.md) without findings or required
+  changes. They inspected source and recorded evidence, without independently running Cargo.
+  The acceptance excludes actor/native implementation, signing/commit integration and full
+  Gate 4. Code/test head `d5ca2ff1516852f15edf7fe5b09db07c61fcda56` implements read-only
+  capture/rebuild/currency/delivery through the existing
+  actor and native custody paths. `studio_overlay_read` is registered with the explicit main
+  window capability and account-read policy, returning a separate local-draft/absent result.
+  The [implementation review note](GATE4-INSPECTION-IMPLEMENTATION-REVIEW.md) supplies its exact
+  comparison; the subsequent user implementation acceptance and coverage correction are above.
+
+  Local results: five store inspection tests pass (209.74 s), including full-wrapper changes
+  preserving displayed draft/basis, presence/deletion/remount/scope/corruption, author/channel,
+  Prepared/Completed reads and both kinds at 256 operations. Two actor/resource tests pass
+  (41.07 s): a real checkpoint crosses the durable writer while draft reconstruction is paused;
+  cancellation/expiry preserve actual worker/result permit ownership. The shared native fixture
+  passes both real actor-produced Index/Flipnote cases (one test, 51.04 s), full projection and
+  unchanged durable records. Strict app library/test Clippy passes (26.77 s), and all six native
+  command security audit tests pass. Logs: `logs/gate4-inspection-{store,actor,fixture,clippy}.log`.
+  These runs do not claim maximal seed/metadata/heap coverage or repository-wide green.
+  The additional real MLS-join and same-snapshot sync-replacement regression passes (0.60 s):
+  unchanged intent bytes cannot legitimize a result from either obsolete live context.
+  Svelte checking reports zero errors and warnings. Native offline compilation is unavailable
+  because the local Cargo cache lacks `png`; GitHub runs native validation. Early codec-shape
+  runs with expensive Automerge setup were stopped, without claiming a pass. The final fixture
+  assembles typed baseline bytes and requires full public decoding plus a canonical checkpoint
+  round trip. Both maximum shapes now pass in 2.98 s: 64 Index objects with four creations and
+  four values per title/expiry register, and 999 Flipnote frames with all 1024 conflict fields.
+  Seeds measure 143,360 / 727,709 bytes in the standalone scope. The corresponding full vault
+  inspection test passes in 83.85 s, preserves exact stored bytes and rejects oversized sealed
+  input; its actual-group seeds measure 143,352 / 727,701 bytes. Logs:
+  `logs/gate4-inspection-{shapes-codec,maximal-store-codec}.log`. The fixture deliberately keeps
+  `[1; 16]` in the compact Index before replaying its local title edit. These are codec/input
+  boundaries, not signed-admission, heap or latency qualification. The initial mutation run
+  detected currency and channel removal, but a later
+  compile error in the newly added size fixture correctly failed the harness; the code was
+  restored and the fixture corrected. The complete final local mutation run now passes:
+  full-wrapper currency, channel and author removal each execute one test and fail at the
+  required assertion; each mutation restores source bytes exactly and its restored regression
+  passes. Log: `logs/gate4-inspection-mutations-final.log`; six individual logs are under
+  `logs/studio-inspection-mutations/app-*`. Root/native formatting and clean-source diff checks
+  pass after the final restoration.
+  Final strict app library/test Clippy passes in 23.70 s on the restored final code and fixtures
+  (`logs/gate4-inspection-final-clippy.log`).
+
+  GitHub [native run 34944924740](https://github.com/Thalpy/Mewtual/actions/runs/34944924740)
+  succeeds for `d5ca2ff`, using PR merge checkout
+  `27a883bc499cd43ef1c568a1014ae714412e8b5c`. The actual job log records **25 native tests
+  passing** (68.21 s), both existing preview mutations and restored passes, and both new
+  inspection mutations and restored passes. Removing only final inspection validity exposes
+  the fully converted draft at `inspection/tests.rs:115`; replacing the original context
+  between visits reaches the obsolete-result assertion at `inspection/tests.rs:164`.
+  Each mutation executes exactly one failing test with its intended message and restores source
+  bytes exactly. The uploaded mutation artifact's SHA-256 is
+  `f2d8dd45bce669b9b310c1829cb913f63eed3c3239b715c58d4452cea16820dd`.
+  [Two-client run 34944924758](https://github.com/Thalpy/Mewtual/actions/runs/34944924758)
+  also succeeds. These are focused results; broad CI is not green. The inspected current-head
+  cargo-deny log repeats the existing rustls 0.23.40 advisory `RUSTSEC-2026-0285` failure.
+  The inspected Linux frontend/Tauri job in
+  [CI run 34944924751](https://github.com/Thalpy/Mewtual/actions/runs/34944924751) passes all
+  **1,229 frontend tests** and Svelte checking, then fails strict native compilation on the
+  previously recorded unused `media_decode::as_mime` and `security_intent` APIs. This does not
+  contradict the focused native test workflow, which does not deny those baseline warnings.
+
+  GitHub [inspection run 34944924744](https://github.com/Thalpy/Mewtual/actions/runs/34944924744)
+  succeeds at the same merge checkout: **nine store/actor tests pass** (267.08 s), **two shared
+  fixture/shape tests pass** (57.90 s), and all three app mutations trigger their intended
+  executed assertions, restore byte-for-byte and pass restored source. The actual job log was
+  inspected; artifact SHA-256:
+  `4cf60c97d0774058a3a8edf53b84f99f10fae885c93c0ff171c274791ba6e1a6`.
+  The [overlay foundation workflow](https://github.com/Thalpy/Mewtual/actions/runs/34944924752)
+  also succeeds. At 08:20 UTC the [handoff run](https://github.com/Thalpy/Mewtual/actions/runs/34944924745)
+  has passed its normal test step and is still running its mutation step; no completed handoff
+  workflow PASS is claimed for this head yet. Evidence updates after `d5ca2ff` are documentation
+  only. New/changed relative documentation links and `git diff --check` pass.
+
+- **HANDOFF-002 closed; bounded handoff implementation accepted (2026-09-15).**
+  The user's re-review compares `85e7179...aa0a81f`, with correction code at `62f06d4`;
+  `aa0a81f` changes documentation only. No remaining implementation or regression-coverage
+  finding requires a change. The reviewer inspected the actual GitHub job and all 20 individual
+  mutation/restoration logs from [run 34903404377](https://github.com/Thalpy/Mewtual/actions/runs/34903404377),
+  merge checkout `a89f90bf685fded1d2e314fd754f2e2afe2de59b`: **24 normal handoff tests pass,
+  ten isolated mutations are detected, and ten restored regressions pass**. The artifact digest
+  matched. The reviewer did not rerun Cargo locally; the separate local checks below remain
+  their recorded execution evidence.
+
+  The acceptance explicitly excludes actor/native activation and full Gate 4 completion.
+  The user clarified **finish Gate 4 before Gate 5**. Gate 5 code is untouched. Remaining:
+  actor/native Closing-overlay lifecycle and bounded preparation/signing, manual and stale-base
+  handling including preview-based drafts, repeated-owner tenure, runtime signed fault repair,
+  and combined acceptance/required suites. See [BACKEND-IMPLEMENTATION](BACKEND-IMPLEMENTATION.md)
+  and [FLIPNOTE-UI-HOOKS](FLIPNOTE-UI-HOOKS.md). Earlier finding closures stand. The one-operation
+  injected write-crash matrix is distinct from the multi-operation fixtures and is not a
+  physical power-loss experiment.
+
+  Next: the [runtime proposal](GATE4-OVERLAY-RUNTIME-REVIEW.md) and opt-in custody profile identify
+  the required split before actor/native activation.
+  The accepted core/store call cannot simply run a 256-operation batch in the live actor.
+
+  Follow-up GitHub status verification on 2026-09-15 confirms the prior code's handoff,
+  [foundation](https://github.com/Thalpy/Mewtual/actions/runs/34903404540),
+  [native](https://github.com/Thalpy/Mewtual/actions/runs/34903404386) and
+  [two-client](https://github.com/Thalpy/Mewtual/actions/runs/34903404376) workflows succeeded.
+  The broader [CI run](https://github.com/Thalpy/Mewtual/actions/runs/34903404402) failed.
+  Its inspected Linux application log repeats the queue-entry regression at `lib.rs:9694`
+  (`e_unknown` included; 608 passed, one failed, ten ignored). Windows test, Linux desktop
+  and cargo-deny jobs also failed; their detailed earlier baseline findings remain below.
+  This status check is separate from the reviewer's inspection of all handoff artifacts.
+
+- **Overlay runtime proposal and custody profile ready for review (2026-09-15).**
+  [GATE4-OVERLAY-RUNTIME-REVIEW](GATE4-OVERLAY-RUNTIME-REVIEW.md) specifies capture, detached
+  inspection, complete-record currency and final native delivery ownership, followed by the
+  required private preparation/signing/commit split. It preserves the accepted handoff barriers.
+  No production behavior, actor/native command or Gate 5 code changes in this checkpoint.
+
+  The new opt-in profile passes **both tests**, exercising Index and Flipnote with 1, 32 and
+  256 typed accepted operations each, successful durable handoff, full projection/count after
+  reopen, retained pending intents and exact byte-preserving completed retry. Run:
+  `cargo test --locked -j 4 --config profile.test.package.catcoms-app.debug=0 -p catcoms-app
+  --lib profile_studio_overlay_handoff -- --ignored --test-threads=1 --nocapture`.
+  Log: `logs/gate4-overlay-custody-profile.log`; test execution 767.21 seconds. The initial
+  build reported two redundant `mut` bindings, removed without behavioral changes before the
+  final lint/regression checks. Measurements are from that otherwise identical test binary.
+
+  At 256 operations, measured warm handoff custody is **177,252 ms for Flipnote** and
+  **133,461 ms for Index**. Read/decode plus separate draft reconstruction is 26,227 / 19,539 ms.
+  These are unoptimized Windows test-profile observations on small bases, not release latency,
+  maximal-byte coverage, heap qualification or actor fairness evidence. Initial fixture intent
+  writes are batched; the measured decoding/candidate/handoff/retry paths use production adapters.
+  [P1-PERFORMANCE](P1-PERFORMANCE.md) records all six samples, exact scope and limitations.
+
+  Final `cargo fmt --all -- --check` and `cargo clippy --locked -j 4 -p catcoms-app --lib
+  --tests -- -D warnings` pass (Clippy: 35.76 seconds). The unchanged regression
+  `studio_overlay_handoff_signs_the_whole_branch_once_and_keeps_pending_intents` passes for
+  both Index and Flipnote in its one executed test (57.53 seconds), compiled after the `mut`
+  cleanup. Logs: `logs/gate4-overlay-runtime-{clippy,regression}.log`. New/changed documentation
+  links and `git diff --check` pass. No full-suite or new-head GitHub result is claimed.
+  The earlier handoff implementation remains accepted; this proposal/instrumentation needs
+  a separate user review. Review base: `aa0a81f34af6707ab05fd2a437412c38b79a82ff`.
+
+- **Historical HANDOFF-002 correction checkpoint (2026-09-14; accepted above on 2026-09-15).**
+  The user's review of `dd2fbc0...85e7179` requests one implementation correction. The local
+  source-to-intent dependency blocked ordinary reads, but reference inventory discarded it and
+  could install an incomplete pixel pin set after the required metadata disappeared. The review
+  found no additional defect in the other handoff boundaries. Prior finding closures stand.
+
+  The scan now retains bounded source requirements and authenticated metadata targets under full
+  numeric server/group/type/logical scope, then checks target equality before reference installation.
+  It reuses the normal one-record-per-step reads and existing count/byte rails. A new real-PIX
+  regression retains an overlay-only CID through missing metadata, fresh reopen, failed scan and
+  protected deletion, then restores the original metadata. Another regression supplies valid but
+  mismatched metadata or an ordinary ledger. The isolated inventory-check mutation is added to
+  the existing handoff harness. Code head: `62f06d49667d1c2db407cb1def2aef3da2aa01fe`, pushed to
+  `Create-suite-2` / [PR #26](https://github.com/Thalpy/Mewtual/pull/26). Re-review base:
+  `85e71798b4197e8a7ef7d1361e4418bd7ecd32d4`. HANDOFF-002 is now closed by the 2026-09-15 review above.
+
+  Local validation at `62f06d4` passes **24 focused tests**: two new reference-dependency tests,
+  seven creative-reference/protected-deletion tests, 13 inventory tests and two Studio inventory
+  cache tests. The commands use `cargo test --locked -j 4 --config
+  profile.test.package.catcoms-app.debug=0 -p catcoms-app --lib` with filters
+  `studio_overlay_handoff_reference_scan`, `store::creative_references::`,
+  `store::epoch_recovery::inventory::` and `store::epoch_studio::tests::inventory_cache::`.
+  Logs: `logs/gate4-handoff-002-{regressions,protection,inventory,cache}.log`.
+  `cargo clippy --locked -j 4 -p catcoms-app --lib --tests -- -D warnings` and
+  `cargo fmt --all -- --check` also pass.
+
+  Local `python .github/scripts/check-studio-handoff-mutations.py reference-dependency` detects
+  exactly one executed failing test at the intended scan assertion. Ignoring only the final
+  dependency-check result produces `known=true, deletion=Ok(true), retained=false`: the protected
+  store actually deletes the overlay-only PIX bytes. The harness restores the source byte for
+  byte, then the same regression passes (one executed test). Evidence:
+  `logs/gate4-handoff-mutation-reference-dependency.log`,
+  `logs/gate4-handoff-restored-reference-dependency.log` and
+  `logs/gate4-handoff-002-mutation-check.log`.
+
+  The [handoff workflow for this code](https://github.com/Thalpy/Mewtual/actions/runs/34903404377)
+  was running at this historical evidence update; the 2026-09-15 acceptance above records its
+  successful completion. That dedicated result does not establish repository-wide green.
+  The existing workflow now includes 24 normal handoff tests and ten isolated mutations/restored
+  cases, and uploads their individual logs. Broader baseline CI failures remain recorded below.
+  Subsequent evidence-only commits do not change the tested correction code or harness.
+
+  [The review note](GATE4-OVERLAY-HANDOFF-IMPLEMENTATION-REVIEW.md) and UI hooks track the correction.
+  The existing crash matrix has one accepted operation; dependent multi-operation replay and
+  partial-manifest cases are separate tests. No physical power-loss experiment is claimed.
+  Actor/native activation and full Gate 4 acceptance remain outside this correction.
+
+- **Closing overlay core/store handoff ready for adversarial implementation review (2026-09-14).**
+  Code checkpoint: `bf37cc48c45d09be6b63e97322171e506768fbf4`, pushed to `Create-suite-2`
+  ([PR #26](https://github.com/Thalpy/Mewtual/pull/26)); base:
+  `dd2fbc01ebb8a692964eec0df19dd201b225c936`. The corrected design is accepted and HANDOFF-001
+  is closed. [The implementation review note](GATE4-OVERLAY-HANDOFF-IMPLEMENTATION-REVIEW.md)
+  describes the concrete boundary and copyable adversarial review request.
+
+  The explicit Rust adapter requires the live member/author, independently observed current-owner
+  tenure and the pristine installed adjacent successor. It privately signs the entire accepted
+  sequence with original timestamps, preflights all replacement peaks, then persists Prepared,
+  the whole source once, and Completed after authenticating/flushing the actual signed source.
+  Pending ledger entries stay pending. Restart resolution completes exact evidence without replay,
+  returns absent same-source evidence durably to Active, and holds partial/conflicting evidence.
+  Rotation/adoption, ordinary writers/retries, retirement and page publication enforce the hold.
+
+  Inner metadata version 2 retains the complete target, older completed acknowledgement and retry
+  floor independently of the base and ordinary ledger. Completed retry checks channel before any
+  acknowledgement or sync. Checked v1 reads preserve original bytes. A new optional local source
+  wrapper byte requires matching intent metadata after restart and later source replacement; it
+  is charged to existing content limits and explicitly called out for implementation review.
+  There is no new network format or actor/native overlay command.
+
+  Local `cargo test --locked -j 4 --config profile.test.package.catcoms-app.debug=0
+  -p catcoms-app --lib studio -- --test-threads=4 --nocapture` passes **202 tests**, with one opt-in
+  profile ignored (`logs/gate4-handoff-studio-regressions.log`). This includes all 22 new handoff
+  tests and the existing overlay, source, rotation, replay, actor, preview and succession tests.
+  [GitHub's dedicated handoff workflow](https://github.com/Thalpy/Mewtual/actions/runs/34885437799)
+  passes all 22 normal tests, **nine isolated mutations and nine restored regressions**. Its
+  [job log](https://github.com/Thalpy/Mewtual/actions/runs/34885437799/job/104114827694) identifies
+  PR merge checkout `e37caec550a1e4c80b8b4fc1a5b90bc1366d0c99` for code head `bf37cc4`.
+  Artifact `studio-handoff-mutations` retains each failing and restored log. Every mutation
+  produced exactly one executed failing test at its intended assertion, and the harness restored
+  exact original source bytes before the passing regressions. The nine targets are completed
+  channel binding, full signed digest, source-version recheck, shared replacement fence,
+  publication fence, required intent metadata, retry floor, acceptance order and later source peak.
+  Mutation execution is from GitHub; no additional local mutation run is claimed.
+
+  [The existing foundation workflow](https://github.com/Thalpy/Mewtual/actions/runs/34885437449)
+  passes 12 tests, five isolated mutations and their restored regressions. Windows and Linux CI
+  format/Clippy steps pass. Local `cargo test --locked -j 4 -p catcoms-replication --lib
+  studio:: -- --test-threads=4` passes **98 tests**, none ignored
+  (`logs/gate4-handoff-replication.log`). All 300 selected local regressions pass. The new evidence
+  links and implementation review note are checked, and `git diff --check` passes.
+
+  The broader [CI run](https://github.com/Thalpy/Mewtual/actions/runs/34885437407) is not green:
+  its [cargo-deny job](https://github.com/Thalpy/Mewtual/actions/runs/34885437407/job/104114827568)
+  reports RUSTSEC-2026-0285 against Rustls 0.23.40 in the unchanged lockfile. It also logs an
+  uninstalled musl toolchain override before continuing to the advisory scan. Neither Cargo.lock,
+  rust-toolchain.toml nor the broad CI workflow changed in this checkpoint. This remains a separate
+  full-gate validation item; no repository-wide green is claimed.
+  Both application test jobs repeat only the existing
+  `tests::a_queue_entry_that_claims_to_be_both_kinds_is_not_a_track` failure at `lib.rs:9694`
+  (two entries including `e_unknown`, expected one): Windows **601 passed / 1 failed / 9 ignored**;
+  Linux **606 passed / 1 failed / 10 ignored**. The test and queue implementation are unchanged here.
+  The Linux desktop job repeats the previously recorded unused-code errors in `media_decode.rs`
+  and `security_intent.rs` under `-D warnings`; its Svelte check passes with zero errors/warnings.
+  Those frontend/native files are unchanged here.
+  [Native regressions](https://github.com/Thalpy/Mewtual/actions/runs/34885437391) and
+  [two-client acceptance](https://github.com/Thalpy/Mewtual/actions/runs/34885437409) pass for `bf37cc4`.
+  Evidence-only commits after `bf37cc4` change documentation, not the tested Rust/harness files.
+
+  Actor/native overlay scheduling, detached preparation and measured signing custody, manual
+  inspect/copy/export/disposition, stale-base and preview overlays remain open. Repeated-owner
+  tenure, signed fault repair and combined acceptance also remain. Gate 4 is still in block 2;
+  implementation acceptance is pending user adversarial review.
+
+- **HANDOFF-001 closed; corrected handoff design accepted (2026-09-14).**
+  The user accepts `b546c8d...dd2fbc01ebb8a692964eec0df19dd201b225c936` with no remaining
+  findings or required changes. This closes the retained-target design finding and authorizes
+  implementation of the [accepted core/store handoff](GATE4-OVERLAY-HANDOFF-REVIEW.md).
+  The implementation checkpoint is recorded above. No execution evidence or native command is
+  implied by the design PASS. OVERLAY-TEST-001 remains closed; Gate 4 remains in block 2.
+
+- **HANDOFF-001 design correction ready for re-review (2026-09-14).**
+  The user's review of `65db6ac...b546c8d` requests one correction: completed retry metadata
+  must retain an independently checkable channel binding after the full base is released.
+  Flipnote logical identity uses the object ID; the enclosing intent scope does not contain
+  its channel. Reusing an opaque basis fingerprint with a different request channel could
+  therefore produce a false exact-retry acknowledgement under the original compact field list.
+  The reviewer found no other design blocker; no production defect or handoff execution is claimed.
+
+  [The revised handoff proposal](GATE4-OVERLAY-HANDOFF-REVIEW.md) now requires a canonical complete
+  target in version-2 enclosing metadata, independently of the optional branch/acknowledgement.
+  Active/Prepared and completed targets must match it. The binding persists through base release,
+  legitimate ordinary retirement, acknowledgement rollover and retry-floor-only states. A completed
+  request must match that target before acknowledgement, source eligibility or sync-only retry.
+  Version-1 migration derives it from the checked base; both target encodings consume the existing
+  metadata limit. No reader or request can implicitly change the record's target.
+
+  The required future regression completes a real Flipnote handoff, releases its base, legitimately
+  retires the ordinary entries and reopens. Correct-channel retry must succeed without recreating
+  a branch; changing only the request channel must return a specific scope refusal without syncing
+  or changing intent bytes. An isolated removal of that request-target comparison must expose the
+  false acknowledgement. These are implementation requirements, not newly executed tests.
+  Documentation links, source references and whitespace are checked; no Rust/frontend code or
+  callable contract changes. HANDOFF-001 awaits user design re-review. OVERLAY-TEST-001 stays closed,
+  the foundation PASS stands, and Gate 4 remains in block 2 with the previously listed work open.
+
+- **OVERLAY-TEST-001 closed; next handoff design ready (2026-09-14).**
+  The user accepts `783486d...65db6ac2b1a2bdbad1b97786f9603877dd902e67` with no remaining
+  masking path or required changes. This closes OVERLAY-TEST-001; the foundation implementation
+  PASS stands. The reviewer inspected the successful [overlay workflow](https://github.com/Thalpy/Mewtual/actions/runs/34848383818)
+  and artifact: 12 normal tests, both constant-version assertion failures, byte-exact restoration
+  and passing restored cases at PR merge checkout `ec622a7aaaf193245ded5512c253879d85054e57`.
+  They did not rerun Cargo locally. Native and two-client workflows for `65db6ac` also pass;
+  its broad CI is failed, so no repository-wide green or Gate 4 acceptance is claimed.
+
+  The source audit for the next step is in
+  [GATE4-OVERLAY-HANDOFF-REVIEW.md](GATE4-OVERLAY-HANDOFF-REVIEW.md). Ordinary replay requires
+  signed historical evidence, while local reconstruction requires every accepted annotation.
+  The proposal therefore transfers a complete branch into its pristine verified expected
+  successor, persists a Prepared record before the signed source, and releases only the overlay
+  hold after exact source/manifest verification. Ordinary intents remain pending for receipts.
+  It specifies restart resolution, a fence at real source replacement paths, full signed-operation
+  hashes, bounded completed acknowledgements/retry floor and unchanged storage/reference limits.
+  The proposal awaits user adversarial design review before its implementation; no new runtime
+  behavior is enabled. This documentation checkpoint is checked for whitespace, links and source
+  references; no new Cargo run is claimed for it.
+
+  This continues block 2, not its completion. Actor/native/manual overlay lifecycle, changed-base
+  reconciliation, provisional-preview overlays, repeated-owner tenure, signed repair, the recorded
+  full-suite failures and final combined acceptance remain. UI hooks retain the current native
+  contract and keep durable overlay Save unavailable. No frontend or production Rust files change.
+
+- **Closing overlay implementation accepted; OVERLAY-TEST-001 correction (2026-09-14).**
+  The user accepts `ac23429...b1b0ec9` with evidence at `783486d`: no blocking production
+  defect and no production change requested. OVERLAY-TEST-001 is a non-blocking P3 regression
+  gap: flipping a caller fingerprint did not isolate the actual Closing source-version binding.
+  The reviewer independently inspected the successful overlay workflow and all six original
+  mutation/restoration logs at PR merge checkout `dc451e0992d8201503152225a7c79c0eb05ee431`.
+  They did not execute Cargo or the proposed source-version mutation locally.
+
+  Two new regressions exercise first acceptance and append, each for Index and Flipnote. A
+  separate valid sender prepares an operation before sealing; the real store ingest quarantines
+  it after Closing, then the receiver vault is reopened. The tests require changed persisted
+  snapshot/quarantine, unchanged source identity, receipt, close, expected seed and owner-tenure
+  input, successful fresh preparation, a different basis, and exact stale-basis refusal with
+  unchanged intent bytes. Already accepted exact retry still returns the same complete draft
+  with its original timestamp/count. First acceptance has a positive control using the fresh basis.
+  The harness now tests the reviewer's constant-source-version mutation independently against
+  both regressions. The focused pair passes (2 tests, 64.20s). Each constant-version mutation
+  fails at `overlay basis ignored changed persisted Closing source version` with exactly one
+  executed failed test (26.37s / 29.00s); byte-exact restoration is followed by one passing
+  regression per case (61.90s / 63.10s). The initial overly broad mutation anchor was rejected
+  before editing; the final anchor names the constructor's receipt assignment uniquely.
+  The local harness selects only the two `source-version-*` entries; the default GitHub run
+  retains all five cases and uploads the mutation/restoration logs. Local evidence is in
+  `logs/gate4-overlay-source-version-test.log`, `logs/gate4-overlay-source-version-mutations.log`
+  and the corresponding `gate4-overlay-{mutation,restored}-source-version-*.log` files.
+  `cargo clippy --locked -j 4 -p catcoms-app --lib --tests -- -D warnings` passes (36.14s).
+  Formatting and `git diff --check` pass. OVERLAY-TEST-001 awaits correction review.
+  Production Rust bytes are unchanged; no new API, native command or frontend file is added.
+
+  Previous-checkpoint GitHub results are now available: the dedicated overlay, native and
+  two-client workflows all pass. Broader CI is not green: the Windows app suite reports
+  `tests::a_queue_entry_that_claims_to_be_both_kinds_is_not_a_track` failing at `lib.rs:9694`
+  (577 passed, 1 failed, 9 ignored), and the Linux desktop job reports dead-code errors in
+  `media_decode.rs` and `security_intent.rs`. Those files are unchanged by `ac23429...b1b0ec9`.
+  These are separate full-gate follow-ups; the coverage correction does not fix or conceal them.
+
+  The foundation PASS does not enable actor/native overlays, automatic replay/disposition,
+  provisional-preview writes, repeated-owner tenure or signed repair. Gate 4 remains open.
+
+- **Closing overlay design accepted; core/store implementation (2026-09-14).**
+  Implementation checkpoint [`b1b0ec9`](https://github.com/Thalpy/Mewtual/commit/b1b0ec9b88f422f5f01cd4deca5cdb463bfe3871)
+  is pushed to `Create-suite-2`, based on `ac23429824ef25ab29c59cdaf2c4c7d99db6161a`.
+  The user accepts `d576af2e1fbe757b4fb6bcebb6326dd1a445b2f0` against `0b6e870`, with no
+  actionable design defect or required change. The review inspected the proposal and existing
+  source; it did not execute overlay tests. Its approval covers this internal foundation only.
+
+  `studio/overlay.rs` now supplies a separate checked Closing basis and local draft type. The
+  basis derives from a real typed settlement plan and source fingerprint. Draft reconstruction
+  reuses typed writers/validators, a private data graph, exact preflight, saved acceptance order
+  and original timestamps. It creates no editable epoch, signed log, receipt or publication permit.
+  Explicit Server Rust adapters obtain tenure from the actual sync instance; callers cannot put
+  tenure in the request. The store rechecks the actual source before first acceptance/append.
+
+  The shared `.intents` record gains an optional versioned local extension. Ordinary records and
+  the core ledger retain their original encodings. Accepted annotations bind full envelope hashes
+  to original ledger entries; failed ordinary Save cannot acquire an annotation. One branch,
+  256 entries, a 2 MiB seed and 64 KiB metadata must fit the existing complete-record and physical
+  budgets together. Both ordinary and overlay writes now use the same persistence helper and
+  sync-only exact-retry path. Accepted retries survive source/tenure changes after current member,
+  target, basis and full-envelope checks; new appends still require eligible Closing provenance.
+
+  Ordinary Apply refuses annotated operation IDs. Receipt and manual retirement retain them even
+  in mixed selections while ordinary covered entries can retire. Inventory includes base-only
+  pixels and all pending-operation references, and undecodable metadata prevents a successful
+  reference scan. The seed-reference regression removes the independent canonical fixture copy
+  and reopens the vault to isolate the base's contribution; it does not claim a complete runtime
+  reclamation/eviction scenario. The count fixture assembles 256 individually typed-admitted
+  annotations, requires full production decoding, and checks refusal of operation 257.
+
+  Ten new core/store regressions pass on the restored final source (123.37s), including both Index/Flipnote restart, uncertain
+  writes, exact retries after installation at the physical cap, deliberately reversed nonce-hash
+  order, codec/annotation rejection, both mixed retirement modes and orphan/replacement accounting.
+  The source/channel/Fault checks pass as part of that run. Existing intent tests pass (15,
+  8.34s), Studio core tests pass (98, 162.58s), and rotation store tests including the exhaustive
+  write/crash/restart case pass (8, 386.94s): 131 distinct affected tests in total.
+  Local Rust 1.89 commands use `--locked -j 4`; app tests also use
+  `--config 'profile.test.package.catcoms-app.debug=0'`, `CARGO_INCREMENTAL=0` and Windows
+  `_LINK_=/DEBUG:NONE`. The filters are `studio_overlay_store_`, `store::epoch_intents`,
+  `studio::` (replication crate), and `studio_rotation_store_`, each with `--test-threads=4`.
+  `cargo fmt --all -- --check`, `git diff --check`, and core/app library and test Clippy pass;
+  Clippy uses `-- -D warnings` (36.94s).
+  `.github/scripts/check-studio-overlay-mutations.py` checks ordinary Apply admission,
+  sequence validation and base-only CID enumeration independently, requires the intended one-test
+  assertion failure, restores bytes and reruns each regression. The dedicated `studio-overlay.yml`
+  workflow publishes those logs as an artifact. Locally all three isolated mutations fail at
+  their intended assertion with exactly one executed failing test (24.60s / 18.87s / 19.46s).
+  Source bytes are restored, then the respective regressions pass (50.63s / 55.63s / 44.22s).
+  Local logs are in ignored `logs/gate4-overlay-*.log`.
+  GitHub [overlay checks](https://github.com/Thalpy/Mewtual/actions/runs/34844201389),
+  [native checks](https://github.com/Thalpy/Mewtual/actions/runs/34844201234),
+  [two-client checks](https://github.com/Thalpy/Mewtual/actions/runs/34844201290) and
+  [CI](https://github.com/Thalpy/Mewtual/actions/runs/34844201267) have started for `b1b0ec9`;
+  their result is pending at this evidence update. Local results above are not GitHub results.
+
+  The repository-wide `scripts/check-no-ambient.sh` fails on six verified pre-existing findings:
+  `apps/desktop/src-tauri/src/media_decode.rs:333,426,444,504`,
+  `crates/catcoms-app/src/studio_exchange/tests/scheduling.rs:150`, and
+  `crates/catcoms-app/tests/support/studio_preview.rs:329`. Each reported call is present in the
+  baseline HEAD, outside this change. No full-repository green or full Gate 4 acceptance is claimed.
+
+  No frontend/native overlay command, automatic overlay replay/disposition, provisional-preview
+  write or new historical-tenure authority is enabled. The UI keeps Closing/Fault/awaiting-tenure
+  work unsaved and visible. Next integration must supply bounded actor/native preparation and a
+  complete replay/manual lifecycle before exposing durable overlay Save. Repeated-owner tenure,
+  signed repair and full Gate 4 acceptance remain open. This implementation awaits user
+  adversarial review; the design PASS does not accept its code. Frontend commits through `ac23429` are
+  preserved; this backend checkpoint changes no `apps/desktop/src` files.
+
+- **Combined scheduling accepted; Closing overlay design checkpoint (2026-09-13).**
+  The user's review of `134394e...6b71d96`, with documentation at `a40909e`, passes pacing,
+  queued retry preservation, pending authoritative priority, the three retained-custody actor
+  scenarios and the native abort-test eventual-release correction. No actionable production
+  or regression finding and no further changes are required. NATIVE-TEST-001 and TAIL-TEST-001
+  remain closed. The reviewer inspected source and actual GitHub native job logs, without
+  rerunning Cargo locally. The ignored local scheduler mutation logs were unavailable at the
+  published reference; their results remain recorded evidence. The 165-test broad run belongs
+  to `487cb0e`; the final `6b71d96` targeted/native evidence is listed below.
+
+  Keep the acceptance bounds: authoritative Index plus Registry, Index/Flipnote preview
+  pressure, controlled cancelled lower-transport ownership, 40 seconds of simulated scheduler
+  time, and priority of pending work rather than preemption. This closes block 1 of the four
+  remaining work areas. Durable Closing overlays/repeated tenure, runtime signed repair and
+  final combined acceptance remain; Gate 4 is not complete.
+
+  `GATE4-CLOSING-OVERLAY-REVIEW.md` proposes the next core/store foundation. An explicit local
+  branch must be distinguished from an unaccepted intent left by failed ordinary Save. It uses
+  a checked known-Closing expected seed, an optional local intent-record extension, unchanged
+  combined storage ceilings, ordered exact retries and restart/reference protection. It defines
+  required implementation tests and holds annotated intents until overlay-aware transitions
+  exist. The proposal awaits user adversarial design review before implementation. It does not
+  add native commands, enable preview writes, implement replay, or resolve Unknown tenure.
+
+  Frontend integration has landed separately (`0b6e870`):
+  `studio-native.ts` and `studio-session.ts` connect the existing Flipnote surface to native
+  commands/events. UI hooks now link those seams instead of describing only fixture stores.
+  This documentation checkpoint does not independently accept the UI or prove a live two-client
+  flow. No production/frontend/test code changes; validation is documentation links and diff
+  checks. Existing Rust/native results are historical evidence, not fresh runs of this checkpoint.
+
+- **Combined actor scheduling checkpoint `6b71d96` (2026-09-13; user review PASS).**
+  The new `studio_exchange/tests/scheduling.rs` fixture joins three real MLS members and proves
+  the receiver's two peers over authenticated catch-up. The current owner has different, prepared
+  Studio Index and Registry checkpoints; another member supplies unconfirmed head/seed/signed-tail
+  history. Owner requests and inbound traffic are hidden at the test transport, without a membership
+  change. Actual spawned actors execute ordinary Ready/vault leases and detached jobs.
+
+  Three cases retain all three preview-eligible reservations: three actual native-delivery guards;
+  two guards plus a cancelled real blocking parser; or two guards plus a cancelled serialized seed
+  request in the simulated transport's outbound table. A test-only actor command observes the real
+  ready cache and probes the actual allocator; an optional barrier pauses a real parser after it
+  acquires both process permits. It does not inject cached data, selections, clocks or scheduling
+  decisions. Real deliveries retain their seeds after handoff cancellation, including after cache
+  eviction. The lower transport keeps request bytes and the original cancelled request's keepalive.
+
+  A fourth watched target produces an authenticated authoritative Hint but cannot obtain a preview
+  slot. Restoring only owner transport reachability must then install both authoritative classes in
+  at most 160 idle passes / 40 seconds of simulated time. The test checks exact distinct projections,
+  checkpoint identities, Studio Open state, Registry epoch, durable reopen, unchanged membership and
+  owner, and zero free preview slots throughout. No later user Read, unwatch, restart or release of
+  retained custodians enables progress; at least one original seed remains before its expiry.
+  Before reconnection, neither checkpoint exists in the receiver's vault.
+
+  The fixture exposed an actual pacing defect: Registry and Studio head discovery can consume the
+  provider's two-request burst, and the immediate third (provisional) request is rejected repeatedly.
+  The bounded preview queue now waits one second for the shared head rail to refill before fresh
+  discovery. It reserves no capacity during that delay; duplicate Hints preserve order/deadline,
+  and existing authoritative preparation/installation priority stays intact. No native shape changes.
+  Initial code/UI prompt: `487cb0efe822be64f40e4551bcb59a1cc451ec2c`. Its broad local `studio_`
+  run passes 165 tests with one opt-in profile ignored (873.08s). Its first native workflow caught
+  repeated Reads starting fresh page work while a preview retry waited, plus a post-abort assertion
+  racing the worker's final guard drops. Final code `6b71d963e61e8b204946a3b44e6eb4b6dadfc17d`
+  defers new same-target page work while that bounded retry is queued. The native abort test keeps
+  all held-while-paused assertions and waits up to five seconds for actual final guard release.
+
+  Removing only `head_after` pacing fails the intended `preview 0 never became ready` assertion
+  after an authenticated Hint (5.21s). Removing only queued-target deferral makes the existing
+  shared native fixture fail at real preview admission under repeated Reads (30.69s). Both
+  scripts require one executed failing test, the intended assertion and nonzero status; compile
+  failures or zero tests cannot count. Each restores original source bytes in `finally` and checks
+  exact equality. Commands: `python logs/gate4-scheduling-mutation.py` and
+  `python logs/gate4-scheduling-read-mutation.py`; logs have matching rate/read-mutation names.
+
+  Final restored-source runs use Rust 1.89, `_LINK_=/DEBUG:NONE`, `CARGO_INCREMENTAL=0`:
+  `cargo test --locked -j 4 --config 'profile.test.package.catcoms-app.debug=0' -p catcoms-app
+  --lib FILTER -- --test-threads=N`. Filters: `studio_actor_owner_return_` (3 passes, N=1, 25.21s),
+  `studio_preview_` (4, N=4, 5.04s), `studio_actor_post_succession_joiner` (4, N=2, 43.44s).
+  The combined cases install both classes after 22.75s / 33s / 33s of simulated time while all
+  three preview reservations remain occupied. `cargo test --locked -j 4 -p catcoms-app
+  --test studio_preview_fixture -- --nocapture` passes the Index/Flipnote shared fixture (2.07s).
+  `cargo clippy --locked -j 4 -p catcoms-app --lib --tests -- -D warnings` passes (34.46s).
+  Root/native formatting passes. Exact local logs are `logs/gate4-scheduling-*.log`.
+
+  [Final native validation](https://github.com/Thalpy/Mewtual/actions/runs/34784331439), job
+  `103796946869`, passes all 19 Studio tests (5.72s). It used PR merge checkout
+  `f98b51007004086790c82b34a7a2b277402fee82` for `6b71d96`. The trust-flag mutation fails at its
+  intended assertion (1.17s); removing only final preview validity returns the expired JSON and
+  fails its intended assertion (1.16s). Source restoration and both reruns pass (2.10s each).
+  [Two-client acceptance](https://github.com/Thalpy/Mewtual/actions/runs/34784331297) passes all
+  Linux/Windows/NAT jobs. These targeted results do not claim the entire PR CI is green.
+
+  NATIVE-TEST-001 and TAIL-TEST-001 remain closed. The user accepts this bounded checkpoint;
+  it does not close durable Closing overlays/repeated tenure, signed repair or full Gate 4 acceptance.
+  The core UI can proceed using `FLIPNOTE-UI-BUILDER-PROMPT.md` and `FLIPNOTE-UI-HOOKS.md`.
+  Concurrent frontend changes are owned by the UI agent and are excluded from this backend commit.
+
+- **NATIVE-TEST-001 closed; core UI hookup ready to start (2026-09-13).**
+  The user's re-review accepts `a89bde6...134394e`, resolving the latter to
+  `134394e2fe163c62a08304dfb7082588c0a3bfed`, with no further changes required. Both Index and
+  Flipnote trust-state serialization and the isolated post-conversion preview fence are covered.
+  The reviewer inspected source and the actual GitHub job logs. Those runs used the PR merge
+  checkout for `c60de4e`; `134394e` is a documentation-only update. Cargo/mutations were not
+  independently rerun locally by the reviewer. The implementation PASS stands; this closes the
+  specific test finding, not combined scheduling acceptance or Gate 4.
+
+  The UI agent can now connect core Index/Flipnote read/create/edit, PIX save/fetch, invalidation
+  events, read-only awaiting-tenure previews and recovery controls. FLIPNOTE-UI-HOOKS now includes
+  a handoff scope and corrects the old ordinary-only read example to the two-result union.
+  Existing renderer stores/types are still fixtures and need an adapter. Backend work remains
+  for durable Closing overlays/repeated tenure, signed repair, claims and sound/Music/export.
+  This turn changes documentation only; no new production or test-code checkpoint needs review.
+
+- **Actor/native implementation PASS; NATIVE-TEST-001 follow-up (2026-09-13).**
+  The user accepts `a89bde68dc1083f6eaab9b15f5cada3f1ca9d704` against
+  `2a1814efc9fa1f22aed3c7ca5bbed627ae92f5d6`, finding no blocking production defect.
+  The review inspected source and recorded execution evidence; it did not rerun Cargo/mutations.
+  NATIVE-TEST-001 (P3) correctly observes that the earlier native conversion test only reads an
+  ordinary synthetic Index and therefore cannot detect preview trust-state/final-fence mutations.
+  No production change is requested. The implementation PASS stands; this finding remains open
+  pending user re-review of the tested correction.
+
+  The follow-up shares a test-only authenticated provider/actor fixture between a lightweight
+  app integration test and native tests. Both Index and Flipnote use real head/seed/signed-tail
+  exchange, cold parsing, actor admission and native `invoke_custody`/`read_view`. Successful
+  conversion must identify `AwaitingTenureReceipt`, retain complete content and seed/tail claims,
+  emit both preview flags and omit phase/publication. The negative variant advances only the
+  injected clock after successful conversion; native must reject the now-expired preview while
+  the session, actor instance and view-request generation remain valid. Focused GitHub CI also
+  changes the trust flag and removes only the final preview-validity condition in separate
+  mutations, requires the intended assertion failures, restores source bytes and reruns tests.
+  Local shared-fixture integration passes for Index and Flipnote (2.05s):
+  `cargo test --locked -j 4 -p catcoms-app --test studio_preview_fixture -- --nocapture`.
+  Focused integration-test Clippy passes with `-D warnings`; root/native formatting, locked
+  native manifest metadata, and mutation-script syntax/unique-anchor checks pass. Local Rust
+  uses `_LINK_=/DEBUG:NONE` and `CARGO_INCREMENTAL=0`.
+  [Native validation on `c60de4e`](https://github.com/Thalpy/Mewtual/actions/runs/34779683539) passes all
+  19 Studio tests (3.95s), including both new cases for Index and Flipnote. Two-client acceptance
+  also passes. Changing only the preview trust flag to false fails at `preview trust-state flag`
+  (0.75s); removing only the final preview-delivery condition fails at
+  `expired preview escaped final native delivery fence` (0.72s). In the latter mutation native
+  returns the converted value, demonstrating that session/instance/request checks did not mask
+  the missing preview check. Each mutation restores native source byte-for-byte in `finally`.
+  Both restored regressions pass (1.45s and 1.35s); mutation command:
+  `python3 .github/scripts/check-studio-preview-mutations.py`.
+  This is test/CI/documentation work only; runtime production logic is unchanged. NATIVE-TEST-001
+  awaits user re-review. Gate 4's combined authoritative-progress regression remains open, along
+  with Closing overlays/repeated tenure, signed repair and full acceptance.
+
+- **Gate 4 actor scheduling and native previews (2026-09-13; awaiting adversarial review).**
+  Published implementation: `be03b0b`; the workflow command-scalar correction is `febbd70`.
+  [Studio native validation on `febbd70`](https://github.com/Thalpy/Mewtual/actions/runs/34767022661)
+  passes all 17 native Studio tests (4.32s), including the new view-generation and late-conversion
+  rejection cases. Two-client acceptance also passes. The existing strict Linux native job still
+  stops on unused future `security_intent.rs` APIs, as it did on the parent; full PR CI is not green.
+  A targeted mutation changed the real worker's permit binding to an immediate drop. The paused-
+  worker test then failed at `cancelled waiter cannot refund the running worker`. The source was
+  restored byte-for-byte in `finally`; all four runtime tests pass again (5.09s). Evidence is in
+  `logs/gate4-preview-worker-mutation.log` and `logs/gate4-preview-runtime-restored.log`.
+
+  The receiver now queues a bounded target retry when authoritative discovery yields a Studio
+  Hint, releases that discovery's reservation, then separately prepares provisional head/seed/tail
+  jobs. Network waits and cold parsing leave native vault custody; generation fencing discards
+  delayed results after reset or replacement. Ready previews share the original retained seed
+  slot with native delivery, release parser permits, and expire at the original discovery deadline.
+  A separate three-permit subset inside the existing four process parser permits also leaves room
+  for authoritative preparation. Duplicate triggers preserve queue order. Authoritative work has
+  priority; Registry failure yields its paired Studio target, and failed Studio discovery advances
+  watched-target rotation. Ready previews yield for authoritative refresh after 30 seconds.
+
+  `StudioReady::execute_read` returns `StudioRead::Document` or the distinct
+  `StudioRead::AwaitingTenureReceipt(StudioPreview)`. The compatibility `execute` API still returns
+  ordinary views. Native Read/List serialize `awaitingTenureReceipt: true` and `provisional: true`
+  for preview content, without a current phase/publication claim or any new confirmed flag.
+  Stored sources take precedence, including empty ones; an absent Index's synthetic empty view
+  does not mask an available preview. No hint creates an epoch source, pointer or durable journal.
+  Native view-request generations suppress stale conversion results. A cancellable five-second
+  handoff retains the actor's checked state through native conversion/final fences after the vault
+  lease is dropped. Expiry/cancellation revokes delivery but does not refund a still-owned seed.
+  Explicit UI lock signals preview reset without awaiting actor command capacity; late results
+  from the old generation are discarded. Frontend files/layout were not changed.
+
+  Local validation uses Rust 1.89 with `_LINK_=/DEBUG:NONE`, `CARGO_INCREMENTAL=0` and:
+  `cargo test --locked -j 4 --config 'profile.test.package.catcoms-app.debug=0'
+  -p catcoms-app --lib FILTER -- --test-threads=4`.
+  The 16 `studio_exchange::tests::succession::` cases pass (145.39s), including both previously
+  ignored preview cases and the two known-CID PIX fetch/reopen cases. Seven
+  `studio_exchange::tests::unopened::` cases pass (72.91s); four
+  `studio::receiver::catchup::tests` pass (37.11s). After adding the reset fence, all four
+  `studio_actor_post_succession_joiner_` cases pass again (24.02s), including clearing an actual
+  actor preview before the next read. Four `studio_preview_` runtime/custody tests pass (5.07s):
+  real head/seed/parse/tail/parse jobs for three ready Index/art previews; original-slot retention
+  through late native delivery and authoritative Hint release; paused actual blocking-worker
+  cancellation/expiry; handoff cancellation, timeout, seed expiry and last-copy release; and
+  absent-Index fallback with installed-source precedence. Fixture parser pools are private to
+  avoid interference from parallel actor tests; they use the same scheduling and worker code.
+  Logs: `logs/gate4-preview-{succession,unopened,catchup,newcomers,runtime}-final.log`.
+  App/sync library/test Clippy and root/native formatting pass.
+
+  Local native Cargo checking stopped before compilation because uncached crates (including
+  `image`) could not be fetched through the restricted network. `.github/workflows/studio-native.yml`
+  runs native Studio regressions on GitHub independently of frontend packaging/strict lint gating;
+  it preserves the existing CI workflow. The previous head's strict CI already failed on the
+  app queue-kind test and unused future APIs in `security_intent.rs`; no full-CI pass is claimed.
+  Native execution status belongs to that workflow, not the local app results above.
+
+  This is meaningful block 1 implementation, not Gate 4 completion. The combined regression with
+  an owner becoming reachable without MLS churn and competing authoritative Studio/Registry
+  installations under three preview/cancelled-owner slots still needs completion. Durable Closing
+  overlays/repeated-tenure evidence, runtime signed repair and combined gate acceptance remain.
+  The next review should focus on the actor/native handoff, current-scope and generation fencing,
+  capacity lifetime, scheduling priority, trust-state serialization and the acceptance assertions.
+
+
+- **TAIL-TEST-001 closed; actor/native preview integration in progress (2026-09-13).**
+  The user's re-review passes `2a1814efc9fa1f22aed3c7ca5bbed627ae92f5d6` against
+  `47bf09860accb3e8c2bbba5eb72d2b4d8d05d26c`, with no further changes required.
+  The reviewer inspected the fixture and recorded validation, without rerunning Cargo or the
+  mutation. This closes the test finding only. Work now continues on scheduling and native
+  previews; Gate 4 remains open.
+
+- **Gate 4 signed-tail review and TAIL-TEST-001 (2026-09-13).** The user-provided review accepts
+  `47bf09860accb3e8c2bbba5eb72d2b4d8d05d26c` against `b3e54dc493d46ea7663533244561ababfc569ad4`
+  with no blocking production defect. The previous canonical-encoding P3 is closed. The reviewer
+  inspected source without running Cargo/mutations; aggregate traffic guards were accepted by
+  inspection, not by tests independently driving every counter to its limit.
+  TAIL-TEST-001 (P3) correctly found that the old inner-document fixture encrypted with B's key
+  before changing outer routing to A, so decryption failed before the intended comparison.
+  The misleading case is removed from the generic error matrix. A dedicated test now covers
+  Index and Flipnote with a correctly signed B operation manually padded/encrypted under A's
+  key and valid outer A routing. It first proves successful decryption, decoded-operation
+  equality, signature validity and the differing inner ID, then requires `EpochScope` directly
+  from `prepare_tail`. This correction changes tests/docs only. The bounded implementation's
+  PASS stands; it does not extend to actor/native integration or Gate 4 completion.
+
+  Validation with the existing environment (`_LINK_=/DEBUG:NONE`, `CARGO_INCREMENTAL=0`):
+  `cargo test --locked -j 4 --config 'profile.test.package.catcoms-replication.debug=0'
+  -p catcoms-replication --lib provisional_tail_rejects_inner_document -- --test-threads=1`
+  passes for both targets (one test, 0.26s; `logs/gate4-tail-test-001.log`). Temporarily replacing
+  only `if op.doc_type != doc_type || op.doc_id != self.doc_id` with the type-only check makes
+  the specific preparation assertion fail (0.14s; `logs/gate4-tail-test-001-mutation.log`).
+  The production file is restored byte-for-byte in `finally`. The restored `studio::provisional`
+  filter passes all six tests (1.02s; `logs/gate4-tail-test-001-restored.log`). Root formatting
+  and replication library/test Clippy pass. No sync/app suite rerun or packaging is claimed for
+  this test-only follow-up. Remaining block 1 work is actor scheduling, parser permits/fairness,
+  periodic revalidation and native preview delivery; the other three blocks remain open.
+
+- **Gate 4 signed-tail checkpoint (`47bf098`, 2026-09-13; bounded implementation passed review).** Continued the first
+  of the four remaining blocks. Distinct sync/app tail types consume an unconfirmed seed and
+  retain its original watch/attempt/member/provider/mount/server scope, fixed lifetime and seed
+  reservation through authenticated page I/O, detached typed parsing and scoped inspection.
+  The shared page transport adds a distinct unconfirmed binding and a lower-transport seed
+  keepalive; ordinary Studio and Registry framing/completion remain separate. The parsed graph
+  stays private and never becomes an EncryptedDoc, checkpoint origin, epoch gate or receipt
+  capability. Current author keys/signatures, scope, actor, seed ancestry, typed semantics and
+  domain markers are checked, with bounded pages, aggregate traffic/content and existing exact
+  checkpoint/recovery preflight. A failed page consumes its candidate. `tail_complete()` marks
+  a finite provider prefix only. No canonical source, pointer or journal is written by these
+  adapters, and ordinary reads/Apply remain unchanged. UI implementation remains user-owned.
+  The P3 canonical-encoding follow-up is also complete: both target schemas accept the alternate
+  raw-valid ordering before the final comparison rejects it; removing that comparison fails
+  the regression, and byte-restored source passes.
+
+  Local validation uses Rust 1.89 / the existing Build Tools, without new installs or packaging:
+  `PATH=C:\Users\phaso\.cargo\bin;%PATH%`, `_LINK_=/DEBUG:NONE`, `CARGO_INCREMENTAL=0`.
+  Run `cargo test --locked -j 4 --config 'profile.test.package.<package>.debug=0'
+  -p <package> --lib <filter> -- --test-threads=4` with:
+  replication / `studio::provisional` (5 pass, 1.16s), sync / `registry_seed` (35 pass, 6.40s),
+  sync / `registry_catchup` (13 pass, 2.38s), app / `studio_provisional_tail` (2 pass, 20.89s).
+  These are 55 focused tests, including 12 new tests: P3 plus four core tail, five sync tail
+  and two app tail cases. The real multi-page test covers Index and Flipnote fixed-prefix
+  service; app cases preserve full ordinary views, refused-Apply behavior and document/journal
+  absence after vault reopen. Lifecycle matrices cover completion and detached preparation/use.
+  `cargo clippy --locked -j 4 -p catcoms-replication -p catcoms-sync -p catcoms-app --lib --tests
+  -- -D warnings` and root formatting pass. Logs are `logs/gate4-preview-tail-{core,app,
+  seed-regressions,page-regressions,clippy}.log`.
+
+  Mutation harness: `logs/gate4-preview-tail-mutations.ps1`; assertions reject omitted current
+  membership checking, omitted inner signature verification, omitted post-parse expiry and lost
+  lower-transport seed custody. Every source is restored byte-for-byte in `finally`, followed
+  by the focused core/sync tail checks. P3's separate mutation/restored evidence is in
+  `logs/gate4-preview-canonical-order-{mutation,restored}.log`. These deliberate failures do
+  not represent failures on the restored implementation.
+
+  This is a review boundary before actor/native integration, not completion of block 1.
+  Scheduling, shared process worker permits/fairness, authoritative progress under three held
+  preview slots, periodic revalidation and native delivery fences remain pending. The two
+  newcomer preview cases remain ignored; no new run or pass is claimed. The other three blocks
+  remain Closing overlays/repeated-owner tenure, runtime signed repair and combined Gate 4
+  acceptance. See `logs/gate4-pending-reviews.md` for the published SHA and copyable request.
+
+- **Gate 4 seed review closure and progress (2026-09-13).** The user-provided review accepts
+  `b3e54dc` against `2f5a8a0` with no blocking implementation defect or required production
+  change. The reviewer inspected source and did not run Cargo or mutations. Its P3 coverage
+  follow-up was to independently challenge the canonical re-encoding comparison with a
+  correctly signed/hash-bound seed whose deterministic actor and complete typed schema are
+  valid, but whose root operations use a different order from the canonical writer. First
+  establish raw-change and typed-schema acceptance, then require provisional parsing to reject
+  it; removing the final comparison should make this regression fail. The earlier root fixture
+  fails earlier schema validation and does not isolate this check. This follow-up is completed
+  in the signed-tail entry above and did not block acceptance of the committed parser.
+  Gate 4 still requires substantial integration: actor scheduling, authenticated tails and
+  native newcomer previews with lifecycle/capacity/fairness evidence; persisted Closing overlays
+  and repeated-owner tenure handling; runtime signed fault/repair issuance, application and
+  distribution; then combined gate scenarios and final review. The reviewed rotation/recovery,
+  takeover/interruption and provisional discovery/seed foundations are complete at their stated
+  boundaries. Gate 4 is not yet at final acceptance, and commit counts are not a completion percentage.
+
+- **Gate 4 provisional seed checkpoint (`b3e54dc`, 2026-09-13; user review passed).** The user review
+  passes `0b32bad` against `1c90c41` and `2f5a8a0` against `0b32bad`, with no required code changes.
+  The reviewer inspected source and did not execute Rust tests. The suggested non-blocking
+  deadline regression now delays head completion to T+9s, allows inspection at T+59.999s and
+  rejects it at T+60s. Its deadline-reset mutation is caught. Future scheduling must coordinate authoritative
+  and provisional heads: a newer preparation of either class supersedes an in-flight head for
+  the same target, although it cannot revoke an already completed owner selection.
+  The current slice connects one-shot provisional seed transport and separate cold typed
+  validation. Consuming the opaque hint pins its member provider and preserves the original
+  60-second candidate expiry and capacity. The authoritative and provisional paths share
+  request cancellation, outbound slots, signed response authentication and bounded AEAD framing;
+  the response still must complete within its 10-second request deadline. Parsing verifies the
+  receipt's self-declared signature and bounded exact raw seed hash/actor/encoding, then typed
+  Index/Flipnote scope, channel/schema and byte-identical compact encoding. No network receipt
+  goes through vault restoration or produces VerifiedReceipt/VerifiedCheckpoint authority.
+  The separate unconfirmed projection retains claimed authorship without proving it. Preparation
+  owns raw bytes and capacity outside sync/store borrows; completion and each use recheck original
+  watch/attempt/member/endpoint/instance, with app mount/server/channel checks on top.
+  These direct adapters do not schedule actor workers or deliver native previews. Future worker
+  permits must survive cancellation independently of the retained seed slot; fairness and
+  competing Studio/Registry installation under preview pressure remain unproved. Authenticated
+  tails, delivery generations, overlays, tenure/repair work and full Gate 4 remain open.
+  Four app provisional tests pass (two new, including sixteen seed lifecycle combinations;
+  `logs/gate4-provisional-seed-app-final.log`, 22.34 seconds). They compare the complete ordinary Read
+  result and the absent Studio/Registry sources and owner/intent/recovery journals before/after
+  parsing, inspection and reopen. An absent Index's existing empty epoch-zero Read is preserved;
+  an absent Flipnote still reads None. A draft assertion incorrectly expected None for both and
+  was corrected without changing production logic. The raw/parsed holders and the existing
+  authoritative RegistrySeedFetch declare capacity last so field destruction frees content
+  before returning the slot, including an off-thread drop or unwind.
+  Final focused suites pass: sync `registry_seed::` 30 (six new, 4.54s), `receipt_head::` 25
+  (one new, 2.49s), replication `checkpoint` 10 (44.80s) and `receipt` 12 (6.11s), app
+  `studio_provisional` 4 and `studio_discovery` 7 (14.16s). The new seed tests include nonempty
+  Index/Flipnote content delivered by a proven non-owner, authenticated malformed receipt/raw
+  seed cases, original-deadline checks before/after parsing, lifecycle revocation at completion
+  and ready use, and cancellation/preparation/result custody with reserved authoritative capacity.
+  Three deliberate mutations are killed at assertions: resetting the hint deadline at completion
+  (0.28s), omitting the receipt self-signature (0.42s), and donating an unrelated lower-transport
+  capacity token (0.35s). Every source was restored byte-for-byte with SHA-256 verification by
+  `logs/gate4-provisional-seed-mutations.ps1`; logs use the `gate4-provisional-seed-mutation-` prefix.
+  Root formatting and replication/sync/app library/test Clippy pass (58.93s). A final fixture
+  refinement gives the wrong-actor case a valid typed schema; its focused rerun and sync Clippy
+  are recorded separately in `gate4-provisional-seed-negative-final.log` and
+  `gate4-provisional-seed-sync-clippy-final.log`.
+  Test commands use `cargo test --locked -j 4 --config 'profile.test.package.<crate>.debug=0'
+  -p <crate> --lib <filter> -- --test-threads=4` with the named crate/filter (the final negative
+  case uses one thread). Clippy uses `cargo clippy --locked -j 4 -p catcoms-replication
+  -p catcoms-sync -p catcoms-app --lib --tests -- -D warnings`; format uses
+  `cargo fmt --all -- --check`. All commands set process-only `CARGO_INCREMENTAL=0` and
+  `_LINK_=/DEBUG:NONE`. No dependency, build profile, installation or native/UI contract changed.
+  Before editing, obsolete generated `target/debug/deps/*.rcgu.o` files were removed after
+  verifying their exact workspace paths and absence of compiler processes, freeing about 1.2GB.
+  The two unfinished newcomer preview cases remain ignored and were not re-run in this slice.
+
+- **Gate 4 successor interruption acceptance (`2f5a8a0`, 2026-09-13; user review passed).** Remote branch
+  `Create-suite-2` now contains exact local discovery commit `0b32bad`; the earlier publishing
+  block is resolved. Its adversarial review has been requested from the user with a copyable
+  message; the subsequent review passes both checkpoints. Independent work extends the accepted
+  succession harness with real actor I/O interruptions before/after recovery and successor
+  writes. Four new tests cover eight Index/Flipnote scenarios with an installed epoch-one
+  old-owner checkpoint and a later Closing source. Only old history and the observed MLS
+  transition are fixtures; the actor constructs the successor's receipt and performs each
+  challenged write. The one-shot failure is scoped to a target and physical store, compiled
+  only under `cfg(test)`, and creates no receipt or source. It either returns an I/O error
+  before the chosen write or completes the real atomic write and then returns that error.
+  Immediate checks require the exact durable prefix: pending receipt/encoded close, untouched
+  frozen history until successor replacement, and full typed recovery before any successor
+  write. The actor/store are dropped and reopened; ordinary Read and idle passes must finish
+  that same decision, local publication and Registry pointer. The accepted harness also checks
+  full recovery, another fresh actor's edit and durable reopen. No fake actor completion,
+  replacement receipt or warm-store transfer is injected. This models I/O error plus loss of
+  volatile state, not process-abort or power-loss behavior.
+  The initial four-test run passes all eight cases (70.25 seconds;
+  `logs/gate4-successor-interruption-cases.log`). Two deliberate production mutations fail:
+  suppressing adoption recovery fails the pre-successor retained-snapshot assertion (27.23s),
+  and dropping the pending-owner retry fails local publication after a completed successor
+  write (61.37s). Both source files were restored byte-for-byte with SHA-256 verification;
+  the script/logs are `logs/gate4-successor-interruption-mutations.ps1` and
+  `logs/gate4-successor-interruption-mutation-*.log`. On restored source, filter
+  `studio_exchange::tests::succession` passes 14 tests with the two unfinished preview cases
+  still ignored (134.26 seconds; `logs/gate4-successor-interruption-succession-final.log`).
+  The original eight accepted succession cases and both known-CID newcomer cases still pass.
+  Filter `studio_frozen_owner_store` with `-- --test-threads=3 --nocapture` passes all three
+  existing store tests, including the full frozen-takeover write-failure matrix (411.01 seconds;
+  `logs/gate4-successor-interruption-store-final.log`). Total restored-source validation:
+  17 passes, four new tests/eight new interruption scenarios, and two ignored preview cases.
+  Root formatting and `cargo clippy --locked -j 4 -p catcoms-app --lib --tests -- -D warnings`
+  pass (36.37 seconds; `logs/gate4-successor-interruption-clippy.log`).
+  All app test commands use `cargo test --locked -j 4
+  --config 'profile.test.package.catcoms-app.debug=0' -p catcoms-app --lib` with the indicated
+  filter and `-- --test-threads=4 --nocapture` unless noted above. The initial compile ran out of disk while
+  writing Rust's query cache; only the verified generated `target/debug/incremental` directory
+  was removed. These runs set process-only `CARGO_INCREMENTAL=0` and `_LINK_=/DEBUG:NONE`.
+  No repository build profile, toolchain installation or dependency changed.
+  Direct A-to-B-to-A through rejoining encounters the already documented Unknown-tenure
+  dependency; neither the Welcome nor the old owner's reused key establishes its new tenure.
+  No authority inference or native/UI contract change is introduced.
+
+- **Gate 4 provisional head discovery (`0b32bad`, 2026-09-12; user review passed on 2026-09-13).**
+  The user accepted `1c90c41`'s allocation foundation without requested changes; the reviewer
+  inspected source and did not run Cargo. The next sync/app slice uses that quota for real
+  provisional head requests and opaque, volatile candidate metadata. Shared response
+  authentication remains separate from current-owner selection: provisional completion cannot
+  mint/supersede a selection. Proof/repair/absent-receipt answers return no candidate and release
+  custody, requiring the future scheduler's normal fresh authoritative retry. Receipt signature
+  and historical/current ownership claims remain unverified; no seed or preview is exposed.
+  The fixed 60-second candidate lifetime starts at preparation; head completion keeps its
+  10-second deadline. Watch/attempt generations, membership, endpoint and sync-instance checks
+  fence completion/use; any newer same-target head attempt invalidates the candidate. App
+  wrappers check mount/server/channel and detach without retaining Server/store borrows.
+  Tests cover actual authenticated member delivery, hostile signed responses, stale generations
+  and capacity held by unpolled/completed/candidate/cancelled transport owners. Preview parsing,
+  actor scheduling/fairness and native delivery remain pending. No UI/native contract change.
+  These adapters are currently exercised directly, not scheduled by the actor receiver.
+  Restored-source validation uses `cargo test --locked -j 4` with
+  `--config 'profile.test.package.catcoms-sync.debug=0' -p catcoms-sync --lib`:
+  `receipt_head:: -- --test-threads=4 --nocapture` passes 24 (7 new; 2.24 seconds;
+  `logs/gate4-provisional-discovery-head-final.log`), and `registry_seed::` with the same test
+  flags passes 24 (2.79 seconds; `logs/gate4-provisional-discovery-seed-regression.log`).
+  App runs use `--config 'profile.test.package.catcoms-app.debug=0' -p catcoms-app --lib`:
+  `studio_provisional_discovery -- --test-threads=2 --nocapture` passes 2 (9.57 seconds;
+  `logs/gate4-provisional-discovery-app-final.log`); `studio_discovery` with 4 threads passes 7
+  (10.49 seconds; `logs/gate4-provisional-discovery-app-regression.log`);
+  `studio_exchange::tests::succession` with 4 threads passes 10 with 2 ignored preview cases
+  (70.57 seconds; `logs/gate4-provisional-discovery-succession.log`);
+  `studio_actors_new_member` with 2 threads passes 2 (4.15 seconds;
+  `logs/gate4-provisional-discovery-new-member.log`). Total: 69 passes, 9 new tests.
+  Three temporary mutations fail at their intended assertions: bypassing response signature
+  verification, accepting a same-key stale-watch candidate and donating an unaccounted token to
+  lower transport. Source restoration was checked byte-for-byte;
+  `logs/gate4-provisional-discovery-mutation-*.log` record the failures. Explicit preview-gap
+  tests were not re-run; their last execution remains `7393165`. The documented process-only
+  `$env:_LINK_ = '/DEBUG:NONE'` workaround is still used; no toolchain/build-profile changes.
+  Root formatting and `cargo clippy --locked -j 4 -p catcoms-sync -p catcoms-app --lib --tests
+  -- -D warnings` pass (18.69 seconds; `logs/gate4-provisional-discovery-clippy.log`).
+  Full Gate 4 acceptance and the competing-class actor capacity/fairness regression remain open.
+
+- **Gate 4 provisional capacity foundation (`1c90c41`, 2026-09-12; user review passed).**
+  The user re-review of `7393165` passes and closes TEST-001/TEST-002 and PR-001 as a design
+  finding, with no further closure changes requested. The reviewer inspected source without
+  running Cargo. The accepted proposal now proceeds with the shared capacity prerequisite:
+  `registry_seed/capacity.rs` supplies an opaque three-of-four provisional memory reservation,
+  and existing authoritative discovery allocates from that same four-slot pool. It grants no
+  hint, seed or installation authority. Provisional fetching/parsing, scheduler fairness,
+  lifecycle validity and native preview reads remain unimplemented. Tests distinguish allocator
+  keepalive modelling from the existing real authenticated head/seed and transport paths.
+  The full competing-class actor progress regression remains pending; no native/UI changes.
+  The review's remaining obligations are retained: explicit unconfirmed-history assertions,
+  same-key rewatch, membership changes during parsing and late native delivery. Refused Apply
+  preserves specified document/journal state but may persist the app's server snapshot.
+  Validation on restored source: `cargo test --locked -j 4
+  --config 'profile.test.package.catcoms-sync.debug=0' -p catcoms-sync --lib registry_seed::
+  -- --test-threads=4 --nocapture` passes all 24 tests (6 new; 2.92 seconds;
+  `logs/gate4-provisional-capacity-sync-final.log`). The app command uses
+  `--config 'profile.test.package.catcoms-app.debug=0' -p catcoms-app --lib`:
+  `studio_exchange::tests::succession -- --test-threads=4 --nocapture` passes 10 with 2 preview
+  cases still ignored (70.16 seconds; `logs/gate4-provisional-capacity-succession.log`), and
+  `studio_actors_new_member -- --test-threads=2 --nocapture` passes both (4.32 seconds;
+  `logs/gate4-provisional-capacity-new-member.log`). The explicit preview failures were not
+  re-run for this allocator-only change; their last execution is recorded under `7393165`.
+  Two temporary mutations are killed at the expected assertions: permitting a fourth preview
+  reservation and bypassing shared accounting for authoritative discovery. Sources were restored
+  byte-for-byte; `logs/gate4-provisional-capacity-mutation-*.log` record the failures (0.10/0.15s).
+  Local execution also needed test-process-only `$env:_LINK_ = '/DEBUG:NONE'` after the Windows
+  linker reported LNK1318/PDB LIMIT. [MSVC documents this option](https://learn.microsoft.com/en-us/cpp/build/reference/debug-generate-debug-info?view=msvc-170)
+  as disabling PDB generation. Disk-full attempts were resolved by deleting only generated PDBs
+  and the verified Rust incremental cache. A disk-full documentation write truncated this file;
+  it was restored exactly from HEAD and this entry reapplied before diff verification.
+  No dependency, repository build-profile or installed-toolchain change was required.
+  Root formatting and `cargo clippy --locked -j 4 -p catcoms-sync -p catcoms-app --lib --tests
+  -- -D warnings` pass (28.74 seconds; `logs/gate4-provisional-capacity-clippy.log`).
+  Full-gate acceptance and the actor capacity/fairness regression are not claimed.
+
+- **Gate 4 joining review revision (`7393165`, 2026-09-12; user re-review passed).** The user accepted
+  `48fcc2e`'s ownership-transition and known-CID byte-persistence claims. PR-001 requests changes
+  to the proposed preview policy: all four retained slots could be filled by previews whose
+  replacement needed one of those same slots before even sending a head query. The revised
+  [proposal](GATE4-PROVISIONAL-READ-REVIEW.md) caps provisional custody at three of the four
+  shared slots, reserves authoritative Studio/Registry progress and separates eviction from
+  successful authoritative replacement. It retains resource keepalives and explicit generation
+  checks, including same-key rewatch, membership changes during parsing and late delivery.
+  The requested capacity/lifecycle runtime regressions are obligations, not claimed passes.
+  TEST-001 now checks captured Registry state and empty Studio/Registry owner, intent and
+  recovery journals after discovery, Read, refused Apply and reopen. The refusal must be the
+  exact retired-epoch error, with no orphan intent or staged recovery. TEST-002 adds a bounded
+  `cfg(test)` watch observation at actual authenticated Studio Hint completion, requiring the
+  expected target, peer, full provider identity and exact receipt without current-owner proof.
+  It never injects a hint or manufactures a selection. No production runtime semantics, native
+  command, event or UI layout changes. Preview reading/editing, Unknown-tenure evidence,
+  repeated-owner scenarios, interruption, signed repair and full Gate 4 acceptance remain open.
+  Final validation on the restored tree uses
+  `cargo test --locked -j 4 --config 'profile.test.package.catcoms-app.debug=0' -p catcoms-app --lib`:
+  filter `studio_exchange::tests::succession -- --test-threads=4 --nocapture` passes 10 with the
+  2 explicit preview cases ignored (78.14 seconds; `logs/gate4-joining-review-final-succession.log`);
+  filter `studio_actors_new_member -- --test-threads=2 --nocapture` passes both ordinary
+  Index/Flipnote discovery/install/tail regressions (4.31 seconds;
+  `logs/gate4-joining-review-new-member-regression.log`). Explicitly enabling
+  `studio_actor_post_succession_joiner_reads_ -- --ignored --test-threads=2 --nocapture` still
+  fails both at the missing-preview assertion, now AFTER exact authenticated Hint observation,
+  Registry/Read/refused-Apply guards and byte persistence checks
+  (`logs/gate4-joining-review-provisional-gap.log`). Three temporary counterexamples each failed
+  at the intended strengthened guard: dropped Studio head requests, an injected signed Registry
+  pointer write and persisting an intent before the correct retired-epoch refusal. Each modified
+  source was restored byte-for-byte; logs are `logs/gate4-joining-review-mutation-*.log`.
+  Root formatting and `cargo clippy --locked -j 4 -p catcoms-app --lib --tests -- -D warnings`
+  pass, covering both production-library and test configurations
+  (`logs/gate4-joining-review-clippy.log`). No fresh full-gate suite or capacity-runtime pass is claimed.
+
+- **Gate 4 post-succession joining / PIX checkpoint (`48fcc2e`, 2026-09-12;
+  ownership/known-CID evidence accepted; original proposal requested changes).**
+  `studio_exchange/tests/succession/joining.rs` adds two availability cases and two explicitly
+  ignored provisional-read acceptance cases. A real frame and its PIX bytes reach Bob before
+  takeover; Bob's actor issues the successor receipt/pointer and saves an independently checked
+  tail. The provider then restarts with sealed source/receipt/pointer/tail/pixels intact. A fresh
+  invitee joins after that restart, on a new network without Alice. This recycles Alice's low leaf
+  and changes ownership again: the newcomer becomes owner with Unknown tenure, while Bob
+  independently observes that transition. No authority is manufactured from the old receipt.
+  The known-CID tests fetch exact PIX bytes through the actor and again from the newcomer's
+  reopened vault with no provider connected, while checking that an unconfirmed hint did not
+  install a canonical Studio source or write owner/intent/recovery journals. The CID comes from
+  the fixture; successful byte fetch is not discovery or a usable Flipnote.
+  The provisional metadata read is a reproduced gap: Studio's `Hint` branch does not load the
+  hinted history, so Read returns None. The opt-in acceptance cases must remain visibly pending.
+  [The concrete next runtime proposal](GATE4-PROVISIONAL-READ-REVIEW.md) awaits user-provided
+  adversarial review; it adds a bounded, separately typed, unconfirmed read fallback. Durable
+  overlays and independent tenure evidence remain subsequent integration work. No production
+  code, native command or UI layout changes in this checkpoint. Gate 4 remains incomplete.
+  Local default-debug compilation twice exhausted disk space. Tests use a command-line-only
+  `--config 'profile.test.package.catcoms-app.debug=0'` override; build profiles are unchanged.
+  Final validation: `cargo test --locked -j 4 --config 'profile.test.package.catcoms-app.debug=0'
+  -p catcoms-app --lib studio_actor_post_succession_joiner -- --test-threads=2 --nocapture`
+  passes 2, ignores the 2 explicitly unfinished acceptance cases (23.48 seconds;
+  `logs/gate4-succession-joining-tests.log`). The same command with filter `studio_actor_new_owner`
+  and `--test-threads=4` passes all 8 accepted cases (52.92 seconds;
+  `logs/gate4-succession-joining-regression.log`). Explicitly running filter
+  `studio_actor_post_succession_joiner_reads_` with `--ignored --test-threads=2 --nocapture`
+  fails both at the intended missing-provisional-read assertion, after the PIX checks succeed
+  (23.70 seconds; `logs/gate4-succession-joining-provisional-gap.log`). Root formatting and
+  `cargo clippy --locked -j 4 -p catcoms-app --tests -- -D warnings` pass (9.65 seconds;
+  `logs/gate4-succession-joining-clippy.log`). Broader full-gate suites are not claimed.
+
+- **Gate 4 Index/checkpoint succession and restored-actor editing (`e3f6669`, 2026-09-12;
+  user accepted).** The matrix adds six cases to the reviewed Flipnote pair: Index
+  Open/Closing epoch-zero takeover and Index/Flipnote Open/Closing takeover of epoch one.
+  It checks inherited epoch/close/seed against the installed old-owner checkpoint and binds
+  the successor's physical document id to the newly issued receipt. Every case then restores a
+  fresh actor, saves another independently checked operation, and reopens the vault to require
+  the exact operation and pending intent with unchanged receipt/pointer. The eligible-history
+  fixture now supports typed Index edits; its old-owner close helper accepts the previous
+  receipt for same-tenure preparation. New-owner decisions still come from the runtime, and the
+  staged-Remove fixture restores strict single-committer policy before Studio runs. Production
+  code and native hooks are unchanged. All eight cases pass with
+  `cargo test --locked -j 4 -p catcoms-app --lib studio_actor_new_owner -- --test-threads=4 --nocapture`
+  (51.29 seconds; `logs/gate4-succession-expanded-tests.log`). The shared-fixture solo three-rotation
+  test also passes (35.66 seconds; `logs/gate4-succession-expanded-solo.log`). Root formatting and
+  `cargo clippy --locked -j 4 -p catcoms-app --tests -- -D warnings` pass
+  (`logs/gate4-succession-expanded-clippy.log`). Broader suites were not repeated for this test-only
+  slice; the previous ambient-check limitation remains below. User-provided review passed.
+  This does not cover repeated owner changes, post-succession joining/PIX availability or
+  interrupted successor installation. Signed repair and full Gate 4 acceptance remain open.
+
+- **Gate 4 succession assertion review (2026-09-12; SUC-001/SUC-002 closed).**
+  The user-provided re-review accepts `5d65998` and requests no further code changes for either
+  finding. This closes the narrow test slice; broader Gate 4 implementation and acceptance remain open.
+  The user-provided source review of `d7ea514` requested SUC-001 (Open expected projection could
+  accept a no-op Save) and SUC-002 (Closing accepted any error without immediate source/intent
+  comparison). The revised tests independently check the requested title and its author/nonce/id,
+  the durable exact operation and pending intent before rotation, and the precise Closing refusal
+  with unchanged physical document id, phase, operation count, projection and intent journal.
+  Production code and the transition/close fixtures are unchanged. Both revised cases passed.
+  Three temporary mutations failed at the intended new assertions: Open Apply replaced by Read,
+  an unrelated Closing error, and validation delayed until after intent persistence. The runner
+  restored both source files byte-for-byte (`logs/gate4-succession-mutation-*.log`). The final
+  `cargo test --locked -j 4 -p catcoms-app --lib studio_actor_new_owner -- --nocapture` run passes
+  both cases (25.07 seconds; `logs/gate4-succession-review-final-tests.log`). Root formatting and
+  `cargo clippy --locked -j 4 -p catcoms-app --tests -- -D warnings` pass
+  (`logs/gate4-succession-review-clippy.log`). Two compile attempts exhausted disk space before
+  tests; clearing only the generated Rust incremental cache allowed the reruns. Broader suites
+  were not repeated for this assertion-only correction; their prior results remain below.
+  The reviewer did not run Cargo; the prior local passes below are author evidence. Restart
+  coverage is an observed transition plus old-owner Open/Closing source, followed by completed
+  takeover and orderly shutdown/reopen. It does not interrupt the successor installation or
+  edit through a freshly restored successor actor, and proves no new multi-peer convergence.
+  The correction checkpoint is on `origin/Create-suite-2`. Next work is the remaining runtime
+  succession coverage, then signed fault/repair integration and full-gate acceptance.
+
+- **Gate 4 audit and actor succession tests (`d7ea514`, 2026-09-12; initial evidence).** The backend
+  checklist now records the omitted `dba52e5` frozen-owner core/store work and distinguishes
+  connected rotation/recovery from runtime succession, signed repair and full-gate acceptance.
+  `studio_exchange/tests/succession.rs` adds two passing actor Ready/lease/idle-worker cases:
+  an Open art source remains editable after an observed owner transition/restart, and an old
+  owner's Closing source stays closed to Save until takeover preserves it in recovery. Both
+  require a current-owner receipt, Open checkpoint, Registry pointer and durable reopen. Reuses
+  the eligible-history fixture plus a test-only helper preparing the actual old-owner close.
+  The staged-Remove fixture restores strict single-committer configuration before running Studio;
+  no product owner-transfer policy, native command or UI component changes. Fixtures are
+  header-only Flipnotes; post-succession PIX availability is not proved. Index, nonzero
+  inheritance, A-to-B-to-A, post-succession newcomer and signed repair remain open.
+  Focused command: `cargo test --locked -j 4 -p catcoms-app --lib studio_actor_new_owner -- --nocapture`
+  (2 passed; `logs/gate4-succession-focused.log`). The first fixture attempt correctly hit the
+  per-author cap when authored by a non-owner; it now uses the old owner's eligible history.
+  Frontend tests pass 1,189/1,189; root formatting and app-test Clippy with warnings denied pass
+  (`logs/gate4-succession-clippy.log`). Broader command:
+  `cargo test --locked -j 4 -p catcoms-app --lib studio_ -- --test-threads=4`
+  passes 138 tests, with one existing opt-in profiling test ignored (710.89 seconds;
+  `logs/gate4-audit-studio-tests.log`).
+  Ambient check fails on existing native `media_decode.rs` uses of `Instant::now()` at 333,
+  426, 444 and 504; no full-suite or gate-completion claim. This computer was initially missing
+  Rust/MSVC; Rust 1.89.0, rustfmt, Clippy and standalone Build Tools/SDK are now installed, with
+  no Visual Studio IDE. The initial Rust attempt failed before tests because the linker was
+  not yet installed. Application builds are left to GitHub per the user's direction.
+  The user supplies the adversarial review for this slice. At the user's request, commit and
+  push review checkpoints to `origin/Create-suite-2` when requesting review; a review request
+  no longer waits on an uncommitted local diff. Review findings still gate the next slice.
 
 - **The membership chain a member cannot complete is now typed and reported (`ed7f7d6`,
   `f61e5dc`, `6576a46`, 2026-09-10).** A member behind by more than every reached peer's

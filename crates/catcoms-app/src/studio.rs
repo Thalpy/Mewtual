@@ -11,6 +11,14 @@ pub use catcoms_replication::{studio as types, EpochPhase, RecoveryReason, Recov
 use catcoms_rt::{CryptoRngCore, MeshTransport};
 use tokio::sync::{oneshot, OwnedMutexGuard};
 
+mod inspection;
+mod overlay;
+pub use inspection::{
+    StudioInspectionDelivery, StudioInspectionPreparation, StudioOverlayInspection,
+    StudioPreparedInspection,
+};
+mod preview;
+pub use preview::{StudioPreview, StudioPreviewDelivery, StudioRead};
 mod publication;
 pub(crate) use publication::StudioSavedTransaction;
 mod control;
@@ -30,6 +38,8 @@ pub use settlement::StudioSettlementState;
 mod dispatch;
 pub(crate) use dispatch::{StudioDispatch, StudioReply, StudioResponse};
 mod receiver;
+#[cfg(test)]
+pub(crate) use receiver::PreviewHarness;
 pub(crate) use receiver::StudioBackgroundResult;
 pub(crate) use receiver::StudioReceiver;
 
@@ -180,6 +190,7 @@ pub struct StudioVaultLease {
     pub(crate) store: OwnedMutexGuard<Option<ServerStore>>,
     pub(crate) server: u64,
     _ordering: Box<dyn Send>,
+    pub(crate) preview_reads: bool,
     cancellation: Option<catcoms_rt::RequestCancellation>,
 }
 impl std::fmt::Debug for StudioVaultLease {
@@ -197,6 +208,7 @@ impl StudioVaultLease {
             store,
             server,
             _ordering: Box::new(ordering),
+            preview_reads: false,
             cancellation: None,
         }
     }
@@ -221,10 +233,27 @@ impl StudioVaultLease {
 #[derive(Debug)]
 pub struct StudioReady {
     pub(crate) lease: oneshot::Sender<StudioVaultLease>,
-    pub(crate) result: oneshot::Receiver<Result<Option<StudioView>, String>>,
+    pub(crate) result: oneshot::Receiver<Result<Option<StudioRead>, String>>,
 }
 impl StudioReady {
+    /// Compatibility API for ordinary document consumers. Unconfirmed previews are omitted.
     pub async fn execute(self, lease: StudioVaultLease) -> Result<Option<StudioView>, String> {
+        Ok(self
+            .execute_result(lease)
+            .await?
+            .and_then(|read| match read {
+                StudioRead::Document(view) => Some(view),
+                StudioRead::AwaitingTenureReceipt(_) => None,
+            }))
+    }
+    pub async fn execute_read(
+        self,
+        mut lease: StudioVaultLease,
+    ) -> Result<Option<StudioRead>, String> {
+        lease.preview_reads = true;
+        self.execute_result(lease).await
+    }
+    async fn execute_result(self, lease: StudioVaultLease) -> Result<Option<StudioRead>, String> {
         self.lease
             .send(lease)
             .map_err(|_| "Studio transaction expired".to_string())?;
@@ -537,6 +566,7 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
             ));
         }
         Ok(StudioSavedTransaction {
+            preview: None,
             view,
             packets,
             observed,

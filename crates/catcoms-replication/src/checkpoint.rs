@@ -270,6 +270,29 @@ pub(crate) fn validate_change(
     Ok(change)
 }
 
+/// Parse an untrusted receipt's exact seed without creating installation authority. The
+/// caller must still check its typed schema and scope; attribution remains unconfirmed.
+pub(crate) fn inspect_unconfirmed_seed(
+    receipt: &crate::Receipt,
+    bytes: &[u8],
+) -> Result<AutoCommit, ReplError> {
+    receipt.verify_signature_only()?;
+    let origin = CheckpointOrigin {
+        document: receipt.document.clone(),
+        epoch: receipt
+            .closed_epoch
+            .checked_add(1)
+            .ok_or(ReplError::EpochBound)?,
+        close_hash: receipt.close_record_hash,
+        seed_hash: receipt.seed_change_hash,
+    };
+    let change = validate_change(&origin, bytes)?;
+    let mut doc = AutoCommit::new();
+    doc.apply_changes([change]).map_err(am_error)?;
+    reject_markers(&doc)?;
+    Ok(doc)
+}
+
 fn reject_markers(doc: &AutoCommit) -> Result<(), ReplError> {
     if doc.keys(ROOT).any(|key| key.starts_with("_p1/op/")) {
         return Err(ReplError::Malformed);

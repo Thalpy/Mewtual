@@ -19,6 +19,10 @@ use catcoms_sync::epoch_service::{EpochServiceInterest, EpochServiceKind};
 use catcoms_sync::registry_seed::{CompletedCheckpointSeed, PendingCheckpointSeed};
 use tokio::sync::OwnedSemaphorePermit;
 mod discovery;
+mod preview;
+#[cfg(test)]
+pub(crate) use preview::PreviewHarness;
+use preview::{PreviewCompletion, PreviewJob, PreviewRuntime};
 mod registry;
 mod registry_runtime;
 mod rotation;
@@ -46,6 +50,7 @@ type PreparedRegistryResult = Result<Box<ServerPreparedRegistryPageSource>, AppE
 /// Thus all running, queued and result-holding preparations together still occupy at most
 /// four slots process-wide. A ready result retains its permit until native custody.
 pub(crate) enum StudioBackgroundJob<T: MeshTransport> {
+    Preview(Arc<()>, PreviewJob),
     RegistryPage(crate::registry_catchup::RegistryPageAttempt<T>),
     Page(StudioPageAttempt<T>),
     Head(CheckpointDiscoveryAttempt<T>),
@@ -58,6 +63,7 @@ pub(crate) enum StudioBackgroundJob<T: MeshTransport> {
     PrepareRegistry(ServerRegistryPagePreparation, Option<Arc<()>>),
 }
 pub(crate) enum StudioBackgroundResult {
+    Preview(Arc<()>, PreviewCompletion),
     RegistryPage(Box<crate::registry_catchup::RegistryPageCompletion>),
     Page(Box<StudioPageCompletion>),
     Head(Box<CheckpointDiscoveryCompletion>),
@@ -73,12 +79,19 @@ impl<T: MeshTransport + 'static> StudioBackgroundJob<T> {
     #[cfg(test)]
     pub(crate) fn is_preparation_for_test(&self) -> bool {
         matches!(self, Self::Prepare(..) | Self::PrepareRegistry(..))
+            || matches!(self, Self::Preview(_, job) if job.is_preparation())
     }
     pub(crate) async fn run(
         self,
         mut cancellation: Option<RequestCancellation>,
     ) -> StudioBackgroundResult {
         let cancelled = match &self {
+            Self::Preview(generation, job) => StudioBackgroundResult::Preview(
+                generation.clone(),
+                PreviewCompletion::Cancelled {
+                    preparation: job.is_preparation(),
+                },
+            ),
             Self::Prepare(_, _, context) => StudioBackgroundResult::Cancelled {
                 preparation: Some(context.clone()),
             },
@@ -89,6 +102,9 @@ impl<T: MeshTransport + 'static> StudioBackgroundJob<T> {
         };
         let work = async move {
             match self {
+                Self::Preview(generation, job) => {
+                    StudioBackgroundResult::Preview(generation, job.run().await)
+                }
                 Self::RegistryPage(attempt) => {
                     StudioBackgroundResult::RegistryPage(Box::new(attempt.fetch().await))
                 }
@@ -127,6 +143,13 @@ impl<T: MeshTransport + 'static> StudioBackgroundJob<T> {
 
 #[derive(Default)]
 pub(super) struct CatchupRuntime {
+    pub(super) preview: PreviewRuntime,
+    #[cfg(test)]
+    pub(super) hint_observer: Option<
+        tokio::sync::watch::Sender<
+            Option<crate::studio_exchange::discovery::StudioHintObservation>,
+        >,
+    >,
     pub(super) settlement: SettlementNotices,
     provider: Option<ServerStudioPageProvider>,
     pass: Option<ServerStudioReceive>,
@@ -150,7 +173,6 @@ pub(super) struct CatchupRuntime {
     discovery_needed: Option<StudioTarget>,
     discovery_plan: Option<DiscoveryPlan>,
     after_registry: Option<DiscoveryPlan>,
-    registry_attempts: u8,
     head_result: Option<Box<CheckpointDiscoveryCompletion>>,
     checkpoint: Option<ServerCheckpointFetch>,
     checkpoint_peer: Option<PeerId>,
@@ -415,6 +437,12 @@ impl CatchupRuntime {
         server: &Server<T, R>,
         watches: &VecDeque<(ServerStudioWatch, u128)>,
     ) -> bool {
+        if self.preview.pending(server.runtime_clock().monotonic_ms())
+            && !self.in_flight
+            && !self.preparing
+        {
+            return true;
+        }
         if self.prepared.is_some() || self.registry_prepared.is_some() {
             return true;
         }
@@ -539,7 +567,25 @@ impl CatchupRuntime {
             .sync
             .with_registry_context(|g, _, _, _| store.studio_storage_budget(id, g, &inventory))
     }
-    pub(super) fn run<T: MeshTransport, R: CryptoRngCore>(
+    fn schedule_preview_if_idle<T: MeshTransport + 'static, R: CryptoRngCore>(
+        &mut self,
+        server: &mut Server<T, R>,
+        store: &ServerStore,
+        id: u64,
+    ) {
+        if !self.in_flight
+            && !self.preparing
+            && self.preparation.is_none()
+            && self.registry_preparation.is_none()
+            && self.pass.is_none()
+            && self.registry_pass.is_none()
+            && self.discovery_plan.is_none()
+            && self.checkpoint.is_none()
+        {
+            self.preview.schedule(server, store, id);
+        }
+    }
+    pub(super) fn run<T: MeshTransport + 'static, R: CryptoRngCore>(
         &mut self,
         server: &mut Server<T, R>,
         store: &mut ServerStore,
@@ -660,6 +706,7 @@ impl CatchupRuntime {
             // Registry maintenance uses the intentional gap between Studio page passes.
             // It cannot consume the client turn promised by the existing service alternation.
             self.work_registry(server, store, id, watches)?;
+            self.schedule_preview_if_idle(server, store, id);
             return Ok(None);
         }
         self.peers = peers;
@@ -672,6 +719,13 @@ impl CatchupRuntime {
         let index = self.selection % watches.len();
         let peer = self.peers[(self.selection / watches.len()) % self.peers.len()];
         let watch = &watches[index].0;
+        if self.preview.defers(watch.target, now) {
+            self.selection = self.selection.wrapping_add(1);
+            self.next_at = now.saturating_add(1_000);
+            self.work_registry(server, store, id, watches)?;
+            self.schedule_preview_if_idle(server, store, id);
+            return Ok(None);
+        }
         if watch.server != id || !Arc::ptr_eq(&watch.mount, &store.registry_mount()) {
             return Err(invalid("catch-up mount changed"));
         }
@@ -810,9 +864,21 @@ impl StudioReceiver {
                 }
             }
         } else {
-            None
+            let generation = self.catchup.preview.generation();
+            self.catchup
+                .preview
+                .job
+                .take()
+                .map(|job| StudioBackgroundJob::Preview(generation, job))
         };
         match &work {
+            Some(StudioBackgroundJob::Preview(_, job)) => {
+                if job.is_preparation() {
+                    self.catchup.preparing = true;
+                } else {
+                    self.catchup.in_flight = true;
+                }
+            }
             Some(StudioBackgroundJob::Prepare(..)) => self.catchup.preparing = true,
             Some(StudioBackgroundJob::PrepareRegistry(..)) => self.catchup.preparing = true,
             Some(StudioBackgroundJob::Page(..) | StudioBackgroundJob::RegistryPage(..)) => {
@@ -831,6 +897,18 @@ impl StudioReceiver {
         result: StudioBackgroundResult,
     ) {
         match result {
+            StudioBackgroundResult::Preview(generation, completed) => {
+                if matches!(
+                    completed,
+                    PreviewCompletion::Prepared(_)
+                        | PreviewCompletion::Cancelled { preparation: true }
+                ) {
+                    self.catchup.preparing = false;
+                } else {
+                    self.catchup.in_flight = false;
+                }
+                self.catchup.preview.complete(generation, completed);
+            }
             StudioBackgroundResult::RegistryPage(completed) => {
                 self.catchup.in_flight = false;
                 if let Some(pass) = &mut self.catchup.registry_pass {

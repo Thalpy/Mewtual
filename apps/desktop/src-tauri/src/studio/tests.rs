@@ -3,9 +3,42 @@ use catcoms_rt::{Hub, ManualClock, PeerId};
 use rand_chacha::ChaCha20Rng;
 use rand_core::SeedableRng;
 use std::future::Future;
+mod preview;
 mod receiver;
 mod recovery;
 mod recovery_restore;
+
+#[tokio::test]
+async fn native_studio_superseded_view_is_rejected_after_conversion() {
+    let (_root, state, actor, task, drain) = fixture().await;
+    let target = StudioTarget::Index {
+        channel: channel_id(&channel()).unwrap(),
+    };
+    let result = invoke_custody(
+        &state,
+        7,
+        InvokeRequest::Document(StudioRequest::Read { target }),
+        |response| {
+            let InvokeResponse::Document(Some(read)) = response else {
+                panic!("empty Index read");
+            };
+            let value = read_view(read)?;
+            // Admit the next native request after the old conversion has actually succeeded.
+            // Dropping it cannot revive the older response; the session/actor remain unchanged.
+            let newer = requests::ViewRequest::begin(&state, 7, target);
+            assert!(newer.is_current());
+            Ok(value)
+        },
+    )
+    .await;
+    assert_eq!(
+        result.unwrap_err(),
+        "Studio view request was superseded; refresh"
+    );
+    actor.shutdown().await;
+    task.await.unwrap();
+    drain.await.unwrap();
+}
 
 fn rng() -> ChaCha20Rng {
     ChaCha20Rng::seed_from_u64(81)
@@ -28,7 +61,7 @@ fn create() -> StudioRequest {
         ts: 123,
     }
 }
-async fn install(
+pub(super) async fn install(
     state: &AppState,
     actor: ServerActor,
     group_id: Vec<u8>,
@@ -495,8 +528,18 @@ async fn native_studio_running_worker_retains_fences_after_invoke_or_actor_abort
             task.await.unwrap();
         }
         drain.await.unwrap();
-        assert!(state.ui_session_commit.try_lock().is_ok());
-        assert!(state.servers.try_lock().is_ok());
+        // After actor abort, its detached worker can still be dropping the remaining lease
+        // fields when the store guard becomes available. Wait for actual fence release;
+        // the assertions above already prove they remained held while the worker was paused.
+        drop(
+            tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                let commit = state.ui_session_commit.lock().await;
+                let servers = state.servers.lock().await;
+                (commit, servers)
+            })
+            .await
+            .expect("completed native worker did not release its fences"),
+        );
         // A cancelled response is never shown, but an already-started save may finish. Reopen
         // the actual saved source with the durably saved MLS snapshot and verify the outcome.
         let server = Server::restore(

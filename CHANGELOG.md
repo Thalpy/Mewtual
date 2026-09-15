@@ -4,6 +4,8 @@ All notable changes to Mewtual are documented here.
 
 ## [Unreleased]
 
+## [0.3.0-alpha.19] - 2026-09-11
+
 ### Added
 
 - **Chat recognises five more services.** A link on a line of its own from **SoundCloud, Vimeo,

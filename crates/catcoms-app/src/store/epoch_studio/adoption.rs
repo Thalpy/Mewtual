@@ -77,6 +77,7 @@ impl ServerStore {
         receipt
             .verify_current_owner(group, tenure)
             .map_err(invalid)?;
+        self.resolve_studio_handoff(server, group, target, device, rng, budget)?;
         // Shares the exact source transfer and fresh five-family accounting used for pages.
         // Actual absence is legal only after inventory agrees, never from a remote pointer.
         let source::CheckedReceiveSource {

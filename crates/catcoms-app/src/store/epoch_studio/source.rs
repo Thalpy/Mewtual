@@ -154,6 +154,7 @@ impl ServerStore {
         read: impl FnOnce(&mut EpochStudioState) -> Result<V, AppError>,
     ) -> Result<V, AppError> {
         current_member(group, device)?;
+        self.check_studio_handoff_publication(server, group, target)?;
         if !self.studio_source_is_warm(server, group, target, device) {
             return Err(invalid("Studio page source requires explicit preparation"));
         }
@@ -183,6 +184,7 @@ impl ServerStore {
         else {
             return Ok(false);
         };
+        self.check_studio_intent_link(version.server, state.unit.document(), &scope, &held.plain)?;
         Ok(held.physical_bytes == version.bytes && blake3::hash(&held.plain) == version.digest)
     }
 

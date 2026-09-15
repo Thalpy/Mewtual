@@ -7,6 +7,7 @@ use catcoms_replication::studio::StudioRecovery;
 use catcoms_rt::ManualClock;
 
 mod frozen;
+mod overlay;
 
 fn eligible(f: &Fixture, store: &mut ServerStore) {
     let mut b = budget(store, f);

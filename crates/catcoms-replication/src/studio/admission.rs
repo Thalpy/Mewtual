@@ -112,12 +112,7 @@ impl StudioTarget {
         let before = doc.doc().clone();
         let projection = self.read(&logical, epoch, &before)?;
         self.local_policy(&projection, domain, &device.device_id())?;
-        let prepared = match &projection {
-            StudioProjection::Index(_) => {
-                index::prepare(&logical, epoch, domain, &device.device_id())?
-            }
-            StudioProjection::Flipnote(p) => frames::prepare(p, domain, &device.device_id(), ts)?,
-        };
+        let prepared = self.prepare_local_write(&projection, domain, &device.device_id(), ts)?;
         let mut operations = recovery::current_operations(doc)?;
         operations.insert(
             domain.id(&device.device_id()),
@@ -180,6 +175,19 @@ impl StudioTarget {
             },
             |staged| recovery::preflight(self.read(&logical, epoch, staged)?, &operations.borrow()),
         )
+    }
+    pub(super) fn prepare_local_write(
+        &self,
+        projection: &StudioProjection,
+        domain: &DomainOp,
+        author: &DeviceId,
+        ts: u64,
+    ) -> Result<PreparedEdit, ReplError> {
+        integer_bound(ts)?;
+        match projection {
+            StudioProjection::Index(p) => index::prepare(p.document(), p.epoch, domain, author),
+            StudioProjection::Flipnote(p) => frames::prepare(p, domain, author, ts),
+        }
     }
     pub(super) fn local_policy(
         &self,

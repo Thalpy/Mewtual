@@ -4128,8 +4128,9 @@ dependencies = [
 
 [[package]]
 name = "mewtual-desktop"
-version = "0.3.0-alpha.18"
+version = "0.3.0-alpha.19"
 dependencies = [
+ "automerge",
  "base64 0.22.1",
  "bytes",
  "catcoms-app",
@@ -4138,6 +4139,7 @@ dependencies = [
  "catcoms-log",
  "catcoms-mls",
  "catcoms-net",
+ "catcoms-replication",
  "catcoms-rt",
  "catcoms-storage",
  "catcoms-sync",

@@ -2,12 +2,25 @@
 
 This is an acceptance checklist, not a count of source files. UI layout, components and the
 canonical Flipnote mockups remain user-owned. No item is complete merely because its core
-helper exists. As of 2026-09-11 (`39ceb76`), the active scope is **Flipnote and the P1 paths it
-requires**, not completion of the entire Creative Suite.
+helper exists. Audited on 2026-09-12 against `acdb7f8`; the active scope is **Flipnote and the P1
+paths it requires**, not completion of the entire Creative Suite.
 
 Frontend integration is tracked separately in [FLIPNOTE-UI-HOOKS](FLIPNOTE-UI-HOOKS.md): actual
 native commands/events, retry rules and explicitly unavailable controls. Update it alongside
 every bridge-facing slice; UI layout and rendering remain user-owned.
+
+Current follow-up (2026-09-15): the user passes `aa0a81f...0b28f06` profiling and detached
+inspection design without findings. Code/test checkpoint `d5ca2ff` adds read-only
+`studio_overlay_read`, implementing capture,
+detached reconstruction, full intent-wrapper currency and native delivery under one original
+session/request. User implementation review passes at `c47ae0b`, with P3 INSPECTION-TEST-001
+requesting a same-sized authenticated replacement and a size-only mutation to isolate digest
+validation. This is a test/harness correction, not a production change; re-review remains.
+All 25 native Studio tests and both new
+native inspection mutations with restored passes succeed on GitHub. Local store, resource
+ownership, actor checkpoint progress, real Index/Flipnote fixtures and all three app mutations
+with restored passes also succeed. Exact code/checkout and scope are in HANDOVER.
+This advances block 2 of Gate 4. It does not enable local Save/handoff or complete Gate 4.
 
 ## Scope reset (2026-09-08)
 
@@ -42,7 +55,7 @@ for unrelated document types. Tests and review accompany each slice, not only ga
 | 1. Typed Flipnote documents | Rust StudioIndex/Flipnote domain-op validation, deterministic projection, conflict/Restore data and exact checkpoint preflight; frame, byte, sfx and patch caps. Unsupported linked-score behavior stays unavailable until gate 6, never silently accepted. | Tests exercise valid edits, malformed/cross-document operations, both concurrent delivery orders and cap boundaries through the real P1 gate. |
 | 2. Durable one-device Save/Load | **Index/art milestone implemented:** accounted vault/lifecycle ownership, native commands, real PIX CIDs, sealed intents, conservative source/seed/recovery reference protection and three-state expiry. Extend these same seams to actual sound/export records in gate 6. No UI edits. | Actor/native create/edit/restart/reopen uses real CIDs. Failure cases preserve durable state. Fileshare unlisting/upload cleanup cannot delete referenced pixels; full scans/restart include superseded seed/history, pending intents and retained/staged recovery. Open edits remain provisional. |
 | 3. Two-member collaboration and joining | **Index/art milestone implemented:** live sharing, automatic same-epoch repair, unopened saved-key service, keyed Registry/Studio checkpoint discovery and recovery-first Studio adoption through the existing actor/native worker. | Actual actors join after the fixture receipt, install Registry plus Index/art checkpoints, persist the Studio open tail and reopen. Provider restart needs no UI watch. Closing survives expired selection and restart; ordinary Read reestablishes the volatile watch, then no further action is needed. Existing cancellation/authority/durability tests and 70-op paging remain. The 8-MiB input/inventory and 256-KiB unrelated-cold rails remain; this is not arbitrary-size latency qualification. |
-| 4. Rotation and recovery in the running app | **Active:** accounted Studio owner settlement, watched rotation, Registry pointer/tail maintenance, recovery List/Read/backup Export/Ack/Restore/Copy, settlement invalidations and conservative own-intent replay are connected, and the persisted eviction grace is enforced rather than waiting on Acknowledge. Remaining: running-app succession/signed fault repair and full-gate acceptance. | Focused crash/restart, solo three-rotation, Registry paging, Create after Index rotation, native recovery fences, deadline-promotion and replay/manual-disposition regressions pass, each guard confirmed to fail when removed. Full-gate acceptance and final suites remain pending. No pruning before receipt and durable recovery; manual recovery is not settlement. Backup Export is not `.pixa` (gate 6). |
+| 4. Rotation and recovery in the running app | **Active:** accounted Studio owner settlement, watched rotation, Registry pointer/tail maintenance, recovery List/Read/backup Export/Ack/Restore/Copy, settlement invalidations and conservative own-intent replay are connected, and the persisted eviction grace is enforced rather than waiting on Acknowledge. Remaining: actor/native Closing-overlay lifecycle and preparation/signing custody, manual/stale-base/preview handling, repeated-owner tenure, runtime signed fault repair and full-gate acceptance. | Focused crash/restart, solo three-rotation, Registry paging, Create after Index rotation, native recovery fences, deadline-promotion and replay/manual-disposition regressions pass, each guard confirmed to fail when removed. Full-gate acceptance and final suites remain pending. No pruning before receipt and durable recovery; manual recovery is not settlement. Backup Export is not `.pixa` (gate 6). |
 | 5. Collaborative frame claims | Required full-identity signalling and shared channel admission; bounded capability/session-bound claim, Ask and Pass messages with receiver-observed expiry. No game/avatar path or standalone drawing feature. | Two members observe advisory claim/Ask/Pass/expiry; collision, replay and disconnect tests pass. Claims never become edit locks. |
 | 6. Sound and export | Linked-score typed operations/preflight/recovery, sfx/emoji patch sources, 64-patch union, deterministic valid-take export and byte-exact `.pixa` publication with durable export records. Cover the specified local GIF export contract without taking over UI design. | No-score and linked-score golden vectors, maximal accepted exports and malformed/over-cap rejection pass; exported bytes can be read back and validated. Playback-facing contracts preserve Deafen and membership teardown. |
 | 7. Flipnote backend acceptance and UI handoff | Run the complete create/save/restart/share/join/rotate/recover/export flow through production adapters, including failure paths. Publish Markdown for the real commands, events, limits and recovery behavior. | Backend acceptance tests and mandatory suites pass, adversarial blocker/high findings are resolved, and every canonical UI dependency maps to a working command/event or explicitly user-owned rendering work. |
@@ -77,10 +90,10 @@ micro-optimization alone is not a reason to postpone Studio integration.
 
 ## Completed-work ledger: reuse before adding
 
-Audited against this branch's committed history through `39ceb76` (2026-09-11), the newest Studio
-commit. The per-commit rows below stop at `b6f137b`; the four Gate 4 commits after them
-(`9799c6f`, `cbed5b7`, `ccddd23`, `39ceb76`) are described in the active-slice section rather than
-as ledger rows. This groups the P1/Flipnote `feat` and `perf` commits from `57e51ad` onward, plus the
+The Gate 4 implementation checkpoints are recorded through `39ceb76`, checked against HEAD
+`acdb7f8` on 2026-09-12. The per-commit rows below stop at `b6f137b`; the five Gate 4 commits
+(`9799c6f`, `cbed5b7`, `ccddd23`, `dba52e5`, `39ceb76`) are described in the active-slice section
+rather than as ledger rows. This groups the P1/Flipnote `feat` and `perf` commits from `57e51ad` onward, plus the
 original P1 commit `a67e284` and the performance probe. It is not a repository-wide release changelog: unrelated
 voice, files, release and user-owned UI work is not marked as Flipnote progress. Commit subjects
 are discovery aids, not proof of completion; the current contracts and limitations below govern.
@@ -137,13 +150,14 @@ Paths below use `rep/` = `crates/catcoms-replication/src/`, `app/` = `crates/cat
 
 ### Gate 4 active slice: bounded recovery hold and slot-order-proof replay (`39ceb76`)
 
-Gate 4 has run four committed slices, all on this branch and all ancestors of HEAD:
+Gate 4 has five committed implementation checkpoints, all on this branch and all ancestors of HEAD:
 
 | Slice | Commit | What it added |
 |---|---|---|
 | Owner settlement preparation | `9799c6f` | Typed owner close/receipt core adapter and recovery-bound successors |
 | Owner rotation and recovery inspection | `cbed5b7` | Registry pointer/tail maintenance in the idle worker; native recovery List/Read/Export/Ack |
 | Recovery controls, replay and settlement events | `ccddd23` | Per-item Restore/Copy, separately retryable pointer restoration, own-intent replay, `settlement-changed` |
+| Frozen-owner succession foundations | `dba52e5` | Shared installed-opening inheritance checks; Studio/Registry frozen-source takeover and exact-journal restart through the accounted store; paced replay follow-ups. This is not running-app succession acceptance. |
 | Bounded recovery hold, slot-order-proof replay | `39ceb76` | **Current slice.** Enforces the eviction grace and removes a slot-ordering dependency from replay |
 
 **Current slice (`39ceb76`), two fixes.** First, the seven-day eviction grace was never enforced:
@@ -178,6 +192,336 @@ frame births and object creations held Manual in both slot orderings, with the r
 deliberately the losing one so the extra evidence is the only difference.
 
 Remaining for Gate 4: running-app succession, signed fault/repair, and full-gate acceptance.
+
+#### Gate 4 progress audit (2026-09-13)
+
+**Current Gate 4 position (2026-09-15).** HANDOFF-002 is closed and the corrected bounded
+Closing-overlay core/store handoff is accepted at `62f06d4` (review/evidence head `aa0a81f`).
+This is implementation acceptance for that boundary, not full Gate 4 acceptance. The user
+clarified that Gate 4 must finish before Gate 5 starts; Gate 5 remains untouched.
+
+Of the four previously listed work areas, block 1 (combined scheduling, `6b71d96`) is accepted.
+Block 2 still needs actor/native overlay integration, bounded preparation/signing custody,
+manual overlay inspection/copy/export/disposition, stale-base and preview-based local-work
+handling, and remaining repeated-owner tenure integration. Blocks 3 (runtime signed fault
+repair) and 4 (combined Gate 4 acceptance and required suites) remain. These are unequal work
+areas, not percentages. The [custody profiling and detached-inspection design](GATE4-OVERLAY-RUNTIME-REVIEW.md)
+are accepted at `0b28f06`. Their [read-only implementation](GATE4-INSPECTION-IMPLEMENTATION-REVIEW.md)
+at `d5ca2ff` passes review at `c47ae0b`; the digest-specific coverage correction remains under
+INSPECTION-TEST-001. This does not enable durable overlay Save in native.
+
+The [Closing overlay foundation design](GATE4-CLOSING-OVERLAY-REVIEW.md) passed user review at
+`d576af2` on 2026-09-14 with no required changes. Its core/store implementation now distinguishes
+explicit local acceptance from an ordinary failed Save, preserves sequence and timestamps across
+restart, shares existing storage/reference accounting, and holds annotated entries out of ordinary
+Apply and retirement. The 131 affected local tests, Clippy and three isolated mutations pass;
+implementation review passed and OVERLAY-TEST-001 is closed by the re-review of `65db6ac`.
+The user accepts the corrected [atomic handoff design](GATE4-OVERLAY-HANDOFF-REVIEW.md) at
+`dd2fbc0` and closes HANDOFF-001. The [core/store implementation](GATE4-OVERLAY-HANDOFF-IMPLEMENTATION-REVIEW.md)
+is pushed at `bf37cc4`; 202 local Studio tests and the dedicated handoff/mutation workflows pass.
+The user closes HANDOFF-002 (P2): reference inventory now honors required intent metadata before
+installing a complete pixel pin set. The correction at `62f06d4` passes 24 focused local tests,
+Clippy and its isolated mutation/restored regression. The reviewer inspected GitHub run
+[34903404377](https://github.com/Thalpy/Mewtual/actions/runs/34903404377): 24 normal handoff tests,
+ten detected mutations and ten passing restored regressions, on merge checkout `a89f90b`.
+No further implementation or coverage change is required for this bounded handoff. The reviewer
+did not rerun Cargo locally. Evidence and broader CI limitations are in [HANDOVER](HANDOVER.md).
+It persists Prepared, the whole signed source, then Completed before releasing the overlay hold;
+ordinary intents remain pending for receipt settlement. A local source dependency also prevents
+missing metadata from exposing an unfinished batch after restart. This is still block 2.
+The user accepts the [runtime inspection design](GATE4-OVERLAY-RUNTIME-REVIEW.md) at `0b28f06`;
+its separate read-only native implementation at `d5ca2ff` passes user review at `c47ae0b` with
+one test finding, INSPECTION-TEST-001. Overlay writes,
+replay/disposition, provisional-preview writes and new tenure authority remain unavailable.
+
+**Combined scheduling checkpoint `6b71d96` (2026-09-13; user review PASS).** The three-member actor
+fixture retains three preview reservations: three real deliveries, or two deliveries plus a
+cancelled parser or a cancelled transport request. It restores only owner transport reachability and
+requires both Registry and Studio checkpoints, exact content and durable reopen within 40 seconds
+of simulated scheduler time. Preview custodians remain retained throughout; no restart, unwatch,
+additional user Read or expiry of all original seeds enables the installations.
+
+This exposed a fast-retry defect: the provider's shared head rail allows a two-request burst, spent
+by Registry and Studio discovery. An immediate provisional head can repeatedly fail before a seed
+is fetched. The bounded preview queue now waits one second before its fresh head attempt, without
+holding a reservation or resetting that deadline on duplicate Hints. Queued targets defer new
+same-target page work so repeated Reads cannot bypass that wait. Authoritative work retains
+priority. Both new conditions have isolated mutation failures and restored-source passes.
+The broad run on `487cb0e` passes 165 tests (one opt-in profile ignored); final `6b71d96` passes
+11 targeted actor tests, the shared native fixture, Clippy and 19 native Studio tests on GitHub,
+including both existing native mutation checks. The native abort regression now waits for actual
+final guard release after its unchanged held-while-paused assertions. Native/UI response shapes
+are unchanged. Exact validation is recorded in HANDOVER. The user's review accepts this bounded
+checkpoint with no actionable production/test finding or required changes. The reviewer inspected
+source and actual GitHub native logs, but did not rerun Cargo locally; local actor/mutation evidence
+remains the recorded execution evidence. The broad 165-test run was on `487cb0e`, not final `6b71d96`.
+The combined authoritative target is Index plus its Registry bucket; Index/Flipnote previews supply
+pressure. Cancelled transport is a controlled lower-layer model, and 40 seconds is simulated scheduler
+time. Priority covers pending authoritative work, not preemption or a universal latency guarantee.
+Closing overlays/repeated tenure, signed repair and full Gate 4 acceptance remain outstanding.
+
+**Actor/native preview checkpoint (2026-09-13, implementation PASS at `a89bde6`).** The user's
+review found no blocking production defect. NATIVE-TEST-001 was a non-blocking P3 regression gap:
+the old native test converted an ordinary Index, so preview serialization and final delivery
+validity needed independent coverage. The test-only follow-up exercises real actor-produced
+Index/Flipnote previews and expiry after successful conversion. All 19 native tests and both
+mutation checks pass on the PR merge checkout for `c60de4e`; source restoration/reruns pass.
+The user re-review of `a89bde6...134394e` closes NATIVE-TEST-001 without further changes.
+This acceptance does not close the combined scheduling regression or Gate 4. TAIL-TEST-001
+is closed by the user's PASS of `2a1814e` against `47bf098`. The existing receiver now schedules
+provisional discovery, seed fetching and finite signed tails outside vault custody; cold workers
+hold their process permits through cancellation and release them on completion. Ready results
+and native delivery share the original seed reservation. Native Read/List expose a separate
+`awaitingTenureReceipt: true` result with `provisional: true`; installed sources take precedence,
+and ordinary Apply cannot use a preview epoch. Native uses request/session/instance checks plus
+a bounded actor handoff for final conversion. Lock clears the volatile cache. No frontend layout
+or editor implementation is changed.
+
+The two previously ignored newcomer preview cases now pass, together with both known-CID PIX
+fetch/reopen cases. Runtime custody tests cover three real ready previews, native delivery retaining
+a slot, authoritative Hint release, and handoff cancellation/expiry. Exact final checks are in
+HANDOVER. This does not yet close the combined owner-reachability/competing-installation regression
+or all of block 1. Blocks 2-4 remain durable Closing overlays/repeated tenure, runtime signed repair,
+and combined Gate 4 acceptance. Earlier statements below describing missing actor/native delivery
+record the boundaries of those earlier checkpoints, not the current implementation.
+
+
+Most rotation/recovery plumbing is connected; the gate remains unaccepted. The rows below
+describe observable boundaries, not equal portions of work or a percentage of time remaining.
+The table audits the implementation checkpoints; fresh test evidence follows it. Full-gate suites and
+acceptance have not been rerun or closed by this audit.
+
+| Area | Current boundary | Evidence still needed |
+|---|---|---|
+| Ordinary owner rotation | Watched Index/art rotation, durable decisions, recovery-first installation and solo installed-head completion are connected. | Full production-adapter acceptance across owner absence, partitions and lifecycle failures. |
+| Registry maintenance | Derived pointers, current-tail paging and Create after Index rotation are connected. | Include these in succession/restart acceptance; preserve per-bucket Fault isolation. |
+| Recovery and own-intent replay | Seven native recovery commands, settlement invalidations, conservative replay/manual disposition and persisted eviction deadlines are connected. | Final combined acceptance and remaining fairness/backpressure/cold-source follow-ups in HANDOVER. |
+| Owner succession | `dba52e5` supplies core/store frozen-source takeover. User-accepted `e3f6669` covers eight Index/Flipnote Open/Closing cases, installed-checkpoint inheritance and restored-actor editing. The joining fixture checks known-CID PIX fetch/reopen and reproduces missing provisional metadata reads when the join recycles the founder's leaf. User-accepted `2f5a8a0` adds eight actor recovery/successor write interruptions and restart. | A-to-B-to-A, provisional newcomer metadata/editing and combined acceptance. Known-CID bytes alone do not close joining acceptance. |
+| Signed fault/repair | ReceiptRepair v2 and bounded receipt-book loser screening have protocol regressions. | Durable repair issuance/application, recovery-before-replacement, distribution, owner-journal handling and runtime exit from Fault. Restore/Copy does not supply these. |
+| Remaining UI state and gate acceptance | Current phase/recovery invalidations exist; every current view is provisional. | Persisted Closing overlays, provisional old-owner newcomer reads and specialized tenure/repair observations still need integration evidence. Then run the complete gate scenarios, required suites and user-provided adversarial review. |
+
+**Reviewed baseline test slice (`d7ea514`/`5d65998`; SUC-001/SUC-002 closed):** the original two tests in
+[studio_exchange/tests/succession.rs](../crates/catcoms-app/src/studio_exchange/tests/succession.rs)
+pass through the actor Ready/lease and idle worker after an observed MLS owner transition and
+restart. One preserves an ordinary own Save in an Open epoch; the other refuses Save in the
+old owner's Closing source and requires its full historical projection in recovery. Both require
+the new owner's durable receipt, Open successor and Registry pointer, then reopen the vault and
+check them again. The only added helper prepares an eligible old-owner close over the existing
+source fixture. The successor receipt and installation are produced by the existing runtime.
+
+The user-provided source review of `d7ea514` requested two assertion fixes, without identifying
+a production defect. SUC-001 now checks the requested title, new-owner attribution, nonce and
+operation id independently of the returned view, then checks the saved exact envelope and its
+pending intent before settlement. SUC-002 now requires the actor's `EpochClosed` error string
+and immediately compares the physical document id, phase, operation count, projection and whole
+pending-intent journal before/after refusal, explicitly excluding the rejected operation.
+The user-provided re-review of `5d65998` closes both findings with no further code changes
+requested. This accepts the narrow test slice; Gate 4 remains unaccepted.
+Both revised cases passed locally. Three temporary mutations then failed at the intended new
+assertions: replacing Open Apply with Read failed the requested-title check; substituting an
+unrelated Closing error failed the exact-error check; moving edit validation after intent
+persistence failed the unchanged-journal check. The mutation runner restored the test and store
+source files byte-for-byte. Logs: `logs/gate4-succession-mutation-*.log`. On the restored tree,
+`cargo test --locked -j 4 -p catcoms-app --lib studio_actor_new_owner -- --nocapture` passes
+both cases (25.07 seconds; `logs/gate4-succession-review-final-tests.log`), root formatting
+passes, and `cargo clippy --locked -j 4 -p catcoms-app --tests -- -D warnings` passes
+(`logs/gate4-succession-review-clippy.log`). The broader suite results below belong to the
+original checkpoint; this assertion-only correction does not claim a fresh full-gate run.
+
+The transition uses the existing staged-Remove protocol as a **test fixture**, then restores
+the strict single-committer configuration before the Studio actor runs. Production owner-transfer
+policy is unchanged. These are header-only Flipnote fixtures, epoch zero to checkpoint one;
+they do not establish post-succession PIX availability. Index takeover, inheritance from an
+already installed checkpoint, A-to-B-to-A runtime behavior, a post-succession joiner and signed
+repair remain outstanding. These two passes do not close running-app succession.
+The final vault reopen follows completed takeover and orderly actor shutdown; interruption
+inside the new owner's installation and editing through a newly restored successor actor are
+not covered. The isolated actor/verifier pair supplies no new multi-peer convergence evidence.
+
+Original `d7ea514` evidence: `cargo test --locked -j 4 -p catcoms-app --lib studio_actor_new_owner -- --nocapture`
+passes both cases; log: `logs/gate4-succession-focused.log`. Frontend tests pass 1,189/1,189,
+root formatting and `cargo clippy --locked -j 4 -p catcoms-app --tests -- -D warnings` pass.
+The broader `cargo test --locked -j 4 -p catcoms-app --lib studio_ -- --test-threads=4` run
+passes 138 tests, with one existing opt-in profiling test ignored (710.89 seconds;
+`logs/gate4-audit-studio-tests.log`). The ambient-dependency gate fails on four pre-existing
+`Instant::now()` calls in native `media_decode.rs` (333, 426,
+444, 504), outside this diff. Full-gate acceptance remains pending. Rust 1.89.0 and the standalone
+Windows build tools/SDK are installed for local tests; application builds are left to GitHub
+at the user's request. Next work is the remaining running-app succession coverage, followed by
+signed fault/repair integration and full-gate acceptance; this test slice needs no further changes.
+
+**Reviewed succession expansion (`e3f6669`; user accepted):** the actor matrix now adds
+Index Open/Closing takeover and installed-checkpoint inheritance for both Index and Flipnote,
+for eight cases including the reviewed epoch-zero Flipnote pair. The previous owner's opening
+is a prepared checkpoint fixture; the new owner's receipt and Registry pointer still come from
+the ordinary actor idle worker. Inheritance must match that installed opening's epoch, close
+hash and seed hash, including when a later old-owner close has frozen the source. The eligible
+history helper now authors typed Index creation/title operations as well as Flipnote headers.
+
+Every case additionally restores a new actor from the saved MLS snapshot after completed
+takeover, reads the installed successor, saves an independently checked exact title/author/nonce/id,
+and reopens the vault again. That new operation and intent must survive while the receipt and
+Registry pointer remain unchanged. The original SUC-001/SUC-002 assertions remain in the shared
+matrix. The eight cases pass with `cargo test --locked -j 4 -p catcoms-app --lib studio_actor_new_owner -- --test-threads=4 --nocapture`
+(51.29 seconds; `logs/gate4-succession-expanded-tests.log`). The shared-fixture regression
+`studio_solo_owner_rotates_repeatedly_on_idle_and_reopens_latest_checkpoint` also passes
+(35.66 seconds; `logs/gate4-succession-expanded-solo.log`), as do root formatting and
+`cargo clippy --locked -j 4 -p catcoms-app --tests -- -D warnings`
+(`logs/gate4-succession-expanded-clippy.log`). Broader suites have not been repeated for this
+test-only slice. These remain isolated metadata-only fixtures: repeated owner
+changes, new joiners/PIX availability and interruption during successor installation are still
+open, alongside signed repair, the remaining UI state contracts and full-gate acceptance.
+
+**Reviewed joining checkpoint (`48fcc2e`; transition/known-CID evidence accepted):**
+[succession/joining.rs](../crates/catcoms-app/src/studio_exchange/tests/succession/joining.rs)
+adds Open/Closing variants with a real Alice-authored frame and real PIX bytes. Bob receives the
+frame and fetches its bytes before the observed Alice-to-Bob transition. Ordinary actor work
+then issues/installs Bob's receipt and pointer; a checked current-tail edit follows. The provider
+restarts with its sealed source, receipt, pointer, tail and pixels intact on a network without Alice.
+
+A genuinely new invitee reuses Alice's low leaf, so the invite itself changes ownership from Bob
+to that newcomer. The tests require that transition and the Welcome recipient's Unknown tenure.
+They do not invent current-owner evidence for Bob's now-former-owner receipt. Known-CID PIX
+fetch and subsequent offline vault-reopen fetch work, while newcomer canonical source and
+owner/intent/recovery journals remain untouched. The CID is supplied by the fixture; this does
+not prove that the newcomer discovers or displays the Flipnote.
+
+The desired provisional metadata read currently fails. Two explicitly ignored, opt-in acceptance
+cases preserve that obligation, including exact frame and tail projection checks; they are not
+passes or completed coverage. The runtime's Studio `Hint` branch currently schedules another
+attempt without fetching the hinted history. A fresh member therefore receives no view from
+the native-facing Read path in this scenario. No existing `provisional: true` DTO flag fills
+that missing loading/confirmation contract.
+
+The concrete next runtime proposal and adversarial-review focus are in
+[GATE4-PROVISIONAL-READ-REVIEW.md](GATE4-PROVISIONAL-READ-REVIEW.md). It introduces a bounded,
+separate unconfirmed read fallback without granting installation, Apply or settlement authority.
+Its design is accepted; the read fallback is not implemented. Overlay editing and independent evidence for a newly joined
+owner with Unknown tenure remain subsequent work; neither may be fabricated from a hint.
+
+Local test compilation needed `--config 'profile.test.package.catcoms-app.debug=0'` after two
+default-debug compiles exhausted free disk space. This command-line override changes only app
+test debug symbols; no repository build profile or dependency changed. The explicit acceptance
+failures and final validation results are recorded in the current HANDOVER entry. Full Gate 4
+suites and final acceptance remain open.
+
+**Joining review revision (PR-001 / TEST-001 / TEST-002; closed by user re-review of `7393165`):** the user accepted
+the ownership-transition and byte-persistence claims of `48fcc2e`, while requesting a concrete
+preview-capacity policy and stronger provisional acceptance guards. PR-001 concerns the proposal,
+not a production exploit introduced by that test-only commit. The revised contract allows at
+most three provisional custodians in the four shared retained slots, reserves authoritative
+Studio/Registry discovery and installation capacity, prioritizes and rotates those classes, and
+permits preview eviction independently of successful authoritative replacement. Cancellation
+invalidates eligibility immediately; actual lower-layer owners retain their capacity until release.
+Same-key unwatch/rewatch, membership changes during parsing and late native delivery must retain
+the existing generation fences. Those allocator/lifecycle regressions remain future runtime work.
+
+TEST-001 captures Registry absence before discovery and compares identity, epoch, phase, admitted/
+quarantined counts and full projection afterward, after Read, after a specifically refused Apply
+and after reopen. Studio and Registry owner/intent/recovery journals must also stay empty,
+including staged recovery and eviction warnings. TEST-002 adds a `cfg(test)` single-value
+observation at the actual completed Studio Hint branch, after the existing authentication and
+watch checks. The tests require the expected logical target, endpoint, full responding member,
+exact receipt and absent current-owner proof before checking the missing preview. Nothing is
+injected into discovery; no production authority, API or native event changes. The two ignored
+preview cases still need runtime implementation and explicit confirmation-state assertions before
+they can count as gate acceptance. Final revision validation is recorded in HANDOVER.
+
+The re-review passes the tests/instrumentation and the revised proposal, with no further changes
+requested for closure. PR-001 is closed at the design level only. The reviewer inspected source
+and did not run Cargo. Refused-Apply assertions cover unchanged specified document/journal state;
+the app may still save its server snapshot before rejection. The Hint observation is historical
+test evidence, not a lifecycle capability.
+
+**Provisional capacity foundation (`1c90c41`; user review passed):** an opaque reservation can hold
+at most three of the existing four retained seed slots per sync instance. Ordinary authenticated
+discovery uses the same pool and can use all four; its current Hint result releases its slot.
+The reservation alone grants no content or installation authority. Allocation tests exercise
+both Studio and Registry head/seed paths with three held provisional reservations, Hint release,
+failed preparation, completed seed custody and transport cancellation/expiry. A unit test models
+multiple parser/delivery keepalives; these lower provisional paths do not yet exist. This does
+not implement previews, actor fairness, lifecycle invalidation or native delivery, nor complete
+the required competing-class actor installation regression. No callable UI hook changes.
+
+**Provisional head discovery (`0b32bad`; user review passed):** the accepted capacity guard
+now follows a real detached head request through completion and an opaque candidate result.
+Preparation requires a current Studio watch and acquires one of the three eligible slots before
+requesting. The existing authenticated response decoder is shared with authoritative discovery;
+the provisional branch cannot mint or supersede an owner selection. Owner-proof, repair and
+absent-receipt responses yield no candidate and release custody; the future scheduler must retry
+through fresh authoritative discovery. Raw authoritative Hints cannot convert into this context.
+Candidates retain the original request/provider/member/sync-instance and copied watch generation,
+with a fixed 60-second receiver-clock lifetime; head completion retains its 10-second deadline.
+Any later head preparation for the same target revokes a candidate, even if that attempt fails.
+The app wrapper also checks mount, server and channel before preparation, completion and scoped
+inspection. These are unconfirmed receipt claims, not verified receipt signatures/history or a
+parsed preview. Seed/tail fetching, parser bounds, scheduler fairness and native preview delivery
+remain separate work. No UI layout, command, event or returned StudioView changed.
+The adapters are exercised directly; the actor receiver does not yet schedule this discovery path.
+
+**Independent successor interruption slice (`2f5a8a0`; user review passed):** four tests cover eight
+Index/Flipnote cases with an installed old-owner checkpoint and later Closing source. A
+per-mount, one-shot `cfg(test)` hook fails the actual actor's rotation before/after recovery or
+successor writes. The tests check the durable prefix immediately, discard actor/store custody,
+reopen from the saved MLS snapshot and require ordinary Read/idle work to finish the exact
+journaled receipt and encoded close. They preserve full typed recovery, complete local
+availability and the Registry pointer, then check a further actor restart, Apply and reopen.
+The restored-source succession group passes 14 tests with two unfinished preview cases ignored;
+both deliberate mutations are caught. Three existing frozen-owner store tests also pass,
+including the write-failure matrix. Formatting and Clippy pass; commands are in HANDOVER.
+This is an I/O-error/restart model, not process-abort or power-loss qualification.
+No production policy, native hook, schema or UI layout changes.
+The direct A-to-B-to-A rejoin route shares the known Unknown-tenure dependency: the returned
+device's Welcome and reused owner key do not prove the beginning of its new tenure. No test may
+fill that gap with a caller-supplied tenure or a receipt's own claim. Repeated succession remains
+open alongside provisional-read integration. The 2026-09-13 review passes both checkpoints with
+no required code changes; the reviewer inspected source without running Cargo. The suggested
+deadline test delays head completion until T+9s and checks expiry at T+60s from preparation.
+Authoritative and provisional head preparations share the same per-target attempt generation:
+a newer provisional preparation can invalidate an in-flight authoritative head, although it
+cannot invalidate an already completed owner selection. Scheduler work must coordinate them.
+
+**Provisional seed transport and validation (`b3e54dc`; user review passed):** a
+one-shot fetch consumes the authenticated hint, pins its provider and carries its original
+60-second deadline and three-of-four capacity through the shared seed transport, detached
+parsing and ready result. Transport still checks its own 10-second response deadline, member
+signature, scope and AEAD framing. The cold parser checks receipt self-signature, exact bounded
+raw seed hash/actor/encoding, typed Index/Flipnote channel/schema and canonical compact bytes.
+Its separate `UnconfirmedStudioSeed` contains typed claims only: no membership or historical
+ownership is inferred from its signing key, and no `VerifiedReceipt`/`VerifiedCheckpoint` is minted.
+App preparation/completion/use checks mount/server/channel, and sync completion/use checks the
+original watch/attempt/member/endpoint/instance. Neither layer writes a source, pointer or journal.
+This is a direct adapter boundary, not actor scheduling or a native preview. Tail authentication,
+worker permits/cancellation fairness, authoritative retry scheduling, lifecycle-safe delivery and
+the ignored newcomer preview cases remain open. See HANDOVER for validation results.
+The user review found no blocking implementation defect or required production change. Its
+P3 coverage follow-up is now implemented: raw-change and typed-schema checks accept a correctly
+signed seed with noncanonical root operation order, but the final comparison rejects it for both
+Index and Flipnote. Removing that comparison fails the regression; byte-restored source passes.
+The reviewer inspected the preceding checkpoint without running Rust tests or mutations.
+
+**Signed-tail checkpoint (`47bf098`; bounded implementation passed review):** distinct sync/app tail attempts
+consume the unconfirmed seed and reuse authenticated Studio page framing without replacing the
+ordinary watch or constructing an installed epoch. Current membership, inner signature, physical
+and logical scope, actor identity, known seed ancestry, typed semantics and operation markers are
+checked. Detached parsing applies a whole page or discards its candidate, with existing exact
+checkpoint/recovery size preflight and aggregate tail limits. No historical tenure or author
+authority is inferred. Original 60-second custody and per-request 10-second limits survive page
+fetch, parser and scoped inspection; cancelled lower transport retains the seed reservation.
+`tail_complete()` marks a checked finite provider prefix, not owner confirmation. The app tests
+preserve ordinary reads and document/journal absence after refused Apply and vault reopen.
+The actor scheduler, shared worker priority/fairness, native preview result and delivery fences
+are still pending. Block 1 remains in progress; Closing overlays/repeated tenure, runtime signed
+repair, and combined Gate 4 acceptance remain the other three blocks. Validation is in HANDOVER.
+The reviewer found no blocking production defect and closed the prior canonical-encoding P3.
+TAIL-TEST-001 (P3) requested a stronger inner-document mismatch fixture: the original changed
+outer routing after encrypting with the wrong document's key, so it failed before scope checking.
+The dedicated Index/Flipnote regression now manually encrypts the validly signed B operation
+with A's key, proves that decryption/signature verification succeed, and requires the specific
+`EpochScope` from `prepare_tail`. Removing only the inner-ID comparison makes that assertion
+fail. The restored six-test provisional suite passes. No production change was requested or
+made for this finding. The review was source-only; its aggregate traffic-limit assessment was
+inspection evidence, not execution of every 16 MiB / 20,000-operation boundary.
 
 #### Landed on the way: Studio owner settlement preparation (`9799c6f`)
 
@@ -496,8 +840,9 @@ all managed types are broad-design backlog; the seven gates above close only Fli
 
 Each code slice gets focused regressions, a read-only adversarial review of the actual diff,
 resolution of blocker/high findings, and all checks required by AGENTS.md. Verified slices are
-committed; periodic non-force pushes require the outstanding destination approval for
-`Thalpy/Mewtual`, branch `Create-suite-2`.
+committed; the user has authorized non-force pushes for review checkpoints to
+`Thalpy/Mewtual`, branch `Create-suite-2`. Request adversarial reviews from the user with a
+copyable message and an exact pushed comparison.
 Unrelated work is preserved. This checklist and HANDOVER record actual progress and gaps.
 
 The final UI implementation guide will list real commands, schemas, events, lifecycle/recovery

@@ -1,57 +1,92 @@
 // Shared studio state for the two places that show it: the contextual sidebar (StudioNav) and
-// the content surface (Studio). One in-memory store per app session until Studio save/load is
-// connected; `rev` is bumped after every mutation so derived views re-read the plain-data store.
+// the content surface (Studio). One connected session per app session, pointed at the channel
+// on screen; `rev` is bumped after every change so derived views re-read the plain-data session.
+//
+// The bump is deferred to a microtask and coalesced. A session call made from inside an effect
+// (open, watch, want) therefore never makes that effect depend on the revision it changes, and
+// a burst of session changes costs one re-read.
 
-import { StudioStore, demoStudio } from "./studio-store.ts";
+import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
+import { StudioSession } from "./studio-session.ts";
+import type { Hex32, StudioIpc } from "./studio-native.ts";
 
-export type StudioPeople = { me: string; rook: string; mika: string; wren: string; owner: string };
+const tauriIpc: StudioIpc = {
+  invoke,
+  listen: (name, handler) => listen(name, handler),
+};
+let ipcOverride: StudioIpc | null = null;
 
 export const studio = $state({
-  store: null as StudioStore | null,
-  selected: "",
+  selected: "" as Hex32 | "",
   rev: 0,
-  people: null as StudioPeople | null,
 });
 
-/// Build the demo studio once, keyed on the local identity. Fixtures stand in for what the
-/// StudioIndex and StudioObject documents will materialize.
-export function ensureStudio(me: string): StudioStore {
-  if (studio.store && studio.people?.me === me) return studio.store;
-  const people: StudioPeople = {
-    me,
-    rook: "rook".padEnd(64, "0"),
-    mika: "mika".padEnd(64, "0"),
-    wren: "wren".padEnd(64, "0"),
-    owner: "owner".padEnd(64, "0"),
-  };
-  const { store, moonCat } = demoStudio(people);
-  studio.store = store;
-  studio.people = people;
-  studio.selected = moonCat;
+let session: StudioSession | null = null;
+let detach: (() => void) | null = null;
+let bumpQueued = false;
+
+function scheduleBump(): void {
+  if (bumpQueued) return;
+  bumpQueued = true;
+  queueMicrotask(() => {
+    bumpQueued = false;
+    studio.rev++;
+  });
+}
+
+/// The one session, created on first use. The identity is display context only (the backend
+/// derives every author); updating it never resets the channel or its pending saves.
+export function ensureStudio(me: string): StudioSession {
+  if (session) {
+    session.me = me;
+    return session;
+  }
+  session = new StudioSession({ ipc: ipcOverride ?? tauriIpc, me });
+  session.onChange(scheduleBump);
+  void session.attach().then((d) => { detach = d; });
+  return session;
+}
+
+/// Point the session at the channel on screen. A change closes the open document and drops
+/// the previous channel's pending work; the same scope is a no-op.
+export function setStudioScope(server: number | null, channel: string): void {
+  if (!session) return;
+  const next = server === null || !channel ? null : { server, channel };
+  const cur = session.scope;
+  const same = (cur === null && next === null) || (cur !== null && next !== null && cur.server === next.server && cur.channel === next.channel);
+  if (same) return;
+  session.setScope(next);
+  studio.selected = "";
+}
+
+/// Lock or session end: forget everything held in the webview, including unsaved pixels.
+export function resetStudio(): void {
+  session?.reset();
+  studio.selected = "";
   studio.rev++;
-  return store;
+}
+
+export function detachStudio(): void {
+  detach?.();
+  detach = null;
+}
+
+/// Test seam: the bridge the next session is built on. Disposes the current session so the
+/// surfaces build a fresh one against it.
+export function useStudioIpc(ipc: StudioIpc | null): void {
+  disposeStudio();
+  ipcOverride = ipc;
+}
+
+export function disposeStudio(): void {
+  detachStudio();
+  session?.reset();
+  session = null;
+  studio.selected = "";
+  studio.rev++;
 }
 
 export function bump(): void {
   studio.rev++;
-}
-
-/// Fixture identities render with fixed names and colours; anything else is a real member the
-/// host resolves. The colours are the peer colours the mockups use (identity, not theme).
-export function fixtureName(id: string): string | null {
-  if (!studio.people) return null;
-  if (id === studio.people.rook) return "rook";
-  if (id === studio.people.mika) return "mika";
-  if (id === studio.people.wren) return "wren";
-  if (id === studio.people.owner) return "thalpy";
-  return null;
-}
-
-export function fixtureColor(id: string): string | null {
-  if (!studio.people) return null;
-  if (id === studio.people.rook) return "#d8a657";
-  if (id === studio.people.mika) return "#6ca0d8";
-  if (id === studio.people.wren) return "#e07ab8";
-  if (id === studio.people.owner) return "#5ec96e";
-  return null;
 }

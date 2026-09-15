@@ -22,11 +22,18 @@ pub use index::{
     IndexSource, IndexValue, StudioIndexProjection, MAX_INDEX_OBJECTS,
 };
 mod frames;
+mod provisional;
 mod recovery;
+pub use provisional::{UnconfirmedStudioSeed, UnconfirmedStudioTailPreparation};
 mod snapshot;
 pub use recovery::{StudioProjection, StudioRecovery};
 mod admission;
 pub use admission::StudioTarget;
+mod overlay;
+pub use overlay::{
+    StudioClosingOverlayBasis, StudioHandoffCandidate, StudioHandoffEvidence, StudioHandoffOutcome,
+    StudioLocalDraft, StudioOverlay, StudioOverlaySave, StudioOverlayState, MAX_STUDIO_OVERLAY_OPS,
+};
 mod epoch;
 pub use epoch::catchup;
 pub use epoch::{

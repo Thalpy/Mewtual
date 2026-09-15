@@ -16,6 +16,24 @@ struct Context {
     expires: u64,
 }
 
+/// Authenticated member delivery only. The candidate receipt has been decoded, not verified
+/// as current or historical owner authority. Only provisional discovery may retain this type.
+pub(crate) struct AuthenticatedCheckpointHint {
+    context: Context,
+    receipt: Receipt,
+}
+impl AuthenticatedCheckpointHint {
+    pub(crate) fn receipt(&self) -> &Receipt {
+        &self.receipt
+    }
+    pub(crate) fn peer(&self) -> PeerId {
+        self.context.peer
+    }
+    pub(crate) fn provider(&self) -> DeviceId {
+        self.context.provider
+    }
+}
+
 /// One signed, non-cloneable request, containing no Server/MLS/vault access. Four slots are
 /// shared across Studio and Registry; capacity follows unpolled jobs, completions and the driver.
 pub struct PendingCheckpointHead<T: MeshTransport> {
@@ -148,47 +166,9 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         &mut self,
         completed: CompletedCheckpointHead,
     ) -> Result<Option<(ReceiptHeadAnswer, Option<HeadSelection>)>, SyncError> {
-        let c = completed.context;
-        if !self.matches_registry_instance(&c.instance)
-            || self.group.group_id() != c.group
-            || self.group.epoch() != c.auth.epoch
-            || self.device.public_key_bytes() != c.requester
-            || !self.head_member(&c.requester)
-            || self.registry_page_peer_device(c.peer) != Some(c.provider)
-            || self.clock.monotonic_ms() >= c.expires
-            || !self
-                .receipt_heads
-                .attempts
-                .get(&c.target)
-                .and_then(std::sync::Weak::upgrade)
-                .is_some_and(|g| Arc::ptr_eq(&g, &c.attempt))
-        {
-            return Err(SyncError::Unauthorized);
-        }
-        let response = completed.response?;
-        if response.is_empty() {
+        let Some((c, outcome)) = self.authenticate_checkpoint_head(completed)? else {
             return Ok(None);
-        }
-        let (key, signature, answer) = decode_response(&response)?;
-        if DeviceId::from_public_key_bytes(key) != c.provider
-            || !self.head_member(key)
-            || !verify_with_public_bytes(
-                key,
-                &scoped_transcript(
-                    c.target.head_domain(),
-                    &c.group,
-                    &c.requester,
-                    &c.auth,
-                    c.peer,
-                    &c.query,
-                    answer,
-                ),
-                &signature,
-            )
-        {
-            return Err(SyncError::Unauthorized);
-        }
-        let outcome = decode_answer(answer, &c.target.document(&c.group)?)?;
+        };
         let selection = if let Some(proof) = &outcome.proof {
             if self.group.designated_committer() != Some(c.provider)
                 || self
@@ -230,5 +210,74 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         };
         // Fresh proof is a one-shot selection, never a lease or a pruning grant.
         Ok(Some((outcome, selection)))
+    }
+    /// Does not mint or supersede an owner selection, even if a proof was supplied. Owner-proof
+    /// and repair answers need the normal authoritative path, with a fresh discovery request.
+    pub(crate) fn complete_checkpoint_hint(
+        &mut self,
+        completed: CompletedCheckpointHead,
+    ) -> Result<Option<AuthenticatedCheckpointHint>, SyncError> {
+        let Some((context, answer)) = self.authenticate_checkpoint_head(completed)? else {
+            return Ok(None);
+        };
+        if answer.proof.is_some() || answer.repair.is_some() {
+            return Ok(None);
+        }
+        Ok(answer
+            .receipt
+            .map(|receipt| AuthenticatedCheckpointHint { context, receipt }))
+    }
+    /// Rechecks provenance, not a lifetime extension. The provisional custodian must separately
+    /// enforce its fixed receiver-clock lifetime and its copied Studio watch/mount bindings.
+    pub(crate) fn checkpoint_hint_is_current(&self, hint: &AuthenticatedCheckpointHint) -> bool {
+        self.head_context_is_current(&hint.context)
+    }
+    fn head_context_is_current(&self, c: &Context) -> bool {
+        self.matches_registry_instance(&c.instance)
+            && self.group.group_id() == c.group
+            && self.group.epoch() == c.auth.epoch
+            && self.device.public_key_bytes() == c.requester
+            && self.head_member(&c.requester)
+            && self.registry_page_peer_device(c.peer) == Some(c.provider)
+            && self
+                .receipt_heads
+                .attempts
+                .get(&c.target)
+                .and_then(std::sync::Weak::upgrade)
+                .is_some_and(|g| Arc::ptr_eq(&g, &c.attempt))
+    }
+    fn authenticate_checkpoint_head(
+        &mut self,
+        completed: CompletedCheckpointHead,
+    ) -> Result<Option<(Context, ReceiptHeadAnswer)>, SyncError> {
+        let c = completed.context;
+        if !self.head_context_is_current(&c) || self.clock.monotonic_ms() >= c.expires {
+            return Err(SyncError::Unauthorized);
+        }
+        let response = completed.response?;
+        if response.is_empty() {
+            return Ok(None);
+        }
+        let (key, signature, answer) = decode_response(&response)?;
+        if DeviceId::from_public_key_bytes(key) != c.provider
+            || !self.head_member(key)
+            || !verify_with_public_bytes(
+                key,
+                &scoped_transcript(
+                    c.target.head_domain(),
+                    &c.group,
+                    &c.requester,
+                    &c.auth,
+                    c.peer,
+                    &c.query,
+                    answer,
+                ),
+                &signature,
+            )
+        {
+            return Err(SyncError::Unauthorized);
+        }
+        let outcome = decode_answer(answer, &c.target.document(&c.group)?)?;
+        Ok(Some((c, outcome)))
     }
 }

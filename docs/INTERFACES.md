@@ -801,6 +801,11 @@ references include current alternatives, the verified seed-only projection, and 
 signed operation. Sequential replacements, hidden/deleted/over-cap frames and old checkpoint
 values still hold their pixels. No blob body is fetched or read during enumeration.
 
+Linked Studio sources additionally require authenticated handoff metadata matching numeric server,
+full group/type/logical scope and complete target. The scan collects these relationships from its
+existing bounded reads and checks them before installing references. A missing file, ordinary
+ledger or mismatched target leaves protection unknown and prevents pixel reclamation (HANDOFF-002).
+
 `CreativeReferences::{len,is_empty,for_group(&[u8])}` reports the full-group union across native
 numeric server aliases. This detached report is not a deletion permit; its Debug shows counts
 only. The current rail is 65,536 distinct `(group,CID)` entries. Overflow, incomplete traversal,
@@ -2014,6 +2019,65 @@ their metadata/admission and the sole complete per-server budget remain coordina
 This is a persist-before-edit prerequisite, not live editing or automatic replay. The registry
 adapter below now invokes it; retirement still requires checkpoint/recovery persistence and no
 actor/network path invokes these adapters yet.
+
+#### Closing overlay foundation (Gate 4, no native command)
+
+The design passed user review at `d576af2` on 2026-09-14. The bounded implementation adds
+`Server::prepare_studio_closing_overlay` and `Server::save_studio_closing_overlay` as explicit
+Rust adapters under caller-owned exclusive Server/store custody. They obtain tenure from
+`ChannelSync::observed_owner_tenure_start`; request data cannot supply tenure. A checked
+`StudioClosingOverlayBasis` derives from the actual Closing source and its settlement plan.
+Save takes its fingerprint and a canonical domain operation; timestamps come from the runtime
+clock and are preserved on exact retries. The result is now `StudioOverlaySave::Local(StudioLocalDraft)`
+or `StudioOverlaySave::HandedOff(StudioHandoffOutcome)` for a completed exact retry. A handoff is
+shared pending history, not receipt finality. No actor/native overlay command or automatic
+promotion/disposition is enabled by these internal adapters.
+
+`EpochIntentState::overlay()` exposes immutable acceptance metadata and `local_draft()` rebuilds
+the local projection. The existing ledger's encoding is unchanged. Its enclosing record is
+either the exact original scope/ledger form or that form followed by `u8(2)` and a length-prefixed
+overlay extension. The extension's version 1 encodes target kind/channel, local author, source
+physical ID/version, exact receipt/seed, next sequence and ordered accepted entries. Each entry
+binds operation ID, complete-envelope hash, sequence and original timestamp. The decoder requires
+matching complete ledger entries and canonical reconstruction; unknown/trailing forms reject.
+Older decoders fail closed on extended records. Restoring this data cannot mint a fresh basis.
+
+One branch, at most 256 overlay entries, a 2 MiB seed and 64 KiB metadata must fit together with
+the ledger inside the unchanged 5 MiB + 1024 plaintext record bound. Existing operation, physical
+intent and per-server content ceilings still apply, including replacement peaks and orphan
+temporaries. Inventory protects base-only pixels as well as every pending operation's references.
+Accepted retries can flush the exact final record at full capacity after the source advances,
+but still require current local membership and exact target/basis/envelope identity. New appends
+require the same eligible Closing source. Failed ordinary Saves are never upgraded into overlays.
+Ordinary Apply rejects annotated IDs, and both receipt/manual retirement hold annotated entries.
+See [the overlay review record](GATE4-CLOSING-OVERLAY-REVIEW.md) for remaining integration obligations.
+
+The foundation implementation and OVERLAY-TEST-001 correction are accepted at `b1b0ec9` / `65db6ac`.
+[The accepted handoff design](GATE4-OVERLAY-HANDOFF-REVIEW.md) is being implemented and tested.
+The user accepts `dd2fbc0` and closes HANDOFF-001. The explicit Rust-only
+`Server::handoff_studio_overlay(store, server, target, basis, budget)` obtains live tenure from sync.
+It transfers the complete branch only into its pristine independently verified installed successor.
+Prepared metadata, one complete signed source replacement, and compact completed metadata cross
+three separate durability barriers. Pending ledger entries remain for ordinary receipt settlement.
+Interrupted attempts resolve complete signed-operation hashes or retain the full branch; an absent
+manifest returns durably to Active. No prefix replay or automatic rebase occurs.
+
+New writes use inner extension version 2: mandatory complete target, optional Active/Prepared
+branch, optional completed acknowledgement with its own matching target, and monotonic retry floor.
+Version 1 remains readable without rewriting on read. The same seed, combined metadata, complete
+record, physical intent and server budgets apply. Completed retries compare the full target before
+source lookup, sync reservation or acknowledgement, including after ordinary ledger retirement.
+
+The local Studio source wrapper additionally accepts a trailing `u8(1)` indicating that its intent
+metadata is required. The common writer retains this link across successor/adoption replacements;
+old wrappers without a link remain byte-compatible. The link counts as ordinary content and makes
+missing handoff metadata an error after restart. It is a local integrity dependency, not network
+authority. Generic page/current-tail service holds Prepared sources, and completed records are
+flushed before publication or normal source rewrites. Rotation/adoption resolve Prepared before
+journal/recovery/retirement work; the common source writer also fences evidence loss.
+
+Actor scheduling, native overlay commands, manual disposition and preview-based overlays remain
+unavailable. Implementation acceptance is still pending adversarial review.
 
 ### Durable registry edits, sealing and checkpoint installation (P1, not yet live-wired)
 
