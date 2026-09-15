@@ -9660,13 +9660,18 @@ mod tests {
             link: "dQw4w9WgXcQ".into(),
         };
         // A source this build does not know, which is the other half of the same rule.
+        //
+        // Deliberately a name no provider will ever take. This fixture used to say "vimeo", which
+        // stopped being unknown the day Vimeo was added as a real deck source: the entry then
+        // classified correctly as a track and the test failed for the one reason that does not
+        // mean anything is broken. A stand-in for the unknown has to be unownable.
         let unknown = JukeEntry {
             id: "e_unknown".into(),
             cid: String::new(),
             name: "From The Future".into(),
+            source: "source-from-the-future".into(),
             author: alice.my_fingerprint(),
             added_ms: 1_000,
-            source: "vimeo".into(),
             link: "12345678".into(),
         };
         // A linked entry whose link is junk: stored shape is checked on the way out too.
