@@ -1,12 +1,27 @@
 # Gate 4: detached local-draft inspection implementation
 
-Status: implementation and regression checkpoint, 2026-09-15. Code/test head:
+Status: user **PASS** for read-only inspection, 2026-09-15, with one P3 regression finding
+INSPECTION-TEST-001. Reviewed `0b28f06...c47ae0b`; original code/test head:
 `d5ca2ff1516852f15edf7fe5b09db07c61fcda56`, base:
 `0b28f06b8a2076a345f06dfea1220787c262650b`. Production changes are at `bf7ceed`;
-`d55c05d` and `d5ca2ff` extend/correct tests and documentation. Subsequent evidence updates
-change documentation only. The user passes the base profiling/design checkpoint
-without findings. HANDOFF-002 and all prior closures stand. This checkpoint requires a separate
-user adversarial implementation review. Gate 4 remains active; Gate 5 is untouched.
+`d55c05d` and `d5ca2ff` extend/correct tests and documentation; `c47ae0b` adds evidence only.
+The user inspected code, actual CI logs and all ten new mutation/restoration logs, verified
+artifact hashes and found no blocking production defect. They did not run Cargo locally.
+HANDOFF-002 and all prior closures stand. Gate 4 remains active; Gate 5 is untouched.
+
+## INSPECTION-TEST-001 correction
+
+The original growing-record fixture rejects even if currency checks only physical size. The
+new regression replaces one ordinary pending envelope's fixed-width nonce after capture,
+through the existing authenticated record writer. Both records must fully decode with equal
+actual sizes, unequal plaintext digests, identical accepted metadata, target, author, basis,
+count and complete draft projection. Fresh inspection succeeds, the old stamp rejects, and
+inspection/currency checks leave durable bytes unchanged. Both Index and Flipnote run.
+
+The added isolated mutation retains physical-size comparison while removing digest comparison.
+It must execute the new test and fail at the specific obsolete-stamp assertion, restore source
+bytes exactly, then pass restored source. No production change is requested or made. See the
+latest HANDOVER for execution status; the finding awaits user re-review.
 
 `studio_overlay_read` returns a separate read-only local draft or absent result for Index and
 Flipnote. It never resolves Prepared, fabricates a receipt or enables durable native Save.
@@ -42,13 +57,13 @@ See the latest [HANDOVER](HANDOVER.md) entry for executed commands, results and 
 | Boundary | Fixture and independent observation |
 |---|---|
 | Real draft | Shared public-adapter fixture creates eligible signed history, seals it and accepts a local edit through the existing store path. Actual spawned actors produce both native drafts; full projection, author, count, basis and unchanged records are checked. |
-| Currency | Add an ordinary pending intent while preserving displayed local content, count and basis; only full-wrapper currency changes. Presence/deletion, numeric/group/target/author scope, corrupt files, nonregular files and identical bytes after remount are separate cases. |
+| Currency | Original growing-record case plus a same-size authenticated ordinary-envelope replacement: different plaintext digest, identical accepted metadata, target, author, basis, count and projection. Old stamp rejects; fresh inspection succeeds; checks preserve bytes. Presence/deletion, scope, corruption, nonregular files and remount are separate cases. |
 | Metadata | Wrong local author and same-logical-object/wrong-channel records reach detached validation. Prepared and Completed reads leave durable bytes unchanged. Ordinary pending intent records produce no draft. |
 | Resource lifetime | Four captures fill the same preparation implementation; a cancelled paused worker retains its slot, as do ready results and expired retained delivery guards. The production actor job is checked against the actual shared pool. |
 | Actor progress | Pause reconstruction of a real retained draft. Another watched document crosses the actual checkpoint writer before releasing the worker, then the original draft still delivers. |
 | Native context | Actual successful reconstruction precedes session-generation change, newer request or instance replacement between visits. Separate tests first convert a real actor draft, then invalidate delivery, session or latest request. |
 | Shapes and limits | Both kinds at 256 accepted operations; canonical codec fixtures at 64 Index objects with retained alternatives and 999 Flipnote frames with all 1024 conflict fields; bounded sealed input, exact UTF-8/escape byte counts and the 32-MiB encoded-output edge. Codec-sized fixtures do not establish signed admission or heap/latency qualification. |
-| Mutations | Remove only full-wrapper currency, target, author, final inspection validity, or original native-context preservation. Each run must execute one test and fail at its named assertion, restore source bytes exactly, then pass restored source. |
+| Mutations | Remove the full currency comparison, retain size comparison alone, or remove target, author, final inspection validity, or original native-context preservation. Each run must execute one test and fail at its named assertion, restore source bytes exactly, then pass restored source. |
 
 New code changes no durable format, source-write fence, handoff transaction or publication
 window. The required-metadata reference protection accepted under HANDOFF-002 stays in place.
@@ -63,24 +78,21 @@ disposition, stale-base and preview-based local-work handling, repeated-owner te
 signed fault repair; combined full Gate 4 acceptance and required suites. Existing broad-CI
 failures are recorded separately in HANDOVER. This checkpoint does not close the gate.
 
-## Message for adversarial review
+## Message for correction re-review
 
 ```text
-Please review detached local-draft inspection at d5ca2ff1516852f15edf7fe5b09db07c61fcda56
-against 0b28f06b8a2076a345f06dfea1220787c262650b on PR #26, Create-suite-2.
-Compare: https://github.com/Thalpy/Mewtual/compare/0b28f06b8a2076a345f06dfea1220787c262650b...d5ca2ff1516852f15edf7fe5b09db07c61fcda56
-Read docs/GATE4-INSPECTION-IMPLEMENTATION-REVIEW.md, the latest HANDOVER evidence,
-and FLIPNOTE-UI-HOOKS.md, then inspect the actual store/app/native code and test logs.
+Please re-review INSPECTION-TEST-001 against c47ae0b61b9b8adc0ab5e4bf798199413bfff73c
+on PR #26, Create-suite-2. Use the pushed correction head and execution evidence in HANDOVER.
+Inspect the new same-size store regression and added size-only mutation in
+.github/scripts/check-studio-inspection-mutations.py.
 
-Challenge full-wrapper currency despite unchanged visible content, complete target/author
-binding, Prepared/Completed/absent behavior, the original session/request across both custody
-visits, cancellation and permit ownership, actor checkpoint progress while reconstruction is
-paused, and final delivery after successful native conversion. Check the byte-limit and maximal
-shape fixtures without treating codec fixtures as signed-admission or heap/latency evidence.
-Inspect isolated mutation failures and restored passes; compilation errors and empty filters
-do not count. Check the native command permission chain as well as the Rust guards.
+Require successful authentication and complete decoding of both records, equal actual sizes
+with different plaintext digests, unchanged accepted metadata/target/author/basis/count/full
+projection, rejection of the old stamp, success of a fresh inspection, and unchanged records
+after read/checks. Confirm the size-only mutation fails at the intended executed assertion,
+restores byte-for-byte and passes restored source; incidental failures do not count.
 
-Return PASS for this bounded implementation or numbered findings with concrete failing paths
-and required corrections. Prior review closures stand. Native overlay Save, automatic handoff,
-manual/preview lifecycle, signed repair and full Gate 4 acceptance remain separate work.
+Return PASS to close INSPECTION-TEST-001 or concrete remaining findings. Production inspection
+already passed; no production correction was requested. Prior closures stand. Native Save,
+automatic handoff, remaining lifecycle/repair work and full Gate 4 acceptance remain separate.
 ```

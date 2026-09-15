@@ -10,7 +10,30 @@ and ranks the live hazards in that path.
 
 ## Status (latest entry: 2026-09-15)
 
-- **Runtime inspection design accepted; read-only implementation awaiting review (2026-09-15).**
+- **Read-only inspection PASS; INSPECTION-TEST-001 coverage correction (2026-09-15).**
+  The user accepts `0b28f06...c47ae0b`, with code/tests at `d5ca2ff`, finding no blocking
+  production defect. They independently inspected both actual GitHub job logs and all ten
+  mutation/restoration logs and verified artifact digests; they did not rerun Cargo locally.
+  One P3 coverage finding remains: adding an ordinary intent also grows the file, so the original
+  freshness regression does not distinguish full-digest checking from size-only checking.
+  No production correction is requested. Prior closures, including HANDOFF-002, stand.
+
+  The correction adds a separate Index/Flipnote regression with an ordinary pending envelope
+  established before capture, then changes only that unannotated envelope's fixed-width nonce.
+  The existing accounted writer seals the replacement. Both complete records must authenticate
+  and decode, have equal actual file sizes and different plaintext digests, and preserve exact
+  accepted metadata, target, author, basis, count and full projection. A fresh inspection must
+  succeed while the old stamp rejects, without either read/check changing durable bytes.
+  The mutation harness additionally replaces only the digest-sensitive comparison with the
+  reviewer's size-only comparison. The first local compile exhausted memory; a single-job
+  retry reached linking but failed because drive C had no free space. No tests executed in
+  either attempt. Approximately 360 MiB of generated incremental cache was removed from the
+  verified, unlinked `target/debug/incremental` workspace directory. A focused retry and GitHub
+  validation are being collected; the finding is not yet closed. Native commands/result shapes
+  and production behavior are unchanged.
+  Gate 4 remains active and incomplete; Gate 5 remains untouched.
+
+- **Read-only inspection implementation checkpoint (2026-09-15; accepted above).**
   The user reviews `aa0a81f...0b28f06` and passes the profiling instrumentation and
   [detached-inspection proposal](GATE4-OVERLAY-RUNTIME-REVIEW.md) without findings or required
   changes. They inspected source and recorded evidence, without independently running Cargo.
@@ -20,7 +43,7 @@ and ranks the live hazards in that path.
   actor and native custody paths. `studio_overlay_read` is registered with the explicit main
   window capability and account-read policy, returning a separate local-draft/absent result.
   The [implementation review note](GATE4-INSPECTION-IMPLEMENTATION-REVIEW.md) supplies its exact
-  comparison and review message. A separate user implementation review remains.
+  comparison; the subsequent user implementation acceptance and coverage correction are above.
 
   Local results: five store inspection tests pass (209.74 s), including full-wrapper changes
   preserving displayed draft/basis, presence/deletion/remount/scope/corruption, author/channel,

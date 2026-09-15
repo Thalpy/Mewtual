@@ -19,6 +19,10 @@ MUTATIONS = {
         (STORE, ".is_some_and(|o| o.author() != self.stamp.author)", ".is_some_and(|_| false)",
          PREFIX + "studio_inspection_author_and_full_channel_are_validated_detached",
          "foreign author escaped detached inspection"),
+        (STORE, "Ok(version == stamp.version)",
+         "Ok(version.as_ref().map(|(_, bytes)| bytes) == stamp.version.as_ref().map(|(_, bytes)| bytes))",
+         PREFIX + "studio_inspection_same_size_authenticated_replacement_is_stale",
+         "same-sized authenticated replacement escaped inspection digest fence"),
     ],
     "native": [
         (NATIVE, "|| inspection_delivery\n            .as_ref()\n            .is_some_and(|delivery| !delivery.is_current())", "",

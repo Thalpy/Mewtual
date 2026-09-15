@@ -7,8 +7,11 @@ Durable overlay Save is still unavailable in native. The next integration checkp
 bounded preparation/signing and the overlay lifecycle. The user accepts the
 [detached inspection proposal](GATE4-OVERLAY-RUNTIME-REVIEW.md) at `0b28f06`, with no findings.
 Its read-only `studio_overlay_read` implementation is registered at `d5ca2ff`; the
-[implementation review](GATE4-INSPECTION-IMPLEMENTATION-REVIEW.md) is pending. This does not
-enable durable overlay Save or close Gate 4.
+[implementation review](GATE4-INSPECTION-IMPLEMENTATION-REVIEW.md) of `0b28f06...c47ae0b` now
+passes. P3 INSPECTION-TEST-001 requests stronger digest-specific regression coverage, with no
+production correction. Its test/harness correction is under validation; the finding remains
+open pending re-review. The command/result contract is unchanged. Durable overlay Save and
+full Gate 4 completion remain unavailable.
 GitHub passes all 25 native Studio tests and both new inspection mutations with restored
 passes at that code/test checkpoint. Exact checkout and execution scope are in [HANDOVER](HANDOVER.md).
 

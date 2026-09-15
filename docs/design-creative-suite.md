@@ -13,7 +13,9 @@ repair) and 4 (combined Gate 4 acceptance and required suites) remain. These are
 areas, not percentages. The user passes the `0b28f06` custody instrumentation and detached
 inspection proposal with no findings. Code/test checkpoint `d5ca2ff` registers read-only
 `studio_overlay_read`, with detached reconstruction and original-context delivery checks;
-its implementation review remains pending. Durable overlay Save is still unavailable.
+its implementation review passes at `c47ae0b`. P3 INSPECTION-TEST-001 requests digest-specific
+regression coverage; its test/harness correction remains under validation, with no requested
+production change. Durable overlay Save is still unavailable.
 
 The [Closing overlay foundation design](GATE4-CLOSING-OVERLAY-REVIEW.md) passed user review at
 `d576af2` on 2026-09-14 with no required changes. Its core/store implementation now distinguishes

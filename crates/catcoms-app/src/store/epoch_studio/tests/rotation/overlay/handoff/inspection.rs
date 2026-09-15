@@ -62,6 +62,131 @@ fn studio_inspection_full_wrapper_change_with_unchanged_draft_is_stale() {
 }
 
 #[test]
+fn studio_inspection_same_size_authenticated_replacement_is_stale() {
+    for art in [false, true] {
+        let root = tempfile::tempdir().unwrap();
+        let f = Fixture::new(art);
+        let mut store = open(root.path());
+        let (_, basis, expected) = prepare(&f, &mut store);
+        let author = f.device.device_id();
+        let mut ordinary = f.title();
+        ordinary.nonce = [99; 16];
+        let ordinary_id = ordinary.id(&author);
+        let mut b = budget(&mut store, &f);
+        store
+            .prepare_epoch_intent(
+                SERVER,
+                &f.logical,
+                ordinary.clone(),
+                &f.device,
+                &f.group,
+                &mut rng(),
+                &mut b.storage,
+                &mut b.intents,
+            )
+            .unwrap();
+        let scope = crate::store::epoch_intents::scope_bytes(SERVER, &f.logical).unwrap();
+        let path = store.epoch_intent_path(&scope);
+        let before_bytes = fs::read(&path).unwrap();
+        let before_raw = store.read_epoch_intent_plain(&path).unwrap().unwrap();
+        let before = store.load_epoch_intents(SERVER, &f.logical).unwrap();
+        assert_eq!(before.encode(&scope).unwrap(), before_raw.plain);
+        assert!(!before.is_overlay(&ordinary_id));
+        let metadata = before
+            .handoff_metadata()
+            .unwrap()
+            .encode_vault(&before.ledger)
+            .unwrap();
+        let sources = canonical(&store);
+        let (stamp, original) = inspect(&f, &store);
+        assert!(current(&f, &store, &stamp));
+        assert_eq!(fs::read(&path).unwrap(), before_bytes);
+
+        // Construct a valid fixture replacement, not an authorized production retirement:
+        // copy every envelope and change only the unannotated ordinary envelope's nonce.
+        let mut replacement = before.clone();
+        replacement.ledger = catcoms_replication::IntentLedger::new(f.logical.clone());
+        let mut replaced = 0;
+        for (id, intent) in before.pending() {
+            let mut operation = intent.operation.clone();
+            if *id == ordinary_id {
+                assert_eq!(intent.author, author);
+                assert_eq!(operation, ordinary);
+                operation.nonce = [100; 16];
+                replaced += 1;
+            }
+            replacement
+                .ledger
+                .prepare(intent.author, operation)
+                .unwrap();
+        }
+        assert_eq!(replaced, 1);
+        assert_eq!(replacement.pending().len(), before.pending().len());
+        let mut b = budget(&mut store, &f);
+        store
+            .write_prepared_intents(
+                SERVER,
+                &f.logical,
+                replacement,
+                Some(before_raw.physical_bytes),
+                false,
+                &mut rng(),
+                &mut b.storage,
+                &mut b.intents,
+                atomic_write,
+                sync_intent,
+            )
+            .unwrap();
+        let after_bytes = fs::read(&path).unwrap();
+        let after_raw = store.read_epoch_intent_plain(&path).unwrap().unwrap();
+        let after = store.load_epoch_intents(SERVER, &f.logical).unwrap();
+        assert_eq!(after.encode(&scope).unwrap(), after_raw.plain);
+        assert_eq!(before_raw.physical_bytes, before_bytes.len() as u64);
+        assert_eq!(after_raw.physical_bytes, fs::metadata(&path).unwrap().len());
+        assert_eq!(after_raw.physical_bytes, after_bytes.len() as u64);
+        assert_eq!(before_raw.physical_bytes, after_raw.physical_bytes);
+        assert_ne!(
+            blake3::hash(&before_raw.plain),
+            blake3::hash(&after_raw.plain)
+        );
+        assert_eq!(
+            after
+                .handoff_metadata()
+                .unwrap()
+                .encode_vault(&after.ledger)
+                .unwrap(),
+            metadata,
+            "ordinary replacement changed accepted branch metadata"
+        );
+        for state in [&before, &after] {
+            let overlay = state.overlay().unwrap();
+            assert_eq!((overlay.target(), overlay.author()), (f.target, author));
+            let draft = state.local_draft().unwrap().unwrap();
+            assert_eq!((draft.basis(), draft.accepted()), (basis, 1));
+            assert_eq!(draft.projection(), &expected);
+        }
+        let (fresh, updated) = inspect(&f, &store);
+        for value in [original, updated] {
+            assert_eq!(value.target, f.target);
+            assert!(!value.prepared);
+            let draft = value.draft.unwrap();
+            assert_eq!((draft.basis(), draft.accepted()), (basis, 1));
+            assert_eq!(draft.projection(), &expected);
+        }
+        assert_eq!(fs::read(&path).unwrap(), after_bytes);
+        assert!(current(&f, &store, &fresh));
+        assert_eq!(fs::read(&path).unwrap(), after_bytes);
+        let obsolete_is_current = current(&f, &store, &stamp);
+        assert_eq!(fs::read(&path).unwrap(), after_bytes);
+        assert_eq!(canonical(&store), sources);
+        assert!(
+            !obsolete_is_current,
+            "same-sized authenticated replacement escaped inspection digest fence"
+        );
+    }
+}
+
+#[test]
 fn studio_inspection_absence_deletion_remount_and_scope_are_distinct() {
     let root = tempfile::tempdir().unwrap();
     let f = Fixture::new(false);
