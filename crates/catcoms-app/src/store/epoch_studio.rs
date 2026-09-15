@@ -206,6 +206,58 @@ impl ServerStore {
     }
     /// Bounded read-only vault restore. Only actual absence returns None; malformed/incoherent
     /// state is an error, never an invitation to overwrite it with a fresh epoch-zero document.
+    /// Test-only: perform the second half of an owner rotation for a source that has ALREADY
+    /// been sealed, which `rotate_studio_owner` refuses because it seals as part of its own
+    /// transaction. This is the same sequence the store's own rotation fixtures run; it exists so
+    /// tests outside `crate::store` can reach the post-seal successor state. It adds no
+    /// production surface and grants no authority.
+    #[cfg(test)]
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn install_sealed_studio_successor_for_test(
+        &mut self,
+        server: u64,
+        group: &ServerGroup,
+        target: StudioTarget,
+        device: &MlsDevice,
+        close: &catcoms_replication::CloseRecord,
+        rng: &mut impl CryptoRngCore,
+        budget: &mut EpochStudioBudget,
+    ) -> Result<EpochStudioState, AppError> {
+        let mut state = self
+            .load_studio_epoch(server, group, target, device)?
+            .ok_or_else(|| invalid("no installed source"))?;
+        let plan = state
+            .unit
+            .prepare_settlement(close, group, 0)
+            .map_err(invalid)?;
+        self.retire_studio_intents_with_io(
+            server,
+            &plan,
+            rng,
+            &mut budget.storage,
+            &mut budget.intents,
+            atomic_write,
+            super::epoch_intents::sync_intent,
+        )?;
+        let observed = state.source.as_ref().map(source::SourceVersion::record);
+        let before = state.unit.snapshot().map_err(invalid)?;
+        let next = state
+            .unit
+            .checkpoint_successor(&plan, group, 0)
+            .map_err(invalid)?;
+        self.save_studio_source(
+            server,
+            next,
+            observed,
+            &before,
+            WritePurpose::Settlement,
+            rng,
+            &mut budget.storage,
+            atomic_write,
+            sync_studio,
+        )
+    }
+
     pub fn load_studio_epoch(
         &self,
         server: u64,

@@ -21,7 +21,7 @@ they are the highest-conflict changes, so they land last. The per-item verdict r
 
 | Order | Item | State |
 |---|---|---|
-| 1 | C-1 structural decode, with C-2's digest fences and the R4 replay exclusion | **landed and reviewed PASS by inspection; no-replay boundary now covered by N24; R4 still needs N25/M9** |
+| 1 | C-1 structural decode, with C-2's digest fences and the R4 replay exclusion | **landed; reviewed PASS; no-replay boundary covered by N24; R4 selection covered by N25/M9** |
 | 2 | C-4 transient reference holds | **seam landed and reviewed PASS; the I-3 transfer needs its consumer** |
 | 3 | The runtime: Flows S, H and R, admission, scheduling, commit seams | not started |
 | 4 | I-4 and C-3 | not started |
@@ -36,7 +36,8 @@ they are the highest-conflict changes, so they land last. The per-item verdict r
 | 2026-09-15 | Design revision 4, N31 correction | `1bcb1bca204d721b848b17c0835faf931ae930e3` | `25ce89bb705dfc228c7b32874788ebd062e6fcf4` | design, docs only | **PASS**: AG1-TEST-001 **closed**; bounded runtime design accepted, no new finding |
 | 2026-09-15 | PASS recorded | `25ce89bb705dfc228c7b32874788ebd062e6fcf4` | `5a899c2` | docs only | n/a; records the verdict and the next checkpoint's request |
 | 2026-09-15 | C-1 and C-4 implementation | `5a899c2` | `d67e649`, `7ed6302` | bounded implementation, PR #27 | **PASS by source inspection** for the C-1 decoder, the C-2 digest changes, the R4 filter and the C-4 seam; no production defect found. Two coverage findings: **C1-TEST-002** (P2) and **R4-TEST-001** (P3). C-1 evidence not a completed checkpoint. |
-| 2026-09-15 | C1-TEST-002 correction | `7ed6302` | uncommitted working tree | test only | N24 plus the unconditional-replay mutation; R4-TEST-001 still open |
+| 2026-09-15 | C1-TEST-002 correction | `7ed6302` | `4d09869` | test only | **PASS**: C1-TEST-002 **closed**; R4-TEST-001 still open |
+| 2026-09-15 | R4-TEST-001 correction | `4d09869` | uncommitted working tree | test plus one cfg(test) helper | N25 and M9; closes the last open finding on this checkpoint |
 
 Working checkout: `M:\Git (local)\CatComs`, branch `Create-suite-2`. **Other agents are working in
 this same checkout**: Agent 3's design landed at `7efc9c2` and Agent 2's documents are present
@@ -283,17 +284,34 @@ reviewer predicted. Byte-exact restoration confirmed by `git diff` reporting no 
 | Unconditional-replay mutation | N24 fails at its intended assertion; the other two pass, confirming they cannot cover this boundary. Restored source: 3 passed. |
 | `cargo clippy -j 1 -p catcoms-replication --lib --tests -- -D warnings`, `cargo fmt --all -- --check` | Clean. |
 
-### R4-TEST-001: still open
+### R4-TEST-001: N25 and M9
 
-N25 and M9 are **not** implemented. The reviewer's required shape is to inspect the actual
-`ReplayEvidence.own` set and require an accepted overlay id to be absent while a comparable
-unannotated own intent is still present. That needs a `Server` value together with a store holding
-both a retained overlay branch and an ordinary pending intent; the existing overlay fixture
-(`tests/support/studio_inspection.rs`) builds its store inside an actor, and the existing replay
-tests exercise `choose`/`deconflict` directly without a `Server`. A store-level test of the
-`is_overlay` predicate alone would not cover the call site and would be masked if the filter were
-deleted, so none was written. The production filter is unambiguous by inspection, but the
-C-1/R4 bundle is **not** fully verified until N25 and M9 land.
+`studio_replay_evidence_excludes_accepted_overlay_ids_and_keeps_ordinary_own_intents` asserts on
+the **actual `ReplayEvidence.own` set** produced by the production path, with the control the
+reviewer specified: an accepted overlay id must be absent while a comparable unannotated own
+intent, authored by the same device and pending in the same ledger, is present. The test first
+establishes that both entries are pending and that only one is annotated, so the assertion is about
+selection rather than about the ledger's contents.
+
+The fixture builds the real state rather than a synthetic one: a founded `Server` with its own
+store, an installed source filled with real large signed operations to reach the production
+rotation threshold, a real seal, a real accepted Closing-overlay entry through
+`save_studio_closing_overlay`, the source warmed through the existing detached preparation, the
+pristine successor installed, and then an ordinary Apply on that successor for the control.
+
+| Check | Result |
+|---|---|
+| `cargo test ... -p catcoms-app --lib studio_replay -- (default threads)` | **10 passed, 0 failed**, 17.88 s. |
+| M9 mutation, removing only `&& !intents.is_overlay(id)` | Fails at "an accepted overlay id reached ordinary replay selection"; `git diff` confirms byte-exact restoration; restored suite passes. |
+| `cargo clippy -j 1 -p catcoms-app --lib --tests -- -D warnings`, `cargo fmt --all -- --check` | Clean. |
+
+One production file gained a **`#[cfg(test)]`** helper,
+`ServerStore::install_sealed_studio_successor_for_test`. `rotate_studio_owner` refuses an
+already-sealed source because it seals inside its own transaction, and the post-seal successor
+install that the store's own rotation fixtures perform uses private items that `crate::studio`
+cannot reach. The helper runs exactly that existing sequence. It is compiled out of production
+builds, adds no callable surface and grants no authority; the alternative was widening real
+production visibility for a test.
 
 ### Not yet done for C-1
 
