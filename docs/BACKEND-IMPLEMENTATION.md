@@ -25,6 +25,11 @@ The next [core signing checkpoint](GATE4-HANDOFF-SIGNING-REVIEW.md) is implement
 review: detached typed preparation, one-operation live-authority-checked signing, and detached
 complete-source assembly. The accepted store transaction uses that same staged algorithm.
 Runtime permit/stamp/commit scheduling and native local acceptance remain outstanding.
+The [four-agent handoff plan](GATE4-AGENT-HANDOFFS.md) divides the remaining work into runtime
+Save/handoff, manual/provisional lifecycle and repeated tenure, signed repair, and combined
+acceptance/required suites. It subdivides the older overlay block; the accepted scheduling block
+stays closed. [Review preambles](GATE4-REVIEW-PREAMBLES.md) specify the separate core, runtime
+and full-gate reviews. Native Save cannot be exposed before its manual lifecycle is reviewed.
 
 ## Scope reset (2026-09-08)
 

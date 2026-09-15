@@ -20,6 +20,11 @@ Durable overlay Save is still unavailable.
 The [core handoff preparation/signing split](GATE4-HANDOFF-SIGNING-REVIEW.md) is now implemented
 and awaiting review. It supports one-operation signing turns between detached stages; live
 actor scheduling and native local acceptance remain to be connected.
+The [four-agent handoffs](GATE4-AGENT-HANDOFFS.md) assign the remaining runtime, lifecycle/tenure,
+repair and integration work, with [separate review preambles](GATE4-REVIEW-PREAMBLES.md).
+This is a subdivision of outstanding work, not a new gate or a change to the accepted product
+contract. Native Save exposure still requires the reviewed manual lifecycle as well as runtime
+custody. The existing mockup and UI layout remain separately owned.
 
 The [Closing overlay foundation design](GATE4-CLOSING-OVERLAY-REVIEW.md) passed user review at
 `d576af2` on 2026-09-14 with no required changes. Its core/store implementation now distinguishes

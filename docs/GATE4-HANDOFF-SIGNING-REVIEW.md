@@ -3,6 +3,12 @@
 Status: implementation awaiting user adversarial review. Base:
 `8190dc46b885f6b61efe9d84c8a1675fb041f823`. INSPECTION-TEST-001 is closed by the user;
 read-only inspection and the previous durable handoff acceptance stand. Gate 4 remains active.
+Code/test commit: `e65bfd89acecd4e660edb0560410e1d02cec5e21`; review destination:
+`Thalpy/Mewtual`, branch `Create-suite-2`, PR #26. The user explicitly requested commit/push
+of this checkpoint and the [four remaining-work handoffs](GATE4-AGENT-HANDOFFS.md).
+[Review preambles](GATE4-REVIEW-PREAMBLES.md) distinguish this core review from runtime and
+full-gate acceptance. The integration base `50f1f99` also preserves the independently merged
+`d7ec5b9` jukebox fixture correction; it does not change this review's core code scope.
 
 ## Implemented boundary
 
@@ -54,8 +60,14 @@ restore source bytes exactly and pass the restored test. Compilation and empty f
 count. A second isolated mutation targets the accounting-owner match while preserving receipt
 verification, target, source identity and projection. The existing acceptance-order mutation
 follows the loop to its new preparation module.
+All three selected local mutation checks detect their intended executed assertion, restore
+source exactly, and pass restored regressions. The app run passes 25 handoff tests with two
+opt-in profiles skipped; the five new core tests and strict replication/app Clippy also pass.
 
 Execution results, maximum-count coverage and exact CI checkouts are recorded in HANDOVER.
+The 256-operation regression passes both kinds locally, with complete projection/restart,
+every original envelope, exactly 256 individual signing calls and unchanged durable records.
+Diagnostic stage timings and their limits are in [P1-PERFORMANCE](P1-PERFORMANCE.md).
 One signature per call is a work-unit bound, not a release latency or measured heap guarantee.
 The existing 256-operation, signed-envelope, aggregate epoch, seed, metadata and recovery limits
 still apply. Reconstruction remains expensive and must run outside actor/store custody.
@@ -76,7 +88,7 @@ Gate 4 acceptance remain outstanding. Gate 5 is untouched.
 ## Adversarial review message
 
 ```text
-Please adversarially review the Gate 4 handoff preparation/signing checkpoint against
+Please adversarially review e65bfd89acecd4e660edb0560410e1d02cec5e21 against
 8190dc46b885f6b61efe9d84c8a1675fb041f823 on PR #26. Start with
 docs/GATE4-HANDOFF-SIGNING-REVIEW.md and the latest HANDOVER evidence.
 

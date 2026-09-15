@@ -16,11 +16,18 @@ is unchanged. Durable overlay Save is still unavailable, and Gate 4 remains inco
 The current [handoff signing checkpoint](GATE4-HANDOFF-SIGNING-REVIEW.md) splits core work into
 detached typed preparation, one-operation signing turns and detached complete-source assembly.
 It awaits adversarial review and adds no native command or UI write capability.
+The [four implementation handoffs](GATE4-AGENT-HANDOFFS.md) now divide the remaining work into
+runtime Save/handoff, manual/provisional lifecycle and repeated tenure, signed repair, and final
+integration/required suites. [Review preambles](GATE4-REVIEW-PREAMBLES.md) cover each scope.
+Native Save must wait for both reviewed runtime custody and manual lifecycle; Agent 4 maintains
+this guide as the branches integrate. This documentation checkpoint enables no new UI control.
 GitHub passes all 25 native Studio tests and both new inspection mutations with restored
-passes at that code/test checkpoint. Exact checkout and execution scope are in [HANDOVER](HANDOVER.md).
+passes for the inspection correction at `d38df93`; these runs predate the core signing split.
+Exact checkout and execution scope are in [HANDOVER](HANDOVER.md).
 
 Earlier accepted scheduling/preview evidence: combined scheduling at `6b71d96` passed user
-review without required changes. Block 1 of the four remaining Gate 4 work areas is accepted; three remain.
+review without required changes. That earlier block 1 is accepted. The new four-agent split above
+subdivides what remains and does not reopen that scheduling acceptance.
 Actor scheduling and native preview implementation passed review
 at `a89bde6`. The user's re-review of `a89bde6...134394e` closes NATIVE-TEST-001 with no further
 changes required, for both Index and Flipnote. The reviewer inspected source and the GitHub job

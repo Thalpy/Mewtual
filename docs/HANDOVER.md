@@ -10,6 +10,20 @@ and ranks the live hazards in that path.
 
 ## Status (latest entry: 2026-09-15)
 
+- **Four remaining-work handoffs prepared (2026-09-15).** The user requests commit/push and
+  implementation/review prompts for four agents. [Implementation handoffs](GATE4-AGENT-HANDOFFS.md)
+  assign runtime Save/handoff, manual/provisional lifecycle and repeated tenure, signed fault
+  repair, and integration/required suites. [Review preambles](GATE4-REVIEW-PREAMBLES.md) include
+  the outstanding core signing review and each future scope. These assignments divide the
+  remaining work; they do not reopen the accepted earlier combined scheduling block.
+  Agents use separate branches; Agent 4 owns shared contract docs and final integration.
+  Native Save exposure depends on reviewed runtime AND manual lifecycle. Gate 4 remains open.
+  Integration base `50f1f99d08f586c9d97637a8f510ae222362a511` preserves the merged `d7ec5b9`
+  jukebox fixture correction. Its change from `vimeo` to an unsupported fixture source is present;
+  it has not been independently retested in this documentation pass. Reverify historical broad
+  CI failures against the integrated code rather than treating the old queue failure as current.
+  This pass adds documentation only; the completed local code/test evidence follows below.
+
 - **Detached handoff preparation and finite signing checkpoint (2026-09-15; review pending).**
   [Review scope and message](GATE4-HANDOFF-SIGNING-REVIEW.md), base `8190dc4`.
   The existing synchronous core/store batch now uses public-context authority capture,
@@ -28,13 +42,45 @@ and ranks the live hazards in that path.
   Log: `logs/gate4-handoff-preparation-tests-final.log`. Strict replication/app library-and-test
   Clippy passes with one build job (66 s), after replacing one redundant Copy clone:
   `logs/gate4-handoff-preparation-clippy.log`. Root formatting, Python syntax and both unique
-  mutation anchors pass. The final two-mutation execution is pending. The full 256-operation app case uses actual stored branches and
+  mutation anchors pass. Both final authority mutations execute and are detected: MLS epoch
+  removal fails at `handoff.rs:180` (one test, 6.53 s), and accounting-owner removal fails at
+  `handoff.rs:248` (one test, 5.98 s). Each restores source byte-for-byte and passes its restored
+  regression for both kinds (12.98 / 12.01 s). Logs:
+  `logs/gate4-handoff-signing-{mls,owner}-{mutated,restored}.log` and
+  `logs/gate4-handoff-signing-mutation-driver-final.log`.
+  The full 256-operation app case uses actual stored branches and
   checks all envelopes, complete projection/restart and unchanged durable records throughout.
+  Both kinds now pass. Diagnostic preparation / slowest individual signing / finish times are
+  11,901 / 35 / 10,545 ms for Index and 15,335 / 18 / 12,720 ms for Flipnote. These are small-seed
+  title-edit fixtures at the operation ceiling, not worst-case latency or heap qualification.
+  See [P1-PERFORMANCE](P1-PERFORMANCE.md). The complete focused store run passes: **25 tests,
+  zero failures, two opt-in profiles ignored**, in 1,515.95 s using one test thread. This includes
+  every durable write/flush interruption, full signed evidence, scope, publication/source
+  replacement and reference dependencies, original envelope/order/timestamp retention, and
+  the 256-operation case. Command: `cargo test --locked -j 1 --config
+  profile.test.package.catcoms-app.debug=0 -p catcoms-app --lib studio_overlay_handoff --
+  --test-threads=1 --nocapture`; log: `logs/gate4-handoff-preparation-store-retry.log`.
   A local app-suite build with one build job failed in LLVM with out-of-memory before running
   tests (`logs/gate4-handoff-preparation-store.log`). A concurrent formatting attempt also hit
-  memory exhaustion; the separate formatting rerun passes. GitHub is used for the larger app suite.
+  memory exhaustion; the separate formatting rerun passes. The sequential app build retry
+  succeeds in 140 s. GitHub validation is configured; no run for `e65bfd8` was returned by the
+  commit workflow query before this documentation push. Prior inspection/native green runs
+  are evidence for their recorded older checkouts, not new signing-code validation.
   These failures are not test passes. Runtime capture/permit/stamp scheduling and native local
   Save/handoff still require integration and review; this checkpoint does not complete Gate 4.
+
+  Code/tests are committed at `e65bfd89acecd4e660edb0560410e1d02cec5e21`. The user has now
+  explicitly requested commit/push to the existing review branch. Origin and open PR #26
+  identify `Thalpy/Mewtual` / `Create-suite-2`; the branch retains the user's subsequent merge.
+  The relocated acceptance-order mutation also passes its executed-assertion check, using the
+  committed harness's exact selector and one build job. It fails at `eligibility.rs:219`
+  (one test, 34.94 s), restores the preparation source byte-for-byte, and the restored regression
+  passes (one test, 37.97 s). Logs: `logs/gate4-handoff-order-mutation-current.log`,
+  `logs/gate4-handoff-mutation-acceptance-order.log` and
+  `logs/gate4-handoff-restored-acceptance-order.log`. Other pre-existing handoff mutants were not
+  rerun locally in this checkpoint; the configured GitHub job retains all ten. Local validation
+  for this checkpoint is finished. The handoff source/tests match `e65bfd8`; the later integrated
+  jukebox fixture change is outside that validation. The evidence and agent handoffs add only docs.
 
 - **INSPECTION-TEST-001 closed by user re-review (2026-09-15).**
   The user accepts the same-size authenticated replacement regression and targeted size-only

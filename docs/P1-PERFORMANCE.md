@@ -351,3 +351,28 @@ runtime activation; this checkpoint does not change that requirement.
 The initial compilation reported two redundant `mut` bindings in the profile; both were removed
 without changing its behavior. Final formatting/Clippy and regression evidence is recorded in
 HANDOVER. No production behavior or persistent format changes in this checkpoint.
+
+## Detached handoff signing stages (2026-09-15)
+
+Code/test commit `e65bfd89acecd4e660edb0560410e1d02cec5e21` adds the normal regression
+`studio_overlay_handoff_prepared_signing_full_count_keeps_source_private`. It uses the same
+real accepted 256-operation fixture above, then exercises the new core stages individually.
+Already authenticated/decoded source, ledger and metadata are outside the measured intervals.
+Authority capture, vault IO, fixture construction and final restart checks are also excluded.
+Every signing call must consume exactly one entry; no durable record may change during
+preparation, signing or final assembly. The completed candidate must contain all original
+envelopes and reproduce the complete expected projection after restart.
+
+| Target | Accepted ops | Detached preparation (ms) | Slowest single signing call (ms) | Detached finish (ms) |
+|---|---|---|---|---|
+| Index | 256 | 11901 | 35 | 10545 |
+| Flipnote | 256 | 15335 | 18 | 12720 |
+
+Both cases pass locally in the sequential handoff suite; log:
+`logs/gate4-handoff-preparation-store-retry.log`. These are one debug observation per target,
+using diagnostic `SystemClock`. The highest observed call time is not a worst-case bound or
+latency percentile. This is maximum accepted operation count with a small seed and title edits,
+not maximal seed/metadata/body/projection/roster/heap qualification or actor fairness evidence.
+The two detached durations still require release of actor/store custody. The compatibility
+store adapter remains synchronous; native activation requires the remaining runtime work in
+[the signing review note](GATE4-HANDOFF-SIGNING-REVIEW.md).
