@@ -22,7 +22,7 @@ they are the highest-conflict changes, so they land last. The per-item verdict r
 | Order | Item | State |
 |---|---|---|
 | 1 | C-1 structural decode, with C-2's digest fences and the R4 replay exclusion | **landed; reviewed PASS; no-replay boundary covered by N24; R4 selection covered by N25/M9** |
-| 2 | C-4 transient reference holds | **seam landed and reviewed PASS; the I-3 transfer needs its consumer** |
+| 2 | C-4 transient reference holds, with the I-3 transfer | **landed; seam reviewed PASS; transfer implemented and mutation-proven; dead-code markers removed** |
 | 3 | The runtime: Flows S, H and R, admission, scheduling, commit seams | not started |
 | 4 | I-4 and C-3 | not started |
 
@@ -37,7 +37,8 @@ they are the highest-conflict changes, so they land last. The per-item verdict r
 | 2026-09-15 | PASS recorded | `25ce89bb705dfc228c7b32874788ebd062e6fcf4` | `5a899c2` | docs only | n/a; records the verdict and the next checkpoint's request |
 | 2026-09-15 | C-1 and C-4 implementation | `5a899c2` | `d67e649`, `7ed6302` | bounded implementation, PR #27 | **PASS by source inspection** for the C-1 decoder, the C-2 digest changes, the R4 filter and the C-4 seam; no production defect found. Two coverage findings: **C1-TEST-002** (P2) and **R4-TEST-001** (P3). C-1 evidence not a completed checkpoint. |
 | 2026-09-15 | C1-TEST-002 correction | `7ed6302` | `4d09869` | test only | **PASS**: C1-TEST-002 **closed**; R4-TEST-001 still open |
-| 2026-09-15 | R4-TEST-001 correction | `4d09869` | uncommitted working tree | test plus one cfg(test) helper | N25 and M9; closes the last open finding on this checkpoint |
+| 2026-09-15 | R4-TEST-001 correction | `4d09869` | `079e59a` | test plus one cfg(test) helper | N25 and M9; pushed, awaiting the reviewer's source inspection to close |
+| 2026-09-15 | I-3 protection transfer | `079e59a` | uncommitted working tree | bounded implementation | Gives C-4 its production consumer; markers removed |
 
 Working checkout: `M:\Git (local)\CatComs`, branch `Create-suite-2`. **Other agents are working in
 this same checkout**: Agent 3's design landed at `7efc9c2` and Agent 2's documents are present
@@ -241,11 +242,53 @@ CID deletes. Two new regressions:
 | M13 mutation, `transient_holds(..) && false` in `ProtectedBlobs::delete` | Fails at "a live job-owned hold did not protect its reference"; restored source passes. |
 | `cargo clippy -j 1 -p catcoms-app --lib --tests -- -D warnings`, `cargo fmt --all -- --check` | Clean. |
 
-**Marker to remove.** Four items carry `#[allow(dead_code)]` because their production consumer is
-the overlay commit path, which lands with the runtime. They expose no callable surface; the
-annotation and its comment must be deleted in the commit that adds the I-3 transfer. I-3 itself is
-**not implemented**: nothing yet installs the ordinary holds before the intent write or releases
-the owner after it.
+### I-3, the protection transfer
+
+C-4's seam now has its production consumer and the four `#[allow(dead_code)]` markers are gone.
+
+`save_studio_closing_overlay_with_io` takes a job-owned `CreativeHold` over the operation's pixel
+references immediately after the operation is decoded and before anything durable happens. The
+guard lives to the end of that scope, so it is released only after the write attempt returns,
+on success, on error and on unwinding alike. `write_studio_overlay_intent` already installed the
+two ordinary conservative holds before its write; that call site is now documented as the second
+half of the transfer, because it is what makes dropping the transient owner safe.
+
+The ordering the accepted design requires, as implemented:
+
+```
+decode and bound the operation
+  -> hold_creative_transient(operation pixels)      // job-owned, covers the in-flight window
+  -> basis / exact-retry / eligibility checks
+  -> hold_creative(base CIDs) + hold_creative_operation(new operation)   // the transfer
+  -> write attempt
+  -> drop CreativeHold                              // scope end, after the attempt returns
+```
+
+Two regressions in `store/epoch_studio/tests/rotation/overlay.rs`:
+
+- `studio_overlay_acceptance_transfers_pixel_protection_before_its_write`: a complete reference
+  scan runs **before** the acceptance and installs a known set excluding the new CID, so the
+  assertion cannot pass through fail-closed unknown protection. After the Save succeeds and every
+  owner is gone, and before any further scan, the CID is still retained, while an unreferenced
+  orphan still reclaims and protection is still known. That control is what distinguishes a real
+  transfer from a blanket refusal.
+- `studio_overlay_uncertain_acceptance_still_protects_its_pixels`: two injected failures, one where
+  the record really lands and only the caller's result is lost, and one that fails leaving a
+  temporary sibling. Both leave the pixels protected, because the transfer runs before the write
+  attempt and does not depend on its outcome.
+
+| Check | Result |
+|---|---|
+| `cargo test ... -p catcoms-app --lib studio_overlay -- --test-threads=1` | **39 passed, 0 failed, 2 ignored**, 1237.73 s. Log `logs/gate4-a1-i3-overlay.log`. The 37 pre-existing overlay and handoff tests plus the two new ones. |
+| `cargo test ... --lib creative_references` | **9 passed, 0 failed**, 3.26 s. |
+| M14, removing only the two ordinary holds from `write_studio_overlay_intent` | Fails at "an accepted operation's pixels were reclaimable before the next scan". `git diff` confirms the restored file differs from `079e59a` only by the new comment, so the two calls are byte-identical. |
+| `cargo clippy -j 1 -p catcoms-app --lib --tests -- -D warnings`, `cargo fmt --all -- --check` | Clean, with no `allow(dead_code)` remaining in `creative_references.rs`. |
+
+**What this does and does not cover.** The transfer and its ordering are real and mutation-proven.
+The detached window it exists to protect is not open yet: the synchronous acceptance path has no
+gap between the transient hold and the write, so these tests prove the transfer, not the window.
+The window appears with Flow S, and N12(a), which pauses a detached stage while a complete scan
+runs, remains outstanding until then.
 
 ### C1-TEST-002: N24 and the unconditional-replay mutation
 

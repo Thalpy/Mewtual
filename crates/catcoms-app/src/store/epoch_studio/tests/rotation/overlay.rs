@@ -992,3 +992,120 @@ fn studio_overlay_store_replacement_counts_base_and_orphans_without_refunding_ol
     let accepted = save(&f, &mut store, &close, basis.fingerprint(), op, 124);
     assert_eq!(accepted.accepted(), 2);
 }
+
+/// I-3. A complete reference scan derives its pin set from durable state, so it cannot know a
+/// pixel reference that only an in-flight acceptance names. The job-owned transient hold covers
+/// that window, but a durable write does NOT repair a set the scan already installed: the
+/// acceptance path must transfer protection to the ordinary conservative holds before its write,
+/// while the transient owner is still alive. These cases exercise the transfer, not the window.
+#[test]
+fn studio_overlay_acceptance_transfers_pixel_protection_before_its_write() {
+    let root = tempfile::tempdir().unwrap();
+    let mut store = open(root.path());
+    let f = Fixture::new(true);
+    let (close, basis) = closing(&f, &mut store);
+    let group = hex::encode(f.group.group_id());
+
+    let mut blobs = store.blob_store(&group).unwrap();
+    let cid = blobs
+        .put(b"pixels named only by the new operation")
+        .unwrap();
+    let orphan = blobs.put(b"nothing will ever name this").unwrap();
+
+    // Establish a KNOWN pin set that predates the acceptance and excludes both CIDs, so the
+    // assertions below cannot pass merely because protection is fail-closed unknown.
+    store.creative_pinned_cids().unwrap();
+    assert!(store.creative_references_known());
+
+    let op = f.domain(
+        FlipnoteOp::InsertFrame {
+            frame: [9; 16],
+            after: None,
+            cid: *cid.as_bytes(),
+            bytes: 39,
+        }
+        .encode()
+        .unwrap(),
+        7,
+    );
+    let draft = save(&f, &mut store, &close, basis.fingerprint(), op, 300);
+    assert_eq!(draft.accepted(), 1);
+
+    // Every transient and result owner is gone, and no scan has run since. Only the ordinary
+    // holds installed during the acceptance can be protecting these bytes now.
+    let mut blobs = store.blob_store(&group).unwrap();
+    assert!(
+        !blobs.delete(&cid).unwrap(),
+        "an accepted operation's pixels were reclaimable before the next scan"
+    );
+    assert!(blobs.get_bounded(&cid, 200).unwrap().is_some());
+    // The control: protection is genuinely known and still reclaims an unreferenced CID, so the
+    // assertion above is not an unknown-protection refusal.
+    assert!(store.creative_references_known());
+    assert!(blobs.delete(&orphan).unwrap());
+}
+
+/// I-3 under uncertain persistence. A write that may have landed, and a write that fails leaving
+/// its temporary sibling, must both leave the new references protected: the transfer runs before
+/// the write attempt precisely so its outcome does not decide whether the pixels survive.
+#[test]
+fn studio_overlay_uncertain_acceptance_still_protects_its_pixels() {
+    for after_rename in [false, true] {
+        let root = tempfile::tempdir().unwrap();
+        let mut store = open(root.path());
+        let f = Fixture::new(true);
+        let (close, basis) = closing(&f, &mut store);
+        let group = hex::encode(f.group.group_id());
+        let mut blobs = store.blob_store(&group).unwrap();
+        let cid = blobs.put(b"pixels for an uncertain write").unwrap();
+        store.creative_pinned_cids().unwrap();
+        assert!(store.creative_references_known());
+
+        let op = f.domain(
+            FlipnoteOp::InsertFrame {
+                frame: [9; 16],
+                after: None,
+                cid: *cid.as_bytes(),
+                bytes: 39,
+            }
+            .encode()
+            .unwrap(),
+            7,
+        );
+        let mut b = budget(&mut store, &f);
+        let failed = store.save_studio_closing_overlay_with_io(
+            SERVER,
+            &f.group,
+            f.target,
+            &f.device,
+            &close,
+            Some(0),
+            basis.fingerprint(),
+            op,
+            300,
+            &mut rng(),
+            &mut b,
+            |path, bytes| {
+                if after_rename {
+                    // The record really lands; only the caller's result is lost.
+                    atomic_write(path, bytes)?;
+                } else {
+                    // A failure that leaves a temporary sibling behind.
+                    let mut staged = path.to_path_buf();
+                    staged.set_extension("intents.mewtual-stage-1-1.tmp");
+                    std::fs::write(&staged, bytes).unwrap();
+                }
+                Err(crate::AppError::Io("interrupted".into()))
+            },
+            sync_intent,
+        );
+        assert!(failed.is_err(), "the injected writer must fail the save");
+
+        let mut blobs = store.blob_store(&group).unwrap();
+        assert!(
+            !blobs.delete(&cid).unwrap(),
+            "an uncertain acceptance left its pixels reclaimable"
+        );
+        assert!(blobs.get_bounded(&cid, 200).unwrap().is_some());
+    }
+}

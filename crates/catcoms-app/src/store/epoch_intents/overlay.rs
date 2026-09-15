@@ -73,7 +73,13 @@ impl ServerStore {
         let view = overlay
             .append(basis, &state.ledger, op_id, ts)
             .map_err(invalid)?;
-        // Conservatively hold base-only and superseded references before any possible write.
+        // I-3, second half: the protection transfer. These two holds must run BEFORE the write
+        // attempt and while the caller's job-owned transient hold is still alive. Each rotates
+        // `Protection.generation` first, so a reference scan already in progress cannot install a
+        // set that omits these CIDs, and each either adds them to the known set or leaves
+        // protection fail-closed unknown. Only that makes it safe for the caller to drop its
+        // transient owner once the write attempt returns: a durable record alone does not repair
+        // a reference set that a scan installed while the operation was still in flight.
         self.hold_creative(
             &document.server_id,
             overlay

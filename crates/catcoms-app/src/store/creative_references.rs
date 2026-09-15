@@ -72,9 +72,6 @@ struct TransientHold {
     cids: BTreeSet<Cid>,
 }
 
-// Consumed by the overlay commit path (design I-3), which lands with the runtime on this
-// branch. Remove this marker with that commit; it exposes no callable surface today.
-#[allow(dead_code)]
 /// At most this many live job-owned holds. Exhaustion refuses new admission; it never disables
 /// unrelated reclamation by marking the whole store unknown.
 pub(super) const MAX_TRANSIENT_HOLD_OWNERS: usize = 8;
@@ -121,7 +118,6 @@ impl Protection {
             hold.owner.strong_count() != 0 && hold.group == group && hold.cids.contains(cid)
         })
     }
-    #[allow(dead_code)]
     fn live_transient_cids(&self) -> usize {
         self.transient
             .iter()
@@ -133,7 +129,6 @@ impl Protection {
 
 /// Releases its hold when dropped, so a cancelled waiter cannot free protection that the actual
 /// worker still needs. Moved through every detached stage and result alongside the permit.
-#[allow(dead_code)]
 pub(crate) struct CreativeHold {
     owner: Arc<()>,
     protection: SharedProtection,
@@ -201,7 +196,6 @@ impl ServerStore {
     ///
     /// This is not durable protection. The caller must transfer these references to the ordinary
     /// conservative holds before releasing the returned guard; see the overlay commit path.
-    #[allow(dead_code)]
     pub(crate) fn hold_creative_transient(
         &self,
         group: &[u8],
