@@ -26,7 +26,12 @@ pub(super) fn maximal(group: &[u8], target: StudioTarget) -> StudioProjection {
         let mut branch = base.fork();
         branch.set_actor(ActorId::from(author.as_bytes().to_vec()));
         for n in 1u128..=if art { 1000 } else { 65 } {
-            let element = if n == 1 { [1; 16] } else { n.to_be_bytes() };
+            // Keep the real overlay fixture's [1; 16] target inside Index's compact prefix.
+            let mut element = [2; 16];
+            element[14..].copy_from_slice(&(n as u16).to_be_bytes());
+            if n == 1 {
+                element = [1; 16];
+            }
             let insert = if art {
                 FlipnoteOp::InsertFrame {
                     frame: element,

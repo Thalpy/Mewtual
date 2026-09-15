@@ -29,6 +29,15 @@ and ranks the live hazards in that path.
   unchanged durable records. Strict app library/test Clippy passes (26.77 s), and all six native
   command security audit tests pass. Logs: `logs/gate4-inspection-{store,actor,fixture,clippy}.log`.
   These runs do not claim maximal seed/metadata/heap coverage or repository-wide green.
+  The additional real MLS-join and same-snapshot sync-replacement regression passes (0.60 s):
+  unchanged intent bytes cannot legitimize a result from either obsolete live context.
+  Svelte checking reports zero errors and warnings. Native offline compilation is unavailable
+  because the local Cargo cache lacks `png`; GitHub runs native validation. The expensive local
+  codec-shape run was stopped and is not a pass. Its GitHub result remains pending. The fixture
+  now deliberately keeps `[1; 16]` inside Index's compact 64-object prefix before replaying its
+  local title edit. The initial mutation run detected currency and channel removal, but a later
+  compile error in the newly added size fixture correctly failed the harness; the code was
+  restored and the fixture corrected. Complete mutation success is still pending.
 
 - **HANDOFF-002 closed; bounded handoff implementation accepted (2026-09-15).**
   The user's re-review compares `85e7179...aa0a81f`, with correction code at `62f06d4`;

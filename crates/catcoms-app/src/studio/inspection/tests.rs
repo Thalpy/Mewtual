@@ -9,6 +9,101 @@ use rand_core::SeedableRng;
 use std::time::Duration;
 
 #[tokio::test]
+async fn studio_inspection_live_membership_change_and_sync_replacement_are_stale() {
+    let hub = Hub::new();
+    let clock = ManualClock::new(1000);
+    let rng = ChaCha20Rng::seed_from_u64(17);
+    let mut server = Server::found(
+        hub.join(PeerId::from_u64(1)),
+        MlsDevice::generate().unwrap(),
+        rng.clone(),
+        Box::new(clock.clone()),
+        "owner",
+    )
+    .unwrap();
+    server.subscribe_control().await.unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let store = ServerStore::open(root.path(), b"context", &mut rng.clone()).unwrap();
+    let target = StudioTarget::Index {
+        channel: crate::channel_id("general").to_be_bytes(),
+    };
+    let pool = Arc::new(tokio::sync::Semaphore::new(4));
+    let original = server
+        .begin_inspection_with_pool(&store, 7, target, &pool)
+        .unwrap()
+        .rebuild()
+        .await
+        .unwrap();
+    let epoch = server.epoch();
+    let invite = server.mint_invite([1; 16], u64::MAX, vec![]).unwrap();
+    let (joined, tick) = tokio::join!(
+        Server::join(
+            hub.join(PeerId::from_u64(2)),
+            MlsDevice::generate().unwrap(),
+            rng.clone(),
+            Box::new(clock.clone()),
+            "new member",
+            server.local_peer(),
+            &invite
+        ),
+        server.sync_once()
+    );
+    tick.unwrap();
+    let _joined = joined.unwrap();
+    assert!(server.epoch() > epoch);
+    assert!(server.sync.matches_registry_instance(&original.instance));
+    let context = server.inspection_context(target).unwrap();
+    assert!(store
+        .studio_inspection_is_current(7, &context.group, target, context.device, &original.stamp)
+        .unwrap());
+    assert!(
+        server
+            .finish_studio_inspection(&store, 7, target, original)
+            .is_err(),
+        "changed live membership context escaped inspection fence"
+    );
+    let current = server
+        .begin_inspection_with_pool(&store, 7, target, &pool)
+        .unwrap()
+        .rebuild()
+        .await
+        .unwrap();
+    assert!(server
+        .finish_studio_inspection(&store, 7, target, current)
+        .is_ok());
+    let old_instance = server
+        .begin_inspection_with_pool(&store, 7, target, &pool)
+        .unwrap()
+        .rebuild()
+        .await
+        .unwrap();
+    let mut restored = Server::restore(
+        &server.snapshot().unwrap(),
+        hub.join(PeerId::from_u64(9)),
+        rng,
+        Box::new(clock),
+        "restored",
+    )
+    .unwrap();
+    assert!(restored.inspection_context(target).unwrap() == old_instance.context);
+    assert!(store
+        .studio_inspection_is_current(
+            7,
+            &context.group,
+            target,
+            context.device,
+            &old_instance.stamp
+        )
+        .unwrap());
+    assert!(
+        restored
+            .finish_studio_inspection(&store, 7, target, old_instance)
+            .is_err(),
+        "replacement sync instance escaped inspection fence"
+    );
+}
+
+#[tokio::test]
 async fn studio_inspection_cancelled_worker_and_retained_result_keep_original_capacity() {
     let root = tempfile::tempdir().unwrap();
     let mut rng = ChaCha20Rng::seed_from_u64(74);
