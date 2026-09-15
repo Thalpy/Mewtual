@@ -10,10 +10,13 @@ native commands/events, retry rules and explicitly unavailable controls. Update 
 every bridge-facing slice; UI layout and rendering remain user-owned.
 
 Current follow-up (2026-09-15): the user passes `aa0a81f...0b28f06` profiling and detached
-inspection design without findings. Read-only `studio_overlay_read` now implements capture,
+inspection design without findings. Code/test checkpoint `d5ca2ff` adds read-only
+`studio_overlay_read`, implementing capture,
 detached reconstruction, full intent-wrapper currency and native delivery under one original
-session/request. Implementation review and final native checks are pending; local store,
-resource ownership, actor checkpoint progress and real Index/Flipnote fixture tests pass.
+session/request. Implementation review is pending; all 25 native Studio tests and both new
+native inspection mutations with restored passes succeed on GitHub. Local store, resource
+ownership, actor checkpoint progress, real Index/Flipnote fixtures and all three app mutations
+with restored passes also succeed. Exact code/checkout and scope are in HANDOVER.
 This advances block 2 of Gate 4. It does not enable local Save/handoff or complete Gate 4.
 
 ## Scope reset (2026-09-08)
@@ -199,8 +202,9 @@ Block 2 still needs actor/native overlay integration, bounded preparation/signin
 manual overlay inspection/copy/export/disposition, stale-base and preview-based local-work
 handling, and remaining repeated-owner tenure integration. Blocks 3 (runtime signed fault
 repair) and 4 (combined Gate 4 acceptance and required suites) remain. These are unequal work
-areas, not percentages. The next checkpoint [measures handoff custody and proposes detached
-inspection](GATE4-OVERLAY-RUNTIME-REVIEW.md); it does not enable durable overlay Save in native.
+areas, not percentages. The [custody profiling and detached-inspection design](GATE4-OVERLAY-RUNTIME-REVIEW.md)
+are accepted at `0b28f06`. Their [read-only implementation](GATE4-INSPECTION-IMPLEMENTATION-REVIEW.md)
+at `d5ca2ff` requires implementation review; it does not enable durable overlay Save in native.
 
 The [Closing overlay foundation design](GATE4-CLOSING-OVERLAY-REVIEW.md) passed user review at
 `d576af2` on 2026-09-14 with no required changes. Its core/store implementation now distinguishes
@@ -222,7 +226,7 @@ It persists Prepared, the whole signed source, then Completed before releasing t
 ordinary intents remain pending for receipt settlement. A local source dependency also prevents
 missing metadata from exposing an unfinished batch after restart. This is still block 2.
 The user accepts the [runtime inspection design](GATE4-OVERLAY-RUNTIME-REVIEW.md) at `0b28f06`;
-its separate read-only native implementation is now under validation. Overlay writes,
+its separate read-only native implementation at `d5ca2ff` awaits user implementation review. Overlay writes,
 replay/disposition, provisional-preview writes and new tenure authority remain unavailable.
 
 **Combined scheduling checkpoint `6b71d96` (2026-09-13; user review PASS).** The three-member actor

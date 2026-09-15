@@ -6,8 +6,11 @@ actor/native activation and full Gate 4 acceptance. Finish Gate 4 before startin
 Durable overlay Save is still unavailable in native. The next integration checkpoint addresses
 bounded preparation/signing and the overlay lifecycle. The user accepts the
 [detached inspection proposal](GATE4-OVERLAY-RUNTIME-REVIEW.md) at `0b28f06`, with no findings.
-Its read-only `studio_overlay_read` implementation is now registered; implementation review
-is pending. This does not enable durable overlay Save or close Gate 4.
+Its read-only `studio_overlay_read` implementation is registered at `d5ca2ff`; the
+[implementation review](GATE4-INSPECTION-IMPLEMENTATION-REVIEW.md) is pending. This does not
+enable durable overlay Save or close Gate 4.
+GitHub passes all 25 native Studio tests and both new inspection mutations with restored
+passes at that code/test checkpoint. Exact checkout and execution scope are in [HANDOVER](HANDOVER.md).
 
 Earlier accepted scheduling/preview evidence: combined scheduling at `6b71d96` passed user
 review without required changes. Block 1 of the four remaining Gate 4 work areas is accepted; three remain.
@@ -121,12 +124,13 @@ this encoded limit nor the bounded input is a measured heap or latency guarantee
 frontend adapter/layout remains separately owned; this adds the backend contract only.
 
 The native entry points are [studio.rs](../apps/desktop/src-tauri/src/studio.rs),
+[studio/inspection.rs](../apps/desktop/src-tauri/src/studio/inspection.rs) (local-draft reads),
 [studio/recovery.rs](../apps/desktop/src-tauri/src/studio/recovery.rs) (all seven
 `studio_recovery_*` commands) and
 [creative_blobs.rs](../apps/desktop/src-tauri/src/creative_blobs.rs); registration and event
 forwarding are in [lib.rs](../apps/desktop/src-tauri/src/lib.rs). These are real actor/vault
-paths. The frontend adapter/session modules above now call these commands and translate their
-results into the existing editor model.
+paths. The frontend adapter/session modules above implement the existing document and recovery
+flows. Hooking up the new local-draft read remains with the UI agent.
 
 `studio_list` and `studio_read` can now return a distinct unconfirmed-history result:
 

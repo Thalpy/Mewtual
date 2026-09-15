@@ -11,7 +11,7 @@ manual overlay inspection/copy/export/disposition, stale-base and preview-based 
 handling, and remaining repeated-owner tenure integration. Blocks 3 (runtime signed fault
 repair) and 4 (combined Gate 4 acceptance and required suites) remain. These are unequal work
 areas, not percentages. The user passes the `0b28f06` custody instrumentation and detached
-inspection proposal with no findings. The next implementation registers read-only
+inspection proposal with no findings. Code/test checkpoint `d5ca2ff` registers read-only
 `studio_overlay_read`, with detached reconstruction and original-context delivery checks;
 its implementation review remains pending. Durable overlay Save is still unavailable.
 

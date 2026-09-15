@@ -1,7 +1,10 @@
 # Gate 4: detached local-draft inspection implementation
 
-Status: implementation and regression checkpoint, 2026-09-15. Base:
-`0b28f06b8a2076a345f06dfea1220787c262650b`. The user passes that profiling/design checkpoint
+Status: implementation and regression checkpoint, 2026-09-15. Code/test head:
+`d5ca2ff1516852f15edf7fe5b09db07c61fcda56`, base:
+`0b28f06b8a2076a345f06dfea1220787c262650b`. Production changes are at `bf7ceed`;
+`d55c05d` and `d5ca2ff` extend/correct tests and documentation. Subsequent evidence updates
+change documentation only. The user passes the base profiling/design checkpoint
 without findings. HANDOFF-002 and all prior closures stand. This checkpoint requires a separate
 user adversarial implementation review. Gate 4 remains active; Gate 5 is untouched.
 
@@ -63,8 +66,9 @@ failures are recorded separately in HANDOVER. This checkpoint does not close the
 ## Message for adversarial review
 
 ```text
-Please review the detached local-draft inspection implementation against
-0b28f06b8a2076a345f06dfea1220787c262650b on PR #26, Create-suite-2.
+Please review detached local-draft inspection at d5ca2ff1516852f15edf7fe5b09db07c61fcda56
+against 0b28f06b8a2076a345f06dfea1220787c262650b on PR #26, Create-suite-2.
+Compare: https://github.com/Thalpy/Mewtual/compare/0b28f06b8a2076a345f06dfea1220787c262650b...d5ca2ff1516852f15edf7fe5b09db07c61fcda56
 Read docs/GATE4-INSPECTION-IMPLEMENTATION-REVIEW.md, the latest HANDOVER evidence,
 and FLIPNOTE-UI-HOOKS.md, then inspect the actual store/app/native code and test logs.
 

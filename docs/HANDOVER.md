@@ -10,15 +10,17 @@ and ranks the live hazards in that path.
 
 ## Status (latest entry: 2026-09-15)
 
-- **Runtime inspection design accepted; implementation in progress (2026-09-15).**
+- **Runtime inspection design accepted; read-only implementation awaiting review (2026-09-15).**
   The user reviews `aa0a81f...0b28f06` and passes the profiling instrumentation and
   [detached-inspection proposal](GATE4-OVERLAY-RUNTIME-REVIEW.md) without findings or required
   changes. They inspected source and recorded evidence, without independently running Cargo.
   The acceptance excludes actor/native implementation, signing/commit integration and full
-  Gate 4. Work now implements read-only capture/rebuild/currency/delivery through the existing
+  Gate 4. Code/test head `d5ca2ff1516852f15edf7fe5b09db07c61fcda56` implements read-only
+  capture/rebuild/currency/delivery through the existing
   actor and native custody paths. `studio_overlay_read` is registered with the explicit main
   window capability and account-read policy, returning a separate local-draft/absent result.
-  Native validation and a separate user implementation review remain.
+  The [implementation review note](GATE4-INSPECTION-IMPLEMENTATION-REVIEW.md) supplies its exact
+  comparison and review message. A separate user implementation review remains.
 
   Local results: five store inspection tests pass (209.74 s), including full-wrapper changes
   preserving displayed draft/basis, presence/deletion/remount/scope/corruption, author/channel,
@@ -45,7 +47,45 @@ and ranks the live hazards in that path.
   boundaries, not signed-admission, heap or latency qualification. The initial mutation run
   detected currency and channel removal, but a later
   compile error in the newly added size fixture correctly failed the harness; the code was
-  restored and the fixture corrected. Complete mutation success is still pending.
+  restored and the fixture corrected. The complete final local mutation run now passes:
+  full-wrapper currency, channel and author removal each execute one test and fail at the
+  required assertion; each mutation restores source bytes exactly and its restored regression
+  passes. Log: `logs/gate4-inspection-mutations-final.log`; six individual logs are under
+  `logs/studio-inspection-mutations/app-*`. Root/native formatting and clean-source diff checks
+  pass after the final restoration.
+  Final strict app library/test Clippy passes in 23.70 s on the restored final code and fixtures
+  (`logs/gate4-inspection-final-clippy.log`).
+
+  GitHub [native run 34944924740](https://github.com/Thalpy/Mewtual/actions/runs/34944924740)
+  succeeds for `d5ca2ff`, using PR merge checkout
+  `27a883bc499cd43ef1c568a1014ae714412e8b5c`. The actual job log records **25 native tests
+  passing** (68.21 s), both existing preview mutations and restored passes, and both new
+  inspection mutations and restored passes. Removing only final inspection validity exposes
+  the fully converted draft at `inspection/tests.rs:115`; replacing the original context
+  between visits reaches the obsolete-result assertion at `inspection/tests.rs:164`.
+  Each mutation executes exactly one failing test with its intended message and restores source
+  bytes exactly. The uploaded mutation artifact's SHA-256 is
+  `f2d8dd45bce669b9b310c1829cb913f63eed3c3239b715c58d4452cea16820dd`.
+  [Two-client run 34944924758](https://github.com/Thalpy/Mewtual/actions/runs/34944924758)
+  also succeeds. These are focused results; broad CI is not green. The inspected current-head
+  cargo-deny log repeats the existing rustls 0.23.40 advisory `RUSTSEC-2026-0285` failure.
+  The inspected Linux frontend/Tauri job in
+  [CI run 34944924751](https://github.com/Thalpy/Mewtual/actions/runs/34944924751) passes all
+  **1,229 frontend tests** and Svelte checking, then fails strict native compilation on the
+  previously recorded unused `media_decode::as_mime` and `security_intent` APIs. This does not
+  contradict the focused native test workflow, which does not deny those baseline warnings.
+
+  GitHub [inspection run 34944924744](https://github.com/Thalpy/Mewtual/actions/runs/34944924744)
+  succeeds at the same merge checkout: **nine store/actor tests pass** (267.08 s), **two shared
+  fixture/shape tests pass** (57.90 s), and all three app mutations trigger their intended
+  executed assertions, restore byte-for-byte and pass restored source. The actual job log was
+  inspected; artifact SHA-256:
+  `4cf60c97d0774058a3a8edf53b84f99f10fae885c93c0ff171c274791ba6e1a6`.
+  The [overlay foundation workflow](https://github.com/Thalpy/Mewtual/actions/runs/34944924752)
+  also succeeds. At 08:20 UTC the [handoff run](https://github.com/Thalpy/Mewtual/actions/runs/34944924745)
+  has passed its normal test step and is still running its mutation step; no completed handoff
+  workflow PASS is claimed for this head yet. Evidence updates after `d5ca2ff` are documentation
+  only. New/changed relative documentation links and `git diff --check` pass.
 
 - **HANDOFF-002 closed; bounded handoff implementation accepted (2026-09-15).**
   The user's re-review compares `85e7179...aa0a81f`, with correction code at `62f06d4`;
