@@ -11,6 +11,13 @@ HANDOFF-002 and all prior closures stand. Gate 4 remains active; Gate 5 is untou
 
 ## INSPECTION-TEST-001 correction
 
+Correction code/test head: `d38df93f2ba49b20b632870d38d353e69e2d60d8`, against
+`c47ae0b61b9b8adc0ab5e4bf798199413bfff73c`. Only the regression, mutation harness and
+documentation change. Execution evidence is in HANDOVER.
+The focused local regression and size-only mutation/restored test pass. GitHub run 34953124247
+also passes all 10 store/actor tests, two fixture tests and four mutation/restoration pairs.
+The added mutation fails at `inspection.rs:182`, then the restored two-kind test passes.
+
 The original growing-record fixture rejects even if currency checks only physical size. The
 new regression replaces one ordinary pending envelope's fixed-width nonce after capture,
 through the existing authenticated record writer. Both records must fully decode with equal
@@ -81,8 +88,9 @@ failures are recorded separately in HANDOVER. This checkpoint does not close the
 ## Message for correction re-review
 
 ```text
-Please re-review INSPECTION-TEST-001 against c47ae0b61b9b8adc0ab5e4bf798199413bfff73c
-on PR #26, Create-suite-2. Use the pushed correction head and execution evidence in HANDOVER.
+Please re-review INSPECTION-TEST-001 at d38df93f2ba49b20b632870d38d353e69e2d60d8
+against c47ae0b61b9b8adc0ab5e4bf798199413bfff73c on PR #26, Create-suite-2.
+Read the latest execution evidence in HANDOVER (subsequent documentation updates only).
 Inspect the new same-size store regression and added size-only mutation in
 .github/scripts/check-studio-inspection-mutations.py.
 

@@ -14,8 +14,9 @@ areas, not percentages. The user passes the `0b28f06` custody instrumentation an
 inspection proposal with no findings. Code/test checkpoint `d5ca2ff` registers read-only
 `studio_overlay_read`, with detached reconstruction and original-context delivery checks;
 its implementation review passes at `c47ae0b`. P3 INSPECTION-TEST-001 requests digest-specific
-regression coverage; its test/harness correction remains under validation, with no requested
-production change. Durable overlay Save is still unavailable.
+regression coverage; its correction at `d38df93` passes the focused local regression and
+size-only mutation/restored test, with re-review pending and no production change.
+Durable overlay Save is still unavailable.
 
 The [Closing overlay foundation design](GATE4-CLOSING-OVERLAY-REVIEW.md) passed user review at
 `d576af2` on 2026-09-14 with no required changes. Its core/store implementation now distinguishes

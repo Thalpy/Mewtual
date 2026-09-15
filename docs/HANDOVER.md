@@ -28,10 +28,45 @@ and ranks the live hazards in that path.
   reviewer's size-only comparison. The first local compile exhausted memory; a single-job
   retry reached linking but failed because drive C had no free space. No tests executed in
   either attempt. Approximately 360 MiB of generated incremental cache was removed from the
-  verified, unlinked `target/debug/incremental` workspace directory. A focused retry and GitHub
-  validation are being collected; the finding is not yet closed. Native commands/result shapes
-  and production behavior are unchanged.
+  verified, unlinked `target/debug/incremental` workspace directory. The focused retry passes
+  both Index and Flipnote (one test, 56.20 s) at correction head
+  `d38df93f2ba49b20b632870d38d353e69e2d60d8`, pushed to `Create-suite-2` / PR #26. Command:
+  `cargo test --locked -j 1 --config profile.test.package.catcoms-app.debug=0 -p catcoms-app
+  --lib studio_inspection_same_size_authenticated_replacement_is_stale -- --nocapture`.
+  Log: `logs/gate4-inspection-digest-regression-final.log`. Strict app library/test Clippy
+  passes with one build job in 61 s (`logs/gate4-inspection-digest-clippy.log`); root formatting
+  and diff checks pass. The focused local mutation driver imports the committed harness's
+  fourth app mutation, uses the same exact test with `-j 1`, and detects the intended assertion
+  at `inspection.rs:182` (one executed failure, 27.62 s). It restores source bytes exactly, then
+  the restored test passes both document kinds (one test, 55.18 s). This is the new mutation
+  only; the complete default four-mutation harness runs separately on GitHub. Local logs:
+  `logs/gate4-inspection-digest-mutation-local.log` and
+  `logs/studio-inspection-mutations/app-3-local-{mutated,restored}.log`. No compile/empty-filter
+  failure is counted as mutation success. The finding awaits user re-review; native
+  commands/result shapes and production behavior are unchanged.
   Gate 4 remains active and incomplete; Gate 5 remains untouched.
+
+  GitHub [native run 34953124271](https://github.com/Thalpy/Mewtual/actions/runs/34953124271)
+  passes at `d38df93`, using PR merge checkout
+  `4f427fc59fd535a7d12ab7031b500f546585cec6`. The actual job log shows 25 native tests passing
+  (83.60 s), both existing preview mutations and both inspection mutations detected, with all
+  restored regressions passing. [Two-client run 34953124337](https://github.com/Thalpy/Mewtual/actions/runs/34953124337)
+  also passes.
+
+  GitHub [inspection run 34953124247](https://github.com/Thalpy/Mewtual/actions/runs/34953124247)
+  passes at the same merge checkout. The inspected actual job log records **10 store/actor
+  tests passing** (199.47 s), **two shared fixture tests passing** (52.31 s), and all **four
+  intended app mutation failures plus four restored passes**. The added size-only comparison
+  fails specifically at `inspection.rs:182` (one executed failure, 28.02 s), restores source
+  byte-for-byte and passes the restored two-kind regression (one test, 56.47 s).
+  The [app mutation artifact](https://github.com/Thalpy/Mewtual/actions/runs/34953124247/artifacts/10390418526)
+  contains eight individual logs, including
+  `app-3-mutated.log` and `app-3-restored.log`; its published SHA-256 is
+  `f3d7d5b6a9c5ce8931226238ae173d091d2a6510252ea9c38153e6653cfc17b0`.
+  The [foundation workflow](https://github.com/Thalpy/Mewtual/actions/runs/34953124188) also
+  passes. These are focused results; the handoff and broad CI workflows are still running at
+  09:48 UTC, and no repository-wide green claim is made. Evidence updates after `d38df93`
+  change documentation only. Review base: `c47ae0b61b9b8adc0ab5e4bf798199413bfff73c`.
 
 - **Read-only inspection implementation checkpoint (2026-09-15; accepted above).**
   The user reviews `aa0a81f...0b28f06` and passes the profiling instrumentation and

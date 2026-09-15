@@ -9,9 +9,10 @@ bounded preparation/signing and the overlay lifecycle. The user accepts the
 Its read-only `studio_overlay_read` implementation is registered at `d5ca2ff`; the
 [implementation review](GATE4-INSPECTION-IMPLEMENTATION-REVIEW.md) of `0b28f06...c47ae0b` now
 passes. P3 INSPECTION-TEST-001 requests stronger digest-specific regression coverage, with no
-production correction. Its test/harness correction is under validation; the finding remains
-open pending re-review. The command/result contract is unchanged. Durable overlay Save and
-full Gate 4 completion remain unavailable.
+production correction. Its correction at `d38df93` passes the local regression and size-only
+mutation/restored test, plus the complete GitHub inspection/mutation workflow; the finding
+remains open pending re-review. The command/result contract
+is unchanged. Durable overlay Save is still unavailable, and Gate 4 remains incomplete.
 GitHub passes all 25 native Studio tests and both new inspection mutations with restored
 passes at that code/test checkpoint. Exact checkout and execution scope are in [HANDOVER](HANDOVER.md).
 
