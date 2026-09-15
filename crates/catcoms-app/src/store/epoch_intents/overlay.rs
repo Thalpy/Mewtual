@@ -31,7 +31,10 @@ impl ServerStore {
         }
         let scope = scope_bytes(server, document)?;
         let mut state = self.checked_epoch_replay_state(server, document, budget, intents)?;
-        let (_, old) = self.read_epoch_intent_record(&scope, document)?;
+        // Physical size only; the record was authenticated above.
+        let old = self
+            .read_scoped_intent_plain(&scope)?
+            .map(|record| record.physical_bytes);
         let intent = LocalIntent {
             author: device.device_id(),
             operation,

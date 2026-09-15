@@ -651,7 +651,12 @@ impl EpochStorageScan<'_> {
                                 epoch_owner::storage_record(server, &document, scope, size)?
                             }
                             EpochRecordKind::Intents => {
-                                let state = epoch_intents::EpochIntentState::decode(
+                                // Accounting and reference collection need the ledger, the
+                                // handoff metadata target and the overlay's seed-derived base
+                                // CIDs, never its replayed projection. A retained branch would
+                                // otherwise be fully reconstructed on every five-family scan in
+                                // the vault, including scans for unrelated documents.
+                                let state = epoch_intents::EpochIntentState::decode_structural(
                                     &plain, scope, &document,
                                 )?;
                                 if let Some(collected) = self.references.as_mut() {

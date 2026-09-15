@@ -145,7 +145,8 @@ impl ServerStore {
     ) -> Result<(), AppError> {
         let scope = scope_bytes(server, document)?;
         let storage_scope = StorageScope::new(server, &document.server_id).map_err(invalid)?;
-        let (mut state, old) = match self.read_epoch_intent_record(&scope, document) {
+        // Retirement needs the ledger and overlay id membership, never a projection.
+        let (mut state, old) = match self.read_epoch_intent_record_structural(&scope, document) {
             Ok(value) => value,
             Err(error) => {
                 budget.invalidate();

@@ -91,10 +91,15 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
                     StudioRecovery::from_snapshot(s, &logical, target.channel()).map_err(invalid)
                 })
                 .collect::<Result<Vec<_>, _>>()?;
-            let own = store
-                .load_epoch_intents(id, &logical)?
+            // An accepted Closing-overlay entry is not ordinary replay work: its effect reaches
+            // shared history through the handoff transaction, never through ordinary Apply.
+            // Exclude annotated ids from SELECTION explicitly rather than relying on `choose`
+            // returning NoEvidence for them, which is a different guarantee. Ordinary failed
+            // Saves keep their existing NoEvidence handling.
+            let intents = store.load_epoch_intents_structural(id, &logical)?;
+            let own = intents
                 .pending()
-                .filter(|(_, i)| i.author == device.device_id())
+                .filter(|(id, i)| i.author == device.device_id() && !intents.is_overlay(id))
                 .map(|(id, i)| (*id, i.clone()))
                 .collect();
             Ok(Some(ReplayEvidence {

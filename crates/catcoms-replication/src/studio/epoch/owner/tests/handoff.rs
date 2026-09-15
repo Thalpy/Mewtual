@@ -258,3 +258,107 @@ fn studio_handoff_preparation_source_owner_must_match_verified_authority() {
         assert_eq!(signing(&mut f, &metadata, &ledger).remaining(), 2);
     }
 }
+
+/// C-1. The structural decoder must accept exactly the records the full decoder accepts, produce
+/// the identical state, and keep every check except the ordered typed reconstruction.
+#[test]
+fn studio_overlay_structural_decode_matches_full_decode_and_keeps_its_entry_checks() {
+    for art in [false, true] {
+        for count in [1usize, 4] {
+            let mut f = Fixture::new(art);
+            let (metadata, ledger, _) = branch(&mut f, count);
+            let encoded = metadata.encode_vault(&ledger).unwrap();
+
+            let full = StudioOverlayState::decode_vault(&encoded, &ledger).unwrap();
+            let structural =
+                StudioOverlayState::decode_vault_structural(&encoded, &ledger).unwrap();
+            // Canonical re-encoding is the state's complete observable content, so equal bytes
+            // from both decoders establish that nothing but the replay was skipped.
+            assert_eq!(
+                structural.encode_vault(&ledger).unwrap(),
+                full.encode_vault(&ledger).unwrap(),
+                "structural decode produced a different state"
+            );
+            assert_eq!(structural.encode_vault(&ledger).unwrap(), encoded);
+            assert_eq!(structural.target(), full.target());
+            assert_eq!(structural.is_prepared(), full.is_prepared());
+            assert_eq!(structural.has_completed(), full.has_completed());
+            assert_eq!(
+                structural.minimum_new_basis_closed_epoch(),
+                full.minimum_new_basis_closed_epoch()
+            );
+            let (a, b) = (structural.overlay().unwrap(), full.overlay().unwrap());
+            assert_eq!(
+                (a.basis(), a.author(), a.target()),
+                (b.basis(), b.author(), b.target())
+            );
+            // The structural result is still a complete branch: its projection is available on
+            // demand, it is simply not computed during decoding.
+            assert_eq!(
+                a.read(&ledger).unwrap().projection(),
+                b.read(&ledger).unwrap().projection()
+            );
+
+            // A ledger missing one annotated entry must be refused by BOTH decoders. This is the
+            // predicate M8 weakens, and it is the reason `checked_entries` stays in the
+            // structural path rather than being left to the ordered replay.
+            let mut short = IntentLedger::new(ledger.document().clone());
+            for (_, intent) in ledger.pending().take(count - 1) {
+                short
+                    .prepare(intent.author, intent.operation.clone())
+                    .unwrap();
+            }
+            assert!(
+                StudioOverlayState::decode_vault_structural(&encoded, &short).is_err(),
+                "structural decode accepted a branch whose entry is absent from the ledger"
+            );
+            assert!(StudioOverlayState::decode_vault(&encoded, &short).is_err());
+
+            // Trailing bytes and a truncated record are refused without replay.
+            let mut trailing = encoded.clone();
+            trailing.push(0);
+            assert!(StudioOverlayState::decode_vault_structural(&trailing, &ledger).is_err());
+            assert!(StudioOverlayState::decode_vault_structural(
+                &encoded[..encoded.len() - 1],
+                &ledger
+            )
+            .is_err());
+        }
+    }
+}
+
+/// C-1. Patch only the acceptance sequence of the single retained entry, leaving its id, envelope,
+/// author, count and every other field untouched. `checked_entries` is the sole guard that rejects
+/// it, so this isolates the predicate that must run in the structural path.
+#[test]
+fn studio_overlay_structural_decode_rejects_a_wrong_acceptance_sequence() {
+    for art in [false, true] {
+        let mut f = Fixture::new(art);
+        let (metadata, ledger, _) = branch(&mut f, 1);
+        // Patch the BRANCH encoding, not the enclosing version-2 state record: the state's
+        // trailing bytes are its completed-acknowledgement fields, so patching there would be
+        // caught by an unrelated check and the fixture would prove nothing.
+        let encoded = metadata.overlay().unwrap().encode_vault(&ledger).unwrap();
+        // One entry occupies the last 88 bytes, with its big-endian sequence at offset 72.
+        // The same layout the accepted 256-operation fixture relies on.
+        let entry = encoded.len() - 88;
+        assert!(crate::studio::StudioOverlay::decode_vault_structural(&encoded, &ledger).is_ok());
+        let mut patched = encoded.clone();
+        assert_eq!(
+            u64::from_be_bytes(patched[entry + 72..entry + 80].try_into().unwrap()),
+            1,
+            "the fixture must be patching the accepted entry's sequence field"
+        );
+        patched[entry + 72..entry + 80].copy_from_slice(&2u64.to_be_bytes());
+        assert_eq!(
+            patched.len(),
+            encoded.len(),
+            "only the sequence value may change"
+        );
+        assert!(
+            crate::studio::StudioOverlay::decode_vault_structural(&patched, &ledger).is_err(),
+            "structural decode accepted sequence 2 for the first accepted entry"
+        );
+        assert!(crate::studio::StudioOverlay::decode_vault(&patched, &ledger).is_err());
+    }
+}

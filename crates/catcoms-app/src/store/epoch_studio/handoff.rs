@@ -169,8 +169,11 @@ impl ServerStore {
             .map_err(invalid)?;
         self.check_handoff_references(&prepared, &candidate, &state)?;
         let scope = epoch_intents::scope_bytes(server, &document)?;
-        let (_, old) = self.read_epoch_intent_record(&scope, &document)?;
-        let original = state.encode(&scope)?;
+        // Physical size and the authenticated plaintext digest are all the unchanged fence needs;
+        // decoding again would reconstruct the whole branch a second time.
+        let original = self.read_scoped_intent_plain(&scope)?;
+        let old = original.as_ref().map(|record| record.physical_bytes);
+        let original = original.map(|record| blake3::hash(&record.plain));
         let mut completed_state = state.clone();
         completed_state.overlay = Some(completed);
         state.overlay = Some(prepared);
@@ -233,8 +236,12 @@ impl ServerStore {
             .map_err(invalid)?;
         // Recheck the actual intent contents before the first write. The source was checked
         // under the same exclusive borrow; the common writer also authenticates its old file.
-        let (actual, actual_old) = self.read_epoch_intent_record(&scope, &document)?;
-        if actual_old != old || actual.encode(&scope)?.as_slice() != original.as_slice() {
+        // Comparing the complete authenticated plaintext digest and physical size covers the same
+        // canonical bytes the previous decode-then-re-encode compared, without a second decode.
+        let actual = self.read_scoped_intent_plain(&scope)?;
+        if actual.as_ref().map(|record| record.physical_bytes) != old
+            || actual.map(|record| blake3::hash(&record.plain)) != original
+        {
             return Err(invalid("overlay intent source changed"));
         }
         let metadata_hash = *blake3::hash(&state.encode(&scope)?).as_bytes();
@@ -298,8 +305,10 @@ impl ServerStore {
         writer: &mut impl FnMut(HandoffWrite, &Path, &[u8]) -> Result<(), AppError>,
         sync: &mut impl FnMut(HandoffSync, &Path, u64) -> Result<(), AppError>,
     ) -> Result<(), AppError> {
-        let (_, old) = self
-            .read_epoch_intent_record(&epoch_intents::scope_bytes(server, document)?, document)?;
+        // `write_prepared_intents` consumes this size; it performs no old-record read of its own.
+        let old = self
+            .read_scoped_intent_plain(&epoch_intents::scope_bytes(server, document)?)?
+            .map(|record| record.physical_bytes);
         self.write_prepared_intents(
             server,
             document,
@@ -477,7 +486,7 @@ impl ServerStore {
         let document = unit.document().clone();
         let scope = epoch_intents::scope_bytes(server, &document)?;
         let (state, old) = self
-            .read_epoch_intent_record(&scope, &document)
+            .read_epoch_intent_record_structural(&scope, &document)
             .inspect_err(|_| budget.invalidate())?;
         let observed = old
             .map(|n| epoch_intents::storage_record(server, &document, &scope, n))
@@ -563,7 +572,7 @@ impl ServerStore {
     ) -> Result<(), AppError> {
         let (target, _, linked) = decode_record_link(plain, scope, document)?;
         if linked {
-            let state = self.load_epoch_intents(server, document)?;
+            let state = self.load_epoch_intents_structural(server, document)?;
             state
                 .handoff_metadata()
                 .ok_or_else(|| invalid("required handoff metadata missing"))?
@@ -583,7 +592,7 @@ impl ServerStore {
     ) -> Result<(), AppError> {
         let document = target.document(&group.group_id()).map_err(invalid)?;
         let scope = epoch_intents::scope_bytes(server, &document)?;
-        let (state, bytes) = self.read_epoch_intent_record(&scope, &document)?;
+        let (state, bytes) = self.read_epoch_intent_record_structural(&scope, &document)?;
         if let Some(metadata) = state.handoff_metadata() {
             metadata.check_target(target).map_err(invalid)?;
             if metadata.is_prepared() {
