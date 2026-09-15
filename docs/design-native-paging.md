@@ -1,7 +1,8 @@
 # Native paged history
 
-Status: design + implementation on branch `perf-native-paging` (2026-09-03). Follows the
-history-scaling work on `perf-history-scaling` (`cf608ba`), which made one materialization of a
+Status: **shipped on `main`** (2026-09-03; merged via PR #20, `455dcfa`). Neither the
+`perf-native-paging` nor the `perf-history-scaling` branch exists any more; both landed in that
+merge. Follows the history-scaling work (`cf608ba`), which made one materialization of a
 channel cheap and cached it per document version. What remained was that the webview still fetched
 and held the **entire** channel on every open and every arrival, and eight deriveds walked it.
 

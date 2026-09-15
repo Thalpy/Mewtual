@@ -59,3 +59,37 @@ test("no source file carries a raw control character where an escape belongs", (
   }
   assert.deepEqual(offenders, [], `write these as escapes instead:\n${offenders.join("\n")}`);
 });
+
+/**
+ * No plain stylesheet may use Svelte's `:global()`.
+ *
+ * Written for a real one, and the failure mode is the reason this is a test rather than a note.
+ * `app.css` is imported by `main.ts` as an ordinary stylesheet, so nothing ever compiles Svelte
+ * syntax out of it: `:global(...)` reaches the browser verbatim, is not valid CSS, and the parser
+ * discards the ENTIRE rule. Nothing warns. The build succeeds, the selector looks right in the
+ * file, and the rule has simply never existed.
+ *
+ * Four rules had been dead this way, including the two that size the jukebox deck's player, which
+ * is why a video on the deck sat at the element's default 300x150 in the corner of its surface
+ * instead of filling it. A styling bug that reads as correct source is expensive to find twice.
+ *
+ * Component `<style>` blocks are exactly where `:global()` belongs, so only standalone `.css`
+ * files are checked.
+ */
+test("a plain stylesheet never uses Svelte's :global(), which browsers discard the rule over", () => {
+  const offenders: string[] = [];
+  for (const path of sourceFiles(sourceDir)) {
+    if (extname(path) !== ".css") continue;
+    const lines = readFileSync(path, "utf8").split("\n");
+    lines.forEach((text, at) => {
+      if (text.includes(":global(")) {
+        offenders.push(`${relative(sourceDir, path)}:${at + 1} ${text.trim()}`);
+      }
+    });
+  }
+  assert.deepEqual(
+    offenders,
+    [],
+    `these rules are silently dropped by the browser; write a plain descendant selector:\n${offenders.join("\n")}`,
+  );
+});

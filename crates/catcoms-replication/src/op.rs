@@ -27,11 +27,96 @@ use catcoms_rt::CryptoRngCore;
 use catcoms_storage::pad::{self, OP_PAD_CEILING, OP_PAD_FLOOR};
 use catcoms_wire::{Decoder, DocType, Encoder};
 
-use crate::epoch::DomainOp;
+use crate::epoch::{DomainOp, MAX_SIGNED_EPOCH_OP_BYTES};
 use crate::ReplError;
 
 const OP_DOMAIN: &str = "catcoms/op/v1";
 const DOMAIN_OP_DOMAIN: &str = "catcoms/op/v2";
+
+/// P1 writers already emit raw Automerge changes. Accepting kind-2 compressed deltas would
+/// charge the compressed bytes while the parser inflates without a bound. Gate this at v2
+/// signing/decoding/verification so every later change parse (including restored logs and close
+/// reconstruction) inherits the same raw-byte bound. Legacy v1 representation is unchanged.
+fn check_domain_delta(delta: &[u8], doc_type: DocType) -> Result<(), ReplError> {
+    if delta.len() > MAX_SIGNED_EPOCH_OP_BYTES {
+        return Err(ReplError::EpochBound);
+    }
+    if delta.len() < 10 || delta[..4] != [0x85, 0x6f, 0x4a, 0x83] || delta[8] != 1 {
+        return Err(ReplError::Malformed);
+    }
+    crate::bounded_change::check(
+        delta,
+        if doc_type == DocType::DocRegistry {
+            7
+        } else {
+            crate::bounded_change::MAX_ACTIONS
+        },
+    )
+}
+
+#[cfg(test)]
+mod domain_framing_tests {
+    use super::*;
+    use automerge::transaction::{CommitOptions, Transactable};
+    use automerge::{ActorId, AutoCommit, ROOT};
+
+    #[test]
+    fn compressed_p1_changes_reject_at_decode_before_any_automerge_parse() {
+        let device = MlsDevice::generate().unwrap();
+        let mut doc =
+            AutoCommit::new().with_actor(ActorId::from(device.device_id().as_bytes().to_vec()));
+        doc.put(ROOT, "v", 1u64).unwrap();
+        doc.commit_with(CommitOptions::default().with_message("x".repeat(5 * 1024 * 1024)));
+        let mut change = doc.get_last_local_change().unwrap();
+        let compressed = change.bytes().into_owned();
+        assert_eq!(compressed[8], 2);
+        assert!(compressed.len() < MAX_SIGNED_EPOCH_OP_BYTES);
+        let domain = DomainOp {
+            nonce: [1; 16],
+            doc_type: DocType::DocRegistry,
+            logical_key: vec![1],
+            body: b"{}".to_vec(),
+        };
+        assert!(SignedOp::sign_domain(
+            &device,
+            DocType::DocRegistry,
+            1,
+            compressed.clone(),
+            &domain
+        )
+        .is_err());
+        // Construct the attacker's otherwise correctly signed v2 envelope without using the
+        // conforming signing helper, so rejection proves enforcement on receive, not just send.
+        let encoded_domain = domain.encode().unwrap();
+        let public = device.public_key_bytes();
+        let signature = device
+            .sign(&signing_payload(
+                DocType::DocRegistry,
+                1,
+                &public,
+                &compressed,
+                Some(&encoded_domain),
+            ))
+            .unwrap();
+        let forged = SignedOp {
+            doc_type: DocType::DocRegistry,
+            doc_id: 1,
+            author_device: device.device_id(),
+            author_pubkey: public,
+            delta: compressed.clone(),
+            domain_op: Some(encoded_domain),
+            signature,
+        };
+        assert!(matches!(
+            SignedOp::decode(&forged.encode()),
+            Err(ReplError::Malformed)
+        ));
+        assert!(!forged.verify());
+        // This change does not migrate or tighten the existing v1 wire grammar.
+        let legacy = SignedOp::sign(&device, DocType::Channel, 1, compressed).unwrap();
+        assert!(SignedOp::decode(&legacy.encode()).unwrap().verify());
+    }
+}
 
 /// A CRDT delta authored and inner-signed by one device.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -113,6 +198,7 @@ impl SignedOp {
         if domain_op.doc_type != doc_type {
             return Err(ReplError::EpochScope);
         }
+        check_domain_delta(&delta, doc_type)?;
         let encoded_domain = domain_op.encode()?;
         let author_pubkey = device.public_key_bytes();
         let payload = signing_payload(
@@ -141,6 +227,9 @@ impl SignedOp {
             return false;
         }
         if let Some(domain_op) = &self.domain_op {
+            if check_domain_delta(&self.delta, self.doc_type).is_err() {
+                return false;
+            }
             let Ok(domain_op) = DomainOp::decode(domain_op) else {
                 return false;
             };
@@ -203,6 +292,9 @@ impl SignedOp {
             Some(encoded)
         };
         d.finish().map_err(|_| ReplError::Malformed)?;
+        if domain_op.is_some() {
+            check_domain_delta(&delta, doc_type)?;
+        }
         Ok(Self {
             doc_type,
             doc_id,

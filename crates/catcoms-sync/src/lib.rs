@@ -59,7 +59,21 @@ use catcoms_wire::{Decoder, DocType, Encoder};
 use thiserror::Error;
 use zeroize::Zeroizing;
 
+mod blob_fetch;
+pub mod checkpoint_exchange;
+pub mod epoch_service;
+mod owner_tenure;
+pub mod receipt_head;
+pub mod registry_catchup;
+mod registry_ingress;
+mod registry_publication;
+mod studio_exchange;
+pub use studio_exchange::StudioWatch;
+pub mod registry_seed;
 mod roles;
+pub use blob_fetch::{CompletedBlobFetch, PendingBlobFetch, MAX_BLOB_FETCH_PEERS};
+pub use registry_ingress::RegistryWatch;
+pub use registry_publication::RegistrySyncInstance;
 // Re-export the role-authority logic so the product/UI layer (catcoms-app) reuses this exact,
 // canonical implementation rather than keeping a second copy that could drift.
 pub use roles::{
@@ -154,10 +168,34 @@ const KIND_DELIVERY_RECEIPT: u8 = 18;
 /// and receives only what is missing. A peer that does not know this kind answers empty, which is
 /// how the requester detects it and falls back to [`KIND_CATCHUP`].
 const KIND_CATCHUP_SINCE: u8 = 19;
+/// P1 registry pages; deliberately no legacy full-history fallback.
+const KIND_REGISTRY_PAGE: u8 = 20;
+/// Keyed P1 receipt-head discovery; no concrete epoch or legacy fallback.
+const KIND_RECEIPT_HEAD: u8 = 21;
+/// Exact expected-hash checkpoint seed, distinct from user operations and file CIDs.
+const KIND_REGISTRY_SEED: u8 = 22;
+/// Typed Studio history pages. No legacy catch-up fallback is permitted.
+const KIND_STUDIO_PAGE: u8 = 23;
+// Additive Studio logical-head and expected-hash checkpoint routes; Registry 21/22 stay v1.
+const KIND_STUDIO_HEAD: u8 = 24;
+const KIND_STUDIO_SEED: u8 = 25;
 /// Frontier entries one incremental catch-up may name. A document's frontier is one hash per
-/// concurrent writer and normally one or two; this is a bound on the walk a requester can ask a
-/// serving peer to perform, not a limit anyone reaches.
-const MAX_CATCHUP_SINCE_HEADS: usize = 64;
+/// concurrent writer, so it is one or two in ordinary use and as many as the group is wide after
+/// a partition in which everybody wrote.
+///
+/// This is deliberately generous, because the cost it was once thought to bound is not really
+/// there. The serving peer's subtraction walk visits each change at most once (`have` is a set,
+/// and a hash already in it terminates that branch), so it is `O(document)` whether it starts
+/// from two heads or five hundred; naming more of them adds 36 bytes each on the wire and a
+/// handful of misses for hashes the peer cannot resolve. `MAX_CONTROL_REQUEST` still bounds the
+/// frame, and 512 heads sit comfortably inside it.
+///
+/// What the old value of 64 did bound was the requester's ability to describe itself, and a
+/// frontier that cannot say what it holds is not merely incomplete, it is **wrong**: the peer
+/// subtracts less than it should and re-sends history the requester already has. See
+/// `docs/MESSAGE-FLOW.md` section 8 for what that composes into. The paging cursor below is the
+/// actual fix; this value keeps ordinary groups from ever reaching the situation.
+const MAX_CATCHUP_SINCE_HEADS: usize = 512;
 /// Marks a response as coming from a peer that understands [`KIND_CATCHUP_SINCE`], so "you are
 /// already up to date" (a bundle of zero ops) is distinguishable from "I did not understand you"
 /// (an empty response). Everything after it is an ordinary catch-up bundle.
@@ -167,6 +205,15 @@ const CATCHUP_SINCE_UNDERSTOOD: u8 = 1;
 /// inferred it from "did I apply anything" stopped on a chunk of ops it already had, and on a
 /// chunk that could carry nothing because the next op was larger than the budget.
 const CATCHUP_SINCE_MORE: u8 = 2;
+/// As [`CATCHUP_SINCE_MORE`], and the answer begins with a [`CATCHUP_CURSOR_BYTES`]-byte
+/// continuation naming where in the serving peer's log to resume.
+///
+/// Its own marker rather than an optional prefix on [`CATCHUP_SINCE_MORE`], because a cursor is
+/// twenty arbitrary bytes and every twenty bytes decode as one: a requester cannot tell a
+/// continuation from the first twenty bytes of a bundle by looking. Only a request that carried
+/// the cursor field is answered with this, so a build that predates paging never sees it, and if
+/// one somehow does, the unknown-marker path already falls back to whole-history catch-up.
+const CATCHUP_SINCE_PAGE: u8 = 4;
 /// The serving peer understands the request and simply does not hold this document.
 ///
 /// Distinct from [`CATCHUP_SINCE_UNDERSTOOD`] with an empty bundle, which says "you have
@@ -444,6 +491,11 @@ const CALL_SIGNAL_REFILL_PER_SEC: u64 = 8;
 /// content address is re-verified on store (so a wrong blob is rejected regardless); this
 /// only bounds memory. Mirrors the 16 MiB catch-up ceiling.
 const MAX_BLOB_RESPONSE: usize = 16 * 1024 * 1024;
+
+/// Largest creative blob fetched whole (the `.pixa` envelope ceiling). A caller must also
+/// supply its record's smaller declared limit; this does not replace aggregate Studio caps.
+pub const MAX_BOUNDED_BLOB_BYTES: usize = 9 * 1024 * 1024;
+const SIGNED_BLOB_OVERHEAD: usize = 3 * 4 + 32 + 64;
 /// Per-requesting-**member** blob-serve budget over a fixed window; the anti-amplification rate
 /// limit (a 32-byte CID can elicit up to `MAX_BLOB_RESPONSE` + a signature). A **bytes** budget
 /// (not a per-blob interval) so a single legitimate download can pull many chunks back-to-back
@@ -901,6 +953,10 @@ pub struct SyncStats {
     pub commits_served: u64,
     /// Commit-catch-up requests this node issued to recover missed commits.
     pub commit_catchups_requested: u64,
+    /// Times a reached source proved it could not chain this node's epoch onward, counted once
+    /// per epoch this node was stuck at rather than once per exchange. See
+    /// [`ChannelSync::membership_chain_gap`] for the detail and for whether one is current.
+    pub commit_chain_gaps_observed: u64,
     /// Live ops decrypted under the current epoch.
     pub ops_ingested: u64,
     /// Live ops recovered with a retained past-epoch key (crossed a boundary).
@@ -936,7 +992,7 @@ pub struct SyncStats {
 
 /// Deferred recovery work, performed on the next async drain in [`ChannelSync::run_once`]
 /// (the handlers that detect a gap run synchronously while processing an event).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum CatchupTask {
     /// Fetch and replay membership commits from `from_epoch` onward.
     Commits {
@@ -961,6 +1017,91 @@ enum CatchupTask {
     },
     /// Fetch a document's history (to recover an op we could not decrypt).
     Doc { doc_type: DocType, doc_id: u128 },
+}
+
+/// A membership chain this node cannot complete from any source it has reached.
+///
+/// The document data plane can repair a member from any peer that holds the history, but it can
+/// only be reached through the current routing label, and that label advances by replaying
+/// membership commits in order. A member that has missed more removals than every reachable peer
+/// still retains is therefore fully connected, still in the roster, and permanently unable to
+/// converge. Nothing in the protocol fixes that on its own, so the first requirement is that the
+/// state be nameable rather than inferred from an absence.
+///
+/// Evidence from the sources actually asked, not a claim about the group: another member may hold
+/// a longer log, which is why `lowest_available` keeps the best offer seen at this epoch and why
+/// the whole record is discarded the moment the epoch moves.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MembershipChainGap {
+    /// The epoch this node is stuck at.
+    pub current_epoch: u64,
+    /// The lowest commit epoch any reached source could still offer. Everything between this and
+    /// `current_epoch` has aged out of every commit log this node has seen.
+    pub lowest_available: u64,
+    /// When this was last observed, on the injected wall clock.
+    pub observed_at_ms: u64,
+}
+
+impl MembershipChainGap {
+    /// How many membership commits are missing from every log this node has reached.
+    pub fn missing_commits(&self) -> u64 {
+        self.lowest_available.saturating_sub(self.current_epoch)
+    }
+}
+
+/// What one commit catch-up exchange **established**, as distinct from how far this node happened
+/// to move while performing it.
+///
+/// The two are routinely different, and only some of them can retire recovery work. An up-to-date
+/// group answers a speculative probe with nothing, and the epoch does not move; a peer that never
+/// replied at all also leaves the epoch where it was. Collapsing both into "zero commits applied"
+/// is what let a timeout close a probe: an ordinary member that missed an epoch while offline
+/// retired its own recovery on the way back and stayed unable to read current traffic until
+/// something unrelated re-detected the gap.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CommitCatchupOutcome {
+    /// A current roster member signed a decodable bundle bound to this exact request.
+    Verified { applied: usize },
+    /// The peer returned no bundle. A member holding nothing from `from_epoch` answers exactly
+    /// this way, and so does one that refused the request: `serve_commit_catchup` sends empty
+    /// bytes for both, so the wire genuinely does not distinguish them. Counted as an
+    /// answer, because the alternative is to treat every honest up-to-date peer as a failure.
+    /// Kept as its own variant so the conflation is visible where it is relied on, and so the
+    /// day the response carries a signed empty bundle there is one place to split it.
+    Empty,
+    /// No answer at all: the request failed or passed its deadline, or what came back was
+    /// oversized, undecodable, or not signed by a current member. A fact about the peer and the
+    /// link, and evidence about the commit log in neither direction.
+    Unanswered,
+    /// The peer answered with authenticated records and none of them chain onto this node's
+    /// epoch: everything it still holds begins above where this node is.
+    ///
+    /// This is the state that was invisible. `serve_commit_catchup` sends a contiguous run from
+    /// the requester's own epoch upward, so a bundle whose lowest record is higher than that says
+    /// the intervening commits have aged out of this peer's retained log. The chain cannot be
+    /// replayed from here, the routing label cannot advance, and the member stays subscribed to
+    /// topics nobody publishes on.
+    ///
+    /// Both bands of it look the same from outside and neither used to be reportable: within
+    /// `max_commit_gap` the records buffer and cannot drain, and past it they are dropped before
+    /// buffering, which produced no evidence at all. Either way the exchange previously returned
+    /// `Verified { applied: 0 }`, which is byte-for-byte what an honest up-to-date peer returns.
+    Stranded { lowest_available: u64 },
+}
+
+impl CommitCatchupOutcome {
+    /// The commits actually applied; zero whenever nothing was established.
+    fn applied(self) -> usize {
+        match self {
+            Self::Verified { applied } => applied,
+            Self::Empty | Self::Unanswered | Self::Stranded { .. } => 0,
+        }
+    }
+
+    /// Whether the peer said anything this node may draw a conclusion from.
+    fn answered(self) -> bool {
+        !matches!(self, Self::Unanswered)
+    }
 }
 
 /// The transcript the admitter signs (and the joiner verifies) to authenticate a
@@ -1025,7 +1166,8 @@ fn catchup_auth_transcript(
 /// the server reconstructs it from where the bytes actually arrived, so a relayed request simply
 /// fails to verify.
 ///
-/// Only `KIND_CATCHUP_SINCE`, and only because it is new on this branch.
+/// New incremental catch-up, registry-page, receipt-head and checkpoint-seed kinds opt into
+/// this binding. Existing released transcripts below remain unchanged.
 ///
 /// The transcript is what a signature is over, so adding a field to it changes what an older
 /// build computes and breaks both directions of a mixed pair. `KIND_PEX` and `KIND_COMMIT_CATCHUP`
@@ -1040,7 +1182,16 @@ fn catchup_auth_transcript(
 /// somebody's behalf and re-authenticates the original bytes at the far end. A delivery receipt is
 /// built once and sent to several targets. Binding either would be wrong rather than safer.
 fn kind_binds_requester_peer(kind: u8) -> bool {
-    matches!(kind, KIND_CATCHUP_SINCE)
+    matches!(
+        kind,
+        KIND_CATCHUP_SINCE
+            | KIND_REGISTRY_PAGE
+            | KIND_RECEIPT_HEAD
+            | KIND_REGISTRY_SEED
+            | KIND_STUDIO_PAGE
+            | KIND_STUDIO_HEAD
+            | KIND_STUDIO_SEED
+    )
 }
 
 /// A **responder's** signature transcript over a served bundle (commit catch-up or
@@ -1194,6 +1345,34 @@ fn encode_signed_commit_resp(
 
 /// A parsed signed commit-catch-up response: `(responder pubkey, signature, bundle)`.
 type SignedCommitResp = (Vec<u8>, [u8; 64], Vec<u8>);
+type BorrowedBlobResp<'a> = (&'a [u8], [u8; 64], &'a [u8]);
+
+/// Borrow the response body only after checking framing and size. The transport has already
+/// buffered its globally bounded frame; this limit is before body copies, hashing and storage,
+/// not a streaming/socket allocation limit. Keep generic commit decoding separate.
+fn decode_blob_response(bytes: &[u8], max_bytes: usize) -> Result<BorrowedBlobResp<'_>, SyncError> {
+    if bytes.len() > MAX_BLOB_RESPONSE
+        || bytes.len() > max_bytes.saturating_add(SIGNED_BLOB_OVERHEAD)
+    {
+        return Err(SyncError::Malformed);
+    }
+    let mut d = Decoder::new(bytes);
+    let pubkey = d.get_bytes().map_err(|_| SyncError::Malformed)?;
+    if pubkey.len() != 32 {
+        return Err(SyncError::Malformed);
+    }
+    let signature = d
+        .get_bytes()
+        .map_err(|_| SyncError::Malformed)?
+        .try_into()
+        .map_err(|_| SyncError::Malformed)?;
+    let blob = d.get_bytes().map_err(|_| SyncError::Malformed)?;
+    if blob.len() > max_bytes {
+        return Err(SyncError::Malformed);
+    }
+    d.finish().map_err(|_| SyncError::Malformed)?;
+    Ok((pubkey, signature, blob))
+}
 
 /// Parse a signed commit-catch-up response into `(responder pubkey, signature, bundle)`.
 fn decode_signed_commit_resp(bytes: &[u8]) -> Result<SignedCommitResp, SyncError> {
@@ -1735,6 +1914,9 @@ fn decode_join_resp(bytes: &[u8]) -> Result<JoinResp, SyncError> {
 /// Errors from channel synchronization.
 #[derive(Debug, Error)]
 pub enum SyncError {
+    /// Driver-acknowledged one-shot publication failed; this is not a local-edit rollback.
+    #[error(transparent)]
+    Publication(#[from] catcoms_rt::PublishOnceError),
     /// A transport-level error.
     #[error(transparent)]
     Transport(#[from] catcoms_rt::TransportError),
@@ -1941,7 +2123,7 @@ struct ProvenMemberPeer {
     /// Whether the exchange that produced this proof was bound at **both** ends: the request
     /// carrying the peer it was sent from, and the answer carrying the peer that produced it.
     ///
-    /// Only `KIND_CATCHUP_SINCE` is. The released build's PEX and commit-catch-up transcripts do
+    /// New incremental catch-up, registry-page and receipt-head kinds are. Released PEX/commit transcripts do
     /// not bind the requester's peer and cannot start doing so without breaking every mixed pair,
     /// so an endpoint can forward somebody's live request to a real member and hand back the
     /// answer: valid, and no evidence at all about the endpoint. Those proofs are good enough to
@@ -3363,7 +3545,45 @@ fn encode_catchup_req(doc_type: DocType, doc_id: u128) -> Vec<u8> {
     e.finish()
 }
 
-fn encode_catchup_since_req(doc_type: DocType, doc_id: u128, heads: &[[u8; 32]]) -> Vec<u8> {
+/// A serving peer's resume point in its own log, as the requester replays it.
+///
+/// Opaque to the requester and meaningful only to the node that minted it: `provider` is that
+/// node's per-runtime identity, so a cursor replayed to the wrong peer, or to the same peer after
+/// a restart, is recognised as foreign and the walk simply starts again. That check is the whole
+/// of its safety requirement. A forged position can only make a server skip operations the forger
+/// then does not receive, so it is not authenticated; the fence exists to stop an honest mistake
+/// (a cursor crossing peers) from silently hiding history, not to stop a liar harming itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct CatchupCursor {
+    provider: [u8; 16],
+    position: u32,
+}
+
+const CATCHUP_CURSOR_BYTES: usize = 20;
+
+impl CatchupCursor {
+    fn encode(&self) -> [u8; CATCHUP_CURSOR_BYTES] {
+        let mut out = [0u8; CATCHUP_CURSOR_BYTES];
+        out[..16].copy_from_slice(&self.provider);
+        out[16..].copy_from_slice(&self.position.to_be_bytes());
+        out
+    }
+
+    fn decode(bytes: &[u8]) -> Option<Self> {
+        let raw: [u8; CATCHUP_CURSOR_BYTES] = bytes.try_into().ok()?;
+        Some(Self {
+            provider: raw[..16].try_into().ok()?,
+            position: u32::from_be_bytes(raw[16..].try_into().ok()?),
+        })
+    }
+}
+
+fn encode_catchup_since_req(
+    doc_type: DocType,
+    doc_id: u128,
+    heads: &[[u8; 32]],
+    cursor: Option<&CatchupCursor>,
+) -> Vec<u8> {
     let mut e = Encoder::new();
     e.put_u16(doc_type.tag());
     e.put_u128(doc_id);
@@ -3371,11 +3591,23 @@ fn encode_catchup_since_req(doc_type: DocType, doc_id: u128, heads: &[[u8; 32]])
     for head in heads {
         e.put_bytes(head).expect("a 32-byte head always encodes");
     }
+    // Trailing and optional, so a build that predates paging still decodes the frame it knows and
+    // answers it. An empty continuation means "I understand cursors and hold none yet", which is
+    // what tells the serving peer it may put one in the reply.
+    e.put_u8(1);
+    // Deliberately not `unwrap_or_default()`: the default of a fixed-size array is that many zero
+    // bytes, not the absence of one, so "no walk in progress" would travel as a real cursor at
+    // position zero under a provider stamp nobody minted.
+    let encoded = cursor.map(CatchupCursor::encode);
+    e.put_bytes(encoded.as_ref().map_or(&[][..], |c| &c[..]))
+        .expect("a 20-byte cursor always encodes");
     e.finish()
 }
 
 #[allow(clippy::type_complexity)]
-fn decode_catchup_since_req(bytes: &[u8]) -> Result<(DocType, u128, Vec<[u8; 32]>), SyncError> {
+fn decode_catchup_since_req(
+    bytes: &[u8],
+) -> Result<(DocType, u128, Vec<[u8; 32]>, Option<Option<CatchupCursor>>), SyncError> {
     let mut d = Decoder::new(bytes);
     let tag = d.get_u16().map_err(|_| SyncError::Malformed)?;
     let doc_type = DocType::from_tag(tag).ok_or(SyncError::Malformed)?;
@@ -3395,8 +3627,26 @@ fn decode_catchup_since_req(bytes: &[u8]) -> Result<(DocType, u128, Vec<[u8; 32]
             .map_err(|_| SyncError::Malformed)?;
         heads.push(head);
     }
+    // Absent for a peer that predates paging, and that is a legal frame rather than a malformed
+    // one: it is answered exactly as it always was. `Some(None)` is a paging-capable requester
+    // starting a fresh walk; `Some(Some(_))` is one continuing an existing one.
+    let cursor = if d.is_empty() {
+        None
+    } else {
+        if d.get_u8().map_err(|_| SyncError::Malformed)? != 1 {
+            return Err(SyncError::Malformed);
+        }
+        let raw = d.get_bytes().map_err(|_| SyncError::Malformed)?;
+        if raw.is_empty() {
+            Some(None)
+        } else {
+            Some(Some(
+                CatchupCursor::decode(raw).ok_or(SyncError::Malformed)?,
+            ))
+        }
+    };
     d.finish().map_err(|_| SyncError::Malformed)?;
-    Ok((doc_type, doc_id, heads))
+    Ok((doc_type, doc_id, heads, cursor))
 }
 
 fn decode_catchup_req(bytes: &[u8]) -> Result<(DocType, u128), SyncError> {
@@ -3663,8 +3913,24 @@ pub enum PostJoinDiscoveryEvent {
 }
 
 pub struct ChannelSync<T: MeshTransport, R: CryptoRngCore> {
-    transport: T,
+    // Only this owner consumes next_event. Detached requests share outbound access without
+    // moving MLS state, document authority, RNG, or the blob store out of the actor.
+    transport: Arc<T>,
+    blob_fetch_instance: Arc<()>,
+    /// Process-local incarnation, freshly allocated by new/restore; never persisted or sent.
+    registry_instance: RegistrySyncInstance,
+    registry_ingress: registry_ingress::RegistryIngress,
+    studio_exchange: studio_exchange::StudioExchange,
+    registry_pages: registry_catchup::RegistryRequests,
+    receipt_heads: receipt_head::HeadRequests,
+    registry_seeds: registry_seed::SeedRequests,
+    epoch_service: epoch_service::EpochService,
+    // A cancelled subscribe/unsubscribe may already have reached the transport. Reconcile this uncertain
+    // topic before calculating the next routing diff; never lose unsubscribe ownership.
+    routing_subscription_pending: Option<Topic>,
     group: ServerGroup,
+    /// Saved with this exact MLS group; never inferred from a received receipt or Welcome.
+    owner_tenure: owner_tenure::OwnerTenure,
     device: MlsDevice,
     rng: R,
     clock: Arc<dyn Clock + Send>,
@@ -3688,7 +3954,9 @@ pub struct ChannelSync<T: MeshTransport, R: CryptoRngCore> {
     /// (subscribing is async, rotation is not).
     needs_resync: bool,
     config: SyncConfig,
-    /// Membership commits queued for the control topic (drained in async run_once).
+    /// Broadcasts queued for a later tick (drained in async `run_once`): membership commits for
+    /// the control topic, and any document operation whose publication the transport refused
+    /// after the edit was already applied (see [`ChannelSync::post`]).
     outbox: Vec<(Topic, Vec<u8>)>,
     /// Transport peers to **evict** (P6): queued by an applied Remove commit, drained in the
     /// async `run_once` (the transport verb is async, the commit path is not). Transient and
@@ -3784,6 +4052,19 @@ pub struct ChannelSync<T: MeshTransport, R: CryptoRngCore> {
     member_route_revision: u64,
     /// Recovery work to perform on the next async drain.
     catchup_queue: Vec<CatchupTask>,
+    /// Whether this process still owes its restored documents one whole-node catch-up sweep.
+    ///
+    /// Set by [`ChannelSync::restore`] when a snapshot brought documents back, and cleared by the
+    /// first peer that proves it can serve a document catch-up. Gossip replays nothing written
+    /// while this node was off, and `member_peers` holds only this session's proofs, so a restart
+    /// reaches its first connection unable to aim recovery anywhere; without this the sweep waited
+    /// on a second connection edge that a stable link never produces, and a room that stayed quiet
+    /// remained as short as the restore left it.
+    ///
+    /// One sweep per process, and only for a restored one. A node that founded or joined in this
+    /// session has nothing older than the session to recover, and sweeping there costs a tick that
+    /// discovery and presence are still using to converge.
+    first_proof_sweep_owed: bool,
     /// Authenticated acknowledgements waiting for a live route back to each op author. Entries
     /// are queued only after decrypting, signature-verifying and newly applying an op; bounded so
     /// an offline author cannot turn receipt retries into unbounded session state.
@@ -3823,6 +4104,26 @@ pub struct ChannelSync<T: MeshTransport, R: CryptoRngCore> {
     /// that source, not about the group, so it takes every eligible source saying it before the
     /// document is treated as caught up. Reset whenever the version moves.
     catchup_sources_checked: HashMap<(DocType, u128), (u64, BTreeSet<PeerId>)>,
+    /// This node's identity as a catch-up *provider*, minted per runtime.
+    ///
+    /// A resume position means something only against the log that produced it: the same operation
+    /// sits at a different index on every member, and a restored snapshot need not rebuild the
+    /// same order. Stamping each continuation with this lets the serving side recognise one that
+    /// came from somewhere else and start the walk again instead of skipping history. It is not
+    /// persisted, so a restart correctly invalidates every cursor outstanding against this node.
+    catchup_provider: [u8; 16],
+    /// Where this node is in each serving peer's log, per document, for a walk in progress.
+    /// Keyed by peer because a cursor from one is meaningless to another. Bounded like every
+    /// other per-document ledger here; the keys are all this node's own.
+    catchup_cursors: HashMap<(DocType, u128, PeerId), CatchupCursor>,
+    /// The membership chain this node could not complete, if it has met one. Never persisted, and
+    /// read through [`ChannelSync::membership_chain_gap`], which discards it once the epoch moves.
+    commit_chain_gap: Option<MembershipChainGap>,
+    /// Tasks whose lack of an eligible source has already been reported. A kept task is retried
+    /// on every drain, so without this the same stall is restated for as long as it lasts: one
+    /// document with one checked source wrote a line a second for half an hour. Emptied whenever
+    /// eligibility actually changes, so the next stall is reported afresh.
+    catchup_stall_reported: HashSet<CatchupTask>,
     /// An in-progress fork-resolution contest (only when `max_committer_rank >= 1`).
     pending: Option<PendingResolve>,
     /// Provisional-Welcome (or rejection) pushes to deliver to joiners once a
@@ -4064,9 +4365,23 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         // replaces it with the transferred one via `adopt_routing_state`.
         let mut file_wrap_key = Zeroizing::new([0u8; 32]);
         rng.fill_bytes(file_wrap_key.as_mut());
+        // Per-runtime, never persisted: a restart must invalidate the resume positions other
+        // members are holding against this node's log rather than have them silently skip.
+        let mut provider = [0u8; 16];
+        rng.fill_bytes(&mut provider);
         let clock: Arc<dyn Clock + Send> = Arc::from(clock);
         let mut this = Self {
-            transport,
+            transport: Arc::new(transport),
+            blob_fetch_instance: Arc::new(()),
+            registry_instance: RegistrySyncInstance::new(),
+            registry_ingress: registry_ingress::RegistryIngress::default(),
+            studio_exchange: studio_exchange::StudioExchange::default(),
+            registry_pages: registry_catchup::RegistryRequests::default(),
+            receipt_heads: receipt_head::HeadRequests::default(),
+            registry_seeds: registry_seed::SeedRequests::default(),
+            epoch_service: epoch_service::EpochService::default(),
+            routing_subscription_pending: None,
+            owner_tenure: owner_tenure::OwnerTenure::new(&group),
             group,
             device,
             rng,
@@ -4107,6 +4422,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             manual_redial_last_ms: None,
             member_route_revision: 0,
             catchup_queue: Vec::new(),
+            first_proof_sweep_owed: false,
             delivery_receipt_outbox: VecDeque::new(),
             delivery_receipt_targets: VecDeque::new(),
             delivery_receipts: HashMap::new(),
@@ -4117,6 +4433,10 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             catchup_cooldowns: HashMap::new(),
             catchup_continuations: HashMap::new(),
             catchup_sources_checked: HashMap::new(),
+            catchup_provider: provider,
+            catchup_cursors: HashMap::new(),
+            commit_chain_gap: None,
+            catchup_stall_reported: HashSet::new(),
             pending: None,
             welcome_outbox: Vec::new(),
             add_request_queue: VecDeque::new(),
@@ -4246,6 +4566,11 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
                 .map_err(|_| oversize())?;
             e.put_bytes(&cached.owner_sig).map_err(|_| oversize())?;
         }
+        // P1 observed tenure is an optional versioned tail for old-snapshot compatibility.
+        // Persist it together with MLS: a separately saved counter could bless an old tenure
+        // after a crash or A -> B -> A. Unknown is encoded explicitly on every new snapshot.
+        e.put_bytes(&self.owner_tenure.encode(&self.group)?)
+            .map_err(|_| oversize())?;
         Ok(Zeroizing::new(e.finish()))
     }
 
@@ -4347,6 +4672,11 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             }
             (gen, set, nodes, direct)
         };
+        let tenure_bytes = if d.is_empty() {
+            None
+        } else {
+            Some(d.get_bytes().map_err(|_| bad())?)
+        };
         d.finish().map_err(|_| bad())?;
 
         // Reconstruct the MLS device + group, then build a base synchronizer and override its
@@ -4355,7 +4685,12 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         // file-wrap key is persisted separately (appended last), so the routing struct here
         // carries `None` for it.
         let (device, group) = restore_server(&mls)?;
+        let tenure = match tenure_bytes {
+            Some(bytes) => owner_tenure::OwnerTenure::decode(bytes, &group)?,
+            None => owner_tenure::OwnerTenure::unknown(&group),
+        };
         let mut this = Self::new(transport, group, device, rng, clock);
+        this.owner_tenure = tenure;
         let (label, secrets) = decode_routing_state(&routing_bytes)?;
         this.adopt_routing_state(RoutingState {
             label,
@@ -4376,6 +4711,10 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             this.docs.insert((doc.doc_type(), doc.doc_id()), doc);
         }
         this.commit_log = commit_log;
+        // A snapshot's documents are as old as the process that wrote them, and nothing else will
+        // notice that. See `first_proof_sweep_owed`; discharged by the first member that proves
+        // it can serve a document catch-up.
+        this.first_proof_sweep_owed = !this.docs.is_empty();
         // Stamp every restored record as seen now. The stamps are transient (they are not in the
         // snapshot), and leaving them absent would make the whole restored map read as maximally
         // stale, so the first new record learned after a reload would evict a real member.
@@ -4524,6 +4863,32 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         self.blobs = blobs;
     }
 
+    /// Saved-content commands must not silently use the process-local attachment fallback.
+    pub fn has_persistent_blob_store(&self) -> bool {
+        self.blobs.is_persistent()
+    }
+
+    /// Local explicit-retention operations. Their policy/consent lives in the owning app actor;
+    /// these calls are never exposed through member requests or replicated expiry fields.
+    pub fn kept_files(&self) -> catcoms_storage::kept::KeptFiles {
+        self.blobs.kept_files()
+    }
+    pub fn begin_keep(&mut self, plan: catcoms_storage::kept::KeepPlan) -> Result<u64, SyncError> {
+        Ok(self.blobs.begin_keep(plan)?)
+    }
+    pub fn put_keep(&mut self, token: u64, bytes: &[u8]) -> Result<(), SyncError> {
+        Ok(self.blobs.put_keep(token, bytes)?)
+    }
+    pub fn finish_keep(&mut self, token: u64) -> Result<(), SyncError> {
+        Ok(self.blobs.finish_keep(token)?)
+    }
+    pub fn abort_keep(&mut self, token: u64) -> Result<(), SyncError> {
+        Ok(self.blobs.abort_keep(token)?)
+    }
+    pub fn forget_kept(&mut self, cid: &Cid) -> Result<(), SyncError> {
+        Ok(self.blobs.forget_kept(cid)?)
+    }
+
     /// Encrypt a file under this group's stable file-wrap key (Phase 9h). Returns its
     /// [`FileRef`] (to record in the encrypted file index) and the ciphertext blob to store +
     /// share over the mesh. The ciphertext is content-addressed by its own CID; only members
@@ -4567,6 +4932,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     ) -> Self {
         let connection_handoff = std::mem::take(&mut routing.connection_handoff);
         let mut this = Self::new(transport, group, device, rng, clock);
+        this.owner_tenure = owner_tenure::OwnerTenure::unknown(&this.group);
         // A joiner has NO group file-wrap key of its own; only the founder mints one. Zero
         // the random key `new` seeded so that an absent/failed transfer leaves `has_file_key`
         // false (and `add_file` refuses), rather than a wrong random key that would silently
@@ -4688,6 +5054,19 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     /// **automerge change hash** of the edit; the handle [`ChannelSync::peers_with_change`]
     /// takes to report who has since proved they hold it. Callers that don't track delivery
     /// simply drop it.
+    ///
+    /// **The edit is the acceptance point, not the broadcast.** Everything that can legitimately
+    /// refuse the write happens before it: an unopened document, a missing routing secret, a
+    /// sealing or automerge failure. Past that the operation exists, with a stable hash, in a
+    /// document this process will go on to serve and persist; reporting a failed *publication* as
+    /// a failed post told every caller above that nothing had happened while something had. In
+    /// the product that meant a message committed to the local channel with no delivery tracking,
+    /// no UI event and no save, so retyping it minted a second copy under a new id and both
+    /// surfaced later.
+    ///
+    /// A publication that cannot go out now is queued in the same bounded outbox as a membership
+    /// commit and retried on the next tick, and the operation is recoverable regardless: it is in
+    /// the document, so it persists with it and reaches other members through ordinary catch-up.
     pub async fn post<F>(
         &mut self,
         doc_type: DocType,
@@ -4712,8 +5091,28 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             bytes = bytes.len(),
             "post op"
         );
-        self.transport.publish(topic, Bytes::from(bytes)).await?;
+        if let Err(error) = self
+            .transport
+            .publish(topic.clone(), Bytes::from(bytes.clone()))
+            .await
+        {
+            tracing::warn!(
+                %error,
+                ?doc_type,
+                doc_id,
+                "op accepted locally but could not be published; queued for the next tick"
+            );
+            self.queue_broadcast(topic, bytes);
+        }
         Ok(change)
+    }
+
+    /// Queue a payload for the next [`Self::drain_outbox`], within `max_outbox` (oldest dropped).
+    fn queue_broadcast(&mut self, topic: Topic, bytes: Vec<u8>) {
+        self.outbox.push((topic, bytes));
+        while self.outbox.len() > self.config.max_outbox {
+            self.outbox.remove(0);
+        }
     }
 
     /// Process one inbound transport event (gossiped op, membership commit, or a
@@ -4735,15 +5134,32 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     /// `Transport(Closed)`. `member_peers` is written only by `promote_member_peer`, off a
     /// roster-verified signed catch-up, so it means precisely "has proved it can answer".
     ///
-    /// Accepted cost: a freshly restored node has an empty `member_peers` and so does not sweep on
-    /// its first reconnect. It proves a member on the first successful catch-up and sweeps after.
+    /// A freshly restored node has an empty `member_peers` and so does not sweep on its first
+    /// reconnect. It proves a member on the first successful catch-up, and
+    /// [`Self::promote_member_peer_bound`] runs this sweep at that point instead. Leaving that
+    /// second half unwritten was the whole of the restart bug: the gate declined the connection,
+    /// nothing declined it again once the proof arrived, and a channel could stay short for the
+    /// rest of the session.
     fn sweep_docs_on_reconnect(&mut self, peer: PeerId) {
         if !self.peer_is_preferred_source(peer) {
+            tracing::debug!(
+                ?peer,
+                open_docs = self.docs.len(),
+                "recovery sweep declined: peer has not proved it can serve a catch-up"
+            );
             return;
         }
+        let before = self.catchup_queue.len();
         for (doc_type, doc_id) in self.docs.keys().copied().collect::<Vec<_>>() {
             self.enqueue_doc_catchup(doc_type, doc_id);
         }
+        tracing::debug!(
+            ?peer,
+            open_docs = self.docs.len(),
+            queued = self.catchup_queue.len() - before,
+            queue_len = self.catchup_queue.len(),
+            "recovery sweep queued every open document"
+        );
     }
 
     fn touch_member_routes(&mut self) {
@@ -4877,6 +5293,18 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             })
             .map(|(device, _)| *device)
             .collect();
+        // The four states a user's report conflates (connected, authenticated, subscribed,
+        // caught up) start being told apart here: this is "connected", and the rest of the line
+        // says how much of the other three this peer already had.
+        tracing::debug!(
+            ?peer,
+            claimed_by_member = !reconnected_devices.is_empty(),
+            proven = self.peer_is_preferred_source(peer),
+            bound = self.peer_has_bound_member_proof(peer),
+            connected = self.connected_peers.len(),
+            epoch = self.group.epoch(),
+            "peer connected"
+        );
         self.topology_promotions
             .retain(|device| !reconnected_devices.contains(device));
         self.remember_peer(peer);
@@ -4976,6 +5404,17 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             return;
         }
         let changes_member_route = self.peer_claimed_by_current_member(peer);
+        tracing::debug!(
+            ?peer,
+            claimed_by_member = changes_member_route,
+            proven = self.peer_is_preferred_source(peer),
+            connected = self.connected_peers.len(),
+            inflight_catchup = self
+                .catchup_inflight
+                .as_ref()
+                .is_some_and(|(_, asked)| *asked == Some(peer)),
+            "peer disconnected"
+        );
         if let Some(evidence) = self.pairwise_reachability.get_mut(&peer) {
             evidence.active_paths.clear();
             evidence.updated_at_ms = self.clock.monotonic_ms();
@@ -5078,7 +5517,9 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
                     // for the next one would leave the ex-member attached across the rotation.
                     self.drain_evictions().await;
                     self.resync_if_needed().await;
-                } else {
+                } else if !self.on_registry_gossip(&topic, &data)
+                    && !self.on_studio_gossip(&topic, &data)
+                {
                     self.on_gossip(from, &data);
                 }
                 Ok(true)
@@ -5104,6 +5545,32 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
                 };
                 if data.len() > request_limit {
                     responder.respond(Bytes::new());
+                    return Ok(true);
+                }
+                if data.first() == Some(&KIND_REGISTRY_PAGE) {
+                    // A bounded responder is retained on self, never across a cancellable await
+                    // in this stack frame. Durable source I/O belongs to the app's explicit drain.
+                    self.queue_registry_page_request(from, &data[1..], responder);
+                    return Ok(true);
+                }
+                if data.first() == Some(&KIND_STUDIO_PAGE) {
+                    self.queue_epoch_page_request(KIND_STUDIO_PAGE, from, &data[1..], responder);
+                    return Ok(true);
+                }
+                if data.first() == Some(&KIND_RECEIPT_HEAD) {
+                    self.queue_receipt_head(from, &data[1..], responder);
+                    return Ok(true);
+                }
+                if data.first() == Some(&KIND_STUDIO_HEAD) {
+                    self.queue_checkpoint_head(KIND_STUDIO_HEAD, from, &data[1..], responder);
+                    return Ok(true);
+                }
+                if data.first() == Some(&KIND_REGISTRY_SEED) {
+                    self.queue_registry_seed(from, &data[1..], responder);
+                    return Ok(true);
+                }
+                if data.first() == Some(&KIND_STUDIO_SEED) {
+                    self.queue_checkpoint_seed(KIND_STUDIO_SEED, from, &data[1..], responder);
                     return Ok(true);
                 }
                 let response = match data.split_first() {
@@ -5202,6 +5669,11 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             // same peer on the very next tick and blocks again, which is how a node with a
             // standing task stops serving anybody else: two of them chasing each other never let
             // go. Cooling the pair off keeps the gap owned while freeing the tick.
+            tracing::debug!(
+                task = ?interrupted,
+                peer = ?asked,
+                "catch-up tick was cancelled mid-request; task restored to the front of the queue"
+            );
             if let (Some(peer), CatchupTask::Doc { doc_type, doc_id }) = (asked, interrupted) {
                 self.cool_off_catchup_peer(peer, doc_type, doc_id);
             }
@@ -5257,10 +5729,15 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             // cooling off after failing us, or it has already answered at this version and the
             // sweep is waiting on somebody else. Both keep it out of this attempt; only the
             // second is a discharged obligation.
-            let cooling: Vec<PeerId> = match task {
-                CatchupTask::Doc { doc_type, doc_id } => {
-                    let mut out: Vec<PeerId> = self
-                        .catchup_cooldowns
+            // Kept apart rather than merged into one list, because they are not the same fact and
+            // reading a stall depends on telling them apart: a peer cooling off is one this node
+            // will ask again in [`CATCHUP_PEER_COOLDOWN_MS`], while a peer that has already
+            // answered at this version is one it will not ask again until the document moves.
+            // A stall on the first clears itself; a stall on the second is waiting for a source
+            // that may never arrive. Reported as one number, the two are indistinguishable.
+            let (cooling, checked): (Vec<PeerId>, Vec<PeerId>) = match task {
+                CatchupTask::Doc { doc_type, doc_id } => (
+                    self.catchup_cooldowns
                         .keys()
                         .filter(|(t, id, peer)| {
                             *t == doc_type
@@ -5268,26 +5745,27 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
                                 && self.catchup_peer_is_cooling(*peer, doc_type, doc_id)
                         })
                         .map(|(_, _, peer)| *peer)
-                        .collect();
-                    out.extend(self.sources_checked(doc_type, doc_id));
-                    out
-                }
-                CatchupTask::Commits { .. } => Vec::new(),
+                        .collect(),
+                    self.sources_checked(doc_type, doc_id).into_iter().collect(),
+                ),
+                CatchupTask::Commits { .. } => (Vec::new(), Vec::new()),
             };
+            // Both still rule a peer out of this attempt.
+            let excluded: Vec<PeerId> = cooling.iter().chain(checked.iter()).copied().collect();
             // The peer that said this document has more to come is asked first while its claim
             // stands: it is the only source whose answer can retire that claim.
             let preferred = match task {
                 CatchupTask::Doc { doc_type, doc_id } => self
                     .catchup_continuation_source(doc_type, doc_id)
                     .filter(|peer| {
-                        !cooling.contains(peer)
+                        !excluded.contains(peer)
                             && Some(*peer) != avoid
                             && self.peer_is_connected(*peer)
                     }),
                 CatchupTask::Commits { .. } => None,
             };
             let Some(peer) =
-                preferred.or_else(|| self.pick_catchup_peer_excluding(avoid, &cooling))
+                preferred.or_else(|| self.pick_catchup_peer_excluding(avoid, &excluded))
             else {
                 // No usable catch-up source known yet; keep the task for a later
                 // tick (a new peer may appear), and likewise when the exclusion is
@@ -5304,12 +5782,32 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
                 let keep = self.known_peers.is_empty()
                     || avoid.is_some()
                     || matches!(retry, CatchupTask::Doc { .. });
+                // Once per stall, not once per drain. A kept task is retried on every tick and
+                // its reason for being stuck rarely changes between them, so restating it is
+                // pure volume: the line that matters is the one that says the stall began.
+                if self.catchup_stall_reported.insert(retry) {
+                    tracing::debug!(
+                        task = ?retry,
+                        kept = keep,
+                        known_peers = self.known_peers.len(),
+                        proven_peers = self.member_peers.len(),
+                        failed_peers = self.failed_catchup_peers.len(),
+                        cooling = cooling.len(),
+                        checked = checked.len(),
+                        "no eligible source for a catch-up task"
+                    );
+                }
                 if keep {
                     self.requeue_catchup(retry);
                 }
                 self.catchup_inflight = None;
                 continue;
             };
+            // A source was found, so whatever stall this task was in is over. Forgetting it here
+            // is what lets the *next* stall be reported: a task that alternates between stalled
+            // and served is a different story from one that has been stuck since it was queued,
+            // and only clearing on progress can tell them apart.
+            self.catchup_stall_reported.remove(&retry);
             // Do not sign a request for a peer we are not connected to.
             //
             // A catch-up request carries a signed timestamp and is refused past
@@ -5324,11 +5822,17 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             // Deferring costs nothing: the task is re-queued, connections are established by the
             // dial plan and PEX, and the next tick signs a request that can actually leave.
             if !self.peer_is_connected(peer) {
+                tracing::debug!(
+                    task = ?retry,
+                    ?peer,
+                    "catch-up deferred: chosen source is not connected right now"
+                );
                 self.requeue_catchup(retry);
                 self.catchup_inflight = None;
                 continue;
             }
             attempted = true;
+            tracing::debug!(task = ?task, ?peer, "catch-up request starting");
             // Now that a peer is chosen, record it with the task: if this tick is cancelled while
             // waiting on it, the restore knows who not to ask again immediately.
             self.catchup_inflight = Some((task, Some(peer)));
@@ -5337,14 +5841,48 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
                     from_epoch, gap_at, ..
                 } => {
                     let before = self.group.epoch();
-                    let _ = self.do_commit_catchup(peer, from_epoch).await;
+                    let outcome = self
+                        .do_commit_catchup(peer, from_epoch)
+                        .await
+                        .unwrap_or(CommitCatchupOutcome::Unanswered);
                     let here = self.group.epoch();
                     // "Filled" has to be judged against the proven gap, not against whether
                     // the reply parsed: an empty bundle used to fall through both arms below,
                     // marking nothing, so the next op re-picked the same peer forever.
                     let progressed = here > before;
-                    let closed =
-                        self.pending_commits.is_empty() && gap_at.is_none_or(|gap| here >= gap);
+                    // A request nobody answered closes nothing. Every other term below is already
+                    // satisfied for an initial probe (nothing buffered, no gap yet proven), so a
+                    // timeout or an unsigned reply retired it exactly as a member's "you are up
+                    // to date" does, and the task was neither re-queued nor handed to another
+                    // source: an ordinary member that missed an epoch while offline discarded its
+                    // own recovery on the way back and stayed unable to decrypt current traffic
+                    // until an unrelated event re-detected the gap.
+                    //
+                    // An empty response still closes it, because that is also what an up-to-date
+                    // member sends; see [`CommitCatchupOutcome::Empty`] for what that costs.
+                    //
+                    // A source that proved it cannot chain us closes nothing, however tidy its
+                    // answer looked. Until that outcome was typed it arrived as
+                    // `Verified { applied: 0 }` with an empty buffer, satisfied every term here,
+                    // and retired the recovery: the node then sat connected and permanently
+                    // behind, with nothing anywhere recording why. Falling through to the branch
+                    // below instead marks the source and re-queues, so the next drain asks
+                    // somebody whose log reaches further back.
+                    let closed = outcome.answered()
+                        && !matches!(outcome, CommitCatchupOutcome::Stranded { .. })
+                        && self.pending_commits.is_empty()
+                        && gap_at.is_none_or(|gap| here >= gap);
+                    tracing::debug!(
+                        ?peer,
+                        ?outcome,
+                        from_epoch,
+                        gap_at,
+                        epoch_before = before,
+                        epoch_after = here,
+                        buffered_commits = self.pending_commits.len(),
+                        closed,
+                        "commit catch-up finished"
+                    );
                     if closed {
                         if progressed {
                             // Progress made: clear the failed-peer set and stop chasing.
@@ -5360,6 +5898,12 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
                             // that is the defect: a member that joined at the missed commit
                             // holds no commit log, and leaving it unmarked made the drain
                             // re-pick it, most-recently-seen, on every single op forever.
+                            //
+                            // An unanswered request lands here too, and is marked for the same
+                            // reason rather than because it proved anything: the task outlives
+                            // the attempt now, so without moving on the next drain would re-pick
+                            // the peer that just spent a whole tick's deadline saying nothing.
+                            // Any inbound traffic from it clears the mark again.
                             self.note_failed_catchup_peer(peer);
                         }
                         self.enqueue_commit_catchup_for(here, gap_at, None);
@@ -5433,6 +5977,10 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     /// Start the sweep again, because this document moved.
     fn clear_sources_checked(&mut self, doc_type: DocType, doc_id: u128) {
         self.catchup_sources_checked.remove(&(doc_type, doc_id));
+        // The sweep starts again, so every source is eligible again and a stall reported under
+        // the old sweep no longer describes this one.
+        self.catchup_stall_reported
+            .remove(&CatchupTask::Doc { doc_type, doc_id });
     }
 
     /// Forget everything `peer` has said about any document's completeness, and re-open the
@@ -5442,16 +5990,19 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     /// to be a current member. Both mean its earlier answers describe a state that no longer
     /// applies, and the second means a source that was only opportunistic is now one this node
     /// must actually hear from.
-    /// Only forgets. Queueing the work is the caller's, and both callers already have a way to do
-    /// it that is paced: a reconnect runs its own document sweep, and a first proof fills the
-    /// backlog the drain takes a couple from per tick. Enqueueing here as well turned every
-    /// connection edge into a burst of catch-up requests, which is enough on a busy node to keep
-    /// the tick too full to serve anybody.
+    /// Only forgets. Queueing the work is the caller's, and both callers run the same paced sweep
+    /// straight afterwards: a reconnect sweeps for a peer already proven, and a first proof sweeps
+    /// for the peer that has just become one. Enqueueing here as well turned every connection
+    /// edge into a burst of catch-up requests, including for peers that had proved nothing, which
+    /// is enough on a busy node to keep the tick too full to serve anybody.
     fn forget_source_answers(&mut self, peer: PeerId) {
         self.catchup_sources_checked.retain(|_, (_, peers)| {
             peers.remove(&peer);
             !peers.is_empty()
         });
+        // This peer's standing just changed, which is exactly the event that can make a stalled
+        // task movable again. Any stall reported before it is about a pool that no longer holds.
+        self.catchup_stall_reported.clear();
     }
 
     /// The sources already asked at this document's current version. Empty once the version moves,
@@ -5680,6 +6231,16 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             .iter()
             .any(|proof| proof.peer == peer && proof.device == device);
         if newly_proven {
+            // "Authenticated", in the four-state vocabulary: a roster member answered at this
+            // transport peer. `bound` says whether the exchange also proved the endpoint.
+            tracing::debug!(
+                ?peer,
+                device = %roles::fingerprint(&device),
+                bound,
+                proven_peers = self.member_peers.len() + 1,
+                sweep_owed = self.first_proof_sweep_owed,
+                "peer proven as a current member"
+            );
             // Any document whose search concluded while it was unproven concluded without it, so
             // those go back on the queue.
             self.forget_source_answers(peer);
@@ -5730,6 +6291,30 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         });
         while self.member_peers.len() > self.config.max_known_peers {
             self.member_peers.pop_front();
+        }
+        if newly_proven && bound && self.first_proof_sweep_owed {
+            // The restore's outstanding sweep, discharged now that a source exists for it.
+            //
+            // A restored node reaches its first connection with an empty proof pool, so
+            // [`Self::sweep_docs_on_reconnect`] correctly declines to aim member-only recovery at
+            // a peer that has not shown it can serve one. The moment a peer does show it, the
+            // sweep that connection could not run is the sweep that has to happen, or history
+            // written while this node was away stays missing until something unrelated notices.
+            // Restoring, opening one channel and finding the rest still short is the shape of it.
+            //
+            // **Only a bound proof.** That is exactly a peer that has served *this node* a
+            // document catch-up, which means its membership check ran and passed. The unbound
+            // proofs are PEX and commit catch-up, and a peer still mid-join answers both while
+            // being unable to serve a members-only document request: sweeping on those aimed
+            // recovery at the joiner, blocked this loop on a reply it could not give, and left
+            // the join it was racing unserved. That is the same deadlock
+            // `sweep_docs_on_reconnect`'s gate exists to prevent, reached one step later.
+            //
+            // **Only once, and only after a restore.** See `first_proof_sweep_owed`. Sweeping on
+            // every new binding put a whole node's documents in front of the discovery and
+            // presence work of a session that had nothing older than itself to recover.
+            self.first_proof_sweep_owed = false;
+            self.sweep_docs_on_reconnect(peer);
         }
     }
 
@@ -6083,6 +6668,16 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
                     set.insert(t);
                 }
             }
+            for watch in self.registry_ingress.watches.values() {
+                if let Some(t) = self.channel_topic_for(DocType::DocRegistry, watch.doc_id, slot) {
+                    set.insert(t);
+                }
+            }
+            for ((doc_type, _), watch) in &self.studio_exchange.watches {
+                if let Some(t) = self.channel_topic_for(*doc_type, watch.doc_id, slot) {
+                    set.insert(t);
+                }
+            }
         }
         set
     }
@@ -6090,14 +6685,31 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     /// Subscribe the routing topics that should now be subscribed and unsubscribe
     /// those that aged out of the window, so subscriptions track the current label.
     async fn resync_subscriptions(&mut self) -> Result<(), SyncError> {
+        // Keep the retry flag armed across errors AND cancellation. A transport can submit its
+        // command before its future resolves, so first establish the uncertain topic as unsubscribed.
+        self.needs_resync = true;
+        if let Some(topic) = self.routing_subscription_pending.clone() {
+            self.transport.unsubscribe(topic).await?;
+            self.routing_subscription_pending = None;
+        }
         let desired = self.desired_routing_topics();
-        for topic in desired.difference(&self.routing_subs) {
+        let additions: Vec<_> = desired.difference(&self.routing_subs).cloned().collect();
+        for topic in additions {
+            self.routing_subscription_pending = Some(topic.clone());
             self.transport.subscribe(topic.clone()).await?;
+            self.routing_subs.insert(topic);
+            self.routing_subscription_pending = None;
         }
-        for topic in self.routing_subs.difference(&desired) {
-            self.transport.unsubscribe(topic.clone()).await?;
+        let removals: Vec<_> = self.routing_subs.difference(&desired).cloned().collect();
+        for topic in removals {
+            // Do not leave a cancelled removal counted as subscribed: a same-topic rewatch could
+            // otherwise skip re-adding it forever. The uncertain token owns idempotent cleanup.
+            self.routing_subs.remove(&topic);
+            self.routing_subscription_pending = Some(topic.clone());
+            self.transport.unsubscribe(topic).await?;
+            self.routing_subscription_pending = None;
         }
-        self.routing_subs = desired;
+        self.needs_resync = false;
         Ok(())
     }
 
@@ -6136,7 +6748,6 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         if !self.needs_resync {
             return;
         }
-        self.needs_resync = false;
         if let Err(e) = self.resync_subscriptions().await {
             tracing::warn!(error = %e, "failed to resync subscriptions after rotation");
             self.needs_resync = true;
@@ -9905,7 +10516,9 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         // departed members on all three branches below.
         let before = self.group.member_device_ids();
         let advanced = match &p.mine {
-            Some(_) if we_won => match self.group.merge_staged_self(&self.device) {
+            Some(_) if we_won => match self
+                .with_observed_mls_transition(|node| node.group.merge_staged_self(&node.device))
+            {
                 // We won: merge our own staged commit.
                 Ok(()) => {
                     if i_removed {
@@ -9927,10 +10540,10 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
                 if let Err(e) = self.group.abort_staged(&self.device) {
                     tracing::error!(error = %e, "abort of losing staged commit failed");
                 }
-                match self
-                    .group
-                    .process_incoming(&self.device, &p.best.mls_commit)
-                {
+                match self.with_observed_mls_transition(|node| {
+                    node.group
+                        .process_incoming(&node.device, &p.best.mls_commit)
+                }) {
                     Ok(inc) => {
                         self.note_commit_applied(&inc, &before);
                         true
@@ -9941,10 +10554,10 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
                     }
                 }
             }
-            None => match self
-                .group
-                .process_incoming(&self.device, &p.best.mls_commit)
-            {
+            None => match self.with_observed_mls_transition(|node| {
+                node.group
+                    .process_incoming(&node.device, &p.best.mls_commit)
+            }) {
                 // Pure applier: apply the winner.
                 Ok(inc) => {
                     self.note_commit_applied(&inc, &before);
@@ -10019,10 +10632,10 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         // The roster as it stands *before* the commit, so an applied removal can name who left
         // (MLS reports only that a removal happened). Bounded by the group size.
         let before = self.group.member_device_ids();
-        match self
-            .group
-            .process_incoming(&self.device, &record.mls_commit)
-        {
+        match self.with_observed_mls_transition(|node| {
+            node.group
+                .process_incoming(&node.device, &record.mls_commit)
+        }) {
             Ok(inc) => {
                 self.evict_past_keys();
                 self.note_commit_applied(&inc, &before);
@@ -10200,7 +10813,9 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         };
         let record = self.sign_staged_record(&staged);
         self.snapshot_epoch_keys();
-        if let Err(e) = self.group.merge_staged_self(&self.device) {
+        if let Err(e) =
+            self.with_observed_mls_transition(|node| node.group.merge_staged_self(&node.device))
+        {
             tracing::error!(error = %e, "merge of remove commit failed");
             let _ = self.group.abort_staged(&self.device);
             return;
@@ -10409,9 +11024,13 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         doc_id: u128,
         heads: &[[u8; 32]],
     ) -> Result<Option<usize>, SyncError> {
+        // Replay only this peer's own continuation. A position from anywhere else names an index
+        // in a different log, and the serving side rejects a foreign one anyway; not sending it is
+        // the half of that fence this node owns.
+        let cursor = self.catchup_cursors.get(&(doc_type, doc_id, peer)).copied();
         let (req, req_auth) = self.build_authed_request(
             KIND_CATCHUP_SINCE,
-            &encode_catchup_since_req(doc_type, doc_id, heads),
+            &encode_catchup_since_req(doc_type, doc_id, heads, cursor.as_ref()),
         )?;
         tracing::debug!(
             ?doc_type,
@@ -10474,8 +11093,11 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             // A signed answer with no marker at all says nothing; treat it as unusable.
             None => Ok(None),
             Some((&CATCHUP_SINCE_UNDERSTOOD, bundle)) => {
-                // It is finished with us, so an unbroken run of "ask me again" has ended.
+                // It is finished with us, so an unbroken run of "ask me again" has ended, and the
+                // walk it was continuing is over. A stale position kept here would make the next
+                // pass resume past history this peer accepts after now.
                 self.clear_catchup_stall(peer, doc_type, doc_id);
+                self.catchup_cursors.remove(&(doc_type, doc_id, peer));
                 let applied = self.apply_catchup_response(doc_type, doc_id, bundle)?;
                 // "That is everything I have" is only a completion of the gap when it comes from
                 // the peer that said there was more of it. Peer selection is group-wide, so the
@@ -10507,9 +11129,26 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
                     // but empty document, and answers exactly this.
                     self.note_source_checked(peer, doc_type, doc_id);
                     if self.unchecked_source_exists(doc_type, doc_id) {
+                        tracing::debug!(
+                            ?doc_type,
+                            doc_id,
+                            ?peer,
+                            version = self.doc_version(doc_type, doc_id),
+                            sources_checked = self.sources_checked(doc_type, doc_id).len(),
+                            "source has nothing further; another source still owes an answer"
+                        );
                         self.cool_off_catchup_peer(peer, doc_type, doc_id);
                         self.enqueue_doc_catchup(doc_type, doc_id);
                     } else {
+                        // "Caught up", in the four-state vocabulary: every source this node is
+                        // obliged to hear from has said so at this version.
+                        tracing::debug!(
+                            ?doc_type,
+                            doc_id,
+                            version = self.doc_version(doc_type, doc_id),
+                            sources_checked = self.sources_checked(doc_type, doc_id).len(),
+                            "document converged: every owed source has answered at this version"
+                        );
                         self.clear_catchup_continuation(doc_type, doc_id);
                     }
                 }
@@ -10521,12 +11160,41 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
                 // aside, so the next drain asks somebody else.
                 tracing::debug!(?doc_type, doc_id, ?peer, "peer does not hold this document");
                 self.clear_catchup_stall(peer, doc_type, doc_id);
+                self.catchup_cursors.remove(&(doc_type, doc_id, peer));
                 self.note_source_checked(peer, doc_type, doc_id);
                 self.cool_off_catchup_peer(peer, doc_type, doc_id);
                 self.enqueue_doc_catchup(doc_type, doc_id);
                 Ok(Some(0))
             }
-            Some((&CATCHUP_SINCE_MORE, bundle)) => {
+            // A paging peer puts its resume point first. Retaining it is what makes a round that
+            // applies nothing still be progress: the next request continues past what was just
+            // offered instead of asking for the same prefix again. `CATCHUP_SINCE_MORE` is the
+            // older shape, which recomputes from the frontier every time and so can repeat itself
+            // indefinitely; that is the behaviour the non-progress bound exists for.
+            Some((marker @ (&CATCHUP_SINCE_MORE | &CATCHUP_SINCE_PAGE), rest)) => {
+                let (advanced, bundle) = if *marker == CATCHUP_SINCE_PAGE {
+                    let Some(cursor) =
+                        CatchupCursor::decode(rest.get(..CATCHUP_CURSOR_BYTES).unwrap_or_default())
+                    else {
+                        tracing::warn!(?peer, "paged catch-up answer without a continuation");
+                        return Err(SyncError::Malformed);
+                    };
+                    let bundle = &rest[CATCHUP_CURSOR_BYTES..];
+                    let previous = self
+                        .catchup_cursors
+                        .insert((doc_type, doc_id, peer), cursor);
+                    // Progress means the walk moved AND the peer paid for it. A conforming pager
+                    // cannot produce an empty page alongside "there is more", because it only
+                    // stops early when the budget is full: a run of operations this node already
+                    // holds is skipped inside one page, not spread over empty ones. So an empty
+                    // page here is a peer minting positions for nothing, which is precisely what
+                    // the non-progress bound is for and must keep counting.
+                    let advanced = bundle.len() > 4
+                        && previous.is_none_or(|old| cursor.position > old.position);
+                    (advanced, bundle)
+                } else {
+                    (false, rest)
+                };
                 let applied = self.apply_catchup_response(doc_type, doc_id, bundle)?;
                 // The peer said it withheld some, so ask again whatever this round applied. A
                 // chunk can legitimately apply nothing (ops already held, or one op too large to
@@ -10547,6 +11215,16 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
                     // A round that moved us also starts the sweep again: every other source's
                     // last answer was about a frontier this node has now passed.
                     self.clear_sources_checked(doc_type, doc_id);
+                } else if advanced {
+                    // Nothing landed, and the round was still real work: a page of operations this
+                    // node already holds but could not name, which is what a frontier wider than
+                    // its cap produces. Counting these was the defect. The walk is consuming the
+                    // peer's log and will reach the end of it, so an unbroken run of them is
+                    // finite where the recomputing path's was not.
+                    //
+                    // Deliberately not cleared, and deliberately not treated as a continuation
+                    // claim: the peer chooses its own positions, so this is progress worth not
+                    // punishing rather than evidence worth granting authority on.
                 } else {
                     self.note_nonprogressing_catchup(peer, doc_type, doc_id);
                 }
@@ -10701,7 +11379,14 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         if applied_count > 0 {
             self.enqueue_doc_catchup(doc_type, doc_id);
         }
-        tracing::debug!(applied = applied_count, "applied doc catch-up");
+        tracing::debug!(
+            ?doc_type,
+            doc_id,
+            applied = applied_count,
+            offered = bundle.len(),
+            version = self.doc_version(doc_type, doc_id),
+            "applied doc catch-up"
+        );
         Ok(applied_count)
     }
 
@@ -10754,6 +11439,22 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         Ok(self.blobs.promote_staged(cid)?)
     }
 
+    /// Stage, verify, promote and flush one immutable blob before its caller publishes any
+    /// reference. A failure may leave an unreferenced held blob, never a false successful CID.
+    pub fn publish_blob_bounded(&mut self, bytes: &[u8]) -> Result<Cid, SyncError> {
+        if bytes.len() > MAX_BOUNDED_BLOB_BYTES {
+            return Err(SyncError::Malformed);
+        }
+        let cid = self.blobs.put_staged(bytes)?;
+        if !self.blobs.promote_staged_bounded(&cid, bytes.len())? {
+            return Err(SyncError::Malformed);
+        }
+        if self.blobs.get_bounded(&cid, bytes.len())?.as_deref() != Some(bytes) {
+            return Err(SyncError::Malformed);
+        }
+        Ok(cid)
+    }
+
     /// Discard one staged blob. Cannot touch held content.
     pub fn drop_staged_blob(&mut self, cid: &Cid) -> Result<bool, SyncError> {
         Ok(self.blobs.drop_staged(cid)?)
@@ -10781,9 +11482,10 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         self.blobs.cids()
     }
 
-    /// Delete a locally-held blob by content address (`Ok(true)` if it was held). Used by the
-    /// product layer's dedup-safe delete-time garbage collection; deletion is harmless if a peer
-    /// still holds it (the content-addressed blob can be re-fetched).
+    /// Delete a locally-held blob by content address (`Ok(true)` if a held copy was removed). Used by the
+    /// product layer's dedup-safe delete-time garbage collection. Persistent adapters also protect
+    /// Studio history/intents/recovery: false can mean retained, and unknown references refuse.
+    /// Successful metadata unlisting therefore never proves disk space was reclaimed.
     pub fn delete_blob(&mut self, cid: &Cid) -> Result<bool, SyncError> {
         Ok(self.blobs.delete(cid)?)
     }
@@ -10800,10 +11502,18 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         peer: catcoms_rt::PeerId,
         cid: &Cid,
         cancellation: Option<RequestCancellation>,
+        max_bytes: Option<usize>,
     ) -> Result<(bool, Option<DeviceId>), SyncError> {
         // A filename alone is not availability: a corrupt record must fall through to the
         // authenticated fetch path, whose CID check plus BlobStore::put repairs it in place.
-        if matches!(self.blobs.get(cid), Ok(Some(_))) {
+        let held = match max_bytes {
+            Some(limit) => self.blobs.get_bounded(cid, limit),
+            None => self.blobs.get(cid),
+        };
+        if matches!(held, Err(catcoms_storage::StorageError::BlobSizeLimit)) {
+            return Err(catcoms_storage::StorageError::BlobSizeLimit.into());
+        }
+        if matches!(held, Ok(Some(_))) {
             return Ok((true, None));
         }
         let (req, auth) =
@@ -10828,14 +11538,13 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         if resp.is_empty() {
             return Ok((false, None)); // the peer did not have this blob
         }
-        if resp.len() > MAX_BLOB_RESPONSE {
-            tracing::warn!(bytes = resp.len(), "oversized blob response dropped");
-            return Err(SyncError::Malformed);
-        }
-        let (responder_pubkey, signature, blob) = decode_signed_commit_resp(&resp)?;
+        let (responder_pubkey, signature, blob) = decode_blob_response(
+            &resp,
+            max_bytes.unwrap_or(MAX_BLOB_RESPONSE - SIGNED_BLOB_OVERHEAD),
+        )?;
         // The responder must be a current member, and the signature must bind this blob to
         // our exact request (key + ts + nonce + epoch).
-        let responder = DeviceId::from_public_key_bytes(&responder_pubkey);
+        let responder = DeviceId::from_public_key_bytes(responder_pubkey);
         if !self.group.contains_device(&responder) {
             return Err(SyncError::Malformed);
         }
@@ -10845,18 +11554,18 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             auth.ts,
             &auth.nonce,
             auth.epoch,
-            &blob,
+            blob,
         );
-        if !verify_with_public_bytes(&responder_pubkey, &transcript, &signature) {
+        if !verify_with_public_bytes(responder_pubkey, &transcript, &signature) {
             tracing::warn!("blob response signature invalid; dropped");
             return Err(SyncError::Malformed);
         }
         // Verify the served bytes hash to the address we asked for *before* storing them.
-        if Cid::of(&blob) != *cid {
+        if Cid::of(blob) != *cid {
             tracing::warn!("served blob content-address mismatch; dropped");
             return Err(SyncError::Malformed);
         }
-        self.blobs.put(&blob)?;
+        self.blobs.put(blob)?;
         Ok((true, Some(responder)))
     }
 
@@ -10865,7 +11574,8 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         peer: catcoms_rt::PeerId,
         cid: &Cid,
     ) -> Result<(bool, Option<DeviceId>), SyncError> {
-        self.request_blob_tracked_cancellable(peer, cid, None).await
+        self.request_blob_tracked_cancellable(peer, cid, None, None)
+            .await
     }
 
     /// Fetch a blob by content address from `peer`; `Ok(true)` if now held (already-held or
@@ -10889,6 +11599,52 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             Some(peer) => self.request_blob(peer, cid).await,
             None => Ok(false),
         }
+    }
+
+    /// Read locally or ask one known peer, refusing over-declared data before copying/storing
+    /// it. No automatic fallback after a refusal. This is a maximum, not an exact-size promise:
+    /// record consumers must also check equality and validate their own format.
+    pub async fn request_blob_bounded(
+        &mut self,
+        cid: &Cid,
+        max_bytes: usize,
+        mut cancellation: Option<RequestCancellation>,
+    ) -> Result<Option<Vec<u8>>, SyncError> {
+        if max_bytes > MAX_BOUNDED_BLOB_BYTES {
+            return Err(SyncError::Malformed);
+        }
+        if cancellation
+            .as_ref()
+            .is_some_and(RequestCancellation::is_cancelled)
+        {
+            return Err(catcoms_rt::TransportError::Cancelled.into());
+        }
+        match self.blobs.get_bounded(cid, max_bytes) {
+            Ok(Some(bytes)) => return Ok(Some(bytes)),
+            Err(catcoms_storage::StorageError::BlobSizeLimit) => {
+                return Err(catcoms_storage::StorageError::BlobSizeLimit.into())
+            }
+            _ => {} // missing or corrupt: an authenticated response can repair this CID
+        }
+        let Some(peer) = self.pick_catchup_peer() else {
+            return Ok(None);
+        };
+        let fetch =
+            self.request_blob_tracked_cancellable(peer, cid, cancellation.clone(), Some(max_bytes));
+        let available = if let Some(cancel) = cancellation.as_mut() {
+            match futures::future::select(Box::pin(cancel.cancelled()), Box::pin(fetch)).await {
+                futures::future::Either::Left(_) => {
+                    return Err(catcoms_rt::TransportError::Cancelled.into())
+                }
+                futures::future::Either::Right((result, _)) => result?.0,
+            }
+        } else {
+            fetch.await?.0
+        };
+        if !available {
+            return Ok(None);
+        }
+        Ok(self.blobs.get_bounded(cid, max_bytes)?)
     }
 
     /// Like [`Self::request_blob_best`], but returns the **provider's fingerprint**; the signed
@@ -10924,7 +11680,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         }
         match self.pick_catchup_peer() {
             Some(peer) => Ok(self
-                .request_blob_tracked_cancellable(peer, cid, Some(cancellation))
+                .request_blob_tracked_cancellable(peer, cid, Some(cancellation), None)
                 .await?
                 .1
                 .map(|device| roles::fingerprint(&device))),
@@ -10940,14 +11696,17 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         peer: catcoms_rt::PeerId,
         from_epoch: u64,
     ) -> Result<usize, SyncError> {
-        self.do_commit_catchup(peer, from_epoch).await
+        Ok(self.do_commit_catchup(peer, from_epoch).await?.applied())
     }
 
+    /// [`Self::request_commit_catchup`], reporting what the exchange **established** rather than
+    /// only how far it moved this node. The drain needs the difference: an unanswered request and
+    /// a verified "you have everything" leave the epoch in exactly the same place.
     async fn do_commit_catchup(
         &mut self,
         peer: PeerId,
         from_epoch: u64,
-    ) -> Result<usize, SyncError> {
+    ) -> Result<CommitCatchupOutcome, SyncError> {
         let (req, req_auth) =
             self.build_authed_request(KIND_COMMIT_CATCHUP, &encode_commit_catchup_req(from_epoch))?;
         tracing::debug!(from_epoch, ?peer, "request commit catch-up");
@@ -10962,7 +11721,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         )
         .await?;
         if resp.is_empty() {
-            return Ok(0);
+            return Ok(CommitCatchupOutcome::Empty);
         }
         if resp.len() > MAX_CATCHUP_RESPONSE {
             tracing::warn!(
@@ -11001,14 +11760,14 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
                 ?peer,
                 "commit catch-up response from a non-member; demoted + rejected"
             );
-            return Ok(0);
+            return Ok(CommitCatchupOutcome::Unanswered);
         }
         if !verify_with_public_bytes(&responder_pubkey, &transcript, &signature) {
             tracing::warn!(
                 ?peer,
                 "commit catch-up response signature invalid; rejected"
             );
-            return Ok(0);
+            return Ok(CommitCatchupOutcome::Unanswered);
         }
         // A member signature authenticates the bytes but does not make malformed bytes usable.
         // Decode before promotion so operational availability means this peer completed a
@@ -11018,6 +11777,11 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         // does not carry the peer it was sent from.
         self.promote_member_peer(peer, responder);
         let mut applied = 0;
+        // The lowest epoch this peer offered above where we stood. Taken from the records as they
+        // arrive rather than from `pending_commits` afterwards, because a record further ahead
+        // than `max_commit_gap` is dropped before it is ever buffered: reading the buffer alone
+        // made the worse of the two stranded bands the invisible one.
+        let mut lowest_future: Option<u64> = None;
         for record in records {
             if record.group_id != group_id {
                 continue;
@@ -11029,27 +11793,72 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
                         applied += 1;
                     }
                 }
-                Ordering::Greater => self.buffer_future_commit(record),
+                Ordering::Greater => {
+                    lowest_future = Some(
+                        lowest_future
+                            .map_or(record.commit_epoch, |low: u64| low.min(record.commit_epoch)),
+                    );
+                    self.buffer_future_commit(record);
+                }
                 Ordering::Less => {}
             }
         }
         // Buffered successors that the fetch unblocked now drain in order.
         self.drain_pending_commits();
-        if let Some((&lowest_gap, _)) = self.pending_commits.iter().next() {
-            if lowest_gap > self.group.epoch() {
-                tracing::warn!(
-                    current = self.group.epoch(),
-                    lowest_gap,
-                    "commit catch-up left an unfillable gap (source's window evicted it); a full rejoin/snapshot is needed"
-                );
-            }
+        let here = self.group.epoch();
+        tracing::debug!(applied, epoch = here, "applied commit catch-up");
+        // A peer serves a contiguous run from the epoch we named upward, so an offer that still
+        // begins above us after draining means the commits in between have left its log. That is
+        // the whole condition, and it covers both bands: buffered-but-unchainable, and dropped
+        // for being too far ahead.
+        if let Some(lowest) = lowest_future.filter(|lowest| *lowest > here) {
+            self.note_membership_chain_gap(here, lowest);
+            return Ok(CommitCatchupOutcome::Stranded {
+                lowest_available: lowest,
+            });
         }
-        tracing::debug!(
-            applied,
-            epoch = self.group.epoch(),
-            "applied commit catch-up"
+        Ok(CommitCatchupOutcome::Verified { applied })
+    }
+
+    /// Record that a reached source could not chain this node's epoch onward.
+    ///
+    /// Keeps the *best* offer seen at this epoch, because a shorter gap is a better chance: two
+    /// peers with different retention tell this node how far it would have to be repaired, and
+    /// the smaller number is the one worth reporting. Any epoch advance discards the record on
+    /// read, so a node that is subsequently repaired stops claiming to be stranded without any
+    /// path needing to remember to clear it.
+    fn note_membership_chain_gap(&mut self, current_epoch: u64, lowest_available: u64) {
+        let observed_at_ms = self.clock.now_ms();
+        let lowest_available = match self.membership_chain_gap() {
+            Some(previous) => previous.lowest_available.min(lowest_available),
+            None => {
+                self.stats.commit_chain_gaps_observed += 1;
+                lowest_available
+            }
+        };
+        tracing::warn!(
+            current_epoch,
+            lowest_available,
+            missing = lowest_available.saturating_sub(current_epoch),
+            "no reached source retains the membership commits this node is missing; it cannot \
+             rejoin the current routing label without being repaired out of band"
         );
-        Ok(applied)
+        self.commit_chain_gap = Some(MembershipChainGap {
+            current_epoch,
+            lowest_available,
+            observed_at_ms,
+        });
+    }
+
+    /// The membership chain this node cannot complete, if it has met one at its current epoch.
+    ///
+    /// `None` is the ordinary answer and means only that no source has yet said it cannot help:
+    /// a node that has spoken to nobody reports nothing, exactly as one that is up to date does.
+    /// The record is discarded here rather than cleared at every epoch-advance path, so a repair
+    /// through any route retires it without that route having to know about it.
+    pub fn membership_chain_gap(&self) -> Option<MembershipChainGap> {
+        self.commit_chain_gap
+            .filter(|gap| gap.current_epoch == self.group.epoch())
     }
 
     /// Read a document's materialized state.
@@ -11669,7 +12478,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     fn serve_catchup_since(&mut self, from: PeerId, data: &[u8]) -> Option<Vec<u8>> {
         let (inner, req_pubkey, req_auth) =
             self.authenticate_request(KIND_CATCHUP_SINCE, data, from)?;
-        let (doc_type, doc_id, heads) = decode_catchup_since_req(&inner).ok()?;
+        let (doc_type, doc_id, heads, cursor) = decode_catchup_since_req(&inner).ok()?;
         // A document this peer does not hold is answered, not left silent. An empty response is
         // the wire's way of saying "I do not know this request kind", and the requester's only
         // sane reading of that is to fall back to the whole-history grammar; so staying silent
@@ -11686,11 +12495,35 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             answer.extend_from_slice(&empty);
             return self.sign_doc_catchup_answer(&req_pubkey, &req_auth, answer);
         }
+        // A cursor this node did not mint (a different peer's, or its own from before a restart)
+        // names a position in somebody else's log. Starting over is the only safe reading: acting
+        // on it would skip history the requester would then never be offered again.
+        let resume = match cursor.flatten() {
+            Some(cursor) if cursor.provider == self.catchup_provider => cursor.position as usize,
+            Some(_) => {
+                tracing::debug!(
+                    ?doc_type,
+                    doc_id,
+                    ?from,
+                    "catch-up continuation was not minted here; restarting the walk"
+                );
+                0
+            }
+            None => 0,
+        };
+        let provider = self.catchup_provider;
         let doc = self.docs.get_mut(&(doc_type, doc_id))?;
-        match doc.export_catchup_since(&heads, &self.group, &self.device, &mut self.rng) {
-            Ok(bundle) => {
+        match doc.export_catchup_page(
+            &heads,
+            resume,
+            MAX_CATCHUP_CHUNK.min(MAX_SIGNED_CATCHUP_BUNDLE),
+            &self.group,
+            &self.device,
+            &mut self.rng,
+        ) {
+            Ok((page, next)) => {
                 let (prefix, served) =
-                    match size_capped_ops(&bundle, MAX_CATCHUP_CHUNK, MAX_SIGNED_CATCHUP_BUNDLE) {
+                    match size_capped_ops(&page, MAX_CATCHUP_CHUNK, MAX_SIGNED_CATCHUP_BUNDLE) {
                         Ok(capped) => capped,
                         Err(e) => {
                             // Refusing is the honest answer: claiming to be done here would
@@ -11699,28 +12532,40 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
                             return None;
                         }
                     };
-                let more = served < bundle.len();
-                if more {
-                    tracing::debug!(
-                        served,
-                        total = bundle.len(),
-                        "incremental doc catch-up truncated; the requester is told to ask again"
-                    );
-                }
+                // The pager sized the page to the same budget, so a short encode here would mean
+                // the two disagreed. Resuming at the operation actually served keeps the reply
+                // truthful either way rather than skipping what was dropped.
+                let next = if served < page.len() {
+                    Some(resume + served)
+                } else {
+                    next
+                };
                 tracing::debug!(
                     ?doc_type,
                     doc_id,
                     ops = served,
                     heads = heads.len(),
-                    more,
+                    resume,
+                    next,
                     "serving incremental doc catch-up"
                 );
-                let mut answer = Vec::with_capacity(prefix.len() + 1);
-                answer.push(if more {
-                    CATCHUP_SINCE_MORE
-                } else {
-                    CATCHUP_SINCE_UNDERSTOOD
-                });
+                let mut answer = Vec::with_capacity(prefix.len() + 1 + CATCHUP_CURSOR_BYTES);
+                match next {
+                    // Only a paging-capable requester is sent a continuation; an older build gets
+                    // exactly the frame it has always got, and re-asks from its frontier.
+                    Some(position) if cursor.is_some() => {
+                        answer.push(CATCHUP_SINCE_PAGE);
+                        answer.extend_from_slice(
+                            &CatchupCursor {
+                                provider,
+                                position: position as u32,
+                            }
+                            .encode(),
+                        );
+                    }
+                    Some(_) => answer.push(CATCHUP_SINCE_MORE),
+                    None => answer.push(CATCHUP_SINCE_UNDERSTOOD),
+                }
                 answer.extend_from_slice(&prefix);
                 self.sign_doc_catchup_answer(&req_pubkey, &req_auth, answer)
             }
@@ -12022,8 +12867,15 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         let base_authenticator = self.group.epoch_authenticator_id();
         self.snapshot_epoch_keys();
         let outcome = self
-            .group
-            .add_member_via_invite(&self.device, key_package, invite, &mut self.ledger, now)
+            .with_observed_mls_transition(|node| {
+                node.group.add_member_via_invite(
+                    &node.device,
+                    key_package,
+                    invite,
+                    &mut node.ledger,
+                    now,
+                )
+            })
             .ok()?;
         self.evict_past_keys();
         let record =
@@ -12577,7 +13429,9 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             .ok()?;
         let base_authenticator = self.group.epoch_authenticator_id();
         self.snapshot_epoch_keys();
-        let outcome = self.group.add_member(&self.device, key_package).ok()?;
+        let outcome = self
+            .with_observed_mls_transition(|node| node.group.add_member(&node.device, key_package))
+            .ok()?;
         self.evict_past_keys();
         // Burn the certificate. `check_device_add` already refused a consumed nonce, so this can
         // only fail on a re-entrant path; treat it as already-burned rather than unwinding a
@@ -13822,6 +14676,47 @@ mod tests {
         assert_eq!(decode_catchup_req(&bytes).unwrap(), (DocType::Wiki, 99));
     }
 
+    /// The head cap is only worth raising if a frontier that large still fits the frame it has to
+    /// travel in, and is still accepted at the far end. Both halves matter: a cap the decoder
+    /// refuses, or one that overruns `MAX_CONTROL_REQUEST`, would turn a wide-frontier member into
+    /// a member that cannot catch up at all rather than one that catches up inefficiently.
+    #[test]
+    fn a_maximal_frontier_still_fits_and_is_still_accepted() {
+        let heads: Vec<[u8; 32]> = (0..MAX_CATCHUP_SINCE_HEADS)
+            .map(|i| {
+                let mut head = [0u8; 32];
+                head[..8].copy_from_slice(&(i as u64).to_be_bytes());
+                head
+            })
+            .collect();
+        let inner = encode_catchup_since_req(DocType::Channel, 1, &heads, None);
+        // The signed envelope this travels inside: kind byte, requester pubkey, timestamp, nonce,
+        // epoch and signature, plus their framing. Generous, so the assertion is about the
+        // frontier rather than about guessing the envelope to the byte.
+        let framed = 1 + inner.len() + 256;
+        assert!(
+            framed < MAX_CONTROL_REQUEST,
+            "a full frontier ({} heads, {framed} framed bytes) must fit the control request bound",
+            heads.len()
+        );
+        let (doc_type, doc_id, decoded, _) = decode_catchup_since_req(&inner).unwrap();
+        assert_eq!((doc_type, doc_id), (DocType::Channel, 1));
+        assert_eq!(decoded, heads, "and survive the round trip intact");
+
+        // One past the cap is still refused, so raising the value did not remove the bound.
+        let mut too_many = heads.clone();
+        too_many.push([0xFF; 32]);
+        assert!(matches!(
+            decode_catchup_since_req(&encode_catchup_since_req(
+                DocType::Channel,
+                1,
+                &too_many,
+                None
+            )),
+            Err(SyncError::Malformed)
+        ));
+    }
+
     #[test]
     fn add_request_and_admit_result_round_trip_through_codecs() {
         // Add-request: invite ‖ key_package ‖ requester_pubkey ‖ ts ‖ sig
@@ -14024,6 +14919,9 @@ mod tests {
         published: std::sync::Mutex<Vec<Vec<u8>>>,
         /// Peer-bound reconnect batches accepted by this fake transport.
         dialed: std::sync::Mutex<Vec<(PeerId, Vec<String>)>>,
+        /// While set, `publish` refuses instead of delivering: a transport going away underneath
+        /// a local edit that has already been applied.
+        refuse_publish: std::sync::atomic::AtomicBool,
     }
 
     impl RecordingNet {
@@ -14035,10 +14933,15 @@ mod tests {
                 denied: std::sync::Mutex::new(HashSet::new()),
                 published: std::sync::Mutex::new(Vec::new()),
                 dialed: std::sync::Mutex::new(Vec::new()),
+                refuse_publish: std::sync::atomic::AtomicBool::new(false),
             }
         }
         fn published(&self) -> Vec<Vec<u8>> {
             self.published.lock().expect("mutex").clone()
+        }
+        fn refuse_publish(&self, refuse: bool) {
+            self.refuse_publish
+                .store(refuse, std::sync::atomic::Ordering::SeqCst);
         }
         fn is_denied(&self, peer: &PeerId) -> bool {
             self.denied.lock().expect("mutex").contains(peer)
@@ -14057,6 +14960,14 @@ mod tests {
             self.inner.unsubscribe(topic).await
         }
         async fn publish(&self, topic: Topic, data: Bytes) -> Result<(), TransportError> {
+            // Recorded only once it has actually gone out, so `published()` means delivered
+            // rather than attempted.
+            if self
+                .refuse_publish
+                .load(std::sync::atomic::Ordering::SeqCst)
+            {
+                return Err(TransportError::Closed);
+            }
             self.published.lock().expect("mutex").push(data.to_vec());
             self.inner.publish(topic, data).await
         }
@@ -14516,6 +15427,52 @@ mod tests {
             node.evicted_devices.len() <= MAX_EVICTED_DEVICES,
             "the readmission ledger must be bounded too"
         );
+    }
+
+    /// A send the transport refused is still a send.
+    ///
+    /// `post` applies the edit and only then hands the bytes over, so a publication failure
+    /// arrives once the operation exists, with a stable hash, in a document this process will go
+    /// on to serve and persist. Reporting that as a failed post told every caller above that
+    /// nothing had happened: the app layer skipped delivery tracking, the actor skipped the UI
+    /// delta and the desktop skipped its save, while the message sat in the channel regardless.
+    /// Retyping it minted a second copy under a new id, and both surfaced later.
+    #[tokio::test]
+    async fn a_refused_publication_still_accepts_the_operation_and_owes_the_delivery() {
+        use automerge::transaction::Transactable;
+        use automerge::ROOT;
+
+        let mut node = recording_node();
+        node.open_channel(DocType::Channel, 5).await.unwrap();
+        // The transport going away underneath a send: the one failure `publish` still reports to
+        // this layer, now that the swarm classifies and retries the rest itself.
+        node.transport.refuse_publish(true);
+
+        let change = node
+            .post(DocType::Channel, 5, |d| d.put(ROOT, "msg", "hello"))
+            .await
+            .expect("an applied edit is an accepted post, whatever the transport did next");
+        assert_eq!(
+            node.doc(DocType::Channel, 5).map(|d| d.op_count()),
+            Some(1),
+            "the operation is in the document either way; that is what made the error a lie"
+        );
+        assert!(
+            node.transport.published().is_empty(),
+            "and nothing went out, so the delivery is genuinely still owed"
+        );
+        assert_eq!(node.outbox.len(), 1, "owed, rather than dropped");
+
+        // The caller can now track what it was told had happened, and a later tick delivers it.
+        node.track_delivery_target(DocType::Channel, 5, change);
+        node.transport.refuse_publish(false);
+        node.drain_outbox().await;
+        assert_eq!(
+            node.transport.published().len(),
+            1,
+            "the queued operation goes out once the transport can take it"
+        );
+        assert!(node.outbox.is_empty(), "and is not sent again after that");
     }
 
     /// P6 on the **committer's own** removal path: `request_remove` must not only rotate the
@@ -15323,6 +16280,248 @@ mod tests {
         );
     }
 
+    /// Ask Alice for commits from `from_epoch` and let her serve it from her real commit log.
+    ///
+    /// Deliberately not `run_once` on the serving side: that also drains her catch-up queue,
+    /// which issues a request nobody in these fixtures answers and an injected clock never times
+    /// out. Her stream also carries whatever else the fixture left on it, so this drains to the
+    /// commit request rather than assuming it is first.
+    async fn commit_catchup_between(
+        bob: &mut Member,
+        alice: &mut Member,
+        alice_peer: PeerId,
+        bob_peer: PeerId,
+        from_epoch: u64,
+    ) -> CommitCatchupOutcome {
+        let (outcome, ()) = tokio::join!(bob.do_commit_catchup(alice_peer, from_epoch), async {
+            for _ in 0..16 {
+                match alice.transport.next_event().await {
+                    Some(TransportEvent::Request {
+                        data, responder, ..
+                    }) if data.first() == Some(&KIND_COMMIT_CATCHUP) => {
+                        let served = alice
+                            .serve_commit_catchup(bob_peer, &data[1..])
+                            .expect("a member serves a member");
+                        responder.respond(Bytes::from(served));
+                        return;
+                    }
+                    Some(_) => continue,
+                    None => panic!("the transport closed before the request arrived"),
+                }
+            }
+            panic!("the commit catch-up request never arrived");
+        });
+        outcome.expect("the exchange completed")
+    }
+
+    /// One membership commit record, with opaque bytes: nothing below applies one.
+    fn stub_commit(group_id: Vec<u8>, commit_epoch: u64) -> CommitRecord {
+        CommitRecord {
+            group_id,
+            commit_epoch,
+            committer_device: [0u8; 32],
+            mls_commit: vec![7],
+            base_authenticator: [0u8; 32],
+            committer_sig: [0u8; 64],
+        }
+    }
+
+    /// A source whose retained log begins above us is reported, not read as "you are up to date".
+    ///
+    /// This is the P0 in `docs/MESSAGE-FLOW.md` section 8. A member that missed more removals than
+    /// its peers still retain is fully connected, still in the roster, and permanently unable to
+    /// advance its routing label. The exchange used to return `Verified { applied: 0 }`, which is
+    /// byte-for-byte what an honest up-to-date peer returns, so the recovery task retired itself
+    /// and nothing recorded why the node never converged.
+    ///
+    /// Both bands are covered here because only one of them left even a log line: within
+    /// `max_commit_gap` the records buffer and cannot drain, and past it they are dropped before
+    /// buffering, which produced no evidence at all.
+    #[tokio::test]
+    async fn a_source_that_cannot_chain_us_is_reported_rather_than_read_as_up_to_date() {
+        let (_hub, mut members, ids) = build_members(2).await;
+        converge_and_publish_test_routes(&mut members);
+        let mut bob = members.pop().unwrap();
+        let mut alice = members.pop().unwrap();
+        let (alice_peer, bob_peer) = (alice.local_peer(), bob.local_peer());
+        prove_live_member(&mut alice, bob_peer, ids[1]);
+        prove_live_member(&mut bob, alice_peer, ids[0]);
+        let gid = alice.group.group_id();
+        let here = bob.group.epoch();
+
+        // Beyond `max_commit_gap`, so the record is dropped before it is ever buffered. This is
+        // the band that used to produce no evidence whatsoever.
+        let far = here + bob.config.max_commit_gap + 5_000;
+        alice.commit_log.clear();
+        alice.commit_log.push_back(stub_commit(gid.clone(), far));
+        let outcome =
+            commit_catchup_between(&mut bob, &mut alice, alice_peer, bob_peer, here).await;
+        assert_eq!(
+            outcome,
+            CommitCatchupOutcome::Stranded {
+                lowest_available: far
+            },
+            "a bundle that begins above us is not an up-to-date answer"
+        );
+        assert!(
+            bob.pending_commits.is_empty(),
+            "and nothing was buffered, which is why this band was invisible"
+        );
+        let gap = bob
+            .membership_chain_gap()
+            .expect("the state is nameable now");
+        assert_eq!(gap.current_epoch, here);
+        assert_eq!(gap.lowest_available, far);
+        assert_eq!(gap.missing_commits(), far - here);
+        assert_eq!(bob.stats().commit_chain_gaps_observed, 1);
+
+        // Within the bound, where the records buffer and still cannot be chained. A nearer offer
+        // is a better chance of repair, so it replaces the further one.
+        let near = here + 40;
+        alice.commit_log.clear();
+        alice.commit_log.push_back(stub_commit(gid.clone(), near));
+        let outcome =
+            commit_catchup_between(&mut bob, &mut alice, alice_peer, bob_peer, here).await;
+        assert_eq!(
+            outcome,
+            CommitCatchupOutcome::Stranded {
+                lowest_available: near
+            }
+        );
+        assert!(
+            !bob.pending_commits.is_empty(),
+            "this band does buffer, and still cannot drain"
+        );
+        assert_eq!(
+            bob.membership_chain_gap().map(|gap| gap.lowest_available),
+            Some(near),
+            "the best offer any source could make is the one worth reporting"
+        );
+        assert_eq!(
+            bob.stats().commit_chain_gaps_observed,
+            1,
+            "counted once per epoch this node is stuck at, not once per exchange"
+        );
+
+        // Neither outcome may retire the recovery, and the source that proved it cannot help is
+        // set aside so the next drain asks somebody with a longer log.
+        assert_eq!(outcome.applied(), 0, "nothing was applied");
+        assert!(
+            outcome.answered(),
+            "the peer did answer; it just cannot help"
+        );
+
+        // Discarded on read once the epoch moves, so a repair through any route retires it
+        // without that route having to know this state exists.
+        bob.note_membership_chain_gap(here + 1, here + 9);
+        assert!(
+            bob.membership_chain_gap().is_none(),
+            "a gap recorded at another epoch says nothing about this one"
+        );
+    }
+
+    /// A stranded answer must not retire the recovery it failed to complete.
+    ///
+    /// This is the half of the P0 that costs something rather than merely failing to report it.
+    /// `Verified { applied: 0 }` with an empty buffer satisfied every term of the drain's
+    /// completion test, so the task was dropped, the source was left unmarked, and nothing tried
+    /// anybody else. A member with a longer log might have been one drain away.
+    #[tokio::test]
+    async fn a_stranded_source_is_set_aside_and_the_recovery_outlives_it() {
+        let (_hub, mut members, ids) = build_members(2).await;
+        converge_and_publish_test_routes(&mut members);
+        let mut bob = members.pop().unwrap();
+        let mut alice = members.pop().unwrap();
+        let (alice_peer, bob_peer) = (alice.local_peer(), bob.local_peer());
+        prove_live_member(&mut alice, bob_peer, ids[1]);
+        prove_live_member(&mut bob, alice_peer, ids[0]);
+        let here = bob.group.epoch();
+
+        // Deliberately the band past `max_commit_gap`, where the record is dropped before it is
+        // buffered. The nearer band leaves something in `pending_commits`, which already fails
+        // the drain's completion test on its own; only here does the outcome itself have to carry
+        // the fact, and only here did the recovery used to retire itself.
+        alice.commit_log.clear();
+        alice.commit_log.push_back(stub_commit(
+            alice.group.group_id(),
+            here + bob.config.max_commit_gap + 5_000,
+        ));
+        bob.enqueue_commit_catchup(here);
+        assert!(bob
+            .catchup_queue
+            .iter()
+            .any(|task| matches!(task, CatchupTask::Commits { .. })));
+
+        let (attempted, ()) = tokio::join!(bob.drain_catchup_queue(), async {
+            for _ in 0..16 {
+                match alice.transport.next_event().await {
+                    Some(TransportEvent::Request {
+                        data, responder, ..
+                    }) if data.first() == Some(&KIND_COMMIT_CATCHUP) => {
+                        let served = alice
+                            .serve_commit_catchup(bob_peer, &data[1..])
+                            .expect("a member serves a member");
+                        responder.respond(Bytes::from(served));
+                        return;
+                    }
+                    Some(_) => continue,
+                    None => panic!("the transport closed before the request arrived"),
+                }
+            }
+            panic!("the commit catch-up request never arrived");
+        });
+        assert!(attempted, "a source was reachable and was asked");
+        assert!(
+            bob.pending_commits.is_empty(),
+            "nothing buffered, so only the typed outcome can keep this task alive"
+        );
+
+        assert!(
+            bob.catchup_queue
+                .iter()
+                .any(|task| matches!(task, CatchupTask::Commits { .. })),
+            "the gap outlives an answer that could not fill it"
+        );
+        assert!(
+            bob.failed_catchup_peers.contains(&alice_peer),
+            "and the source that proved it cannot help is set aside for the next drain"
+        );
+        assert!(
+            bob.membership_chain_gap().is_some(),
+            "with the reason recorded rather than inferred from an absence"
+        );
+    }
+
+    /// The other half of the same claim: silence has to keep meaning silence.
+    ///
+    /// A member that is genuinely up to date answers a speculative probe with nothing, and that
+    /// must not be reported as a chain gap. A detectability signal that fires on the ordinary case
+    /// is worse than none, because the state it describes is the one nobody can act on.
+    #[tokio::test]
+    async fn an_up_to_date_source_reports_no_membership_gap() {
+        let (_hub, mut members, ids) = build_members(2).await;
+        converge_and_publish_test_routes(&mut members);
+        let mut bob = members.pop().unwrap();
+        let mut alice = members.pop().unwrap();
+        let (alice_peer, bob_peer) = (alice.local_peer(), bob.local_peer());
+        prove_live_member(&mut alice, bob_peer, ids[1]);
+        prove_live_member(&mut bob, alice_peer, ids[0]);
+        let here = bob.group.epoch();
+        assert_eq!(here, alice.group.epoch(), "they agree to begin with");
+
+        // Alice holds nothing at or above Bob's epoch, which is exactly what an up-to-date group
+        // looks like from a probe.
+        alice.commit_log.clear();
+        let outcome =
+            commit_catchup_between(&mut bob, &mut alice, alice_peer, bob_peer, here + 1).await;
+        assert_eq!(outcome, CommitCatchupOutcome::Empty);
+        assert!(
+            bob.membership_chain_gap().is_none(),
+            "an ordinary probe against an ordinary group reports nothing"
+        );
+        assert_eq!(bob.stats().commit_chain_gaps_observed, 0);
+    }
+
     #[test]
     fn known_peers_are_bounded_and_most_recent_wins() {
         let mut node = solo_node();
@@ -15857,7 +17056,92 @@ mod tests {
         );
     }
 
-    async fn build_members(n: u64) -> (std::sync::Arc<Hub>, Vec<Member>, Vec<DeviceId>) {
+    /// The other half of that gate: a first proof must run the sweep its connection declined.
+    ///
+    /// `member_peers` holds this session's proofs and nothing else, so a process that has just
+    /// restored reaches its first connection with an empty pool and correctly declines to aim
+    /// member-only recovery at a peer that has proved nothing. Recovery then depended on a
+    /// *second* connection edge that a stable link never produces, and every channel written to
+    /// while this node was away stayed short until something unrelated happened to notice: the
+    /// user-visible shape was "restart, and the chat stops filling in".
+    ///
+    /// Both documents, from the proof alone, with no further transport event.
+    #[tokio::test]
+    async fn a_first_member_proof_sweeps_the_docs_a_restore_left_short() {
+        let (_hub, mut members, ids) = build_members(2).await;
+        let alice = &mut members[0];
+        alice.open_channel(DocType::Channel, 1).await.unwrap();
+        alice.open_channel(DocType::Channel, 2).await.unwrap();
+        let snap = alice.snapshot().unwrap();
+
+        // The process comes back holding two channels and this session's empty proof pool.
+        let hub2 = Hub::new();
+        let mut alice = Member::restore(
+            &snap,
+            hub2.join(PeerId::from_u64(99)),
+            ChaCha20Rng::seed_from_u64(7),
+            Box::new(ManualClock::new(1_000)),
+        )
+        .unwrap();
+        assert!(
+            alice.first_proof_sweep_owed,
+            "a snapshot's documents are as old as the process that wrote them"
+        );
+        assert!(alice.member_peers.is_empty());
+        alice.catchup_queue.clear();
+
+        let queued_docs = |sync: &Member| -> BTreeSet<u128> {
+            sync.catchup_queue
+                .iter()
+                .filter_map(|task| match task {
+                    CatchupTask::Doc { doc_type, doc_id } if *doc_type == DocType::Channel => {
+                        Some(*doc_id)
+                    }
+                    _ => None,
+                })
+                .collect()
+        };
+
+        let peer = PeerId::from_u64(9_998);
+        alice.note_peer_connected(peer);
+        assert!(
+            queued_docs(&alice).is_empty(),
+            "the connection itself proves nothing, so it must not aim recovery anywhere"
+        );
+
+        // An unbound proof is PEX or commit catch-up, and a peer still mid-join answers both
+        // while being unable to serve a members-only document request. Sweeping here aims
+        // recovery at the joiner and blocks this loop on a reply it cannot give, which is the
+        // deadlock the connection-time gate exists to prevent.
+        let joiner = PeerId::from_u64(9_997);
+        alice.note_peer_connected(joiner);
+        alice.promote_member_peer(joiner, ids[1]);
+        assert!(
+            queued_docs(&alice).is_empty(),
+            "an unbound proof says a member signed something, not that it can serve a catch-up"
+        );
+
+        // A bound proof is a peer that has served this node a document catch-up, so its
+        // membership check has run and passed. No second connection edge.
+        alice.promote_member_peer_bound(peer, ids[1], true);
+        assert_eq!(
+            queued_docs(&alice),
+            BTreeSet::from([1, 2]),
+            "a first bound proof must queue every open document, not just the one being read"
+        );
+
+        // And it is owed once. A later binding is ordinary session traffic, and putting a whole
+        // node's documents in front of it costs the tick that discovery and presence need.
+        assert!(!alice.first_proof_sweep_owed);
+        alice.catchup_queue.clear();
+        alice.promote_member_peer_bound(PeerId::from_u64(9_996), ids[1], true);
+        assert!(
+            queued_docs(&alice).is_empty(),
+            "the restore's sweep is discharged, not repeated for every new source"
+        );
+    }
+
+    pub(super) async fn build_members(n: u64) -> (std::sync::Arc<Hub>, Vec<Member>, Vec<DeviceId>) {
         assert!(n >= 1);
         let hub = Hub::new();
         let founder = MlsDevice::generate().unwrap();
@@ -15902,7 +17186,7 @@ mod tests {
     /// exact signed descriptor per member. `build_members` intentionally leaves intermediate
     /// joiners behind to exercise catch-up elsewhere; repair tests need a genuinely converged
     /// roster so every helper can authenticate both ends of an A -> C -> B request.
-    fn converge_and_publish_test_routes(members: &mut [Member]) {
+    pub(super) fn converge_and_publish_test_routes(members: &mut [Member]) {
         let founder_peer = members[0].local_peer();
         let commits: Vec<_> = members[0].commit_log.iter().cloned().collect();
         let final_epoch = members[0].epoch();
@@ -16254,6 +17538,260 @@ mod tests {
                 "every post arrived"
             );
         }
+    }
+
+    /// The continuation field is additive in both directions.
+    ///
+    /// A build that predates paging sends no field at all, and that frame has to keep decoding or
+    /// a mixed group stops synchronizing entirely. A paging requester with no walk in progress
+    /// sends an empty one, which is what tells the serving peer it may answer with a cursor.
+    #[test]
+    fn a_catch_up_continuation_is_optional_and_round_trips() {
+        let heads = [[7u8; 32]];
+
+        let mut legacy = Encoder::new();
+        legacy.put_u16(DocType::Channel.tag());
+        legacy.put_u128(9);
+        legacy.put_u32(1);
+        legacy.put_bytes(&heads[0]).unwrap();
+        let (doc_type, doc_id, decoded, cursor) =
+            decode_catchup_since_req(&legacy.finish()).unwrap();
+        assert_eq!((doc_type, doc_id), (DocType::Channel, 9));
+        assert_eq!(decoded, heads);
+        assert_eq!(cursor, None, "no field at all is a peer that cannot page");
+
+        let fresh = encode_catchup_since_req(DocType::Channel, 9, &heads, None);
+        assert_eq!(
+            decode_catchup_since_req(&fresh).unwrap().3,
+            Some(None),
+            "a paging requester starting a walk says so"
+        );
+
+        let cursor = CatchupCursor {
+            provider: [3; 16],
+            position: 41,
+        };
+        let resumed = encode_catchup_since_req(DocType::Channel, 9, &heads, Some(&cursor));
+        assert_eq!(
+            decode_catchup_since_req(&resumed).unwrap().3,
+            Some(Some(cursor)),
+            "and one continuing a walk replays it exactly"
+        );
+
+        // A short continuation is refused rather than read as a smaller position, which would
+        // silently resume somewhere nobody chose.
+        let mut truncated = Encoder::new();
+        truncated.put_u16(DocType::Channel.tag());
+        truncated.put_u128(9);
+        truncated.put_u32(0);
+        truncated.put_u8(1);
+        truncated
+            .put_bytes(&[0u8; CATCHUP_CURSOR_BYTES - 1])
+            .unwrap();
+        assert!(matches!(
+            decode_catchup_since_req(&truncated.finish()),
+            Err(SyncError::Malformed)
+        ));
+    }
+
+    /// A resume position is only meaningful against the log that issued it.
+    ///
+    /// The same operation sits at a different index on every member, so honouring a cursor minted
+    /// elsewhere would skip history the requester would then never be offered again. The serving
+    /// side recognises a foreign provider stamp and starts the walk over.
+    #[tokio::test]
+    async fn a_continuation_minted_elsewhere_restarts_the_walk() {
+        use automerge::transaction::Transactable;
+        use automerge::ROOT;
+
+        let (_hub, mut members, ids) = build_members(2).await;
+        converge_and_publish_test_routes(&mut members);
+        let mut bob = members.pop().unwrap();
+        let mut alice = members.pop().unwrap();
+        let (alice_peer, bob_peer) = (alice.local_peer(), bob.local_peer());
+        prove_live_member(&mut alice, bob_peer, ids[1]);
+        prove_live_member(&mut bob, alice_peer, ids[0]);
+        alice.open_channel(DocType::Channel, 86).await.unwrap();
+
+        // More than one chunk, so every answer below is a page with a continuation rather than a
+        // completed exchange.
+        let body = "y".repeat(16_384);
+        for i in 0..40 {
+            alice
+                .post(DocType::Channel, 86, |doc| {
+                    doc.put(ROOT, format!("m{i}"), body.as_str())
+                })
+                .await
+                .unwrap();
+        }
+
+        // What the serving side answers a requester that names no continuation.
+        let position_for =
+            |alice: &mut Member, bob: &mut Member, cursor: Option<&CatchupCursor>| {
+                let (req, _) = bob
+                    .build_authed_request(
+                        KIND_CATCHUP_SINCE,
+                        &encode_catchup_since_req(DocType::Channel, 86, &[], cursor),
+                    )
+                    .unwrap();
+                let resp = alice
+                    .serve_catchup_since(bob_peer, &req[1..])
+                    .expect("a member serves a member");
+                let (_, _, answer) = decode_signed_commit_resp(&resp).unwrap();
+                assert_eq!(answer[0], CATCHUP_SINCE_PAGE, "there is more to come");
+                CatchupCursor::decode(&answer[1..1 + CATCHUP_CURSOR_BYTES]).expect("a continuation")
+            };
+
+        let first = position_for(&mut alice, &mut bob, None);
+        assert_eq!(
+            first.provider, alice.catchup_provider,
+            "the continuation is stamped with the log that produced it"
+        );
+        assert!(first.position > 0, "the first page consumed some log");
+
+        // Alice's own continuation moves the walk on, which is what makes the next assertion mean
+        // something: positions are honoured when they are hers.
+        let second = position_for(&mut alice, &mut bob, Some(&first));
+        assert!(
+            second.position > first.position,
+            "her own continuation resumes rather than restarting"
+        );
+
+        // The same position under somebody else's provider stamp is refused, and the walk begins
+        // again from the top rather than skipping to that index.
+        let foreign = CatchupCursor {
+            provider: [0xAB; 16],
+            position: second.position,
+        };
+        let restarted = position_for(&mut alice, &mut bob, Some(&foreign));
+        assert_eq!(
+            restarted.position, first.position,
+            "a continuation from another log is ignored, not obeyed"
+        );
+    }
+
+    /// The regression guard for the composition in `docs/MESSAGE-FLOW.md` section 8.
+    ///
+    /// A page of operations the requester already holds applies nothing, and before the cursor
+    /// existed that was indistinguishable from a peer answering uselessly on a timer: it counted
+    /// against the source, and eight of them deprioritised an honest member. With a continuation
+    /// the same round is real progress, because the walk consumed log and cannot repeat itself.
+    /// The old shape, which recomputes the difference every time and genuinely can repeat, must
+    /// still be counted.
+    #[tokio::test]
+    async fn a_page_of_pure_duplicates_is_progress_but_an_unpaged_repeat_is_not() {
+        use automerge::transaction::Transactable;
+        use automerge::ROOT;
+
+        let (_hub, mut members, ids) = build_members(2).await;
+        converge_and_publish_test_routes(&mut members);
+        let mut bob = members.pop().unwrap();
+        let mut alice = members.pop().unwrap();
+        let (alice_peer, bob_peer) = (alice.local_peer(), bob.local_peer());
+        prove_live_member(&mut alice, bob_peer, ids[1]);
+        prove_live_member(&mut bob, alice_peer, ids[0]);
+        alice.open_channel(DocType::Channel, 87).await.unwrap();
+        bob.open_channel(DocType::Channel, 87).await.unwrap();
+        // Bob authors it, so he holds it without a delivery step. Handing it to him with
+        // `run_once` would also drain his catch-up queue, which is a request nobody in this
+        // fixture answers and an injected clock never times out.
+        bob.post(DocType::Channel, 87, |doc| doc.put(ROOT, "only", "op"))
+            .await
+            .unwrap();
+        assert_eq!(bob.doc(DocType::Channel, 87).unwrap().op_count(), 1);
+
+        // That same operation, offered back to him: a page that applies nothing, which is exactly
+        // what a frontier too narrow to name everything produces. The channel key is derived from
+        // the group rather than the author, so a bundle sealed on either side opens on the other.
+        let duplicate = {
+            let bundle = bob
+                .docs
+                .get_mut(&(DocType::Channel, 87))
+                .unwrap()
+                .export_catchup_since(&[], &bob.group, &bob.device, &mut bob.rng)
+                .unwrap();
+            assert_eq!(bundle.len(), 1);
+            size_capped_ops(&bundle, MAX_CATCHUP_CHUNK, MAX_CONTROL_RESPONSE)
+                .unwrap()
+                .0
+        };
+
+        /// Drive one exchange in which Alice answers with exactly `body`.
+        ///
+        /// Alice's stream carries whatever else the fixture left on it, so this drains to the
+        /// catch-up request rather than assuming it is first, which is what a serve loop does
+        /// anyway.
+        async fn answer(
+            alice: &mut Member,
+            bob: &mut Member,
+            alice_peer: PeerId,
+            bob_peer: PeerId,
+            body: Vec<u8>,
+        ) {
+            let (_, ()) = tokio::join!(
+                bob.request_catchup(alice_peer, DocType::Channel, 87),
+                async {
+                    let mut body = Some(body);
+                    for _ in 0..16 {
+                        match alice.transport.next_event().await {
+                            Some(TransportEvent::Request {
+                                data, responder, ..
+                            }) if data.first() == Some(&KIND_CATCHUP_SINCE) => {
+                                let body = body.take().expect("answered once");
+                                responder.respond(Bytes::from(signed_catchup_answer(
+                                    alice, bob_peer, &data, body,
+                                )));
+                                return;
+                            }
+                            Some(_) => continue,
+                            None => panic!("the transport closed before the request arrived"),
+                        }
+                    }
+                    panic!("the catch-up request never arrived");
+                }
+            );
+        }
+
+        // Three paged rounds, each carrying only what Bob has and each naming a further position.
+        for round in 1..=3u32 {
+            let mut page = vec![CATCHUP_SINCE_PAGE];
+            page.extend_from_slice(
+                &CatchupCursor {
+                    provider: [9; 16],
+                    position: round,
+                }
+                .encode(),
+            );
+            page.extend_from_slice(&duplicate);
+            answer(&mut alice, &mut bob, alice_peer, bob_peer, page).await;
+            assert_eq!(
+                bob.catchup_stalls
+                    .get(&(DocType::Channel, 87, alice_peer))
+                    .copied(),
+                None,
+                "a page that advances the walk is progress, not a strike against the source"
+            );
+        }
+        assert_eq!(
+            bob.catchup_cursors
+                .get(&(DocType::Channel, 87, alice_peer))
+                .map(|c| c.position),
+            Some(3),
+            "and the requester replays the newest position it was given"
+        );
+
+        // The same bundle without a continuation is the old shape, which can be repeated forever,
+        // so it is still counted.
+        let mut unpaged = vec![CATCHUP_SINCE_MORE];
+        unpaged.extend_from_slice(&duplicate);
+        answer(&mut alice, &mut bob, alice_peer, bob_peer, unpaged).await;
+        assert_eq!(
+            bob.catchup_stalls
+                .get(&(DocType::Channel, 87, alice_peer))
+                .copied(),
+            Some(1),
+            "a repeat with no way to advance is exactly what the bound is for"
+        );
     }
 
     /// One operation can be larger than a whole catch-up chunk, and it must still be delivered.
@@ -16908,6 +18446,176 @@ mod tests {
         assert!(doc_queued(&bob), "and the gap is still owned");
     }
 
+    /// A stall that cannot move is reported once, not once per drain.
+    ///
+    /// The drain retries a kept task on every tick, and a document whose only source is not worth
+    /// asking stays stalled until that changes. Reporting the condition per tick rather than per
+    /// transition is what buried a real log: one document with one excluded source wrote a line a
+    /// second for half an hour, into the record a "my message never arrived" report has to be read
+    /// out of. The transition is the event; the condition is not.
+    /// A `tracing` writer that keeps what was written, so a test can count emitted lines.
+    #[derive(Clone, Default)]
+    struct CapturedLog(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl CapturedLog {
+        fn count(&self, needle: &str) -> usize {
+            String::from_utf8_lossy(&self.0.lock().unwrap())
+                .matches(needle)
+                .count()
+        }
+    }
+
+    impl std::io::Write for CapturedLog {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for CapturedLog {
+        type Writer = CapturedLog;
+        fn make_writer(&'a self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
+    #[tokio::test]
+    async fn a_catch_up_stall_is_reported_once_until_eligibility_changes() {
+        let logs = CapturedLog::default();
+        let _log_guard = tracing::subscriber::set_default(
+            tracing_subscriber::fmt()
+                .with_writer(logs.clone())
+                .with_max_level(tracing::Level::DEBUG)
+                .finish(),
+        );
+        const STALL: &str = "no eligible source for a catch-up task";
+
+        let (_hub, mut members, ids) = build_members(2).await;
+        converge_and_publish_test_routes(&mut members);
+        let mut it = members.into_iter();
+        let alice = it.next().unwrap();
+        let mut bob = it.next().unwrap();
+        let alice_peer = alice.local_peer();
+        prove_live_member(&mut bob, alice_peer, ids[0]);
+        bob.open_channel(DocType::Channel, 92).await.unwrap();
+
+        let task = CatchupTask::Doc {
+            doc_type: DocType::Channel,
+            doc_id: 92,
+        };
+        // Opening the channel queues catch-up work of its own, and this test is about one task
+        // that cannot move rather than about that sweep.
+        bob.catchup_queue.clear();
+        // The only source is left alone about this document, so the drain can find nobody.
+        bob.cool_off_catchup_peer(alice_peer, DocType::Channel, 92);
+        bob.enqueue_doc_catchup(DocType::Channel, 92);
+
+        bob.drain_catchup_queue().await;
+        assert_eq!(
+            logs.count(STALL),
+            1,
+            "the first drain that finds nobody says so"
+        );
+
+        // Every later drain finds the same nothing, and says nothing further about it.
+        for _ in 0..5 {
+            bob.drain_catchup_queue().await;
+        }
+        assert_eq!(
+            logs.count(STALL),
+            1,
+            "a stall that has not changed is not restated on every tick"
+        );
+        assert!(
+            bob.catchup_queue.contains(&task),
+            "and staying quiet is not the same as dropping the work"
+        );
+
+        // The sweep starting again is a real change in eligibility, so the next stall is reported
+        // afresh rather than being suppressed by the record of the last one.
+        bob.clear_sources_checked(DocType::Channel, 92);
+        bob.drain_catchup_queue().await;
+        assert_eq!(
+            logs.count(STALL),
+            2,
+            "a sweep that starts again re-arms the report"
+        );
+    }
+
+    /// A commit probe nobody answered is not a probe that found nothing.
+    ///
+    /// The proactive probe a non-committer sends on every connection carries no proven gap, and a
+    /// node that has just restarted has nothing buffered either, so every term of "this search is
+    /// finished" except the answer itself was already true. A timeout therefore retired the task
+    /// exactly as an up-to-date member's reply would, and nothing re-queued it or tried another
+    /// source: a member that missed an epoch while offline could come back, fail its one probe,
+    /// and stay unable to decrypt current traffic.
+    #[tokio::test]
+    async fn an_unanswered_commit_probe_is_not_a_finished_one() {
+        let (_hub, mut members, ids) = build_members(2).await;
+        converge_and_publish_test_routes(&mut members);
+        let mut it = members.into_iter();
+        let mut alice = it.next().unwrap();
+        let mut bob = it.next().unwrap();
+        let alice_peer = alice.local_peer();
+        assert!(
+            !bob.is_designated_committer(),
+            "the proactive probe is the non-committer's recovery path"
+        );
+        prove_live_member(&mut bob, alice_peer, ids[0]);
+
+        let probing = |sync: &Member| {
+            sync.catchup_queue
+                .iter()
+                .any(|task| matches!(task, CatchupTask::Commits { gap_at: None, .. }))
+        };
+
+        bob.catchup_queue.clear();
+        bob.maybe_probe_for_missed_commits();
+        assert!(probing(&bob), "a reconnecting non-committer probes");
+
+        // Silence: a peer that accepted the request and never came back, which is what a timeout
+        // resolves to.
+        let (_, ()) = tokio::join!(bob.drain_catchup_queue(), async {
+            let Some(TransportEvent::Request { responder, .. }) =
+                alice.transport.next_event().await
+            else {
+                panic!("the drain's probe is the next event");
+            };
+            drop(responder);
+        });
+        assert!(
+            probing(&bob),
+            "nobody said this node is up to date, so the probe is still owed an answer"
+        );
+
+        // An answer does retire it, including the empty one an up-to-date member sends: without
+        // that, an ordinary connect would chase a gap that does not exist and mark every honest
+        // peer failed on the way. (The mark from the silent attempt clears the moment the peer is
+        // seen again; cleared here because this test never routes that traffic.)
+        bob.failed_catchup_peers.clear();
+        let (_, ()) = tokio::join!(bob.drain_catchup_queue(), async {
+            let Some(TransportEvent::Request {
+                from,
+                data,
+                responder,
+                ..
+            }) = alice.transport.next_event().await
+            else {
+                panic!("the drain's probe is the next event");
+            };
+            let response = alice.handle_request(from, &data);
+            responder.respond(Bytes::from(response));
+        });
+        assert!(
+            !probing(&bob),
+            "an answered probe must not be chased on every later tick"
+        );
+    }
+
     /// A successful answer that carries nothing is not the same claim as a completed document,
     /// and the difference decides whether a gap survives.
     ///
@@ -17474,7 +19182,7 @@ mod tests {
         let (req, _auth) = bob
             .build_authed_request(
                 KIND_CATCHUP_SINCE,
-                &encode_catchup_since_req(DocType::Channel, 103, &[]),
+                &encode_catchup_since_req(DocType::Channel, 103, &[], None),
             )
             .unwrap();
 
@@ -18713,12 +20421,14 @@ mod tests {
         let request_epoch = bob.group.epoch();
         let request_ts = 1_000;
 
-        // `ChannelSync::new` draws the first 32 bytes for the file-wrap key. Reproduce that draw
-        // through the injected deterministic RNG, then bind Alice's reply to the exact nonce the
-        // following catch-up request will use.
+        // `ChannelSync::new` draws 32 bytes for the file-wrap key and then 16 for its catch-up
+        // provider id. Reproduce both draws through the injected deterministic RNG, then bind
+        // Alice's reply to the exact nonce the following catch-up request will use.
         let mut expected_rng = ChaCha20Rng::seed_from_u64(0x0BAD_51A6);
         let mut discarded_file_key = [0u8; 32];
         expected_rng.fill_bytes(&mut discarded_file_key);
+        let mut discarded_provider = [0u8; 16];
+        expected_rng.fill_bytes(&mut discarded_provider);
         let mut request_nonce = [0u8; 16];
         expected_rng.fill_bytes(&mut request_nonce);
 
@@ -21980,6 +23690,153 @@ mod tests {
         assert!(fetched.unwrap(), "Bob fetched the blob from a member");
         assert_eq!(bob.get_blob(&cid), Some(data));
         assert!(bob.has_blob(&cid), "and it is now held locally");
+    }
+
+    #[test]
+    fn bounded_blob_response_checks_framing_before_body_copy() {
+        let frame = encode_signed_commit_resp(&[1; 32], &[2; 64], b"pixels");
+        let (_, _, body) = decode_blob_response(&frame, 6).unwrap();
+        assert_eq!(body, b"pixels");
+        assert_eq!(
+            body.as_ptr(),
+            frame[SIGNED_BLOB_OVERHEAD..].as_ptr(),
+            "body is borrowed"
+        );
+        assert!(decode_blob_response(&frame, 5).is_err());
+        for len in 0..frame.len() {
+            assert!(decode_blob_response(&frame[..len], 6).is_err());
+        }
+        let mut trailing = frame.clone();
+        trailing.push(0);
+        assert!(decode_blob_response(&trailing, 100).is_err());
+        assert!(
+            decode_blob_response(&encode_signed_commit_resp(&[1; 31], &[2; 64], b"pixels"), 6)
+                .is_err()
+        );
+        let mut wrong_sig = Encoder::new();
+        wrong_sig.put_bytes(&[1; 32]).unwrap();
+        wrong_sig.put_bytes(&[2; 63]).unwrap();
+        wrong_sig.put_bytes(b"pixels").unwrap();
+        assert!(decode_blob_response(&wrong_sig.finish(), 6).is_err());
+    }
+
+    #[tokio::test]
+    async fn bounded_blob_fetch_rejects_before_storage_then_accepts_correct_limit() {
+        let (_hub, members, _ids) = build_members(2).await;
+        let mut members = members.into_iter();
+        let mut alice = members.next().unwrap();
+        let mut bob = members.next().unwrap();
+        let peer = alice.local_peer();
+        let cid = alice.put_blob(b"pixels").unwrap();
+        let (result, _) = tokio::join!(
+            bob.request_blob_tracked_cancellable(peer, &cid, None, Some(5)),
+            alice.run_once()
+        );
+        assert!(result.is_err());
+        assert!(
+            !bob.has_blob(&cid),
+            "signed but oversized bytes never enter storage"
+        );
+        let (result, _) = tokio::join!(
+            bob.request_blob_tracked_cancellable(peer, &cid, None, Some(6)),
+            alice.run_once()
+        );
+        assert!(
+            result.unwrap().0,
+            "an incorrect earlier declaration does not blacklist a CID"
+        );
+        assert_eq!(
+            bob.request_blob_bounded(&cid, 6, None)
+                .await
+                .unwrap()
+                .unwrap(),
+            b"pixels"
+        );
+        assert!(
+            bob.request_blob_bounded(&cid, 5, None).await.is_err(),
+            "cache hits obey the bound too"
+        );
+        assert!(bob
+            .request_blob_bounded(&cid, MAX_BOUNDED_BLOB_BYTES + 1, None)
+            .await
+            .is_err());
+        let (tx, rx) = tokio::sync::watch::channel(true);
+        assert!(bob
+            .request_blob_bounded(&cid, 6, Some(RequestCancellation::new(rx, None)))
+            .await
+            .is_err());
+        drop(tx);
+    }
+
+    #[test]
+    fn bounded_blob_publication_returns_only_held_verified_bytes() {
+        let mut node = solo_node();
+        let cid = node.publish_blob_bounded(b"pixels").unwrap();
+        assert_eq!(cid, Cid::of(b"pixels"));
+        assert_eq!(node.get_blob(&cid).unwrap(), b"pixels");
+        assert_eq!(node.clear_staged_blobs().unwrap(), 0);
+        assert_eq!(node.publish_blob_bounded(b"pixels").unwrap(), cid);
+        assert!(node
+            .publish_blob_bounded(&vec![0; MAX_BOUNDED_BLOB_BYTES + 1])
+            .is_err());
+    }
+
+    #[tokio::test]
+    async fn bounded_blob_fetch_rejects_bad_signature_wrong_cid_and_request_replay() {
+        let (_hub, members, _ids) = build_members(2).await;
+        let mut members = members.into_iter();
+        let alice = members.next().unwrap();
+        let mut bob = members.next().unwrap();
+        let peer = alice.local_peer();
+        let cid = Cid::of(b"pixels");
+        for fault in ["signature", "cid", "nonce", "outsider"] {
+            let (result, ()) = tokio::join!(
+                bob.request_blob_tracked_cancellable(peer, &cid, None, Some(6)),
+                async {
+                    let Some(TransportEvent::Request {
+                        data, responder, ..
+                    }) = alice.transport.next_event().await
+                    else {
+                        panic!("blob request must be next");
+                    };
+                    assert_eq!(data[0], KIND_BLOB_FETCH);
+                    let (_, requester, ts, mut nonce, epoch, _) =
+                        decode_authed_request(&data[1..]).unwrap();
+                    let blob = if fault == "cid" { b"wrong!" } else { b"pixels" };
+                    if fault == "nonce" {
+                        nonce[0] ^= 1;
+                    }
+                    let transcript = blob_fetch_resp_transcript(
+                        &alice.group.group_id(),
+                        &requester,
+                        ts,
+                        &nonce,
+                        epoch,
+                        blob,
+                    );
+                    let outsider = MlsDevice::generate().unwrap();
+                    let signer = if fault == "outsider" {
+                        &outsider
+                    } else {
+                        &alice.device
+                    };
+                    let mut sig = signer.sign(&transcript).unwrap();
+                    if fault == "signature" {
+                        sig[0] ^= 1;
+                    }
+                    responder.respond(Bytes::from(encode_signed_commit_resp(
+                        &signer.public_key_bytes(),
+                        &sig,
+                        blob,
+                    )));
+                }
+            );
+            assert!(result.is_err(), "{fault}");
+            assert!(
+                bob.blob_cids().is_empty(),
+                "{fault} must not store either CID"
+            );
+        }
     }
 
     #[tokio::test]

@@ -1,6 +1,13 @@
 # Design: Diagnostics / Debug Console
 
-Status: design spec, not yet implemented. Reference mockup: `apps/desktop/design/debug-console.html`
+Status: **built.** Shipped as `apps/desktop/src/DebugConsole.svelte` and
+`apps/desktop/src/debug-console.ts`, over the `crates/catcoms-diagnostics/` capture layer; the six
+rail sections specced below are `DBG_SECTIONS` in `debug-console.ts`. Most of the body has been
+retro-edited to match what shipped; where it has not, section 8 is flagged inline.
+
+Scope: this document is the **visual contract** (shell, layout, sections, tone, tokens).
+`docs/design-diagnostics-suite.md` is the plan of record for capture, redaction and privacy, and
+is where those decisions get made. Reference mockup: `apps/desktop/design/debug-console.html`
 (open it in a browser; it is self-contained and uses the real tokens).
 
 ## 1. Purpose
@@ -20,8 +27,10 @@ Design intent in one line: an operator terminal you can screenshot at a stranger
 
 ## 2. Entry points and shell
 
-- Opened from Settings > Connection > Diagnostics via a new "Open debug console" button,
-  and by a keybind (proposed: `Ctrl+Shift+D`, subject to the keybind table).
+- Opened from Settings > Connection > Diagnostics via the "Open debug console" button. As
+  built, that button is the **only** entry point: it calls `openDebugConsole("overview")` in
+  `App.svelte`, which lazily imports `DebugConsole.svelte`. A keybind was proposed here
+  (`Ctrl+Shift+D`) and never shipped; nothing binds it today.
 - It is a full-screen takeover exactly like the settings overlay: fixed, `inset:
   var(--titlebar-h) 0 0 0`, above the app, below the titlebar and toasts. `Esc` closes it
   (topmost-layer-first convention). Reuse the `stx-esc` / `stx-esc-ring` close control.
@@ -417,7 +426,16 @@ Voice:
 - Grounds: console chrome on `--panel`, content floor and scrollers on `--bg-0`,
   inputs/hover on `--bg-elev`. Radii: `--r` for rows/controls/chips, `--r-lg` for cards.
 
-## 8. Component sketch (Svelte 5 runes)
+## 8. Component sketch (Svelte 5 runes); superseded by the shipped code
+
+**Superseded.** This sketch is kept for the shape it argued for, not as a description of the
+code. Nothing in it exists by these names: there is no `debug-console.svelte.js`, no `makeRing`,
+no `feRing`, no `sevCounts`. What shipped instead is `apps/desktop/src/debug-console.ts` (pure
+helpers and types: `LogEvent`, `DBG_SECTIONS`, `DBG_VIEW_CAP`, `appendEvents`, `filterEvents`,
+`latestSeq`, `dropNote`, the alias/redaction layer) with the state and markup in
+`DebugConsole.svelte`, over the native capture layer in `crates/catcoms-diagnostics/`
+(`ring.rs`, `hub.rs`, `event.rs`, `redact.rs`, `render.rs`, `export.rs`, `config.rs`). Read those
+for the real contract; read this only for the intent.
 
 Capture ring, shared by frontend feed and the roll-up:
 

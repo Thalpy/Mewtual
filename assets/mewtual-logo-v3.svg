@@ -1,0 +1,95 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-labelledby="title desc">
+  <title id="title">Mewtual logo</title>
+  <desc id="desc">A dark cat-eared shield with a pastel rim, a white kawaii cat face inside, and a pink heart lock badge on its edge.</desc>
+  <defs>
+    <linearGradient id="rim" x1="72" y1="40" x2="440" y2="490" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#5BCEFA"/>
+      <stop offset="0.5" stop-color="#E9D5FF"/>
+      <stop offset="1" stop-color="#F5A9B8"/>
+    </linearGradient>
+    <linearGradient id="lock" x1="337" y1="329" x2="406" y2="404" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#F9A8D4"/>
+      <stop offset="1" stop-color="#F472B6"/>
+    </linearGradient>
+  </defs>
+
+  <!-- One silhouette carries all three ideas: shield body, chat-bubble point, cat ears. -->
+  <path
+    d="M256 492C168 458 72 372 72 262V155Q72 118 109 118L117 39 228 118H284L395 39 403 118Q440 118 440 155V262C440 372 344 458 256 492Z"
+    fill="#262238"
+    stroke="url(#rim)"
+    stroke-width="14"
+    stroke-linejoin="round"
+  />
+
+  <!-- The kitty, now filling the shield so her head is the second shape you read. -->
+  <path
+    d="M129 184 139 86 222 144C233 141 244 140 256 140S279 141 290 144L373 86 383 184C402 208 412 238 412 271 412 354 343 418 256 418S100 354 100 271C100 238 110 208 129 184Z"
+    fill="#FFFDFE"
+  />
+  <path d="m157 116 11 65 43-28Z" fill="#F5A9B8" opacity="0.85"/>
+  <path d="m355 116-11 65-43-28Z" fill="#5BCEFA" opacity="0.85"/>
+
+  <g fill="none" stroke="#66517A" stroke-width="11" stroke-linecap="round">
+    <path d="M158 241c18 16 41 16 59 0"/>
+    <path d="M295 241c18 16 41 16 59 0"/>
+  </g>
+  <g fill="none" stroke="#66517A" stroke-width="6" stroke-linecap="round">
+    <path d="m163 231-11-11M177 224l-5-15"/>
+    <path d="m349 231 11-11M335 224l5-15"/>
+  </g>
+  <ellipse cx="162" cy="286" rx="33" ry="15" fill="#F5A9B8" opacity="0.45"/>
+  <ellipse cx="350" cy="286" rx="33" ry="15" fill="#F5A9B8" opacity="0.45"/>
+
+  <path d="M245 276c6-6 17-6 23 0-3 10-9 15-12 15s-9-5-11-15Z" fill="#B784A7"/>
+  <g fill="none" stroke="#8B6A9E" stroke-width="6" stroke-linecap="round">
+    <path d="M256 291v6c0 10-10 15-19 15"/>
+    <path d="M256 297c0 10 10 15 19 15"/>
+  </g>
+
+  <!-- Whiskers as little network links. -->
+  <g fill="none" stroke-linecap="round" stroke-width="8">
+    <path d="m179 305-62-15M179 325l-57 10" stroke="#5BCEFA"/>
+    <path d="m333 305 62-15M333 325l57 10" stroke="#F5A9B8"/>
+  </g>
+  <g fill="#FFFFFF" stroke-width="4">
+    <circle cx="118" cy="290" r="6" stroke="#5BCEFA"/>
+    <circle cx="123" cy="335" r="6" stroke="#5BCEFA"/>
+    <circle cx="394" cy="290" r="6" stroke="#F5A9B8"/>
+    <circle cx="389" cy="335" r="6" stroke="#F5A9B8"/>
+  </g>
+
+  <!-- Bow on the right ear. -->
+  <g transform="translate(372 176) rotate(16) scale(1.25)">
+    <path d="M0 7c-16-14-29-9-27 5 3 13 15 15 28 5Z" fill="#F5A9B8" stroke="#FFFFFF" stroke-width="4"/>
+    <path d="M10 7c16-14 29-9 27 5-3 13-15 15-28 5Z" fill="#5BCEFA" stroke="#FFFFFF" stroke-width="4"/>
+    <circle cx="5" cy="12" r="9" fill="#E9D5FF" stroke="#FFFFFF" stroke-width="4"/>
+  </g>
+
+  <!-- Sparkles tucked in the dark corners beside the ears. -->
+  <g fill="#FFFFFF">
+    <path d="m92 128 4 10 10 4-10 4-4 10-4-10-10-4 10-4Z"/>
+    <path d="m420 128 4 10 10 4-10 4-4 10-4-10-10-4 10-4Z"/>
+  </g>
+
+  <!-- Heart lock badge pinned on the rim, bottom right. -->
+  <g transform="translate(392 402) scale(.94) translate(-374 -371)">
+    <circle cx="374" cy="371" r="49" fill="#FFFFFF" stroke="#E9D5FF" stroke-width="7"/>
+    <path
+      d="M353 363v-12c0-16 9-28 21-28s21 12 21 28v12"
+      fill="none"
+      stroke="#8B5E83"
+      stroke-width="11"
+      stroke-linecap="round"
+    />
+    <path
+      d="M374 409c-7-7-34-28-34-48 0-13 10-23 23-23 6 0 9 3 11 7 2-4 5-7 11-7 13 0 23 10 23 23 0 20-27 41-34 48Z"
+      fill="url(#lock)"
+      stroke="#FFFFFF"
+      stroke-width="5"
+      stroke-linejoin="round"
+    />
+    <circle cx="374" cy="365" r="6" fill="#FFFFFF"/>
+    <path d="m371 370 6 0 4 13h-14Z" fill="#FFFFFF"/>
+  </g>
+</svg>

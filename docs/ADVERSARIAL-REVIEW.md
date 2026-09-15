@@ -42,9 +42,10 @@ Replace every bracketed field before sending this prompt to the reviewer:
 ```text
 Act as a read-only adversarial reviewer for Mewtual, a security-sensitive peer-to-peer desktop app.
 Do not edit files. Inspect the actual current worktree and `git diff`; do not rely on this summary.
-Read the repository instructions available in the checkout plus the relevant sections of
-docs/ARCHITECTURE.md, docs/INTERFACES.md, docs/THREAT-MODEL.md, docs/HANDOVER.md, and
-docs/ADVERSARIAL-REVIEW.md first.
+Read AGENTS.md (the repository instructions) plus the relevant sections of docs/ARCHITECTURE.md,
+docs/INTERFACES.md, docs/THREAT-MODEL.md, docs/HANDOVER.md, and docs/ADVERSARIAL-REVIEW.md first.
+If the change touches message send, gossip, or catch-up/backfill, also read docs/MESSAGE-FLOW.md,
+the canonical trace of that path.
 
 Objective:
 [What was built or is proposed, and the user-visible outcome.]

@@ -1,10 +1,43 @@
 # Design: epoch close, owner checkpoints and bounded recovery (P1)
 
+**Implementation scope (2026-09-08):** P1 is being integrated for Flipnote, not completed for
+every future document family before Studio work begins. The active consumers are the registry,
+StudioIndex and StudioObject (flipnotes and linked scores). `BACKEND-IMPLEMENTATION.md` gives
+the delivery gates. This narrows implementation scope, not the receipt, recovery, authorization
+or resource guarantees below. Games and game-only avatar-consent work are paused.
+
 Status: accepted design, revision 5; protocol-core implementation and adversarial testing have
 started. The current slice defines and tests operation envelopes, closes, receipts and their
 crash journals, the persisted epoch gate, durable intent metadata, and bounded recovery slots.
-Checkpoint materializers, settlement orchestration, sync discovery, storage admission and app/UI
-events remain later slices and the feature is not usable yet. Revision 4
+The checkpoint/registry slice adds deterministic raw seeds, receipt-bound checkpoint installation and
+vault restore, exact projection-size preflight, and the typed registry materializer. Recovery-slot
+transitions now also have a standalone vault-sealed store API with crash-safe replacement/retry,
+peak-space accounting, bounded recovery-file inventory discovery and explicit staging cleanup.
+Owner receipt decisions now have an accounted vault-backed prepare/completion adapter with exact
+crash retries. A combined bounded inventory/cleanup covers owner journals and recovery files;
+explicit intent-covering variants and vault-backed local intent preparation add the third family.
+Registry epochs add the fourth: inbound edits and owner seals persist, and local edits now save
+their intent before the epoch, returning publication-ready ciphertext only after both barriers.
+An exact retry reseals the original signed change under current membership, not a new delta.
+Registry installation now saves recovery and receipt-covered intent retirement before atomic
+successor selection. One saved author-owned intent can be replayed through a checked bounded
+store step, now driven by a cooperative one-ledger replay pass and one-shot network sender.
+Opt-in authenticated registry gossip and kind-20 paged requests use cooperative saved-state
+adapters; bounded provider cursors and durable receiver continuation are implemented. Independent
+owner-tenure observations persist with MLS, and keyed registry receipt-head queries/proofs now
+use explicit local snapshot preparation plus checked source/decision barriers. Expected-seed
+fetch and recovery-first registry installation now connect that selection to the vault and a
+fresh open-epoch catch-up pass. Automatic wakeups/global replay scheduling, other
+managed-file families and production orchestration are not wired yet. The Studio slices named as
+later work in earlier revisions have since landed: the typed Index/frames materializers
+(`crates/catcoms-replication/src/studio/{index,frames}/snapshot.rs`), settlement orchestration
+(`.../studio/epoch/settlement.rs` and `crates/catcoms-app/src/studio/settlement.rs`), checkpoint
+discovery (`crates/catcoms-app/src/studio_exchange/discovery.rs`,
+`crates/catcoms-sync/src/checkpoint_exchange.rs`) and the app/UI event path, which forwards phase
+observations through `settlement-changed` (section 13). What remains later slices is the rest:
+the specialized settlement states, the Registry/repair producers, the other managed document
+families and complete storage integration. No frontend consumes any of this, so
+the feature is not usable yet. Revision 4
 dialled the protocol back to a bounded checkpoint-and-recovery mechanism. Revision 5 makes the
 five remaining lifecycle corrections: adoption is folded into the first crash-safe receipt of
 each owner tenure (section 11); a newcomer reads old-owner heads provisionally and gets
@@ -102,8 +135,13 @@ op_id = H("catcoms-domain-op:v1", logical key, verified outer author identity, n
 
 `op_id` is derived only, recomputed by every receiver from the verified outer `SignedOp`
 author. Every collection element has a stable 32-hex element id chosen at creation; collections
-project as ordered sets by element id; concurrent insertions of different ids after one
-predecessor order by ascending `op_id`; insertions of the same id with different payloads
+project as ordered sets by element id. Sequence consumers retain a causally resolved insertion
+gap: predecessor insertion op id and right-origin insertion op id, with null at the beginning
+or when no right origin exists. Concurrent insertions into the same gap order by ascending
+`op_id`; recorded placement constraints take precedence over that tie-break (the exact frame
+traversal is specified in creative section 2.9). This does not promise hash order for all pairs
+of concurrent inserts after one predecessor when they observed different right origins.
+Insertions of the same id with different payloads
 resolve to the smallest `op_id` with others shown as conflicts; a tombstone wins over any
 insertion of its id; scalars project by Automerge's concurrent-put rule within an epoch and by
 the checkpoint's bounded conflict data across one; the envelope is at most 64 KiB; delivery
@@ -117,6 +155,15 @@ in the editor, every signed operation counted in full. A **per-device share** of
 operations and 1 MiB per epoch applies to every device except the owner's. Reserved space per
 epoch: 2 MiB seed, 64 KiB closes, 16 KiB receipts. One complete signed operation is capped at
 256 KiB before admission; its canonical domain envelope remains capped at 64 KiB.
+P1 v2 deltas are raw Automerge kind-1 changes. Before Automerge parsing, the codec scans the
+raw column framing without expanding runs: at most 65,536 primitive actions (7 for registry
+operations), 1,048,576 expanded column cells, 262,144 predecessor references, and 16 MiB of
+expanded key strings per change. String lengths must fit their encoded column before allocation;
+value lengths must fit the raw-byte budget; unsupported or compressed column specs reject.
+These are parser-work limits, separate from the signed-operation count, wire bytes and typed
+schema limits. A newly admitted operation's inner signing key must be a current roster member;
+group sealing by a relay alone does not authorize the inner author. Already accepted history
+survives removal, while receipt-authorized historical closes and seeds use their separate paths.
 
 ## 6. Close records
 
@@ -171,8 +218,44 @@ pinned outside the cap. Candidate order has no authority.
 5. **Prune** through the sealed epoch and mark it `Settled`.
 6. **Replay** this peer's own unconfirmed intents that the closure excluded into the checkpoint.
 
-An intent is **final** when inside a receipted closure. Until then it is retained, vault-sealed,
-and replayed wherever the document is next `Open`.
+Registry store implementation: steps 3-5 select one seed-backed successor by an atomic replacement
+of the full Closing restart unit, rather than writing a temporary pruned predecessor. It flushes
+that complete source before saving recovery, then durably retires only exact receipt-covered
+intent envelopes before replacement. A crash before replacement leaves the source as the finality
+proof; afterward the successor's opening receipt and seed are the proof. Exact installation retries
+flush the actual successor without rerunning predecessor retirement or replacing newer edits.
+Save retries retain their original concrete document id; deliberate replay explicitly targets the
+new one. Full-quota capacity orchestration and automatic replay are not live-wired yet.
+
+Newcomer registry implementation: a discovered checkpoint need not close the epoch held locally.
+Explicit adoption state freezes that whole source and retains the selected high-water plus one
+prior target. Delayed conflicts with that target or the original seed-opening receipt fault
+before stale filtering. A typed Rewound plan conservatively keeps the complete previous version,
+including seed-only pointers; no intent is retired merely because a seed has a matching value.
+Recovery identity depends on source content, not the destination receipt or late quarantine, so
+retargeting reuses the same warning. The scoped Server installer now saves the full source/receipt
+before seed work, then saves typed whole-source recovery before atomically selecting the successor.
+Fault outcomes are durable even without a seed. Restart or an expired fetch handle requires fresh
+discovery. Exact installed retries flush the actual successor and preserve later edits; no intents
+are retired by adoption. The caller explicitly re-watches the installed epoch for paged catch-up.
+This cooperative registry path is not automatic actor scheduling or a generic Studio installer.
+
+An intent is **final** only when inside a receipted closure. Ordinary pending intents remain
+vault-sealed and are considered for replay when the document is next `Open`.
+
+**Manual-recovery disposition (user decision, 2026-09-10).** An old own edit that cannot safely
+be replayed, or is represented only by checkpoint provenance without its receipted closure,
+may leave the pending queue only after its complete author/envelope is matched in an actual
+typed retained/staged recovery snapshot and that recovery record is durably flushed under the
+same exclusive storage custody. This means **needs recovery**, never receipted/final. Current
+signed-log operations, another author's edits, seed equality alone and failed-Save ledger entries
+without recovery evidence do not authorize this disposition. Classify after successor installation
+and attempt safe automatic replay before moving held edits to manual recovery. Do not infer
+causal ordering from operation hashes or timestamps, or overwrite a newer remote field during
+replay. The existing two retained snapshots, one staged slot, warning and seven-day eviction
+policy bound the remaining copy; Restore, Copy and Export remain available while it is retained.
+If recovery flush or ledger replacement fails, retain pending state and retry the same checked
+transition. This is bounded recovery, not a new finality protocol or indefinite preservation.
 
 ## 8. Seeds, checkpoints, retirement, and receipts
 
@@ -184,6 +267,26 @@ any member may. Only `(doc id, change hash)` metadata is retained for checkpoint
 is unverified (4096 entries per server, no bodies). A seed above 1 MiB travels unpadded because
 the padding ceiling is 1 MiB; that disclosure must be added to `THREAT-MODEL.md` before
 implementation.
+
+The raw Automerge 0.10 change (chunk kind 1) is the seed wire representation. Compressed changes,
+document snapshots and bundles reject before parsing. Verification checks the receipt's complete
+change hash and checksum before decoding, then the actor, sequence, start op, dependencies,
+timestamp, message and consumer schema. The actor derivation treats the concrete u128 document id
+as its 16 big-endian bytes. A raw-byte golden vector pins the entire change. Installation returns
+a separate document whose user-operation log excludes the seed; its optional vault-snapshot
+extension retains the logical scope, checkpoint epoch, close hash and seed hash. Every accepted
+checkpoint edit descends from that seed. Existing seedless vault snapshots retain their encoding.
+
+Implementation note (2026-09-08): registry seeds now have cooperative authenticated kind-22
+expected-hash fetch and installed-vault-source serving. It uses the existing 512-byte to 1-MiB
+padding ladder inside group AEAD; the above-ceiling disclosure is recorded in THREAT-MODEL.
+The receiver's private selection is minted during fresh kind-21 owner-proof verification and
+rechecked against runtime, MLS, owner and superseding discovery. Four retained passes hold one
+seed each with three paced attempts and a 60-second lifetime; transport capacity survives caller
+cancellation until driver termination. Only installed opening seeds are served, not a latest
+receipt's unavailable next seed. Fetching writes no receiver state; explicit registry installation
+uses the recovery-first transaction above. Combined automatic scheduling and other managed types remain unfinished;
+INTERFACES specifies the exact wire framing and bounds. These resource lifetimes are not leases.
 
 **Retirement.** The checkpoint carries the canonical projection of the receipted heads plus
 bounded conflict data and nothing else. Markers are never carried. Tombstones are never carried
@@ -232,12 +335,52 @@ therefore exactly the open epoch.
 
 **Fault and repair.** Two valid receipts under one tenure for one epoch naming different closes
 put the document into a read-only **fault** state, both kept, surfaced to everyone. It ends
-with a `ReceiptRepair v1 = { v:1, server id, doc type tag, logical key, tenure id, receipt hash a,
+with a `ReceiptRepair v2 = { v:2, server id, doc type tag, logical key, fault tenure id,
+issuer tenure start group epoch, receipt hash a,
 receipt hash b, selected receipt hash, repair sequence, owner public key, signature }` (at most
 1 KiB, sequence strictly increasing, persisted before publication like a receipt). The record
 selects the entire conflicting receipt rather than one epoch so it also repairs differing inherited
 fields first observed on different receipt epochs. Applying it is held until the losing receipt's
 checkpoint, if held, is persisted as a recovery snapshot through the staged slot.
+
+V2 separates the repairing owner's tenure from the tenure of the conflicting receipts. Live
+verification requires an independently observed current issuer tenure before even an exact retry;
+a carried field is not its own evidence. V1 remains decode/hash-compatible historical data but
+cannot authorize live repair. The bounded receipt book retains the latest exact repair and both
+full named receipts across checkpoints/restart. It screens the exact loser in ordinary, opening
+and adoption ingest; if inherited selections differed, it also screens receipts with that exact
+losing inherited selection in that fault tenure. A third baseline still faults. Same-baseline
+receipts carry no parent chain, so higher descendants cannot be classified by invented ancestry.
+Exact repair retries preserve newer progress and cannot clear a different active fault. A fault
+whose named pair differs holds until the exact evidence is available. Only the latest repair is
+retained: an older no-longer-covered conflict can require another repair after that bounded
+evidence is replaced. Repaired books use explicit local versions 4/5 under the unchanged 8 KiB
+cap; ordinary v1/v2 and adoption v3 remain unchanged without repair evidence. This codec/book
+prerequisite is tested, but does not itself exit a gate, reset an owner journal or install a seed.
+
+Implementation note for owner issuance: `ServerStore::prepare_epoch_owner_receipt` now persists
+the bounded canonical owner journal before returning. `mark_epoch_owner_receipt_published` reloads
+and durably records completion; an exact completion retry cannot clear a later pending receipt.
+A verified strictly newer tenure can replace an unfinished old-tenure decision under the same
+write barrier, preventing a returning owner from being stranded. The scope-sealed record charges
+protocol bytes and shares recovery's logical-document reserve owner. This is not yet a publisher:
+the explicit registry owner driver now validates the actual eligible closure and typed seed before
+signing. It requires the current durable MLS/tenure snapshot permit, derives inheritance from the
+installed opening, and saves the exact close with the decision in one bounded owner-record extension.
+An interrupted seal resumes those heads, not newer live heads; later Open edits enter recovery.
+Legacy pending receipts without close provenance hold explicitly. The driver then seals and invokes
+the adjacent recovery-first installer. Rotation results retain publication-pending status. Kind-21
+serving now drives the exact completion API only after a fresh current-owner proof is accepted by
+the local reply-forwarding channel, under the same synchronous Server/store gate. This completes
+a saved publication attempt, not peer delivery or transport-driver admission. A dropped receiver
+does not complete it; a crash or disk failure after handoff can require exact retry. Uncertain
+writes block the live budget until inventory reconciliation. Gate 4 additionally permits local
+completion after verifying the exact installed Open checkpoint, expected seed and matching durable
+current-owner journal and flushing both records. This records head/seed availability, never remote
+delivery, and allows a solo owner to rotate repeatedly. Only durable completion permits another
+eligible owner decision. Recently watched Studio and associated Registry maintenance now use the
+existing idle worker; conservative own-intent replay and native recovery controls are connected.
+Running-app succession, signed repair and final Gate 4 acceptance remain unfinished.
 
 ## 9. Intents and markers
 
@@ -247,10 +390,67 @@ marker commit atomically and the whole change is charged to the epoch. A root ke
 concurrent-create race of a lazily-created shared map, and every domain materializer ignores this
 reserved prefix. Replay into an `Open` epoch is idempotent by the marker keys; replay into a
 checkpoint consults recovery snapshots for tombstones and applies otherwise.
+The registry's stable keys need a narrower rule than Studio's random element ids: its store
+replay step HOLDS, never deletes, a saved intent when new authoring targets current/retained/staged
+deletion evidence or would replace a higher current admitted/overflow pointer hint. It accepts
+only the saved id and an explicitly captured existing Open epoch, requires the original current
+local author, and never rewrites the nonce/envelope. Because origin epochs are not recorded in
+the ledger, even a deliberate later re-put can conservatively need explicit recovery. After
+two-snapshot eviction, absent deletion evidence is only best-effort protection.
+
+An exact authenticated CURRENT-log operation instead reseals its original signed bytes, without
+changing materialization, even if deletion/newer hints arrived afterward. This exception requires
+full-envelope equality, not a marker, and keeps a Tombstone's failed post-rename flush retryable.
+All recovery validation, scope/current-author checks and both vault barriers still apply. The
+single-step API returns prepared ciphertext or a held reason; it neither schedules/sends replay
+nor retires held intents. Live replay scheduling and explicit recovery actions remain later work.
+
+The cooperative `RegistryReplayPass` now selects only the actual local author's saved ids, in
+canonical id order, from a ledger checked against both inventories. It retains a boxed snapshot
+of at most 10,000 ids (320,000 payload bytes), not bodies/ciphertext. Begin takes an explicit
+captured concrete id and does not establish that its source is current/Open; each actual step
+does so through the checked replay adapter. One attempt runs per step, paced by a monotonic
+100-ms per-pass deadline charged before work. Errors/unwinds pause without skipping; checked
+deadline overflow refuses work. This is not a global scheduler or per-server ingest limit.
+
+Prepared work waits for an opaque exact-attempt local submission ticket. Stale/cross-pass or
+duplicate acknowledgements cannot advance; explicit failed-send retry reseals the same saved id
+and preserves pacing. No timeout assumes success. Holds are visited once without removing their
+intent. Complete means snapshot traversal, never delivery/finality or an empty current ledger.
+New ids need another pass; missing selected ids pause. Dropping/restarting, including after a lost
+ticket, preserves durable intents and exact-current-log retry behavior. Mount binding is local
+and rejects a reopened vault, not a lock/incarnation send permit. Live consumers must still bound
+active passes/aggregate work and recheck lifecycle, membership, MLS epoch and Open before sending.
+
+The additive `MeshTransport::publish_once` prerequisite now waits for a driver attempt without
+entering Mewtual's legacy ciphertext retry queue. The cooperative Server replay sender consumes
+it with exact sync-instance binding and fresh authority/Open checks before each dispatch. This
+is a callable backend path, not an autonomous actor-owned worker.
+Driver cancellation is effective only if observed before admission; normal gossip caches and
+handler queues can outlive an attempt, even after some error results. Local Submitted/Duplicate
+outcomes do not imply delivery or intent retirement. Retries still require fresh authority checks
+and resealing by saved id, not reuse of a previously prepared body. The API's bounded inputs do
+not raise the configured gossip message-size limit.
+
 Caps: 64 KiB per intent, 10,000 intents and 4 MiB per logical document, 64 MiB per vault,
 20,000 markers per epoch (one for each operation admitted by the epoch maximum).
 
 ## 10. Recovery snapshots and the staged slot
+
+Implemented persistence prerequisite: `ServerStore::update_epoch_recovery` reloads and saves the
+complete slot record under exclusive mutable store access. It returns only after the existing
+file-sync/rename primitive succeeds (plus parent-directory sync on Unix). The sealed record binds
+local server id, full MLS group id, document type and logical key, and retains the last completed
+eviction pair so an acknowledgement can be retried after a post-rename flush failure. The original
+warning deadline survives reload and retries. Reads never evict. Encoders preflight the exact
+aggregate snapshot size before allocating; reads cap file bytes before unsealing.
+
+This API does **not** yet install/prune epochs or accept network requests. Its three slots are
+logical: atomic replacement temporarily duplicates ciphertext, and the existing writer can leave
+crash-orphan temporary siblings. Global admission/reserve accounting and cleanup must cover those
+bytes before integration. Records currently remain after server removal, like held blobs, until
+the retention lifecycle is wired. These are outstanding implementation tasks, not guarantees this
+standalone slice claims to have completed.
 
 A **recovery snapshot** is a typed materialization of content that lost a settlement, a repair
 or a succession rewind:
@@ -268,6 +468,36 @@ RecoverySnapshot v1 = { v:1, doc type tag, logical key, epoch, base close record
 The tombstone and element lists are strictly ordered by element id, conflicts by target and then
 value operation id, and applied operations by operation id; duplicates reject. All three physical
 slots must name the same logical document.
+
+**Registry recovery specialization (implemented, excluded settlements only).** Registry keys are
+typed logical keys, not random element ids. Its generic `tombstones`, `elements` and `conflicts`
+arrays are empty; the projection payload retains complete admitted pointers, overflow and
+pointer-key tombstones, plus excluded domain operations with full author identities. Inherited
+seed-only pointers have no invented operation author. The outer `applied_ops` is the sorted union
+of accepted source-operation ids; excluded operation ids must be a subset. The outer base close
+is the source epoch's opening close, absent only at epoch zero. The selected receipt hash is
+historical provenance, not current authority or permission to replay another author's operation.
+
+Payload v1 uses the existing big-endian/length-framed codec, in this exact order: `u8 version=1`,
+`bytes group_id`, `u8 bucket`, `bytes receipt_hash[32]`, admitted-pointer list, overflow-pointer
+list, tombstone-key list, excluded-operation list. Lists start with `u32 count`. Pointer entries
+are `u16 type_tag, bytes logical_key, u64 target_epoch`; tombstones omit target_epoch. Excluded
+entries are `bytes author[32], bytes DomainOp-v1`, strictly ordered by derived operation id.
+Pointer/key lists are strictly ordered by type/key, mutually disjoint; overflow requires all 2048
+admitted slots occupied. The combined key count is at most 2048 seed keys plus 20,000 operations,
+and the entire generic snapshot remains at most 6 MiB. Exact size preflight precedes encoding.
+The payload deliberately excludes quarantine/gate bookkeeping: identical recovery content keeps
+its snapshot id and warning deadline across retries despite newly quarantined packets.
+
+`stage_registry_recovery` recomputes from checked Closing state under exclusive store access,
+verifies its source accounting and (before a nonempty save) all existing typed slots, then uses the
+accounted recovery adapter. No evidence needs a slot when exclusions, overflow and tombstones
+are all empty; that path does not inspect or claim health of old recovery files. Failure or an
+eviction-pending warning never installs/prunes the source. The
+first/second snapshot may still refuse at the content ceiling until a future multi-record
+settlement reservation is implemented. Restore/Copy/Export, repair/rewind-specific typed records,
+checkpoint installation and intent retirement remain separate work; this adapter grants none
+of those actions implicitly.
 
 At most 6 MiB, preflighted before persistence. Physical state per logical document is **two
 retained slots plus one staged slot**, and the staged slot is counted in the settlement
@@ -316,6 +546,15 @@ the group epoch at which it became committer, so there is no undefined state. Ol
 signatures are rejected because the signer is not the committer; tenures of one device are
 distinct because the tenure id includes the group epoch.
 
+Implemented local evidence: sync observes the actual applied owner transition (including an
+Add into a recycled low leaf) and saves its resulting group epoch with that exact MLS snapshot.
+Only locally founded epoch zero starts known. Welcome joins and legacy snapshots have Unknown
+tenure, which same-owner commits preserve. An upgraded existing owner or a newly joined lowest-
+leaf owner can therefore remain unable to authorize rotation until independent evidence or a
+later witnessed transition exists. The implementation does not substitute the current group
+epoch or a restored receipt's claimed tenure. This observation is not a flush/publication grant;
+the owner proof path must still persist and recheck the matching snapshot and decision.
+
 **Newcomers.** A peer joining after a succession, for a document the new owner has not yet
 receipted, can verify neither the old receipts (the signer is not the current committer) nor a
 new one (none exists). It reads the head hinted by members provisionally, may edit the open
@@ -348,6 +587,39 @@ tombstone; stable admission of 2048 live pointers per bucket with previously adm
 keeping their slots; every seed carries the complete projection; warn at 3900 epochs,
 read-only at 4096 pending migration.
 
+Implementation format: the bucket logical key is `H("catcoms-registry-key:v1", server id, b)`
+with `b` framed as a u64. Target keys carry both their document type and logical-key bytes.
+The exact canonical bodies are `{"epoch":0,"key":"<lowercase hex>","t":"put_pointer","type":16}`
+and `{"key":"<lowercase hex>","t":"tombstone_pointer","type":16}`. The physical root uses
+`bucket`, `epoch`, `key`, `kind:"registry"`, `v:1`, and flat `p/<four-hex-tag>/<hex-key>` values
+for pointer epochs, `d/... = true` for tombstones and seed-only `s/... = true` for admitted slots.
+Flat keys avoid concurrent creation of competing nested maps. Only seed verification can introduce
+slot keys. A registry pointer number is a discovery hint: concurrent values choose the maximum,
+not an authority or history winner. This is specific to registry hints, not Studio scalar values.
+Target numbers span u64; the 4096 ceiling applies to the registry's own epoch. Tombstones win
+throughout an open epoch and retire at rotation. Overflow remains explicit in the materializer
+for settlement recovery; it is not silently included in an over-cap seed. Both local and inbound
+registry changes preflight the exact encoded next seed, with a fixed-size placeholder close hash.
+The maximal-key bucket fixture pins capacity and a repeated-rotation fixture pins retirement.
+Registry change validation also binds every predecessor operation id to the same root property
+at the change's causal heads. Immutable headers are only created when absent, preserving harmless
+equal-value conflicts from concurrent bucket creation. An already-applied put/tombstone may write
+only its new intent marker, but the requested value must already exist at those exact causal
+heads; a value held solely on another merged branch cannot justify the no-op.
+
+The implemented `RegistryEpoch` coordinator now keeps that typed document, gate, receipt book
+and opening receipt privately owned under one exclusive mutation interface. Its bounded local
+restart format stores the raw seed and signed operations, not a separate Automerge save; restore
+rebuilds the DAG, validates typed changes and matches complete gate metadata and receipt phase.
+Receipt admission only closes editing and retains the full source. The store now attaches it to
+vault persistence/inventory for inbound edits and receipt seals, returning outcomes only after
+the save/flush barrier. Local edits now join intent preparation and registry persistence;
+cooperative gossip, paged receive, keyed registry head/seed discovery and explicit recovery-first
+newcomer installation exist, but automatic orchestration remains unwired.
+The store installation transaction now saves recovery
+and receipt-covered intent retirement before atomically replacing the source. The core successor
+builder alone leaves the predecessor untouched and gives no authority to discard it.
+
 **Catch-up.** Requests carry up to 64 heads and an opaque provider cursor bound by HMAC to
 `(provider, requester, doc type, doc id, log generation, position, expiry 10 minutes)`; pages
 are topologically ordered and dependency-complete relative to the heads plus everything
@@ -355,15 +627,35 @@ delivered under the cursor; a reconstructed log bumps the generation and answers
 Catch-up serves seeds by change hash, closes, receipts and repairs by record hash, receipt
 heads by logical key, and operation pages by document id.
 
+Implemented registry page-serving prerequisite: a provider-local cursor freezes accepted-log
+count and a digest of that exact signed prefix plus seed. Appends beyond the prefix do not reset
+progress; an identical checked reload can continue, while prefix changes or a reminted provider
+key require restart. Original sorted heads (64 max) and the claimed verified seed repeat on every
+request and are MAC-bound with provider/requester and scope. Pages carry at most 32 operations /
+512 KiB of framed current-MLS ciphertext, with no empty nonterminal page. The Server adapter reads
+vault-authenticated history, checks membership/cursor bounds/MAC/expiry before source I/O and pins
+runtime/mount. Missing still-undelivered removed-author operations report that historical
+authorization is required; previously delivered cursor history need not block current-author
+descendants. No authority check on live ingestion is relaxed. Kind 20 now provides authenticated,
+rate-limited network page exchange, and a bounded cooperative receiver saves complete pages before
+advancing continuation. It permits one initial empty-head fallback for divergent history while
+retaining the verified seed and all charged limits. This proves no remote currency; automatic
+runtime scheduling and historical-authority transfer remain to be integrated. Cooperative registry
+receipt-head, expected-seed and recovery-first installation are implemented.
+`INTERFACES.md` records the implemented contracts. Rebuilds changing prefix bytes invalidate
+continuation, not arbitrary read-only reloads of byte-identical history.
+
 **Storage.** Preflight admission under one accounting lock before any inbound record or local
 commit. Never evictable: the open epoch, the current checkpoint and its predecessor until
 installed, receipts, repairs, closes, registry epochs, intents, the staged snapshot. A
 **settlement reserve** of 48 MiB covers one serialized settlement: the staged snapshot (6 MiB),
 a 2 MiB seed, a reconstruction copy and temporary files, conflict overflow; a 16 MiB allowance
-covers receipts, closes, seed metadata and registry epochs, so a settlement that would free
-space always lands. If the preflight fails and nothing safely evictable remains (retained
-snapshots past their warning, then receipted non-current epochs of documents not opened in 30
-days), the peer refuses the content and shows "storage limit reached".
+covers receipts, closes and protocol seed metadata. Peer-writable registry history, seed bodies
+and admission metadata charge ordinary content instead, so peers cannot exhaust receipt space.
+Only exact receipt growth in a registry record charges the protocol allowance. Settlement still
+requires sufficient protocol and reserve headroom. If the preflight fails and nothing safely
+evictable remains (retained snapshots past their warning, then receipted non-current epochs of
+documents not opened in 30 days), the peer refuses the content and shows "storage limit reached".
 
 | State | Bound |
 |---|---|
@@ -386,13 +678,109 @@ days), the peer refuses the content and shows "storage limit reached".
 plus the share; per server sustained 50 per second, burst 200, at most 16 documents with
 in-flight validation work; not relied on for correctness.
 
+Implemented admission prerequisite: `EpochStorageBudget` takes a complete trusted local inventory
+and splits the 2 GiB total into 1984 MiB ordinary content, 16 MiB protocol allowance, and 48 MiB
+settlement reserve. Its fixed-size inventory map has a local 65,536-record rail, counting empty
+crash-orphan files too. An over-rail inventory requires bounded cleanup before reconciliation,
+never truncation of accounting. Single-record
+replacement checks both final occupancy and the peak old inventory plus full replacement and
+scratch; no planned deletion is subtracted before I/O. Settlement copies may use the reserve,
+but ordinary writes may not. Held staged bytes pin that reserve to one document. A reservation
+sets the budget unready before returning; dropping or forgetting it requires complete inventory
+reconciliation. Successful I/O commits prevalidated counters; pre-I/O cancellation alone refunds.
+
+The accounted recovery adapter observes the actual authenticated old record (full content/staged
+split, physical ciphertext length and document owner), reserves its full replacement, saves and
+then commits. It is not the multi-record settlement transaction: a first/second recovery snapshot
+becomes retained immediately and can still be refused at the content cap. Supporting a settlement
+that frees other history requires the later transaction to hold those new bytes in reserve until
+the actual source deletion commits. Complete managed-type inventory/bootstrap, temporary cleanup, and a sole
+coordinator excluding the low-level unaccounted API remain required before production wiring.
+
+Recovery-namespace discovery is implemented as an exclusive borrowing scan, scheduled in steps of
+at most 64 directory entries and one bounded authenticated body. It stops at 131,072 visited names
+or 65,536 final/temporary records and never exposes partial results as complete. It reconstructs
+full scope from authenticated records, validates canonical names, and retains metadata only.
+Temporaries are never read/promoted/deleted: verified final destinations identify their ownership
+after the whole scan, while any unresolved orphan prevents per-server composition. Known temporary
+bytes count wholly as settlement scratch. This remains one inventory component, not the sole
+coordinator or permission to prune; all other P1 record types still need inventory integration.
+
+Explicit recovery-staging cleanup is now implemented as a separate borrowing job. It removes
+only canonical unpublished atomic-write siblings, never final recovery files or logical staged
+versions. Each successful batch (including an empty retry) runs the existing directory sync;
+failed batches may have partially removed siblings but expose no completion or budget refund.
+EOF transitions directly into a new inventory while retaining exclusive store access. A scan may
+still find missed orphans because deletion affects directory traversal; another bounded cleanup
+pass is permitted. Accounting is released only by reconciliation of complete current inventories,
+not by the cleanup's observed-byte counter. Source history/intents must survive until their final
+save succeeds. Startup/settlement wiring and cleanup of other managed types remain future work.
+
+`scan_epoch_storage` and `cleanup_epoch_storage_staging` now extend that same engine to the union
+of recovery and owner-journal files without relaxing aggregate rails. Coverage stays explicit and
+unchanged across cleanup, scan and completed metadata; old recovery-only APIs preserve their
+scope. Owner bodies use their small namespace-specific cap and schema; their saved bytes charge
+protocol allowance. Orphans require an authenticated destination of the SAME namespace, never a
+matching digest in another family. Combined cleanup removes only unpublished attempts, never
+saved pending/high-water decisions. This union is not all P1 storage or a production budget bootstrap.
+
+Local intent preparation is now a standalone vault adapter. It stores the existing bounded
+`IntentLedger` under a full local-server/group/type/key scope, with the author derived from the
+actual local MLS device and checked against current membership. New intents save before success;
+no accepted intent is removed by this adapter. An exact matching retry authenticates the existing
+ledger (including any newer intents), then syncs that unchanged file and its parent without a
+second copy. This repairs the post-rename durability boundary even when no copy fits at the cap.
+New writes charge full ordinary-content replacement peak, not the settlement reserve.
+
+`scan_epoch_storage_with_intents` and `cleanup_epoch_storage_staging_with_intents` opt into all
+these three families; earlier coverage stays unchanged. Intent temporaries charge content
+and cleanup never removes final ledgers. The dedicated vault intent budget is constructed only
+from completed inventory including all three families. Its 64 MiB cap conservatively counts physical final bytes,
+framing, all intent temporaries (even unresolved ones), and peak replacement copies. A private
+mounted-store generation invalidates older budgets and scan results before intent write/sync or
+cleanup attempts; failures require fresh inventory reconciliation. Per-document 10,000-intent /
+4 MiB canonical-operation limits still come from the core ledger. Global intent metadata also has
+the scanner's 65,536-record rail. This does not admit other managed families' metadata: the sole
+coordinator still must compose all storage types, validate domain semantics before preparation,
+replay only as the original author, and enforce the ordered source/recovery/retirement/selection
+barriers in section 7; registry store adapters now do so, but live orchestration remains unwired.
+
+The explicit `scan_epoch_storage_with_registry` and `cleanup_epoch_storage_staging_with_registry`
+now include the fourth implemented family, scope-bound vault `.registry-epoch` records. Inventory
+reuses full raw-seed/signed-log/gate/receipt validation, but returns metadata only and requires no
+present-time owner authorization. Inbound edits and seals reload under an exclusive store borrow;
+no arbitrary replacement API exists. Changed bytes reserve the full replacement peak, identical
+bytes use a sync-only retry, and no result escapes a failed write/flush. Seals keep the full source.
+Unpublished registry attempts conservatively charge ordinary content (including receipt-write
+attempts), so an orphan at the content ceiling may require explicit cleanup before reconciliation.
+The opt-in Server gossip receiver now connects actual network ticks to this durable admission
+path for explicitly watched registry epochs. Its compact inbox, authentication and rate rails
+are documented in `INTERFACES.md` under "Opt-in registry gossip receive". This is still not a
+sole all-family coordinator: actor-owned scheduling, lifecycle cancellation and automatic catch-up
+remain unwired. Registry head/seed exchange and newcomer installation are cooperative.
+
+Local `edit_registry_epoch` now performs canonical/scope/current-author and Open checks before
+journaling, including a full-envelope comparison against any retained operation with the same id.
+It then durably prepares the intent, reloads the epoch and either applies the edit or reseals its
+exact saved signed operation; only after the epoch save/flush does ciphertext return. Failure of
+the second record leaves a valid durable intent, never a published operation without recovery data.
+Exact retries sync both unchanged files without replacement copies, including when restoring has
+derived a new quota-exempt owner. No new persistence or wire version is required. Markers do not
+retire intents, Closing/Fault refuses publication preparation, and automatic cross-epoch replay
+remains part of recovery. Actual sending must recheck session, server incarnation, current
+membership/MLS epoch and the retained document's Open lifecycle; this API sends nothing itself.
+
 ## 13. Application events
 
 `AppEvent::SettlementChanged { doc type tag, logical key, state }` on every change of a
 document's settlement state: `Open`, `Closing`, `AwaitingReceipt`, `Settled`,
 `HeldForStorage`, `Fault`, `Repairing`, `AwaitingTenureReceipt`, `RecoveryAvailable`,
-`RecoveryEvictionPending`, `StorageRefused`. The desktop bridge forwards it with the same shape
-as `StatusUpdated` (tested).
+`RecoveryEvictionPending`, `StorageRefused`. The Studio actor/native path now forwards phase
+observations `Open`, `Closing`, `Settled`, `Fault`, recovery availability/warnings and a
+`RefreshRequired` invalidation through `settlement-changed`, with payload and lifecycle tests.
+These are independent observations, not an exclusive combined state machine or receipt evidence.
+The remaining specialized states and Registry/repair producers are not yet connected; the UI
+must re-read actual state rather than synthesize them. See `FLIPNOTE-UI-HOOKS.md` for the payload.
 
 ## 14. Tests
 

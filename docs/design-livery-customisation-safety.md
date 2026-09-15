@@ -1,14 +1,25 @@
 # Livery / profile customisation; how far is safe? (security design)
 
-Status: **assessment + proposal.** Answers "can we expose HTML/CSS for server livery and
-user profiles, MySpace/Oshi style?" Short answer: **no raw HTML or raw CSS, for either**;
-but the expressive *feel* is reachable through a widened allow-list + catalog assets + a
-CID-based custom cursor. This doc records why, so the line isn't re-litigated later.
+Status: **implemented (the safe 90%); assessment retained.** Answers "can we expose
+HTML/CSS for server livery and user profiles, MySpace/Oshi style?" Short answer: **no raw
+HTML or raw CSS, for either**; but the expressive *feel* is reachable through a widened
+allow-list + catalog assets + a CID-based custom cursor. This doc records why, so the line
+isn't re-litigated later.
+
+What shipped: the CSP backstop (below), the widened token vocabulary
+(`App.svelte`, the `LIVERY_RADIUS` / `LIVERY_FONTS` / `LIVERY_PATTERNS` catalogs read by
+`sanitizeLivery`: `--radius` enum, bundled font catalog, background-pattern catalog),
+and the custom cursor with its dimension cap, opaque-area minimum and mandatory `, auto`
+fallback (`App.svelte`, `validateCursor`), written through the `set_server_cursor` command
+(`apps/desktop/src-tauri/src/lib.rs`). Still open: the optional **contrast floor** and
+the publisher-side **debounce** (see `design-livery.md`).
 
 ## The threat frame
 
-The desktop client is a **Tauri WebView with the `invoke` bridge in document scope**, and
-`tauri.conf.json` currently sets **`"csp": null`** (no Content-Security-Policy backstop).
+The desktop client is a **Tauri WebView with the `invoke` bridge in document scope**. When
+this was written `tauri.conf.json` set **`"csp": null`** (no Content-Security-Policy
+backstop); it now ships a real policy (see "Prerequisite hardening" below), but the frame
+below is why that policy is a *second* wall and not the argument on its own.
 Anything that executes as markup in that document can call every Tauri command the client
 can: read/enumerate messages, mint invites, delete files, publish livery, walk the
 fileshare, read anything the vault unlocked. So peer-authored markup is not a theming
@@ -26,8 +37,9 @@ Two proposed mitigations do **not** work, and it's important to say why:
 ### Even CSS-without-HTML is unsafe in chrome
 
 - **Overlay phishing.** `position: fixed` + high `z-index` lets peer CSS paint a fake
-  passphrase/unlock prompt over the real UI. With `csp:null` and a shared document, this
-  is a credential-capture surface, not a cosmetic one.
+  passphrase/unlock prompt over the real UI. In a shared document this is a
+  credential-capture surface, not a cosmetic one, and CSP does not stop it: the style
+  allowance below (`'unsafe-inline'` for style attributes) is exactly what such CSS uses.
 - **CSS exfiltration.** Attribute-selector + value-triggered background requests can leak
   DOM contents; today's blob-only media path removes the `url()` fetch vector, and raw CSS
   would hand it back.
@@ -62,13 +74,32 @@ becomes markup or a network fetch. This is the same shape as the existing livery
 
 ## Prerequisite hardening; ✅ done
 
-`tauri.conf.json` now ships a real **CSP** (plus a `devCsp` allowing only Vite's HMR
-socket): scripts locked to `'self'` (Tauri auto-nonces its own bootstrap), images/media
-allow `data:`/`blob:` (the content-addressed embed pipeline), `object-src 'none'`,
-`frame-src 'none'`, connect limited to the IPC scheme. Style attributes keep
-`'unsafe-inline'` (profile colours/bubbles are inline styles; style attrs cannot execute
-script). With this, a sanitizer slip degrades to "markup appeared" rather than "peer code
-ran with bridge access"; the second wall the doc above assumes.
+`tauri.conf.json` now ships a real **CSP** (plus a `devCsp` that differs only by allowing
+Vite's HMR socket, `ws://localhost:1420 http://localhost:1420`, in `connect-src`). The
+live policy, the `app.security.csp` key of `apps/desktop/src-tauri/tauri.conf.json`:
+
+- `default-src 'self'`, `script-src 'self'` (Tauri auto-nonces its own bootstrap),
+  `object-src 'none'`, `base-uri 'self'`, `form-action 'self'`, `font-src 'self'`.
+- `img-src` / `media-src`: `'self' data: blob: catcoms-media: http://catcoms-media.localhost`.
+  `data:`/`blob:` are the content-addressed embed pipeline; the two `catcoms-media` entries
+  are the local custom protocol that streams decrypted attachment bytes (and its Windows
+  `http://…localhost` spelling), so large media need not be inlined.
+- `connect-src 'self' ipc: http://ipc.localhost`: the IPC scheme only, no outbound origin.
+- `frame-src`: **not** `'none'`. Seven allow-listed embed hosts are permitted so link embeds can
+  render their players: `https://open.spotify.com`, `https://www.youtube-nocookie.com`,
+  `https://w.soundcloud.com`, `https://player.vimeo.com`, `https://player.mixcloud.com`,
+  `https://embed.music.apple.com`, `https://embed.bsky.app`. That is a deliberate, named
+  exception: those origins are sandboxed cross-origin frames with no bridge access, but any
+  widening of this list is a security change, not a styling one, and it is a privacy change as
+  well as a script-execution one. The device-wide **Chat & Media → load these cards without
+  asking** preference is a single switch over this whole list rather than a per-host consent, so
+  adding a host silently extends an answer the member already gave, and the member-facing copy
+  (`USER_GUIDE.md`, `CHANGELOG.md`) has to be updated in the same change.
+- Style attributes keep `'unsafe-inline'` (profile colours/bubbles are inline styles; style
+  attrs cannot execute script, but see the overlay-phishing note above).
+
+With this, a sanitizer slip degrades to "markup appeared" rather than "peer code ran with
+bridge access"; the second wall the doc above assumes.
 
 ## Verdict
 

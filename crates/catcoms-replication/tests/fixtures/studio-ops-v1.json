@@ -1,0 +1,126 @@
+{
+  "version": 1,
+  "patch_id": "6ef42672dfee8b336c82d5466a84dceaa6dd18f405e5a4710ea24c9db47eaf6c",
+  "cases": [
+    {
+      "name": "put_object",
+      "kind": "index",
+      "body": "{\"created_by\":\"0101010101010101010101010101010101010101010101010101010101010101\",\"expiry\":null,\"kind\":\"flipnote\",\"object\":\"01010101010101010101010101010101\",\"op\":\"put_object\",\"title\":\"Moon 🐈\\n\\u0000\\t\\b\\f\\r\\u000b\\u001f\\\"\\\\/  é\",\"ts\":123456789}"
+    },
+    {
+      "name": "put_score",
+      "kind": "index",
+      "body": "{\"created_by\":\"0101010101010101010101010101010101010101010101010101010101010101\",\"kind\":\"score\",\"object\":\"02020202020202020202020202020202\",\"op\":\"put_object\",\"title\":\"lullaby\",\"ts\":0}"
+    },
+    {
+      "name": "tombstone_object",
+      "kind": "index",
+      "body": "{\"object\":\"01010101010101010101010101010101\",\"op\":\"tombstone_object\"}"
+    },
+    {
+      "name": "set_title",
+      "kind": "index",
+      "body": "{\"object\":\"01010101010101010101010101010101\",\"op\":\"set_title\",\"title\":\"\"}"
+    },
+    {
+      "name": "expiry_unrecorded",
+      "kind": "index",
+      "body": "{\"object\":\"01010101010101010101010101010101\",\"op\":\"set_expiry\"}"
+    },
+    {
+      "name": "expiry_never",
+      "kind": "index",
+      "body": "{\"expiry\":null,\"object\":\"01010101010101010101010101010101\",\"op\":\"set_expiry\"}"
+    },
+    {
+      "name": "expiry_zero",
+      "kind": "index",
+      "body": "{\"expiry\":0,\"object\":\"01010101010101010101010101010101\",\"op\":\"set_expiry\"}"
+    },
+    {
+      "name": "expiry_max",
+      "kind": "index",
+      "body": "{\"expiry\":9007199254740991,\"object\":\"01010101010101010101010101010101\",\"op\":\"set_expiry\"}"
+    },
+    {
+      "name": "insert_frame",
+      "kind": "flipnote",
+      "body": "{\"after\":null,\"bytes\":65536,\"cid\":\"abababababababababababababababababababababababababababababababab\",\"frame\":\"01010101010101010101010101010101\",\"op\":\"insert_frame\"}"
+    },
+    {
+      "name": "insert_after",
+      "kind": "flipnote",
+      "body": "{\"after\":\"01010101010101010101010101010101\",\"bytes\":25,\"cid\":\"abababababababababababababababababababababababababababababababab\",\"frame\":\"02020202020202020202020202020202\",\"op\":\"insert_frame\"}"
+    },
+    {
+      "name": "remove_frame",
+      "kind": "flipnote",
+      "body": "{\"frame\":\"01010101010101010101010101010101\",\"op\":\"remove_frame\"}"
+    },
+    {
+      "name": "replace_frame",
+      "kind": "flipnote",
+      "body": "{\"bytes\":25,\"cid\":\"abababababababababababababababababababababababababababababababab\",\"frame\":\"01010101010101010101010101010101\",\"op\":\"replace_frame\"}"
+    },
+    {
+      "name": "set_sfx",
+      "kind": "flipnote",
+      "body": "{\"frame\":\"01010101010101010101010101010101\",\"note\":127,\"op\":\"set_sfx\",\"patch\":\"6ef42672dfee8b336c82d5466a84dceaa6dd18f405e5a4710ea24c9db47eaf6c\",\"sfx\":\"02020202020202020202020202020202\"}"
+    },
+    {
+      "name": "remove_sfx",
+      "kind": "flipnote",
+      "body": "{\"op\":\"remove_sfx\",\"sfx\":\"02020202020202020202020202020202\"}"
+    },
+    {
+      "name": "set_patch",
+      "kind": "flipnote",
+      "body": "{\"descriptor\":{\"e\":{\"a\":12,\"d\":380,\"r\":120,\"s\":45},\"f\":{\"c\":18000,\"e\":0,\"m\":0,\"q\":0},\"l\":{\"d\":0,\"r\":100,\"t\":0},\"o\":[{\"c\":0,\"l\":100,\"t\":0,\"w\":1}],\"v\":1,\"x\":{\"c\":0,\"d\":0,\"r\":0}},\"op\":\"set_patch\",\"patch\":\"6ef42672dfee8b336c82d5466a84dceaa6dd18f405e5a4710ea24c9db47eaf6c\"}"
+    },
+    {
+      "name": "remove_patch",
+      "kind": "flipnote",
+      "body": "{\"op\":\"remove_patch\",\"patch\":\"6ef42672dfee8b336c82d5466a84dceaa6dd18f405e5a4710ea24c9db47eaf6c\"}"
+    },
+    {
+      "name": "set_export",
+      "kind": "flipnote",
+      "body": "{\"bytes\":9437184,\"cid\":\"abababababababababababababababababababababababababababababababab\",\"expiry\":null,\"export\":\"02020202020202020202020202020202\",\"op\":\"set_export\"}"
+    },
+    {
+      "name": "export_unrecorded",
+      "kind": "flipnote",
+      "body": "{\"bytes\":100,\"cid\":\"abababababababababababababababababababababababababababababababab\",\"export\":\"02020202020202020202020202020202\",\"op\":\"set_export\"}"
+    },
+    {
+      "name": "export_timestamp",
+      "kind": "flipnote",
+      "body": "{\"bytes\":100,\"cid\":\"abababababababababababababababababababababababababababababababab\",\"expiry\":123456789,\"export\":\"02020202020202020202020202020202\",\"op\":\"set_export\"}"
+    },
+    {
+      "name": "remove_export",
+      "kind": "flipnote",
+      "body": "{\"export\":\"02020202020202020202020202020202\",\"op\":\"remove_export\"}"
+    },
+    {
+      "name": "title",
+      "kind": "flipnote",
+      "body": "{\"field\":\"title\",\"op\":\"set_header\",\"value\":\"cat\"}"
+    },
+    {
+      "name": "fps",
+      "kind": "flipnote",
+      "body": "{\"field\":\"fps\",\"op\":\"set_header\",\"value\":24}"
+    },
+    {
+      "name": "score_link",
+      "kind": "flipnote",
+      "body": "{\"field\":\"score\",\"op\":\"set_header\",\"value\":\"02020202020202020202020202020202\"}"
+    },
+    {
+      "name": "score_unlink",
+      "kind": "flipnote",
+      "body": "{\"field\":\"score\",\"op\":\"set_header\",\"value\":null}"
+    }
+  ]
+}

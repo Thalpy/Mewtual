@@ -67,15 +67,17 @@ handle `relay_client`/`dcutr`/`identify` events (mostly logging + surfacing
 
 ## Staging (each slice compiles + tests independently)
 
-- **6e-3a; relay-capable swarm + relay server.** Add the features; switch the
-  swarm builders to `with_relay_client` + identify + dcutr; add `build_relay_swarm`
-  + a relay run loop + `catcomsctl relay --port`. **Test:** a relay node + a client
+- **6e-3a; relay-capable swarm + relay server. ✅ done.** The features are on, the swarm
+  builders use `with_relay_client` + identify + dcutr, and `build_relay_swarm` /
+  `run_relay` live in `crates/catcoms-net/src/relay_node.rs` behind
+  `catcomsctl relay --port`. **Test:** a relay node + a client
   that **reserves** a slot (over the memory transport); assert the reservation is
   accepted and the client gets a circuit listen address.
-- **6e-3b; circuit dial end-to-end.** `serve --relay` reserves and advertises the
-  circuit address; `join` dials it. **Test:** relay + server + joiner over the
-  memory transport, server reachable *only* via the circuit address (no direct
-  addr advertised), joiner completes `request_join` + catch-up through the relay.
+- **6e-3b; circuit dial end-to-end. ✅ done.** `catcomsctl serve --relay` reserves and
+  advertises the circuit address; `join` dials it. **Test:**
+  `crates/catcoms-sync/tests/tcp_relay_e2e.rs`; relay + server + joiner, server reachable
+  *only* via the circuit address (no direct addr advertised), joiner completes
+  `request_join` + catch-up through the relay.
 - **6e-3c; DCUtR hole punch. ✅ done.** `dcutr`/`identify` are wired into
   `MeshBehaviour`; a relayed connection auto-attempts a direct upgrade (no trigger
   code; the behaviour fires on any `is_relayed` connection, fed candidate addresses
@@ -86,9 +88,10 @@ handle `relay_client`/`dcutr`/`identify` events (mostly logging + surfacing
   joiner over **TCP loopback** (identify's address translation makes loopback
   hole-punch work); asserts the joiner observes the DCUtR `Ok` upgrade to the server.
   Real NAT is still a manual/staging check, per the honest-limits note below.
-- **6e-3d; rendezvous discovery + eclipse resistance.** Rendezvous server +
-  client registration/discovery under blinded namespaces; ≥2 rendezvous, member
-  peer-exchange, roster-size sanity check.
+- **6e-3d; rendezvous discovery + eclipse resistance. ✅ done** (see
+  `design-6e-rendezvous.md`, which records the completion and its own deferred list).
+  Rendezvous server + client registration/discovery under blinded namespaces; ≥2 rendezvous,
+  member peer-exchange, roster-size sanity check.
 
 ## Test strategy / honest limits
 
@@ -101,7 +104,10 @@ sees plaintext, which is already true of every byte Mewtual sends.
 
 ## Residuals / deferred
 
-- Relay **rate-limiting / reservation caps** + relay selection/rotation (hardening).
+- Relay **selection / rotation** (hardening). Rate-limiting and reservation caps are done:
+  `RelayLimits` in `crates/catcoms-net/src/relay_node.rs` bounds concurrent reservations and
+  per-node/per-prefix/per-peer rates, with the accounting in `crates/catcoms-net/src/metering.rs`;
+  the caps are operator-tunable from `catcomsctl relay`.
 - DCUtR **failure fallback** (stay relayed) UX + metrics.
 - Metadata: a relay sees who-relays-through-it and timing (ARCHITECTURE §3);
   mitigated (≥2 relays, cover traffic later), not eliminated.

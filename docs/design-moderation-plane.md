@@ -1,7 +1,14 @@
 # Moderation plane
 
-Status: implementation contract for phase 12a. This document is security-relevant and must be
-kept in step with `docs/THREAT-MODEL.md` and the public bridge in `docs/INTERFACES.md`.
+Status: **shipped (phase 12a, verified 2026-08-20)**; this remains the implementation contract for
+it. `DocType::Moderation = 14` (`crates/catcoms-wire/src/context.rs:72`) carries the document; the
+signed event/vote encoding and its kind/outcome vocabulary are in
+`crates/catcoms-app/src/moderation.rs:27,106,111`; `create_kick_case` and `resolve_kick_case` are at
+`crates/catcoms-app/src/lib.rs:7310,7412`; the lane graph, its per-user filter and the evidence
+scroll are rendered from the `moderationTimeline` / `filteredModerationTimeline` / `moderationGraph`
+derivations in `apps/desktop/src/App.svelte`. This document is
+security-relevant and must be kept in step with `docs/THREAT-MODEL.md` and the public bridge in
+`docs/INTERFACES.md`.
 
 ## Product contract
 
@@ -73,9 +80,11 @@ does not upgrade the original message into author-signed content.
 - Removed members keep only the epochs already available to them; delivery of a final resolution is
   best-effort. The case and reason exist before removal so an online target can receive them.
 
-## Antagonist review checklist
+## Antagonist review checklist ✅ satisfied
 
-Before calling the slice complete, tests and review must try:
+This was the gate on the slice, and the slice passed it (2026-08-20). The list stays as the
+standing regression contract: every item below is covered, and anything that touches the
+moderation document has to keep it covered. Tests and review must try:
 
 1. replaying a signed event into a different group;
 2. changing the reason, evidence, target, outcome, or vote after signing;

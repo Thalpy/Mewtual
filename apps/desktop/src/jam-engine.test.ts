@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { JAM_DRUM_DIGESTS_GLOBAL, JAM_DRUM_DIGESTS_PER_LANE, JAM_DRUM_PENDING_GLOBAL, JAM_DRUM_PENDING_PER_SOURCE, JAM_HELD_PER_PEER, JAM_LEGACY_SESSION_NONCE, JAM_REMOTE_HOLD_MAX_MS, JAM_SESSION_NONCE_HEX_CHARS, type JamPatch } from "./jam-contract.ts";
+import { JAM_DRUM_DIGESTS_GLOBAL, JAM_DRUM_DIGESTS_PER_LANE, JAM_DRUM_PENDING_GLOBAL, JAM_DRUM_PENDING_PER_SOURCE, JAM_HELD_PER_PEER, JAM_LEGACY_SESSION_NONCE, JAM_REMOTE_HOLD_MAX_MS, JAM_SESSION_NONCE_HEX_CHARS, JAM_VOICE_DECLICK_SECONDS, type JamPatch } from "./jam-contract.ts";
 import { drumSeed, JamEngine, type JamDrumSeedInput, type JamPlaybackPatchSet } from "./jam-engine.ts";
 import { jamPatchId } from "./jam-patch.ts";
 import { JamLatestTaskQueue } from "./jam-publication.ts";
@@ -24,12 +24,23 @@ class FakeNode {
   disconnect() { this.disconnects += 1; this.connections = []; }
 }
 
+// The native start/stop state machine, enforced. A permissive fake accepted `stop()` before
+// `start()` and recorded a scheduled stop that a real browser would have refused with
+// InvalidStateError; `stopSource` swallows that throw, so every assertion about a voice's
+// audio-clock deadline passed while the deadline did not exist. A test double that is more
+// forgiving than the platform cannot establish scheduling behaviour.
 class FakeSource extends FakeNode {
   onended: (() => void) | null = null;
   starts: number[] = [];
   stops: number[] = [];
-  start(time = 0) { this.starts.push(time); }
-  stop(time = 0) { this.stops.push(time); }
+  start(time = 0) {
+    if (this.starts.length) throw new Error("cannot call start more than once");
+    this.starts.push(time);
+  }
+  stop(time = 0) {
+    if (!this.starts.length) throw new Error("cannot call stop without calling start first");
+    this.stops.push(time);
+  }
   end() { this.onended?.(); }
 }
 
@@ -142,6 +153,43 @@ test("validated immutable patches render through one receiver-owned room effect 
   for (const source of voiceSources) source.end();
   assert.equal(engine.snapshot().voices.length, 0);
   assert.ok(voiceSources.every((source) => source.disconnects > 0));
+});
+
+test("a release of zero is still a ramp, so a gate envelope cannot click", async () => {
+  // A patch may legally ask for a release of 0, and the OFF setting on the envelope stage writes
+  // exactly that. Taking a sustained waveform to silence in no time is a step discontinuity, which
+  // is a click, and it is loudest on the very settings someone reaches for wanting a hard gate.
+  const { fake, engine } = contextAndEngine();
+  const alice = engine.openSource("alice");
+  const gate: JamPatch = { ...patch, e: { a: 0, d: 0, s: 100, r: 0 } };
+  const id = await jamPatchId(gate);
+  assert.equal(await engine.installPatch(alice, sn, id, gate), "installed");
+  const gainsBefore = fake.nodes.filter((node) => node instanceof FakeGain).length;
+  assert.equal(engine.noteOn({ channel: alice, sequence: 1, note: 60, wave: "sine", patchId: id }).ok, true);
+  const voiceGains = fake.nodes.filter((node) => node instanceof FakeGain).slice(gainsBefore) as FakeGain[];
+
+  // The audio-clock watchdog that ends a voice whose note-off never arrived has to fade over the
+  // same floor. It used to schedule its sustain level and its zero endpoint at the same instant,
+  // so a lost note-off ended in a step even though releasing by hand did not.
+  const watchdogEnds = voiceGains.flatMap((g) => g.gain.events.filter(([kind, value, time]) =>
+    kind === "linear" && value === 0 && time > 2));
+  assert.ok(watchdogEnds.length > 0, "the watchdog schedules an end for the voice");
+  for (const [, , end] of watchdogEnds) {
+    const holds = voiceGains.flatMap((g) => g.gain.events.filter(([kind, , time]) =>
+      kind === "set" && time === end));
+    assert.equal(holds.length, 0, `the watchdog must not hold and end at the same instant (${end})`);
+  }
+
+  fake.currentTime = 2;
+  assert.equal(engine.noteOff({ channel: alice, sequence: 2, note: 60 }).ok, true);
+  // Exactly one gain is taken to zero by the release: the voice's own output.
+  const ramps = voiceGains.flatMap((g) => g.gain.events.filter(([kind, value, time]) =>
+    kind === "linear" && value === 0 && time >= 2));
+  assert.ok(ramps.length > 0, "the note-off ramps the voice to silence");
+  assert.ok(
+    ramps.every(([, , time]) => time >= 2 + JAM_VOICE_DECLICK_SECONDS),
+    `a zero release must still fall over at least ${JAM_VOICE_DECLICK_SECONDS}s, got ${JSON.stringify(ramps)}`,
+  );
 });
 
 test("four reconnect generations establish the same verified patch under one persistent budget", async () => {
@@ -1037,4 +1085,73 @@ test("room construction failure stops the already-started chorus source and disc
   assert.throws(() => new JamEngine(fake as unknown as AudioContext), /delay unavailable/);
   assert.ok(fake.sources.some((source) => source.starts.length > 0 && source.stops.length > 0));
   assert.ok(fake.nodes.slice(1).every((node) => node.disconnects > 0));
+});
+
+test("a voice a seek revives starts part-way through its envelope, not at the start of its attack", async () => {
+  // Take playback joined mid-track has to open voices for notes whose attack already happened. The
+  // envelope automation is scheduled from a back-dated origin so the AudioParam timeline evaluates
+  // to the level the voice has reached; scheduling it from now would re-attack a note that has been
+  // sounding for seconds, which is a different (and louder) sound than the take contains.
+  const { fake, engine } = contextAndEngine();
+  fake.currentTime = 40;
+  const alice = engine.openSource("alice");
+  const swell: JamPatch = { ...patch, e: { a: 4_000, d: 1_000, s: 60, r: 500 } };
+  const id = await jamPatchId(swell);
+  assert.equal(await engine.installPatch(alice, sn, id, swell), "installed");
+  const gainsBefore = fake.nodes.filter((node) => node instanceof FakeGain).length;
+  assert.equal(
+    engine.noteOn({ channel: alice, sequence: 1, note: 60, wave: "sine", patchId: id, ageMs: 3_000 }).ok,
+    true,
+  );
+  const voiceGains = fake.nodes.filter((node) => node instanceof FakeGain).slice(gainsBefore) as FakeGain[];
+  const starts = voiceGains.flatMap((g) => g.gain.events.filter(([kind, value]) => kind === "set" && value === 0));
+  assert.ok(starts.length > 0, "the voice still has an envelope origin");
+  assert.ok(starts.every(([, , time]) => time === 37),
+    "three seconds of a four-second attack are already behind the seek point");
+  // Attack plus decay is five seconds, so a three-second-old note is still climbing: its peak is
+  // scheduled ahead of now and the ramp is what carries it there.
+  const peaks = voiceGains.flatMap((g) => g.gain.events.filter(([kind, , time]) => kind === "linear" && time === 41));
+  assert.ok(peaks.length > 0, "the rest of the attack is still to come");
+});
+
+test("a revived voice older than its own envelope is clamped to the sustain shelf", async () => {
+  // Past attack plus decay every envelope holds at sustain, so backdating further is audibly
+  // identical and only pushes automation further into the past. The clamp keeps it near the now.
+  const { fake, engine } = contextAndEngine();
+  fake.currentTime = 100;
+  const alice = engine.openSource("alice");
+  const short: JamPatch = { ...patch, e: { a: 10, d: 40, s: 80, r: 200 } };
+  const id = await jamPatchId(short);
+  assert.equal(await engine.installPatch(alice, sn, id, short), "installed");
+  const gainsBefore = fake.nodes.filter((node) => node instanceof FakeGain).length;
+  assert.equal(
+    engine.noteOn({ channel: alice, sequence: 1, note: 60, wave: "sine", patchId: id, ageMs: 480_000 }).ok,
+    true,
+  );
+  const voiceGains = fake.nodes.filter((node) => node instanceof FakeGain).slice(gainsBefore) as FakeGain[];
+  const starts = voiceGains.flatMap((g) => g.gain.events.filter(([kind, value]) => kind === "set" && value === 0));
+  assert.ok(starts.length > 0);
+  assert.ok(starts.every(([, , time]) => Math.abs(time - 99.95) < 1e-9),
+    "an eight-minute-old note backdates by its own fifty-millisecond envelope, not by eight minutes");
+});
+
+test("live playing carries no age, and a nonsense age is refused rather than rendered", () => {
+  const { fake, engine } = contextAndEngine();
+  fake.currentTime = 12;
+  const alice = engine.openSource("alice");
+  engine.beginSourceSession(alice, sn);
+  const gainsBefore = fake.nodes.filter((node) => node instanceof FakeGain).length;
+  assert.equal(engine.noteOn({ channel: alice, sequence: 1, note: 60, wave: "sine" }).ok, true);
+  const voiceGains = fake.nodes.filter((node) => node instanceof FakeGain).slice(gainsBefore) as FakeGain[];
+  const starts = voiceGains.flatMap((g) => g.gain.events.filter(([kind, value]) => kind === "set" && value === 0));
+  assert.ok(starts.length > 0 && starts.every(([, , time]) => time === 12),
+    "an ordinary note begins now, exactly as it did before an age existed");
+
+  for (const ageMs of [-1, Number.NaN, Number.POSITIVE_INFINITY]) {
+    assert.equal(
+      engine.noteOn({ channel: alice, sequence: 2, note: 62, wave: "sine", ageMs }).reason,
+      "invalid",
+      `an age of ${ageMs} must not reach the graph`,
+    );
+  }
 });

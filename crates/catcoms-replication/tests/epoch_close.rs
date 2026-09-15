@@ -11,8 +11,8 @@ use catcoms_mls::{MlsDevice, ServerGroup};
 use catcoms_replication::{
     Admission, AdmittedOperation, CloseRecord, EncryptedDoc, EpochGate, EpochPhase,
     InheritedCheckpoint, IntentLedger, LogicalDocument, OwnerReceiptJournal, Receipt, ReceiptBook,
-    ReceiptHeadProof, ReceiptIngest, ReceiptRepair, RecoveryReason, RecoverySlots,
-    RecoverySnapshot, RecoveryTransition, ReplError, SealedOp, SignedOp,
+    ReceiptHeadProof, ReceiptIngest, ReceiptRepair, ReceiptRepairIngest, RecoveryReason,
+    RecoverySlots, RecoverySnapshot, RecoveryTransition, ReplError, SealedOp, SignedOp,
 };
 use catcoms_wire::DocType;
 use rand_chacha::ChaCha20Rng;
@@ -295,24 +295,29 @@ fn owner_repair_selects_one_equivocating_receipt_and_returns_the_loser_for_recov
         ReceiptIngest::Fault
     );
 
-    let repair = ReceiptRepair::sign(
+    let repair = ReceiptRepair::sign_in_tenure(
         document,
         a.tenure_id,
         [b.hash(), a.hash()],
         a.hash(),
         1,
+        group.epoch(),
         &owner,
     )
     .unwrap();
     let decoded = ReceiptRepair::decode(&repair.encode()).unwrap();
-    decoded.verify_current_owner(&group).unwrap();
-    assert_eq!(book.apply_repair(&decoded, &group).unwrap(), b);
+    decoded.verify_current_owner(&group, group.epoch()).unwrap();
+    assert_eq!(
+        book.apply_repair(&decoded, &group, group.epoch()).unwrap(),
+        (ReceiptRepairIngest::Applied, b.clone())
+    );
     assert!(!book.is_faulted());
     assert_eq!(book.latest(), Some(&a));
-    assert!(matches!(
-        book.apply_repair(&decoded, &group),
-        Err(ReplError::ReceiptConflict)
-    ));
+    // Exact retry is now explicit and inert; it does not run the original selection again.
+    assert_eq!(
+        book.apply_repair(&decoded, &group, group.epoch()).unwrap(),
+        (ReceiptRepairIngest::Duplicate, b)
+    );
 }
 
 #[test]
@@ -663,7 +668,7 @@ fn gate_restore_preserves_admissions_across_an_owner_change() {
 }
 
 #[test]
-fn third_recovery_snapshot_is_crash_resumable_and_never_makes_four_physical_copies() {
+fn third_recovery_snapshot_is_crash_resumable_and_never_makes_four_logical_slots() {
     let mut slots = RecoverySlots::default();
     assert_eq!(
         slots.stage(snapshot(1), 100).unwrap(),

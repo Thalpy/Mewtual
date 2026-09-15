@@ -37,6 +37,32 @@ export function heartbeatRecovery(input: {
 }
 
 /**
+ * Who has to be told that this device is leaving a room.
+ *
+ * Not "everyone the server currently calls online", which is what a hangup used to be addressed
+ * to. A peer you have an established WebRTC edge with is in the room by the strongest evidence
+ * there is, and does not have to be reachable over the mesh at that instant; when they were not,
+ * they got no farewell at all and their end drew LOST a few seconds later, which is the word for
+ * a link that died on its own. Leaving read as crashing out.
+ *
+ * So it is the union: every peer with an edge, plus every member the roster says is online. Self
+ * is never a target, and a roster read that failed contributes nothing rather than emptying the
+ * set, because the edges alone are still worth telling.
+ */
+export function hangupTargets(
+  edges: readonly string[],
+  members: readonly string[],
+  online: ReadonlySet<string>,
+  selfFp: string,
+): string[] {
+  const targets = new Set(edges);
+  for (const fp of members) if (online.has(fp)) targets.add(fp);
+  targets.delete(selfFp);
+  targets.delete("");
+  return [...targets];
+}
+
+/**
  * What a peer says about itself: the two mute states, which video slot they are filling, and the
  * jam-take coordination pair. `rec` is what THEY are doing (0 none, 1 arming/paused: asking the
  * room, 2 recording); `rc` is whether they consent to being recorded. Both are honest-client

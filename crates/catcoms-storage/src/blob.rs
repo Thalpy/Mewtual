@@ -2,6 +2,7 @@
 
 use std::collections::hash_map::Entry;
 use std::collections::{HashMap, VecDeque};
+use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use catcoms_crypto::{seal, unseal, SealedBlob};
@@ -19,16 +20,55 @@ use crate::StorageError;
 /// and promotes the whole set once its manifest is published, so an upload that never finishes
 /// leaves nothing in the store to account for. See [`put_staged`](BlobStore::put_staged).
 pub trait BlobStore {
+    /// Explicit local copies have a separate quota and ownership from fetched/uploaded cache
+    /// bytes. Unsupported stores (especially memory/FIFO stores) never claim durable retention.
+    fn kept_files(&self) -> crate::kept::KeptFiles {
+        crate::kept::KeptFiles::default()
+    }
+    /// Reserve the complete exact plan before accepting any retained network bytes.
+    fn begin_keep(&mut self, _plan: crate::kept::KeepPlan) -> Result<u64, StorageError> {
+        Err(StorageError::Io(
+            "kept copies require the encrypted disk store".into(),
+        ))
+    }
+    /// Write only into the reservation selected by this process-local token.
+    fn put_keep(&mut self, _token: u64, _bytes: &[u8]) -> Result<(), StorageError> {
+        Err(StorageError::Malformed)
+    }
+    /// Called only after the application has verified the complete ordered plaintext CID.
+    fn finish_keep(&mut self, _token: u64) -> Result<(), StorageError> {
+        Err(StorageError::Malformed)
+    }
+    /// Cancel this exact reservation. Failed cleanup must not refund its capacity.
+    fn abort_keep(&mut self, _token: u64) -> Result<(), StorageError> {
+        Err(StorageError::Malformed)
+    }
+    /// Explicit local release; replicated expiry/unlisting never calls this operation.
+    fn forget_kept(&mut self, _cid: &Cid) -> Result<(), StorageError> {
+        Err(StorageError::Malformed)
+    }
+    /// Whether held bytes survive dropping this store. Publication APIs that promise a saved
+    /// blob must fail closed on the default in-memory fallback after an attachment failure.
+    fn is_persistent(&self) -> bool {
+        false
+    }
+
     /// Store `bytes`, returning their content address.
     fn put(&mut self, bytes: &[u8]) -> Result<Cid, StorageError>;
 
     /// Fetch the bytes for `cid`, verifying their integrity. `None` if absent.
     fn get(&self, cid: &Cid) -> Result<Option<Vec<u8>>, StorageError>;
 
+    /// Integrity-checked read bounded before allocating/copying blob content. The bound is on
+    /// plaintext bytes; sealing stores allow only their fixed envelope overhead in addition.
+    fn get_bounded(&self, cid: &Cid, max_bytes: usize) -> Result<Option<Vec<u8>>, StorageError>;
+
     /// Whether the store currently holds `cid`.
     fn has(&self, cid: &Cid) -> bool;
 
-    /// Remove `cid`. Returns whether it was present.
+    /// Remove a held copy of `cid`. Returns whether a copy was removed; a reference-protecting
+    /// adapter may retain it (`false`) or refuse while its inventory is unknown. This is not
+    /// evidence that no copy exists; use `has`/verified reads to determine availability.
     fn delete(&mut self, cid: &Cid) -> Result<bool, StorageError>;
 
     /// All currently-held content addresses.
@@ -50,6 +90,14 @@ pub trait BlobStore {
     /// This is the commit point of an upload, and it is a move rather than a copy so that
     /// promoting a 256 MiB file does not mean rewriting it.
     fn promote_staged(&mut self, cid: &Cid) -> Result<bool, StorageError>;
+
+    /// Verify and promote within a plaintext limit, then flush the held file before success.
+    /// Both staged and existing held copies are read with the bound. Failure after promotion
+    /// may leave held content; callers must not publish a reference or delete that shared copy.
+    /// Memory stores provide process-local availability only. Filesystem stores sync the file
+    /// and, on Unix, its containing directories (matching the vault's platform durability seam).
+    fn promote_staged_bounded(&mut self, cid: &Cid, max_bytes: usize)
+        -> Result<bool, StorageError>;
 
     /// Discard one staged blob. `Ok(false)` if it was not staged.
     ///
@@ -151,6 +199,14 @@ impl BlobStore for MemoryBlobStore {
         self.blobs.contains_key(cid)
     }
 
+    fn get_bounded(&self, cid: &Cid, max_bytes: usize) -> Result<Option<Vec<u8>>, StorageError> {
+        match self.blobs.get(cid) {
+            Some(bytes) if bytes.len() > max_bytes => Err(StorageError::BlobSizeLimit),
+            Some(bytes) => verify(cid, bytes.clone()).map(Some),
+            None => Ok(None),
+        }
+    }
+
     fn delete(&mut self, cid: &Cid) -> Result<bool, StorageError> {
         if let Some(b) = self.blobs.remove(cid) {
             self.total_bytes -= b.len();
@@ -185,6 +241,21 @@ impl BlobStore for MemoryBlobStore {
         Ok(self.staged.remove(cid).is_some())
     }
 
+    fn promote_staged_bounded(
+        &mut self,
+        cid: &Cid,
+        max_bytes: usize,
+    ) -> Result<bool, StorageError> {
+        let Some(bytes) = self.staged.get(cid) else {
+            return Ok(false);
+        };
+        if bytes.len() > max_bytes {
+            return Err(StorageError::BlobSizeLimit);
+        }
+        verify(cid, bytes.clone())?;
+        self.promote_staged(cid)
+    }
+
     fn clear_staging(&mut self) -> Result<usize, StorageError> {
         let n = self.staged.len();
         self.staged.clear();
@@ -199,6 +270,80 @@ impl BlobStore for MemoryBlobStore {
 /// name does not parse as a CID, and clearing the whole staging area is one directory walk rather
 /// than a pattern match over every file in the store.
 const STAGING_DIR: &str = "staging";
+
+/// Inspect the opened file before reading. `take` also bounds a file that grows after metadata
+/// is checked. Never reserve from an untrusted on-disk length or fall back to `fs::read`.
+pub(crate) fn read_bounded(path: &Path, max_bytes: usize) -> Result<Option<Vec<u8>>, StorageError> {
+    let file = match std::fs::File::open(path) {
+        Ok(file) => file,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(StorageError::Io(e.to_string())),
+    };
+    let metadata = file
+        .metadata()
+        .map_err(|e| StorageError::Io(e.to_string()))?;
+    if !metadata.is_file() {
+        return Err(StorageError::Malformed);
+    }
+    if metadata.len() > max_bytes as u64 {
+        return Err(StorageError::BlobSizeLimit);
+    }
+    let mut bytes = Vec::new();
+    file.take((max_bytes as u64).saturating_add(1))
+        .read_to_end(&mut bytes)
+        .map_err(|e| StorageError::Io(e.to_string()))?;
+    if bytes.len() > max_bytes {
+        return Err(StorageError::BlobSizeLimit);
+    }
+    Ok(Some(bytes))
+}
+
+fn flush_promoted(dir: &Path, cid: &Cid) -> Result<(), StorageError> {
+    // Write access is required for FlushFileBuffers on Windows. No content is changed here.
+    std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(dir.join(cid.to_hex()))
+        .and_then(|file| file.sync_all())
+        .map_err(|e| StorageError::CommittedButNotDurable(e.to_string()))?;
+    #[cfg(unix)]
+    for path in [dir.to_path_buf(), dir.join(STAGING_DIR)] {
+        std::fs::File::open(path)
+            .and_then(|file| file.sync_all())
+            .map_err(|e| StorageError::CommittedButNotDurable(e.to_string()))?;
+    }
+    Ok(())
+}
+
+/// Establish the namespace before accepting a persistent store. File/leaf-directory fsync alone
+/// does not persist a freshly-created group directory's entry in its parent. Sync all ancestors
+/// on open, including retries where a previous failed open already made the directories visible.
+/// Windows retains the existing vault's file-flush-only platform guarantee.
+pub(crate) fn create_blob_directory(dir: &Path) -> Result<(), StorageError> {
+    create_blob_directory_with_sync(dir, |path| {
+        #[cfg(unix)]
+        {
+            std::fs::File::open(path)?.sync_all()
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = path;
+            Ok(())
+        }
+    })
+}
+
+fn create_blob_directory_with_sync(
+    dir: &Path,
+    mut sync: impl FnMut(&Path) -> std::io::Result<()>,
+) -> Result<(), StorageError> {
+    std::fs::create_dir_all(dir).map_err(|e| StorageError::Io(e.to_string()))?;
+    let absolute = std::fs::canonicalize(dir).map_err(|e| StorageError::Io(e.to_string()))?;
+    for ancestor in absolute.ancestors() {
+        sync(ancestor).map_err(|e| StorageError::Io(e.to_string()))?;
+    }
+    Ok(())
+}
 
 fn staged_path(dir: &Path, cid: &Cid) -> PathBuf {
     dir.join(STAGING_DIR).join(cid.to_hex())
@@ -257,10 +402,32 @@ pub struct FsBlobStore {
 }
 
 impl FsBlobStore {
+    // The injected flush exists to exercise the committed-but-not-durable boundary without
+    // filesystem-specific permission tricks. Production always supplies `flush_promoted`.
+    fn promote_bounded_with_flush(
+        &mut self,
+        cid: &Cid,
+        max_bytes: usize,
+        flush: impl FnOnce(&Path, &Cid) -> Result<(), StorageError>,
+    ) -> Result<bool, StorageError> {
+        let Some(bytes) = read_bounded(&staged_path(&self.dir, cid), max_bytes)? else {
+            return Ok(false);
+        };
+        verify(cid, bytes)?;
+        let healthy = matches!(self.get_bounded(cid, max_bytes), Ok(Some(_)));
+        if !promote_staged_file(&self.dir, cid, healthy)? {
+            return Ok(false);
+        }
+        self.get_bounded(cid, max_bytes)?
+            .ok_or(StorageError::Malformed)?;
+        flush(&self.dir, cid)?;
+        Ok(true)
+    }
+
     /// Open (creating if needed) a blob store rooted at `dir`.
     pub fn open(dir: impl AsRef<Path>) -> Result<Self, StorageError> {
         let dir = dir.as_ref().to_path_buf();
-        std::fs::create_dir_all(&dir).map_err(|e| StorageError::Io(e.to_string()))?;
+        create_blob_directory(&dir)?;
         Ok(Self { dir })
     }
 
@@ -270,6 +437,10 @@ impl FsBlobStore {
 }
 
 impl BlobStore for FsBlobStore {
+    fn is_persistent(&self) -> bool {
+        true
+    }
+
     fn put(&mut self, bytes: &[u8]) -> Result<Cid, StorageError> {
         let cid = Cid::of(bytes);
         let path = self.path(&cid);
@@ -278,7 +449,7 @@ impl BlobStore for FsBlobStore {
         // has served the CID-verified bytes again. We only overwrite after `get` has proved that
         // the existing record is absent or invalid, so the repair path never discards a valid
         // local copy.
-        if !matches!(self.get(&cid), Ok(Some(_))) {
+        if !matches!(self.get_bounded(&cid, bytes.len()), Ok(Some(_))) {
             std::fs::write(&path, bytes).map_err(|e| StorageError::Io(e.to_string()))?;
         }
         Ok(cid)
@@ -295,6 +466,20 @@ impl BlobStore for FsBlobStore {
 
     fn has(&self, cid: &Cid) -> bool {
         self.path(cid).exists()
+    }
+
+    fn get_bounded(&self, cid: &Cid, max_bytes: usize) -> Result<Option<Vec<u8>>, StorageError> {
+        read_bounded(&self.path(cid), max_bytes)?
+            .map(|bytes| verify(cid, bytes))
+            .transpose()
+    }
+
+    fn promote_staged_bounded(
+        &mut self,
+        cid: &Cid,
+        max_bytes: usize,
+    ) -> Result<bool, StorageError> {
+        self.promote_bounded_with_flush(cid, max_bytes, flush_promoted)
     }
 
     fn delete(&mut self, cid: &Cid) -> Result<bool, StorageError> {
@@ -352,10 +537,30 @@ pub struct SealingBlobStore<R: CryptoRngCore> {
 }
 
 impl<R: CryptoRngCore> SealingBlobStore<R> {
+    fn read_sealed_bounded(
+        &self,
+        path: &Path,
+        cid: &Cid,
+        max_bytes: usize,
+    ) -> Result<Option<Vec<u8>>, StorageError> {
+        // XChaCha20-Poly1305 disk framing is nonce(24) + plaintext + tag(16).
+        let disk_limit = max_bytes
+            .checked_add(40)
+            .ok_or(StorageError::BlobSizeLimit)?;
+        let Some(encoded) = read_bounded(path, disk_limit)? else {
+            return Ok(None);
+        };
+        let plaintext = unseal(&self.key, &decode_sealed(&encoded)?)?;
+        if plaintext.len() > max_bytes {
+            return Err(StorageError::BlobSizeLimit);
+        }
+        verify(cid, plaintext).map(Some)
+    }
+
     /// Open (creating if needed) a sealing store rooted at `dir`, sealing under `key`.
     pub fn open(dir: impl AsRef<Path>, key: [u8; 32], rng: R) -> Result<Self, StorageError> {
         let dir = dir.as_ref().to_path_buf();
-        std::fs::create_dir_all(&dir).map_err(|e| StorageError::Io(e.to_string()))?;
+        create_blob_directory(&dir)?;
         Ok(Self {
             dir,
             key: Zeroizing::new(key),
@@ -378,7 +583,7 @@ impl<R: CryptoRngCore> std::fmt::Debug for SealingBlobStore<R> {
 }
 
 /// Frame a sealed blob for disk: `nonce(24) ‖ ciphertext`.
-fn encode_sealed(s: &SealedBlob) -> Vec<u8> {
+pub(crate) fn encode_sealed(s: &SealedBlob) -> Vec<u8> {
     let mut out = Vec::with_capacity(s.nonce.len() + s.ciphertext.len());
     out.extend_from_slice(&s.nonce);
     out.extend_from_slice(&s.ciphertext);
@@ -386,7 +591,7 @@ fn encode_sealed(s: &SealedBlob) -> Vec<u8> {
 }
 
 /// Parse a sealed blob from disk bytes.
-fn decode_sealed(bytes: &[u8]) -> Result<SealedBlob, StorageError> {
+pub(crate) fn decode_sealed(bytes: &[u8]) -> Result<SealedBlob, StorageError> {
     if bytes.len() <= 24 {
         return Err(StorageError::Malformed);
     }
@@ -398,12 +603,16 @@ fn decode_sealed(bytes: &[u8]) -> Result<SealedBlob, StorageError> {
 }
 
 impl<R: CryptoRngCore> BlobStore for SealingBlobStore<R> {
+    fn is_persistent(&self) -> bool {
+        true
+    }
+
     fn put(&mut self, bytes: &[u8]) -> Result<Cid, StorageError> {
         let cid = Cid::of(bytes);
         let path = self.path(&cid);
         // A corrupt sealed file still has the expected CID filename. Validate the record before
         // deduplicating so an authenticated peer fetch can replace it with freshly sealed bytes.
-        if !matches!(self.get(&cid), Ok(Some(_))) {
+        if !matches!(self.get_bounded(&cid, bytes.len()), Ok(Some(_))) {
             let sealed = seal(&self.key, bytes, &mut self.rng)?;
             std::fs::write(&path, encode_sealed(&sealed))
                 .map_err(|e| StorageError::Io(e.to_string()))?;
@@ -422,6 +631,31 @@ impl<R: CryptoRngCore> BlobStore for SealingBlobStore<R> {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
             Err(e) => Err(StorageError::Io(e.to_string())),
         }
+    }
+
+    fn get_bounded(&self, cid: &Cid, max_bytes: usize) -> Result<Option<Vec<u8>>, StorageError> {
+        self.read_sealed_bounded(&self.path(cid), cid, max_bytes)
+    }
+
+    fn promote_staged_bounded(
+        &mut self,
+        cid: &Cid,
+        max_bytes: usize,
+    ) -> Result<bool, StorageError> {
+        if self
+            .read_sealed_bounded(&staged_path(&self.dir, cid), cid, max_bytes)?
+            .is_none()
+        {
+            return Ok(false);
+        }
+        let healthy = matches!(self.get_bounded(cid, max_bytes), Ok(Some(_)));
+        if !promote_staged_file(&self.dir, cid, healthy)? {
+            return Ok(false);
+        }
+        self.get_bounded(cid, max_bytes)?
+            .ok_or(StorageError::Malformed)?;
+        flush_promoted(&self.dir, cid)?;
+        Ok(true)
     }
 
     fn has(&self, cid: &Cid) -> bool {
@@ -478,6 +712,171 @@ mod tests {
     use super::*;
     use rand_chacha::ChaCha20Rng;
     use rand_core::SeedableRng;
+
+    fn bounded_contract(store: &mut dyn BlobStore) {
+        let cid = store.put_staged(b"pixels").unwrap();
+        assert_eq!(store.get_bounded(&cid, 6).unwrap(), None);
+        assert!(matches!(
+            store.promote_staged_bounded(&cid, 5),
+            Err(StorageError::BlobSizeLimit)
+        ));
+        assert!(!store.has(&cid));
+        assert!(store.promote_staged_bounded(&cid, 6).unwrap());
+        assert_eq!(store.get_bounded(&cid, 6).unwrap().unwrap(), b"pixels");
+        assert!(matches!(
+            store.get_bounded(&cid, 5),
+            Err(StorageError::BlobSizeLimit)
+        ));
+        assert!(!store.promote_staged_bounded(&cid, 6).unwrap());
+        store.put_staged(b"pixels").unwrap();
+        assert!(
+            store.promote_staged_bounded(&cid, 6).unwrap(),
+            "duplicate publication flushes too"
+        );
+        assert_eq!(store.clear_staging().unwrap(), 0);
+        let empty = store.put(b"").unwrap();
+        assert_eq!(store.get_bounded(&empty, 0).unwrap(), Some(vec![]));
+    }
+
+    #[test]
+    fn bounded_blob_contract_all_stores_and_reopen() {
+        bounded_contract(&mut MemoryBlobStore::new());
+        let raw = tempfile::tempdir().unwrap();
+        bounded_contract(&mut FsBlobStore::open(raw.path()).unwrap());
+        let sealed = tempfile::tempdir().unwrap();
+        bounded_contract(
+            &mut SealingBlobStore::open(sealed.path(), [7; 32], ChaCha20Rng::seed_from_u64(1))
+                .unwrap(),
+        );
+        let cid = Cid::of(b"pixels");
+        assert_eq!(
+            FsBlobStore::open(raw.path())
+                .unwrap()
+                .get_bounded(&cid, 6)
+                .unwrap()
+                .unwrap(),
+            b"pixels"
+        );
+        assert_eq!(
+            SealingBlobStore::open(sealed.path(), [7; 32], ChaCha20Rng::seed_from_u64(2))
+                .unwrap()
+                .get_bounded(&cid, 6)
+                .unwrap()
+                .unwrap(),
+            b"pixels"
+        );
+    }
+
+    #[test]
+    fn bounded_promotion_repairs_oversized_destinations_without_reading_them() {
+        // A sparse corrupt file makes an accidental unbounded read particularly costly. Both
+        // promotion and ordinary fetched-blob dedup must use the incoming plaintext bound.
+        for sealed in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let mut store: Box<dyn BlobStore> = if sealed {
+                Box::new(
+                    SealingBlobStore::open(dir.path(), [7; 32], ChaCha20Rng::seed_from_u64(1))
+                        .unwrap(),
+                )
+            } else {
+                Box::new(FsBlobStore::open(dir.path()).unwrap())
+            };
+            let cid = store.put_staged(b"pixels").unwrap();
+            let path = dir.path().join(cid.to_hex());
+            std::fs::File::create(&path)
+                .unwrap()
+                .set_len(128 * 1024 * 1024)
+                .unwrap();
+            assert!(matches!(
+                store.get_bounded(&cid, 6),
+                Err(StorageError::BlobSizeLimit)
+            ));
+            assert!(store.promote_staged_bounded(&cid, 6).unwrap());
+            assert_eq!(store.get_bounded(&cid, 6).unwrap().unwrap(), b"pixels");
+            std::fs::File::create(&path)
+                .unwrap()
+                .set_len(128 * 1024 * 1024)
+                .unwrap();
+            store.put(b"pixels").unwrap();
+            assert_eq!(store.get_bounded(&cid, 6).unwrap().unwrap(), b"pixels");
+        }
+    }
+
+    #[test]
+    fn bounded_promotion_rejects_corrupt_staging_and_preserves_held_copy() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = FsBlobStore::open(dir.path()).unwrap();
+        let cid = store.put(b"pixels").unwrap();
+        store.put_staged(b"pixels").unwrap();
+        std::fs::write(staged_path(dir.path(), &cid), b"wrong!").unwrap();
+        assert!(matches!(
+            store.promote_staged_bounded(&cid, 6),
+            Err(StorageError::CidMismatch)
+        ));
+        assert_eq!(store.get_bounded(&cid, 6).unwrap().unwrap(), b"pixels");
+    }
+
+    #[test]
+    fn bounded_store_creation_syncs_ancestors_even_after_failed_open() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join("blobs").join("group");
+        assert!(
+            create_blob_directory_with_sync(&dir, |_| Err(std::io::Error::other("sync failed")))
+                .is_err()
+        );
+        assert!(
+            dir.exists(),
+            "failed open may leave visible directories but no store authority"
+        );
+        let mut synced = Vec::new();
+        create_blob_directory_with_sync(&dir, |path| {
+            synced.push(path.to_path_buf());
+            Ok(())
+        })
+        .unwrap();
+        let absolute = std::fs::canonicalize(&dir).unwrap();
+        assert_eq!(
+            synced,
+            absolute
+                .ancestors()
+                .map(Path::to_path_buf)
+                .collect::<Vec<_>>()
+        );
+        assert!(!MemoryBlobStore::new().is_persistent());
+        assert!(FsBlobStore::open(&dir).unwrap().is_persistent());
+    }
+
+    #[test]
+    fn bounded_promotion_flush_failure_preserves_held_bytes_and_retries_after_reopen() {
+        for duplicate in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let mut store = FsBlobStore::open(dir.path()).unwrap();
+            if duplicate {
+                store.put(b"pixels").unwrap();
+            }
+            let cid = store.put_staged(b"pixels").unwrap();
+            let error = store
+                .promote_bounded_with_flush(&cid, 6, |root, cid| {
+                    assert_eq!(std::fs::read(root.join(cid.to_hex())).unwrap(), b"pixels");
+                    Err(StorageError::CommittedButNotDurable(
+                        "injected flush".into(),
+                    ))
+                })
+                .unwrap_err();
+            assert!(matches!(error, StorageError::CommittedButNotDurable(_)));
+            assert_eq!(store.get_bounded(&cid, 6).unwrap().unwrap(), b"pixels");
+            assert_eq!(
+                store.clear_staging().unwrap(),
+                0,
+                "promotion happened, not a rollback"
+            );
+            drop(store);
+            let mut reopened = FsBlobStore::open(dir.path()).unwrap();
+            reopened.put_staged(b"pixels").unwrap();
+            assert!(reopened.promote_staged_bounded(&cid, 6).unwrap());
+            assert_eq!(reopened.get_bounded(&cid, 6).unwrap().unwrap(), b"pixels");
+        }
+    }
 
     fn store_roundtrip(store: &mut dyn BlobStore) {
         let cid = store.put(b"some bytes").unwrap();

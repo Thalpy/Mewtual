@@ -6,12 +6,35 @@ import {
   bufferIce,
   directionIdle,
   directionSending,
+  hangupTargets,
   heartbeatRecovery,
   isCurrentVoiceRoom,
   mergePeerState,
   videoSlotPlan,
   type SlotDirection,
 } from "./voice-signaling.ts";
+
+test("a hangup reaches everyone with an edge, not only whoever the roster calls online", () => {
+  // The defect this exists for: `bob` is being talked to over a live WebRTC edge while the mesh
+  // has nothing to say about him. Addressing the farewell to the online set alone left him with
+  // no notice at all, so his end watched the connection die and drew LOST over someone who had
+  // simply pressed Leave.
+  const targets = hangupTargets(["bob"], ["me", "bob", "cara", "dan"], new Set(["cara"]), "me");
+  assert.deepEqual(targets.sort(), ["bob", "cara"]);
+
+  // Self is never a target, however it turns up, and a member is told once even when both
+  // sources name them.
+  assert.deepEqual(
+    hangupTargets(["me", "bob"], ["me", "bob"], new Set(["me", "bob"]), "me").sort(),
+    ["bob"],
+  );
+  // A roster read that failed contributes nothing rather than emptying the set: the peers there
+  // are edges with are still worth telling, and they are the ones who would otherwise see LOST.
+  assert.deepEqual(hangupTargets(["bob", "cara"], [], new Set(), "me").sort(), ["bob", "cara"]);
+  assert.deepEqual(hangupTargets([], [], new Set(), "me"), []);
+  // An empty fingerprint is not an address; it is dropped from either source.
+  assert.deepEqual(hangupTargets([""], ["", "bob"], new Set(["", "bob"]), "me"), ["bob"]);
+});
 
 test("voice signals are scoped by server as well as channel", () => {
   assert.equal(isCurrentVoiceRoom(7, "general", 7, "general"), true);

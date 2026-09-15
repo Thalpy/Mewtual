@@ -1,10 +1,13 @@
 # Design; rendezvous auto-discovery in the desktop UI
 
-Status: **design approved, implementing.** Lets a joiner join a server with **no hard-coded
+Status: **implemented.** Lets a joiner join a server with **no hard-coded
 inviter address**; the invite points at a zero-knowledge rendezvous, the founder registers there,
-and the joiner discovers → dials → joins. The entire mechanism is already built + tested one layer
-below the bridge (`crates/catcoms-sync/tests/tcp_rendezvous_e2e.rs` is the canonical recipe); this
-is the product/UI wiring.
+and the joiner discovers → dials → joins. The mechanism was built + tested one layer
+below the bridge (`crates/catcoms-sync/tests/tcp_rendezvous_e2e.rs` is the canonical recipe) and
+the product/UI wiring described here has since landed: `mint_invite_with_rendezvous` and
+`MeshHandle` on the backend; on the frontend, the rendezvous field on the found form (persisted as
+a default), the same field under Settings → Network, and the phase readout on the found/join
+surface.
 
 See also: [`design-6e-rendezvous.md`](design-6e-rendezvous.md), [`HANDOVER.md`](HANDOVER.md).
 
@@ -84,14 +87,24 @@ pre-spawn), and keep a fresh `MeshHandle`.
   `busy` spinner text becomes phase-aware).
 - Join needs **no input**; it reads `invite.rendezvous`.
 
-## Scope / deferred (noted, not in this slice)
+## Scope / deferred (noted, not in this slice); since closed
+
+Recorded as it stood when this slice shipped. Everything named below except multi-rendezvous-root
+corroboration has since been built; `design-postjoin-discovery.md` supersedes this list and is the
+current state of that work.
+
 - **Periodic TTL re-registration:** a single registration's granted TTL (libp2p default ≫ the 1h
   invite life) covers an invite's usefulness, so we register once per invite. A long-lived server
   that outlives the TTL silently leaves discovery until its next fresh invite / reload; a
-  re-register timer is a follow-up (would need the actor to own a re-register tick).
+  re-register timer is a follow-up (would need the actor to own a re-register tick). **Built:**
+  `RendezvousRenewal` renews at three quarters of the bounded TTL, driven by `drive_discovery`.
 - **Post-join steady-state discovery** (rotation-aware `rendezvous_namespaces`, re-finding members
   after restart), **`EclipseDetector` surfacing**, **`AddressCache` persistence**, **PEX**, and
   **multi-rendezvous-root corroboration** beyond feeding all `invite.rendezvous` into one `plan()`.
+  **Built,** except the last: `drive_discovery` / `next_postjoin_discovery_event` do steady-state
+  discovery; the eclipse hint reaches the UI as the `eclipse-changed` event and an advisory banner;
+  the address cache is persisted through the vault across launches; PEX is `KIND_PEX`.
+  Multi-rendezvous-root corroboration is still open.
 - The rendezvous/relay **infra nodes** themselves are member-operated (`catcomsctl rendezvous`); a
   deployment concern, not client code.
 

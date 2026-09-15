@@ -98,6 +98,42 @@ pub enum TransportError {
     InvalidDialBatch,
 }
 
+/// Local admission bounds for one-shot publications, not a promise that the gossip protocol's
+/// configured message limit accepts every payload this large. Check before queueing/copying.
+pub const MAX_PUBLISH_ONCE_BYTES: usize = 512 * 1024;
+pub const MAX_PUBLISH_ONCE_TOPIC_BYTES: usize = 64;
+
+/// Result of a single driver-side gossip attempt. Neither value proves remote delivery.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PublishSubmission {
+    /// The gossip implementation accepted a local submission, not merely an actor command.
+    Submitted,
+    /// Its message cache already knew this message. This does not prove a successful prior send.
+    Duplicate,
+}
+
+/// One-shot publication failure. Once the driver starts its attempt, even a refusal may leave
+/// normal gossip-cache/handler state. No variant authorizes retiring a durable intent.
+#[derive(Clone, Copy, Debug, Error, PartialEq, Eq)]
+pub enum PublishOnceError {
+    #[error("one-shot publication is unsupported")]
+    Unsupported,
+    #[error("publication exceeds the payload or topic limit")]
+    TooLarge,
+    #[error("one-shot publication capacity is busy")]
+    Busy,
+    /// The driver or its acknowledgement disappeared; submission may already have happened.
+    #[error("publication transport closed; submission may be unknown")]
+    Closed,
+    #[error("no eligible gossip subscribers")]
+    NoPeers,
+    #[error("gossip subscriber queues are full")]
+    QueuesFull,
+    /// Signing/transform failure, without exposing payload, topic or implementation diagnostics.
+    #[error("gossip publication failed")]
+    Failed,
+}
+
 /// Opaque accounting authority retained until a transport-owned request really terminates.
 ///
 /// A caller future can be cancelled while a production transport still owns an outbound stream.
@@ -227,7 +263,14 @@ pub struct Responder {
 impl Responder {
     /// Send the reply back to the requester.
     pub fn respond(self, data: Bytes) {
-        let _ = self.reply.send(data);
+        let _ = self.try_respond(data);
+    }
+
+    /// Hand the reply to the local forwarding channel, refusing a dropped receiver.
+    /// Success means the channel accepted the bytes, even if they have not been read yet.
+    /// It does NOT prove the transport driver sent them or that the remote peer received them.
+    pub fn try_respond(self, data: Bytes) -> Result<(), TransportError> {
+        self.reply.send(data).map_err(|_| TransportError::Closed)
     }
 
     /// Create a responder paired with its receiver. A transport implementation
@@ -453,6 +496,24 @@ pub trait MeshTransport: Send + Sync {
     /// Fan a message out to every other subscriber of `topic` (best-effort).
     async fn publish(&self, topic: Topic, data: Bytes) -> Result<(), TransportError>;
 
+    /// Attempt gossip once and await the DRIVER's result, without a transport-owned application
+    /// retry queue. The default fails closed; falling back to `publish` would silently weaken
+    /// this contract. Payload/topic lengths are capped by the `MAX_PUBLISH_ONCE_*` constants.
+    ///
+    /// Dropping the future cancels work if observed before driver admission. Admission and drop
+    /// can race: once the synchronous gossip attempt begins it cannot be retracted. Normal gossip
+    /// caching/forwarding and network buffering remain possible, even after a NoPeers/QueuesFull
+    /// error. This is NOT delivery, expiry, authorization, or a "no bytes escaped" guarantee.
+    /// Lifecycle-sensitive callers must hold their own authority through admission and recover
+    /// uncertain results by stable operation id, never by treating failure as a clean rollback.
+    async fn publish_once(
+        &self,
+        _topic: Topic,
+        _data: Bytes,
+    ) -> Result<PublishSubmission, PublishOnceError> {
+        Err(PublishOnceError::Unsupported)
+    }
+
     /// Send an addressed request to `peer` and await its reply.
     async fn request(
         &self,
@@ -485,6 +546,21 @@ pub trait MeshTransport: Send + Sync {
         peer: PeerId,
         _proto: ProtocolId,
         _data: Bytes,
+    ) -> Result<Bytes, TransportError> {
+        Err(TransportError::Unreachable(peer))
+    }
+
+    /// Cancellable, accounted request over a connection that is still live at driver admission.
+    ///
+    /// File-provider fallback must neither redial an old route nor recycle concurrency while a
+    /// cancelled stream is still owned below the caller. Implementations without both properties
+    /// fail closed instead of delegating to a dialing or unaccounted request method.
+    async fn request_connected_cancellable(
+        &self,
+        peer: PeerId,
+        _proto: ProtocolId,
+        _data: Bytes,
+        _cancellation: RequestCancellation,
     ) -> Result<Bytes, TransportError> {
         Err(TransportError::Unreachable(peer))
     }
@@ -718,5 +794,93 @@ pub trait MeshTransport: Send + Sync {
     /// authenticated group event, and elapsed time is not evidence of anything.
     async fn unevict_peer(&self, _peer: PeerId) -> Result<(), TransportError> {
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod response_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn checked_response_accepts_an_unread_channel_but_refuses_a_dropped_receiver() {
+        let bytes = Bytes::from_static(b"exact response");
+        let (tx, rx) = Responder::channel();
+        assert!(tx.try_respond(bytes.clone()).is_ok());
+        assert_eq!(rx.recv().await, Some(bytes.clone()));
+        let (tx, rx) = Responder::channel();
+        drop(rx);
+        assert!(matches!(tx.try_respond(bytes), Err(TransportError::Closed)));
+        // The legacy fire-and-forget API keeps its existing dropped-receiver behavior.
+        let (tx, rx) = Responder::channel();
+        drop(rx);
+        tx.respond(Bytes::new());
+    }
+}
+
+#[cfg(test)]
+mod publication_tests {
+    use super::*;
+
+    /// An existing transport which knows only retrying publication. The additive API must not
+    /// silently inherit weaker send semantics or require unrelated test transports to migrate.
+    struct LegacyOnly;
+
+    #[async_trait]
+    impl MeshTransport for LegacyOnly {
+        fn local_peer(&self) -> PeerId {
+            unreachable!()
+        }
+        async fn subscribe(&self, _: Topic) -> Result<(), TransportError> {
+            unreachable!()
+        }
+        async fn unsubscribe(&self, _: Topic) -> Result<(), TransportError> {
+            unreachable!()
+        }
+        async fn publish(&self, _: Topic, _: Bytes) -> Result<(), TransportError> {
+            panic!("one-shot must never fall back to legacy publish")
+        }
+        async fn request(
+            &self,
+            _: PeerId,
+            _: ProtocolId,
+            _: Bytes,
+        ) -> Result<Bytes, TransportError> {
+            unreachable!()
+        }
+        async fn request_cancellable(
+            &self,
+            _: PeerId,
+            _: ProtocolId,
+            _: Bytes,
+            _: RequestCancellation,
+        ) -> Result<Bytes, TransportError> {
+            unreachable!()
+        }
+        async fn next_event(&self) -> Option<TransportEvent> {
+            unreachable!()
+        }
+    }
+
+    #[tokio::test]
+    async fn connected_cancellable_unsupported_transport_fails_closed() {
+        let transport: &dyn MeshTransport = &LegacyOnly;
+        let (_sender, receiver) = watch::channel(false);
+        let peer = PeerId::from_u64(1);
+        assert!(matches!(
+            transport.request_connected_cancellable(peer, ProtocolId("test"), Bytes::new(),
+                RequestCancellation::new(receiver, None)).await,
+            Err(TransportError::Unreachable(p)) if p == peer
+        ));
+    }
+
+    #[tokio::test]
+    async fn publish_once_unsupported_transport_fails_closed_without_legacy_fallback() {
+        let transport: &dyn MeshTransport = &LegacyOnly;
+        assert_eq!(
+            transport
+                .publish_once(Topic::new("no-fallback"), Bytes::new())
+                .await,
+            Err(PublishOnceError::Unsupported)
+        );
     }
 }

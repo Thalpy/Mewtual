@@ -8,31 +8,449 @@ code was written), the honest residual risks, and the phased build plan.
 
 | Area | Decision |
 |------|----------|
-| Stack | Rust core (shared `rlib`+`cdylib`) + Svelte 5 UI, packaged via **Tauri 2** to Linux/Windows/Android from one codebase. |
+| Stack | Rust core (an ordinary workspace of library crates; the shared `staticlib`+`cdylib`+`rlib` artifact is the **Tauri bridge**, `apps/desktop/src-tauri`, which is what a mobile host links against) + Svelte 5 UI, packaged via **Tauri 2** to Linux/Windows/Android from one codebase. |
 | Group crypto | **MLS (RFC 9420)** via `openmls`, ciphersuite `0x0003` (X25519 + ChaCha20-Poly1305 + SHA-256 + Ed25519), `PrivateMessage` wire format only. One MLS group == one server/connection. Per-**device** identity (a human with N devices = N leaves). |
 | Channels | NOT separate groups; each channel/wiki/status/calendar/moderation document derives an independent key via the MLS exporter secret + a canonical, injective `(doc_type, doc_id)` context. |
 | Delivery | Encrypted **CRDT documents** (`automerge`) synced P2P. Chat logs are append-oriented; policy documents are not assumed append-only without protocol enforcement. New Studio/index/reply/registry types use the owner-receipted bounded epoch-close protocol in [`design-epoch-close.md`](design-epoch-close.md); this is distinct from per-operation delivery receipts. A newly applied remote op queues an authenticated, connected-only delivery receipt for its exact document/change hash; causal descendant evidence remains the compatibility fallback. Delivery receipts prove delivery, never reading. |
 | Networking | **rust-libp2p** (QUIC + TCP + WSS for the application mesh). Direct reachability uses stable ports plus best-effort **UPnP IGD, IPv4 PCP/NAT-PMP, and IPv6 PCP firewall pinholes**; zero-knowledge **circuit-relay v2 + DCUtR** hole-punching and authenticated rendezvous cover harder networks; **AutoNAT v2** performs scoped dial-back testing through explicitly enabled relay/rendezvous nodes. PCPv6 binds the exact global listener address to that interface's scoped default router, requests short leases for TCP and UDP/QUIC, and honors the router's assigned lifetime up to 24 hours. AutoNAT serving is experimental and off by default; its pre-socket guard enforces exact source/target matching, direct public-address shape, global/per-prefix/per-peer rate buckets and concurrency caps. Invites embed bootstrap multiaddrs. A 60-second `JoinReply` lets the inviter (or one explicitly authorized current-member helper) dial a joiner's validated public routes back. Separately, an opted-in current member can publish a two-minute signed **switchboard offer**; a fresh, explicitly labelled assisted invite may endorse up to three such members, and the joiner must consent before they are contacted after direct routes fail. A switchboard forwards only the admission exchange to the invite's named inviter and must catch up the exact MLS Add before becoming the joiner's first member path; it never signs/adopts the Welcome or becomes a general circuit relay. An already-admitted but isolated member can create a ten-minute, member-signed `MemberRecoveryCode` containing at most four direct literal-IP, terminal-peer-bound candidates. The recipient verifies its exact current device→transport binding and seals expiring consent before the bounded dial; only a later outbound Noise-authenticated route is promoted, without destroying the last proven contact on failure. |
 | Live media | Calls and screen shares use WebRTC separately from the libp2p application mesh. A receiver advertises only its nearest 720p/1080p/1440p/2160p display bucket (with resize hysteresis); a screen sender parks each edge, applies per-peer resolution/bitrate/frame-rate limits, and only then attaches the screen track. Client-wide presets are exposed both in Settings and from the call-stage cog. Screen audio defaults off; the user may request the selected surface's audio or grant multiple independently chosen application/window sources, which are mixed locally into one audio sender and forgotten when sharing stops. Its 160-kbps-per-peer cap is reported as planned unless the WebView applies it. Permission-prompt results carry lifecycle leases so stop, leave, lock, mode changes, and competing requests stop late tracks rather than resurrecting capture. It reports the estimated aggregate mesh upload and prefers H.265/AV1/VP9 with compatible fallbacks when the WebView exposes them. Runtime stats, not preference order, are the source of truth for the negotiated codec. |
 | Invites | Strictly **single-use, device-bound** (one device per invite); revocable/expirable. |
-| Files | Content-addressed over **ciphertext**. New listings carry a group-bound device signature over author/name/path/file-ref so per-uploader local trust cannot be bypassed by rewriting the CRDT `author` scalar; unsigned legacy listings remain usable but cannot satisfy specific-uploader auto-load. Expiry default **1 month**, adjustable global → per-server → per-file; "expired" = evicted from cache / dropped from auto-share, still re-fetchable by CID. Health checks authenticate storage seals/CIDs and decrypt file refs; repair may overwrite a corrupt local record only with authenticated, CID-valid peer bytes. |
+| Files | Content-addressed over **ciphertext**. New listings carry a group-bound device signature over author/name/path/file-ref so per-uploader local trust cannot be bypassed by rewriting the CRDT `author` scalar; unsigned legacy listings remain usable but cannot satisfy specific-uploader auto-load. Circulation expiry is metadata; automatic eviction is not wired. Explicit kept copies use a separate quota-reserved sealed local store. Index publication does not prove remote possession. Health checks authenticate storage seals/CIDs and decrypt file refs; repair may overwrite a corrupt local record only with authenticated, CID-valid peer bytes. |
 | Moderation | One group-bound, independently signed moderation document per server. Warnings attest to bounded snapshots; kick votes are advisory; only the owner-only MLS removal path changes membership. The log is not yet protocol-enforced append-only (threat-model R7). |
 | Local continuity & backup | Drafts/read positions are bounded and vault-sealed. Backup is an opaque, non-overwriting copy of a freshly snapshotted sealed vault. Secret changes atomically rewrap the same DEK; automated restore is not implied. |
 
 ## 2. Corrections from the adversarial review (must hold in the implementation)
+
+Creative immutable blobs are independent of the P1 document lifecycle. The C0c native seam uses
+the existing blob staging/store and authenticated fetch protocol, with PIX1 validation and bounded
+reads/response decoding added at the relevant boundaries. Publication returns a real CID only after
+promotion and flush; saving a Studio reference is a separate subsequent operation. P1 does not replace
+Automerge or sync: it adds permission to retire their retained history into owner-receipted,
+verifiable checkpoints with bounded recovery. Existing snapshots alone do not provide that.
+
+Gate 4's current worktree connects Studio's typed owner decision to the same durable P1 journal,
+recovery store and exact-envelope intent retirement used by Registry. Recently watched targets
+share the existing native idle worker for owner rotation and Registry pointer/tail maintenance.
+An installed, flushed checkpoint with an exactly matching current-owner journal can complete
+that journal's pending publication slot locally: it is available through keyed head/seed service,
+not claimed delivered to another member. This lets a solo owner keep rotating. A Registry Fault
+remains a per-bucket hold; it does not invalidate otherwise authenticated storage accounting.
+Actual changed Registry wrappers refresh the existing inventory-validation cache before the next
+Studio turn. No second mutable document cache, budget owner or network protocol is introduced.
+
+Explicit recovery controls now borrow the same sole Server/vault/session custody. Whole-version
+Restore is a sequence of re-previewed domain choices, never a replacement Automerge branch or
+an atomic batch. A fingerprint covers the complete current projection; Apply also rechecks all
+retained/staged historical deletion evidence and then uses normal Save. Exact accepted own-log
+retries remain idempotent after later edits or snapshot eviction. Pending intents do not bypass
+that fence. Copy is explicit mutable replacement/deletion, not same-id resurrection. Pointer
+restoration is separately retryable with actual saved-target verification and existing Registry
+accounting; an incomplete pointer step cannot relabel already saved content as wholly restored.
+
+The same watched worker now paces own-intent replay, with current full-log equality and all
+retained recovery snapshots checked before each operation. Stable-id prerequisites use a bounded
+topological plan; hashes do not choose between competing mutable edits. A newer current value,
+deletion, contradictory historical selection or cold large reference holds automatic replay.
+The user-approved manual disposition first flushes the existing full-envelope recovery copy,
+then removes only the matching own intents through the accounted ledger writer. This is needs
+recovery, not receipt finality. Missing evidence stays pending. Settlement invalidations are
+queued under custody but emitted after its release; reads do not emit refresh-triggering events.
+
+Studio's first Rust schema layer (`catcoms_replication::studio`) decodes the closed IndexOp and
+FlipnoteOp bodies, preserving stable element ids and the frontend's canonical JSON bytes.
+Contextual decoding checks the whole P1 envelope and expected type/key; Index creation additionally
+binds `created_by` to a caller-supplied, independently verified full author. This decoder grants
+no membership, causal-mutation, storage or publication authority. The first read-only projection
+is StudioIndex: flat immutable insertion/deletion records retain full provenance and mutable
+title/expiry registers use Automerge's actual winner with all concurrent alternatives retained.
+The smallest insertion op id wins a same-object collision; the first 64 live object ids are
+visible, with explicit overflow and deleted content kept for later typed recovery. Every live
+root value is checked, including losing headers; primitive and value-byte limits bound the reader.
+The art-only Flipnote frame projection now likewise retains insertion/replacement/deletion
+evidence. Stable insertion-node origins and a right-origin forest preserve sequential placement
+and same-gap concurrent ordering without rewiring losing/deleted anchors. All live alternatives
+remain available even when a frame is deleted or beyond the 999-frame / 8 MiB playable prefix.
+Sound/score/export state rejects until its projection support lands. Neither reader authenticates
+its records. A separate Index delta validator checks canonical record/actor
+binding, the sender's dependency-frontier target existence, immutable headers/evidence and exact
+same-property predecessors for mutable registers. It is a pure semantic callback: P1 must still
+authenticate membership/server/physical scope and preflight the exact checkpoint. The art/frame
+callback supplies corresponding checks, deriving left/right insertion origins
+from the sender's full causal projection, including hidden nodes. Its private historical reader
+uses one frontier for keys, all values and register winners; the public current reader retains
+its original pristine-history rule. `StudioTarget` combines these callbacks with existing P1
+gated edit/ingest and exact next-checkpoint AND complete recovery preflight. It supports epoch
+zero and verified typed seeds; it does not own durable intents, storage, publication or settlement.
+The compact baseline is one immutable `_studio/seed` bytes property alongside the original
+headers, not a new operation log. It preserves selected values/authorship and up to four values
+per conflict field across 1024 fields. Frame origins normalize to the live playable chain and
+are explicitly marked `checkpoint`; all original/hidden/losing evidence and current operation
+bodies remain in typed recovery. Ordinary post-seed registers override fallback values, with
+same-property predecessors only; inherited provenance ids are not reusable operations/markers.
+No user operations, markers or tombstones enter the compact seed. Generic P1 hash/receipt
+verification and canonical typed rebuilding both run before installation. Recovery uses the
+existing bounded envelope with a complete typed payload, not the lossy generic summary arrays.
+Historical reads still repeat Automerge clock work; boundedness is not measured production
+latency. These projection helpers themselves provide no actor/native or user-interface binding.
+`StudioEpoch` now privately owns the Index/art document, signed log, gate, opening receipt and
+receipt book. Its bounded vault-only restart format revalidates signatures, causal mutations,
+typed seed and gate/log coherence; removed authors remain historical evidence, not current edit
+authority. The `ServerStore` adapter saves the exact intent before this whole unit and returns
+prepared ciphertext only after both durability barriers. Exact retained-envelope retries flush
+unchanged files, including at the ordinary content ceiling. Receipt sealing retains the complete
+source and persists faults; it does not settle, prune or install a replacement.
+Opt-in five-family inventory adds Studio records and temporaries to the existing storage/intent
+budgets. A mount-local generation rejects stale scans and duplicate Studio budget handles. The
+coordinator must still exclude interleaved raw registry/recovery/owner writes; the token is not
+a global filesystem transaction or blob-retention guarantee.
+Explicit Index/art Save/Load now runs through `ServerActor::studio_begin` and five native commands.
+The bounded queue carries no vault guard: the actor advertises Ready before native attempts all
+locks fail-fast. The transferred lease retains mounted vault, numeric-server persistence, UI
+commit and exact registry-incarnation guards. One blocking worker owns the sole live Server
+(not a cloned MLS/device) plus that lease; invoke/actor cancellation cannot release its custody
+mid-write. Guards drop before reply/event awaits. A worker panic stops the actor rather than
+resuming an absent or stale Server. Live channel/member and complete-envelope checks precede
+mutation I/O; current MLS/device snapshot persistence precedes the intent/source write.
+Local frame references require exact held, validated 192x144 PIX bytes promoted and flushed in
+the same vault namespace. Create writes the object before the Index and is exact-retryable, not
+atomic across files; a different nonce cannot rename an existing object through Create.
+Native projections retain conflict/deletion evidence and three-state expiry. Local update events
+invalidate views, while responses explicitly label local publication and provisional edits.
+Create keeps the new object in epoch zero but obtains the Index's actual Open epoch under the
+same transaction, including after rotation. Automatic Index/art sync and watched-owner rotation
+are connected; the remaining recovery/succession integration is tracked in the backend roadmap.
+Dense-source latency remains unqualified. UI is unchanged.
+Persistent blob handles now share one mount-local deletion guard outside the kept-copy adapter.
+The derived reference union is keyed by full group bytes (including numeric-server aliases).
+Studio source/intent/recovery writes add holds before I/O; only a complete, generation-current,
+exclusive five-family reference scan replaces them. Unknown/corrupt/unsupported/partial state
+refuses held-blob deletion. A cheap bounded absence-only filename check can initialize an empty
+new mount; a restored P1 mount starts Unknown. Studio access refreshes before pre-holding new
+PIX CIDs, then verifies/promotes bytes. Its later budget scan is deliberately reference-neutral.
+Source holds include the verified seed-only projection as well as current projection and signed
+operations: successor edits can hide a seed's replacement pixels. Pending intents and BOTH
+retained and staged typed recovery also hold pixels, including deleted/superseded versions.
+The guard stays locked through synchronous unlink; dropping the store revokes old blob handles.
+There is no durable pin ledger or expiry engine. Full scans have existing work rails plus a
+65,536-reference cache rail; overflow holds bytes rather than truncate. Existing file unlisting
+and upload cleanup use the guarded delete, but still do not promise freed disk space. Explicit
+kept-copy release and unreferenced staging cleanup retain their separate ownership semantics.
+Future sound/export/doodle record support must extend enumeration before enabling reclamation
+for those formats; current unsupported records cannot be interpreted as an empty hold set.
+Explicit Studio exchange now reuses current sealed operations, blinded topics, the cancel-safe
+subscription reconciler and one-shot publication. A bounded opt-in sync inbox authenticates,
+but the existing accounted Studio store remains the only durable admission path. Logical
+watch identity excludes channel aliases and retains full-author rate debt across replacement.
+Saved-only send matches the entire own operation in the current source before exact retry and
+resealing; it cannot become another edit path bypassing native Save's PIX/snapshot ordering.
+Server adapters bind channel, source, mount and current membership. These low-level cooperative
+calls provide no scheduler, catch-up or discovery themselves. The bounded native runtime below
+now supplies scheduling/custody, remote events and one opened-source reuse slot; joining remains open.
+Native Save remains local/provisional.
+Initial publication is now integrated into that existing Save arm. Its private bounded batch
+contains only the packets returned by successful durable edits, exposed after the final view
+read; partial Create errors expose no batch. The worker returns the sole Server and lease, and
+the actor keeps the same native/source custody through at most two one-shot attempts under one
+two-second injected-clock deadline. No duplicate save/reseal pass is performed for this initial
+send. Native cancellation/operation accounting follow the actual worker/lease; interruption or
+send failure cannot retire an intent or undo Save. Guards drop before reply/event backpressure.
+The response remains a local/provisional acknowledgement, not a delivery claim.
+Successful access now installs at most 16 recent-target watches from the already-checked source
+descriptors; same-watch reuse preserves queued traffic, eviction revokes it. Reconciliation shares
+the existing two-second network wait budget. An independent coalesced boolean wakes one native
+receiver per exact actor incarnation, never through an actor-awaiting event consumer. One packet
+per paced pass gets the same Ready/lease/off-executor custody as Save. Current watch/mount/channel
+and membership/MLS are rechecked before disk work; snapshot persistence precedes typed ingest.
+Only newly Accepted durable edits emit remote StudioUpdated; events recheck native incarnation.
+Automatic inventory uses the existing scanner with local limits (1024 directory entries,
+64 records, 8 MiB authenticated bytes and 256 KiB cold validation bytes). The mount-local
+64-entry LRU retains only pure Registry/Studio footprint validation, never a document, inventory
+or write permit. Every hit requires fresh authenticated file bytes, scope/filename binding and
+the exact complete-wrapper digest/size. Ordinary complete scans warm it; remount starts cold.
+The sole mounted store can also retain one owned verified Studio restart unit, moved rather than
+cloned. Explicit view access prepares it; warm receive and timeline reads reauthenticate its exact
+complete wrapper and bind current actor/group/MLS before reuse. Index refreshes keep only their
+verified footprint when art occupies the slot, so list invalidation does not evict opened art.
+The source has an 8 MiB encoded-input rail, not an 8 MiB heap promise. Cold targets retain the
+256 KiB inline rail; larger watched sources use bounded detached preparation instead. Ingest uses the same typed
+gate, fresh complete inventory/budget and durable save. Failed takes discard the owned graph;
+successful unchanged flushes preserve the physical version rather than a normalized snapshot hash.
+Failures pause until successful explicit Studio access and emit StudioReceivePaused; peer traffic
+cannot repeatedly trigger a failed scan. This is not a reduced document cap or completed large-
+vault collaboration: unrelated cold inventory still needs explicit preparation. Unopened-source
+service and Index/art discovery now use the bounded coordinator described below.
+No new persistence, finality, blob fetch or UI implementation is introduced.
+Studio now reuses the registry's private bounded page walk through a typed provider wrapper.
+Registry-v1 cursor bytes stay unchanged; Studio adds a distinct HMAC domain and channel binding
+alongside full group/type/key/concrete epoch/provider/requester/initial-heads/seed. Both use the
+same fixed accepted-prefix continuation, 32-operation / 512-KiB page bounds, monotonic expiry,
+current-member resealing and explicit checkpoint/historical-authority holds.
+The cooperative store provider serves only its exact prepared source, with authority/MAC checks
+before I/O and full authenticated-wrapper matching afterward; it never performs a cold restore
+inside a page call. Page admission moves the same checked source as live receive, validates every
+entry through the existing typed gate and crosses one accounted save/flush barrier. A bad middle
+entry saves no prefix. An uncertain rename may leave the old source or the entire new page; only
+successful persistence returns counts/frontier, and exact retry after reconciliation deduplicates.
+Empty pages verify the exact Open epoch and flush held bytes; actual epoch-zero absence stays
+absent. No source seed, receipt or intent is installed/retired by this seam. Additive Studio kind
+23 now uses the existing Registry request pool/rates and bounded typed answer framing with a
+separate signed-response domain. The actor owns the cursor/retry state; signed connected-only
+attempts detach before network waits, so mutually reconnecting actors can serve each other.
+The native receiver wakes on its pending hint or five seconds of injected-clock idle time. This
+is outside the actor select loop, avoiding a separate continuously-ready timer arm. Native work
+still uses the existing command path; legacy command-versus-outbox cancellation debt is unchanged.
+Service/client/gossip turns are bounded; held pages win their persistence pass. A context change
+discards/retries instead of becoming a sticky storage pause. Cold watched source verification
+also detaches, sharing Registry's four process slots; full-wrapper/mount/member/MLS fences
+reattach only a current result to the same one-source owner. Provider cursors remint on runtime/
+mount changes. Keyed discovery, unopened-provider service and checkpoint installation still need
+joining integration; no native lifecycle permit or finality follows from a page result.
+Expiry mirrors FileExpiry's absent/null/timestamp states, not the fixture's numeric-only view.
+Jam descriptors are bounded/validated and retain their existing declaration-order identity hash
+even inside the sorted-key Studio body. No audio renderer or game/avatar work is added.
+
+P1 owner authority now also has independent local tenure evidence in the MLS synchronizer.
+Locally founded epoch zero is known; Welcome joins and legacy snapshots are Unknown. Every
+applied owner-changing MLS transition records its resulting epoch, including Adds into recycled
+low leaf slots. Same-owner commits preserve Unknown rather than inventing a start. A shared
+synchronous mutation seam observes the actual group before propagating a helper result, including
+an error after a successful merge. The observation is saved in the same strict snapshot as MLS,
+not in a separately advanced sidecar. A received receipt never establishes its own tenure.
+This supplies local evidence only: fresh owner proofs require the publication barrier described
+below. An upgraded or newly joined owner with Unknown tenure may remain
+unable to authorize rotation until independent evidence or a witnessed transition is available.
+
+Explicit owner registry rotation now uses that same durable MLS/tenure snapshot permit. Under
+exclusive sync/store borrows it flushes the checked source, checks the owner inventory, and either
+resumes the exact saved decision or derives a new close from all current heads. More than 64 heads
+refuses without truncation. The actual authenticated closure must meet the lower/upper budgets and
+typed checkpoint validation before signing; a live projection alone is insufficient. First-of-tenure
+inheritance comes from the installed opening seed, and later decisions repeat the journal baseline.
+The owner vault record saves the exact close alongside the selected receipt in one atomic replacement,
+so a crash before sealing cannot change the decision when more Open edits arrive. Such later edits
+enter recovery through the existing adjacent installer. Legacy pending receipts without a saved close
+hold explicitly. Installation returns publication-pending status and does not mark the receipt
+published. Kind-21 serving now records exact completion only after a current-owner proof is
+accepted by the local reply-forwarding channel. Its private one-shot handoff is consumed under
+the same synchronous Server/store borrow with fresh authority and accounted journal persistence.
+This is not transport-driver admission or peer delivery. A crash or write failure after handoff
+can require exact republication; uncertain disk state blocks accounting until reconciliation.
+Automatic scheduling and durable repair remain open.
+
+Keyed registry receipt-head discovery is now a cooperative authenticated kind-21 exchange.
+It registers logical buckets, not concrete epochs, and returns provisional hints or a one-shot
+current-owner selection proof. Explicit local preparation saves the whole-server MLS/tenure
+snapshot and mints a runtime/epoch/mount-bound permit; remote queries never trigger that large
+legacy serialization. A proof additionally requires complete inventory agreement, a nonfault
+saved registry, and exact equality with the pending-preferred owner journal. Source flush and
+journal re-save precede signing. Disagreement/stale preparation remains a hint; lost indexed
+files, faults and corruption refuse. A selected receipt is not proof its seed is available or
+verified. Expected-seed fetching uses additive kind 22. Explicit recovery-first registry
+installation is connected to that scoped selection. The Studio coordinator now schedules Registry
+checkpoint bootstrap and Studio joining; automatic Registry tail receive/rotation remains Gate 4.
+
+Checkpoint fetching keeps discovery provenance rather than converting public receipt fields into
+authority. The private selection is minted only while checking the fresh kind-21 owner response;
+runtime, MLS, requester, owner and a per-bucket supersession token accompany it. Four non-Clone
+handles retain at most one verified 2-MiB seed each for bounded attempts. Any newer authenticated
+owner selection for that bucket, MLS transition, runtime replacement or receiver timeout revokes
+use without refunding memory still held by a handle. This is not a current-head lease.
+
+The independently proven seed provider may be any current member. It serves the installed
+opening seed from a checked, inventory-matched vault unit, not the latest receipt's prospective
+successor; during Closing the latter is normally unavailable. Fault refuses. Kind 22 binds full
+identities, current MLS, actual transports and the exact query/answer. Raw seeds use the existing
+512-byte to 1-MiB padding ladder inside group AEAD; above that ceiling the encoded size remains
+visible. The receipt's exact Automerge hash is checked before parsing, then the canonical registry
+schema. Fetching never writes the receiver's vault, retires intents or replaces provisional work.
+The registry core has explicit checkpoint-adoption state: a distant selected receipt seals
+the entire held source, with no pruning, and a typed plan preserves the whole previous version.
+Retargets keep the same content-derived recovery id; seed-only and terminal-epoch versions count.
+The outer restart v2 / adoption-only receipt-book v3 keep nonadjacent selections separate from
+ordinary adjacent settlement. Opening/prior-target equivocation is checked before stale filtering.
+Fault is a successful typed outcome which the store transaction saves before seed or recovery work;
+bad seed or recovery must not suppress that evidence. Constructing a separate successor
+does not install it, retire intents, or provide a transferable network-authority permit.
+
+Studio Index/art now consume this same adoption model through a typed whole-version recovery
+plan and the existing sole prepared source/five-family budget. Source Closing or Fault is saved
+before optional seed work; recovery is durable before selecting the separate successor. Normal
+Studio restart v1 is unchanged, with v2 reserved for an in-progress adoption. The shared adoption
+verifier no longer mistakes Registry's 4,096-epoch product ceiling for a limit on Studio receipts.
+Joined-member tests use the desktop's normal authenticated channel-index bootstrap, then actual
+head/seed requests, recovery-first installation, open-tail paging and disk reopen.
+
+Gate 4 now also has Studio's typed owner-close and adjacent settlement preparation, matching
+the existing Registry flow without introducing another finality protocol. The privately owned
+Studio source validates the exact signed dependency closure and builds its typed seed. An
+immutable close/receipt decision resumes unchanged after newer Open edits or restart; only the
+future durable owner-journal adapter can make it publishable. Adjacent plans distinguish complete
+included/excluded author envelopes and preserve the full source projection when compaction loses
+evidence, even without excluded operations (conflict overflow, deletions and original frame gaps).
+Whole-restart-unit fingerprints fence plans; the separate successor preserves repair bookkeeping.
+There is no new wire/vault format and no runtime rotation, pruning, intent retirement or UI hook
+in this core slice. The next connection is the existing accounted journal/recovery/store gate,
+then the actor/native driver; do not rebuild those storage primitives.
+
+Additive Studio kinds 24/25 reuse Registry's head/seed queues, rates and retained capacity, while
+separately binding type/channel/object and response domains. Detached prepare/I/O/complete phases
+leave the actor free; private runtime/MLS/endpoint/attempt context is checked again on return.
+The old cooperative Registry wrappers also become connected-only; wire compatibility is preserved,
+but they no longer implicitly dial a proven endpoint. Weak generation maps follow the bounded
+live handles. Both outbound and retained seed capacity follow cancelled lower-driver work.
+Studio service shares the owner snapshot/journal durability barriers; no remote query can cause
+whole-server serialization. The existing Studio receiver now drives unopened saved-key service
+and automatic checkpoint discovery for recently accessed Index/art targets. Sync prepays each
+exact authenticated queued request before source capture; it neither adds a UI watch nor grants
+receive authority. Detached work reuses the four-slot preparation pool and the existing owned
+Studio/Registry graphs. Registry graphs release their retained slots after a fixed 30 seconds
+on the local idle pass, without extending the deadline per query. Verified prepared Registry
+sources and exact Studio-bootstrap installation results warm the existing exact-wrapper
+inventory LRU, not another cache or budget. Unrelated Registry writes retain their cold behavior.
+Local owner snapshot failures retry after 30 seconds; queries cannot accelerate that cadence.
+
+Joining tries the known key's Registry bucket, then the current owner's Studio head, expected
+seed, recovery-first install and open-tail pages. Registry cold-request expiry allows at most
+three fresh, charged head requests five seconds apart; a hint/refusal never authorizes installation.
+A large already-saved Registry is prepared for accounting but its automatic adoption is deferred;
+the known Studio key remains directly discoverable. Registry checkpoint bootstrap is not a claim
+of current Registry operation-tail state. Rotation, pointer publication/refresh and Registry tail
+receive, owner succession, own-intent replay and recovery controls remain Gate 4. Old-owner hints
+still grant no authority. Recent-target watches are volatile: ordinary Read after restart resumes
+the persisted Closing state, then expiry/retries need no further UI action.
+
+`Server::install_registry_seed_step` now performs this explicit newcomer transaction under exclusive
+sync/store borrows. It rechecks runtime, MLS, full local identity, owner/tenure, superseding selection,
+receiver-clock expiry and physical mount/server at entry. The accounted store saves the full source
+Closing (or Fault) even before a seed is available, then validates and saves whole-source typed
+recovery before atomically selecting the successor. Invalid inventory or uncertain I/O fails closed;
+an indexed source cannot be replaced by invented epoch zero. Recovery warnings keep their original
+ids/deadlines across retargets and restart. Resuming after expiry requires fresh discovery, not a
+receipt reconstructed into a permit. Adoption retires no intents; exact installation retries flush
+the actual successor and preserve later edits. Old concrete watches/queued pages are not rebound:
+the caller explicitly watches the installed epoch before normal paged catch-up. This is cooperative
+registry integration, not an actor worker, current-head lease or universal progress at full quota.
+
+The registry's adjacent, locally proved checkpoint transaction orders durable barriers as source flush,
+typed recovery, included-only intent retirement, then atomic successor selection. Until selection
+the complete Closing source remains the restart proof; afterward the verified seed and preserved
+receipt book do. Exact retries flush the actual successor without replacing newer work. Local
+Save requests carry a concrete epoch id so retired intents cannot silently reappear on retry.
+Delayed opening-receipt conflicts fault even a successor already sealed by a newer receipt,
+preserving both accepted content and high-water evidence. This is a tested backend adapter,
+not live actor/transport orchestration. A bounded replay step now selects a saved intent by id,
+checks its actual local author/current Open epoch and all typed recovery evidence, then uses the
+existing durability path. New authoring is held on deletion or a superseding pointer hint; an
+exact current-log retry reseals unchanged so failed-flush deletions remain retryable. Holds never
+retire intents. Deletion screening is conservative for stable keys and best-effort after bounded
+recovery eviction. A cooperative replay pass now snapshots one author's bounded id set and paces
+one attempt at a time. It waits for an exact local submission acknowledgement, pauses failures at
+the same id, and never retires intents on traversal/submission. The cooperative Server sender now
+binds that pass to the exact sync instance and holds exclusive sync/store borrows from checked
+preparation through one-shot dispatch. Actual full local identity, MLS epoch and current blinded
+routing are checked before sending. Only Submitted advances; Duplicate, errors, cancellation and
+unwind preserve the saved id for a fresh reseal without resetting pacing. This is not an autonomous
+worker: aggregate scheduling, native lifecycle cancellation, catch-up, settlement-wide
+capacity headroom and discovery remain to be integrated. No universal progress at full quota is
+claimed yet.
+
+The transport offers one-shot publication, now used by that cooperative backend sender. Legacy
+`publish` acknowledges actor enqueueing and can hold ciphertext for later retries. `publish_once`
+instead waits for one driver attempt and never enters that application retry queue. Its bounded
+commands retain their capacity after caller cancellation until drained. Cancellation observed at
+the last driver check suppresses an attempt, but cannot retract work admitted before it. Normal
+gossip caches/handler queues may retain bytes even after some refusal results; cache duplicates
+and local submissions are never delivery proofs. The sender owns saved-id retries and known-state
+checks, not native UI-lock policy, driver deadlines or live actor wakeups. These additive seams do
+not change existing chat publication or wire/persistence formats.
+
+Managed registry gossip now has an opt-in receive path separate from the legacy document map.
+A synchronous watch captures the checked current concrete epoch (or deterministic epoch zero
+when absent), numeric server, physical vault mount and fresh sync/watch generation. Network ticks
+authenticate into a 16-packet queue; an explicit Server drain persists at most one packet through
+the existing typed gate and accounted store. Only the returned Admission describes the saved
+outcome; queuing is not acceptance, and no delivery receipt or legacy accepted-op counter is earned.
+Current local/full author membership, MLS scope, bucket and blinded topic are checked; delayed
+packets recheck authority at drain. Same-id watch replacement revokes old queued work. Current-MLS
+only reception and drop-on-cap/failure require author retry or future catch-up, not silent recovery.
+Global pre-auth and per-full-author/document limits bound work; the shared pre-auth allowance does
+not promise per-peer fairness. Subscription reconciliation retains a single uncertain topic across
+an interrupted subscribe/unsubscribe and establishes it as unsubscribed before retry, including
+after the same topic was rewatched. Revoking a watch needs only its exact generation, so an old
+mount can discard its own queued traffic without gaining permission to ingest. Desired
+watch installation itself never awaits. Actor/native ownership, automatic scheduling of the
+cooperative discovery/catch-up/installation paths remain next.
+
+Registry catch-up has a cooperative read-only page provider over checked vault history.
+Vault reconstruction checks dependency/duplicate presence through Automerge's applied change-graph
+metadata, without reconstructing raw operations merely to test membership. It avoids historical
+visibility scans for a change whose dependencies exactly equal the entire current frontier.
+The trusted restore loop derives that equality after signature,
+actor, scope and dependency checks, with no mutation before semantic validation. Other branches
+retain historical reads, and live edit/ingest never asserts this optimization. The exact-frontier
+path also skips the semantic validator's already-proven dependency-presence predicate. This changes no
+wire/snapshot format, membership rule, cap or request deadline. `P1-PERFORMANCE.md` records measurements;
+explicit source preparation now separates capture under store custody, detached worker rebuild,
+and reattachment under reacquired custody. The worker owns no vault/device/MLS keys. Four
+process-wide slots remain charged through captured bytes, cancelled workers and retained results,
+including across remounts. Read-only cache attachment and each page compare the entire authenticated
+saved record, so gate/book-only faults invalidate it. Superseded preparation jobs cannot attach.
+Cold/stale service returns a local preparation error and never rebuilds inside the request path.
+Automatic scheduling and native lifecycle ownership still need integration; the split API must
+be driven without holding actor/vault locks through reconstruction.
+Its HMAC cursor freezes the provider's dependency-complete accepted-log prefix
+and advances by position, so appends and large head sets cannot force the same prefix forever.
+Every page freshly seals at most 32 operations / 512 KiB of framed bytes; byte-identical reloads
+preserve cursors, changed prefixes and provider restarts do not. Source seeds must already be
+verified by a conforming requester; missing removed-author history explicitly needs historical
+authorization rather than weakening live operation admission. Already emitted cursor history
+counts as claimed held dependencies. Requester claims and prefix completion prove no remote
+possession, finality or currency. The app binds provider state to the exact runtime/mount and
+validates bounded request/MAC/current membership before source I/O. Kind 20 now routes authenticated
+page requests into a bounded opt-in queue, and a mount/watch-bound app drain serves saved history
+under independent requester and aggregate source-read limits. Both transport endpoints are bound
+in the exchange; a client needs a current bound-member proof before disclosing private identifiers.
+Its four outbound permits follow actual transport termination after caller cancellation. Replies
+are unadmitted claims, not currency or delivery evidence. A bounded receiver now derives the
+frontier from checked durable state, fetches without borrowing the vault, and advances only after
+one accounted all-or-none page save. Independent unknown heads permit one empty-head fallback;
+verified seed, provider and charged limits stay fixed. Four watch-bound passes each retain at most
+one page and expire on the receiver's monotonic clock. Duplicate and terminal-empty pages still
+cross the storage/inventory barrier; a receipt seal or MLS advance cannot turn them into stale
+success. Automatic actor/native scheduling remains; the adapters
+do not move vault ownership into sync or change the legacy document map.
+
+Owner succession over an **already frozen** source now shares one first-new-tenure check
+(`crates/catcoms-replication/src/epoch/succession.rs`). `frozen_owner_inheritance` establishes what a
+new tenure inherits: the INSTALLED opening, never an uninstalled remote target and never an old
+owner's journal. Scope and key checks precede allocation, because a Rust record can bypass the wire
+decoder, so every receipt in play is re-decoded from its own encoding and restored-verified from the
+vault before anything else is read from it. Epoch zero with no opening, or an opening whose closed
+epoch is exactly one below and whose tenure start is strictly below this tenure, are the only two
+inheritances; anything else is a receipt conflict. A same-tenure call is permitted **only** to resume
+the exact previously journaled decision, never to generate a replacement for a pending seal, which is
+what makes the write/seal crash boundary safe: before the journal write the held seal belongs to an
+older tenure, and after it the seal may be that first current-tenure decision and no other.
+`owner_rotation_needs_adoption` is a local routing hint only; the authority and source checks are
+repeated inside `frozen_owner_decision`, which the Studio and Registry owner modules each hold over
+the shared helper. This deliberately does **not** reopen a gate or choose a seed: Studio and Registry
+still validate their own actual full closure, persist the exact decision, and use whole-source
+recovery before checkpoint adoption.
 
 The naive "one group, every device commits, replay old ciphertext to latecomers" design
 is broken. The load-bearing fixes:
 
 1. **Proposal/commit split.** Concurrent MLS commits fork the group. Devices replicate
    *proposals* via the CRDT; a single designated committer per epoch packs them into one
-   commit; deterministic fork-resolution (lowest `commit_hash`) + loser re-issues.
+   commit; deterministic fork-resolution (lowest commit hash) + loser re-issues. (Design-era
+   name; the implementation calls it `commit_id`.)
 2. **Snapshot-only catch-up.** Never replicate raw old-epoch frames between members (it
    contradicts forward secrecy). Latecomers receive a self-contained Automerge snapshot
    re-sealed under the current epoch. `max_past_epochs` only covers in-session reordering.
-3. **Inner per-op signature.** Every `LogEntry` is signed by the author's Ed25519 leaf
+3. **Inner per-op signature.** Every log entry is signed by the author's Ed25519 leaf
    over `(doc_id, deps, mls_epoch, payload, author_device)`, verified independently of MLS
    sealing; so re-sealing is a pure transport re-wrap and history cannot be forged/omitted.
+   (Design-era name; the implementation calls the type `SignedOp`, sealed as `SealedOp`.)
 4. **Invites bound in MLS.** The invitee's KeyPackage carries a `(GroupId, invite_nonce)`
    extension validated at `Add`; the leaf is reserved in the InviteLedger before commit.
    Stops cross-group KeyPackage replay and partition double-claim.
@@ -198,7 +616,9 @@ decrypt the new joiner's ops. A design+adversarial-review pass (verified against
 the openmls 0.8.1 source) showed the "safe by construction" claim was only *assumed*,
 so safety is **enforced**: only the **designated committer** (lowest leaf index) may
 admit, which prevents concurrent commits from forking the epoch chain. Tested with a
-3-member join + a non-committer-admit rejection.
+3-member join + a non-committer-admit rejection. That is the **default** configuration
+(`SyncConfig::max_committer_rank: 0`), not the only one the code can do; §4c records the
+staged fork-resolution path that a non-zero rank enables.
 
 ## 4c. Missed-commit recovery + past-epoch key window (6d-1b)
 
@@ -213,28 +633,122 @@ Separately, a bounded **past-epoch channel-key window** (`snapshot_epoch_keys` b
 each advance → `Zeroizing` keys, evicted past `max_past_epochs`) lets an op sealed
 just before an epoch boundary still decrypt (`ingest_with_key`, inner signature still
 verified) instead of being dropped as `EpochUnavailable`; deeper gaps fall back to
-auto-queued document/commit catch-up. Peer discovery is by remembering inbound
-`Gossip.from`/`Request.from` (no `DeviceId→PeerId` directory yet).
+auto-queued document/commit catch-up. Peer discovery started as nothing more than remembering
+inbound `Gossip.from`/`Request.from`; there is now a real `DeviceId→PeerId` directory.
+`ChannelSync::member_transport_peer(&DeviceId) -> Option<PeerId>` resolves a **current member**
+device to the transport identity in its latest self-signed `PeerDescriptor`, the records fed by
+member PEX and the sealed address cache. It is deliberately narrow: the record is signed by the
+device it describes, so a modified client can sign one naming somebody else's transport peer.
+That is harmless for a caller that only *labels* the record's own device, and not harmless at
+all for a caller that acts **against** the value, so every such caller carries its own
+operation-specific liveness and exact-binding checks (transport eviction is the worked example,
+with three checks in three places).
 
 An adversarial review (background `Workflow`) hardened this before commit. The
 load-bearing fix: the **catch-up serve endpoints are members-only**. A requester
-proves current membership by signing `("catcoms/catchup-auth/v1" ‖ group_id ‖ kind ‖
-body ‖ requester_pubkey ‖ timestamp)` with its MLS leaf key; the server serves only
+proves current membership by signing a transcript with its MLS leaf key; the server serves only
 if that key content-addresses a current member, the timestamp is fresh, and the
 signature verifies; so an outsider cannot harvest a group's id, member device ids,
-or history from these endpoints. (Residual: within-freshness-window replay of a
-captured signed request, closed by the Noise transport in production; a server nonce
-challenge or authenticated-peer binding is the full fix, with 6e.) Also folded in:
+or history from these endpoints. Also folded in:
 hard response-size bounds on the *serving* side, `committer_device` validated against
 the designated committer on the inbound apply path, and explicit caps on every
 recovery buffer/queue.
 
+The transcript has since grown: of the two residuals the original review recorded, one is closed
+and the other is narrowed but still open (see the end of this paragraph).
+It is now `(CATCHUP_AUTH_DOMAIN ‖ group_id ‖ u16 kind ‖ inner ‖ requester_pubkey ‖ ts ‖ nonce ‖
+req_epoch)`, with the requester's **transport peer** appended for the kinds where
+`kind_binds_requester_peer` is true (`KIND_CATCHUP_SINCE`, plus the registry page/receipt-head/seed
+and studio page/head/seed kinds). The per-request RNG nonce and the epoch close the
+same-millisecond `ts` collision window, so a captured response cannot be replayed against a
+different request; the peer binding is rebuilt from where the bytes actually arrived, so an
+endpoint cannot forward a request verbatim to a real member and have that member's answer
+attributed to itself. Which kinds carry the binding is a compatibility decision, not a security
+ranking. **The transcript is what a signature is over, so adding a field to it changes what an
+older build computes and breaks both directions of a mixed pair.** `KIND_PEX` and
+`KIND_COMMIT_CATCHUP` exist on the released build and keep the released transcript exactly; a
+commit catch-up that stopped verifying would be a member stuck at an old epoch, unable to open
+anything sealed under the new one, which is a missing-message failure rather than a discovery one.
+They instead stop being a way to *prove* anything about a transport peer: their answers still carry
+usable records, but only an exchange bound at both ends establishes that the endpoint answering is
+the member that signed. Two more are excluded on their own merits: reciprocal forwarding relays a
+request on somebody's behalf and re-authenticates the original bytes at the far end, and a delivery
+receipt is built once and sent to several targets, so binding either would be wrong rather than
+safer. The remaining residual is that there is no server-side seen-nonce log, so a captured
+*request* can be re-sent inside `MAX_REQUEST_AGE_MS`; that costs one freshly-signed re-serve into
+the peer's own Noise session.
+
+**Document catch-up pages by position.** `export_catchup_since` recomputed the whole difference on
+every call, so a serving peer that could only send a prefix sent the same prefix forever; against a
+requester whose frontier is too narrow to name everything it holds, that prefix is history it
+already has and the operations it needs sit behind a wall of duplicates it can never clear. That is
+a livelock, not an inefficiency, and it is reachable: `sync_frontier` caps the hashes a requester
+may name, and a serving peer walks its own log in insertion order, so unnameable history sorts
+ahead of whatever is actually missing. Two protocol-boundary facts follow.
+- `MAX_CATCHUP_SINCE_HEADS` is **512**, raised from 64. The subtraction walk visits each change at
+  most once (`have` is a set, and a hash already in it terminates that branch), so it is
+  O(document) whether it starts from two heads or five hundred; the real cost is 36 bytes each on
+  the wire, and a maximal frontier frames to roughly 18 KiB against the 64 KiB control-request
+  bound. What 64 bounded was the requester's ability to *describe itself*, and a frontier that
+  cannot say what it holds is not merely incomplete, it is wrong. This moved the threshold past
+  any realistic group; it did not remove the failure mode.
+- `export_catchup_page` did. It walks the log from a caller-supplied position, skips what the
+  requester claimed, stops on a byte budget and reports where to resume, sizing **before** sealing
+  so a page never pays to seal operations it will not send. `KIND_CATCHUP_SINCE` carries an
+  optional trailing continuation, and a truncated answer comes back under its own marker
+  `CATCHUP_SINCE_PAGE` with a 20-byte cursor (its own marker rather than an optional prefix on
+  `CATCHUP_SINCE_MORE`, because every twenty bytes decode as a cursor and a requester could not
+  otherwise tell one from the front of a bundle). **Both wire directions are additive**: a build
+  predating paging sends no continuation field, that frame still decodes and is answered exactly
+  as before, and it is never sent the new marker, because only a request carrying the field gets
+  one. A position means something only against the log that issued it, so each cursor is stamped
+  with a per-runtime provider id and one replayed to the wrong peer, or to the same peer after a
+  restart, is recognised as foreign and the walk restarts rather than skipping history. It is
+  deliberately **not** authenticated: a forged position can only make a server skip operations the
+  forger then does not receive, so the fence exists to stop an honest mistake silently hiding
+  history, not to stop a liar harming itself. A round that applies nothing but advances the walk no
+  longer counts against the source; a round that repeats with no way to advance still does.
+
+**The dead zone past the commit log, and what is now known about it.** A member behind by more
+than a serving peer's `max_commit_log` cannot be chained from that peer, and there are two bands:
+inside `max_commit_gap` the records buffer and can never drain, past it they are dropped before
+buffering. Both used to return `Verified { applied: 0 }`, which is byte-for-byte what an honest
+up-to-date peer returns, so the drain read the exchange as closed and retired the recovery; and
+past `max_commit_gap` nothing was logged at all. The state is now typed.
+`CommitCatchupOutcome` distinguishes `Verified { applied }` from `Empty` (the peer sent an empty
+bundle, which is genuinely what both an up-to-date member and a refusal look like on the wire, kept
+as its own variant so the conflation is visible where it is relied on), `Unanswered` (no answer,
+oversized, undecodable, or not signed by a current member: a fact about the peer and the link, and
+evidence about the commit log in neither direction) and `Stranded { lowest_available }` (the peer
+answered with authenticated records that all begin above this node's epoch). A `Stranded` outcome
+closes nothing, so the drain marks that source and re-queues to one whose log reaches further back.
+`note_membership_chain_gap` keeps the **best** (lowest) offer seen at this epoch in
+`MembershipChainGap { current_epoch, lowest_available, observed_at_ms }`, counts
+`SyncStats::commit_chain_gaps_observed` once per epoch, and warns; `membership_chain_gap()`
+filters on read against the current epoch, so a node repaired through any route stops claiming to
+be stranded without that route having to know about it. **The limit is deliberate and worth
+stating: this is detectability only. Nothing surfaces it in the UI and there is no repair path.**
+A full snapshot rejoin remains the missing recovery, and `docs/MESSAGE-FLOW.md` §11 puts
+surfacing the state to the user ahead of deciding whether an automatic rejoin can be made safe.
+
+**Implemented but off by default (not deferred):**
+- **Concurrent-commit fork resolution.** `SyncConfig::max_committer_rank` is `0` in
+  `Default`, which is strict single-committer: only the designated (lowest-leaf-index)
+  member admits, on the synchronous fast path. At `>= 1` the staged path is live: a node
+  collects competing same-base candidates for `stage_decision_window_ms` (`PendingResolve`),
+  adopts the lowest `commit_id`, and the winner merges its staged commit while the loser
+  aborts (`MyStaged`; a staged Add carries a `StagedJoin` whose provisional Welcome is
+  pushed on a win and rejected on a loss, and whose invite nonce is consumed only on a
+  winning merge). A candidate built on a different base is a deeper divergence and is
+  refused outright. `SyncStats::forks_resolved` / `forks_lost` / `forks_too_deep` count it,
+  and it is test-gated (roadmap 6d-2a 2b/2c, 6d-2b 1/2). Turning it on is a configuration
+  decision, not remaining work.
+
 **Still deferred, with the data model already in place (no rewrite):**
-- **6d-2**; concurrent-commit fork resolution + the full RFC 9420 proposal/commit
-  split (designated committer packs replicated proposals; deterministic lowest-hash
-  tie-break; openmls `clear_pending_commit` rollback / `fork_resolution` heal),
-  plus the replicated InviteLedger (single-use across members) and joiner-bound
-  nonces. Until then network admission is single-committer only.
+- The rest of **6d-2**: the full RFC 9420 proposal/commit split (the designated committer
+  packing replicated *proposals*, rather than each member committing its own), the
+  replicated InviteLedger giving single-use across members, and joiner-bound nonces.
+- A full snapshot rejoin for a member past every reached peer's commit log.
 - Per-peer rate limiting / off-actor offload of join work.
 
 ## 4d. Product operations and moderation plane
@@ -245,7 +759,13 @@ CID and file-layer key. One report per server is cached for the process session 
 deduplicated category/pin/largest-file inventory; category local-byte totals remain estimates, while
 the verified ciphertext total is exact. **Repair** is an explicit network action: it re-fetches only
 missing or unreadable content from authenticated members, re-runs verification, and replaces that
-cache. **Connectivity assistant**
+cache. Upload deduplication also requires complete locally authenticated possession, including
+whole-file hashing. A metadata-only re-upload retains fresh staged ciphertext and publishes an
+attested repair; only an exact verified local-device listing can be replaced. Other uploaders'
+attestations remain intact. Downloads and media share a bounded resolver for at most four encrypted
+manifests with identical ordered plaintext chunk identities, lengths and MIME fields. Media cache
+identity binds the complete sorted set; every alternative is independently authenticated before
+use, with local alternatives tried before any network wait. **Connectivity assistant**
 reports the live peer/path evidence already available to the node; it is diagnostic and never a
 proof that every remote member or future network path is reachable.
 
@@ -307,3 +827,11 @@ fakes own no detached lower work.
 8. Product model + Tauri desktop UI (channels, fileshare browser, status, wiki).
 9. Android (Tauri 2 mobile): JNI keystore, foreground service, two-tier keys.
 10. Hardening: calendar, cover traffic, supply-chain attestation, security review.
+
+### File reliability and explicit retention
+
+[File reliability](design-file-reliability.md) separates actor-owned authorization/storage from bounded
+network tasks, projects conflicting first file-index lists consistently, and adds explicit local kept
+copies. Kept-copy ownership never comes from replicated expiry. One exact manifest is reserved and
+verified before durable visibility; normal cache deletion cannot remove it. UI availability reports
+local evidence and leaves remote copies unconfirmed.
