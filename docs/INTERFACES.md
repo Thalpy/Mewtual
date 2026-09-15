@@ -2076,8 +2076,28 @@ authority. Generic page/current-tail service holds Prepared sources, and complet
 flushed before publication or normal source rewrites. Rotation/adoption resolve Prepared before
 journal/recovery/retirement work; the common source writer also fences evidence loss.
 
-Actor scheduling, native overlay commands, manual disposition and preview-based overlays remain
-unavailable. Implementation acceptance is still pending adversarial review.
+The bounded store handoff is accepted; HANDOFF-002 is closed. Read-only `studio_overlay_read`
+is separately accepted, with INSPECTION-TEST-001 now closed. Native overlay writes, automatic
+handoff scheduling, manual disposition and preview-based overlays remain unavailable.
+
+The [prepared-signing checkpoint](GATE4-HANDOFF-SIGNING-REVIEW.md), awaiting review, adds:
+
+```rust
+StudioOverlayState::handoff_authority(&self, &MlsDevice, &ServerGroup, observed_tenure)
+    -> Result<StudioHandoffAuthority, ReplError>;
+StudioOverlayState::prepare_handoff_detached(self, StudioEpoch, IntentLedger, StudioHandoffAuthority)
+    -> Result<StudioHandoffSigning, ReplError>;
+StudioHandoffSigning::remaining(&self) -> usize;
+StudioHandoffSigning::sign_next(&mut self, &MlsDevice, &ServerGroup, observed_tenure)
+    -> Result<bool, ReplError>; // one private signature, or false when already complete
+StudioHandoffSigning::finish(self) -> Result<StudioHandoffCandidate, ReplError>;
+```
+
+Authority capture borrows live secrets only for public-context validation. Preparation and finish
+own authenticated private input and take no device/group secrets; signing rechecks original live
+context on each turn. No signed prefix escapes. The existing synchronous `prepare_handoff`
+adapter uses these stages too. Runtime callers still owe original shared-permit ownership and
+current incarnation/mount/full source-and-intent stamps before signing and durable commit.
 
 ### Durable registry edits, sealing and checkpoint installation (P1, not yet live-wired)
 

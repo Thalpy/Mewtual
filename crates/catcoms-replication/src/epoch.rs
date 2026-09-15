@@ -2364,6 +2364,11 @@ impl EpochGate {
         Ok(())
     }
 
+    /// Current owner used for per-device share accounting.
+    pub(crate) fn owner(&self) -> DeviceId {
+        self.inner.lock().expect("epoch gate poisoned").owner
+    }
+
     /// Update the owner whose operations are exempt from the per-device share.
     ///
     /// Succession does not replace an open epoch, so this update uses the same gate as admission.

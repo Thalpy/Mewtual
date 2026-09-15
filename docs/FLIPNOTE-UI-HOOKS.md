@@ -8,11 +8,14 @@ bounded preparation/signing and the overlay lifecycle. The user accepts the
 [detached inspection proposal](GATE4-OVERLAY-RUNTIME-REVIEW.md) at `0b28f06`, with no findings.
 Its read-only `studio_overlay_read` implementation is registered at `d5ca2ff`; the
 [implementation review](GATE4-INSPECTION-IMPLEMENTATION-REVIEW.md) of `0b28f06...c47ae0b` now
-passes. P3 INSPECTION-TEST-001 requests stronger digest-specific regression coverage, with no
-production correction. Its correction at `d38df93` passes the local regression and size-only
-mutation/restored test, plus the complete GitHub inspection/mutation workflow; the finding
-remains open pending re-review. The command/result contract
+passes. The user closes P3 INSPECTION-TEST-001 after accepting the digest-specific regression
+and size-only mutation. Its correction at `d38df93` passes the local regression and mutation/
+restored test, plus the complete GitHub inspection/mutation workflow. No production correction
+is required. The command/result contract
 is unchanged. Durable overlay Save is still unavailable, and Gate 4 remains incomplete.
+The current [handoff signing checkpoint](GATE4-HANDOFF-SIGNING-REVIEW.md) splits core work into
+detached typed preparation, one-operation signing turns and detached complete-source assembly.
+It awaits adversarial review and adds no native command or UI write capability.
 GitHub passes all 25 native Studio tests and both new inspection mutations with restored
 passes at that code/test checkpoint. Exact checkout and execution scope are in [HANDOVER](HANDOVER.md).
 

@@ -3,6 +3,9 @@ use super::*;
 use catcoms_mls::{MlsDevice, ServerGroup};
 use catcoms_rt::CryptoRngCore;
 
+mod preparation;
+pub use preparation::{StudioHandoffAuthority, StudioHandoffSigning};
+
 #[derive(Debug)]
 pub enum StudioOverlaySave {
     Local(StudioLocalDraft),
@@ -180,15 +183,30 @@ impl StudioOverlayState {
         device: &MlsDevice,
         group: &ServerGroup,
         tenure: u64,
-        rng: &mut impl CryptoRngCore,
+        _rng: &mut impl CryptoRngCore,
+    ) -> Result<StudioHandoffCandidate, ReplError> {
+        let authority = self.handoff_authority(device, group, tenure)?;
+        // Compatibility batch for the accepted synchronous store transaction. Runtime callers
+        // must schedule the detached stages and each signing turn separately under fresh stamps.
+        let candidate = source.copy_handoff_source(group)?;
+        let mut signing =
+            self.clone()
+                .prepare_handoff_detached(candidate, ledger.clone(), authority)?;
+        while signing.sign_next(device, group, tenure)? {}
+        signing.finish()
+    }
+
+    fn prepared_manifest(
+        mut self,
+        candidate: StudioEpoch,
+        ledger: &IntentLedger,
+        before: [u8; 32],
     ) -> Result<StudioHandoffCandidate, ReplError> {
         self.validate(ledger)?;
         if self.prepared.is_some() {
             return Err(ReplError::EpochClosed);
         }
         let overlay = self.active.as_ref().ok_or(ReplError::EpochScope)?;
-        let before = source_hash(source)?;
-        let candidate = source.overlay_candidate(overlay, ledger, device, group, tenure, rng)?;
         let signed = overlay
             .checked_entries(ledger)?
             .into_iter()
@@ -198,21 +216,39 @@ impl StudioOverlayState {
                     .ok_or(ReplError::Malformed)
             })
             .collect::<Result<Vec<_>, _>>()?;
-        let mut metadata = self.clone();
-        metadata.legacy = false;
-        metadata.prepared = Some(Prepared {
-            epoch: candidate.epoch(),
-            doc_id: candidate.doc_id(),
+        self.set_prepared(
+            candidate.epoch(),
+            candidate.doc_id(),
+            before,
+            signed,
+            ledger,
+        )?;
+        Ok(StudioHandoffCandidate {
+            source: candidate,
+            metadata: self,
+        })
+    }
+
+    fn set_prepared(
+        &mut self,
+        epoch: u64,
+        doc_id: u128,
+        before: [u8; 32],
+        signed: Vec<[u8; 32]>,
+        ledger: &IntentLedger,
+    ) -> Result<(), ReplError> {
+        let overlay = self.active.as_ref().ok_or(ReplError::EpochScope)?;
+        self.prepared = Some(Prepared {
+            epoch,
+            doc_id,
             receipt: overlay.receipt().hash(),
             before,
             branch: branch_hash(overlay, ledger)?,
             signed,
         });
-        metadata.encode_vault(ledger)?;
-        Ok(StudioHandoffCandidate {
-            source: candidate,
-            metadata,
-        })
+        self.legacy = false;
+        self.encode_vault(ledger)?;
+        Ok(())
     }
     /// Read-only evidence classification; never clears the local hold or implies a flush.
     pub fn evidence(

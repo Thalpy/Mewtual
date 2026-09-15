@@ -13,14 +13,18 @@ Current follow-up (2026-09-15): the user passes `aa0a81f...0b28f06` profiling an
 inspection design without findings. Code/test checkpoint `d5ca2ff` adds read-only
 `studio_overlay_read`, implementing capture,
 detached reconstruction, full intent-wrapper currency and native delivery under one original
-session/request. User implementation review passes at `c47ae0b`, with P3 INSPECTION-TEST-001
-requesting a same-sized authenticated replacement and a size-only mutation to isolate digest
-validation. This is a test/harness correction, not a production change; re-review remains.
+session/request. User implementation review passes at `c47ae0b`; the user now closes
+INSPECTION-TEST-001 after accepting the same-sized authenticated replacement and size-only
+mutation at `d38df93`. No production correction is required.
 All 25 native Studio tests and both new
 native inspection mutations with restored passes succeed on GitHub. Local store, resource
-ownership, actor checkpoint progress, real Index/Flipnote fixtures and all three app mutations
+ownership, actor checkpoint progress and real Index/Flipnote fixtures succeed; all four app mutations
 with restored passes also succeed. Exact code/checkout and scope are in HANDOVER.
 This advances block 2 of Gate 4. It does not enable local Save/handoff or complete Gate 4.
+The next [core signing checkpoint](GATE4-HANDOFF-SIGNING-REVIEW.md) is implemented and awaiting
+review: detached typed preparation, one-operation live-authority-checked signing, and detached
+complete-source assembly. The accepted store transaction uses that same staged algorithm.
+Runtime permit/stamp/commit scheduling and native local acceptance remain outstanding.
 
 ## Scope reset (2026-09-08)
 
@@ -207,8 +211,8 @@ handling, and remaining repeated-owner tenure integration. Blocks 3 (runtime sig
 repair) and 4 (combined Gate 4 acceptance and required suites) remain. These are unequal work
 areas, not percentages. The [custody profiling and detached-inspection design](GATE4-OVERLAY-RUNTIME-REVIEW.md)
 are accepted at `0b28f06`. Their [read-only implementation](GATE4-INSPECTION-IMPLEMENTATION-REVIEW.md)
-at `d5ca2ff` passes review at `c47ae0b`; the digest-specific coverage correction remains under
-INSPECTION-TEST-001. This does not enable durable overlay Save in native.
+at `d5ca2ff` passes review at `c47ae0b`; the user closes the digest-specific coverage finding
+INSPECTION-TEST-001 at `d38df93`. This does not enable durable overlay Save in native.
 
 The [Closing overlay foundation design](GATE4-CLOSING-OVERLAY-REVIEW.md) passed user review at
 `d576af2` on 2026-09-14 with no required changes. Its core/store implementation now distinguishes
@@ -230,8 +234,8 @@ It persists Prepared, the whole signed source, then Completed before releasing t
 ordinary intents remain pending for receipt settlement. A local source dependency also prevents
 missing metadata from exposing an unfinished batch after restart. This is still block 2.
 The user accepts the [runtime inspection design](GATE4-OVERLAY-RUNTIME-REVIEW.md) at `0b28f06`;
-its separate read-only native implementation at `d5ca2ff` passes user review at `c47ae0b` with
-one test finding, INSPECTION-TEST-001. Overlay writes,
+its separate read-only native implementation at `d5ca2ff` passes user review at `c47ae0b`;
+INSPECTION-TEST-001 is now closed. Overlay writes,
 replay/disposition, provisional-preview writes and new tenure authority remain unavailable.
 
 **Combined scheduling checkpoint `6b71d96` (2026-09-13; user review PASS).** The three-member actor

@@ -4,6 +4,74 @@ use super::*;
 use catcoms_replication::studio::{StudioOverlay, StudioOverlayState};
 use catcoms_rt::{Clock, SystemClock};
 
+#[test]
+fn studio_overlay_handoff_prepared_signing_full_count_keeps_source_private() {
+    for art in [false, true] {
+        let root = tempfile::tempdir().unwrap();
+        let f = Fixture::new(art);
+        let mut store = open(root.path());
+        let (_, expected) = fixture(&f, &mut store, 256);
+        let before = canonical(&store);
+        let state = store.load_epoch_intents(SERVER, &f.logical).unwrap();
+        let metadata = state.handoff_metadata().unwrap().clone();
+        let authority = metadata.handoff_authority(&f.device, &f.group, 0).unwrap();
+        let source = f.load(&store).unwrap().unit;
+        let clock = SystemClock;
+        let start = clock.monotonic_ms();
+        let mut batch = metadata
+            .prepare_handoff_detached(source, state.ledger.clone(), authority)
+            .unwrap();
+        let prepare_ms = clock.monotonic_ms() - start;
+        assert_eq!(batch.remaining(), 256);
+        let mut max_turn_ms = 0;
+        for remaining in (0..256).rev() {
+            let start = clock.monotonic_ms();
+            assert!(batch.sign_next(&f.device, &f.group, 0).unwrap());
+            max_turn_ms = max_turn_ms.max(clock.monotonic_ms() - start);
+            assert_eq!(
+                batch.remaining(),
+                remaining,
+                "full-count signing turn exceeded one operation"
+            );
+        }
+        assert!(!batch.sign_next(&f.device, &f.group, 0).unwrap());
+        assert_eq!(
+            canonical(&store),
+            before,
+            "signing exposed a durable prefix"
+        );
+        let start = clock.monotonic_ms();
+        let (mut candidate, prepared) = batch.finish().unwrap().into_parts();
+        let finish_ms = clock.monotonic_ms() - start;
+        assert_eq!(candidate.op_count(), 256);
+        assert_eq!(candidate.projection().unwrap(), expected);
+        for (_, intent) in state.ledger.pending() {
+            assert!(candidate
+                .contains_exact_operation(intent.author, &intent.operation)
+                .unwrap());
+        }
+        assert_eq!(
+            prepared.evidence(&candidate, &state.ledger).unwrap(),
+            catcoms_replication::studio::StudioHandoffEvidence::Complete
+        );
+        let restored = StudioEpoch::restore(
+            &candidate.snapshot().unwrap(),
+            &f.group,
+            f.target,
+            f.device.device_id(),
+        )
+        .unwrap();
+        assert_eq!(restored.op_count(), 256);
+        assert_eq!(restored.projection().unwrap(), expected);
+        assert_eq!(
+            canonical(&store),
+            before,
+            "finish installed a source outside the durable writer"
+        );
+        println!("HANDOFF_SIGNING_PROFILE art={art} operations=256 prepare_ms={prepare_ms} max_turn_ms={max_turn_ms} finish_ms={finish_ms}");
+    }
+}
+
 pub(super) fn fixture(
     f: &Fixture,
     store: &mut ServerStore,

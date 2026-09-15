@@ -5,6 +5,7 @@ on:
     paths:
       - '.github/workflows/studio-handoff.yml'
       - '.github/scripts/check-studio-handoff-mutations.py'
+      - '.github/scripts/check-studio-handoff-signing-mutations.py'
       - 'crates/catcoms-app/**'
       - 'crates/catcoms-sync/**'
       - 'crates/catcoms-replication/**'
@@ -18,6 +19,28 @@ env:
   RUSTFLAGS: '-D warnings'
 
 jobs:
+  prepared-signing:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.89.0
+      - uses: Swatinem/rust-cache@v2
+      - name: Test detached preparation and individual signing turns
+        run: >-
+          cargo test --locked -j 4 --config 'profile.test.package.catcoms-replication.debug=0'
+          -p catcoms-replication --lib studio_handoff_preparation -- --nocapture
+      - name: Check replication library and tests
+        run: cargo clippy --locked -j 4 -p catcoms-replication --lib --tests -- -D warnings
+      - name: Verify actual MLS-change mutation and restored regression
+        run: python3 .github/scripts/check-studio-handoff-signing-mutations.py
+      - name: Preserve signing mutation and restoration evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: studio-handoff-signing-mutations
+          path: logs/gate4-handoff-signing-*.log
+          if-no-files-found: ignore
   handoff:
     runs-on: ubuntu-latest
     timeout-minutes: 45

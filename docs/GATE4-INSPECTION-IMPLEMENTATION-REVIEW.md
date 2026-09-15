@@ -1,7 +1,7 @@
 # Gate 4: detached local-draft inspection implementation
 
-Status: user **PASS** for read-only inspection, 2026-09-15, with one P3 regression finding
-INSPECTION-TEST-001. Reviewed `0b28f06...c47ae0b`; original code/test head:
+Status: user **PASS** for read-only inspection; **INSPECTION-TEST-001 closed** by user
+re-review, 2026-09-15. Reviewed `0b28f06...c47ae0b`; original code/test head:
 `d5ca2ff1516852f15edf7fe5b09db07c61fcda56`, base:
 `0b28f06b8a2076a345f06dfea1220787c262650b`. Production changes are at `bf7ceed`;
 `d55c05d` and `d5ca2ff` extend/correct tests and documentation; `c47ae0b` adds evidence only.
@@ -28,7 +28,8 @@ inspection/currency checks leave durable bytes unchanged. Both Index and Flipnot
 The added isolated mutation retains physical-size comparison while removing digest comparison.
 It must execute the new test and fail at the specific obsolete-stamp assertion, restore source
 bytes exactly, then pass restored source. No production change is requested or made. See the
-latest HANDOVER for execution status; the finding awaits user re-review.
+latest HANDOVER for execution status. The user accepts this correction and closes the finding
+without further changes; the production PASS stands.
 
 `studio_overlay_read` returns a separate read-only local draft or absent result for Index and
 Flipnote. It never resolves Prepared, fabricates a receipt or enables durable native Save.
@@ -85,7 +86,7 @@ disposition, stale-base and preview-based local-work handling, repeated-owner te
 signed fault repair; combined full Gate 4 acceptance and required suites. Existing broad-CI
 failures are recorded separately in HANDOVER. This checkpoint does not close the gate.
 
-## Message for correction re-review
+## Historical message for correction re-review (finding now closed)
 
 ```text
 Please re-review INSPECTION-TEST-001 at d38df93f2ba49b20b632870d38d353e69e2d60d8

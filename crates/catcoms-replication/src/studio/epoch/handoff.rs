@@ -2,7 +2,16 @@
 use super::*;
 use crate::IntentLedger;
 
+mod preparation;
+pub(in crate::studio) use preparation::PreparedOverlayChanges;
+
 impl StudioEpoch {
+    pub(in crate::studio) fn copy_handoff_source(
+        &mut self,
+        group: &ServerGroup,
+    ) -> Result<Self, ReplError> {
+        Self::restore(&self.snapshot()?, group, self.target, self.actor)
+    }
     /// Cheap exact-history fence over authenticated vault bytes. It does not install/decode
     /// an editable source or infer authority; malformed framing refuses the replacement.
     pub fn preserves_vault_source(
@@ -70,27 +79,20 @@ impl StudioEpoch {
         }
         Ok(kept)
     }
-    pub(in crate::studio) fn overlay_candidate(
+    pub(in crate::studio) fn check_overlay_successor(
         &mut self,
         overlay: &StudioOverlay,
         ledger: &IntentLedger,
-        device: &MlsDevice,
-        group: &ServerGroup,
-        tenure: u64,
-        rng: &mut impl CryptoRngCore,
-    ) -> Result<Self, ReplError> {
+    ) -> Result<(), ReplError> {
         if self.target != overlay.target() || self.document() != ledger.document() {
             return Err(ReplError::EpochScope);
         }
         if self.actor != overlay.author()
-            || self.actor != device.device_id()
-            || group.group_id() != self.logical.server_id
-            || group.member_signature_key(&self.actor).as_deref()
-                != Some(device.public_key_bytes().as_slice())
+            || self.gate.owner()
+                != DeviceId::from_public_key_bytes(&overlay.receipt().owner_public_key)
         {
             return Err(ReplError::EpochAuthority);
         }
-        overlay.receipt().verify_current_owner(group, tenure)?;
         if self.phase() != EpochPhase::Open
             || self.adopting
             || self.opening.as_ref() != Some(overlay.receipt())
@@ -106,13 +108,7 @@ impl StudioEpoch {
         {
             return Err(ReplError::EpochClosed);
         }
-        // Restore the real source, preserving its gate, receipt book and installed identity.
-        // Never manufacture a successor from the local extension's receipt/seed here.
-        let mut candidate = Self::restore(&self.snapshot()?, group, self.target, self.actor)?;
-        for (intent, ts) in overlay.ordered(ledger)? {
-            candidate.edit_or_reseal(device, group, rng, &intent.operation, ts)?;
-        }
-        Ok(candidate)
+        Ok(())
     }
 
     /// Exact signed bytes, including delta and timestamp. Seed markers are deliberately absent.

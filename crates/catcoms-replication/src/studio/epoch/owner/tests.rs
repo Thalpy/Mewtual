@@ -4,6 +4,7 @@ use rand_chacha::ChaCha20Rng;
 use rand_core::SeedableRng;
 
 mod frozen;
+mod handoff;
 
 struct Fixture {
     owner: MlsDevice,

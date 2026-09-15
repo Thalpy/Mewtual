@@ -21,6 +21,7 @@ use crate::{
 mod adoption;
 pub mod catchup;
 mod handoff;
+pub(in crate::studio) use handoff::PreparedOverlayChanges;
 mod owner;
 mod settlement;
 pub use adoption::StudioAdoptionPlan;

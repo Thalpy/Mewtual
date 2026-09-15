@@ -47,7 +47,7 @@ MUTATIONS = [
     ("retry-floor", CORE, "if closed < floor {", "if closed < floor && false {",
      "metadata::studio_overlay_handoff_rollover_floor_rejects_forgotten_retry_after_rewind",
      "forgotten overlay retry crossed persisted floor"),
-    ("acceptance-order", "crates/catcoms-replication/src/studio/epoch/handoff.rs",
+    ("acceptance-order", "crates/catcoms-replication/src/studio/epoch/handoff/preparation.rs",
      "for (intent, ts) in overlay.ordered(ledger)? {",
      "for (intent, ts) in overlay.ordered(ledger)?.into_iter().rev() {",
      "eligibility::studio_overlay_handoff_replays_dependency_order_and_retains_all_pixel_references",

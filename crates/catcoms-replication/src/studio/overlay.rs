@@ -12,8 +12,8 @@ const MAX_EXTENSION: usize = MAX_CHECKPOINT_BYTES + MAX_METADATA;
 
 mod handoff;
 pub use handoff::{
-    StudioHandoffCandidate, StudioHandoffEvidence, StudioHandoffOutcome, StudioOverlaySave,
-    StudioOverlayState,
+    StudioHandoffAuthority, StudioHandoffCandidate, StudioHandoffEvidence, StudioHandoffOutcome,
+    StudioHandoffSigning, StudioOverlaySave, StudioOverlayState,
 };
 
 #[derive(Clone)]

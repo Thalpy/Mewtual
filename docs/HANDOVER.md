@@ -10,11 +10,46 @@ and ranks the live hazards in that path.
 
 ## Status (latest entry: 2026-09-15)
 
+- **Detached handoff preparation and finite signing checkpoint (2026-09-15; review pending).**
+  [Review scope and message](GATE4-HANDOFF-SIGNING-REVIEW.md), base `8190dc4`.
+  The existing synchronous core/store batch now uses public-context authority capture,
+  detached typed preparation, one-operation signing turns and detached complete assembly.
+  Private prepared changes bind exact envelopes/order/timestamps and the pristine actual
+  successor. Each signing turn checks live membership/key, MLS epoch, receipt owner and
+  independently observed tenure. Source accounting owner and verified receipt owner must
+  match; exact combined Prepared metadata is preflighted before signing. No prefix escapes.
+  Existing store durability/reference/publication fences and native contracts are unchanged.
+
+  The initial four core regressions pass for both kinds (13.73 s), including a full signed-byte
+  oracle from ordinary edits and a real MLS transition with unchanged owner. Its isolated MLS
+  mutant fails at the intended assertion, byte-exact restoration succeeds and the restored
+  test passes. All five final core regressions pass for both kinds (15.28 s), adding
+  accounting-owner mismatch and pre-sign combined-metadata checks to the implementation.
+  Log: `logs/gate4-handoff-preparation-tests-final.log`. Strict replication/app library-and-test
+  Clippy passes with one build job (66 s), after replacing one redundant Copy clone:
+  `logs/gate4-handoff-preparation-clippy.log`. Root formatting, Python syntax and both unique
+  mutation anchors pass. The final two-mutation execution is pending. The full 256-operation app case uses actual stored branches and
+  checks all envelopes, complete projection/restart and unchanged durable records throughout.
+  A local app-suite build with one build job failed in LLVM with out-of-memory before running
+  tests (`logs/gate4-handoff-preparation-store.log`). A concurrent formatting attempt also hit
+  memory exhaustion; the separate formatting rerun passes. GitHub is used for the larger app suite.
+  These failures are not test passes. Runtime capture/permit/stamp scheduling and native local
+  Save/handoff still require integration and review; this checkpoint does not complete Gate 4.
+
+- **INSPECTION-TEST-001 closed by user re-review (2026-09-15).**
+  The user accepts the same-size authenticated replacement regression and targeted size-only
+  mutation described below, finding no remaining masking path and requesting no production
+  change. The read-only inspection production PASS stands. This closure does not claim a new
+  independent Cargo run. Gate 4 remains active: the next implementation splits handoff into
+  detached typed preparation, finite signing turns and detached complete-candidate assembly.
+  Native overlay Save/handoff, remaining lifecycle/tenure, runtime signed repair and combined
+  acceptance remain outstanding; Gate 5 is untouched.
+
 - **Read-only inspection PASS; INSPECTION-TEST-001 coverage correction (2026-09-15).**
   The user accepts `0b28f06...c47ae0b`, with code/tests at `d5ca2ff`, finding no blocking
   production defect. They independently inspected both actual GitHub job logs and all ten
   mutation/restoration logs and verified artifact digests; they did not rerun Cargo locally.
-  One P3 coverage finding remains: adding an ordinary intent also grows the file, so the original
+  The original P3 coverage finding was: adding an ordinary intent also grows the file, so the original
   freshness regression does not distinguish full-digest checking from size-only checking.
   No production correction is requested. Prior closures, including HANDOFF-002, stand.
 
@@ -42,7 +77,7 @@ and ranks the live hazards in that path.
   only; the complete default four-mutation harness runs separately on GitHub. Local logs:
   `logs/gate4-inspection-digest-mutation-local.log` and
   `logs/studio-inspection-mutations/app-3-local-{mutated,restored}.log`. No compile/empty-filter
-  failure is counted as mutation success. The finding awaits user re-review; native
+  failure is counted as mutation success. The user now closes the finding above; native
   commands/result shapes and production behavior are unchanged.
   Gate 4 remains active and incomplete; Gate 5 remains untouched.
 
@@ -64,8 +99,8 @@ and ranks the live hazards in that path.
   `app-3-mutated.log` and `app-3-restored.log`; its published SHA-256 is
   `f3d7d5b6a9c5ce8931226238ae173d091d2a6510252ea9c38153e6653cfc17b0`.
   The [foundation workflow](https://github.com/Thalpy/Mewtual/actions/runs/34953124188) also
-  passes. These are focused results; the handoff and broad CI workflows are still running at
-  09:48 UTC, and no repository-wide green claim is made. Evidence updates after `d38df93`
+  passes. Follow-up status now confirms handoff run 34953124265 also passed; broad CI
+  34953124189 failed. No repository-wide green claim is made. Evidence updates after `d38df93`
   change documentation only. Review base: `c47ae0b61b9b8adc0ab5e4bf798199413bfff73c`.
 
 - **Read-only inspection implementation checkpoint (2026-09-15; accepted above).**

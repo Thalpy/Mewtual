@@ -13,10 +13,13 @@ repair) and 4 (combined Gate 4 acceptance and required suites) remain. These are
 areas, not percentages. The user passes the `0b28f06` custody instrumentation and detached
 inspection proposal with no findings. Code/test checkpoint `d5ca2ff` registers read-only
 `studio_overlay_read`, with detached reconstruction and original-context delivery checks;
-its implementation review passes at `c47ae0b`. P3 INSPECTION-TEST-001 requests digest-specific
-regression coverage; its correction at `d38df93` passes the focused local regression and
-size-only mutation/restored test, with re-review pending and no production change.
+its implementation review passes at `c47ae0b`. The user closes INSPECTION-TEST-001 after accepting
+the digest-specific correction at `d38df93`, with passing local and GitHub regression/mutation
+evidence and no production change required.
 Durable overlay Save is still unavailable.
+The [core handoff preparation/signing split](GATE4-HANDOFF-SIGNING-REVIEW.md) is now implemented
+and awaiting review. It supports one-operation signing turns between detached stages; live
+actor scheduling and native local acceptance remain to be connected.
 
 The [Closing overlay foundation design](GATE4-CLOSING-OVERLAY-REVIEW.md) passed user review at
 `d576af2` on 2026-09-14 with no required changes. Its core/store implementation now distinguishes
