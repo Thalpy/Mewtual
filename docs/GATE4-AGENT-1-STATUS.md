@@ -1,8 +1,13 @@
 # Gate 4 Agent 1 status: local Save and automatic handoff runtime
 
 Owner: Agent 1 ([assignment](GATE4-AGENT-HANDOFFS.md#agent-1-local-save-and-automatic-handoff-runtime)).
-Proposal: [GATE4-AGENT-1-DESIGN](GATE4-AGENT-1-DESIGN.md), currently revision 4.
+Proposal: [GATE4-AGENT-1-DESIGN](GATE4-AGENT-1-DESIGN.md), revision 4, **accepted (PASS) at
+`25ce89bb705dfc228c7b32874788ebd062e6fcf4`, 2026-09-15, design boundary only**.
 Review preamble: 1. Current entries override older ones.
+
+**The design boundary is complete; nothing is implemented.** No production code, test, mutation,
+workflow or measurement exists for this scope. The next checkpoint is a bounded implementation on a
+separate branch or worktree, using the request in design 18.3.
 
 ## Checkpoints
 
@@ -11,7 +16,8 @@ Review preamble: 1. Current entries override older ones.
 | 2026-09-15 | Design revision 1 | `a052f78b62a549702686a8741932f1d2f8c98773` | `ac12822f04337b3e388618f81ce4a4b29d1e9b87` | design, docs only | **REQUEST CHANGES**: AG1-001 to AG1-005, AG1-TEST-001 |
 | 2026-09-15 | Design revision 2 | `ac12822f04337b3e388618f81ce4a4b29d1e9b87` | `56198de80e4942fd1612feff5d9d07f2f9cced7a` | design, docs only | **REQUEST CHANGES**: AG1-004 **closed**; residuals on the other five |
 | 2026-09-15 | Design revision 3 | `56198de80e4942fd1612feff5d9d07f2f9cced7a` | `1bcb1bca204d721b848b17c0835faf931ae930e3` | design, docs only | **REQUEST CHANGES**: AG1-001, AG1-002, AG1-003, AG1-005 **closed at the design boundary**; AG1-TEST-001 open, P3 |
-| 2026-09-15 | Design revision 4, N31 correction | `1bcb1bca204d721b848b17c0835faf931ae930e3` | uncommitted working tree | design, docs only | re-review not yet requested |
+| 2026-09-15 | Design revision 4, N31 correction | `1bcb1bca204d721b848b17c0835faf931ae930e3` | `25ce89bb705dfc228c7b32874788ebd062e6fcf4` | design, docs only | **PASS**: AG1-TEST-001 **closed**; bounded runtime design accepted, no new finding |
+| 2026-09-15 | PASS recorded | `25ce89bb705dfc228c7b32874788ebd062e6fcf4` | uncommitted working tree | docs only | n/a; records the verdict and the next checkpoint's request |
 
 Working checkout: `M:\Git (local)\CatComs`, branch `Create-suite-2`. **Other agents are working in
 this same checkout**: Agent 3's design landed at `7efc9c2` and Agent 2's documents are present
@@ -30,7 +36,7 @@ code and executed evidence, and the reviewer said so explicitly for each one.
 | AG1-003 | P2 | **Closed at the design boundary.** I-3 establishes ordinary protection before potentially durable I/O and before transient ownership is released. | Design 8.3, R7, 14 N12, M14 |
 | AG1-004 | P2 | **Closed** at revision 2. Prepared alone no longer prohibits nondestructive access; Agent 2 still owns the concrete lifecycle. | Design 12.1 |
 | AG1-005 | P3 | **Closed at the design boundary.** Admission depends on actual owners, not an actor-side strong reference awaiting cleanup. | Design 5.5, 7.1, 14 N14, M3 |
-| AG1-TEST-001 | P3 | **Open; answered in revision 4.** M8, M6, M12 and M9 are accepted. The residual was that N31 required only `remaining() > 0`, which a visit deferring on the priority gate without signing also satisfies, so both the unchanged and the mutated implementation could pass. Revision 4 adds a positive signing precondition (`after < before` and `after > 0` with an exact expected count derived from production `remaining()`), a deterministic injected-clock seam, staged authoritative work queued only after slice selection, and independent preconditions per limit, with M5 split into M5a and M5b. | Design 7.3, 14.1 "N31 in full", 14.2 M5a/M5b |
+| AG1-TEST-001 | P3 | **Closed at the design boundary** (revision-4 review). The residual was that N31 required only `remaining() > 0`, which a visit deferring on the priority gate without signing also satisfies, so both the unchanged and the mutated implementation could pass. Revision 4 adds a positive signing precondition (`after < before`, `after > 0`, exact expected count derived from production `remaining()`), a deterministic injected-clock seam, authoritative work staged only after slice selection, and independent per-limit preconditions, with M5 split into M5a and M5b. The reviewer confirmed the production basis: `remaining()` delegates to the pending queue and `sign_next` removes exactly one item only after the signature succeeds, so the delta counts **successfully produced** signatures. | Design 7.3, 14.1 "N31 in full", 14.2 M5a/M5b |
 
 ## Audit claims corrected across revisions
 
@@ -203,14 +209,25 @@ Accompanying prose:
 
 ## Next actions
 
-1. Commit revision 4, pathspec-scoped to these two files, and send the re-review request in
-   design 18 with the head SHA filled in. Only AG1-TEST-001 is at stake.
-2. Once that closes, the design boundary is complete and the next checkpoint is implementation on a
-   separate branch or worktree, with review 1 as a bounded implementation verdict.
-3. Confirm with Agent 2 the prerequisites P1 to P5, the two-hold contract (design 12.1) and the copy
+1. Commit this PASS record, pathspec-scoped to these two files. No further design review is pending.
+2. Move to a separate branch or worktree before writing any code. This checkout is shared with
+   Agents 2 and 3.
+3. Sequence the implementation so the shared-seam changes land in reviewable order, each with its
+   own line in the verdict rather than arriving as one commit:
+   1. **I-4** (`inventory_generation`, `EpochMutation` guarded primitives) plus the writer-coverage
+      audit and N17 with M20. Nothing else can land soundly first.
+   2. **C-3** (owned cursor, time budget, classify-before-invoking parked-body escalation) on top of
+      I-4, with N18 and M21. C-3 and I-4 stand or fall together.
+   3. **C-1** (structural decode) and **C-4** (transient holds and the I-3 transfer), with N12, N13,
+      N23, N24, M8, M13 to M15.
+   4. The **runtime** itself: Flows H, S and R, admission, scheduling and the commit, with the
+      remaining regressions and mutations.
+4. Produce design 13's eight measurements as the implementation lands; the C-3 largest-step figures
+   are a prerequisite for calibrating the classify-before-invoking threshold, and until they exist
+   the threshold defaults to detaching.
+5. Confirm with Agent 2 the prerequisites P1 to P5, the two-hold contract (design 12.1) and the copy
    requirements (design 12.2); give Agent 4 the central edit list in design 15. Agent 3's side of
-   the I-4 coordination is already on record at `7efc9c2`.
-4. Sequence the implementation so the shared-seam changes land in reviewable order: I-4 and its
-   writer audit first, then C-3's cursor on top of it, then C-1 and C-4, then the runtime. All four
-   touch shared files and three are adjacent to HANDOFF-002's reviewed scan, so each needs its own
-   line in the implementation verdict rather than arriving as one commit.
+   the I-4 coordination is already on record at `7efc9c2`, and their "unaffected if I-4 does not
+   land" clause is an integration alternative, not an opt-out from a deployed cursor's discipline.
+6. Keep native Save unregistered and out of FLIPNOTE-UI-HOOKS until Agent 2's manual lifecycle
+   passes its own review and their status note says so.

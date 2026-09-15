@@ -1,20 +1,25 @@
 # Gate 4 Agent 1: local Save and automatic handoff runtime
 
-Status: **revision 4, design proposal, awaiting re-review. No production code is written.**
-Revisions 1 to 3 received REQUEST CHANGES. The revision-3 review
-(`1bcb1bca204d721b848b17c0835faf931ae930e3`) **closed AG1-001, AG1-002, AG1-003 and AG1-005 at the
-design boundary**, leaving AG1-004 closed and one open P3: N31's signing-slice regression can
-mistake pre-signing priority deferral for a bounded slice. Revision 4 corrects that and records the
-implementation consequences attached to the reviewer's answers to the revision-3 questions.
+Status: **user PASS for this bounded runtime design, 2026-09-15. No production code is written.**
+Reviewed `1bcb1bca204d721b848b17c0835faf931ae930e3...25ce89bb705dfc228c7b32874788ebd062e6fcf4`,
+revision 4. AG1-TEST-001 is closed at the design boundary; AG1-001 to AG1-005 remain closed at
+their previously stated boundaries. No further design change is required and no new finding arose.
+The reviewer inspected source and both designs without executing Cargo, tests, mutations or
+measurements.
 
-Design base: `a052f78b62a549702686a8741932f1d2f8c98773`. Revision 3 head:
-`1bcb1bca204d721b848b17c0835faf931ae930e3`. Scope is
+**This PASS accepts the design only.** Code and executed tests must still establish the specified
+behaviour, including the exact M5a and M5b failures with byte-exact restoration and passing
+restored regressions. It grants no implementation acceptance, no measurement, no native Save
+exposure, no acceptance of Agent 3's repair design and no part of full Gate 4.
+
+Design base: `a052f78b62a549702686a8741932f1d2f8c98773`. Accepted head:
+`25ce89bb705dfc228c7b32874788ebd062e6fcf4`. Scope is
 [Agent 1 of the four handoffs](GATE4-AGENT-HANDOFFS.md); progress is in
 [GATE4-AGENT-1-STATUS](GATE4-AGENT-1-STATUS.md).
 
 **Unmet dependency, unchanged.** The [core signing split](GATE4-HANDOFF-SIGNING-REVIEW.md) at
-`e65bfd8` is still unreviewed. Section 16 carries the contingency. Closure at the design boundary
-is not implementation acceptance: every mechanism below still needs code and executed evidence.
+`e65bfd8` is still unreviewed. Section 16 carries the contingency. Agent 2's reviewed manual
+lifecycle remains a prerequisite for native Save registration (12.3).
 
 Accepted work this design must not weaken: the Closing-overlay foundation (`b1b0ec9`), the handoff
 design (HANDOFF-001), the bounded core/store handoff implementation (`62f06d4`, HANDOFF-002), the
@@ -30,7 +35,7 @@ and the combined scheduling block (`6b71d96`). No closure is reopened.
 | AG1-003, protection transfer at persistence | **Closed at the design boundary.** Ordinary protection is established before potentially durable I/O and before transient ownership is released. | 8.3, R7, 14 N12, M14 |
 | AG1-004, Prepared as a permanent export prohibition | **Closed** at revision 2. | 12.1 |
 | AG1-005, abandoned native handle | **Closed at the design boundary.** Admission depends on actual owners, not an actor-side strong reference awaiting cleanup. | 5.5, 7.1, 14 N14, M3 |
-| AG1-TEST-001, masked mutations | **Open, P3.** M8, M6, M12 and M9 are accepted. N31 must prove the observed visit actually signed operations rather than yielding before signing. **Corrected in revision 4**: a positive-signing precondition, a deterministic clock seam, staged authoritative work, and independent preconditions per limit. | 7.3, 14.1 N31, 14.2 M5 |
+| AG1-TEST-001, masked mutations | **Closed at the design boundary** by the revision-4 review. The positive-signing precondition, the deterministic clock seam, the staged authoritative work and the per-limit preconditions remove the priority-deferral masking path. | 7.3, 14.1 N31, 14.2 M5a/M5b |
 
 Implementation consequences adopted from the revision-3 answers: I-4's guard becomes a **type-level
 prerequisite** rather than a convention (9.2); the parked-body escalation must **classify before
@@ -1055,9 +1060,16 @@ assert_eq!(before - after, EXPECTED_SIGNATURES_THIS_VISIT);
 ```
 
 `signing_remaining_for_test` is a `#[cfg(test)]` accessor over the production
-`StudioHandoffSigning::remaining()`, in the style of the existing `replay_state_for_test`. Because
-the core decrements exactly one per `sign_next`, `before - after` **is** the production count of
-signing calls in that visit; no test-only counter is introduced.
+`StudioHandoffSigning::remaining()`, in the style of the existing `replay_state_for_test`.
+`remaining()` delegates to the private pending queue's length, and `PreparedOverlayChanges::sign_next`
+appends the signature and removes exactly one pending operation only after that signature succeeds;
+no queue item is removed before it does.
+
+**Precisely, `before - after` counts successfully produced signatures**, not an unsuccessful
+invocation and not the terminal `Ok(false)` on an empty queue. That is the intended reading and it
+does not weaken N31: the observed visit is a successful, partially completed one, and it must
+produce exactly the expected number of signatures. The test reads actual work progress rather than
+incrementing an independent test counter.
 
 Staging, common to both fixtures:
 
@@ -1088,7 +1100,7 @@ expensive operations landing on opposite sides of a wall-clock threshold.
 | M2 | Source digest comparison in `studio_overlay_is_current`. **Redundant by design.** | N8 | Same boundary. |
 | M3 | Weak-handle reaping in `OverlayAdmission::can_admit` (treat a dead owner as live, or a live owner as dead) | N14 | Two live admission tokens observed, or admission refused after every owner dropped. |
 | M4 | Per-visit reauthentication before the first `sign_next` of a slice | N8 variant changing bytes between slices | "signing continued across visits on changed records". |
-| M5a | `MAX_SIGNING_TURNS_PER_VISIT` only | **N31 count fixture** | "a single visit consumed every remaining signature": `after == 0`, so the `after > 0` assertion fails. The time budget cannot stop the mutant because the injected clock is staged not to reach it, and the priority gate cannot mask it because the fixture asserts no authoritative work was pending at slice entry. |
+| M5a | `MAX_SIGNING_TURNS_PER_VISIT` only | **N31 count fixture** | "a single visit consumed every remaining signature": `after == 0`, so the `after > 0` assertion fails. The priority gate cannot mask it because the fixture asserts no authoritative work was pending at slice entry. The injected clock must stay below `SIGNING_SLICE_BUDGET_MS` **through the whole mutant batch**, not merely through the first cap-length prefix, or the time bound would stop the mutant and the count bound would not be isolated. This is a stronger staging condition than the normal run needs, and it is the M5a fixture's responsibility. |
 | M5b | `SIGNING_SLICE_BUDGET_MS` only | **N31 time fixture** | Same assertion, with the count cap unable to be the reason because the fixture has fewer operations than the cap. |
 | M6 | The H1 pristine-successor probe. **Redundant by design** with `check_overlay_successor`. | N5 negative variant | "**H2 started** for a non-pristine successor": a detached plan job was scheduled. Permit consumption alone is not the observation, because reservation now precedes the probe. |
 | M7 | Barrier 1 before barrier 2 | N7 | "the source was replaced before Prepared was durable". |
@@ -1158,6 +1170,12 @@ also confirms it introduces no competing source writer and no second preparation
 coordinated verdict the reviewer asked for therefore has both sides on record; the exhaustive
 choke-point audit remains an implementation-review obligation.
 
+One reading to foreclose: Agent 3's "unaffected if I-4 does not land" clause is about a different
+integration choice, not an opt-out. **Once the resumable scanner is deployed, a participating repair
+writer cannot decline the generation discipline**, because a spanning cursor's soundness depends on
+every five-family mutation rotating the token. If I-4 is not adopted, C-3 is not adopted either and
+the scanner keeps its exclusive borrow; the two stand or fall together.
+
 ## 16. Contingency if the core signing review changes the split
 
 H1's authority capture and H2's `prepare_handoff_detached` are the only stages bound to the split.
@@ -1213,75 +1231,77 @@ From revision 3, all three answers adopted with their attached consequences:
    must come from I-3's pre-I/O transfer rather than from assuming a successful return. The
    premature-release optimisation is deliberately out of scope for this checkpoint.
 
-Nothing is open for this re-review beyond confirming the AG1-TEST-001 correction. The design
-questions from revisions 1 to 3 are all answered and adopted.
+Nothing remains open. Every design question raised across revisions 1 to 4 is answered and adopted,
+and the revision-4 review returned PASS with no new finding.
 
-## 18. Re-review request
+## 18. Review record and the next checkpoint
 
-Fill `[FULL_HEAD_SHA]` with the commit that adds this revision before sending.
+### 18.1 Design review, closed
+
+| Revision | Base | Head | Verdict |
+|---|---|---|---|
+| 1 | `a052f78b62a549702686a8741932f1d2f8c98773` | `ac12822f04337b3e388618f81ce4a4b29d1e9b87` | REQUEST CHANGES: AG1-001 to AG1-005, AG1-TEST-001 |
+| 2 | `ac12822f04337b3e388618f81ce4a4b29d1e9b87` | `56198de80e4942fd1612feff5d9d07f2f9cced7a` | REQUEST CHANGES: AG1-004 closed |
+| 3 | `56198de80e4942fd1612feff5d9d07f2f9cced7a` | `1bcb1bca204d721b848b17c0835faf931ae930e3` | REQUEST CHANGES: AG1-001, AG1-002, AG1-003, AG1-005 closed |
+| 4 | `1bcb1bca204d721b848b17c0835faf931ae930e3` | `25ce89bb705dfc228c7b32874788ebd062e6fcf4` | **PASS**: AG1-TEST-001 closed; bounded runtime design accepted |
+
+All four reviews were source and design inspection; no Cargo command, test, mutation or measurement
+was executed in any of them, and none is claimed by this document.
+
+### 18.2 What the PASS does not cover
+
+Implementation of C-1, C-2, C-3, C-4 and I-4; the runtime itself; every measurement in section 13;
+every regression in 14.1 and every mutation in 14.2, including the exact M5a and M5b executed
+failures with byte-exact restoration and passing restored regressions; the core signing split at
+`e65bfd8`; Agent 2's manual lifecycle and therefore native Save registration; Agent 3's repair
+design; and full Gate 4 acceptance, which remains with Agent 4.
+
+### 18.3 Implementation review request (review preamble 1)
+
+Send this at the first bounded implementation checkpoint, not before. The bracketed fields must be
+real before sending; the preamble forbids placeholders. Section 15's sequencing note asks that I-4
+with its writer audit, then C-3, then C-1 and C-4, then the runtime each get their own line in the
+verdict rather than arriving as one commit.
 
 ```text
-Review type: design re-review, one open P3.
-Base: 1bcb1bca204d721b848b17c0835faf931ae930e3. Head: [FULL_HEAD_SHA].
-Compare: https://github.com/Thalpy/Mewtual/compare/1bcb1bca204d721b848b17c0835faf931ae930e3...[FULL_HEAD_SHA]
-Scope/evidence: docs/GATE4-AGENT-1-DESIGN.md revision 4 and docs/GATE4-AGENT-1-STATUS.md.
-Design only: no production code, no test and no new measurement exists.
-Dependencies unchanged: e65bfd8 is still unreviewed; Agent 2's manual lifecycle remains a
-registration prerequisite; native Save stays unregistered and out of FLIPNOTE-UI-HOOKS.
-AG1-001 to AG1-005 are closed at the design boundary and are not reopened here.
+Review type: bounded implementation.
+Base: [FULL_BASE_SHA]. Head: [FULL_HEAD_SHA]. Compare: [IMMUTABLE_COMPARE_URL].
+Scope/evidence: docs/GATE4-AGENT-1-STATUS.md at the head, and the design accepted at
+25ce89bb705dfc228c7b32874788ebd062e6fcf4 (PASS, design boundary only).
+Dependencies: [CORE_SIGNING_VERDICT]; native Save exposure: [ACTUAL_STATE, expected: unregistered,
+pending Agent 2's reviewed manual lifecycle].
+Suites and runs: [COMMANDS, RESULTS, RUN_AND_JOB_URLS, ACTUAL_CHECKOUT_SHAS].
+Mutations: [PER_MUTATION EXECUTED FAILURE, INTENDED ASSERTION, RESTORED PASS].
+Per-item verdict requested for: I-4 and its writer audit; C-3; C-1; C-4; the runtime.
 
-The only finding left open was AG1-TEST-001: N31 could mistake pre-signing priority deferral for a
-bounded signing slice, because requiring only remaining() > 0 is satisfied by a visit that yielded
-on the priority gate without signing anything, under both the unchanged and the mutated
-implementation. That is the substance of this re-review. Revision 4 also records the implementation
-consequences attached to the three revision-3 answers; those are secondary and are listed last.
+Challenge the complete capture, detached plan, authorize, finite signing slices, detached assembly,
+durable commit and native delivery path as implemented, not as designed. Identify every expensive
+decode, graph restore, inventory traversal and final conversion that still holds Server, vault or
+native custody, and check the measurements in design section 13 against what the code actually does
+at maximal accepted shapes.
 
-AG1-TEST-001: section 7.3 now states that the priority yield and the slice bound are different
-outcomes and must stay separable in observation, the former signing zero operations and the latter
-at least one and fewer than all. The runtime records the remaining count at slice entry and exit,
-so before - after is the production count of sign_next calls in that visit, since the core
-decrements exactly one per call; no test-only counter is added. Section 14.1's "N31 in full" then
-requires, for the visit that exercises the bound: after < before, after > 0, and an exact expected
-signature count. Judge whether that positive precondition is sufficient to distinguish the two
-events, and whether deriving the count from remaining() is a legitimate production observation.
+Verify the accepted invariants hold in code: I-1 (first acceptance fully validates; later writers
+preserve the checked identity), I-2 (one live per-actor admission proved by a live Arc, including a
+dropped native handle and a cancelled worker), I-3 (ordinary protection installed before possible
+I/O and before the transient owner is released), I-4 (rotation before any five-family mutation,
+kept on failure and unwinding, with the audited writer list proving coverage and a budget mint or
+entry alone not rotating). Confirm the original shared permit is owned from capture to release and
+that cancellation never frees a live owner's slot.
 
-Check the fixture staging, which is the other half of the correction. Each fixture asserts before
-the turn that there is no epoch-service interest, no watch inbound and no parked background result,
-so the priority gate cannot be the reason the visit stops. Authoritative work is queued only after
-the slice has been selected, through the sync and transport side, never by reaching into the store
-from inside the slice, which slice exclusivity forbids. The next turn must show actual authoritative
-progress before the following slice signs again. Confirm this ordering is achievable without
-reentrant store access and that it cannot be satisfied by work that was already pending.
+Require whole Prepared, Source, Completed with full signed evidence, the retained pending ledger,
+the retry floor and rollover, HANDOFF-001's target comparison, HANDOFF-002's inventory dependency
+and, separately, check_handoff_references; the common source-write fence and the publication hold.
+No signed prefix may escape, and Completed publication must use ordinary paging with the two-packet
+initial Save limit untouched.
 
-Check the two limit fixtures isolate their bounds. The count fixture has more operations than
-MAX_SIGNING_TURNS_PER_VISIT and an injected clock staged so the elapsed budget cannot be reached
-within the cap; the time fixture has fewer operations than the cap, so the cap cannot be the reason,
-and the clock crosses SIGNING_SLICE_BUDGET_MS after a chosen k operations while operations remain.
-M5 is split into M5a and M5b accordingly, each removing one bound and failing at after > 0. The
-slice budget is measured on the injected catcoms_rt::Clock, not SystemClock, so neither fixture
-depends on cheap and expensive operations landing on opposite sides of a wall-clock threshold.
-Verify neither mutant can be caught for an unrelated reason and that neither fixture's other bound
-can be the stop reason.
+For the mutation evidence, verify the unique guard removed, the executed test count, the exact
+intended assertion, byte-exact restoration and the restored pass. M5a and M5b must each fail at the
+after > 0 assertion with the other bound unable to be the stop reason, and M1, M2 and M6 are
+intentionally redundant guards asserting early refusal and resource consumption rather than
+corrupted durable state. A compilation failure, a zero-match filter or an unrelated refusal is not
+detection.
 
-Secondary, from the revision-3 answers. Section 9.2 makes the I-4 guard a type-level prerequisite:
-the five-family mutation primitives take an EpochMutation obtainable only from
-epoch_mutation_guard, so a bypass is a compile error rather than a forgotten convention, while the
-audited writer list and N17 with M20 still prove coverage. Sync-repair is included because the
-existing code already treats an unchanged-file flush attempt as invalidating, and over-rotation is
-the safe direction. Section 9.2 also adds the three parked-body consequences: classify before
-invoking rather than measuring after a validator returns, defaulting to detachment when cost cannot
-be conservatively classified; the parked body and its worker and result keep the job's original
-ownership and are rebound to cursor, mount, record and generation before consumption; and no bound,
-poisoning rule or reference-cache exclusion is bypassed. Section 8.3 records why the transient owner
-is kept until the write attempt returns rather than released after the ordinary holds are installed.
-
-Section 15 now records that Agent 3's design revision 1 at 7efc9c2 has accepted I-4 and named the
-three writers of theirs that must rotate, and asks that save_studio_source_checked's handoff
-parameter shape be preserved; this design preserves it, since the Option<VerifiedPersistedSource>
-input is added to the resolver rather than the writer. Confirm both sides agree.
-
-Return PASS for this bounded design, or numbered findings with severity, file/line, trigger, impact,
-evidence and required correction. A PASS accepts the design only: no implementation, no measurement
-and no native Save exposure is claimed, the core signing split and Agent 2's lifecycle remain
-separate dependencies, and full Gate 4 acceptance remains with Agent 4.
+Return a verdict for this runtime boundary only. Native Save must remain unregistered until Agent
+2's manual lifecycle passes its own review, and full Gate 4 acceptance remains with Agent 4.
 ```
+
