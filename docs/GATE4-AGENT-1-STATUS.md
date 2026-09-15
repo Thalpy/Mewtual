@@ -21,8 +21,8 @@ they are the highest-conflict changes, so they land last. The per-item verdict r
 
 | Order | Item | State |
 |---|---|---|
-| 1 | C-1 structural decode, with C-2's digest fences and the R4 replay exclusion | **landed on the branch, partial evidence** |
-| 2 | C-4 transient reference holds | **seam landed, verified; the I-3 transfer needs its consumer** |
+| 1 | C-1 structural decode, with C-2's digest fences and the R4 replay exclusion | **landed and reviewed PASS by inspection; no-replay boundary now covered by N24; R4 still needs N25/M9** |
+| 2 | C-4 transient reference holds | **seam landed and reviewed PASS; the I-3 transfer needs its consumer** |
 | 3 | The runtime: Flows S, H and R, admission, scheduling, commit seams | not started |
 | 4 | I-4 and C-3 | not started |
 
@@ -34,7 +34,9 @@ they are the highest-conflict changes, so they land last. The per-item verdict r
 | 2026-09-15 | Design revision 2 | `ac12822f04337b3e388618f81ce4a4b29d1e9b87` | `56198de80e4942fd1612feff5d9d07f2f9cced7a` | design, docs only | **REQUEST CHANGES**: AG1-004 **closed**; residuals on the other five |
 | 2026-09-15 | Design revision 3 | `56198de80e4942fd1612feff5d9d07f2f9cced7a` | `1bcb1bca204d721b848b17c0835faf931ae930e3` | design, docs only | **REQUEST CHANGES**: AG1-001, AG1-002, AG1-003, AG1-005 **closed at the design boundary**; AG1-TEST-001 open, P3 |
 | 2026-09-15 | Design revision 4, N31 correction | `1bcb1bca204d721b848b17c0835faf931ae930e3` | `25ce89bb705dfc228c7b32874788ebd062e6fcf4` | design, docs only | **PASS**: AG1-TEST-001 **closed**; bounded runtime design accepted, no new finding |
-| 2026-09-15 | PASS recorded | `25ce89bb705dfc228c7b32874788ebd062e6fcf4` | uncommitted working tree | docs only | n/a; records the verdict and the next checkpoint's request |
+| 2026-09-15 | PASS recorded | `25ce89bb705dfc228c7b32874788ebd062e6fcf4` | `5a899c2` | docs only | n/a; records the verdict and the next checkpoint's request |
+| 2026-09-15 | C-1 and C-4 implementation | `5a899c2` | `d67e649`, `7ed6302` | bounded implementation, PR #27 | **PASS by source inspection** for the C-1 decoder, the C-2 digest changes, the R4 filter and the C-4 seam; no production defect found. Two coverage findings: **C1-TEST-002** (P2) and **R4-TEST-001** (P3). C-1 evidence not a completed checkpoint. |
+| 2026-09-15 | C1-TEST-002 correction | `7ed6302` | uncommitted working tree | test only | N24 plus the unconditional-replay mutation; R4-TEST-001 still open |
 
 Working checkout: `M:\Git (local)\CatComs`, branch `Create-suite-2`. **Other agents are working in
 this same checkout**: Agent 3's design landed at `7efc9c2` and Agent 2's documents are present
@@ -244,14 +246,59 @@ annotation and its comment must be deleted in the commit that adds the I-3 trans
 **not implemented**: nothing yet installs the ordinary holds before the intent write or releases
 the owner after it.
 
+### C1-TEST-002: N24 and the unconditional-replay mutation
+
+The revision-4 reviewer found that nothing proved the structural decoder actually skips the replay.
+Every branch built through `append` is replayable by construction, so the equivalence and
+wrong-sequence tests would both keep passing if `out.read(ledger)?` ran unconditionally: valid
+branches replay successfully and malformed ones fail before the replay. The central behavioural
+claim of C-1 was unprotected.
+
+`studio_overlay_structural_decode_accepts_a_branch_the_full_decoder_cannot_replay` closes it. The
+branch names a sound-effect operation the typed writer does not support. `checked_entries` never
+decodes an operation body, so the record is completely consistent structurally: the entry is in the
+ledger, authored by the basis author, with the exact envelope hash, sequence 1 and canonical
+re-encoding. The fixture obtains a canonical accepted single-entry encoding for a supported
+operation, then retargets that entry's id and envelope, which occupy fixed-width fields at offsets
+4 and 40 of the 88-byte entry, so the record stays canonical. It asserts the unsupported operation
+is genuinely unacceptable through `append`, and that the unmodified canonical record still replays,
+so the refusal comes from the retargeted entry and not from the encoding.
+
+Required outcome, proven:
+
+| Decoder | Result |
+|---|---|
+| `decode_vault_structural` | succeeds |
+| `read` and `decode_vault` | refuse |
+
+**The mutation is part of C-1's required evidence, not an ordinary regression.** Replacing
+`if replay { out.read(ledger)?; }` with an unconditional `out.read(ledger)?;` makes N24 fail at its
+structural-success assertion, while the other two structural tests **still pass** exactly as the
+reviewer predicted. Byte-exact restoration confirmed by `git diff` reporting no change against
+`d67e649`; all three then pass.
+
+| Check | Result |
+|---|---|
+| `cargo test ... -p catcoms-replication --lib studio` | **107 passed, 0 failed**, 98.36 s. |
+| Unconditional-replay mutation | N24 fails at its intended assertion; the other two pass, confirming they cannot cover this boundary. Restored source: 3 passed. |
+| `cargo clippy -j 1 -p catcoms-replication --lib --tests -- -D warnings`, `cargo fmt --all -- --check` | Clean. |
+
+### R4-TEST-001: still open
+
+N25 and M9 are **not** implemented. The reviewer's required shape is to inspect the actual
+`ReplayEvidence.own` set and require an accepted overlay id to be absent while a comparable
+unannotated own intent is still present. That needs a `Server` value together with a store holding
+both a retained overlay branch and an ordinary pending intent; the existing overlay fixture
+(`tests/support/studio_inspection.rs`) builds its store inside an actor, and the existing replay
+tests exercise `choose`/`deconflict` directly without a `Server`. A store-level test of the
+`is_overlay` predicate alone would not cover the call site and would be masked if the filter were
+deleted, so none was written. The production filter is unambiguous by inspection, but the
+C-1/R4 bundle is **not** fully verified until N25 and M9 land.
+
 ### Not yet done for C-1
 
-N24's boundary case, a record that is structurally consistent but not typed-replayable, is not
-implemented: constructing one requires a branch whose operations are each individually valid on the
-base but invalid in sequence, which `append` cannot produce because it replays as it accepts. It
-needs a hand-assembled two-entry encoding. The C-1 call-site table in design 5.1 is implemented but
-has no test asserting that no moved call site needs a projection, and the app-side suites beyond
-`studio_overlay` have not run.
+The C-1 call-site table in design 5.1 is implemented but has no test asserting that no moved call
+site needs a projection, and the app-side suites beyond `studio_overlay` have not run.
 
 ## Touched files
 
