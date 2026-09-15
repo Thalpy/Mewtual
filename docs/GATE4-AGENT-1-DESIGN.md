@@ -1,36 +1,41 @@
 # Gate 4 Agent 1: local Save and automatic handoff runtime
 
-Status: **revision 3, design proposal, awaiting re-review. No production code is written.**
-Revision 1 (`ac12822f04337b3e388618f81ce4a4b29d1e9b87`) and revision 2
-(`56198de80e4942fd1612feff5d9d07f2f9cced7a`) each received REQUEST CHANGES. AG1-004 is closed at
-the design boundary. This revision answers the five residuals left open against revision 2 and
-adopts the reviewer's answers to the revision-2 questions.
+Status: **revision 4, design proposal, awaiting re-review. No production code is written.**
+Revisions 1 to 3 received REQUEST CHANGES. The revision-3 review
+(`1bcb1bca204d721b848b17c0835faf931ae930e3`) **closed AG1-001, AG1-002, AG1-003 and AG1-005 at the
+design boundary**, leaving AG1-004 closed and one open P3: N31's signing-slice regression can
+mistake pre-signing priority deferral for a bounded slice. Revision 4 corrects that and records the
+implementation consequences attached to the reviewer's answers to the revision-3 questions.
 
-Design base: `a052f78b62a549702686a8741932f1d2f8c98773`. Revision 2 head:
-`56198de80e4942fd1612feff5d9d07f2f9cced7a`. Scope is
+Design base: `a052f78b62a549702686a8741932f1d2f8c98773`. Revision 3 head:
+`1bcb1bca204d721b848b17c0835faf931ae930e3`. Scope is
 [Agent 1 of the four handoffs](GATE4-AGENT-HANDOFFS.md); progress is in
 [GATE4-AGENT-1-STATUS](GATE4-AGENT-1-STATUS.md).
 
 **Unmet dependency, unchanged.** The [core signing split](GATE4-HANDOFF-SIGNING-REVIEW.md) at
-`e65bfd8` is still unreviewed. Section 16 carries the contingency.
+`e65bfd8` is still unreviewed. Section 16 carries the contingency. Closure at the design boundary
+is not implementation acceptance: every mechanism below still needs code and executed evidence.
 
 Accepted work this design must not weaken: the Closing-overlay foundation (`b1b0ec9`), the handoff
 design (HANDOFF-001), the bounded core/store handoff implementation (`62f06d4`, HANDOFF-002), the
 detached-inspection proposal (`0b28f06`) and its read-only implementation (INSPECTION-TEST-001),
 and the combined scheduling block (`6b71d96`). No closure is reopened.
 
-## 0. Disposition of the revision-2 residuals
+## 0. Finding ledger
 
-| Residual | Disposition in revision 3 | Where |
+| Finding | State after the revision-3 review | Where |
 |---|---|---|
-| AG1-001, S0's PIX validation and transient hold precede acknowledgement classification, so a valid completed retry for a legitimately reclaimed CID can be refused before it is identified | **Corrected.** S0 is split into common request validation, classification, and new-authoring-only media admission. An acknowledgement performs no blob read, promotion, hold or possession check. | 6.2, 6.3, 14 N2/N30 |
-| AG1-002, C-3's two generations are not universal inventory-mutation tokens: the accounted recovery and owner writers rotate neither, and `studio_generation` rotates on every budget *entry* | **Corrected.** A new `inventory_generation` rotated at an audited low-level mutation choke point, before possible I/O, covering all five families and their temporary siblings; `studio_generation` is explicitly not used. Per-step invalidation checks, and a detached-validation escalation so the per-visit bound is custody time, not step count. | 9.2, C-3, 13 L6 |
-| AG1-003, releasing the transient hold after the durable write does not repair an already-installed reference set that omits the new CID | **Corrected.** An explicit protection transfer: the existing conservative pre-write holds run in S3 while the transient hold is still live, which also rotates the protection generation and invalidates any in-flight installation; the transient owner is released only after the write attempt returns. | 8.3, 14 N12 |
-| AG1-005, a native preparation handle abandoned between visits leaves admission live forever | **Corrected.** Admission bookkeeping keeps only `Weak` handles and reaps dead owners, so release happens wherever the last `Arc` drops, including a dropped native handle, with no awaited native call in the path. | 7.1, 5.5, 14 N14 |
-| AG1-TEST-001, M5 points at a detached-worker test and M8 is masked by the encoder's own `checked_entries` | **Corrected.** M5 gets a real H3 test (N31) with independent count and time controls; M8 targets a single invariant inside the shared checker so every path uses the weakened predicate, with the earlier call separately labelled redundant; M6's observation becomes "H2 started". | 14.1 N31, 14.2 |
-| AG1-004 | **Closed at the design boundary** by the reviewer. Unchanged here. | 12.1 |
-| Source-description qualifications: uncached families, `write_prepared_intents`'s old size | Accepted and rewritten. | 3 R1, 5.2 C-2 |
-| Reviewer answers to the revision-2 questions 1 to 4 | Adopted, including the constraints attached to each. | 17 |
+| AG1-001, acknowledgement must not require media admission | **Closed at the design boundary.** S0 is split into common request validation, classification, and new-authoring-only media admission; S1a is terminal and sync-only. | 6.2, 6.3, 14 N30, M16 |
+| AG1-002, cross-visit inventory consistency | **Closed at the design boundary**, subject to I-4's stated implementation audit. | 9.2, R10, 14 N17, M20, M21 |
+| AG1-003, protection transfer at persistence | **Closed at the design boundary.** Ordinary protection is established before potentially durable I/O and before transient ownership is released. | 8.3, R7, 14 N12, M14 |
+| AG1-004, Prepared as a permanent export prohibition | **Closed** at revision 2. | 12.1 |
+| AG1-005, abandoned native handle | **Closed at the design boundary.** Admission depends on actual owners, not an actor-side strong reference awaiting cleanup. | 5.5, 7.1, 14 N14, M3 |
+| AG1-TEST-001, masked mutations | **Open, P3.** M8, M6, M12 and M9 are accepted. N31 must prove the observed visit actually signed operations rather than yielding before signing. **Corrected in revision 4**: a positive-signing precondition, a deterministic clock seam, staged authoritative work, and independent preconditions per limit. | 7.3, 14.1 N31, 14.2 M5 |
+
+Implementation consequences adopted from the revision-3 answers: I-4's guard becomes a **type-level
+prerequisite** rather than a convention (9.2); the parked-body escalation must **classify before
+invoking** a validator and carries the job's original ownership (9.2); the transient owner is kept
+until the write attempt returns, with the rationale recorded (8.3).
 
 ## 1. Outcome and boundary
 
@@ -613,9 +618,23 @@ not re-probed each turn.
   deadline is checked between signatures and can overrun by one whole operation including its
   authority checks, so they must be recalibrated against the measured largest admitted individual
   operation and roster shape. The slice bound constrains H3 only.
+- **Two distinct events.** The priority yield and the slice bound are different outcomes and must
+  stay separable in observation as well as in code. The priority yield returns having signed
+  **zero** operations; the slice bound returns having signed **at least one and fewer than all**.
+  A visit that returns with work remaining proves nothing on its own, because it may have deferred
+  before signing. The runtime therefore records, per visit, the remaining count at slice entry and
+  at slice exit; `remaining_before - remaining_after` is the number of production `sign_next` calls
+  that visit made, since the core decrements exactly one per call. N31 and M5 rest on that
+  distinction, and it is the AG1-TEST-001 correction.
+- **Injected clock.** The slice budget is measured on `server.runtime_clock().monotonic_ms()`, the
+  same injected `catcoms_rt::Clock` the rest of the receiver uses, never `SystemClock`. This gives
+  N31 a deterministic seam instead of hoping cheap and expensive operations fall on opposite sides
+  of a wall-clock threshold.
 - **Slice exclusivity.** A signing slice runs entirely inside the blocking worker that owns the
   moved `Server` and the vault lease: no `await`, no reentrant store operation, no callback that can
-  reach the store. This is the condition attached to per-visit wrapper reauthentication (N9).
+  reach the store. This is the condition attached to per-visit wrapper reauthentication (N9), and
+  it also constrains how N31 may stage authoritative work: the work is queued through the sync and
+  transport side after the slice has been selected, never by reaching into the store from inside it.
 - **Coalescing and pacing.** One target at a time, round-robin from the watch rail; a hold sets
   `now + 30_000` doubling to 300,000 ms, reset on durable progress; `explicit_retry` may lower the
   delay but not clear the counter.
@@ -660,7 +679,7 @@ does **not** prohibit fail-closed unknown protection after uncertain durable I/O
 retained references cannot be represented: once bytes may have been accepted, preserving an
 incomplete known set would be unsafe. Section 8.3 respects that distinction.
 
-### 8.3 The protection transfer (AG1-003 residual)
+### 8.3 The protection transfer (AG1-003, closed at the design boundary)
 
 R7's extension is that a durable write does not repair an installed known set that omits the new
 CID. The transient owner may therefore be dropped only after ordinary conservative protection covers
@@ -690,6 +709,15 @@ references protected by the ordinary mechanism rather than by an obsolete known 
 Flow H needs no equivalent: it introduces no new CIDs, a retained branch's base and pending CIDs are
 already enumerated by the inventory's Intents arm, and `check_handoff_references` independently
 refuses a commit that would release a base reference (R9).
+
+**Why the owner is kept until the write returns rather than released earlier.** Once I-3's ordinary
+holds are installed, immediate release would already be safe within the same uninterrupted custody
+interval: the known set contains the CID, or protection is fail-closed unknown, and the protection
+generation has invalidated older installations. Keeping the owner through the attempt is chosen
+anyway because it gives one ownership boundary across success, error and unwinding for little extra
+complexity, and because the durable guarantee must come from I-3's pre-I/O transfer rather than from
+assuming a successful return. The premature-release optimisation is deliberately not part of this
+checkpoint.
 
 ## 9. Durable commit with bounded custody
 
@@ -728,16 +756,41 @@ inventory_generation: Arc<()>,
 > monotonic and never restores a previous token, so an over-rotation costs a rescan and an
 > under-rotation is the only unsafe direction.
 
-Enforcement is at an audited low-level choke point, not a list of logical callers that can drift:
-every five-family durable mutation takes `ServerStore::epoch_mutation_guard()`, which rotates the
-token and returns a guard, and the guard is acquired before the reservation's write. A failed or
-panicking write therefore still leaves the token rotated. The audit obligation is to show that the
-shared `atomic_write`, sync and unlink helpers used on five-family paths, and every raw or public
-adapter that can write outside them, take the guard. Known participants that rotate nothing today
-and must: `update_epoch_recovery_accounted_with_writer`, the eviction settle path,
+Enforcement is a choke point **backed by** an audited writer list; the revision-3 answer is that
+these are complementary, not alternatives, and that a helper callers are merely encouraged to invoke
+would recreate a forgettable convention. The guard is therefore a **type-level prerequisite**, not a
+call the writer must remember: the five-family mutation primitives take it, so a write, rename,
+sync-repair or unlink on those paths cannot be expressed without one.
+
+```rust
+/// Obtainable only from `ServerStore::epoch_mutation_guard()`, which rotates
+/// `inventory_generation` first. Rotation is not undone when this drops.
+pub(in crate::store) struct EpochMutation<'a> { /* private */ }
+impl EpochMutation<'_> {
+    pub(in crate::store) fn write(&self, path: &Path, bytes: &[u8]) -> Result<(), AppError>;
+    pub(in crate::store) fn sync(&self, path: &Path, bytes: u64) -> Result<(), AppError>;
+    pub(in crate::store) fn remove(&self, path: &Path) -> Result<(), AppError>;
+}
+```
+
+The bare `atomic_write`, `sync_*` and unlink helpers stop being reachable for five-family paths, so
+a bypass is a compile error rather than a missing convention. A failed or panicking write still
+leaves the token rotated, because rotation happens in `epoch_mutation_guard` before the guard is
+handed out and is never restored.
+
+The audited writer list then proves coverage, because a correct central guard is insufficient if one
+writer reaches disk another way. Known participants that rotate nothing today and must:
+`update_epoch_recovery_accounted_with_writer`, the eviction settle path,
 `update_epoch_owner_state_with_writer`, every accounted `epoch_registry` writer, the Studio source
-writer and sealing, rotation and adoption writers, receive, and `epoch_recovery/cleanup.rs`'s
-unlink steps.
+writer and sealing, rotation and adoption writers, receive, `epoch_recovery/cleanup.rs`'s unlink
+steps, the injected-failure writer seams used by tests, and any raw or tooling adapter. N17 and M20
+keep per-family evidence for exactly this reason.
+
+A sync-repair is included even though it changes no bytes: the existing code already treats an
+unchanged-file flush attempt as invalidating a captured inventory, and over-rotation is the safe
+direction under I-4. Conversely, a budget mint or entry alone must **not** rotate, which is what
+keeps I-4 separate from budget ownership; and an operation that may have changed files must rotate
+even when it returns an error.
 
 `studio_generation` is **not** used, for two independent reasons established in R10: it rotates on
 every Studio budget entry, which would make a parked cursor die on unrelated Studio activity (the
@@ -771,9 +824,29 @@ validation can dominate a step, so a step cap alone cannot promise responsivenes
 therefore takes a time budget as well, and when one record's validation would exceed it the cursor
 parks that record's already-read authenticated plaintext and yields; the next detached stage runs
 the pure validation (`inventory_record`, `inventory_references`, `validate_vault_snapshot` are
-functions over plaintext) and the following visit installs the result. At most one parked body
-exists at a time, which is the existing one-body-per-step rail, and its bytes are accounted in
-section 13.4.
+functions over plaintext, needing no `Server`, device key or MLS secret) and the following visit
+installs the result.
+
+Three consequences, from the revision-3 answer, that the implementation must honour:
+
+1. **Classify before invoking, never measure afterwards.** `budget_ms` is not a preemption
+   mechanism: checking elapsed time after a long synchronous validator has returned does not enforce
+   the boundary. The cursor decides to detach **before** calling a validator whose cost it cannot
+   conservatively bound within the remaining budget, using the record's family, its authenticated
+   physical size and whether the scan is collecting references, against a conservative threshold
+   derived from measurement 13.7. Where cost cannot be conservatively classified, the default is to
+   detach.
+2. **The parked body carries the job's original ownership.** It and its validation worker and result
+   hold the same `OverlayOwnership`: no second overlay pool, no capacity released when only the
+   waiter is cancelled. The returned validation is bound to the original cursor identity, mount,
+   record id and `inventory_generation`, and all four are rechecked before it is consumed.
+3. **Parking bypasses no bound.** A genuine per-family or aggregate size-limit violation still
+   refuses; scan poisoning, the cardinality and byte rails and the reference-cache exclusion are
+   unchanged. At most one parked body exists at a time, which is the existing one-body-per-step
+   rail, and its bytes are accounted in section 13.4.
+
+This accepts a scheduling boundary, not a measured custody-time or heap ceiling; N18 and the
+maximal-record measurement in 13.7 remain required.
 
 **Restart and quiescence.** The runtime restarts an invalidated scan at most
 `MAX_INVENTORY_RESTARTS = 3` times per commit attempt, then returns `InventoryUnstable` and applies
@@ -898,9 +971,11 @@ Nothing here is measured yet. Required, for Index and Flipnote:
    S3's I-3 holds.
 6. The effect of C-1 on `checked_epoch_replay_state` and on a five-family inventory of a vault
    containing several large retained branches.
-7. C-3: maximum continuous custody per scan slice, **the largest single-record step**, how often the
+7. C-3: maximum continuous custody per scan slice, **the largest single-record step** for each
+   family at its accepted encoded ceiling with and without reference collection, how often the
    detached-validation escalation is needed, visits per full scan, and the restart rate under
-   concurrent writes.
+   concurrent writes. The largest-step figures are what calibrate 9.2's conservative
+   classify-before-invoking threshold; until they exist the threshold must default to detaching.
 8. Wall-clock for a 256-operation handoff with the visit count, **reported separately from maximum
    continuous custody**.
 
@@ -940,7 +1015,7 @@ Limits:
 | N8 | store | Same-size authenticated replacement of the intent record, then the source record, after capture | Refused at the digest comparison before any signing turn; a fresh attempt succeeds. |
 | N9 | store | Slice exclusivity | Structural assertion that a signing slice has no `await`, no reentrant store call and no store-reaching callback. |
 | N10 | actor | Mid-signing MLS change | No durable signed prefix, no retirement, bounded retry; whole-branch completion after the context stabilises. |
-| N31 | actor | **AG1-TEST-001 signing slice.** A real H3 sequence with more operations than one slice permits, with queued authoritative work (an inbound page and a current epoch-service interest). Two independent fixtures: many cheap operations to reach the count limit, and fewer expensive operations to reach the time budget. **No paused detached worker is used.** | Each visit returns with `remaining() > 0`; the queued authoritative work completes between slices; signing then resumes and completes. |
+| N31 | actor | **AG1-TEST-001 signing slice.** Two fixtures over a real H3 sequence, each isolating one bound, with the injected clock supplying deterministic elapsed time and **no paused detached worker**. See the preconditions and assertions below the table. | The observed visit signs at least one and fewer than all remaining operations; authoritative work completes between real signing slices; the branch then completes. |
 | N11 | actor | Change device key, membership, owner, tenure, channel, mount, numeric server, actor instance between stages | Each produces its own hold; each fixture passes all earlier checks first. |
 | N12 | store | **AG1-003 full lifetime.** (a) Pause S2, run a complete reference scan that installs a set omitting X, attempt protected deletion: bytes retained by the transient hold. (b) Resume S3 to success, drop **every** transient and result owner, then attempt protected deletion **before any further scan**: bytes still retained, because I-3 installed ordinary protection. (c) Repeat with an uncertain write (failure after rename, and a failure leaving a temporary sibling): bytes retained. (d) Remove the bytes externally before S3: `PixelMissing` refusal before the intent barrier with unchanged durable bytes. (e) Healthy unreferenced CID still deletes. |
 | N13 | store | Transient-hold rails | Exhaustion refuses with `ReferenceCapacity` **before installing any partial hold**, does not mark the store unknown, and leaves unrelated reclamation working; live owners are counted through cancellation; duplicates are accounted, not hidden. Separately: fail-closed unknown is still reachable after uncertain durable I/O. |
@@ -961,6 +1036,50 @@ Limits:
 | N28 | store | Maximal accepted shapes | Accepted at each ceiling; one byte over refuses with no partial output. |
 | N29 | store | Earlier Gate 4 regressions | Unchanged. |
 
+#### N31 in full (the AG1-TEST-001 correction)
+
+Revision 3's N31 required only `remaining() > 0` after the observed visit, which a visit that
+deferred on the priority gate without signing anything also satisfies. Both the unchanged and the
+mutated implementation could then pass. The correction is a **positive signing precondition** plus
+fixture staging that prevents the priority check from standing in for the slice bound.
+
+Every N31 fixture asserts, for the visit that is supposed to exercise the bound:
+
+```rust
+let before = runtime.signing_remaining_for_test().expect("signing job");
+// ... exactly one production background turn ...
+let after = runtime.signing_remaining_for_test().expect("signing job");
+assert!(after < before, "the observed visit did not sign anything");
+assert!(after > 0, "the observed visit was not bounded");
+assert_eq!(before - after, EXPECTED_SIGNATURES_THIS_VISIT);
+```
+
+`signing_remaining_for_test` is a `#[cfg(test)]` accessor over the production
+`StudioHandoffSigning::remaining()`, in the style of the existing `replay_state_for_test`. Because
+the core decrements exactly one per `sign_next`, `before - after` **is** the production count of
+signing calls in that visit; no test-only counter is introduced.
+
+Staging, common to both fixtures:
+
+1. At slice entry there is **no** epoch-service interest, **no** watch inbound and **no** parked
+   background result, so the priority gate cannot be the reason the visit stops. The fixture asserts
+   this precondition before the turn.
+2. Authoritative work is queued **after** the slice has been selected, through the sync and
+   transport side (a peer page request and a checkpoint interest), never by reaching into the store
+   from inside the slice, which slice exclusivity forbids.
+3. The next background turn must service that authoritative work, observed as actual progress (the
+   page or checkpoint advances), **before** the following slice signs again. That is the
+   "authoritative progress between real signing slices" observation.
+4. The branch then completes, with every original envelope and the full projection.
+
+| Fixture | Independent precondition | Expected stop reason |
+|---|---|---|
+| Count limit | Remaining operations **exceed** `MAX_SIGNING_TURNS_PER_VISIT`; the injected clock advances a fixed small amount per operation so the elapsed budget **cannot** be reached within the cap | `before - after == MAX_SIGNING_TURNS_PER_VISIT` |
+| Time limit | Remaining operations are **fewer** than `MAX_SIGNING_TURNS_PER_VISIT`, so the cap cannot be the reason; the injected clock crosses `SIGNING_SLICE_BUDGET_MS` after a chosen `k` operations while operations still remain | `before - after == k` |
+
+The injected `catcoms_rt::Clock` is the deterministic seam; neither fixture depends on cheap and
+expensive operations landing on opposite sides of a wall-clock threshold.
+
 ### 14.2 Isolated mutations
 
 | # | Guard removed | Test | Assertion, at the protected boundary |
@@ -969,7 +1088,8 @@ Limits:
 | M2 | Source digest comparison in `studio_overlay_is_current`. **Redundant by design.** | N8 | Same boundary. |
 | M3 | Weak-handle reaping in `OverlayAdmission::can_admit` (treat a dead owner as live, or a live owner as dead) | N14 | Two live admission tokens observed, or admission refused after every owner dropped. |
 | M4 | Per-visit reauthentication before the first `sign_next` of a slice | N8 variant changing bytes between slices | "signing continued across visits on changed records". |
-| M5 | `MAX_SIGNING_TURNS_PER_VISIT`, then separately `SIGNING_SLICE_BUDGET_MS` | **N31** (not N16) | "a single visit consumed every remaining signature": `remaining() == 0` after one visit and the queued authoritative work did not run between slices. Two mutations, one per bound. |
+| M5a | `MAX_SIGNING_TURNS_PER_VISIT` only | **N31 count fixture** | "a single visit consumed every remaining signature": `after == 0`, so the `after > 0` assertion fails. The time budget cannot stop the mutant because the injected clock is staged not to reach it, and the priority gate cannot mask it because the fixture asserts no authoritative work was pending at slice entry. |
+| M5b | `SIGNING_SLICE_BUDGET_MS` only | **N31 time fixture** | Same assertion, with the count cap unable to be the reason because the fixture has fewer operations than the cap. |
 | M6 | The H1 pristine-successor probe. **Redundant by design** with `check_overlay_successor`. | N5 negative variant | "**H2 started** for a non-pristine successor": a detached plan job was scheduled. Permit consumption alone is not the observation, because reservation now precedes the probe. |
 | M7 | Barrier 1 before barrier 2 | N7 | "the source was replaced before Prepared was durable". |
 | M8 | **`entry.sequence != index as u64 + 1` inside the shared `checked_entries`**, so the decoder and `encode_vault` use the same weakened predicate | N23 | "a wrong-sequence branch decoded and re-encoded successfully". A separate, labelled-redundant mutation removes only the structural decoder's earlier `checked_entries` call and asserts early refusal, since `encode_vault` would otherwise catch it. |
@@ -1026,6 +1146,18 @@ overlays. Repair must resolve an interrupted Prepared overlay through the existi
 both holds, adopt C-3's cursor at its scan call sites, and take `epoch_mutation_guard` in any writer
 it adds.
 
+**Agent 3 has accepted I-4.** Their design revision 1, committed at `7efc9c2` after this design's
+revision 3, records in its section 13.1 that the owner record write, the recovery stage and the
+successor write are all five-family durable mutations that must rotate the token at the same audited
+choke point if I-4 lands, and that their design is unaffected if it does not. They also ask that
+`save_studio_source_checked`'s `handoff` parameter shape be preserved so a parallel `repair`
+parameter can be added without a third mechanism: **this design preserves it**, since 9.3 step 8
+passes the existing `CheckedHandoffWrite` capability unchanged and the
+`Option<VerifiedPersistedSource>` input is added to the resolver, not to the writer. Their design
+also confirms it introduces no competing source writer and no second preparation pool. The
+coordinated verdict the reviewer asked for therefore has both sides on record; the exhaustive
+choke-point audit remains an implementation-review obligation.
+
 ## 16. Contingency if the core signing review changes the split
 
 H1's authority capture and H2's `prepare_handoff_detached` are the only stages bound to the split.
@@ -1060,90 +1192,96 @@ From revision 2:
 4. **Copy-while-Prepared requirements** handed to Agent 2 in 12.2, including that a different
    channel label for the same Flipnote object is not an independent destination.
 
-Open for this re-review:
+From revision 3, all three answers adopted with their attached consequences:
 
-- Is I-4's choke-point enforcement the right shape, or should each logical writer rotate explicitly
-  with an audited list?
-- Is parking one authenticated record body for detached validation acceptable inside the cursor, or
-  should an oversized single record instead abort the scan with `InventoryUnstable`?
-- Does I-3 need to hold the transient owner until after the intent write returns, as specified, or
-  is releasing it immediately after the ordinary holds are installed sufficient?
+5. **Choke point backed by an audited writer list, not one or the other.** 9.2 makes the guard a
+   type-level prerequisite, so a five-family write, rename, sync-repair or unlink cannot be
+   expressed without it and a bypass is a compile error rather than a forgotten convention. The
+   writer list still proves coverage, and N17 with M20 keeps per-family evidence. I-4 stays separate
+   from budget ownership in both directions: a budget mint or entry alone must not invalidate, and
+   an operation that may have changed files must invalidate even when it returns an error.
+6. **Park and validate detached, within the accepted encoded bounds**, rather than aborting a scan
+   because a valid record is expensive. The three consequences are written into 9.2: classify before
+   invoking, because `budget_ms` is not a preemption mechanism and a post-hoc elapsed check enforces
+   nothing, defaulting to detachment when cost cannot be conservatively classified; the parked body
+   and its worker and result keep the job's original ownership and are rebound to cursor, mount,
+   record and generation before consumption; and no bound, poisoning rule or reference-cache
+   exclusion is bypassed. This accepts a scheduling boundary, not a measured custody or heap ceiling.
+7. **Keep the transient owner until the write attempt returns**, as specified. 8.3 records why:
+   earlier release would already be safe inside one uninterrupted custody interval, but retaining it
+   gives a single ownership boundary across success, error and unwinding, and the durable guarantee
+   must come from I-3's pre-I/O transfer rather than from assuming a successful return. The
+   premature-release optimisation is deliberately out of scope for this checkpoint.
+
+Nothing is open for this re-review beyond confirming the AG1-TEST-001 correction. The design
+questions from revisions 1 to 3 are all answered and adopted.
 
 ## 18. Re-review request
 
 Fill `[FULL_HEAD_SHA]` with the commit that adds this revision before sending.
 
 ```text
-Review type: design re-review after a second REQUEST CHANGES.
-Base: 56198de80e4942fd1612feff5d9d07f2f9cced7a. Head: [FULL_HEAD_SHA].
-Compare: https://github.com/Thalpy/Mewtual/compare/56198de80e4942fd1612feff5d9d07f2f9cced7a...[FULL_HEAD_SHA]
-Scope/evidence: docs/GATE4-AGENT-1-DESIGN.md revision 3 and docs/GATE4-AGENT-1-STATUS.md.
+Review type: design re-review, one open P3.
+Base: 1bcb1bca204d721b848b17c0835faf931ae930e3. Head: [FULL_HEAD_SHA].
+Compare: https://github.com/Thalpy/Mewtual/compare/1bcb1bca204d721b848b17c0835faf931ae930e3...[FULL_HEAD_SHA]
+Scope/evidence: docs/GATE4-AGENT-1-DESIGN.md revision 4 and docs/GATE4-AGENT-1-STATUS.md.
 Design only: no production code, no test and no new measurement exists.
 Dependencies unchanged: e65bfd8 is still unreviewed; Agent 2's manual lifecycle remains a
 registration prerequisite; native Save stays unregistered and out of FLIPNOTE-UI-HOOKS.
-AG1-004 is closed at the design boundary and is not reopened here.
+AG1-001 to AG1-005 are closed at the design boundary and are not reopened here.
 
-This revision answers the five residuals left against revision 2. Section 0 maps each to its
-correction. Verify each against the code, not the prose.
+The only finding left open was AG1-TEST-001: N31 could mistake pre-signing priority deferral for a
+bounded signing slice, because requiring only remaining() > 0 is satisfied by a visit that yielded
+on the priority gate without signing anything, under both the unchanged and the mutated
+implementation. That is the substance of this re-review. Revision 4 also records the implementation
+consequences attached to the three revision-3 answers; those are secondary and are listed last.
 
-AG1-001 residual: S0 is split into common request validation, acknowledgement classification, and
-new-authoring-only media admission. Confirm that no blob read, promotion, hold or possession check
-can run before completed_retry and exact_retry have been evaluated, that the ordinary-collision
-check also precedes media admission, and that S1a requires no basis, tenure or source lookup.
-Attack N30: a frame operation accepted and handed off, its CID legitimately reclaimed after
-retirement, then the original request retried. Require acknowledgement with no PIX work, no second
-envelope and byte-preserving sync-only persistence, and require a genuinely new operation
-referencing the same missing CID to be refused before acceptance.
+AG1-TEST-001: section 7.3 now states that the priority yield and the slice bound are different
+outcomes and must stay separable in observation, the former signing zero operations and the latter
+at least one and fewer than all. The runtime records the remaining count at slice entry and exit,
+so before - after is the production count of sign_next calls in that visit, since the core
+decrements exactly one per call; no test-only counter is added. Section 14.1's "N31 in full" then
+requires, for the visit that exercises the bound: after < before, after > 0, and an exact expected
+signature count. Judge whether that positive precondition is sufficient to distinguish the two
+events, and whether deriving the count from remaining() is a legitimate production observation.
 
-AG1-002 residual: the two existing tokens are replaced by a new inventory_generation and invariant
-I-4. Check the audit facts the design rests on: update_epoch_recovery_accounted_with_writer and
-update_epoch_owner_state_with_writer replace real records and rotate neither existing token;
-enter_studio_budget_scope rotates studio_generation on every budget ENTRY, which would both
-self-invalidate a parked cursor and still miss those writers. Judge whether the choke-point
-enforcement (epoch_mutation_guard taken before the reservation's write, rotation monotonic and
-kept on failure or panic) is sufficient, whether the enumerated participants are complete, and
-whether temporary siblings, unlinks and cleanup are covered. Check that invalidation is tested
-before resuming expensive work as well as at finish, and that the reference-scan cache bypass, the
-separate Protection generation rule, mount identity, coverage, poisoning and the cardinality and
-byte rails are all preserved. Attack N17's per-family cases and M20's per-writer mutations, and
-confirm a Studio budget mint or entry alone does not invalidate. Also judge the step-granularity
-correction: a time budget plus the parked-body detached-validation escalation, with at most one
-parked body accounted in 13.4.
+Check the fixture staging, which is the other half of the correction. Each fixture asserts before
+the turn that there is no epoch-service interest, no watch inbound and no parked background result,
+so the priority gate cannot be the reason the visit stops. Authoritative work is queued only after
+the slice has been selected, through the sync and transport side, never by reaching into the store
+from inside the slice, which slice exclusivity forbids. The next turn must show actual authoritative
+progress before the following slice signs again. Confirm this ordering is achievable without
+reentrant store access and that it cannot be satisfied by work that was already pending.
 
-AG1-003 residual: the fix is invariant I-3, an explicit protection transfer. Confirm from
-creative_references.rs that hold_creative rotates Protection.generation first (so an in-flight
-scan's install fails), that it adds to pins when known and leaves protection unknown when it
-cannot, and that ProtectedBlobs::delete consults both tables under one guard through unlink.
-Judge whether running the ordinary holds before the intent write and releasing the transient owner
-after the write attempt returns covers uncertain persistence, including a failure after rename and
-a failure leaving a temporary sibling. Attack N12 parts (b) and (c) in particular: protected
-deletion attempted after a successful Save, after every transient and result owner has dropped,
-and before any further scan. Check that 8.2's refusal-on-exhaustion rule does not block the
-fail-closed unknown path that I-3 depends on.
+Check the two limit fixtures isolate their bounds. The count fixture has more operations than
+MAX_SIGNING_TURNS_PER_VISIT and an injected clock staged so the elapsed budget cannot be reached
+within the cap; the time fixture has fewer operations than the cap, so the cap cannot be the reason,
+and the clock crosses SIGNING_SLICE_BUDGET_MS after a chosen k operations while operations remain.
+M5 is split into M5a and M5b accordingly, each removing one bound and failing at after > 0. The
+slice budget is measured on the injected catcoms_rt::Clock, not SystemClock, so neither fixture
+depends on cheap and expensive operations landing on opposite sides of a wall-clock threshold.
+Verify neither mutant can be caught for an unrelated reason and that neither fixture's other bound
+can be the stop reason.
 
-AG1-005 residual: admission bookkeeping now holds only Weak handles and reaps dead owners, so
-release is whatever happens when the last Arc drops. Confirm there is no transition a dropped
-native handle must perform, that StudioOverlaySavePreparation and StudioPreparedOverlaySave own
-the OverlayOwnership so dropping either releases admission, permit and any reference hold, and
-that a retained result still owning a clone keeps admission unavailable. Attack N14's three cases,
-especially the native handle dropped without a second visit, both before reconstruction starts and
-while the worker is paused.
+Secondary, from the revision-3 answers. Section 9.2 makes the I-4 guard a type-level prerequisite:
+the five-family mutation primitives take an EpochMutation obtainable only from
+epoch_mutation_guard, so a bypass is a compile error rather than a forgotten convention, while the
+audited writer list and N17 with M20 still prove coverage. Sync-repair is included because the
+existing code already treats an unchanged-file flush attempt as invalidating, and over-rotation is
+the safe direction. Section 9.2 also adds the three parked-body consequences: classify before
+invoking rather than measuring after a validator returns, defaulting to detachment when cost cannot
+be conservatively classified; the parked body and its worker and result keep the job's original
+ownership and are rebound to cursor, mount, record and generation before consumption; and no bound,
+poisoning rule or reference-cache exclusion is bypassed. Section 8.3 records why the transient owner
+is kept until the write attempt returns rather than released after the ordinary holds are installed.
 
-AG1-TEST-001 residual: M5 now points at N31, a real H3 sequence with more operations than one
-slice permits, with independent count and time mutations and no paused detached worker. M8 now
-weakens a single invariant inside the shared checked_entries so the decoder and encode_vault use
-the same predicate, with the earlier structural call separately labelled redundant and tested for
-early refusal. M6's observation is H2 starting rather than permit consumption. M12's owner-journal
-fixture must independently pass all earlier validation with current accounting inputs. Verify none
-of the twenty-two can pass for an unrelated reason.
+Section 15 now records that Agent 3's design revision 1 at 7efc9c2 has accepted I-4 and named the
+three writers of theirs that must rotate, and asks that save_studio_source_checked's handoff
+parameter shape be preserved; this design preserves it, since the Option<VerifiedPersistedSource>
+input is added to the resolver rather than the writer. Confirm both sides agree.
 
-Source-description corrections to confirm: Recovery, OwnerReceipts and Intents are all uncached and
-only Registry and Studio are cacheable, so the surviving point is that the Intents arm is the one
-whose uncached cost scales with a retained branch; and write_prepared_intents consumes a supplied
-old size, so C-2 changes its callers, not that helper.
-
-Answer the three questions in section 17. Return PASS for this bounded design, or numbered findings
-with severity, file/line, trigger, impact, evidence and required correction, and say which
-residuals remain open. A PASS accepts the design only: no implementation, no measurement and no
-native Save exposure is claimed, and full Gate 4 acceptance remains with Agent 4.
+Return PASS for this bounded design, or numbered findings with severity, file/line, trigger, impact,
+evidence and required correction. A PASS accepts the design only: no implementation, no measurement
+and no native Save exposure is claimed, the core signing split and Agent 2's lifecycle remain
+separate dependencies, and full Gate 4 acceptance remains with Agent 4.
 ```

@@ -1,7 +1,7 @@
 # Gate 4 Agent 1 status: local Save and automatic handoff runtime
 
 Owner: Agent 1 ([assignment](GATE4-AGENT-HANDOFFS.md#agent-1-local-save-and-automatic-handoff-runtime)).
-Proposal: [GATE4-AGENT-1-DESIGN](GATE4-AGENT-1-DESIGN.md), currently revision 3.
+Proposal: [GATE4-AGENT-1-DESIGN](GATE4-AGENT-1-DESIGN.md), currently revision 4.
 Review preamble: 1. Current entries override older ones.
 
 ## Checkpoints
@@ -9,23 +9,28 @@ Review preamble: 1. Current entries override older ones.
 | Date | Checkpoint | Base | Head | Kind | Verdict |
 |---|---|---|---|---|---|
 | 2026-09-15 | Design revision 1 | `a052f78b62a549702686a8741932f1d2f8c98773` | `ac12822f04337b3e388618f81ce4a4b29d1e9b87` | design, docs only | **REQUEST CHANGES**: AG1-001 to AG1-005, AG1-TEST-001 |
-| 2026-09-15 | Design revision 2 | `ac12822f04337b3e388618f81ce4a4b29d1e9b87` | `56198de80e4942fd1612feff5d9d07f2f9cced7a` | design, docs only | **REQUEST CHANGES**: AG1-004 **closed**; residuals on AG1-001, AG1-002, AG1-003, AG1-005, AG1-TEST-001 |
-| 2026-09-15 | Design revision 3, residuals answered | `56198de80e4942fd1612feff5d9d07f2f9cced7a` | uncommitted working tree | design, docs only | re-review not yet requested |
+| 2026-09-15 | Design revision 2 | `ac12822f04337b3e388618f81ce4a4b29d1e9b87` | `56198de80e4942fd1612feff5d9d07f2f9cced7a` | design, docs only | **REQUEST CHANGES**: AG1-004 **closed**; residuals on the other five |
+| 2026-09-15 | Design revision 3 | `56198de80e4942fd1612feff5d9d07f2f9cced7a` | `1bcb1bca204d721b848b17c0835faf931ae930e3` | design, docs only | **REQUEST CHANGES**: AG1-001, AG1-002, AG1-003, AG1-005 **closed at the design boundary**; AG1-TEST-001 open, P3 |
+| 2026-09-15 | Design revision 4, N31 correction | `1bcb1bca204d721b848b17c0835faf931ae930e3` | uncommitted working tree | design, docs only | re-review not yet requested |
 
-Working checkout: `M:\Git (local)\CatComs`, branch `Create-suite-2`. Implementation must move to a
-separate branch or worktree before any code change; all three documentation passes deliberately
-share the checkout and touch only these two files.
+Working checkout: `M:\Git (local)\CatComs`, branch `Create-suite-2`. **Other agents are working in
+this same checkout**: Agent 3's design landed at `7efc9c2` and Agent 2's documents are present
+untracked. All four Agent 1 passes touch only these two files, and any commit must be
+pathspec-scoped to them. Implementation must move to a separate branch or worktree.
 
 ## Finding ledger
 
-| Finding | Severity | Status | Where answered |
+Closure at the design boundary is not implementation acceptance: every mechanism below still needs
+code and executed evidence, and the reviewer said so explicitly for each one.
+
+| Finding | Severity | Status | Where |
 |---|---|---|---|
-| AG1-001 | P2 | **Open residual answered in revision 3.** Revision 2 fixed basis and tenure ordering, rollover identity and outcome wording; the residual was that S0's PIX validation and transient hold still preceded acknowledgement classification, so a valid completed retry for a legitimately reclaimed CID could be refused before being identified. Revision 3 splits S0 into common request validation, classification, and new-authoring-only media admission. | Design 6.2, 6.3, 14 N30, M16 |
-| AG1-002 | P2 | **Open residual answered in revision 3.** Revision 2's retained-candidate verification was accepted; the residual was that C-3's two generations are not universal inventory-mutation tokens. Revision 3 introduces `inventory_generation` and invariant I-4, rotated at an audited choke point before possible I/O, and explicitly does not use `studio_generation`. | Design 9.2, R10, 14 N17, M20, M21 |
-| AG1-003 | P2 | **Open residual answered in revision 3.** Protection during the detached interval was accepted; the residual was that releasing the transient hold after the durable write does not repair an already-installed reference set omitting the new CID. Revision 3 adds invariant I-3, an explicit protection transfer before the intent write. | Design 8.3, R7, 14 N12(b)(c), M14 |
-| AG1-004 | P2 | **CLOSED at the design boundary** by the revision-2 review. Prepared alone no longer prohibits nondestructive access. Agent 2 still owns and must obtain review for the concrete lifecycle. | Design 12.1 |
-| AG1-005 | P3 | **Open residual answered in revision 3.** Background cancellation and pre-read admission were accepted; the residual was that a native preparation handle abandoned between visits leaves admission live forever. Revision 3 keeps only `Weak` handles and reaps dead owners, so release happens wherever the last `Arc` drops. | Design 5.5, 7.1, 14 N14, M3 |
-| AG1-TEST-001 | P3 | **Open residual answered in revision 3.** M5 pointed at a detached-worker test and M8 was masked by `encode_vault`'s own `checked_entries`. Revision 3 adds N31 for a real signing slice with independent count and time mutations, retargets M8 at a single invariant inside the shared checker, and changes M6's observation to "H2 started". | Design 14.1 N31, 14.2 |
+| AG1-001 | P2 | **Closed at the design boundary** (revision-3 review). Accepted and completed retries no longer require media admission: S0 is split into common request validation, classification, and new-authoring-only media admission, and S1a is terminal and sync-only. | Design 6.2, 6.3, 14 N30, M16 |
+| AG1-002 | P2 | **Closed at the design boundary**, subject to I-4's stated implementation audit. `inventory_generation` replaces the invalid two-token assumption; the reviewer confirmed the underlying facts about the recovery and owner writers and about budget entry. | Design 9.2, R10, 14 N17, M20, M21 |
+| AG1-003 | P2 | **Closed at the design boundary.** I-3 establishes ordinary protection before potentially durable I/O and before transient ownership is released. | Design 8.3, R7, 14 N12, M14 |
+| AG1-004 | P2 | **Closed** at revision 2. Prepared alone no longer prohibits nondestructive access; Agent 2 still owns the concrete lifecycle. | Design 12.1 |
+| AG1-005 | P3 | **Closed at the design boundary.** Admission depends on actual owners, not an actor-side strong reference awaiting cleanup. | Design 5.5, 7.1, 14 N14, M3 |
+| AG1-TEST-001 | P3 | **Open; answered in revision 4.** M8, M6, M12 and M9 are accepted. The residual was that N31 required only `remaining() > 0`, which a visit deferring on the priority gate without signing also satisfies, so both the unchanged and the mutated implementation could pass. Revision 4 adds a positive signing precondition (`after < before` and `after > 0` with an exact expected count derived from production `remaining()`), a deterministic injected-clock seam, staged authoritative work queued only after slice selection, and independent preconditions per limit, with M5 split into M5a and M5b. | Design 7.3, 14.1 "N31 in full", 14.2 M5a/M5b |
 
 ## Audit claims corrected across revisions
 
@@ -43,7 +48,8 @@ share the checkout and touch only these two files.
 
 ## Facts established by the revision-3 audit
 
-Verified in the code at the design base and relied on by revision 3:
+Verified in the code at the design base, relied on from revision 3 onward, and confirmed
+independently by the revision-3 reviewer:
 
 - The only rotations of an inventory-relevant token are `epoch_intents.rs:479`, `:510`,
   `epoch_intents/retirement.rs:199`, `:233` (`intent_generation`),
@@ -72,7 +78,7 @@ Verified in the code at the design base and relied on by revision 3:
 | Agent 2 manual overlay lifecycle | Not started. | Native Save stays unregistered and absent from FLIPNOTE-UI-HOOKS. Prerequisites P1 to P5, design 12.3, now including `ReferenceCapacity` and `InventoryUnstable` holds. |
 | Agent 2 live-tenure contract | Not started. | The runtime binds `tenure` as an opaque `u64` and needs "equal value implies the same continuous tenure" (P4). |
 | Agent 2 copy contract | Not started. | Design 12.2 lists the requirements the revision-2 reviewer attached to copy-while-Prepared, including that a different channel label for the same Flipnote object is not an independent destination. |
-| Agent 3 signed repair | Not started. | Must respect both holds and the existing fences, adopt C-3's cursor at its scan call sites, and take `epoch_mutation_guard` in any writer it adds. **I-4 needs a coordinated verdict with Agent 3.** |
+| Agent 3 signed repair | **Design revision 1 landed at `7efc9c2`.** Its section 13.1 accepts I-4, names the owner record write, the recovery stage and the successor write as the three of its writers that must rotate the token, states its design is unaffected if I-4 does not land, and confirms it adds no competing source writer and no second preparation pool. It asks that `save_studio_source_checked`'s `handoff` parameter shape be preserved; this design preserves it. | The coordinated verdict on I-4 now has both sides on record. The exhaustive choke-point audit remains an implementation-review obligation. |
 | Agent 4 shared seam, enum, registration and workflow edits | Not started. | Design 15 lists every central edit. I-4 is now the largest and highest-risk item. |
 
 ## Proposed API seams
@@ -137,8 +143,9 @@ design 5 and 15.
 
 | Command | Result |
 |---|---|
-| `git rev-parse HEAD`, `git status --short` | Revision 3 is based on `56198de80e4942fd1612feff5d9d07f2f9cced7a` with a clean tree before this pass; revision 3 is uncommitted. |
+| `git log --oneline`, `git status --short` | Revision 4 starts from `7efc9c2` (Agent 3's design), which contains revision 3 at `1bcb1bc`. Agent 1's two files were unmodified by `7efc9c2`; Agent 2's documents are present untracked. Revision 4 is uncommitted. |
 | `git fetch origin Create-suite-2` | Revision 1 and 2 passes both found `origin/Create-suite-2` equal to the local head. |
+| `grep` over `docs/GATE4-AGENT-3-DESIGN.md` sections 11 and 13.1 | Agent 3 accepts I-4, names its three affected writers, asks that `save_studio_source_checked`'s `handoff` parameter shape be preserved, and confirms no competing source writer or second pool. |
 | `gh pr view 26 --json state,reviews,title,headRefName` | Open, `Create-suite-2`, `reviews: []`. Verdicts on this design were delivered outside GitHub's submitted-review endpoint, so its emptiness is not evidence that no review happened; `e65bfd8` is called unreviewed because HANDOVER and the core note agree, not because of that endpoint. |
 
 **No Cargo command, test, mutation, workflow or benchmark has been executed in any pass, and no new
@@ -196,10 +203,14 @@ Accompanying prose:
 
 ## Next actions
 
-1. Commit revision 3 and send the re-review request in design 18 with the head SHA filled in.
-2. Get a coordinated verdict with Agent 3 on I-4 and C-3 before any implementation: they change a
-   seam every Studio write path and the repair paths use.
+1. Commit revision 4, pathspec-scoped to these two files, and send the re-review request in
+   design 18 with the head SHA filled in. Only AG1-TEST-001 is at stake.
+2. Once that closes, the design boundary is complete and the next checkpoint is implementation on a
+   separate branch or worktree, with review 1 as a bounded implementation verdict.
 3. Confirm with Agent 2 the prerequisites P1 to P5, the two-hold contract (design 12.1) and the copy
-   requirements (design 12.2); give Agent 4 the central edit list in design 15.
-4. Do not start implementation on this checkout. Hold C-1, C-3, C-4 and I-4 until the design verdict
-   returns: all four touch shared files, and three are adjacent to HANDOFF-002's reviewed scan.
+   requirements (design 12.2); give Agent 4 the central edit list in design 15. Agent 3's side of
+   the I-4 coordination is already on record at `7efc9c2`.
+4. Sequence the implementation so the shared-seam changes land in reviewable order: I-4 and its
+   writer audit first, then C-3's cursor on top of it, then C-1 and C-4, then the runtime. All four
+   touch shared files and three are adjacent to HANDOFF-002's reviewed scan, so each needs its own
+   line in the implementation verdict rather than arriving as one commit.
