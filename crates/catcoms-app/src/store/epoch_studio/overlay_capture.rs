@@ -14,22 +14,60 @@ use catcoms_crypto::DeviceId;
 use catcoms_replication::studio::{StudioClosingOverlayBasis, StudioLocalDraft};
 use catcoms_replication::LocalIntent;
 
-/// Verified media facts for one new acceptance, together with the hold that protects them.
+/// Exactly what the media facts were derived from. A-001: without this, "minted by admission" only
+/// says the facts are internally consistent, not that they belong to the operation that will
+/// actually be appended.
+#[derive(PartialEq, Eq)]
+struct MediaOrigin {
+    operation: [u8; 32],
+    target: StudioTarget,
+    document: LogicalDocument,
+}
+
+/// Verified media facts for one new acceptance, together with the hold that protects them and the
+/// identity of the request they came from.
 ///
-/// Only `admit_studio_overlay_media` can produce this, and it derives the frame reference from the
-/// operation itself. A caller therefore cannot present verified frame facts without the hold that
-/// protects them, nor a hold without the facts S3 needs, nor either one for an operation they do
-/// not belong to. Before this type existed the staged capture took the three independently and
-/// stored them, so a future caller could have disabled the S3 recheck or N12(a)'s protection by
-/// passing `None`.
-pub(crate) struct AdmittedOverlayMedia {
+/// Only `admit_studio_overlay_authoring` can produce this, and it derives the frame reference from
+/// the operation itself. A caller therefore cannot present verified frame facts without the hold
+/// that protects them, nor a hold without the facts S3 needs. Before this type existed the staged
+/// capture took the three independently and stored them, so a future caller could have disabled the
+/// S3 recheck or N12(a)'s protection by passing `None`.
+struct AdmittedOverlayMedia {
+    origin: MediaOrigin,
     frame: Option<(catcoms_storage::Cid, u64)>,
     hold: Option<CreativeHold>,
 }
 
-impl std::fmt::Debug for AdmittedOverlayMedia {
+/// One authorized new acceptance: the intent that will be appended, and the media facts and hold
+/// minted from that same operation, on that same target and document.
+///
+/// A-001. Carrying the intent and the media as separate arguments let a caller pair media admitted
+/// for operation A with an intent carrying operation B: the detached plan would append B while S3
+/// rechecked and protected A's pixels. Nothing in the synchronous adapter did that, but the point
+/// of the staged seam is that the receiver becomes a second caller. Both halves are now minted
+/// together, the fields are private and there is no second constructor, so the mismatch cannot be
+/// expressed; `capture_studio_overlay_save` rechecks the binding anyway, which is what the
+/// `mismatched_for_test` fixture exercises.
+pub(crate) struct AdmittedOverlayAuthoring {
+    intent: LocalIntent,
+    media: AdmittedOverlayMedia,
+}
+
+impl std::fmt::Debug for AdmittedOverlayAuthoring {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("AdmittedOverlayMedia { .. }")
+        f.write_str("AdmittedOverlayAuthoring { .. }")
+    }
+}
+
+impl AdmittedOverlayAuthoring {
+    /// Test-only: deliberately pair one request's intent with another request's admitted media, so
+    /// the binding check at capture has something to refuse. Production has no way to build this.
+    #[cfg(test)]
+    pub(crate) fn mismatched_for_test(intent: LocalIntent, media_of: Self) -> Self {
+        Self {
+            intent,
+            media: media_of.media,
+        }
     }
 }
 
@@ -158,28 +196,50 @@ impl StudioOverlayCapture {
 }
 
 impl ServerStore {
-    /// S1b media admission, for new authoring that has already been authorized.
+    /// S1b media admission, for new authoring that has already been authorized. Returns the intent
+    /// and its media as one value, because they are only meaningful together (A-001).
     ///
     /// `operation_blob_cid` extracts an address and the typed layer checks declared sizes; neither
     /// establishes that the bytes exist. Validate and promote them into the durable namespace, then
-    /// take the job-owned hold, and return both together so they cannot be separated.
+    /// take the job-owned hold, and bind both to the operation, target and document they came from.
     ///
     /// Callers must reach this only after classification has ruled out an acknowledgement AND
     /// after the request's basis has been matched against a freshly derived one. An unmatched
     /// stale request must be refused before any blob is read or promoted and before the reference
     /// rails are consulted.
-    pub(crate) fn admit_studio_overlay_media(
+    pub(crate) fn admit_studio_overlay_authoring(
         &self,
         target: StudioTarget,
         document: &LogicalDocument,
+        device: &MlsDevice,
+        operation: DomainOp,
+    ) -> Result<AdmittedOverlayAuthoring, AppError> {
+        let intent = LocalIntent {
+            author: device.device_id(),
+            operation,
+        };
+        let origin = MediaOrigin {
+            operation: intent.operation.id(&intent.author),
+            target,
+            document: document.clone(),
+        };
+        let media = self.admit_studio_overlay_media(origin, document, &intent.operation)?;
+        Ok(AdmittedOverlayAuthoring { intent, media })
+    }
+
+    fn admit_studio_overlay_media(
+        &self,
+        origin: MediaOrigin,
+        document: &LogicalDocument,
         operation: &DomainOp,
     ) -> Result<AdmittedOverlayMedia, AppError> {
-        let frame = match target {
+        let frame = match origin.target {
             StudioTarget::Flipnote { .. } => frame_pixels(document, operation)?,
             StudioTarget::Index { .. } => None,
         };
         let Some((cid, bytes)) = frame else {
             return Ok(AdmittedOverlayMedia {
+                origin,
                 frame: None,
                 hold: None,
             });
@@ -204,6 +264,7 @@ impl ServerStore {
             std::collections::BTreeSet::from([*cid.as_bytes()]),
         )?;
         Ok(AdmittedOverlayMedia {
+            origin,
             frame: Some((cid, bytes)),
             hold: Some(hold),
         })
@@ -231,7 +292,7 @@ impl ServerStore {
     }
 
     /// Capture under custody, after classification has ruled out an acknowledgement, the basis has
-    /// been matched, and media has been admitted.
+    /// been matched, and authoring has been admitted.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn capture_studio_overlay_save(
         &self,
@@ -240,12 +301,28 @@ impl ServerStore {
         target: StudioTarget,
         device: &MlsDevice,
         basis: StudioClosingOverlayBasis,
-        intent: LocalIntent,
+        authoring: AdmittedOverlayAuthoring,
         ts: u64,
-        media: AdmittedOverlayMedia,
     ) -> Result<StudioOverlayCapture, AppError> {
         current_member(group, device)?;
         let document = target.document(&group.group_id()).map_err(invalid)?;
+        let AdmittedOverlayAuthoring { intent, media } = authoring;
+        // A-001. The combined value already makes a cross-operation pairing inexpressible; this
+        // recheck is what makes the guarantee testable, and it also catches a capture whose target,
+        // document or device differs from the one media was admitted against. The detached plan
+        // appends `intent.operation`, so S3 and the job-owned hold must belong to that operation.
+        if intent.author != device.device_id()
+            || media.origin
+                != (MediaOrigin {
+                    operation: intent.operation.id(&intent.author),
+                    target,
+                    document: document.clone(),
+                })
+        {
+            return Err(invalid(
+                "admitted media does not belong to this authoring request",
+            ));
+        }
         let scope = epoch_intents::scope_bytes(server, &document)?;
         // Authenticate the bounded record without decoding it: the detached stage owns the decode.
         let record = self.read_scoped_intent_plain(&scope)?;
@@ -329,9 +406,21 @@ impl ServerStore {
             draft,
             media,
         } = plan;
-        let AdmittedOverlayMedia { frame, hold } = media;
+        let AdmittedOverlayMedia {
+            origin,
+            frame,
+            hold,
+        } = media;
         if stamp.server != server || stamp.target != target {
             return Err(invalid("overlay plan belongs to another target"));
+        }
+        // The plan's own copy of the binding capture already checked. A plan is a value the
+        // receiver will hold across a detach and hand back here, so the commit does not take the
+        // capture's word for which operation these media facts protect.
+        if origin.target != target || origin.document != stamp.document {
+            return Err(invalid(
+                "admitted media does not belong to this authoring request",
+            ));
         }
         if !self.studio_overlay_is_current(group, device, &stamp)? {
             return Err(invalid("overlay record or context changed; retry"));
