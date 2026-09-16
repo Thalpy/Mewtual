@@ -1,6 +1,16 @@
 # Gate 4 Agent 3: runtime signed fault repair
 
-Status: **revision 9, design proposal, awaiting re-review. No production code is written.**
+Status: **revision 10, design proposal, awaiting re-review. No production code is written.**
+
+Revision 9 (`3b6a4b40462ae83a341f8f6741c93edff55b5ef7`) received **REQUEST CHANGES** with
+AG3-DES-039 to AG3-DES-044 and AG3-TEST-008. The reviewer **closed AG3-DES-038** and accepted the
+owner-side half of AG3-DES-034. Revision 10 answers the six and reopens none of that. It also
+absorbs a dependency change this scope had missed: Agent 2's accepted design **removes**
+`observed_owner_tenure_start` in favour of a verification/authoring split with a fail-closed
+`Imported` state, which sections 6.3 and 13.2 were still written against. Disposition table is
+section 0.
+
+
 
 Revision 8 (`b8bb5f3a3db6d0b8e450c82119f95e2cb929bce6`) received **REQUEST CHANGES** with
 AG3-DES-034 to AG3-DES-038 and AG3-TEST-007. The reviewer **closed AG3-DES-030** at the mechanism
@@ -72,7 +82,19 @@ this scope needs and what it does without each.
 No Cargo command was executed for this pass either. Every number is a source constant read at the
 base or an explicitly labelled estimate.
 
-## 0. Disposition of the revision-8 findings
+## 0. Disposition of the revision-9 findings
+
+| Finding | Disposition in revision 10 | Where |
+|---|---|---|
+| AG3-DES-039, a historical reserved pair has no encodable repair binding | **Corrected.** `repair_kind` had values for none, external index and source-bound inline, so a pair sitting in the reserved slot could be selected as active work and then not be nameable at B1 at all. A fourth kind binds the repair directly to that slot, which is the cleaner of the two options you offered because the migration alternative has no guaranteed capacity. | 5.2, 15.1 N37(g) |
+| AG3-DES-040, liveness consumes a tenure identity the accepted seam does not provide | **Corrected, and the dependency change absorbed.** Agent 2's accepted design removes `observed_owner_tenure_start` for `verification_owner_tenure_start` and `authoring_owner_tenure_start` with a fail-closed `Imported`, which sections 6.3 and 13.2 were still written against. Mutation and drain now derive the expected tenure id through the existing `tenure_id(...)` derivation from the **authoring** accessor, with `None` a hold rather than `false`; the verification accessor may only add refusals. | 3 R32, 6.3, 6.6, 13.2, 15.1 N42 |
+| AG3-DES-041, demotion leaves the only slot occupied | **Corrected.** Leaving a demoted pair in the slot solves one owner change and recreates AG3-DES-032 on the next. Demotion now migrates the pair into the historical list when there is room, and where there is not, a new live conflict sets a durable evidence-free hold marker that suppresses proof while the reporter retries, which is the marker you suggested. | 5.2, 6.6, 15.1 N43 |
+| AG3-DES-042, a shared-receipt pair cannot be drained into the same fault | **Corrected.** `is_repaired_loser` screens before conflict handling, so feeding `R1` yields `Stale` and feeding `R3` against a head of `R2` yields `{R2,R3}`, never the reported `{R1,R3}`. Report admission therefore keeps an exact-pair fallback: when the live seal cannot reproduce the reported pair, the pair stays owner-side under the proof gate and is directly repairable through the new binding rather than being forced through `ReceiptBook::fault`. | 3 R33, 6.5, 15.1 N39 |
+| AG3-DES-043, the claim is invisible for a pre-B2 peer job | **Corrected.** A non-owner has no owner record by U-9 and no `resolved_repair` before B2, so the durable predicate could not represent an in-flight Flow D repair and ordinary settlement could win the race into a `Settled` hold that makes the repair permanently unappliable. A runtime target claim acquired at S1 and owned through S4 joins the durable predicate. | 10.3, 15.1 N37(h), M18 |
+| AG3-DES-044, the drain has no crash-safe write order | **Corrected.** The source fault write and its durability return first; only then is the slot cleared. A crash between leaves duplicate evidence, which is valid and idempotently cleaned, and an uncertain source write leaves the slot and the proof suppression intact. | 5.2, 8, 15.1 N37(f) |
+| AG3-TEST-008 | **Corrected.** N39 asserts exact pair identity, N42 and N43 cover the tenure states and repeated demotion at capacity, N37 gains (h) and mid-drain failures, and M18 and M19 cover the peer claim and the settlement and rotation fences. | 15.1, 15.2 |
+
+## 0.0 Disposition of the revision-8 findings
 
 | Finding | Disposition in revision 9 | Where |
 |---|---|---|
@@ -507,6 +529,30 @@ bit, which is AG3-DES-033(B).
 can replace the source. So ordinary discovery is a source-mutating path with exactly the same
 ownership hazard as report admission, and gating it on `repair_install_pending()` leaves the whole
 B1-to-B2 interval unclaimed. This is AG3-DES-034.
+
+### R32: the tenure accessor this scope was written against is being removed
+
+Agent 2's accepted design removes `observed_owner_tenure_start` rather than repointing it, so that
+no call site inherits the wrong semantics by default, and replaces it with
+`verification_owner_tenure_start()` and `authoring_owner_tenure_start()` over an
+`Observed | Imported(u64) | Unknown` state. `Imported(S)` yields `Some(S)` for verification and
+`None` for authoring, deliberately fail-closed for this scope's issuance and application
+(`GATE4-AGENT-2-DESIGN.md` 9.3 part 5, 9.4 V1/V5/V6). At this head only the single accessor exists
+in the tree (`catcoms-sync/src/owner_tenure.rs:151`), so this is an accepted design contract, not
+yet a compile-time obligation. Sections 6.3 and 13.2 were still written against the single accessor.
+
+The identity also matters: `tenure_id` is `H("catcoms-tenure:v1", server id, owner public key,
+group epoch)` (`epoch.rs:178`), not the start epoch, so a pair's tenure cannot be compared against a
+bare `u64`. This is AG3-DES-040.
+
+### R33: a repaired loser is screened before conflict handling, so an exact pair cannot be re-derived
+
+`ingest_verified` returns `Fault` on an existing fault, then `Stale` on `is_repaired_loser`, before
+any conflict comparison (`epoch.rs:1615-1622`). After `{R1,R2}` is repaired for `R2`, feeding `R1`
+through the typed seal yields `Stale`, and feeding `R3` against a head of `R2` yields a fault of
+`{R2,R3}`. Neither reproduces the reported `{R1,R3}`. So "drain the reserved pair into a real source
+fault" is not always possible, and an exact pair a peer is blocked on can only be preserved
+owner-side. This is AG3-DES-042.
 
 ### R12: the store cannot validate a conflicting pair today
 
