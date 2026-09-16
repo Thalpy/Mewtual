@@ -107,7 +107,27 @@ impl EpochRecordKind {
             Self::Studio => super::super::epoch_studio::MAX_SEALED_BYTES,
         }
     }
+    /// A cheap precheck bound that no canonical scope of this family can exceed.
+    ///
+    /// Every family frames the same document fields, so only the length-prefixed domain differs
+    /// between them. A single constant sized for Recovery's 31-byte domain therefore refused any
+    /// family with a longer one at the maximum document shape; `DraftArchive`'s 36-byte domain is
+    /// the first to have one, and a legal 506-byte archive scope was rejected outright (B-001).
+    ///
+    /// This is an upper bound, not each family's exact maximum: Registry and Studio additionally
+    /// pin their logical key to 32 and 16 bytes, so their real maxima are well below it. Being
+    /// loose there costs nothing, because `decode_record_scope` re-derives the canonical scope for
+    /// the family and compares it byte for byte. Being *tight* is what must never happen, and
+    /// `no_family_can_encode_a_scope_its_own_bound_refuses` proves it against real encodings.
+    fn scope_cap(self) -> usize {
+        MAX_SCOPE_DOCUMENT_BYTES + 4 + self.domain().len()
+    }
 }
+
+/// The scope fields after the domain, at the largest shape `LogicalDocument::new` admits: the
+/// numeric mount, the length-prefixed group id at 256 bytes, the document type tag, and the
+/// length-prefixed logical key at 192 bytes.
+const MAX_SCOPE_DOCUMENT_BYTES: usize = 8 + 4 + 256 + 2 + 4 + 192;
 
 // Count ignored legacy names too: a flat directory with hostile clutter must not make one step
 // scan indefinitely. These are local discovery rails, not replicated admission rules.
@@ -873,7 +893,7 @@ fn decode_record_scope(
     scope: &[u8],
     family: EpochRecordKind,
 ) -> Result<(u64, LogicalDocument), AppError> {
-    if scope.len() > 501 {
+    if scope.len() > family.scope_cap() {
         return Err(invalid("epoch storage inventory scope exceeds its bound"));
     }
     let mut d = Decoder::new(scope);
@@ -1659,6 +1679,119 @@ mod tests {
             .read_scoped_draft_archive_plain(&intent_scope)
             .unwrap()
             .is_none());
+    }
+
+    /// B-001. No family may be able to encode a canonical scope that its own precheck bound then
+    /// refuses. `scope_cap()` is arithmetic over `domain().len()`, so this runs it against real
+    /// maximal encodings for all six families, and would fail loudly if `LogicalDocument`'s limits
+    /// or any family's key rule changed underneath it.
+    #[test]
+    fn no_family_can_encode_a_scope_its_own_bound_refuses() {
+        // Each family's own largest legal document: Registry and Studio pin their logical key to
+        // 32 and 16 bytes, the rest take the full 192.
+        let widest = |family: EpochRecordKind| match family {
+            EpochRecordKind::Registry => {
+                LogicalDocument::new(vec![1; 256], DocType::DocRegistry, vec![2; 32]).unwrap()
+            }
+            EpochRecordKind::Studio => {
+                LogicalDocument::new(vec![1; 256], DocType::StudioObject, vec![2; 16]).unwrap()
+            }
+            _ => LogicalDocument::new(vec![1; 256], DocType::StudioObject, vec![2; 192]).unwrap(),
+        };
+        for family in [
+            EpochRecordKind::Recovery,
+            EpochRecordKind::OwnerReceipts,
+            EpochRecordKind::Intents,
+            EpochRecordKind::DraftArchive,
+            EpochRecordKind::Registry,
+            EpochRecordKind::Studio,
+        ] {
+            let doc = widest(family);
+            let scope = family.scope(u64::MAX, &doc).unwrap();
+            assert!(
+                scope.len() <= family.scope_cap(),
+                "{family:?} encodes a {}-byte scope its own {}-byte bound refuses",
+                scope.len(),
+                family.scope_cap()
+            );
+            let decoded = decode_record_scope(&scope, family).unwrap_or_else(|error| {
+                panic!("{family:?} refused its own maximal canonical scope: {error}")
+            });
+            assert_eq!(decoded, (u64::MAX, doc.clone()));
+            // The four families whose logical key is unconstrained reach the bound exactly, so the
+            // arithmetic is tight where tightness is observable at all.
+            if !matches!(family, EpochRecordKind::Registry | EpochRecordKind::Studio) {
+                assert_eq!(
+                    scope.len(),
+                    family.scope_cap(),
+                    "{family:?} no longer reaches its stated bound"
+                );
+            }
+            // One byte past the bound is refused for every family, so the precheck still bounds
+            // the work `decode_record_scope` does before it re-derives anything.
+            let mut over = scope.clone();
+            over.resize(family.scope_cap() + 1, 0);
+            assert!(decode_record_scope(&over, family).is_err());
+        }
+    }
+
+    /// B-001 in the scanner. A maximum-shape archive is 506 bytes because its domain is five bytes
+    /// longer than Recovery's, so the old Recovery-sized constant refused a completely legal record
+    /// that was canonically scoped, correctly sealed, correctly named and under its family's byte
+    /// cap. Once Agent 2's writer exists such an archive would be unreconcilable into the intent
+    /// budget and would block any operation needing a complete scan.
+    #[test]
+    fn a_maximum_shape_draft_archive_is_inventoried_rather_than_refused_by_a_scope_bound() {
+        let root = tempfile::tempdir().unwrap();
+        let mut store = open(root.path());
+        let doc = LogicalDocument::new(vec![7; 256], DocType::StudioObject, vec![8; 192]).unwrap();
+
+        let archive_scope = epoch_draft_archive::scope_bytes(7, &doc).unwrap();
+        let intent_scope = epoch_intents::scope_bytes(7, &doc).unwrap();
+        assert_eq!(
+            archive_scope.len(),
+            506,
+            "the maximal archive scope is no longer the shape this regression exists for"
+        );
+        assert_eq!(intent_scope.len(), 499);
+        assert!(
+            archive_scope.len() > EpochRecordKind::Recovery.scope_cap(),
+            "the archive scope no longer exceeds Recovery's bound, so this proves nothing"
+        );
+
+        let decoded = decode_record_scope(&archive_scope, EpochRecordKind::DraftArchive)
+            .unwrap_or_else(|error| {
+                panic!("a maximum-shape archive scope was refused by a scope bound: {error}")
+            });
+        assert_eq!(decoded, (7, doc.clone()));
+        // Neither family accepts the other's scope even at the maximum shape.
+        assert!(decode_record_scope(&archive_scope, EpochRecordKind::Intents).is_err());
+        assert!(decode_record_scope(&intent_scope, EpochRecordKind::DraftArchive).is_err());
+
+        let path = epoch_draft_archive::write_draft_archive_for_test(
+            &store,
+            7,
+            &doc,
+            b"opaque archive body",
+            &mut ChaCha20Rng::seed_from_u64(5),
+        )
+        .unwrap();
+        let physical = fs::metadata(&path).unwrap().len();
+        let view = collect_with(
+            &mut store,
+            EpochInventoryCoverage::RecoveryOwnerReceiptsAndIntents,
+        );
+        let archive = view
+            .records()
+            .find(|e| e.kind == EpochRecordKind::DraftArchive)
+            .expect("a maximum-shape archive was refused by a scope bound");
+        assert_eq!(archive.document, doc);
+        assert_eq!(archive.record.footprint.content, physical);
+        assert_eq!(
+            EpochIntentBudget::from_inventory(&view).unwrap().bytes(),
+            physical,
+            "a maximum-shape archive could not be reconciled into the intent budget"
+        );
     }
 
     #[cfg(unix)]

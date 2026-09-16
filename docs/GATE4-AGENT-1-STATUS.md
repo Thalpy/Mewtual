@@ -45,6 +45,9 @@ they are the highest-conflict changes, so they land last. The per-item verdict r
 | 2026-09-16 | Per-actor overlay admission | `c57faee` | `bbfd5e5` | bounded implementation | Seam **PASS**, scoped to its own tests rather than end to end; **FS-002** (P2) opened against Flow S: a stale request still performed media admission before being identified as stale. One P3 API-hardening point on the capture's independent media parameters. |
 | 2026-09-16 | FS-002 correction and `AdmittedOverlayMedia` | `bbfd5e5` | `5a024a7` | bounded implementation | Authorization moved ahead of media admission; media minted as one unforgeable value. New stale-basis regression with two hazards and two positive controls, plus M16. Awaiting review. |
 | 2026-09-16 | `EpochRecordKind::DraftArchive` seam | `5a024a7` | `705d44b` | integration seam for Agent 2, option (a) | Physical family plumbing only: no payload, writer, release path, reference collector or sub-cap, and no I-4 guard. Two regressions, M17/M18/M19. Reported to Agent 2; handover sent to Agent 3. |
+| 2026-09-16 | FS-002 and seam review | `bbfd5e5` | `70eaad4` | bounded implementation, two scopes | **FS-002 closed**, A-1 confirmed preserved, stale-basis fixture and both controls confirmed valid. **A-001** (P3): admitted media not bound to the intent capture receives separately. **B-001** (P2): the shared scope decoder caps every family at Recovery's 501 bytes, refusing a legal 506-byte archive scope. |
+| 2026-09-16 | A-001 correction | `70eaad4` | uncommitted working tree | bounded implementation | `AdmittedOverlayAuthoring` as one value plus a `MediaOrigin` rechecked at capture and commit; regression and M20. |
+| 2026-09-16 | B-001 correction | A-001 head | uncommitted working tree | integration seam correction | Per-family `scope_cap()`; two regressions and M21. |
 
 Working checkout: `M:\Git (local)\CatComs`. The four design passes were made on `Create-suite-2`;
 implementation is on `gate4-agent1-runtime`, which is the current branch.
@@ -70,7 +73,9 @@ code and executed evidence, and the reviewer said so explicitly for each one.
 | AG1-004 | P2 | **Closed** at revision 2. Prepared alone no longer prohibits nondestructive access; Agent 2 still owns the concrete lifecycle. | Design 12.1 |
 | AG1-005 | P3 | **Closed at the design boundary.** Admission depends on actual owners, not an actor-side strong reference awaiting cleanup. | Design 5.5, 7.1, 14 N14, M3 |
 | FS-001 | P2 | **Closed.** New authoring could durably accept an operation naming pixels the vault does not hold. S1b admission and the S3 possession recheck now exist, with N12(d) and M15. | Status "FS-001" |
-| FS-002 | P2 | **Corrected, awaiting review.** Classification is not authorization: a stale request still read, could promote and could hold pixels before the basis comparison refused it. Authorization now precedes media admission, and media is minted as one value that cannot be assembled by a caller. | Status "FS-002" |
+| FS-002 | P2 | **Closed** at the `70eaad4` review. Classification is not authorization: a stale request still read, could promote and could hold pixels before the basis comparison refused it. Authorization now precedes media admission, A-1 confirmed preserved, and both positive controls confirmed to discriminate. | Status "FS-002" |
+| A-001 | P3 | **Corrected, awaiting review.** `AdmittedOverlayMedia` prevented fabricated facts but was not bound to the `LocalIntent` capture received separately, so media for operation A could be captured against operation B. Now one combined `AdmittedOverlayAuthoring` value with a private `MediaOrigin` rechecked at capture and at commit. | Status "A-001" |
+| B-001 | P2 | **Corrected, awaiting review.** `decode_record_scope` prechecked every family at Recovery's 501-byte maximum, so a legal 506-byte maximum-shape `DraftArchive` scope was refused outright. The bound is now per family. | Status "B-001" |
 | AG1-TEST-001 | P3 | **Closed at the design boundary** (revision-4 review). The residual was that N31 required only `remaining() > 0`, which a visit deferring on the priority gate without signing also satisfies, so both the unchanged and the mutated implementation could pass. Revision 4 adds a positive signing precondition (`after < before`, `after > 0`, exact expected count derived from production `remaining()`), a deterministic injected-clock seam, authoritative work staged only after slice selection, and independent per-limit preconditions, with M5 split into M5a and M5b. The reviewer confirmed the production basis: `remaining()` delegates to the pending queue and `sign_next` removes exactly one item only after the signature succeeds, so the delta counts **successfully produced** signatures. | Design 7.3, 14.1 "N31 in full", 14.2 M5a/M5b |
 
 ## Audit claims corrected across revisions
@@ -585,6 +590,70 @@ namespace is byte-identical including staging, and the durable intent record is 
 
 **Scope limitation carried forward.** The reviewer's I-2 note stands: the admission seam passed on
 its own tests, not end to end. Nothing here consumes `OverlayAdmission` yet.
+
+### A-001: binding admitted media to the operation that consumes it
+
+The reviewer accepted the FS-002 ordering and closed FS-002, but held that the claim attached to
+`AdmittedOverlayMedia` was not yet true. Correct: private fields prevented a caller **fabricating**
+frame facts or separating them from their hold, but `capture_studio_overlay_save` still took
+`intent` and `media` as independent arguments with nothing tying them together. A crate-internal
+caller could admit media for operation A and capture it against an intent carrying operation B: the
+detached plan appends B while S3 rechecks, and the job-owned hold protects, A's pixels. That is a
+durable acceptance naming pixels nothing verified, next to unprotected pixels for the ones it does
+name. The synchronous adapter never did this; the point of the seam is that the receiver becomes a
+second caller.
+
+Taking the reviewer's second option, the combined value:
+
+```rust
+pub(crate) struct AdmittedOverlayAuthoring { intent: LocalIntent, media: AdmittedOverlayMedia }
+```
+
+`admit_studio_overlay_authoring(target, document, device, operation)` builds the `LocalIntent` and
+admits its media in one call and is the only constructor, so the mismatch cannot be **expressed**.
+Because a type-level fact executes nothing, the reviewer's third option is layered on top:
+`AdmittedOverlayMedia` now carries a private `MediaOrigin { operation, target, document }`, capture
+rechecks it against `intent.operation.id(&intent.author)` and its own derived target and document,
+and the commit rechecks target and document again, because a plan is a value the receiver holds
+across a detach and hands back.
+
+`admitted_media_cannot_be_paired_with_another_operation` forces the mismatch through a
+`#[cfg(test)]` `mismatched_for_test` constructor, requires the specific binding error rather than
+any failure, asserts no durable record changed, and then captures, plans and commits the correctly
+paired request as a positive control, ending with both holds released.
+
+| Check | Result |
+|---|---|
+| `... --lib admitted_media_cannot_be_paired` | **1 passed, 0 failed**. |
+| **M20**, dropping the origin comparison from capture and keeping only the author check | Fails at "media admitted for one operation was captured against another"; restored source passes. |
+
+### B-001: the shared scope decoder's bound was Recovery's, not each family's
+
+A P2 in the seam, and correct. `decode_record_scope` prechecked `scope.len() > 501` before the
+family's domain check. That 501 is exactly Recovery's own maximum: its 31-byte domain plus 470
+bytes of document framing at `LogicalDocument`'s limits of 256 and 192. The archive's domain is 36
+bytes, so its maximum canonical scope is 506. A legal maximum-shape archive would have been
+canonically scoped, correctly sealed, correctly named and under its family byte cap, and the
+inventory would still have refused it, leaving a record that cannot reconcile into
+`EpochIntentBudget` and that blocks any operation needing a complete scan. The claim that the
+generic decoder worked "unmodified" was wrong at the boundary.
+
+`EpochRecordKind::scope_cap()` now derives the bound per family from `domain().len()` plus the
+shared document framing. It is documented as an **upper bound rather than each family's exact
+maximum**, because Registry and Studio additionally pin their logical key to 32 and 16 bytes; being
+loose there costs nothing, since `decode_record_scope` re-derives the canonical scope and compares
+it byte for byte. Being tight is the failure mode, and that is what is now tested.
+
+| Regression | What it proves |
+|---|---|
+| `no_family_can_encode_a_scope_its_own_bound_refuses` | For all six families, built at each family's own largest legal document: the real encoding is within its bound and decodes back to the same server and document; the four families with unconstrained keys reach the bound exactly; one byte past the bound is still refused, so the precheck still bounds pre-derivation work. |
+| `a_maximum_shape_draft_archive_is_inventoried_rather_than_refused_by_a_scope_bound` | A 256/192 archive scope is 506 bytes, exceeds Recovery's bound, decodes under `DraftArchive`, is rejected under `Intents` and rejects the intent scope in return, and the scanner inventories the file and reconciles its bytes into `EpochIntentBudget`. |
+
+| Check | Result |
+|---|---|
+| **M21**, restoring the hard-coded `501` | Both fail at named assertions, "DraftArchive refused its own maximal canonical scope" and "a maximum-shape archive scope was refused by a scope bound"; restored source passes. |
+| `... --lib store::` | **295 passed, 0 failed, 8 ignored**, 545.64 s. |
+| `cargo clippy -p catcoms-app --all-targets -- -D warnings`, `cargo fmt --all --check` | Clean. |
 
 ### `EpochRecordKind::DraftArchive`, the shared enum seam for Agent 2
 
