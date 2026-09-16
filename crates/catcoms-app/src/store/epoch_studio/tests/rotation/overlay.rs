@@ -1243,17 +1243,11 @@ fn studio_overlay_detached_acceptance_survives_a_complete_scan_between_capture_a
         .unwrap(),
         7,
     );
-    let media = store
-        .admit_studio_overlay_media(f.target, &f.logical, &op)
+    let authoring = store
+        .admit_studio_overlay_authoring(f.target, &f.logical, &f.device, op)
         .unwrap();
-    let intent = catcoms_replication::LocalIntent {
-        author: f.device.device_id(),
-        operation: op,
-    };
     let capture = store
-        .capture_studio_overlay_save(
-            SERVER, &f.group, f.target, &f.device, basis, intent, 300, media,
-        )
+        .capture_studio_overlay_save(SERVER, &f.group, f.target, &f.device, basis, authoring, 300)
         .unwrap();
 
     // The detached stage. Custody is genuinely released here: `plan` owns authenticated plaintext
@@ -1311,17 +1305,11 @@ fn studio_overlay_detached_plan_is_refused_when_the_record_changed() {
     let f = Fixture::new(false);
     let (close, basis) = closing(&f, &mut store);
     let basis_fingerprint = basis.fingerprint();
-    let intent = catcoms_replication::LocalIntent {
-        author: f.device.device_id(),
-        operation: f.title(),
-    };
-    let media = store
-        .admit_studio_overlay_media(f.target, &f.logical, &intent.operation)
+    let authoring = store
+        .admit_studio_overlay_authoring(f.target, &f.logical, &f.device, f.title())
         .unwrap();
     let capture = store
-        .capture_studio_overlay_save(
-            SERVER, &f.group, f.target, &f.device, basis, intent, 300, media,
-        )
+        .capture_studio_overlay_save(SERVER, &f.group, f.target, &f.device, basis, authoring, 300)
         .unwrap();
     let plan = capture.plan().unwrap();
 
@@ -1443,17 +1431,11 @@ fn studio_overlay_new_acceptance_requires_pixels_at_admission_and_again_before_t
         .unwrap(),
         7,
     );
-    let media = store
-        .admit_studio_overlay_media(f.target, &f.logical, &op)
+    let authoring = store
+        .admit_studio_overlay_authoring(f.target, &f.logical, &f.device, op)
         .unwrap();
-    let intent = catcoms_replication::LocalIntent {
-        author: f.device.device_id(),
-        operation: op,
-    };
     let capture = store
-        .capture_studio_overlay_save(
-            SERVER, &f.group, f.target, &f.device, basis, intent, 300, media,
-        )
+        .capture_studio_overlay_save(SERVER, &f.group, f.target, &f.device, basis, authoring, 300)
         .unwrap();
     let plan = capture.plan().unwrap();
 
@@ -1499,6 +1481,129 @@ fn studio_overlay_new_acceptance_requires_pixels_at_admission_and_again_before_t
         .local_draft()
         .unwrap()
         .is_none());
+}
+
+/// A-001. The media facts and the operation that consumes them must be one value. Pairing media
+/// admitted for operation A with an intent carrying operation B would make the detached plan append
+/// B while S3 rechecked, and the job-owned hold protected, A's pixels: a durable acceptance naming
+/// pixels nothing verified, and unprotected pixels for the ones it does name.
+///
+/// Production cannot express that pairing at all, because `AdmittedOverlayAuthoring` has private
+/// fields and `admit_studio_overlay_authoring` is its only constructor. That is a type-level fact
+/// and nothing can execute it, so the binding is also rechecked at capture and at commit, and this
+/// test forces the mismatch through a test-only constructor to prove those rechecks fire.
+#[test]
+fn admitted_media_cannot_be_paired_with_another_operation() {
+    let root = tempfile::tempdir().unwrap();
+    let mut store = open(root.path());
+    let f = Fixture::new(true);
+    let (close, basis) = closing(&f, &mut store);
+    let (first_cid, first_bytes) = published_pix(&store, &f, 11);
+    let (second_cid, second_bytes) = published_pix(&store, &f, 12);
+    assert_ne!(first_cid, second_cid, "the fixture frames share pixels");
+    // A second basis for the positive control, derived from the same unchanged Closing source.
+    let control_basis = {
+        let mut b = budget(&mut store, &f);
+        store
+            .prepare_studio_closing_overlay(
+                SERVER,
+                &f.group,
+                f.target,
+                &f.device,
+                &close,
+                Some(0),
+                &mut b,
+            )
+            .unwrap()
+    };
+    assert_eq!(control_basis.fingerprint(), basis.fingerprint());
+    let records = canonical(&store);
+
+    let frame = |frame: [u8; 16], cid: [u8; 32], bytes: u64, nonce: u8| {
+        f.domain(
+            FlipnoteOp::InsertFrame {
+                frame,
+                after: None,
+                cid,
+                bytes,
+            }
+            .encode()
+            .unwrap(),
+            nonce,
+        )
+    };
+    // Two legitimately admitted requests, each naming its own published pixels.
+    let a = store
+        .admit_studio_overlay_authoring(
+            f.target,
+            &f.logical,
+            &f.device,
+            frame([9; 16], first_cid, first_bytes, 7),
+        )
+        .unwrap();
+    let b = store
+        .admit_studio_overlay_authoring(
+            f.target,
+            &f.logical,
+            &f.device,
+            frame([10; 16], second_cid, second_bytes, 8),
+        )
+        .unwrap();
+    let live = store.live_transient_holds_for_test();
+    assert_eq!(live, 2, "each admitted request takes its own hold");
+
+    // B's intent with A's media. Capture must refuse before any custody is released, so no plan
+    // and no detached stage ever exists for the mismatched pair.
+    let intent = catcoms_replication::LocalIntent {
+        author: f.device.device_id(),
+        operation: frame([10; 16], second_cid, second_bytes, 8),
+    };
+    let swapped =
+        crate::store::epoch_studio::overlay_capture::AdmittedOverlayAuthoring::mismatched_for_test(
+            intent, a,
+        );
+    let refused = store
+        .capture_studio_overlay_save(SERVER, &f.group, f.target, &f.device, basis, swapped, 300);
+    match refused {
+        Err(error) => assert!(
+            error
+                .to_string()
+                .contains("admitted media does not belong to this authoring request"),
+            "the mismatch was refused for an unrelated reason: {error}"
+        ),
+        Ok(_) => panic!("media admitted for one operation was captured against another"),
+    }
+    assert_eq!(
+        canonical(&store),
+        records,
+        "a refused capture changed durable records"
+    );
+
+    // Positive control: the same capture with B's own admitted authoring is accepted and reaches a
+    // plan, so the refusal above is the binding and not the fixture.
+    let capture = store
+        .capture_studio_overlay_save(SERVER, &f.group, f.target, &f.device, control_basis, b, 300)
+        .expect("a correctly paired request was refused");
+    let plan = capture.plan().unwrap();
+    let mut budget = budget(&mut store, &f);
+    let draft = store
+        .commit_studio_overlay_save(
+            SERVER,
+            &f.group,
+            f.target,
+            &f.device,
+            &close,
+            Some(0),
+            plan,
+            &mut rng(),
+            &mut budget,
+            atomic_write,
+            sync_intent,
+        )
+        .unwrap();
+    assert_eq!(draft.accepted(), 1);
+    // A's hold died with the refused capture; B's died with its commit.
+    assert_eq!(store.live_transient_holds_for_test(), 0);
 }
 
 /// Every file this group's blob namespace holds, staging included, by path and exact bytes. Used

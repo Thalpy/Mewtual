@@ -184,15 +184,16 @@ impl ServerStore {
         }
         drop(source);
         // S1b, now that this request is both unaccepted and authorized: validate and promote the
-        // referenced pixels into the durable namespace, then take the job-owned hold. The two are
-        // minted together so no caller can hold verified frame facts without the hold that
-        // protects them. The hold is carried through the detached stage and released only when the
-        // commit returns.
-        let media = self.admit_studio_overlay_media(target, &logical, &operation)?;
+        // referenced pixels into the durable namespace, then take the job-owned hold. The intent,
+        // the frame facts and the hold are minted as one value bound to this operation, target and
+        // document, so no caller can hold verified frame facts without the hold that protects them
+        // or pair either with a different operation. The hold is carried through the detached stage
+        // and released only when the commit returns.
+        let authoring = self.admit_studio_overlay_authoring(target, &logical, device, operation)?;
         // The three staged seams, composed inline. A scheduled caller runs the same three in the
         // same order with custody released around `plan`; there is no second algorithm.
-        let capture = self
-            .capture_studio_overlay_save(server, group, target, device, fresh, intent, ts, media)?;
+        let capture =
+            self.capture_studio_overlay_save(server, group, target, device, fresh, authoring, ts)?;
         let plan = capture.plan()?;
         self.commit_studio_overlay_save(
             server, group, target, device, close, tenure, plan, rng, budget, writer, sync,
