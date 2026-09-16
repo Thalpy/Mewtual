@@ -864,6 +864,44 @@ provenance and coordinated inventory and writer design.
   never importable, and never occupies a recovery slot or an eviction deadline. It is readable and
   exportable, and it is destroyed only by the explicit release action.
 
+**The seam has landed, and it carries two guarantees this design inherits** (Agent 1, `705d44b`,
+verified in source by Agent 2):
+
+- **The coverage condition is structural, not conventional.** Revision 6 asked only that "reference
+  scans run at full coverage" be preserved. `EpochStorageScan::collect_creative_references` in fact
+  **refuses** unless `progress.visited_entries == 0` and
+  `coverage() == RecoveryOwnerReceiptsIntentsRegistryAndStudio`, and
+  `finish_creative_references` is the only path to `Protection::install`. A narrower or partly
+  consumed scan therefore cannot install a protection set at all. The hazard that gating by
+  `includes_intents()` might let a narrow scan install a set omitting archive CIDs is closed by
+  construction rather than by discipline.
+- **The reference arm fails closed until this design's collector replaces it.** A reference scan
+  that meets an archive returns "draft archive reference collection is not implemented" rather than
+  completing with a known set that omits the archive's CIDs. The refusal is scoped to
+  `self.references.is_some()`, so ordinary accounting scans still count archives and only reference
+  scans refuse. **Agent 2 accepts this and asked for it to stay.** Its value is that it makes it
+  impossible to land `write_studio_draft_archive_with_io` before the collector: doing so breaks
+  reclamation loudly instead of silently reclaiming archived pixels, and loud is the correct
+  direction for the one failure that would destroy the preservation guarantee.
+
+> **I-5 (new).** When this design's collector replaces that arm, the fail-closed behaviour is
+> **narrowed, never removed**: the arm stops refusing every archive and starts refusing any archive
+> whose bounded canonical payload it cannot decode. 6.5's rule that a corrupt or unsupported archive
+> fails closed for reclamation is that same guard after narrowing, and it must be visible in the
+> diff as a narrowing rather than a deletion.
+
+Mutation succession: Agent 1's M19 asserts that removing the seam's arm lets a scan return
+`Ok(CreativeReferences { count: 0 })` for a vault holding an archive. When the collector lands, M19
+is **superseded by M28**, whose assertion is different: removing the collector arm yields a set that
+is non-empty but **missing the archive's CIDs**, failing N19. Both must not persist as "the archive
+reference guard"; M19 retires with the arm it guards.
+
+Also retiring with the collector: `write_draft_archive_for_test`, Agent 1's `cfg(test)`,
+`pub(in crate::store)` hand-sealer, which exists only because the family currently has no writer. It
+bypasses nothing the seam validates, since the production scope, sealing, framing and path are real
+and only the opaque body is synthetic, but it must be deleted when
+`write_studio_draft_archive_with_io` lands, and the seam's regressions repointed at the real writer.
+
 **Sequencing against I-4.** Agent 1's `epoch_mutation_guard` does not exist yet; I-4 is last in its
 sequence. The seam commit that adds the `DraftArchive` family deliberately contains **no writer**,
 so there is nothing for it to guard and the seam is landable without I-4. Pulling I-4 forward for
@@ -1258,7 +1296,7 @@ ordering is:
 | Function | Order |
 |---|---|
 | `epoch_studio/handoff.rs` `handoff_studio_overlay_with_io` | `completed_branch` (:86), then `resolve_studio_handoff_with_io` (:109), then `completed_branch` again (:121), and **only then** `tenure.ok_or_else` (:128) |
-| `epoch_studio/overlay.rs` `save_studio_closing_overlay_with_io` | `completed_retry` (:172), then `exact_retry` (:194) with the exact path returning at :212, then media admission (:248), and **only then** `tenure.ok_or_else` (:261). Its own comment says a later fault or Unknown tenure must not turn a saved exact request into a new append |
+| `epoch_studio/overlay.rs` `save_studio_closing_overlay_with_io` | After Agent 1's FS-002 the sequence is: decode and bound the request, enter budget, structural state read, `completed_retry`, `exact_retry`, ordinary collision, **then** `tenure.ok_or_else`, then current Closing source, fresh basis, basis comparison, media admission, capture, detach, commit. Every acknowledgement and exact-retry branch still returns or refuses strictly before any tenure is required. Media admission moved to **after** tenure, which is FS-002's own correction and is orthogonal to A-1 |
 | `epoch_studio/overlay.rs` `prepare_studio_closing_overlay` | `tenure.ok_or_else` at :53, immediately. This one really is pure authoring, and A-1 still holds for it: the store refuses, the wrapper does not |
 
 **A-1's precondition is structural, not merely ordering.** Agent 1's reverification against its
@@ -1284,9 +1322,18 @@ finding. Under A-1 there is nothing to judge, and `require_observed_owner_tenure
 call sites that are a single authoring stage with no acknowledgement or recovery branch at all,
 which today means Agent 1's S1b basis mint and Agent 3's repair issuance.
 
-The line numbers above are Agent 1's reverified positions in its in-flight tree, not this design's
-base; they will move again and are recorded for locating the checks, not as an invariant. What is
-invariant is the order and, for handoff, the signature.
+Line numbers are deliberately absent for Save: they moved twice in two days. What is invariant is
+the order and, for handoff, the signature.
+
+**The reverification was load-bearing, not ceremonial.** Between this design's base and Agent 1's
+FS-002 at `5a024a7`, `tenure.ok_or_else` did move earlier in `save_studio_closing_overlay_with_io`.
+A-1 survived because it moved to just after the collision check rather than above the retry
+branches, but that is the exact drift A-1 exists to catch, and it happened immediately. Agent 1 has
+since bracketed the ordering with assertions on both sides,
+`studio_overlay_exact_retry_is_acknowledged_without_media_admission` and
+`studio_overlay_stale_basis_is_refused_before_any_media_admission`, so the Save path now has
+executable guards of its own. N-T7b remains Agent 2's, and remains the only end-to-end proof that an
+`Imported` server can still acknowledge and still resolve a Prepared handoff.
 
 `prepare_receipt_head_snapshot` switches to `authoring_owner_tenure_start`, which is the change that
 closes the safety hole at the sync layer: a device carrying a stale v1 start can no longer mint the

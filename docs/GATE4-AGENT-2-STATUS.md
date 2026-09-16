@@ -235,26 +235,33 @@ executed test count, the ignored cases, the run URL and the actual checkout SHA.
 
 The design is accepted; implementation has not started. Before it does:
 
-1. **`EpochRecordKind::DraftArchive` must land first, as an isolated seam commit.** Requested from
-   Agent 1 on 2026-09-16, accepted by Agent 1, and **it will land without a writer and therefore
-   without `epoch_mutation_guard`**, which does not exist yet: I-4 is last in Agent 1's sequence.
-   Agent 2 declined to have I-4 pulled forward, because the seam contains nothing to guard.
-   The obligation is instead carried in I-4's participant list, see prerequisite 2. Agent 1 informs
-   Agent 3 once landed.
+1. **`EpochRecordKind::DraftArchive`: LANDED** at Agent 1's `705d44b`, option (a), seam only, no
+   writer, no guard, I-4 not pulled forward. Agent 2 verified two claims in source rather than
+   accepting them: `collect_creative_references` structurally refuses a narrow or partly consumed
+   scan, and the archive reference arm fails closed, scoped to reference scans only. Both are
+   recorded as inherited guarantees in design 6.5, with invariant I-5 requiring the fail-closed arm
+   to be **narrowed, not deleted**, when the collector replaces it. Agent 1 informs Agent 3.
 2. **The archive writers must appear in I-4's participant list.** `write_studio_draft_archive_with_io`
    and `release_studio_draft_archive_with_io` join the recovery, owner, Registry, Studio source,
    intent and cleanup writers that rotate nothing today. Until I-4 lands, the archive writers are in
    the same position as every other five-family writer. This is a tracked obligation on both sides,
    not a commit-message note.
-3. **A-1's precondition: REVERIFIED by Agent 1, and stronger than requested.** Save still
-   acknowledges and exact-retries before any tenure, and handoff's Prepared resolution cannot
-   require one at all, because `resolve_studio_handoff_with_io` takes no tenure parameter. The L11
-   limbo case cannot arise from statement-level drift; only from adding an argument. N-T7b is
-   retained as defence in depth and as the reachability proof. The Save path has no equivalent
-   structural guarantee and remains guarded by ordering plus N-T7b.
+3. **A-1's precondition: REVERIFIED TWICE, and the second one mattered.** Agent 1's FS-002 at
+   `5a024a7` did move `tenure.ok_or_else` earlier in `save_studio_closing_overlay_with_io`. A-1
+   survived, because it moved to just after the ordinary-collision check rather than above the retry
+   branches, but that is the exact drift A-1 exists to catch and it happened within days. Agent 1
+   has since bracketed the Save ordering with its own assertions on both sides. Handoff is stronger
+   still: `resolve_studio_handoff_with_io` takes no tenure parameter, so the L11 limbo case cannot
+   arise from statement-level drift at all. N-T7b remains Agent 2's and remains the only end-to-end
+   proof.
 4. **Branch placement: settled.** Everything stays on `gate4-agent1-runtime` for now, by the user's
    decision. Agent 4 may still relocate these documents at integration.
-5. The shared central edits listed above stay coordinated with Agent 4: the control and dispatch
+5. **Two seam artefacts retire with this design's implementation.** Agent 1's M19 is superseded by
+   M28 when the collector lands, with a different assertion; and `write_draft_archive_for_test`, the
+   `cfg(test)` hand-sealer that exists only because the family has no writer, is deleted when
+   `write_studio_draft_archive_with_io` lands, with the seam's regressions repointed at the real
+   writer.
+6. The shared central edits listed above stay coordinated with Agent 4: the control and dispatch
    enums, `StudioSettlementState`, the inventory family and the `catcoms-mls` receive rule.
 
 ## Open questions
