@@ -45,6 +45,9 @@ pub(crate) struct StudioOverlayCapture {
     intent: LocalIntent,
     ts: u64,
     pixels: Option<CreativeHold>,
+    /// The request's frame reference and declared size, taken under custody at S1b. It says what
+    /// to recheck at S3; possession itself is never carried across the detach.
+    frame: Option<(catcoms_storage::Cid, u64)>,
 }
 
 impl std::fmt::Debug for StudioOverlayCapture {
@@ -60,6 +63,7 @@ pub(crate) struct StudioOverlayPlan {
     state: EpochIntentState,
     draft: StudioLocalDraft,
     pixels: Option<CreativeHold>,
+    frame: Option<(catcoms_storage::Cid, u64)>,
 }
 
 impl std::fmt::Debug for StudioOverlayPlan {
@@ -113,6 +117,7 @@ impl StudioOverlayCapture {
             state,
             draft,
             pixels: self.pixels,
+            frame: self.frame,
         })
     }
 }
@@ -131,6 +136,7 @@ impl ServerStore {
         intent: LocalIntent,
         ts: u64,
         pixels: Option<CreativeHold>,
+        frame: Option<(catcoms_storage::Cid, u64)>,
     ) -> Result<StudioOverlayCapture, AppError> {
         current_member(group, device)?;
         let document = target.document(&group.group_id()).map_err(invalid)?;
@@ -158,6 +164,7 @@ impl ServerStore {
             intent,
             ts,
             pixels,
+            frame,
         })
     }
 
@@ -216,6 +223,7 @@ impl ServerStore {
             state,
             draft,
             pixels,
+            frame,
         } = plan;
         if stamp.server != server || stamp.target != target {
             return Err(invalid("overlay plan belongs to another target"));
@@ -240,6 +248,13 @@ impl ServerStore {
             return Err(invalid("Closing overlay basis changed"));
         }
         drop(source);
+        // S3: the referenced pixels must still be physically present. The transient hold is a
+        // liveness claim over an address, not proof the bytes survived the detached stage, so
+        // this runs before the ordinary holds and before the intent barrier. A missing blob must
+        // not become a newly accepted durable reference.
+        if let Some((cid, bytes)) = &frame {
+            self.check_studio_frame_pixels(&stamp.document.server_id, cid, *bytes)?;
+        }
         // I-3, second half: the protection transfer. These run BEFORE the write attempt and while
         // the plan's job-owned hold is still alive, so dropping that hold below is safe whatever
         // the write does. A durable record alone does not repair a reference set that a complete

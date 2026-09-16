@@ -88,6 +88,17 @@ fn save(
             .unwrap(),
     )
 }
+/// Publish a real PIX and return the reference a frame operation must carry. A local acceptance
+/// may not name pixels the vault does not hold, so frame fixtures publish genuine bytes rather
+/// than synthetic addresses.
+fn published_pix(store: &ServerStore, f: &Fixture, tint: u8) -> ([u8; 32], u64) {
+    let mut bytes = pix();
+    bytes[8] = tint; // vary one palette channel so each fixture frame has a distinct CID
+    let mut blobs = store.blob_store(&hex::encode(f.group.group_id())).unwrap();
+    let cid = blobs.put(&bytes).unwrap();
+    (*cid.as_bytes(), bytes.len() as u64)
+}
+
 fn canonical(store: &ServerStore) -> BTreeMap<String, Vec<u8>> {
     fs::read_dir(store.dir.join("servers"))
         .unwrap()
@@ -179,23 +190,26 @@ fn studio_overlay_store_reversed_hash_order_reconstructs_full_frame_history() {
     let f = Fixture::new(true);
     let mut store = open(root.path());
     let (close, basis) = closing(&f, &mut store);
+    let (insert_cid, insert_bytes) = published_pix(&store, &f, 0x41);
+    let (replace_cid, replace_bytes) = published_pix(&store, &f, 0x42);
+    let (second_cid, second_bytes) = published_pix(&store, &f, 0x43);
     let bodies = [
         FlipnoteOp::InsertFrame {
             frame: [2; 16],
             after: Some([1; 16]),
-            cid: [4; 32],
-            bytes: 12,
+            cid: insert_cid,
+            bytes: insert_bytes,
         },
         FlipnoteOp::ReplaceFrame {
             frame: [2; 16],
-            cid: [5; 32],
-            bytes: 13,
+            cid: replace_cid,
+            bytes: replace_bytes,
         },
         FlipnoteOp::InsertFrame {
             frame: [6; 16],
             after: Some([2; 16]),
-            cid: [6; 32],
-            bytes: 14,
+            cid: second_cid,
+            bytes: second_bytes,
         },
         FlipnoteOp::RemoveFrame { frame: [2; 16] },
     ];
@@ -227,7 +241,7 @@ fn studio_overlay_store_reversed_hash_order_reconstructs_full_frame_history() {
     assert!(p.tombstones.contains_key(&[2; 16]));
     assert!(p.frames.contains_key(&[6; 16]));
     let pins = store.creative_pinned_cids().unwrap();
-    for cid in [[3; 32], [4; 32], [5; 32], [6; 32]] {
+    for cid in [[3; 32], insert_cid, replace_cid, second_cid] {
         assert!(pins
             .for_group(&f.group.group_id())
             .any(|held| *held == catcoms_storage::Cid::from_bytes(cid)));
@@ -243,7 +257,7 @@ fn studio_overlay_store_reversed_hash_order_reconstructs_full_frame_history() {
     assert_eq!(actual.projection(), expected.projection());
     assert_eq!(actual.accepted(), 4);
     let pins = store.creative_pinned_cids().unwrap();
-    for cid in [[3; 32], [4; 32], [5; 32], [6; 32]] {
+    for cid in [[3; 32], insert_cid, replace_cid, second_cid] {
         assert!(pins
             .for_group(&f.group.group_id())
             .any(|held| *held == catcoms_storage::Cid::from_bytes(cid)));
@@ -1007,9 +1021,9 @@ fn studio_overlay_acceptance_transfers_pixel_protection_before_its_write() {
     let group = hex::encode(f.group.group_id());
 
     let mut blobs = store.blob_store(&group).unwrap();
-    let cid = blobs
-        .put(b"pixels named only by the new operation")
-        .unwrap();
+    let payload = pix();
+    let pixels = payload.len() as u64;
+    let cid = blobs.put(&payload).unwrap();
     let orphan = blobs.put(b"nothing will ever name this").unwrap();
 
     // Establish a KNOWN pin set that predates the acceptance and excludes both CIDs, so the
@@ -1022,7 +1036,7 @@ fn studio_overlay_acceptance_transfers_pixel_protection_before_its_write() {
             frame: [9; 16],
             after: None,
             cid: *cid.as_bytes(),
-            bytes: 39,
+            bytes: pixels,
         }
         .encode()
         .unwrap(),
@@ -1038,7 +1052,7 @@ fn studio_overlay_acceptance_transfers_pixel_protection_before_its_write() {
         !blobs.delete(&cid).unwrap(),
         "an accepted operation's pixels were reclaimable before the next scan"
     );
-    assert!(blobs.get_bounded(&cid, 200).unwrap().is_some());
+    assert!(blobs.get_bounded(&cid, 100_000).unwrap().is_some());
     // The control: protection is genuinely known and still reclaims an unreferenced CID, so the
     // assertion above is not an unknown-protection refusal.
     assert!(store.creative_references_known());
@@ -1057,7 +1071,9 @@ fn studio_overlay_uncertain_acceptance_still_protects_its_pixels() {
         let (close, basis) = closing(&f, &mut store);
         let group = hex::encode(f.group.group_id());
         let mut blobs = store.blob_store(&group).unwrap();
-        let cid = blobs.put(b"pixels for an uncertain write").unwrap();
+        let payload = pix();
+        let pixels = payload.len() as u64;
+        let cid = blobs.put(&payload).unwrap();
         store.creative_pinned_cids().unwrap();
         assert!(store.creative_references_known());
 
@@ -1066,7 +1082,7 @@ fn studio_overlay_uncertain_acceptance_still_protects_its_pixels() {
                 frame: [9; 16],
                 after: None,
                 cid: *cid.as_bytes(),
-                bytes: 39,
+                bytes: pixels,
             }
             .encode()
             .unwrap(),
@@ -1106,7 +1122,7 @@ fn studio_overlay_uncertain_acceptance_still_protects_its_pixels() {
             !blobs.delete(&cid).unwrap(),
             "an uncertain acceptance left its pixels reclaimable"
         );
-        assert!(blobs.get_bounded(&cid, 200).unwrap().is_some());
+        assert!(blobs.get_bounded(&cid, 100_000).unwrap().is_some());
     }
 }
 
@@ -1122,14 +1138,16 @@ fn studio_overlay_exact_retry_is_acknowledged_without_media_admission() {
     let (close, basis) = closing(&f, &mut store);
     let group = hex::encode(f.group.group_id());
     let mut blobs = store.blob_store(&group).unwrap();
-    let cid = blobs.put(b"pixels for the accepted operation").unwrap();
+    let payload = pix();
+    let pixels = payload.len() as u64;
+    let cid = blobs.put(&payload).unwrap();
 
     let op = f.domain(
         FlipnoteOp::InsertFrame {
             frame: [9; 16],
             after: None,
             cid: *cid.as_bytes(),
-            bytes: 39,
+            bytes: pixels,
         }
         .encode()
         .unwrap(),
@@ -1204,9 +1222,9 @@ fn studio_overlay_detached_acceptance_survives_a_complete_scan_between_capture_a
     let (close, basis) = closing(&f, &mut store);
     let group = hex::encode(f.group.group_id());
     let mut blobs = store.blob_store(&group).unwrap();
-    let cid = blobs
-        .put(b"pixels created for a detached acceptance")
-        .unwrap();
+    let payload = pix();
+    let pixel_bytes = payload.len() as u64;
+    let cid = blobs.put(&payload).unwrap();
     let orphan = blobs.put(b"unreferenced throughout").unwrap();
 
     // A known pin set that predates the acceptance and excludes the new CID, so nothing below
@@ -1219,7 +1237,7 @@ fn studio_overlay_detached_acceptance_survives_a_complete_scan_between_capture_a
             frame: [9; 16],
             after: None,
             cid: *cid.as_bytes(),
-            bytes: 39,
+            bytes: pixel_bytes,
         }
         .encode()
         .unwrap(),
@@ -1229,7 +1247,7 @@ fn studio_overlay_detached_acceptance_survives_a_complete_scan_between_capture_a
         author: f.device.device_id(),
         operation: op,
     };
-    let pixels = store
+    let held = store
         .hold_creative_transient(&f.group.group_id(), BTreeSet::from([*cid.as_bytes()]))
         .unwrap();
     let capture = store
@@ -1241,7 +1259,8 @@ fn studio_overlay_detached_acceptance_survives_a_complete_scan_between_capture_a
             basis,
             intent,
             300,
-            Some(pixels),
+            Some(held),
+            Some((cid, pixel_bytes)),
         )
         .unwrap();
 
@@ -1255,7 +1274,7 @@ fn studio_overlay_detached_acceptance_survives_a_complete_scan_between_capture_a
         !blobs.delete(&cid).unwrap(),
         "a complete scan reclaimed pixels held by a detached acceptance"
     );
-    assert!(blobs.get_bounded(&cid, 200).unwrap().is_some());
+    assert!(blobs.get_bounded(&cid, 100_000).unwrap().is_some());
     // The scan is genuinely complete and usable: an unreferenced CID still reclaims.
     assert!(store.creative_references_known());
     assert!(blobs.delete(&orphan).unwrap());
@@ -1288,7 +1307,7 @@ fn studio_overlay_detached_acceptance_survives_a_complete_scan_between_capture_a
         !blobs.delete(&cid).unwrap(),
         "the committed acceptance left its pixels reclaimable"
     );
-    assert!(blobs.get_bounded(&cid, 200).unwrap().is_some());
+    assert!(blobs.get_bounded(&cid, 100_000).unwrap().is_some());
 }
 
 /// The staged commit must refuse a plan whose record changed while it was detached, rather than
@@ -1306,7 +1325,7 @@ fn studio_overlay_detached_plan_is_refused_when_the_record_changed() {
     };
     let capture = store
         .capture_studio_overlay_save(
-            SERVER, &f.group, f.target, &f.device, basis, intent, 300, None,
+            SERVER, &f.group, f.target, &f.device, basis, intent, 300, None, None,
         )
         .unwrap();
     let plan = capture.plan().unwrap();
@@ -1355,4 +1374,162 @@ fn studio_overlay_detached_plan_is_refused_when_the_record_changed() {
         1,
         "the refusal disturbed the accepted branch"
     );
+}
+
+/// FS-001 / N12(d). A new acceptance may not name pixels the vault does not hold. The reference
+/// extractor only reads an address and the typed layer only checks declared sizes, so possession
+/// is a separate obligation: once at S1b, and again at S3 because the bytes can disappear while
+/// the append is detached.
+#[test]
+fn studio_overlay_new_acceptance_requires_pixels_at_admission_and_again_before_the_barrier() {
+    // A CID that was never published must be refused before anything is accepted.
+    let root = tempfile::tempdir().unwrap();
+    let mut store = open(root.path());
+    let f = Fixture::new(true);
+    let (close, basis) = closing(&f, &mut store);
+    let records = canonical(&store);
+    let absent = f.domain(
+        FlipnoteOp::InsertFrame {
+            frame: [9; 16],
+            after: None,
+            cid: [0xee; 32],
+            bytes: 39,
+        }
+        .encode()
+        .unwrap(),
+        7,
+    );
+    let mut b = budget(&mut store, &f);
+    let refused = store.save_studio_closing_overlay(
+        SERVER,
+        &f.group,
+        f.target,
+        &f.device,
+        &close,
+        Some(0),
+        basis.fingerprint(),
+        absent,
+        300,
+        &mut rng(),
+        &mut b,
+    );
+    assert!(
+        refused.is_err(),
+        "an operation naming absent pixels was accepted"
+    );
+    assert_eq!(canonical(&store), records, "the refusal changed records");
+    assert!(store
+        .load_epoch_intents(SERVER, &f.logical)
+        .unwrap()
+        .local_draft()
+        .unwrap()
+        .is_none());
+
+    // Now the S3 case: admission succeeds, then the bytes are removed while the append is
+    // detached. Every stamp and basis check still passes, so the refusal must come from the
+    // possession recheck and not from an earlier stale-plan guard.
+    let root = tempfile::tempdir().unwrap();
+    let mut store = open(root.path());
+    let f = Fixture::new(true);
+    let (close, basis) = closing(&f, &mut store);
+    let group = hex::encode(f.group.group_id());
+    let mut blobs = store.blob_store(&group).unwrap();
+    let cid = blobs.put(&pix()).unwrap();
+    let records = canonical(&store);
+
+    let op = f.domain(
+        FlipnoteOp::InsertFrame {
+            frame: [9; 16],
+            after: None,
+            cid: *cid.as_bytes(),
+            bytes: pix().len() as u64,
+        }
+        .encode()
+        .unwrap(),
+        7,
+    );
+    let intent = catcoms_replication::LocalIntent {
+        author: f.device.device_id(),
+        operation: op,
+    };
+    let held = store
+        .hold_creative_transient(&f.group.group_id(), BTreeSet::from([*cid.as_bytes()]))
+        .unwrap();
+    let capture = store
+        .capture_studio_overlay_save(
+            SERVER,
+            &f.group,
+            f.target,
+            &f.device,
+            basis,
+            intent,
+            300,
+            Some(held),
+            Some((cid, pix().len() as u64)),
+        )
+        .unwrap();
+    let plan = capture.plan().unwrap();
+
+    // Remove the bytes underneath the detached job, as external deletion or storage damage would.
+    let path = store.dir.join("blobs").join(&group);
+    for entry in fs::read_dir(&path).unwrap().flatten() {
+        if entry.path().is_file() {
+            fs::remove_file(entry.path()).unwrap();
+        }
+    }
+    assert!(store
+        .blob_store(&group)
+        .unwrap()
+        .get_bounded(&cid, 100_000)
+        .unwrap()
+        .is_none());
+
+    let mut b = budget(&mut store, &f);
+    let refused = store.commit_studio_overlay_save(
+        SERVER,
+        &f.group,
+        f.target,
+        &f.device,
+        &close,
+        Some(0),
+        plan,
+        &mut rng(),
+        &mut b,
+        atomic_write,
+        sync_intent,
+    );
+    match refused {
+        Err(error) => assert!(
+            error.to_string().contains("no longer held"),
+            "a new acceptance named absent pixels: {error}"
+        ),
+        Ok(_) => panic!("a new acceptance named absent pixels"),
+    }
+    assert_eq!(canonical(&store), records, "the refusal changed records");
+    assert!(store
+        .load_epoch_intents(SERVER, &f.logical)
+        .unwrap()
+        .local_draft()
+        .unwrap()
+        .is_none());
+}
+
+/// A valid PIX payload at the 192x144 the Flipnote frame rules require: a four-entry palette and
+/// 108 maximal runs, which is exactly 27,648 pixels. Consecutive equal indices are legal here
+/// because a maximal run clears the non-maximal-run rule.
+fn pix() -> Vec<u8> {
+    let mut bytes = vec![0x50, 0x49, 0x58, 0x31, 191, 143, 3];
+    for entry in [
+        [1, 0x13, 0x12, 0x18],
+        [2, 0xe8, 0xe6, 0xf0],
+        [3, 0x97, 0x7d, 0xf2],
+        [0, 0xe0, 0x7a, 0xb8],
+    ] {
+        bytes.extend(entry);
+    }
+    for _ in 0..108 {
+        bytes.extend([255, 0]);
+    }
+    crate::creative::validate_pix(&bytes).expect("the fixture must be a valid PIX");
+    bytes
 }

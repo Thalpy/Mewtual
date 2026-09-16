@@ -155,23 +155,26 @@ fn studio_overlay_handoff_replays_dependency_order_and_retains_all_pixel_referen
     let f = Fixture::new(true);
     let mut store = open(root.path());
     let (close, basis) = closing(&f, &mut store);
+    let (insert_cid, insert_bytes) = published_pix(&store, &f, 0x41);
+    let (replace_cid, replace_bytes) = published_pix(&store, &f, 0x42);
+    let (second_cid, second_bytes) = published_pix(&store, &f, 0x43);
     let bodies = [
         FlipnoteOp::InsertFrame {
             frame: [2; 16],
             after: Some([1; 16]),
-            cid: [4; 32],
-            bytes: 12,
+            cid: insert_cid,
+            bytes: insert_bytes,
         },
         FlipnoteOp::ReplaceFrame {
             frame: [2; 16],
-            cid: [5; 32],
-            bytes: 13,
+            cid: replace_cid,
+            bytes: replace_bytes,
         },
         FlipnoteOp::InsertFrame {
             frame: [6; 16],
             after: Some([2; 16]),
-            cid: [6; 32],
-            bytes: 14,
+            cid: second_cid,
+            bytes: second_bytes,
         },
         FlipnoteOp::RemoveFrame { frame: [2; 16] },
     ];
@@ -226,7 +229,7 @@ fn studio_overlay_handoff_replays_dependency_order_and_retains_all_pixel_referen
     drop(store);
     let mut store = open(root.path());
     let pins = store.creative_pinned_cids().unwrap();
-    for cid in [[3; 32], [4; 32], [5; 32], [6; 32]] {
+    for cid in [[3; 32], insert_cid, replace_cid, second_cid] {
         assert!(
             pins.for_group(&f.group.group_id())
                 .any(|actual| *actual == catcoms_storage::Cid::from_bytes(cid)),

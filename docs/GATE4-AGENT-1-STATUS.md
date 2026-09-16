@@ -40,7 +40,8 @@ they are the highest-conflict changes, so they land last. The per-item verdict r
 | 2026-09-15 | R4-TEST-001 correction | `4d09869` | `079e59a` | test plus one cfg(test) helper | N25 and M9; pushed, awaiting the reviewer's source inspection to close |
 | 2026-09-15 | I-3 protection transfer | `079e59a` | `65e77d1` | bounded implementation | Mechanism **PASS**; **I3-001** (P2) opened: media admission ran before retry classification |
 | 2026-09-16 | I3-001 correction | `65e77d1` | `b7df00b` | bounded implementation | **PASS**: I3-001 **closed** |
-| 2026-09-16 | Flow S staged seams and N12(a) | `7b9cf3e` | uncommitted working tree | bounded implementation | First real detached window; runtime not acceptable until I-4/C-3 lands where H7 spans an inventory |
+| 2026-09-16 | Flow S staged seams and N12(a) | `7b9cf3e` | `1c3a1e0` | bounded implementation | Split and N12(a) **PASS**; **FS-001** (P2) opened: new authoring could durably accept a missing PIX blob |
+| 2026-09-16 | FS-001 correction | `1c3a1e0` | uncommitted working tree | bounded implementation | S1b admission and S3 possession recheck, with N12(d) and M15 |
 
 Working checkout: `M:\Git (local)\CatComs`, branch `Create-suite-2`. **Other agents are working in
 this same checkout**: Agent 3's design landed at `7efc9c2` and Agent 2's documents are present
@@ -370,6 +371,51 @@ mutation.
 `studio_overlay_detached_plan_is_refused_when_the_record_changed` covers the other half: a plan
 derived from superseded bytes is refused at the stamp comparison, records are unchanged and the
 accepted branch is undisturbed.
+
+### FS-001: the media-availability contract
+
+Flow S had neither of the two media checks the design specifies.
+`catcoms_replication::studio::operation_blob_cid` extracts an address and validates grammar and
+scope; it does not establish that the blob exists. The typed admission layer checks operation
+semantics and declared byte and count caps, not physical availability. A transient hold is a
+liveness claim over an address, and typed replay never fetches pixels. So a valid `InsertFrame`
+naming a CID the vault does not hold could be captured, appended, committed and become a durable
+local draft referencing bytes the store does not possess.
+
+Both checks now exist, on the new-authoring path only:
+
+- **S1b `admit_studio_frame_pixels`**, before the transient hold and before any detached work:
+  the bytes must be present at the declared size, pass `validate_pix`, be 192x144, and are staged
+  and promoted into the durable namespace, exactly as the ordinary Apply path does.
+- **S3 `check_studio_frame_pixels`**, immediately before the I-3 holds and the intent barrier:
+  the bytes must still be physically present at the declared size. External deletion or storage
+  damage during the detached stage refuses here rather than producing a durable draft.
+
+The capture carries the request's `(cid, declared bytes)` so the commit knows what to recheck;
+possession itself is never carried across the detach. Acknowledgements and exact retries reach
+none of this, so AG1-001 and I3-001 are preserved: the exact-retry path still returns before the
+capture exists.
+
+`studio_overlay_new_acceptance_requires_pixels_at_admission_and_again_before_the_barrier` covers
+both controls. A never-published CID is refused before anything is accepted, with records unchanged
+and no local draft. Then a valid capture is followed by physical removal of the bytes underneath
+the detached job; every stamp and basis check still passes, so the refusal has to come from the
+possession recheck, and the assertion requires that specific error rather than any failure.
+
+| Check | Result |
+|---|---|
+| `... --lib studio_overlay_ -- --test-threads=1` | **43 passed, 0 failed, 2 ignored**, 1202.15 s. Log `logs/gate4-a1-fs001-fix.log`. |
+| **M15**, removing only the S3 possession recheck | Fails at the design's named assertion, "a new acceptance named absent pixels"; restored source passes. |
+| `cargo clippy -j 1 -p catcoms-app --lib --tests -- -D warnings`, `cargo fmt --all -- --check` | Clean. |
+
+**Fixtures corrected, not weakened.** Enforcing possession broke two pre-existing frame tests,
+`studio_overlay_store_reversed_hash_order_reconstructs_full_frame_history` and
+`handoff::eligibility::studio_overlay_handoff_replays_dependency_order_and_retains_all_pixel_references`,
+because both saved frame operations naming synthetic CIDs the vault never held, with arbitrary
+declared sizes. That is precisely the gap FS-001 describes, encoded in fixtures. Both now publish
+real 192x144 PIX through `published_pix` and assert pins against the real CIDs, so their subjects,
+hash ordering and reference retention, are unchanged and their inputs are now realistic. No
+assertion was removed or relaxed.
 
 **What this does and does not cover.** The transfer and its ordering are real and mutation-proven.
 Those particular tests prove the transfer on the composed path; N12(a) above now proves the
