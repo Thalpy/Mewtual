@@ -219,6 +219,44 @@ preservation claim; and the two new `SettlementState` values `localDraftManual` 
 `localDraftDisposed`. Agent 4 applies it. No row may be published as available before the
 corresponding command is registered.
 
+## Implementation progress
+
+Implementation started 2026-09-16, after the design PASS and once Agent 1's `DraftArchive` seam
+landed. Everything on `gate4-agent1-runtime`.
+
+### Slice 1: the draft archive payload codec (core)
+
+| Item | State |
+|---|---|
+| `crates/catcoms-replication/src/studio/overlay/archive.rs` | New. `StudioDraftArchive`, `StudioOverlayProvenance`, `MAX_STUDIO_DRAFT_ARCHIVE_BYTES`. |
+| Built from a **structural** branch plus its ledger | Yes: `from_branch` uses `checked_entries` and the ledger's envelopes, so a non-replayable branch archives exactly as well as a replayable one (design 6.5, finding 5 of SEC-PAIR-001). |
+| `replayable` | A recorded label, not a gate. |
+| Bound | `MAX_STUDIO_DRAFT_ARCHIVE_BYTES` derived in replication from the field maxima, which is the correct layer: the payload schema owns its own bound. Agent 1's app-side `MAX_DRAFT_ARCHIVE_PAYLOAD_BYTES` currently re-derives the same value independently. **Open item for slice 2:** tie them with a static assertion rather than leaving two derivations, and hand the collapse to Agent 4. |
+| Tests | 6, in `studio/epoch/owner/tests/archive.rs`, reusing the real settlement `Fixture`. A synthetic basis would have needed a test-only constructor on `StudioClosingOverlayBasis`, which the overlay design forbids. |
+| Evidence | `cargo test -j 1 -p catcoms-replication`: 212 + 14 + 25 + 8 passed, 0 failed, 0 ignored. Strict clippy `--all-targets -D warnings` clean. `cargo fmt --check` clean. |
+
+**One mutation run, and it found a bad test of mine.** Deleting operation-CID collection from
+`blob_cids` did **not** fail the reference test as first written: the replication fixture authors
+only header edits, which carry no PIX reference, so both sides of the comparison were the base set
+and the assertion was vacuous. The test is now scoped and labelled to the base half only, with an
+in-test assertion that fires if the fixture ever gains a CID-bearing operation and silently
+re-widens it. **The operation half is owed in slice 2**, against the app crate's Flipnote fixture
+that publishes real PIX blobs, which is also where the collector plugs into the inventory arm and
+where M28 can observe a missing CID. Deferred, not done.
+
+A second mutation confirms a guard that no test previously reached: removing the
+`entry.operation.id(&entry.author) != entry.id` check makes
+`draft_archive_rejects_an_entry_id_that_does_not_bind_its_body` fail at its intended assertion and
+nothing else; source restored byte for byte and all 6 pass again. Without that check an archive
+could name accepted work it does not contain, and a preserving disposal would destroy the real
+operation while claiming to have kept it.
+
+### Not yet built
+
+The app-side archive record writer and reader, the reference collector that narrows Agent 1's
+fail-closed arm (I-5), the release path, the disposal transaction, the v3 record arms, the
+composite copy capture, the lifecycle classifier, the tenure work and every native command.
+
 ## Test and CI evidence
 
 | Item | State |
