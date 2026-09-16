@@ -1243,7 +1243,10 @@ could neither fault the source, nor take the occupied slot, nor displace anythin
 response nothing durable kept proof suppressed. So:
 
 1. at the next write after demotion, the pair **migrates** into `pairs` when there is room, freeing
-   the slot for a future live conflict;
+   the slot for a future live conflict. Migration happens **before** any B1 for that pair, so the
+   binding is deterministic (AG3-DES-047): a migrated pair is issued as `repair_kind 1` by index,
+   and `repair_kind 3` is used only while the pair is still in `reserved`, whether because it is
+   still live or because there was no room to migrate. The two are never both applicable;
 2. where `pairs` is full it stays put, derived-historical, and the slot is unavailable;
 3. a live conflict arriving with no slot sets `live_overflow` to the authoring tenure start instead
    of being dropped. That is the evidence-free hold: it suppresses proof on the same derived-live
@@ -1252,6 +1255,28 @@ response nothing durable kept proof suppressed. So:
 
 The marker deliberately carries no receipts. It cannot authorize anything, only refuse, which is the
 correct asymmetry for a fact we know but cannot yet substantiate.
+
+**Not every live pair is drainable** (AG3-DES-046). Revision 10 required a live reserved pair to
+become a source fault before any other repair could issue, while the AG3-DES-042 fallback said an
+unreproducible pair stays owner-side and is repaired directly. For `{R1,R3}` after `{R1,R2}` was
+repaired, both rules applied and there was no legal next step. So resolution is split by a predicate
+computed on the already-checked source **without mutating it**:
+
+```text
+pair_is_materialisable(source, pair) =
+    neither member is is_repaired_loser(source)
+ && one member is the source's current head or its opening      // so the conflict forms against it
+```
+
+- **materialisable** -> drain into a source fault, under the crash-safe order below, then repair it
+  as the source's own pair through `repair_kind 2`;
+- **not materialisable** -> the pair stays in `reserved`, proof stays suppressed, and it is issued
+  directly through `repair_kind 3`. It never passes through `ReceiptBook::fault`, because the seal
+  demonstrably cannot produce it (R33).
+
+The decision is made before any durable source mutation, so the impossible case is never reached by
+first faulting the source into some *other* pair. 15.1 N39 exercises the selection and issuance
+boundary, not only the retained pair.
 
 **The drain is its own crash-safe transaction** (AG3-DES-044). A live pair lives in the owner record
 and its eventual fault lives in the source: two durable objects with no atomic transition, and
@@ -1311,8 +1336,9 @@ derived, in this order:
 1. a persisted repair that is not yet terminal names the active pair (AG3-DES-019: once B1 exists,
    that transaction owns the target);
 2. otherwise the source's own fault pair, read from `ReceiptBook::fault`;
-3. otherwise the reserved pair **if `reserved_is_live`**, which must be drained into a real source
-   fault before any other repair may be issued;
+3. otherwise the reserved pair **if `reserved_is_live`**, which must be **resolved** before any
+   other repair may be issued, by the drain when it is materialisable and by direct issuance when it
+   is not (below);
 4. otherwise the lowest retained pair id in `pairs`;
 5. otherwise the reserved pair when it is no longer live, ranked with history.
 
@@ -1340,8 +1366,18 @@ became the source's own does not consume capacity twice.
 **Terminal-pair recycling** (AG3-DES-022, second hole). Revision 5 said the other retained pair
 "becomes active" when a repair becomes terminal, but never removed the pair that just terminated,
 so the lowest-pair-id rule could make already-resolved evidence active again. So: when a repair's
-committed state becomes terminal, one durable transition removes its named pair from `pairs` (if it
-was there) and clears `repair` and `applied`. Its evidence is not lost, because the book's
+committed state becomes terminal, one durable transition removes the pair **its binding names** and
+then clears `repair` and `applied`. The removal is binding-specific (AG3-DES-047), which revision 10
+left as a single `pairs`-only rule that silently stranded a kind-3 pair in `reserved` where it could
+become active again:
+
+| `repair_kind` | Removes |
+|---|---|
+| 1, external | the indexed entry in `pairs` |
+| 2, source-bound | nothing in the record; the pair lives in the source |
+| 3, reserved | clears `reserved` exactly |
+
+Its evidence is not lost, because the book's
 `resolved_repair` now holds both receipts and `is_repaired_loser` screens them. The transition is
 idempotent: re-reporting the **exact** pair this repair named is a no-op (6.5 rule 6, as narrowed by
 AG3-DES-029, which deliberately does not extend to a distinct pair merely containing its loser), and
