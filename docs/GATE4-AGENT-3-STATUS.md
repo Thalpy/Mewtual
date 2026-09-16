@@ -1,7 +1,7 @@
 # Gate 4 Agent 3 status: runtime signed fault repair
 
 Owner: Agent 3 ([assignment](GATE4-AGENT-HANDOFFS.md#agent-3-runtime-signed-fault-repair)).
-Proposal: [GATE4-AGENT-3-DESIGN](GATE4-AGENT-3-DESIGN.md), currently revision 3.
+Proposal: [GATE4-AGENT-3-DESIGN](GATE4-AGENT-3-DESIGN.md), currently revision 4.
 Review preamble: 3. Current entries override older ones.
 
 ## Checkpoints
@@ -10,7 +10,8 @@ Review preamble: 3. Current entries override older ones.
 |---|---|---|---|---|---|
 | 2026-09-15 | Design revision 1 | `1bcb1bca204d721b848b17c0835faf931ae930e3` | `7efc9c2aba0a37d9aec57e268d9ff63edaca1b8a` | design, docs only | **REQUEST CHANGES**: AG3-DES-001 to AG3-DES-008, AG3-TEST-001; U-1 to U-6 decided |
 | 2026-09-15 | Design revision 2, findings answered | `7efc9c2aba0a37d9aec57e268d9ff63edaca1b8a` | `63a11e1a6451c7ed373c90b0e81b59d8a748a72a` | design, docs only | **REQUEST CHANGES**: AG3-DES-003, 005, 007, 008 corrections **accepted**; new AG3-DES-009 to AG3-DES-012; M2 and M12 non-isolating; U-7 and U-8 decided |
-| 2026-09-16 | Design revision 3, second-round findings answered | `63a11e1a6451c7ed373c90b0e81b59d8a748a72a` | this commit | design, docs only | re-review requested |
+| 2026-09-16 | Design revision 3, second-round findings answered | `63a11e1a6451c7ed373c90b0e81b59d8a748a72a` | `a62178b94f20cd60a5363e6a3d6d6216edb9e516` | design, docs only | **REQUEST CHANGES**: historical-pair direction, 2a/2b split, v2 framing, U-7, U-8 and M12 **accepted**; new AG3-DES-013 to AG3-DES-016; M2 still masked; U-9 and U-10 decided |
+| 2026-09-16 | Design revision 4, third-round findings answered | `a62178b94f20cd60a5363e6a3d6d6216edb9e516` | this commit | design, docs only | re-review requested |
 
 Working checkout: `M:\Git (local)\CatComs`, shared with the parallel Agent 1 and Agent 2 sessions,
 which are now doing implementation and design work respectively. Agent 1 has the checkout on its
@@ -19,6 +20,22 @@ documents with explicit pathspecs. `Create-suite-2` was fast-forwarded once, at 
 these documents off Agent 1's branch alone; it has not been moved since. **Agent 3 implementation
 must move to a separate branch or worktree before any code change**; no mutation harness may run
 against another agent's source.
+
+## Finding ledger, revision 3 round
+
+| Finding | Severity | Status | Where answered |
+|---|---|---|---|
+| AG3-DES-013 | P1 | **Answered in revision 4.** Case 5 matched "cross-tenure, any shape", so an owner applying a historical repair to its own healthy source would reopen a sealed epoch and lose newer progress. Fault status now classifies before tenure; a source not faulted on the named pair reaches only the screening case. Flow D no longer discards repairs for non-faulted documents, which is what made case 6 unreachable. | Design 5.1 C-2, 7 Flow D, 15.1 N5c, N5d |
+| AG3-DES-014 | P1 | **Answered, and revision 3's claim was wrong.** `decode_mode` derives the document from `latest` alone and `ResolvedRepair::verify` requires equality, so the epoch-zero shape failed `ReceiptConflict`. C-8 widens that derivation for versions 4 and 5 only. | Design 3 R17, 5.1 C-8, 15.1 N2b |
+| AG3-DES-015 | P1 | **Answered.** Revision 3 defined only the creation of `reconciled`. Promotion on completion, retirement on supersession, clearing on tenure change, inert stale retries and decode constraints are now specified; without promotion, `complete_studio_head` had no valid path for the reconciled winner at all. | Design 3 R18, 5.1 C-7, 15.1 N28 |
+| AG3-DES-016 | P1 | **Answered.** A single active pair now spans the source fault and the owner record, with a source fault always active and one bounded deferred slot, so sequential repair works in both orderings. Ordinary receipt issuance is explicitly not blocked. | Design 5.2, 6.5, 15.1 N31 |
+| AG3-TEST-002 | P2 | **Answered, and the masking is confirmed at the source**: `reserve` sets `ready = false` and a failed write never commits, so the successor `reserve` fails on `Reconcile` regardless. M2 now bypasses the recovery save before it reserves. | Design 3 R20, 15.2 M2 |
+| U-9 | decision | **Reviewer's answer adopted**: `EpochFaultRecord` stays owner-only. | Design 5.2, 16 |
+| U-10 | decision | **Reviewer's answer adopted**: no automatic expiry. | Design 5.2, 16 |
+
+Accepted in the revision-3 round and not reopened: the historical-pair report direction, the 2a/2b
+adoption split with the committed-state terminality oracle, the Studio and Registry v2 framing and
+parse-order correction, U-7, U-8, and the retargeted M12.
 
 ## Finding ledger, revision 2 round
 
@@ -65,10 +82,31 @@ AG3-DES-008.
 | "One reported receipt is enough" (rev 2) | **Wrong for the historical case.** A new owner may hold neither member, so the reporter, which is faulted and holds both, always sends both. |
 | "The per-requester rail and pending cap precede the v2 decode" (rev 2) | **Wrong.** `queue_checkpoint_head` decodes the scoped query before charging the per-requester rail, so the decode is split instead. |
 | "Clearing a losing `in_flight` reconciles the journal" (rev 2) | **Insufficient.** Both the head selector and `prepare_verified` key off the retained high water, so the owner falls back to an older receipt and reads its next one as a gap. |
+| "Cross-tenure case 5 applies to any shape" (rev 3) | **Wrong.** It would let a historical repair reopen a healthy current-tenure source and drop its legitimate head. Fault status must classify first. |
+| "Case 5's epoch-zero shape satisfies restart" (rev 3) | **Wrong.** `decode_mode` derives the document from `latest` only, so a resolved repair with no head fails `ReceiptConflict`. Asserted without checking the decoder. |
+| "A repair for a document with no local fault is discarded" (rev 3) | **Contradicted its own case 6.** Distribution has to reach the screening path or the case is dead code. |
+| "`reconciled` plus `canonical_head()` finishes the journal fix" (rev 3) | **Incomplete.** Creation without promotion, retirement, tenure clearing or decode constraints leaves the reconciled winner impossible to complete and eventually stale. |
+| "M2 is isolated once it mints on a lie" (rev 3) | **Still masked.** The failed accounted write leaves the budget unready, so the successor write fails on `Reconcile` before the intended assertion can fail. |
+
+## Facts established by the revision-4 audit
+
+New this revision, verified in code:
+
+- `ReceiptBook::decode_mode` derives its document as
+  `latest.as_ref().map(|receipt| receipt.document.clone())` (`epoch.rs:1877`) and then calls
+  `resolved.verify(document.as_ref(), ..)`, whose first condition is
+  `document != Some(&self.repair.document)` (`epoch/repair_state.rs:43`). A resolved repair with no
+  `latest` therefore fails `ReceiptConflict`.
+- `OwnerReceiptJournal::mark_published` returns early only on an exact `high_water` match and
+  otherwise requires `in_flight` to be present and equal (`epoch.rs:2043-2058`). A receipt that is
+  neither has no completion path.
+- `EpochStorageBudget::reserve` sets `self.ready = false` before returning
+  (`store/epoch_budget.rs:376`) and a writer error returns without `commit()`, so every later
+  `reserve` fails with `BudgetError::Reconcile`.
 
 ## Facts established by the revision-3 audit
 
-New this revision, verified in code:
+Verified in code and still relied on:
 
 - `ingest_verified` returns `Ok(ReceiptIngest::Fault)` on `self.fault.is_some()` before the
   repaired-loser screen, the tenure comparison and the high-water logic (`epoch.rs:1615-1619`);
@@ -128,9 +166,11 @@ Full signatures are in [the design](GATE4-AGENT-3-DESIGN.md) section 5. Summary,
   repaired-loser-is-not-an-anchor predicates (C-3); `conflicting_receipt_pair` plus
   `ReceiptRepair::check_evidence` layered on it (C-4); `StudioRepairState`, `repair_state`,
   `repair_install_pending`, `fault_evidence`, `ReceiptBook::repair_sequence` (C-5);
-  `prepare_repair_adoption` (C-6); `OwnerReceiptJournal::resolve_repair`, `canonical_head` and the
-  version-2 journal with its `reconciled` slot (C-7).
-- Store: `EpochFaultRecord` and the owner record's version-3 section; `prepare_epoch_repair`
+  `prepare_repair_adoption` (C-6); `OwnerReceiptJournal::resolve_repair`, `canonical_head`, the
+  version-2 journal with its `reconciled` slot and that slot's promotion, retirement and
+  tenure-clearing lifecycle (C-7); the repair-bearing book document derivation (C-8).
+- Store: `EpochFaultRecord` with its `active` and `deferred` pairs and the single-active-pair rule
+  spanning the source fault; the owner record's version-3 section; `prepare_epoch_repair`
   (which also reconciles the journal) and `mark_epoch_repair_applied`; `apply_studio_repair`,
   `issue_studio_repair`, `report_studio_fault`, `studio_fault_evidence`, `StudioRepairOutcome`,
   `StudioRepairHold`, `CheckedRepairRecovery`, `stage_studio_repair_recovery`, `servable_repair`;
@@ -188,7 +228,7 @@ sections 5 and 13.3.
 
 ## Executed checks
 
-**None, in any of the three passes.** No Cargo, npm or script command has been run: these
+**None, in any of the four passes.** No Cargo, npm or script command has been run: these
 checkpoints change no code, and the local machine keeps checks serial. Every number quoted in the design is a constant
 read from source at the base or an explicitly labelled estimate. The maximal-shape replacement
 cost, the custody time of the capture and commit stages, and the protocol-allowance arithmetic in
@@ -204,8 +244,13 @@ design section 10.1 are **unverified**.
 | Prepared overlay fence and source custody (design 13.1) | Agent 1 | design revision 3, unreviewed | repair relies only on the existing `resolve_studio_handoff` and `save_studio_source_checked`; if `inventory_generation` lands, rotating it becomes mandatory over the full list in design 10.3 |
 | Native registration, UI hooks, INTERFACES rows | Agent 4 | not started | commands stay unregistered and nothing is callable from the renderer |
 
-U-1 through U-8 are all decided and carried. Two smaller questions, U-9 and U-10, are open in design
-section 16 and block nothing.
+U-1 through U-10 are all decided and carried. One smaller question, U-11, is open in design section
+16 and blocks nothing.
+
+At the reviewed head, Agent 1's runtime implementation is only partial and its I-4 and C-3 work has
+not landed, and Agent 2's tenure design is awaiting re-review with no implementation. Neither
+blocks this design checkpoint, but both are real prerequisites before Agent 3 implementation
+integrates.
 
 ## Coordination summary
 
