@@ -1,7 +1,7 @@
 # Gate 4 Agent 3 status: runtime signed fault repair
 
 Owner: Agent 3 ([assignment](GATE4-AGENT-HANDOFFS.md#agent-3-runtime-signed-fault-repair)).
-Proposal: [GATE4-AGENT-3-DESIGN](GATE4-AGENT-3-DESIGN.md), currently revision 5.
+Proposal: [GATE4-AGENT-3-DESIGN](GATE4-AGENT-3-DESIGN.md), currently revision 6.
 Review preamble: 3. Current entries override older ones.
 
 ## Checkpoints
@@ -12,7 +12,8 @@ Review preamble: 3. Current entries override older ones.
 | 2026-09-15 | Design revision 2, findings answered | `7efc9c2aba0a37d9aec57e268d9ff63edaca1b8a` | `63a11e1a6451c7ed373c90b0e81b59d8a748a72a` | design, docs only | **REQUEST CHANGES**: AG3-DES-003, 005, 007, 008 corrections **accepted**; new AG3-DES-009 to AG3-DES-012; M2 and M12 non-isolating; U-7 and U-8 decided |
 | 2026-09-16 | Design revision 3, second-round findings answered | `63a11e1a6451c7ed373c90b0e81b59d8a748a72a` | `a62178b94f20cd60a5363e6a3d6d6216edb9e516` | design, docs only | **REQUEST CHANGES**: historical-pair direction, 2a/2b split, v2 framing, U-7, U-8 and M12 **accepted**; new AG3-DES-013 to AG3-DES-016; M2 still masked; U-9 and U-10 decided |
 | 2026-09-16 | Design revision 4, third-round findings answered | `a62178b94f20cd60a5363e6a3d6d6216edb9e516` | `ad023d2e5b514a8f9598b1fe433fd2b080ecad6c` | design, docs only | **REQUEST CHANGES**: C-8 epoch-zero fix, reconciled lifecycle, healthy-source clobber fix and M2 **accepted**; new AG3-DES-017 to AG3-DES-021; AG3-TEST-003 on M12/N24/N5d; U-11 agreed |
-| 2026-09-16 | Design revision 5, fourth-round findings answered | `ad023d2e5b514a8f9598b1fe433fd2b080ecad6c` | this commit | design, docs only | re-review requested |
+| 2026-09-16 | Design revision 5, fourth-round findings answered | `ad023d2e5b514a8f9598b1fe433fd2b080ecad6c` | `3737f1d4fff6f2c08302b0ecb1b024008818a1cf` | design, docs only | **REQUEST CHANGES**: AG3-DES-021 **closed**; case 6c/N32, the sequence concept and M2 accepted; new AG3-DES-022 to AG3-DES-025; AG3-TEST-004 on N5c/N18/M12 |
+| 2026-09-16 | Design revision 6, fifth-round findings answered | `3737f1d4fff6f2c08302b0ecb1b024008818a1cf` | this commit | design, docs only | re-review requested |
 
 Working checkout: `M:\Git (local)\CatComs`, shared with the parallel Agent 1 and Agent 2 sessions,
 which are now doing implementation and design work respectively. Agent 1 has the checkout on its
@@ -21,6 +22,20 @@ documents with explicit pathspecs. `Create-suite-2` was fast-forwarded once, at 
 these documents off Agent 1's branch alone; it has not been moved since. **Agent 3 implementation
 must move to a separate branch or worktree before any code change**; no mutation harness may run
 against another agent's source.
+
+## Finding ledger, revision 5 round
+
+| Finding | Severity | Status | Where answered |
+|---|---|---|---|
+| AG3-DES-022 | P1 | **Answered in revision 6.** `ReceiptBook.fault` is itself one durable slot, so the source's own pair never needed a record copy; requiring it to be "retained here" is what let two historical pairs crowd out the pair actually blocking the document. The record now holds external pairs only and the derivation falls back to the book. The missing terminal-pair recycling is specified as an explicit, idempotent, crash-safe removal. | Design 3 R25, 5.2, 15.1 N31b, N31c |
+| AG3-DES-023 | P1 | **Answered.** Three different bounds coexisted: the new five-receipt formula, the superseded three-receipt paragraph in the same section, and 11.4 KiB in section 10.1. One canonical formula now, stated once, with 10.1 agreeing and the struct display corrected. | Design 5.2, 10.1 |
+| AG3-DES-024 | P1 | **Answered.** Core verifies current owner before its retry shortcut on purpose; revision 5 inverted that inside `plan_repair`, an authority-bearing API. Authority and evidence now precede every retry, sequence and in-progress outcome, with the store check named as defence in depth rather than the safety property. | Design 5.1 C-2, 15.1 N35 |
+| AG3-DES-025 | P2 | **Answered.** Case 6d leaves a different fault standing, so a distinct `Screened` outcome and pair-specific barrier and crash prose separate a terminal disposition from a usable document. | Design 5.3, 8, 15.1 N33 |
+| AG3-TEST-004 | P2 | **Answered.** N5c narrowed to the same-baseline higher head; N18 split into malformed-refuses and valid-unrelated-screens; M12's fixture qualified as historical throughout; Flow D's stale "case 6b" wording replaced by deference to the classification. | Design 7, 15.1 N5c, N18, 15.2 M12 |
+
+Closed in the revision-5 round: **AG3-DES-021**. Accepted and not reopened: case 6c with N32 for
+AG3-DES-017, the monotone sequence concept subject to AG3-DES-024's ordering fix, M2, and
+M1/M3-M11.
 
 ## Finding ledger, revision 4 round
 
@@ -109,10 +124,26 @@ AG3-DES-008.
 | "A repair for a different pair is `PairMismatch`" (rev 4) | **Wrong.** It is simply not about this source's blocker. Screening-only application is what removes the deadlock. |
 | "The non-faulted path only needs authority and evidence checks" (rev 4) | **Wrong.** It bypassed `apply_repair`'s `repair_sequence` monotonicity guard, so a delayed lower-sequence repair could overwrite a newer one. |
 | "N5d asserts stored bytes are unchanged" (rev 4) | **Self-contradictory.** Case 6b durably adds repair evidence; the assertion had to be narrowed to non-repair content. |
+| "A source fault's pair must be retained in the record to be selected" (rev 5) | **Wrong, and the record could not represent the result.** Two retained historical pairs could crowd out the pair actually blocking the document, and its repair had nowhere valid to bind. The source's pair is already durable in the book and needs no slot. |
+| "The other retained pair becomes active when a repair terminates" (rev 5) | **Incomplete.** Nothing removed the pair that just terminated, so already-resolved evidence could become active again. |
+| "MAX_RECORD_BYTES ... 3 * MAX_RECEIPT_BYTES" (rev 5, second statement) | **Stale duplicate.** Revision 5 added the correct five-receipt formula but left the old one later in the same section and 11.4 KiB in section 10.1. |
+| "Sequence and retry classify before anything else" (rev 5) | **Unsafe ordering.** Core deliberately verifies current owner before its retry shortcut; inverting that inside an authority-bearing API reintroduces the M4 bug one layer up. |
+| "B2 means the fault has durably ended" (rev 5, after case 6d) | **False for the screening cases.** A terminal disposition is not the same as a usable document. |
+
+## Facts established by the revision-6 audit
+
+New this revision, verified in code:
+
+- `ReceiptBook.fault` is a single `Option<(Receipt, Receipt)>` alongside the single
+  `resolved_repair` (`epoch.rs:1571-1575`), so the source holds exactly one unresolved pair and
+  holds it whether or not any owner record mentions it.
+- `ReceiptBook::apply_repair` calls `verify_current_owner` **before** its exact-retry shortcut, with
+  the comment "Authority must precede the retry shortcut: a returning key is not its old tenure"
+  (`epoch.rs:1735-1741`).
 
 ## Facts established by the revision-5 audit
 
-New this revision, verified in code:
+Verified in code and still relied on:
 
 - `prepare_checkpoint_adoption` requires only `adopting`, `Closing`, not faulted and
   `latest == receipt` (`studio/epoch/adoption.rs:89-95`), and `prepare_settlement` requires not
@@ -206,9 +237,11 @@ Full signatures are in [the design](GATE4-AGENT-3-DESIGN.md) section 5. Summary,
   `prepare_repair_adoption` (C-6); `OwnerReceiptJournal::resolve_repair`, `canonical_head`, the
   version-2 journal with its `reconciled` slot and that slot's promotion, retirement and
   tenure-clearing lifecycle (C-7); the repair-bearing book document derivation (C-8).
-- Store: `EpochFaultRecord` holding one or two canonically ordered pairs plus at most one repair,
-  with active status **derived** on load from the source and record rather than stored; the owner
-  record's version-3 section bounded for five receipt-sized values; `prepare_epoch_repair`
+- Store: `EpochFaultRecord` holding up to two canonically ordered **external** pairs plus at most
+  one repair, with active status **derived** on load (pending repair, else the source's own fault
+  pair from the book, else the lowest external pair) and an explicit terminal-pair recycling
+  transition; the owner record's version-3 section bounded for five receipt-sized values, stated
+  once; `prepare_epoch_repair`
   (which also reconciles the journal) and `mark_epoch_repair_applied`; `apply_studio_repair`,
   `issue_studio_repair`, `report_studio_fault`, `studio_fault_evidence`, `StudioRepairOutcome`,
   `StudioRepairHold`, `CheckedRepairRecovery`, `stage_studio_repair_recovery`, `servable_repair`;
@@ -266,7 +299,7 @@ sections 5 and 13.3.
 
 ## Executed checks
 
-**None, in any of the five passes.** No Cargo, npm or script command has been run: these
+**None, in any of the six passes.** No Cargo, npm or script command has been run: these
 checkpoints change no code, and the local machine keeps checks serial. Every number quoted in the design is a constant
 read from source at the base or an explicitly labelled estimate. The maximal-shape replacement
 cost, the custody time of the capture and commit stages, and the protocol-allowance arithmetic in

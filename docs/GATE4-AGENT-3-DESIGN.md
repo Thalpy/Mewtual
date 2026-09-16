@@ -1,6 +1,14 @@
 # Gate 4 Agent 3: runtime signed fault repair
 
-Status: **revision 5, design proposal, awaiting re-review. No production code is written.**
+Status: **revision 6, design proposal, awaiting re-review. No production code is written.**
+
+Revision 5 (`3737f1d4fff6f2c08302b0ecb1b024008818a1cf`) received **REQUEST CHANGES** with
+AG3-DES-022 to AG3-DES-025 and AG3-TEST-004. The reviewer closed AG3-DES-021, accepted case 6c and
+N32 for AG3-DES-017, accepted the monotone sequence concept subject to an ordering fix, and kept M2
+and M1/M3-M11 accepted. Revision 6 answers the five and reopens none of that. Its disposition table
+is section 0.
+
+
 
 Revision 4 (`ad023d2e5b514a8f9598b1fe433fd2b080ecad6c`) received **REQUEST CHANGES** with
 AG3-DES-017 to AG3-DES-021 and AG3-TEST-003, and agreement on U-11. The reviewer accepted C-8's
@@ -37,7 +45,17 @@ proposals. Sections 13.1 and 13.2 state what this scope needs and what it does w
 No Cargo command was executed for this pass either. Every number is a source constant read at the
 base or an explicitly labelled estimate.
 
-## 0. Disposition of the revision-4 findings
+## 0. Disposition of the revision-5 findings
+
+| Finding | Disposition in revision 6 | Where |
+|---|---|---|
+| AG3-DES-022, the two-pair record is not closed under a third source fault | **Corrected by removing the coupling entirely.** The record now holds only **external** pairs, never the source's own. A source fault already lives in `ReceiptBook::fault`, so it needs no slot, can never be crowded out by retained historical evidence, and is always derivable. A repair may name the source's fault pair or a record pair. The missing terminal-pair recycling is also specified: when a repair becomes terminal its named pair is removed from the record and the repair field cleared, so a resolved pair can never become active again. | 3 R25, 5.2, 15.1 N31 |
+| AG3-DES-023, contradictory owner-record bounds | **Corrected.** Revision 5 left three different figures in the document: the new five-receipt formula, the old three-receipt formula later in the same section, and 11.4 KiB in section 10.1. One canonical formula now appears once, the stale paragraph is gone, 10.1 agrees, and the displayed struct is the actual multi-pair representation rather than the superseded singular one. | 5.2, 10.1 |
+| AG3-DES-024, retry-first ordering can bypass the core live-authority check | **Corrected.** Core deliberately verifies current owner **before** its retry shortcut (`epoch.rs:1735-1741`, "a returning key is not its old tenure"), and revision 5's "sequence and retry classify before anything else" inverted that one layer up, in an authority-bearing API. Authority and evidence now precede every retry, sequence and in-progress outcome, and store-side redundancy is explicitly not what makes the core safe. | 5.1 C-2, 15.1 N35 |
+| AG3-DES-025, case 6d's outcome contract claims the fault ended | **Corrected.** Case 6d deliberately leaves a different source fault standing, so B2's "Fault has durably ended" and the terminal `Repaired` were false for it. A distinct `Screened` outcome, and pair-specific wording in the barrier and crash prose, separate "this signed disposition is terminal" from "this document is no longer Faulted". | 5.3, 8, 15.1 N33 |
+| AG3-TEST-004 | **Corrected.** N5c narrowed to the deliberately unclassifiable same-baseline higher head, since a provably losing baseline now takes 6c; N18 split into malformed evidence, which refuses, and a valid unrelated pair, which screens; M12's fixture qualified as historical throughout, because a current-tenure report must still fault the source even when the record is full; Flow D's "lands in case 6b" replaced by a deference to the C-2 classification. | 7 Flow D, 15.1 N5c, N18, 15.2 M12 |
+
+## 0.0 Disposition of the revision-4 findings
 
 | Finding | Disposition in revision 5 | Where |
 |---|---|---|
@@ -367,6 +385,18 @@ it. So applying a second repair to a source whose first repair still has an outs
 replacement would erase the evidence that `repair_install_pending()` is derived from, abandoning the
 in-flight transaction. This is the second half of AG3-DES-019.
 
+### R25: a receipt book has exactly one fault slot as well as one repair slot
+
+`ReceiptBook.fault` is a single `Option<(Receipt, Receipt)>` alongside the single
+`resolved_repair` (`epoch.rs:1571-1575`). The source therefore holds exactly one unresolved pair,
+and it holds it whether or not any owner record mentions it. Revision 5's derivation nevertheless
+required a source fault's pair to be "retained here" before it could be selected, so two retained
+historical pairs could crowd out the very pair making the document read-only, and a repair for it
+could not be written because the record's single repair had to validate against a retained pair.
+
+The resolution is that the source's own pair never needed a record slot: it is already durable, in
+the book, and always available. This is AG3-DES-022.
+
 ### R12: the store cannot validate a conflicting pair today
 
 `Receipt::restore_verified_from_vault` is `pub(crate)` (`epoch.rs:1125`) and `receipts_conflict` is
@@ -510,12 +540,26 @@ its own single transition.
 Classification. Let `S` be the selected receipt, `L` the loser, `H` the pre-application `latest`,
 `E` the gate epoch, `O` the opening.
 
-**Sequence and retry classify before anything else** (AG3-DES-020). The faulted path delegates to
-`apply_repair`, which enforces `repair.repair_sequence > self.repair_sequence`; revision 4's
-non-faulted path skipped `apply_repair` and so skipped that guard, while Flow D began applying
-repairs regardless of fault status. A delayed lower-sequence repair could therefore overwrite a
-newer resolved repair, reviving older loser screening and making a spent sequence reusable. So,
-uniformly and before any fault or tenure test:
+**Live authority comes first, then sequence and retry** (AG3-DES-024, AG3-DES-020). Core already
+gets this order right and says why: `apply_repair` calls `verify_current_owner` **before** its exact
+retry shortcut, because "a returning key is not its old tenure" (`epoch.rs:1735-1741`). Revision 5
+said sequence and retry classified "before anything else", which inverted that one layer up inside
+`plan_repair`, itself an authority-bearing API taking `group` and `issuer_tenure_start`. An exact
+old repair could then reach `AlreadyResolved` without the core's issuer-tenure recheck and, worse,
+resume a replacement when `install_pending` was true. The store's own `verify_current_owner` in S-2
+is defence in depth; it is explicitly **not** what makes the core safe. So `plan_repair` runs, in
+this order:
+
+1. `repair.verify_current_owner(group, issuer_tenure_start)`;
+2. `repair.check_evidence(a, b)` and the caller's scope checks;
+3. the retry, sequence and in-progress table below;
+4. the fault and tenure classification.
+
+15.1 N35 asserts step 1 precedes step 3 at the **core** boundary, with an exact previously resolved
+repair, the same device key, an independently observed different current tenure and an outstanding
+continuation: it must fail authority, not return `AlreadyResolved`.
+
+Step 3, uniformly, for faulted and healthy sources alike:
 
 | Precondition | Result |
 |---|---|
@@ -834,11 +878,13 @@ repair" as owner state per logical document, so the decision extends the existin
 
 ```rust
 pub struct EpochFaultRecord {
-    /// The frozen pair, canonical ascending by hash. Validated by the repair-INDEPENDENT
-    /// `conflicting_receipt_pair`, because this slot is written before any repair exists.
-    a: Receipt,
-    b: Receipt,
-    /// Signed only after an explicit current-owner decision.
+    /// EXTERNAL unresolved pairs only: pairs this document's own source is not faulted on.
+    /// Each is canonical ascending by hash and validated by the repair-INDEPENDENT
+    /// `conflicting_receipt_pair`, because a slot is written before any repair exists.
+    /// At most two. The source's own pair is never stored here (AG3-DES-022).
+    pairs: Vec<FaultPair>,          // 0..=2, ordered by pair id
+    /// Signed only after an explicit current-owner decision. It may name the source's own
+    /// fault pair or one of `pairs`.
     repair: Option<ReceiptRepair>,
     /// The local source has durably crossed its repair transition (barrier B2). It does NOT
     /// mean the replacement finished, and never means delivery.
@@ -886,13 +932,34 @@ derived, in this order:
 
 1. a persisted repair that is not yet terminal names the active pair (AG3-DES-019: once B1 exists,
    that transaction owns the target);
-2. otherwise, if the source is Faulted and its pair is retained here, that pair;
-3. otherwise the single retained pair;
-4. otherwise the lower pair id, deterministically.
+2. otherwise the source's own fault pair, read from `ReceiptBook::fault`;
+3. otherwise the lowest retained pair id in `pairs`, deterministically.
 
-A source fault whose pair this record does not yet hold is recorded on the next admission; until
-then rule 2 simply does not fire, and nothing is inconsistent. Crash at any point leaves at most two
-pairs and one repair on disk, and the derivation is a pure function of what survived.
+**The source's pair is never a record slot** (AG3-DES-022, R25). Revision 5 required it to be
+"retained here" before rule 2 could fire, which left a reachable dead end: with two unresolved
+historical pairs already retained, a local source fault on a third pair could neither be selected
+nor be given a repair, because the single repair field had to validate against a retained pair and
+both slots were full. Since `ReceiptBook.fault` is itself durable and holds exactly one pair, the
+record never needed a copy. Rule 2 now always fires when the source is faulted, whatever the record
+holds, and the repair field may name that pair directly. The combined state is therefore closed: at
+most two external pairs, plus whatever single pair the source itself is blocked on, plus one repair.
+
+A record slot that duplicates the source's current fault pair is redundant; on load it is ignored
+for derivation and dropped at the next write, so a pair that was external when reported and later
+became the source's own does not consume capacity twice.
+
+**Terminal-pair recycling** (AG3-DES-022, second hole). Revision 5 said the other retained pair
+"becomes active" when a repair becomes terminal, but never removed the pair that just terminated,
+so the lowest-pair-id rule could make already-resolved evidence active again. So: when a repair's
+committed state becomes terminal, one durable transition removes its named pair from `pairs` (if it
+was there) and clears `repair` and `applied`. Its evidence is not lost, because the book's
+`resolved_repair` now holds both receipts and `is_repaired_loser` screens them. The transition is
+idempotent: re-reporting a pair the book already screens is a no-op (6.5 rule 6), and an exact retry
+after a crash re-performs the same removal. Only after it completes may the repair field be used for
+another pair, which is what stops a single field silently changing owners.
+
+Crash at any point leaves at most two external pairs and one repair on disk, and the derivation is
+a pure function of what survived plus the source's own book.
 
 **The frozen pair is never replaced while unresolved** (I-10). A report naming a different pair
 while this slot holds an unresolved one is refused, exactly as a third receipt never replaces a
@@ -933,11 +1000,10 @@ reviewer asked this be decided explicitly, so: the owner keeps making progress i
 while a historical decision is pending, and the cost is that peers faulted on the old pair stay
 faulted until it is decided, which is visible in the fault view.
 
-Bounds: `MAX_RECORD_BYTES` becomes
-`MAX_OWNER_RECEIPT_JOURNAL_BYTES + MAX_CLOSE_RECORD_BYTES + 3 * MAX_RECEIPT_BYTES + 1280`, which
-with C-7's raised journal constant is about 12.4 KiB, with `MAX_SEALED_BYTES` following. The reader
-still refuses anything larger before allocating. These bytes charge the protocol allowance through
-the existing owner `storage_record`.
+The bound is stated once, above. Revision 5 left this paragraph behind with the superseded
+three-receipt formula, which is AG3-DES-023: an implementation following it would have recreated
+exactly the failure AG3-DES-018 closed. These bytes charge the protocol allowance through the
+existing owner `storage_record`.
 
 Transitions, both through `update_epoch_owner_state_with_writer` so they inherit its reload,
 inventory verification, reservation, seal, atomic write and commit order:
@@ -975,8 +1041,13 @@ In a new leaf `store/epoch_studio/repair.rs`.
 
 ```rust
 pub enum StudioRepairOutcome {
-    /// Fault ended and no replacement is required. Terminal.
+    /// This document's own Fault ended and no replacement is required. Terminal.
     Repaired,
+    /// This signed disposition is terminal and durably recorded, but it was NOT about this
+    /// document's own blocker: the source's own Fault, if any, still stands (case 6d), or the
+    /// source was healthy (cases 6b). Never read as "the document is usable again"; the
+    /// caller re-reads settlement state (AG3-DES-025).
+    Screened,
     /// Fault ended, the replacement completed. Terminal.
     Installed,
     /// Fault ended durably; the selected checkpoint's seed is still required. NOT terminal.
@@ -1024,10 +1095,14 @@ that write returns; signing alone grants no IO authority.
    or syncs the actual source (`store/epoch_studio.rs:556-566`).
 5. `unit.apply_receipt_repair(...)`. On `Held`, save nothing and return the hold with the unchanged
    state.
-6. Save the source (barrier **B2**). Fault has durably ended. The outcome is then read back from
-   the **committed** `repair_state()`, never from the plan's `install` field (C-5, AG3-DES-010):
-   `install_pending` continues to step 7 or returns `AwaitingSeed`, and only a committed state
-   that is neither pending nor awaiting returns the terminal `Repaired`. The owner then records B3.
+6. Save the source (barrier **B2**). **The signed disposition is durable; whether this document's
+   own Fault ended is a separate question** (AG3-DES-025). B2 ends the fault only for the
+   transitioning cases 1 to 5; in the screening cases 6b and 6d the source's own state is
+   deliberately untouched, so a different fault may still stand. The outcome is read back from the
+   **committed** `repair_state()` and the committed phase, never from the plan's `install` field
+   (C-5, AG3-DES-010): `install_pending` continues to step 7 or returns `AwaitingSeed`; a screening
+   case returns `Screened`; and only a transitioning case whose committed state is neither pending
+   nor awaiting returns the terminal `Repaired`. The owner then records B3.
 7. Replacement, reusing the accepted adoption half with the section 9 capability: validate every
    retained recovery slot as typed, verify the recovery inventory record, promote a due eviction
    (**B4**), hold if a warning is pending, stage the whole-version `Repair` snapshot (**B5**), hold
@@ -1412,11 +1487,13 @@ B4, B5, B6.
 **Flow D, distribution.** Ordinary head answers carry `{ receipt, repair, proof? }` under the 6.6
 predicate. The receiver authenticates the responder and the response signature, then verifies the
 repair under 6.2 and 6.3 and runs Flow A **whatever its own fault status**. Revision 3 discarded a
-repair for a document with no local fault, which contradicted case 6's existence and meant the
-screening path was never reached in practice (AG3-DES-013). A verified repair on a healthy source
-now lands in case 6b: the resolved disposition is recorded so the loser and its baseline
-descendants are screened from then on, and nothing else changes. Only a repair that fails
-verification, or that names a document this peer does not hold, is discarded.
+repair for a document with no local fault, which contradicted the screening case's existence and
+meant it was never reached in practice (AG3-DES-013). Which case a verified repair lands in is
+decided by C-2's classification and nothing here: a healthy source with no covered anchor screens
+through 6b, one already sitting on the repudiated branch is retargeted through 6c, and one faulted
+on a different pair screens through 6d. Revision 5 said "lands in case 6b", which overrode the
+classification it had itself just refined (AG3-TEST-004). Only a repair that fails verification, or
+that names a document this peer does not hold, is discarded.
 
 **Flow X, visible exit.** `RefreshRequired` before the transaction; `Repairing` once B2 returns and
 while `repair_install_pending` or any hold is true; then the actual phase read back from the saved
@@ -1431,7 +1508,7 @@ candidates.
 |---|---|---|---|
 | B0 | owner record or source: the reported frozen pair (6.5 rule 5) | no evidence; the reporter retries; no proof was served for a disputed receipt because admission precedes the response | the pair is frozen and cannot be replaced by a third receipt; the owner can decide |
 | B1 | owner record: repair signed, journal reconciled to the canonical winner, stale close binding dropped | no repair exists; the fault is unchanged; the owner may decide again, possibly differently | the exact decision resumes; a different selection is refused; the owner offers the winner as an unproven hint |
-| B2 | source: fault cleared, resolved repair in book, adoption mode set | source still Fault; re-apply from the pending record or a re-fetched repair; identical result | fault has ended; if `install_pending`, the state is the accepted adoption "Closing, awaiting seed" shape carrying the repair |
+| B2 | source: resolved repair in book, and for a transitioning case the fault cleared and adoption mode set | source unchanged; re-apply from the pending record or a re-fetched repair; identical result | the disposition is durable. For cases 1 to 5 this document's fault has ended and, if `install_pending`, the state is the accepted adoption "Closing, awaiting seed" shape carrying the repair. For the screening cases 6b and 6d the source's own phase is untouched and any different fault still stands (AG3-DES-025) |
 | B3 | owner record: `applied` | serving falls back to the source book, which already carries the repair, so eligibility is unchanged | record and book agree |
 | B4 | recovery eviction promotion | warning still pending; the hold is re-reported | staging proceeds |
 | B5 | recovery record: staged `Repair` snapshot | nothing staged; recompute yields the identical snapshot id and deadline | the losing version is durably readable; replacement may proceed |
@@ -1502,7 +1579,7 @@ conservative holds that run before either barrier.
 
 | Write | Purpose | Pool | Peak |
 |---|---|---|---|
-| owner record (B1, B3) | `Settlement` | protocol allowance, 16 MiB per server | old plus new, about 11.4 KiB each at maximum |
+| owner record (B1, B3) | `Settlement` | protocol allowance, 16 MiB per server | old plus new, about 14.4 KiB each at maximum (5.2's single canonical bound) |
 | recovery stage (B4, B5) | `Settlement` | settlement reserve, 48 MiB, staged slot | up to 6 MiB plus the existing replacement peak |
 | source transition (B2) and successor (B6) | `Settlement` | settlement reserve | old plus new source |
 | report fault write (Flow R) | `Settlement` | settlement reserve | old plus new source |
@@ -1697,9 +1774,11 @@ Core:
   epoch-zero source, restores with `latest` and `tenure` consistent, is never `install_pending`,
   and permits an immediately following ordinary adoption of the current owner's checkpoint that
   stages a `Rewound` snapshot.
-- **N5c** Case 6b: a non-faulted source holding a descendant of the repudiated branch records the
-  resolved repair, screens the loser, and performs no transition; case 6a rewinds only when the
-  repair is same-tenure and the opening is the loser.
+- **N5c** Case 6b, narrowed per AG3-TEST-004: the source's head is a **same-baseline higher
+  receipt** whose ancestry receipts cannot express, so it is deliberately unclassifiable. It records
+  the resolved repair, screens the exact loser, and performs no transition. A source on a *provably
+  losing* baseline is N32(c)'s case 6c, not this one; revision 5's wording conflated them. Case 6a
+  rewinds only when the repair is same-tenure and the opening is the loser.
 - **N5d** AG3-DES-013, with AG3-TEST-003's correction to the assertion: owner B holds a **healthy
   Closing source with newer B-tenure progress**, none of whose anchors is covered by the repair, and
   applies a historical A repair. Assert the exact phase, head, `previous_until_installed`, adoption
@@ -1717,11 +1796,18 @@ Core:
   ancestry.
 - **N33** AG3-DES-019, both halves. (a) B1 persists repair RA for a historical pair, crash before
   B2, then the source faults on an unrelated pair B: assert RA still applies as screening and
-  becomes terminal, that the source keeps its own fault untouched, and that a repair for pair B can
-  then be issued and applied. (b) repair RA is at `AwaitingSeed` or `RecoveryPending` with
+  becomes terminal **and, simultaneously, that the persisted source still reports Fault on pair B**
+  with the outcome `Screened` rather than `Repaired` (AG3-DES-025), that the source keeps its own
+  fault byte-unchanged, and that a repair for pair B can then be issued and applied. (b) repair RA is at `AwaitingSeed` or `RecoveryPending` with
   `repair_install_pending()` true when a second pair arrives: assert the second pair is retained in
   the free record slot, that a different repair is `Held(RepairInProgress)`, that the single
   `resolved_repair` slot is not overwritten, and that RA's replacement still completes afterwards.
+- **N35** AG3-DES-024, at the **core** boundary on `StudioEpoch::apply_receipt_repair`, not only on
+  `ReceiptBook::apply_repair`: an exact previously resolved repair, the same device key, an
+  independently observed **different** current tenure, and an outstanding continuation
+  (`install_pending` true). It must fail the live-authority check, not return `AlreadyResolved` and
+  not resume the replacement. Assert the store's own `verify_current_owner` is not what produced the
+  refusal, by driving the core API directly.
 - **N34** AG3-DES-020: a **healthy** source holds resolved repair sequence N; a valid, correctly
   signed, current-tenure repair with sequence N-1 for a different pair arrives through Flow D.
   Assert `Held(SequenceNotNewer)` and that the complete book and source are byte-unchanged. Repeat
@@ -1772,8 +1858,12 @@ Store:
   B-tenure receipt does **not** clear P's fault (R14), which is the fact that makes this path
   mandatory. Separately: a v2 record signed in A's first tenure is refused after A returns; a v1
   record is always refused.
-- **N18** Mismatched named pair holds, leaves the fault unchanged, and does not touch an unrelated
-  active fault on another document.
+- **N18** Split per AG3-TEST-004, since `PairMismatch` no longer exists. (a) **Malformed or wrong
+  evidence** (a pair that fails `conflicting_receipt_pair`, a repair whose `receipt_hashes` do not
+  match the supplied pair, a wrong document or channel) must refuse and change nothing. (b) A
+  **valid repair for an unrelated pair** must take case 6d: it screens, becomes terminal, returns
+  `Screened`, and leaves this source's own active fault byte-unchanged. Neither touches an
+  unrelated document.
 - **N19** Interrupted Prepared overlay on a faulted document: the repair and the report both
   resolve it first; a `Hold` refuses both and retains everything.
 - **N20** The repair retires zero intents from a ledger holding an **eligible ordinary
@@ -1829,9 +1919,18 @@ Sync, app and native:
   source's pair becomes active, and both are repaired in turn. In both, assert no evidence is
   discarded, the record stays at two pairs plus one repair, a third distinct pair is refused with a
   defer reason, `StudioFaultView` names which pair is decidable, and ordinary receipt issuance is
-  **not** blocked by an unresolved record pair. Also assert the maximal shape, two distinct pairs
-  plus one repair, encodes, decodes and survives crash and reopen at every barrier, and that an
-  aliased or half-duplicated pair is rejected (AG3-DES-018).
+  **not** blocked by an unresolved record pair. Also assert the maximal shape, two distinct external
+  pairs plus one repair, encodes, decodes and survives crash and reopen at every barrier, and that
+  an aliased or half-duplicated pair is rejected (AG3-DES-018).
+- **N31b** AG3-DES-022's closure, the state revision 5 could not represent: two unresolved
+  historical pairs are already retained **and** the local source then faults on a third,
+  current-tenure pair. Assert the source's pair is selected as active without occupying a record
+  slot, that a repair for it can be issued and applied, and that after restart all three are
+  repaired sequentially with no evidence lost.
+- **N31c** Terminal-pair recycling: repair A becomes terminal, its pair is removed and the repair
+  field cleared, repair B is then issued for the remaining pair, and after restart **A never becomes
+  decidable again**. Assert the removal is idempotent on an exact retry and that re-reporting A is a
+  no-op because the book already screens it.
 - **N30** Custody and fairness: pause a real repair reconstruction in S2 while authoritative
   discovery, page receive and a second server complete; assert the permit is still owned, that
   cancellation does not refund it, that a dropped native handle releases it, and that after all
@@ -1857,7 +1956,7 @@ stated. No useful redundant validation is deleted to manufacture a failure.
 | M9 | the single eligibility guard | remove the `eviction_pending` refusal in `stage_studio_repair_recovery` before the mint | N15: no successor bytes are written while the warning is pending and before its deadline. A due promotion without acknowledgement is a separate positive control |
 | M10 | losing-baseline screening (I-9) | remove `is_repaired_loser`'s losing-baseline arm | a covered losing-baseline descendant remains `Stale` **without re-faulting**. (Revision 1's assertion here was wrong and is withdrawn) |
 | M11 | no over-suppression (I-9) | make `is_repaired_loser` return true for any same-tenure receipt | a genuine third differing baseline still faults |
-| M12 | report admission (I-10) | **Corrected twice.** Revision 2's mutant was masked by core's independent `Fault`/`Stale`; revision 3's assertion was then invalidated by AG3-DES-016, because a second distinct pair now legitimately fills the free slot, so the restored design would fail its own named assertion. The fixture starts with **both** record slots occupied by distinct pairs and a third distinct report arriving; the mutant removes the refusal so the third pair displaces retained evidence | N26 and N31: with both slots occupied, a third distinct report leaves both retained pairs byte-unchanged **and** reaches no source writer, reservation or seal |
+| M12 | report admission (I-10) | **Corrected twice.** Revision 2's mutant was masked by core's independent `Fault`/`Stale`; revision 3's assertion was then invalidated by AG3-DES-016, because a second distinct pair now legitimately fills the free slot, so the restored design would fail its own named assertion. The fixture starts with **both record slots occupied by unresolved HISTORICAL pairs and a third HISTORICAL report arriving**, which AG3-TEST-004 requires: a current-tenure report must still durably fault the source even when the record is full, so suppressing that write would be unsafe and must not be what this mutant appears to test. The mutant removes the refusal so the third pair displaces retained evidence | N26 and N31: with both slots occupied, a third distinct historical report leaves both retained pairs byte-unchanged **and** reaches no source writer, reservation or seal |
 
 ### 15.3 Harness
 
@@ -1910,16 +2009,17 @@ Copyable, with the common contract from
 sent alongside it.
 
 ```text
-Review type: design, revision 5, findings re-review.
-Base: ad023d2e5b514a8f9598b1fe433fd2b080ecad6c (revision 4). Head: [FULL_HEAD_SHA once pushed].
-Compare: https://github.com/Thalpy/Mewtual/compare/ad023d2e5b514a8f9598b1fe433fd2b080ecad6c...[FULL_HEAD_SHA]
-Earlier revisions: a62178b94f20cd60a5363e6a3d6d6216edb9e516 (revision 3),
+Review type: design, revision 6, findings re-review.
+Base: 3737f1d4fff6f2c08302b0ecb1b024008818a1cf (revision 5). Head: [FULL_HEAD_SHA once pushed].
+Compare: https://github.com/Thalpy/Mewtual/compare/3737f1d4fff6f2c08302b0ecb1b024008818a1cf...[FULL_HEAD_SHA]
+Earlier revisions: ad023d2e5b514a8f9598b1fe433fd2b080ecad6c (revision 4),
+a62178b94f20cd60a5363e6a3d6d6216edb9e516 (revision 3),
 63a11e1a6451c7ed373c90b0e81b59d8a748a72a (revision 2),
 7efc9c2aba0a37d9aec57e268d9ff63edaca1b8a (revision 1), original scope base
 1bcb1bca204d721b848b17c0835faf931ae930e3.
-Scope/evidence: docs/GATE4-AGENT-3-DESIGN.md revision 5 and docs/GATE4-AGENT-3-STATUS.md.
+Scope/evidence: docs/GATE4-AGENT-3-DESIGN.md revision 6 and docs/GATE4-AGENT-3-STATUS.md.
 Documentation only: no production code, test, shared contract document or workflow is changed, and
-no Cargo command was executed in any of the five passes. Every number is a source constant or a
+no Cargo command was executed in any of the six passes. Every number is a source constant or a
 labelled estimate. The commit sits on a branch shared with Agents 1 and 2, so a literal base-to-head
 comparison may again contain intervening Agent 1 production commits; only the two Agent 3 documents
 are mine.
@@ -1927,58 +2027,49 @@ Dependencies unchanged: tenure seam is Agent 2's section 13.2 contract, with a d
 no implementation or accepted review; Agent 1's runtime integration is separately unreviewed; the
 core signing split at e65bfd8 remains unreviewed.
 
-This revision answers AG3-DES-017 to AG3-DES-021 and AG3-TEST-003, and adopts your U-11 agreement.
-Section 0 is the disposition table. It reopens nothing you accepted: C-8's epoch-zero fix, the
-reconciled publication lifecycle, the healthy-source half of AG3-DES-013, M2, the historical-pair
-report direction, the 2a/2b split, the Studio and Registry v2 framing, U-7 to U-10, and
-AG3-DES-003, 005, 007 and 008 are all unchanged.
+This revision answers AG3-DES-022 to AG3-DES-025 and AG3-TEST-004. Section 0 is the disposition
+table. It reopens nothing you closed or accepted: AG3-DES-021 stays closed, case 6c and N32 stand,
+the monotone sequence concept stands with the ordering fix you required, and M2 and M1/M3-M11 are
+unchanged.
 
-AG3-DES-017 is confirmed at the source and is the sharpest of the five. Neither installer screens
-the receipt it already holds: prepare_checkpoint_adoption asks only for adopting, Closing, not
-faulted and latest == receipt, and prepare_settlement takes receipts.latest() and verifies only
-current-owner authority. So revision 4's equation of "not faulted" with "safe to leave unchanged"
-was wrong, and a peer sitting on the loser would install or settle the repudiated branch. A new
-case 6c retargets any non-faulted source whose own latest, opening or adoption target is the exact
-loser or satisfies is_repaired_loser, using the same adoption shape as case 3 so the whole prior
-version is preserved as Repair recovery. Case 6b now applies only when no anchor is covered. The
-same-baseline higher head, whose ancestry receipts cannot express, is deliberately left to 6b and
-N32(d) asserts that limitation explicitly rather than inventing ancestry. N32(a)(b)(c) assert the
-three covered shapes never subsequently install or settle the loser.
+AG3-DES-022 is the important one and the fix is to remove the coupling rather than grow the record.
+ReceiptBook.fault is itself a single durable slot, so the source's own pair never needed a copy in
+the owner record; revision 5's requirement that it be "retained here" is what created the dead end
+where two historical pairs could crowd out the pair actually making the document read-only, with no
+way to write a repair for it. The record now holds EXTERNAL pairs only, at most two, and the
+derivation is: pending repair, else the source's own fault pair read from the book, else the lowest
+retained external pair. The combined state is closed under every transition, including your exact
+sequence. A record slot that duplicates the source's current pair is ignored and dropped, so
+capacity is never consumed twice. The second hole is also fixed: a terminal repair now has an
+explicit, idempotent, crash-safe transition that REMOVES its named pair and clears the repair field,
+so already-resolved evidence can never be selected again by the lowest-pair-id rule. N31b runs two
+historical pairs plus a third local fault through restart; N31c runs terminal recycling and asserts
+A never becomes decidable again.
 
-AG3-DES-018: the extension is re-specified for one or two pairs plus at most one repair, with
-canonical pair ordering by pair id, rejection of equal ids and of pairs sharing a receipt hash, and
-the rule that applied is false whenever no repair is present. MAX_RECORD_BYTES now covers five
-receipt-sized values rather than three, which matters because read_epoch_owner_plain caps the file
-before unsealing, so the under-sized contract would have made N31's maximal state impossible to
-write or reopen at all. Crucially, active status is now DERIVED on every load from the source and
-the record rather than durably stored, so nothing implies the atomic source-plus-record transition
-you correctly said does not exist; revision 4's talk of demoting a pair implied exactly that write.
+AG3-DES-023: you are right, and there were three figures, not two. Revision 5 added the five-receipt
+formula but left the superseded three-receipt paragraph later in the same section and 11.4 KiB in
+section 10.1. There is now one canonical formula, stated once, with 10.1 agreeing, and the displayed
+struct is the actual multi-pair representation rather than the superseded singular one.
 
-AG3-DES-019: your deadlock is real and the fix is to stop treating a repair for an unrelated pair
-as a mismatch. Case 6d applies such a repair as screening only, which is terminal for a repair this
-source is not blocked on, so the historical repair completes, the record's repair slot frees, and
-the source's own pair becomes active and decidable. Held(PairMismatch) is removed as an outcome.
-For the second half, R24 records that ReceiptBook has exactly one resolved_repair slot, so a
-different repair is now Held(RepairInProgress) while repair_install_pending() is true, released
-only when the committed state is terminal rather than when applied is set; the existing
-one-claim-per-target rule in 10.3 already keeps discovery off such a source. N33 runs both halves.
+AG3-DES-024: correct, and it is the M4 bug one layer up. Core deliberately verifies current owner
+before its retry shortcut and says why; revision 5's "sequence and retry classify before anything
+else" inverted that inside plan_repair, which is itself authority-bearing. The order is now
+verify_current_owner, then check_evidence and scope, then retry/sequence/in-progress, then
+classification, and the design states explicitly that the store's redundant check is defence in
+depth and not what makes the core safe. N35 drives the core API directly with an exact resolved
+repair, the same key, a different observed tenure and an outstanding continuation.
 
-AG3-DES-020: sequence and retry classification moved ahead of the fault and tenure tests and now
-applies to every path, because the non-faulted path skipped apply_repair and therefore its
-repair_sequence > book.repair_sequence guard, exactly as you describe, while Flow D had begun
-applying repairs regardless of fault status. N34 replays a valid delayed N-1 repair against a
-healthy source holding N and asserts the complete book and source are byte-unchanged.
+AG3-DES-025: also correct. Case 6d deliberately leaves a different fault standing, so B2's "fault
+has durably ended" and the terminal Repaired were false for it. A distinct Screened outcome now
+separates "this signed disposition is terminal" from "this document is usable again", and the
+barrier and crash prose are pair-specific. N33(a) asserts both facts at once: RA terminal and the
+persisted source still Faulted on pair B.
 
-AG3-DES-021: journal v2 now derives document and tenure identity from the effective retained set
-including reconciled, which is the journal analogue of C-8 and makes the codec match what N7
-already demanded.
-
-AG3-TEST-003: M12 is retargeted, since your AG3-DES-016 correction made a second distinct pair land
-legitimately in the free slot, so its old assertion would have failed on the restored design; the
-fixture now starts with both slots occupied and a third distinct report arriving. N24's discard
-claim is withdrawn to match Flow D. N5d's "stored bytes unchanged" is replaced by "all non-repair
-content unchanged, receipt-book bytes differ only by the expected repair evidence", since case 6b
-durably adds it.
+AG3-TEST-004: N5c is narrowed to the same-baseline higher head, since a provably losing baseline is
+N32(c)'s case 6c; N18 is split into malformed evidence that refuses and a valid unrelated pair that
+screens; M12's fixture is qualified as historical throughout, because a current-tenure report must
+still fault the source even with a full record and suppressing that write would be unsafe; and Flow
+D now defers to the C-2 classification instead of asserting case 6b over it.
 
 No U-questions remain open.
 
