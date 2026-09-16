@@ -5,17 +5,29 @@
 //! still has a complete lossless export and a preserving disposal available to it.
 use super::*;
 use crate::epoch::{MAX_INTENT_BYTES_PER_DOCUMENT, MAX_RECEIPT_BYTES};
+use crate::LocalIntent;
 
-/// Fixed per-entry cost: id(32) + sequence(8) + ts(8) + author(32) plus this encoder's framing.
-const ENTRY_OVERHEAD_BYTES: usize = 128;
-/// Version, provenance and replayable bytes, the document, the target, four 32-byte digests,
-/// the generation, the optional unconfirmed triple, and framing for all of it.
+/// Fixed per-entry cost excluding the operation body: id, envelope, sequence, timestamp, author
+/// and the body's own length prefix, with this encoder's framing on each byte string.
+/// `draft_archive_constants_cover_the_real_encoder` measures the true value and fails if it ever
+/// exceeds this; the margin is headroom for a future field, not a guess about the current one.
+const ENTRY_OVERHEAD_BYTES: usize = 160;
+/// Version, provenance and replayable bytes, the document at its largest admissible shape, the
+/// target, four 32-byte digests, the generation, the optional unconfirmed triple, and framing.
+/// Measured against the real encoder by the same test.
 const HEADER_BYTES: usize = 2048;
 
-/// Bound on the canonical payload, derived from the fields it can hold rather than from the
-/// intent record's cap, which the archive is not obliged to obey: it is its own record kind.
-/// The seed and operation terms cannot both be saturated by a branch that fit a live record,
-/// so the reachable maximum is lower, but the bound must not depend on that coincidence.
+/// Bound on the canonical payload, from the field maxima rather than from the intent record's
+/// cap, which the archive is not obliged to obey: it is its own record kind. The seed and
+/// operation terms cannot both be saturated by a branch that fit a live record, so the reachable
+/// maximum is lower, but the bound must not depend on that coincidence.
+///
+/// The two overhead terms above are padding constants, not schema-derived expressions. What
+/// makes them trustworthy is not the arithmetic here but the measurement in
+/// `draft_archive_constants_cover_the_real_encoder`, which encodes real archives, recovers the
+/// actual fixed costs, extrapolates each variable field to its documented maximum and asserts
+/// the result still fits. A future field or framing change fails that test rather than silently
+/// narrowing this bound.
 pub const MAX_STUDIO_DRAFT_ARCHIVE_BYTES: usize = HEADER_BYTES
     + MAX_RECEIPT_BYTES
     + MAX_CHECKPOINT_BYTES
@@ -45,12 +57,19 @@ impl StudioOverlayProvenance {
     }
 }
 
-/// One archived operation, complete: the stable id, its saved position and timestamp, and the
-/// original author and body. The envelope is not stored separately because it is derived from
-/// the author and body, and storing both would let them disagree.
+/// One archived operation, complete: the stable id, the accepted envelope, its saved position
+/// and timestamp, and the original author and body.
+///
+/// The envelope is carried deliberately, and the earlier reasoning for omitting it was wrong.
+/// `DomainOp::id` hashes the logical key, author and nonce and **not the body**, so an id alone
+/// binds identity, not content: a different body under the same nonce keeps the same id. The
+/// live branch does not rely on the id either, it compares `envelope` in `checked_entries`. An
+/// archive that dropped it could decode an entry whose body was not the accepted one, which is
+/// unacceptable in the artefact whose entire job is to be the surviving evidence of that body.
 #[derive(Clone, PartialEq, Eq)]
 struct ArchiveEntry {
     id: [u8; 32],
+    envelope: [u8; 32],
     sequence: u64,
     ts: u64,
     author: DeviceId,
@@ -104,6 +123,8 @@ impl StudioDraftArchive {
             .into_iter()
             .map(|(entry, intent)| ArchiveEntry {
                 id: entry.id,
+                // The exact value `checked_entries` has just verified against this intent.
+                envelope: entry.envelope,
                 sequence: entry.sequence,
                 ts: entry.ts,
                 author: intent.author,
@@ -208,6 +229,7 @@ impl StudioDraftArchive {
         e.put_u32(self.entries.len() as u32);
         for entry in &self.entries {
             put(&mut e, &entry.id)?;
+            put(&mut e, &entry.envelope)?;
             e.put_u64(entry.sequence);
             e.put_u64(entry.ts);
             put(&mut e, entry.author.as_bytes())?;
@@ -271,6 +293,7 @@ impl StudioDraftArchive {
         for _ in 0..count {
             entries.push(ArchiveEntry {
                 id: fixed(&mut d)?,
+                envelope: fixed(&mut d)?,
                 sequence: number(&mut d)?,
                 ts: number(&mut d)?,
                 author: DeviceId::from_bytes(fixed(&mut d)?),
@@ -319,10 +342,27 @@ impl StudioDraftArchive {
             if entry.sequence != index as u64 + 1 || !seen.insert(entry.id) {
                 return Err(ReplError::IntentConflict);
             }
-            // The id binds author and nonce. An entry whose recorded id disagrees with the
-            // body it carries would let an archive name work it does not contain.
-            if entry.operation.id(&entry.author) != entry.id {
+            // Two separate bindings, because neither alone is enough. The id covers the
+            // logical key, author and nonce, so it fixes WHICH accepted operation this is;
+            // the envelope covers the author and the complete encoded body, so it fixes WHAT
+            // that operation says. `DomainOp::id` does not hash the body, so without the
+            // envelope a different body under the same nonce would decode unchallenged.
+            if entry.operation.id(&entry.author) != entry.id
+                || super::envelope(&LocalIntent {
+                    author: entry.author,
+                    operation: entry.operation.clone(),
+                })? != entry.envelope
+            {
                 return Err(ReplError::IntentConflict);
+            }
+            // Invariants `from_branch` already gets from `checked_entries` and the ledger.
+            // Restated here so a decoded archive stands on its own rather than on the
+            // provenance of the path that happened to build it.
+            if entry.author != self.author
+                || entry.operation.doc_type != self.document.doc_type
+                || entry.operation.logical_key != self.document.logical_key
+            {
+                return Err(ReplError::EpochScope);
             }
             integer_bound(entry.ts)?;
             operation_bytes = operation_bytes
