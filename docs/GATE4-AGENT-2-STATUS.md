@@ -8,7 +8,8 @@ Review preamble: [preamble 2](GATE4-REVIEW-PREAMBLES.md#review-2-manualprovision
 
 | Item | State |
 |---|---|
-| Design revision | 6, **awaiting re-review on (a) and (c); boundary (b) has PASSED at revision 4** |
+| Design revision | 7. **Design ACCEPTED: adversarial PASS for (a), (b) and (c), no findings.** Revision 7 adds only two non-blocking refinements offered with the PASS. |
+| Design verdict | PASS at `a6d8170f6ab1f0d46287808fc8051ac2a387521c`, 2026-09-16. (b) passed at revision 4, (a) and (c) at revision 6. **Design only**: no implementation, test, measurement or native exposure is accepted. |
 | Original design base | `1bcb1bca204d721b848b17c0835faf931ae930e3` |
 | Revision 1 head, reviewed | `a901f6b0f64df2b4ea9cc0221b64ac98276f582d` |
 | Revision 2 head, reviewed as SEC-PAIR-001 | `21ca8fa93c07b8bb65a00bc0bbc555518f8a7132` |
@@ -18,7 +19,8 @@ Review preamble: [preamble 2](GATE4-REVIEW-PREAMBLES.md#review-2-manualprovision
 | Revision 5 base | `37fa87753d32a2c4f5d1172cc865910a93d90fa1` |
 | Revision 5 head, reviewed | `f2257b018d396a835529742c40d4b282bbc127d9` |
 | Revision 6 base | `f2257b018d396a835529742c40d4b282bbc127d9` |
-| Revision 6 head SHA | `a6d8170`. Any later SHA recording this row is documentation-only and adds no design content. |
+| Revision 6 head, **accepted** | `a6d8170f6ab1f0d46287808fc8051ac2a387521c` |
+| Revision 7 head SHA | _pending: the commit that adds the two accepted refinements; refinements only, no reviewed decision changes_ |
 | Working checkout | main repository tree. Revision 2 was committed on branch `gate4-agent1-runtime`, which a parallel Agent 1 session had checked out; the user asked for no branch change. The design content is branch-independent, but Agent 4 should expect to move these two documents when the branches are integrated. No separate worktree yet; one is taken before any production edit. |
 | Production code | **None written.** |
 | Tests added | **None.** |
@@ -28,15 +30,19 @@ Review preamble: [preamble 2](GATE4-REVIEW-PREAMBLES.md#review-2-manualprovision
 
 ## Agent 1's registration prerequisites (its section 12.3)
 
-**Authoritative statement: P1 to P4 are DESIGNED ONLY, and the design has not yet passed review.
-P5 is FALSE. `studio_overlay_save` must not be registered.**
+**Authoritative statement: P1 to P4 are DESIGNED AND THE DESIGN IS REVIEWED, but NONE OF THEM IS
+IMPLEMENTED. P5 is FALSE. `studio_overlay_save` must not be registered.**
+
+P1's wording is "a reviewed manual lifecycle". The design of that lifecycle is now reviewed and
+accepted; the lifecycle itself does not exist. P5 asks whether P1 to P4 are **implemented** and
+reviewed, and no line of production code has been written for any of them.
 
 | Prerequisite | State | Where |
 |---|---|---|
-| P1 reviewed manual lifecycle: inspect, export, copy-into-current, explicit disposition, lossless across restart and refusal | Designed, unimplemented, **design not yet accepted** | design 6.1-6.6, 12 |
-| P2 every `StudioOverlayHold` variant mapped to a user-visible actionable state | Designed | design 7, 11 |
-| P3 truthful native results, events and UI-hooks rows | Designed, including the corrected three-state write outcome | design 11 |
-| P4 live-tenure contract, now over `verification_owner_tenure_start()` and `authoring_owner_tenure_start()` | Designed | design 9.4 V1-V7 |
+| P1 reviewed manual lifecycle: inspect, export, copy-into-current, explicit disposition, lossless across restart and refusal | **Design accepted**, unimplemented | design 6.1-6.6, 12 |
+| P2 every `StudioOverlayHold` variant mapped to a user-visible actionable state | **Design accepted**, unimplemented | design 7, 11 |
+| P3 truthful native results, events and UI-hooks rows | **Design accepted**, unimplemented; no row is published as available and no command is registered | design 11 |
+| P4 live-tenure contract, over `verification_owner_tenure_start()` and `authoring_owner_tenure_start()` | **Design accepted**, unimplemented | design 9.4 V1-V8, 9.3 part 5 A-1 |
 | P5 explicit statement that P1-P4 are implemented and reviewed | **No** | this table |
 
 This row is the single authoritative source for P5. It changes only after implementation exists and
@@ -52,7 +58,8 @@ three boundaries, so the design itself is not yet accepted.
 | 2026-09-16 | Design revision 3 (`9097207`) | **CHANGES REQUIRED on all three boundaries**, two findings: 1 High, 1 Medium. All five SEC-PAIR-001 corrections accepted. Reviewer ran no Cargo commands. |
 | 2026-09-16 | Design revision 4 (`37fa877`) | **(b) PASS.** (a) and (c) CHANGES REQUIRED for one Medium test and mutation gap. The revision-3 High tenure finding is closed at the design level. Reviewer ran no Cargo commands. |
 | 2026-09-16 | Design revision 5 (`f2257b0`) | **(b) PASS remains.** (a) and (c) CHANGES REQUIRED for one new Medium finding introduced by revision 5's own accessor-removal hardening. The revision-4 finding is closed. Reviewer ran no Cargo commands. |
-| 2026-09-16 | Design revision 6 | Request prepared; head SHA pending. Re-review requested for (a) and (c) only. |
+| 2026-09-16 | Design revision 6 (`a6d8170`) | **PASS for (a) and (c), no findings.** With (b)'s revision-4 PASS this accepts the whole design. Every finding from revisions 1 to 6 is closed at the design boundary. Two non-blocking refinements were offered and are adopted in revision 7. Reviewer ran no Cargo commands. |
+| 2026-09-16 | Design revision 7 | Accepted refinements only: A-1's scope sentence and N-T7b's diagnostics. No reviewed decision changes. |
 
 ### Revision-5 re-review findings and their disposition
 
@@ -224,7 +231,29 @@ corresponding command is registered.
 Nothing in this scope has been executed. Any later claim of a pass must name the exact command, the
 executed test count, the ignored cases, the run URL and the actual checkout SHA.
 
-## Open questions carried to the re-review
+## Implementation prerequisites, in order
+
+The design is accepted; implementation has not started. Before it does:
+
+1. **`EpochRecordKind::DraftArchive` must land first, as an isolated Agent 4 integration commit**
+   (design 16.2, the reviewer's answer). It adds a sixth variant to a closed shared enum and touches
+   every `match` over it, including files Agents 1 and 3 are editing now. Agents 1, 2 and 3 rebase
+   onto that seam rather than each adding the variant.
+2. **A-1's precondition must be reverified, not assumed.** Its ordering citations are the committed
+   state at `f2257b0`, and Agent 1 has in-flight changes to `epoch_studio/overlay.rs`. N-T7b is what
+   makes that check executable.
+3. **Branch placement needs a decision.** Revisions 1 to 7 were committed on `gate4-agent1-runtime`,
+   which a parallel Agent 1 session had checked out. The documents are branch-independent; Agent 4
+   should expect to relocate them at integration.
+4. The shared central edits listed above stay coordinated with Agent 4: the control and dispatch
+   enums, `StudioSettlementState`, the inventory family and the `catcoms-mls` receive rule.
+
+## Open questions
+
+None. Design 16 records every question as answered, including the 16.1 product decision, which is
+option (a): `Imported` ships fail-closed with no operator-adoption override.
+
+## Superseded: open questions carried to the re-review
 
 Design section 16: archive placement (a second record kind in the Intents family versus its own
 inventoried family); archive cardinality; whether the generational identity fully closes finding 3

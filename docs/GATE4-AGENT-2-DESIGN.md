@@ -1,7 +1,17 @@
 # Gate 4 Agent 2: overlay lifecycle, provisional local work and repeated tenure
 
-Status: **revision 6, design proposal, awaiting re-review on (a) and (c). Boundary (b) has PASSED.
-No production code is written, no test has been added and no Cargo command was executed.**
+Status: **design ACCEPTED. Adversarial review PASS for all three boundaries at
+`a6d8170f6ab1f0d46287808fc8051ac2a387521c`, 2026-09-16, with no findings.** (b) passed at revision 4
+and was not reopened; (a) and (c) passed at revision 6. Revision 7 is the accepted text plus two
+non-blocking refinements the reviewer offered while passing, folded in below and marked as such.
+
+**This PASS accepts the design only.** No production code is written, no test has been added, no
+Cargo command was executed and no measurement exists. It grants no implementation acceptance, no
+native Save exposure, no acceptance of Agent 1's or Agent 3's work and no part of full Gate 4.
+Agent 1's registration prerequisite P5 remains **false**, and `studio_overlay_save` stays
+unregistered. The next adversarial boundary is implementation: whether the accessor split, the v1
+migration, the M-1 receive rule, the `DraftArchive` family, A-1's ordering, N-T7/N-T7b and the
+mutation anchors are built and actually execute as specified.
 
 Revision 1 (`a901f6b`) received CHANGES REQUIRED with nine findings. Revision 2 (`21ca8fa`)
 received CHANGES REQUIRED as SEC-PAIR-001 with five. Revision 3 (`9097207`) received CHANGES
@@ -44,7 +54,19 @@ only and
 section 14 records what breaks if they change. Agent 3's design is separate and is not consumed
 here except through the tenure seam of section 9.4.
 
-## 0. Disposition of the revision-5 re-review findings
+## 0. Design acceptance, and the two refinements folded into revision 7
+
+The revision-6 re-review returned **PASS for (a) and (c) with no findings**, with (b) already passed
+at revision 4. Every finding raised across revisions 1 to 6 is closed at the design boundary. The
+reviewer offered two non-blocking refinements while passing; both are adopted, and neither changes
+an accepted decision:
+
+| Refinement | Adopted as | Where |
+|---|---|---|
+| A-1 should be read specifically as the rule for **store-delegating lifecycle wrappers**. An app-level operation that itself performs irreversible authoring before reaching a store stage cannot defer its authority check merely because A-1 exists. | A-1 gains an explicit scope sentence. The reviewer judged the existing single-stage exception sufficient and did not raise it as a finding; it is tightened anyway, because this document now becomes implementation instructions and the previous finding showed how brittle a whole-function reading is. | 9.3 part 5, A-1 |
+| N-T7b could assert `is_prepared()` and that the fixture's initial `completed_branch(.., current_basis)` is `None`. Harmless, not required: the reviewer independently established that completion advances the basis floor, so a Prepared branch cannot legitimately carry a completed handoff's old basis and the short-circuit cannot mask the resolution path. | Added to N-T7b as diagnostics. The reasoning is recorded with it so a later reader does not mistake a cheap assertion for the actual argument. | 17.1 N-T7b |
+
+## 0b. Disposition of the revision-5 re-review findings
 
 Boundary **(b), the preview-local-work extension, PASSED** at revision 4 and is not changed here.
 
@@ -55,7 +77,7 @@ Boundary **(b), the preview-local-work extension, PASSED** at revision 4 and is 
 Revision 5's own correction, the `Imported` app-seam anchoring, was accepted by that re-review and
 is unchanged here.
 
-## 0b. Disposition of the revision-4 re-review findings
+## 0c. Disposition of the revision-4 re-review findings
 
 | Finding | Disposition in revision 5 | Where |
 |---|---|---|
@@ -64,7 +86,7 @@ is unchanged here.
 | Hardening note: P4 still cited V1-V5 | Corrected to V1-V7 in both documents. | 13, status note |
 | 16.1 product decision | **Adopted as (a)**, over my own recommendation of (b): `Imported` ships fail-closed with no operator-adoption override. The "no fourth option" claim is refined to cover reconstruction only. | 16, 15 L11 |
 
-## 0c. Disposition of the revision-3 re-review findings
+## 0d. Disposition of the revision-3 re-review findings
 
 | Finding | Disposition in revision 4 | Where |
 |---|---|---|
@@ -74,7 +96,7 @@ is unchanged here.
 Revision-3's own corrections to SEC-PAIR-001 were accepted by that re-review and are unchanged here;
 the table below is retained as their record.
 
-## 0d. Disposition of the SEC-PAIR-001 findings (retained record)
+## 0e. Disposition of the SEC-PAIR-001 findings (retained record)
 
 | Finding | Disposition in revision 3 | Where |
 |---|---|---|
@@ -87,7 +109,7 @@ the table below is retained as their record.
 Revision-1 findings 1, 2, 4, 5, 6, 8 and 9 are closed by SEC-PAIR-001. Their corrections are
 unchanged in this revision and the table below is retained as the record of them.
 
-## 0e. Disposition of the revision-1 findings (retained record)
+## 0f. Disposition of the revision-1 findings (retained record)
 
 | Finding | Disposition in revision 2 | Where |
 |---|---|---|
@@ -1204,9 +1226,17 @@ compiler enumerates them. The intended mapping, from the audit:
 | `owner_tenure/tests.rs`, `studio_exchange/tests/*` | whichever the case asserts; several existing assertions become `verification_*` and must be read individually rather than renamed mechanically |
 
 > **A-1 (revision-5 finding 1). The accessor choice and the refusal site are separate decisions.**
-> An app wrapper reads `authoring_owner_tenure_start()` and passes the resulting `Option<u64>`
-> through unchanged. It does **not** call `require_observed_owner_tenure()` on the way in. The store
-> owns every refusal, at the stage that actually needs a tenure.
+> A **store-delegating lifecycle wrapper** reads `authoring_owner_tenure_start()` and passes the
+> resulting `Option<u64>` through unchanged. It does **not** call `require_observed_owner_tenure()`
+> on the way in. The store owns every refusal, at the stage that actually needs a tenure.
+>
+> **Scope (revision-6 refinement).** A-1 is a rule about *deferring to a store stage that already
+> classifies durable state*, not a general licence to defer. An app-level operation that performs
+> irreversible authoring of its own before reaching such a stage must check its authority where that
+> authoring happens; it cannot skip the check merely because A-1 exists. No operation in this design
+> is of that shape, and the reviewer judged the single-stage exception below sufficient without
+> raising it, but the scope is stated because this document is now implementation instructions and
+> the revision-5 finding showed how brittle a whole-function reading is.
 
 Revision 5 classified all three wrappers as "authoring, through `require_observed_owner_tenure`",
 which would have moved the refusal above work that deliberately precedes it. The committed store
@@ -1575,7 +1605,7 @@ not see. Added, changed or corrected:
 | N-T6 | actor | Remove then rejoin in separate commits, the rejoining device becoming owner | The rejoining owner and every witness observe the same start; its receipts verify. |
 | N-T6b | actor | **Finding 7 discriminator.** A committer leaf identity change across a contiguous step, with four observers: the rejoining owner, a known-tenure witness, an **Unknown-tenure newcomer** that requests a fresh owner proof, and a restarted copy of the witness | With 9.3 part 3 the witness and the rejoining owner agree, so the newcomer's proof-derived selection agrees too, and the restarted witness agrees after `decode`. Separately assert that an ordinary committer self-update, which rotates the HPKE key but keeps the credential, does **not** reset the observed start. |
 | N-T7 | actor | **Corrected (revision-4 finding 1). The V1 authoring-refusal matrix, run for BOTH fail-closed values.** Two fixtures reaching the app layer: one with `Unknown`, and one built by migrating a genuine ambiguous v1 snapshot as in N-T6d so the value is a real `Imported(S)` rather than an injected one | For each fixture: `Server::observed_owner_tenure()` reports the expected variant, and for the migrated one it reports **`StudioOwnerTenure::Imported(S)`, not `Known(S)`**; `require_observed_owner_tenure()` refuses; and every V1 authority entry point refuses at its own check, each fixture passing the earlier checks first: Closing basis minting, first local acceptance, handoff preparation, a signing turn, the commit, receipt issuance, rotation, Registry pointer publication, and Agent 3's repair issuance and application. The `Imported` fixture additionally asserts that verification is **unaffected** in the same run, so the test cannot pass by making `Imported` behave as `Unknown` everywhere. |
-| N-T7b | actor | **New (revision-5 finding 1). The positive complement to N-T7.** Using the same genuinely migrated `Imported(S)` fixture, and repeated for `Unknown` | Each of these still works with no authoring tenure available: an exact accepted Save retry returns its saved entry with no new envelope, no new sequence and no generation increment; a completed-handoff request returns its terminal acknowledgement; and an already durable `Prepared` handoff runs its existing resolution path to Active, Complete or Hold according to the actual evidence. In the same run, a genuinely new Save and a fresh handoff preparation both still refuse. The `Prepared` case is the one that matters most under L11, because an `Imported` single-owner server never regains authoring, so a permanent hold here would be permanent data limbo. |
+| N-T7b | actor | **New (revision-5 finding 1). The positive complement to N-T7.** Using the same genuinely migrated `Imported(S)` fixture, and repeated for `Unknown` | Each of these still works with no authoring tenure available: an exact accepted Save retry returns its saved entry with no new envelope, no new sequence and no generation increment; a completed-handoff request returns its terminal acknowledgement; and an already durable `Prepared` handoff runs its existing resolution path to Active, Complete or Hold according to the actual evidence. In the same run, a genuinely new Save and a fresh handoff preparation both still refuse. The `Prepared` case is the one that matters most under L11, because an `Imported` single-owner server never regains authoring, so a permanent hold here would be permanent data limbo. **Diagnostics (revision-6 refinement):** the `Prepared` fixture also asserts `is_prepared()` and that its initial `completed_branch(target, author, current_basis)` is `None`. These are assertions, not the argument: the reason a completed-handoff short-circuit cannot mask the resolution path is that completion clears `active` and `prepared`, stores the `Completed` manifest and advances `minimum_new_basis_closed_epoch`, while `completed_branch` also matches on basis, so a live `Prepared` branch cannot legitimately carry a completed handoff's superseded basis. The assertions make a later regression say so out loud. |
 | N-T6d | sync | **Revision-3 finding 1, the v1 migration.** Build old-format state with `start = Some(S)`, `S < epoch`; under the **old** observation rule apply the formerly invisible same-owner discontinuity and show `S` is preserved; serialize genuine v1 bytes; decode under the new implementation against the post-transition group | The result is **`Imported(S)`, not `Observed(S)`**: `verification_owner_tenure_start()` returns `Some(S)` so verification is unchanged and a mismatched proof is still refused, while `authoring_owner_tenure_start()` returns `None` and `prepare_receipt_head_snapshot` refuses. Save and reload the new snapshot and require it is still `Imported`. Separately: a v1 state with `start == Some(epoch)`, and the founding `epoch == 0, start == Some(0)`, both decode to `Observed`; a v1 state with no start decodes to `Unknown`; a `start > epoch` v1 state is still rejected. Finally, apply a genuine owner change and require the promotion to `Observed` at the new epoch. |
 | N-T6c | mls, actor | **SEC-PAIR-001 finding 4, adversarial.** Construct the forbidden same-commit remove-and-re-add of the designated committer, reusing the same signature key and credential bytes, **bypassing the local commit builder**, and deliver the staged commit to an uninvolved witness | The witness refuses it **before `merge_staged_commit`**, so its epoch and its observed tenure are unchanged and no member reaches the ambiguous position. Assert separately that the local builder refuses to construct it, that a remove-and-re-add of a **different** `DeviceId` is still accepted, and that a genuine rejoin in a **later** commit is still accepted and produces agreement. The invite ledger is not consulted by the witness in any of these. |
 
