@@ -1,6 +1,13 @@
 # Gate 4 Agent 3: runtime signed fault repair
 
-Status: **revision 10, design proposal, awaiting re-review. No production code is written.**
+Status: **revision 11, design proposal, awaiting re-review. No production code is written.**
+
+Revision 10 (design body through `11ce6f1`) received **REQUEST CHANGES** with AG3-DES-045 to
+AG3-DES-049 and AG3-TEST-009. The reviewer **closed AG3-DES-040 in 6.3 and 13.2** and **closed
+AG3-DES-043**, and accepted AG3-DES-044's write order. All five new findings are internal
+contradictions in revision 10 itself, and all five are confirmed. Disposition table is section 0.
+
+
 
 Revision 9 (`3b6a4b40462ae83a341f8f6741c93edff55b5ef7`) received **REQUEST CHANGES** with
 AG3-DES-039 to AG3-DES-044 and AG3-TEST-008. The reviewer **closed AG3-DES-038** and accepted the
@@ -82,7 +89,18 @@ this scope needs and what it does without each.
 No Cargo command was executed for this pass either. Every number is a source constant read at the
 base or an explicitly labelled estimate.
 
-## 0. Disposition of the revision-9 findings
+## 0. Disposition of the revision-10 findings
+
+| Finding | Disposition in revision 11 | Where |
+|---|---|---|
+| AG3-DES-045, the overflow hold has no wire bytes | **Corrected.** The field was added to the struct and the proof gate and never to the codec or `check_scope`, so the mechanism described as surviving restart could not be written at all and N43 was impossible as stated. It now has a canonical encoding, strict `0/1` canonicality, validation, and corruption failing the record rather than clearing the hold. | 5.2, 15.1 N44(a) |
+| AG3-DES-046, the fallback contradicts the active-pair rule | **Corrected.** For `{R1,R3}` after `{R1,R2}` was repaired, "must drain before any other repair may be issued" and "cannot be drained, repair it directly" both applied and there was no legal next step. A `pair_is_materialisable` predicate, computed on the checked source **without mutating it**, splits drainable from direct-repair-only. | 5.2, 15.1 N45(a)(b) |
+| AG3-DES-047, `repair_kind 3` has no coherent lifecycle | **Corrected.** Migration now happens before any B1, so a migrated pair is `repair_kind 1` and kind 3 applies only while the pair is still reserved; the two are never both applicable. Recycling is binding-specific, so a kind-3 pair is cleared from `reserved` instead of being stranded there and becoming decidable again. | 5.2, 15.1 N45(c)(d) |
+| AG3-DES-048, the hold collapses distinct conflicts into one bit | **Corrected.** Clearing a pairless marker on one reporter's retry forgets every other known conflict, which is the safety half of AG3-DES-032 returning. The hold now keeps up to four pair fingerprints cleared individually, plus a sticky `unknown` flag for the overflow-of-overflow case that only a tenure change clears. It still stores no receipts, so it can only refuse. | 5.2, 6.6, 15.1 N44(b)(c) |
+| AG3-DES-049, the tenure fix is inconsistent for the hold | **Corrected.** The stale `observed_tenure_id` pseudocode is gone, and both liveness predicates compare against one `tenure_id` derived in the same custody visit from the **authoring** accessor, the group id and the committer key. The hold stores that derived id rather than a bare start epoch, so two tenures sharing a start cannot be confused. | 5.2, 6.6, 15.1 N44(d) |
+| AG3-TEST-009 | **Corrected.** N44 covers the hold's codec, multiple distinct overflows and tenure identity; N45 covers materialisability, the migration and binding choice, and terminal kind-3 clearing. | 15.1 |
+
+## 0.0 Disposition of the revision-9 findings
 
 | Finding | Disposition in revision 10 | Where |
 |---|---|---|
