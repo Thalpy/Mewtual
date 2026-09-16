@@ -40,7 +40,6 @@ pub(crate) use epoch_registry::registry_full_loads_for_test;
 pub(crate) use epoch_registry::tests::performance::save_inventory_fixture;
 pub(crate) use epoch_registry::{RegistrySourceCapture, RegistrySourceStamp};
 mod epoch_studio;
-pub(crate) use creative_references::CreativeHold;
 pub use creative_references::{CreativeReferences, MAX_CREATIVE_REFERENCES};
 pub(crate) use epoch_intents::inspection::{
     StudioInspectedDraft, StudioInspectionCapture, StudioInspectionStamp,
@@ -76,7 +75,10 @@ pub use epoch_studio::{
     EpochStudioBudget, EpochStudioState, StudioAdoptionOutcome, StudioPageAdmission,
     StudioRotationOutcome,
 };
-pub(crate) use epoch_studio::{PreparedStudioSource, StudioSourceCapture};
+pub(crate) use epoch_studio::{
+    PreparedStudioSource, StudioOverlayCapture, StudioOverlayPlan, StudioOverlayStart,
+    StudioSourceCapture,
+};
 pub mod epoch_budget;
 
 /// One persisted server in the registry: enough to relist it in the UI and reload its

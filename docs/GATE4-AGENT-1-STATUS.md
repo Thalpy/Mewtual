@@ -23,7 +23,7 @@ they are the highest-conflict changes, so they land last. The per-item verdict r
 |---|---|---|
 | 1 | C-1 structural decode, with C-2's digest fences and the R4 replay exclusion | **landed; reviewed PASS; no-replay boundary covered by N24; R4 selection covered by N25/M9** |
 | 2 | C-4 transient reference holds, with the I-3 transfer | **landed; seam reviewed PASS; transfer implemented and mutation-proven; dead-code markers removed** |
-| 3 | The runtime: Flows S, H and R, admission, scheduling, commit seams | **Flow S store seams and per-actor admission landed. Receiver wiring, scheduling and Flows H/R not started** |
+| 3 | The runtime: Flows S, H and R, admission, scheduling, commit seams | **Flow S landed end to end as a detached job, with per-actor admission consumed and the shared pool proved. Flows H and R not started; no native command, gated on Agent 2's P5** |
 | 4 | I-4 and C-3 | not started |
 
 ## Checkpoints
@@ -46,8 +46,9 @@ they are the highest-conflict changes, so they land last. The per-item verdict r
 | 2026-09-16 | FS-002 correction and `AdmittedOverlayMedia` | `bbfd5e5` | `5a024a7` | bounded implementation | Authorization moved ahead of media admission; media minted as one unforgeable value. New stale-basis regression with two hazards and two positive controls, plus M16. Awaiting review. |
 | 2026-09-16 | `EpochRecordKind::DraftArchive` seam | `5a024a7` | `705d44b` | integration seam for Agent 2, option (a) | Physical family plumbing only: no payload, writer, release path, reference collector or sub-cap, and no I-4 guard. Two regressions, M17/M18/M19. Reported to Agent 2; handover sent to Agent 3. |
 | 2026-09-16 | FS-002 and seam review | `bbfd5e5` | `70eaad4` | bounded implementation, two scopes | **FS-002 closed**, A-1 confirmed preserved, stale-basis fixture and both controls confirmed valid. **A-001** (P3): admitted media not bound to the intent capture receives separately. **B-001** (P2): the shared scope decoder caps every family at Recovery's 501 bytes, refusing a legal 506-byte archive scope. |
-| 2026-09-16 | A-001 correction | `70eaad4` | uncommitted working tree | bounded implementation | `AdmittedOverlayAuthoring` as one value plus a `MediaOrigin` rechecked at capture and commit; regression and M20. |
-| 2026-09-16 | B-001 correction | A-001 head | uncommitted working tree | integration seam correction | Per-family `scope_cap()`; two regressions and M21. |
+| 2026-09-16 | A-001 correction | `70eaad4` | `35929a9` | bounded implementation | **PASS, A-001 closed.** `AdmittedOverlayAuthoring` as one value plus a `MediaOrigin` rechecked at capture and commit; regression and M20. |
+| 2026-09-16 | B-001 correction | `35929a9` | `1cac519` | integration seam correction | **PASS, B-001 closed.** Per-family `scope_cap()`; two regressions and M21. |
+| 2026-09-16 | Overlay runtime, Flow S detached | `130a64b` | uncommitted working tree | bounded implementation | The store algorithm split so scheduled and synchronous share one path; the `OverlayPlan` job and result; admission and the shared permit consumed for real; the admission dead-code marker removed. Four regressions, M22 and M23. |
 
 Working checkout: `M:\Git (local)\CatComs`. The four design passes were made on `Create-suite-2`;
 implementation is on `gate4-agent1-runtime`, which is the current branch.
@@ -683,6 +684,67 @@ it byte for byte. Being tight is the failure mode, and that is what is now teste
 | `... --lib store::` | **295 passed, 0 failed, 8 ignored**, 545.64 s. |
 | `cargo clippy -p catcoms-app --all-targets -- -D warnings`, `cargo fmt --all --check` | Clean. |
 
+### The overlay runtime: Flow S detached, and the one-algorithm split
+
+Item 3 of the sequencing table. The store seams existed but nothing scheduled them, and
+`studio/overlay/admission.rs` still carried a dead-code marker.
+
+**One algorithm, enforced structurally.** `save_studio_closing_overlay_with_io` is now a thin
+adapter over `start_studio_closing_overlay_with_io`, which performs S0, S1, the terminal S1a
+acknowledgement, and for new authoring S1b and the capture, returning `StudioOverlayStart::Settled`
+or `::Captured`. The synchronous path composes that with `plan` and the commit inline; the
+scheduled path runs the same three with custody released around `plan`. A scheduler cannot drift
+from a second copy of the classification, because there is no second copy. The adapter takes its
+writer and sync as `FnMut` and lends a reborrow to each stage, so no existing caller changed.
+
+**The job.** `StudioBackgroundJob::OverlayPlan(Box<StudioOverlayCapture>, OverlayOwnership,
+OverlayContext)` and `StudioBackgroundResult::OverlayPlanned`. The capture moves in **whole**, which
+is the condition the A-001 reviewer attached: nothing decomposes `AdmittedOverlayAuthoring` or
+rebuilds its contents. The worker is `spawn_blocking`, matching the existing `Prepare` arm.
+
+**Ownership through cancellation.** `OverlayOwnership` moves into the blocking closure, so the
+`tokio::select!` cancellation branch structurally cannot take it back: `CancelledOverlay` carries no
+ownership and clears the waiter's bookkeeping only. A cancelled waiter therefore leaves admission
+and the shared slot occupied until the worker ends by itself, with no release message from it.
+A parked result keeps them too, because its pixels are still protected only by its transient hold.
+
+**Design deviation, stated for review.** Design 5.5 gave `OverlayOwnership` three members; the
+third, `Option<CreativeHold>`, is removed. A-001 made `AdmittedOverlayMedia` the single owner of
+that hold, minted with the frame facts it protects and carried inside the capture and the plan. A
+second `Option<CreativeHold>` here would be a competing owner and a way to hold pixels without the
+facts S3 rechecks, which is exactly what A-001 closed. The three still release together in practice,
+because a job owns both the bundle and its capture.
+
+**Scheduling.** Overlay has its own per-actor slot rather than sharing `preparing` with source
+preparation, so a local Save is not blocked behind catch-up reconstruction for the lifetime of an
+actor or the reverse. It is selected ahead of source preparation in `detach`: it holds no network
+resource and its permit is already reserved. 7.2's reserve-before-first-read is
+`CatchupRuntime::reserve_overlay`, and a refusal releases by dropping, with no bookkeeping to unwind.
+
+| Regression | What it proves |
+|---|---|
+| `overlay_reservation_shares_the_one_preparation_pool` | N15's central claim, by pointer identity: production draws from the one process-wide `preparation_pool()`, so there is **no overlay-only pool**. |
+| `a_full_preparation_pool_refuses_an_overlay_reservation_and_recovers` | A full shared pool is a retryable refusal that consumes no admission, and a freed slot admits the identical retry. |
+| `a_cancelled_overlay_waiter_does_not_free_a_still_running_worker_slot` | I-2 and 7.1 through the runtime: one job per actor, and a cancelled waiter frees neither admission nor the slot while the worker still owns the bundle. Both return when the worker ends, with no second visit. |
+| `a_queued_or_parked_overlay_keeps_the_actor_busy` | A queued capture and a parked result each keep the actor busy, so a plan awaiting commit cannot be displaced. |
+
+| Check | Result |
+|---|---|
+| `... --lib` the four above | **4 passed, 0 failed**. |
+| **M22**, minting admission directly instead of through `OverlayAdmission::admit` | Fails at "a second overlay job was admitted for the same actor"; restored source passes. |
+| **M23**, making `can_admit` clear owners instead of reaping live ones | Fails the runtime test at the same named assertion **and** both seam tests at theirs, proving the runtime property depends on weak-handle reaping rather than on the local waiter flag; restored source passes. |
+| `cargo clippy -j 1 -p catcoms-app --all-targets -- -D warnings`, `cargo fmt --all --check` | Clean. |
+| `cargo test -j 1 -p catcoms-app --lib`, no concurrent Cargo work | **637 passed, 0 failed, 11 ignored**, 1144.46 s. Up from 630 at `70eaad4` by the seven tests added since, with no `studio_exchange` failures. |
+
+**What is not done, and why.** N14(b) and N14(c) need a native `PrepareOverlaySave` handle, which
+cannot exist while Agent 2's P5 is false. `StudioReceiver::save_overlay` therefore has no production
+caller yet and carries one `#[allow(dead_code)]` marker naming its consumer. Its `close` and
+`budget` are parameters exactly as on the existing explicit `Server::save_studio_closing_overlay`:
+acquiring them means the saved close from the owner journal and a completed five-family inventory,
+and deciding when to pay for both is the manual lifecycle Agent 2 owns. A `StudioControlAction`
+variant was drafted and **withdrawn** rather than invent that shape unilaterally. No native command
+is registered; `studio_overlay_read` remains the only overlay command in `invoke_handler`.
+
 ### `EpochRecordKind::DraftArchive`, the shared enum seam for Agent 2
 
 Not Agent 1 work. Agent 2's design adds a sixth variant to a closed shared enum, so every match
@@ -851,12 +913,12 @@ Accompanying prose:
 
 ## Next actions
 
-1. **The receiver's overlay runtime**, which is the actual next Agent 1 scope. Consume
-   `OverlayAdmission` and `OverlayOwnership`, add the `StudioBackgroundJob::OverlayPlan` job and its
-   result variants, and delete the `#[allow(dead_code)]` marker on `studio/overlay/admission.rs`
-   with that commit. Until then I-2 is a seam PASS only, and N14/N15 have to be proved end to end
-   against the real `preparation_pool()` rather than against an ad hoc four-permit semaphore.
-2. Then Flow H and Flow R, then I-4 with C-3. See the revised sequencing table above.
+1. **Flow H**, the largest remaining piece: H1 capture, H2 detached plan, the H3 signing slice with
+   `MAX_SIGNING_TURNS_PER_VISIT`/`SIGNING_SLICE_BUDGET_MS` on the injected clock, H4 detached
+   assembly, H5 commit, H6 notify. N31 and M5a/M5b live here, and 7.3's two-distinct-events rule
+   (priority yield signs zero; slice bound signs at least one and fewer than all) is the part most
+   likely to be got wrong. Then **Flow R**, which needs no media and is independent.
+2. Then I-4 with C-3. See the revised sequencing table above.
 3. Produce design 13's eight measurements as each item lands; C-1's before-and-after is the first
    and is cheap, since the opt-in profile already exists. **No measurement exists yet.**
 4. R4-TEST-001 stays open until the reviewer can inspect `079e59a` on GitHub. C-1's call-site table

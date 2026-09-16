@@ -25,9 +25,104 @@ pub(crate) struct StudioReceiver {
     replay: replay::ReplayRuntime,
     replay_turn: bool,
 }
+/// What one custody visit of the scheduled Flow S concluded.
+#[allow(dead_code)]
+pub(crate) enum StudioOverlaySaveVisit {
+    /// Terminal and already durable: an acknowledgement, an exact retry, or a commit that this
+    /// visit completed from a plan an earlier visit left ready.
+    Saved(Box<catcoms_replication::studio::StudioOverlaySave>),
+    /// New authoring captured and handed to the background runtime. The caller asks again after
+    /// a later visit; the request stays retryable and byte-stable in the meantime.
+    Scheduled,
+    /// Admission or the shared four-slot pool is full. Retryable, and nothing was read, promoted
+    /// or held: 7.2 reserves before the first body read precisely so this costs nothing.
+    Busy,
+}
+
 impl StudioReceiver {
     pub(crate) fn clear_previews(&mut self) {
         self.catchup.preview = Default::default();
+    }
+
+    /// Scheduled local Save (Flow S), under the actor's custody lease.
+    ///
+    /// One visit does at most one of: commit a plan a previous visit left ready, settle a
+    /// classification terminally, or capture new authoring and detach it. The expensive
+    /// reconstruction never runs here; that is the whole point.
+    ///
+    /// `close` and `budget` are parameters, exactly as they are on the existing explicit
+    /// `Server::save_studio_closing_overlay`. Acquiring them is the caller's job: the saved close
+    /// comes from the owner journal and the budget from a completed five-family inventory, and
+    /// deciding when to pay for both is the manual lifecycle Agent 2 owns. That command is what
+    /// will call this, so no production caller exists yet.
+    //
+    // Consumed by the native/actor overlay lifecycle, which is gated on Agent 2's P5 (still
+    // false) and on C-3 making the per-visit inventory affordable. The seam is exercised by its
+    // own tests today and exposes no command; delete this marker with that commit.
+    #[allow(dead_code)]
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn save_overlay<T: MeshTransport + 'static, R: CryptoRngCore>(
+        &mut self,
+        server: &mut Server<T, R>,
+        store: &mut ServerStore,
+        id: u64,
+        target: StudioTarget,
+        close: &catcoms_replication::CloseRecord,
+        basis: [u8; 32],
+        operation: catcoms_replication::DomainOp,
+        budget: &mut crate::store::EpochStudioBudget,
+    ) -> Result<StudioOverlaySaveVisit, AppError> {
+        // A plan this actor already produced is finished first. Its transient hold is the only
+        // thing protecting its pixels, and it occupies admission until it is consumed.
+        if let Some((plan, ownership)) = self.catchup.take_planned_overlay(target) {
+            let tenure = server.sync.observed_owner_tenure_start();
+            let committed = server.sync.with_registry_context(|group, device, _, rng| {
+                store.commit_studio_overlay(
+                    id, group, target, device, close, tenure, *plan, rng, budget,
+                )
+            });
+            // Explicit: admission and the shared slot are released only after the commit attempt
+            // returns, on success and on error alike.
+            drop(ownership);
+            return committed.map(|draft| {
+                StudioOverlaySaveVisit::Saved(Box::new(
+                    catcoms_replication::studio::StudioOverlaySave::Local(draft),
+                ))
+            });
+        }
+        // 7.2. Reserve before the first bounded read, and release by dropping if there is nothing
+        // to schedule. Nothing below this line reaches a blob until S1b.
+        let Some(ownership) = self.catchup.reserve_overlay() else {
+            return Ok(StudioOverlaySaveVisit::Busy);
+        };
+        let tenure = server.sync.observed_owner_tenure_start();
+        let started = server
+            .sync
+            .with_registry_context(|group, device, clock, rng| {
+                store.start_studio_closing_overlay(
+                    id,
+                    group,
+                    target,
+                    device,
+                    close,
+                    tenure,
+                    basis,
+                    operation,
+                    clock.now_ms(),
+                    rng,
+                    budget,
+                )
+            })?;
+        match started {
+            // Terminal, and the reservation is released by dropping `ownership` on return.
+            crate::store::StudioOverlayStart::Settled(saved) => {
+                Ok(StudioOverlaySaveVisit::Saved(saved))
+            }
+            crate::store::StudioOverlayStart::Captured(capture) => {
+                self.catchup.schedule_overlay(*capture, ownership, target);
+                Ok(StudioOverlaySaveVisit::Scheduled)
+            }
+        }
     }
 
     #[cfg(test)]

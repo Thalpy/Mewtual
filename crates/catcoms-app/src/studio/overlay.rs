@@ -6,12 +6,7 @@ use catcoms_replication::studio::{
 };
 use catcoms_replication::{CloseRecord, DomainOp};
 
-// Consumed by the receiver's overlay runtime, which lands next on this branch and brings the
-// job and result variants with it. The seam is exercised by its own tests today and exposes no
-// callable surface; delete this marker with that commit.
-#[allow(dead_code)]
 mod admission;
-#[allow(unused_imports)]
 pub(crate) use admission::{OverlayAdmission, OverlayOwnership};
 
 impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {

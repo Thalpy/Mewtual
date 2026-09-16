@@ -277,3 +277,118 @@ fn studio_owner_lifecycle_retries_failed_snapshot_on_local_clock_not_request_fre
         panic!("successful current lifecycle must be reused")
     });
 }
+
+fn pooled(permits: usize) -> CatchupRuntime {
+    CatchupRuntime {
+        overlay_pool: Some(Arc::new(tokio::sync::Semaphore::new(permits))),
+        ..Default::default()
+    }
+}
+
+/// N15, the half that a per-actor test can prove exactly: there is no overlay-only pool. The
+/// production reservation draws from the one process-wide preparation semaphore that source and
+/// registry preparation use, which is why a full pool is a retryable refusal rather than a queue.
+#[test]
+fn overlay_reservation_shares_the_one_preparation_pool() {
+    assert!(
+        Arc::ptr_eq(
+            &CatchupRuntime::default().overlay_pool(),
+            crate::registry_catchup::preparation_pool()
+        ),
+        "overlay work was given a pool of its own"
+    );
+}
+
+/// N15. A full shared pool refuses the reservation and nothing else happens: no body is read, no
+/// blob touched, no admission consumed. Releasing one slot makes the identical retry succeed.
+#[test]
+fn a_full_preparation_pool_refuses_an_overlay_reservation_and_recovers() {
+    let mut runtime = pooled(4);
+    let pool = runtime.overlay_pool();
+    let held: Vec<_> = (0..4)
+        .map(|_| {
+            pool.clone()
+                .try_acquire_owned()
+                .expect("the pool has four slots")
+        })
+        .collect();
+
+    assert!(
+        runtime.reserve_overlay().is_none(),
+        "an overlay job was admitted with no slot left in the shared pool"
+    );
+    // The refusal is capacity only: admission was not consumed by the attempt, so the retry below
+    // is not being served by a leftover token.
+    assert!(runtime.overlay_admission_available_for_test());
+
+    drop(held);
+    let ownership = runtime
+        .reserve_overlay()
+        .expect("a freed slot did not admit the identical retry");
+    assert_eq!(pool.available_permits(), 3);
+    drop(ownership);
+    assert_eq!(pool.available_permits(), 4);
+}
+
+/// I-2 through the runtime rather than the seam alone: one overlay job per actor, and a cancelled
+/// waiter does **not** make a second admissible. This is 7.1's first bullet, and the case that
+/// motivated weak-handle bookkeeping: the blocking closure still owns the bundle and is still
+/// running, so the slot and the admission must stay occupied with no release message from it.
+#[test]
+fn a_cancelled_overlay_waiter_does_not_free_a_still_running_worker_slot() {
+    let mut runtime = pooled(4);
+    let pool = runtime.overlay_pool();
+    let ownership = runtime
+        .reserve_overlay()
+        .expect("the first job is admitted");
+    assert_eq!(pool.available_permits(), 3);
+    assert!(
+        runtime.reserve_overlay().is_none(),
+        "a second overlay job was admitted for the same actor"
+    );
+
+    // The waiter is cancelled: the runtime drops its tracked job and `run` yields CancelledOverlay,
+    // which clears the waiter bookkeeping only. `ownership` here stands for the bundle the still
+    // running blocking closure owns.
+    runtime.overlay_detached = true;
+    drop(runtime.overlay.take()); // the runtime's own tracked handle goes with the waiter
+    runtime.note_cancelled_overlay_for_test();
+    assert!(!runtime.overlay_detached);
+    assert!(
+        runtime.reserve_overlay().is_none(),
+        "a cancelled waiter released admission while its worker was still running"
+    );
+    assert_eq!(
+        pool.available_permits(),
+        3,
+        "a cancelled waiter refunded a slot its worker still owns"
+    );
+
+    // The worker finishes by itself. Both come back with no second visit and no release call.
+    drop(ownership);
+    assert_eq!(pool.available_permits(), 4);
+    assert!(runtime.reserve_overlay().is_some());
+}
+
+/// A parked plan is a live job: it still owns the bundle and its pixels are still protected only
+/// by its transient hold, so the actor must not admit another overlay until a custody visit
+/// consumes it. The reservation also refuses while a capture is queued but not yet detached.
+#[test]
+fn a_queued_or_parked_overlay_keeps_the_actor_busy() {
+    let mut runtime = pooled(4);
+    let ownership = runtime
+        .reserve_overlay()
+        .expect("the first job is admitted");
+    runtime.overlay_detached = true;
+    assert!(runtime.reserve_overlay().is_none(), "detached");
+    runtime.overlay_detached = false;
+
+    // Parked result, ownership still alive inside it.
+    runtime.park_overlay_for_test(ownership);
+    assert!(
+        runtime.reserve_overlay().is_none(),
+        "a parked plan awaiting commit did not keep the actor busy"
+    );
+    runtime.overlay_planned = None;
+    assert!(runtime.reserve_overlay().is_some());
+}

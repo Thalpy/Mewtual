@@ -37,6 +37,68 @@ impl ServerStore {
         )
     }
 
+    /// Ordinary durable IO for the scheduled runtime's first custody visit.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn start_studio_closing_overlay(
+        &mut self,
+        server: u64,
+        group: &ServerGroup,
+        target: StudioTarget,
+        device: &MlsDevice,
+        close: &CloseRecord,
+        tenure: Option<u64>,
+        basis: [u8; 32],
+        operation: DomainOp,
+        ts: u64,
+        rng: &mut impl CryptoRngCore,
+        budget: &mut EpochStudioBudget,
+    ) -> Result<StudioOverlayStart, AppError> {
+        self.start_studio_closing_overlay_with_io(
+            server,
+            group,
+            target,
+            device,
+            close,
+            tenure,
+            basis,
+            operation,
+            ts,
+            rng,
+            budget,
+            atomic_write,
+            super::super::epoch_intents::sync_intent,
+        )
+    }
+
+    /// Ordinary durable IO for the scheduled runtime's commit visit.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn commit_studio_overlay(
+        &mut self,
+        server: u64,
+        group: &ServerGroup,
+        target: StudioTarget,
+        device: &MlsDevice,
+        close: &CloseRecord,
+        tenure: Option<u64>,
+        plan: StudioOverlayPlan,
+        rng: &mut impl CryptoRngCore,
+        budget: &mut EpochStudioBudget,
+    ) -> Result<catcoms_replication::studio::StudioLocalDraft, AppError> {
+        self.commit_studio_overlay_save(
+            server,
+            group,
+            target,
+            device,
+            close,
+            tenure,
+            plan,
+            rng,
+            budget,
+            atomic_write,
+            super::super::epoch_intents::sync_intent,
+        )
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn prepare_studio_closing_overlay(
         &mut self,
@@ -62,8 +124,15 @@ impl ServerStore {
             .map_err(invalid)
     }
 
+    /// Everything Flow S does under the first custody visit: S0 validation, S1 classification,
+    /// the terminal S1a acknowledgement, and for new authoring S1b authorization, media admission
+    /// and capture.
+    ///
+    /// Both callers use this. The synchronous adapter below composes it with `plan` and the commit
+    /// inline; the scheduled runtime runs the same three stages with custody released around
+    /// `plan`. There is deliberately no second algorithm for a scheduler to drift from.
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn save_studio_closing_overlay_with_io(
+    pub(crate) fn start_studio_closing_overlay_with_io(
         &mut self,
         server: u64,
         group: &ServerGroup,
@@ -78,7 +147,7 @@ impl ServerStore {
         budget: &mut EpochStudioBudget,
         writer: impl FnOnce(&Path, &[u8]) -> Result<(), AppError>,
         sync: impl FnOnce(&Path, u64) -> Result<(), AppError>,
-    ) -> Result<StudioOverlaySave, AppError> {
+    ) -> Result<StudioOverlayStart, AppError> {
         current_member(group, device)?;
         let logical = target.document(&group.group_id()).map_err(invalid)?;
         // Bound the caller's public Vec before making a LocalIntent copy.
@@ -121,7 +190,9 @@ impl ServerStore {
                     writer,
                     sync,
                 )?;
-                return Ok(StudioOverlaySave::HandedOff(outcome));
+                return Ok(StudioOverlayStart::Settled(Box::new(
+                    StudioOverlaySave::HandedOff(outcome),
+                )));
             }
         }
         let exact = match state.overlay() {
@@ -161,7 +232,9 @@ impl ServerStore {
                     writer,
                     sync,
                 )
-                .map(StudioOverlaySave::Local);
+                .map(|draft| {
+                    StudioOverlayStart::Settled(Box::new(StudioOverlaySave::Local(draft)))
+                });
         }
         // Everything from here is new authoring. Authorization comes BEFORE media admission:
         // "not previously accepted" is not the same as "authorized to author now". A request
@@ -190,14 +263,61 @@ impl ServerStore {
         // or pair either with a different operation. The hold is carried through the detached stage
         // and released only when the commit returns.
         let authoring = self.admit_studio_overlay_authoring(target, &logical, device, operation)?;
-        // The three staged seams, composed inline. A scheduled caller runs the same three in the
-        // same order with custody released around `plan`; there is no second algorithm.
-        let capture =
-            self.capture_studio_overlay_save(server, group, target, device, fresh, authoring, ts)?;
+        self.capture_studio_overlay_save(server, group, target, device, fresh, authoring, ts)
+            .map(|capture| StudioOverlayStart::Captured(Box::new(capture)))
+    }
+
+    /// The synchronous adapter: the same three stages with no detach between them. Every caller
+    /// that cannot release custody, and every existing test, takes this path.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn save_studio_closing_overlay_with_io(
+        &mut self,
+        server: u64,
+        group: &ServerGroup,
+        target: StudioTarget,
+        device: &MlsDevice,
+        close: &CloseRecord,
+        tenure: Option<u64>,
+        basis: [u8; 32],
+        operation: DomainOp,
+        ts: u64,
+        rng: &mut impl CryptoRngCore,
+        budget: &mut EpochStudioBudget,
+        // `FnMut` so this can lend the same writer to the start visit and then to the commit.
+        // A reborrow `&mut F` is itself `FnOnce`, so neither callee's bound changes and no caller
+        // has to pass anything twice.
+        mut writer: impl FnMut(&Path, &[u8]) -> Result<(), AppError>,
+        mut sync: impl FnMut(&Path, u64) -> Result<(), AppError>,
+    ) -> Result<StudioOverlaySave, AppError> {
+        let capture = match self.start_studio_closing_overlay_with_io(
+            server,
+            group,
+            target,
+            device,
+            close,
+            tenure,
+            basis,
+            operation,
+            ts,
+            rng,
+            budget,
+            &mut writer,
+            &mut sync,
+        )? {
+            StudioOverlayStart::Settled(saved) => return Ok(*saved),
+            StudioOverlayStart::Captured(capture) => *capture,
+        };
         let plan = capture.plan()?;
         self.commit_studio_overlay_save(
             server, group, target, device, close, tenure, plan, rng, budget, writer, sync,
         )
         .map(StudioOverlaySave::Local)
     }
+}
+
+/// What the first custody visit concluded. `Settled` is terminal and already durable; `Captured`
+/// is new authoring whose expensive reconstruction has not happened yet.
+pub(crate) enum StudioOverlayStart {
+    Settled(Box<StudioOverlaySave>),
+    Captured(Box<StudioOverlayCapture>),
 }

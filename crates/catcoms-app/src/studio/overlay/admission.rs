@@ -7,17 +7,27 @@
 //! admission occupied for the lifetime of the actor. Holding only `Weak` handles removes the
 //! transition entirely, so release is whatever happens when the last `Arc` drops, wherever it
 //! lives, and no path has to remember anything.
-use crate::store::CreativeHold;
 use std::sync::{Arc, Weak};
 use tokio::sync::OwnedSemaphorePermit;
 
-/// Everything a detached worker, a retained result or a native preparation handle must own for
-/// as long as it is alive. Dropping it releases the admission token, the shared preparation
-/// permit and any job-owned reference hold together, so a job cannot half-exist.
+/// The admission token and the shared preparation permit a detached worker, a retained result or
+/// a native preparation handle must own for as long as it is alive. Dropping it releases both
+/// together, so a job cannot hold capacity after its admission has gone or vice versa.
+///
+/// **Deviation from design 5.5, stated for review.** The design gave this a third member, the
+/// job-owned reference hold. A-001 made `AdmittedOverlayMedia` the single owner of that hold,
+/// minted with the verified frame facts it protects and carried inside the capture and the plan.
+/// Keeping a second `Option<CreativeHold>` here would create a competing owner and a way to hold
+/// pixels without the facts S3 rechecks, which is exactly what A-001 closed. The three pieces
+/// still release together in practice, because a job owns both this bundle and its capture, and
+/// dropping the job drops both.
 pub(crate) struct OverlayOwnership {
+    // Held for their `Drop`, never read: the admission token's liveness IS the admission, and the
+    // permit's existence IS the reserved slot. Reading either would be meaningless.
+    #[allow(dead_code)]
     admission: Arc<()>,
+    #[allow(dead_code)]
     permit: OwnedSemaphorePermit,
-    pixels: Option<CreativeHold>,
 }
 
 impl std::fmt::Debug for OverlayOwnership {
@@ -27,22 +37,8 @@ impl std::fmt::Debug for OverlayOwnership {
 }
 
 impl OverlayOwnership {
-    pub(crate) fn new(
-        admission: Arc<()>,
-        permit: OwnedSemaphorePermit,
-        pixels: Option<CreativeHold>,
-    ) -> Self {
-        Self {
-            admission,
-            permit,
-            pixels,
-        }
-    }
-
-    /// Hand the reference hold to the stage that needs it, keeping the admission and the permit.
-    /// Used at the commit boundary, where the store releases the hold after its write attempt.
-    pub(crate) fn take_pixels(&mut self) -> Option<CreativeHold> {
-        self.pixels.take()
+    pub(crate) fn new(admission: Arc<()>, permit: OwnedSemaphorePermit) -> Self {
+        Self { admission, permit }
     }
 
     #[cfg(test)]
@@ -114,8 +110,7 @@ mod tests {
 
         // An ordinary job: admitted, then released by dropping its ownership bundle.
         let token = admission.admit().expect("the first job is admitted");
-        let ownership =
-            OverlayOwnership::new(token, pool.clone().try_acquire_owned().unwrap(), None);
+        let ownership = OverlayOwnership::new(token, pool.clone().try_acquire_owned().unwrap());
         assert!(
             admission.admit().is_none(),
             "a second job was admitted while the first was live"
@@ -127,8 +122,7 @@ mod tests {
         // A cancelled background waiter: the runtime drops its tracked job, but the blocking
         // closure still owns the bundle. Admission must stay unavailable until that closure ends.
         let token = admission.admit().expect("a new job is admitted");
-        let still_running =
-            OverlayOwnership::new(token, pool.clone().try_acquire_owned().unwrap(), None);
+        let still_running = OverlayOwnership::new(token, pool.clone().try_acquire_owned().unwrap());
         assert!(
             admission.admit().is_none(),
             "a cancelled waiter released admission while its worker was still running"
@@ -139,7 +133,7 @@ mod tests {
         // A retained result still owning a clone keeps admission unavailable, so ordinary
         // completion of the worker cannot clear it while the result is still parked.
         let token = admission.admit().expect("a new job is admitted");
-        let worker = OverlayOwnership::new(token, pool.try_acquire_owned().unwrap(), None);
+        let worker = OverlayOwnership::new(token, pool.try_acquire_owned().unwrap());
         let parked_result = worker.admission_for_test();
         drop(worker);
         assert!(
@@ -157,7 +151,7 @@ mod tests {
         let mut admission = OverlayAdmission::default();
         let pool = pool();
         let token = admission.admit().expect("the preparation is admitted");
-        let handle = OverlayOwnership::new(token, pool.clone().try_acquire_owned().unwrap(), None);
+        let handle = OverlayOwnership::new(token, pool.clone().try_acquire_owned().unwrap());
         assert!(admission.admit().is_none());
         // Native cancels between visits, or simply drops the handle. No release is performed.
         drop(handle);
@@ -173,16 +167,16 @@ mod tests {
         );
     }
 
-    /// The bundle releases its three pieces together, so a job cannot keep capacity after its
-    /// admission has gone or vice versa.
+    /// The bundle releases its two pieces together, so a job cannot keep capacity after its
+    /// admission has gone or vice versa. The job-owned reference hold is the capture's, not this
+    /// bundle's; see the type comment for why A-001 makes that the only correct owner.
     #[test]
     fn overlay_ownership_releases_admission_and_capacity_together() {
         let mut admission = OverlayAdmission::default();
         let pool = pool();
         let token = admission.admit().unwrap();
         let weak = Arc::downgrade(&token);
-        let ownership =
-            OverlayOwnership::new(token, pool.clone().try_acquire_owned().unwrap(), None);
+        let ownership = OverlayOwnership::new(token, pool.clone().try_acquire_owned().unwrap());
         assert_eq!(pool.available_permits(), 3);
         assert_eq!(weak.strong_count(), 1);
         assert!(ownership.permit_for_test().num_permits() >= 1);
