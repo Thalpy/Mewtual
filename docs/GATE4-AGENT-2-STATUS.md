@@ -8,11 +8,12 @@ Review preamble: [preamble 2](GATE4-REVIEW-PREAMBLES.md#review-2-manualprovision
 
 | Item | State |
 |---|---|
-| Design revision | 2, **awaiting re-review** |
+| Design revision | 3, **awaiting re-review** |
 | Original design base | `1bcb1bca204d721b848b17c0835faf931ae930e3` |
 | Revision 1 head, reviewed | `a901f6b0f64df2b4ea9cc0221b64ac98276f582d` |
-| Revision 2 base | `a901f6b0f64df2b4ea9cc0221b64ac98276f582d` |
-| Revision 2 head SHA | `21ca8fa93c07b8bb65a00bc0bbc555518f8a7132`. Any later SHA recording this row is documentation-only and adds no design content. |
+| Revision 2 head, reviewed as SEC-PAIR-001 | `21ca8fa93c07b8bb65a00bc0bbc555518f8a7132` |
+| Revision 3 base | `21ca8fa93c07b8bb65a00bc0bbc555518f8a7132` |
+| Revision 3 head SHA | _pending: the commit that adds revision 3; fill before sending the review request_ |
 | Working checkout | main repository tree. Revision 2 was committed on branch `gate4-agent1-runtime`, which a parallel Agent 1 session had checked out; the user asked for no branch change. The design content is branch-independent, but Agent 4 should expect to move these two documents when the branches are integrated. No separate worktree yet; one is taken before any production edit. |
 | Production code | **None written.** |
 | Tests added | **None.** |
@@ -42,7 +43,18 @@ three boundaries, so the design itself is not yet accepted.
 | Date | Item | Verdict |
 |---|---|---|
 | 2026-09-15 | Design revision 1 (`a901f6b`) | **CHANGES REQUIRED on all three boundaries**, nine findings: 3 High, 6 Medium. Reviewer ran no Cargo commands and did not complete the `catcoms-sync/src/lib.rs` constructor/restore call-site trace. |
-| 2026-09-15 | Design revision 2 | Request prepared; head SHA pending. Three separable verdicts requested again. |
+| 2026-09-15 | Design revision 2 (`21ca8fa`) | **CHANGES REQUIRED on all three boundaries**, as SEC-PAIR-001, five findings: 3 High, 2 Medium. Revision-1 findings 1, 2, 4, 5, 6 and 8 closed; 9 closed at the API level with a test-layer correction; 3 and 7 open in narrower forms. Reviewer ran no Cargo commands. |
+| 2026-09-16 | Design revision 3 | Request prepared; head SHA pending. Three separable verdicts requested again. |
+
+### SEC-PAIR-001 findings and their disposition
+
+| # | Sev | Finding | Disposition |
+|---|---|---|---|
+| 1 | High | The generation scheme had no legal first-acceptance state: every unknown identity returned `Stale`, including the legitimate first Save of the next generation | **Corrected.** `classify_request` is structural and basis-free and returns `Unmatched`, which is not a verdict; `admit_new_branch` resolves it into `New` or `Stale` at the authorizing stage against the derived expected-next identity. No new stage, no reserved generation, AG1-001 preserved (N17a, M10b, M10c). |
+| 2 | High | The archive had no unambiguous physical identity in the Intents inventory | **Corrected, adopting the 16.1 answer.** `EpochRecordKind::DraftArchive`: distinct physical family, Intents accounting class, gated by `includes_intents()` (N19b, M28). Revision 2's placement is withdrawn as unrepresentable; audit fact A6 records why. |
+| 3 | High | The archive's declared bound could not contain its own maximum payload | **Corrected.** Three constants derived from the actual field bounds, threaded through reader cap, family `sealed_cap`, authentication rail, budget, sub-cap and native bound, with a static assertion and maximal-shape tests (N19c, L3b). |
+| 4 | High | The same-commit tenure residual was blocked only in the local commit builder | **Corrected.** M-1 moves to the receive side, into the existing pre-merge staged-commit inspection, stated over `DeviceId`. The invite ledger is demoted to honest-join admission (N-T6c, M22d). |
+| 5 | Med | N14/M5 could not test a missing or wrong confirmation at the store layer | **Corrected.** Split by layer: N14n/M5n at the native adapter, N14/M5 at the store. |
 
 ### Revision 1 findings and their disposition
 
@@ -66,7 +78,9 @@ Full signatures are in design section 5. Changes against revision 1 are marked.
 | Seam | Kind | Consumer |
 |---|---|---|
 | `StudioOverlayProvenance` on the basis | core | Agents 1, 3 |
-| **`branch_generation`, `branch_id`, `classify_request`** (new, finding 3) | core | Agent 1's Save classification |
+| **`branch_generation`, `branch_id`, `classify_request` returning `Unmatched`, and `admit_new_branch`** | core | Agent 1's Save classification at S1 and its authorizing stage at S1b |
+| **`EpochRecordKind::DraftArchive`** as a distinct physical family in the Intents accounting class | store, **touches every match on that enum** | Agents 1, 3, 4 |
+| **M-1 in `ServerGroup::process_incoming`'s pre-merge inspection** and in the local commit builder | mls, **authority-bearing, every member's receive path** | boundary (c) |
 | v3 terminal `disposed` arm, `dispose`, extended `validate` (**no `copy` arm**, finding 1) | core | Agent 1, Agent 3 |
 | Provenance guard on `prepare_handoff*` | core | Agent 1 |
 | **`UnconfirmedStudioSeed::seed_bytes` and `ProvisionalStudioSeedUse.seed_bytes`** (new, finding 6) | core, sync | boundary (b) |
@@ -110,8 +124,12 @@ Full signatures are in design section 5. Changes against revision 1 are marked.
 - **I-H (new, finding 2).** No count of copied items, and no `source_ops` value, ever establishes
   that a branch was preserved. Only a durable archive whose `content`, `branch`, `generation` and
   entry list match does.
-- **I-I (new, finding 3).** A request naming a branch identity the record does not know is refused
-  as Stale. Forgetting acknowledgement evidence degrades to refusal, never to acceptance.
+- **I-I.** A request naming a branch identity the record does not know is refused as Stale unless it
+  is exactly the derived next generation under freshly minted live authority, in which case it is a
+  first acceptance. Forgetting acknowledgement evidence degrades to refusal, never to acceptance.
+- **I-K (new, SEC-PAIR-001 finding 4).** No member merges a commit that both removes the pre-commit
+  designated committer and adds the same `DeviceId`. The rule binds the receive path, not only the
+  builder, and does not depend on the invite ledger, which no other member holds.
 - **I-J (new, finding 6).** No durable unconfirmed branch is built from retained preview bytes
   without a detached re-parse that re-proves the receipt binding from first principles.
 

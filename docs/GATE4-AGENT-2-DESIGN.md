@@ -1,14 +1,17 @@
 # Gate 4 Agent 2: overlay lifecycle, provisional local work and repeated tenure
 
-Status: **revision 2, design proposal, awaiting re-review. No production code is written, no test
+Status: **revision 3, design proposal, awaiting re-review. No production code is written, no test
 has been added and no Cargo command was executed.**
 
-Revision 1 (`a901f6b0f64df2b4ea9cc0221b64ac98276f582d`) received CHANGES REQUIRED on all three
-boundaries, with nine findings. This revision answers every one of them. Section 0 maps each
-finding to its correction; verify each against the code, not the prose.
+Revision 1 (`a901f6b`) received CHANGES REQUIRED with nine findings. Revision 2
+(`21ca8fa93c07b8bb65a00bc0bbc555518f8a7132`) received CHANGES REQUIRED again, as SEC-PAIR-001, with
+five findings: revision-1 findings 1, 2, 4, 5, 6 and 8 closed, finding 9 closed at the API level
+with a test-layer correction outstanding, and findings 3 and 7 open in narrower forms, plus two new
+archive findings. This revision answers all five. Section 0 maps each to its correction; verify each
+against the code, not the prose.
 
-Design base for this revision: `a901f6b0f64df2b4ea9cc0221b64ac98276f582d`. Original design base:
-`1bcb1bca204d721b848b17c0835faf931ae930e3`. Scope is
+Design base for this revision: `21ca8fa93c07b8bb65a00bc0bbc555518f8a7132`. Earlier bases:
+`a901f6b0f64df2b4ea9cc0221b64ac98276f582d`, `1bcb1bca204d721b848b17c0835faf931ae930e3`. Scope is
 [Agent 2 of the four handoffs](GATE4-AGENT-HANDOFFS.md); progress is in
 [GATE4-AGENT-2-STATUS](GATE4-AGENT-2-STATUS.md). The applicable review scope is
 [review preamble 2](GATE4-REVIEW-PREAMBLES.md#review-2-manualprovisional-overlay-lifecycle-and-repeated-tenure).
@@ -33,7 +36,20 @@ unreviewed. Agent 1's runtime design is unaccepted; this design consumes its sea
 section 14 records what breaks if they change. Agent 3's design is separate and is not consumed
 here except through the tenure seam of section 9.4.
 
-## 0. Disposition of the revision-1 findings
+## 0. Disposition of the SEC-PAIR-001 findings
+
+| Finding | Disposition in revision 3 | Where |
+|---|---|---|
+| **1 (High)** the generation scheme has no legal first-acceptance state: `classify_request` returns `Stale` for any unknown id, including the legitimate first Save of the next generation | **Corrected.** `classify_request` is a structural, basis-free classifier returning `Active`, `Transferred`, `Disposed` or **`Unmatched`**. `Unmatched` is not terminal: it is resolved into `New` or `Stale` at the authorizing stage, where the basis is minted anyway, by comparing the request against the **derived expected-next** identity. Agent 1's rule that acknowledgement classification performs no basis mint, tenure read, source lookup or media work is preserved. | 5.1, 6.6, 17.1 N17a, M10b |
+| **2 (High)** the archive has no unambiguous physical identity in the Intents inventory | **Corrected, adopting the reviewer's 16.1 answer.** A distinct physical record kind `EpochRecordKind::DraftArchive` with its own suffix, sealing domain, scope, canonical path, reader and sealed cap, its own inventory key, final/temporary recognition, `epoch_files_absent` participation, I-4 invalidation and reference collection, while remaining in the **Intents accounting class** through `includes_intents()` and `EpochIntentBudget`. Revision 2's "one more record kind inside the existing family" is withdrawn as unrepresentable. | 5.4, 6.5, 14, 17.1 N19b |
+| **3 (High)** the archive's declared bound cannot contain its own stated maximum payload | **Corrected.** A strict size formula derived from the actual field bounds, with three separate constants threaded through the reader cap, inventory per-record cap, budget, sub-cap and native bound, plus a static assertion and maximal-shape tests. The archive is no longer bounded by the intent record's cap, which it never had to be once it is its own record kind. | 5.3, 6.5, 15 L3b, 17.1 N19c |
+| **4 (High)** the same-commit tenure residual is blocked only in the local commit builder | **Corrected.** The prohibition moves to the **receive side**, into the existing pre-merge staged-commit inspection that already walks `add_proposals()` and `remove_proposals()`, as a `DeviceId`-based rule independent of leaf allocation. The invite ledger is explicitly demoted to honest-join admission and is no longer load-bearing for this invariant. | 9.3 part 4, 17.1 N-T6c, M22d |
+| **5 (Medium)** N14/M5 cannot test a missing or wrong confirmation at the store layer | **Corrected.** Split by layer: the native adapter tests absence and every wrong literal; the store tests that the typed confirmation is required for the destructive branch. M5's literal mutation moves to the native parser. | 17.1 N14, N14n, 17.2 M5, M5n |
+
+Revision-1 findings 1, 2, 4, 5, 6, 8 and 9 are closed by SEC-PAIR-001. Their corrections are
+unchanged in this revision and the table below is retained as the record of them.
+
+## 0b. Disposition of the revision-1 findings (retained record)
 
 | Finding | Disposition in revision 2 | Where |
 |---|---|---|
@@ -102,6 +118,26 @@ revision, each read at the pinned source:
   observation `None` a valid fresh proof mints a `HeadSelection` carrying the proof's claimed
   tenure. The reviewer is right: this is deliberate accepted reader behaviour and it means a wrong
   value is **not** universally refused. Revision 1's safety argument is withdrawn.
+- **A6 (SEC-PAIR-001 finding 2).** `EpochRecordKind` is a closed five-variant enum, and each variant
+  owns exactly one `suffix()`, one `domain()`, one `scope()` and one `sealed_cap()`
+  ([inventory.rs:48-99](../crates/catcoms-app/src/store/epoch_recovery/inventory.rs#L48)).
+  `storage_name` iterates that fixed family list gated by coverage, so a file is assigned to a
+  family **by filename suffix before decryption**; `decode_record_scope` then requires the
+  authenticated scope's leading domain to equal `family.domain()` and requires the scope to
+  re-derive canonically; the inventory is keyed by `(EpochRecordKind, hash)`. A second record under
+  the same family therefore has no representable identity: sharing the scope collides on the key,
+  changing the scope fails the domain check, and a new suffix is simply not recognised. The
+  reviewer is right and revision 2's placement was unimplementable.
+- **A7 (SEC-PAIR-001 finding 4).** `ServerGroup::process_incoming` already inspects the staged
+  commit **before** merging it: it walks `staged.add_proposals()` for the defence-in-depth
+  credential binding check and `staged.remove_proposals()` for the `ns_secret_L` rotation signal,
+  and only then calls `merge_staged_commit`
+  ([group.rs:466-490](../crates/catcoms-mls/src/group.rs#L466)). Its own comment states that
+  single-use nonce enforcement stays with the admitting committer's ledger and that this is the
+  binding check every applier can make without the invite token. That is exactly why revision 2's
+  part 4 was insufficient, and it is also the seam the correction needs: the pre-merge roster is
+  still the pre-commit roster at that point, so the pre-commit designated committer and the removed
+  leaves' device ids are both available.
 - **A5.** `StudioRecoveryItem`'s `value` field already names the source operation id of the value
   the planner selects (`frame_value`/`index_value` match `source.op_id`), and the deletion and
   creation arms take `tombstones[id].first()` and `creations.first()`
@@ -132,7 +168,21 @@ no representation in what it produces. Copy is therefore a genuinely useful way 
 forward and a genuinely invalid proof that work was preserved. Revision 2 keeps the first role and
 deletes the second.
 
-**O10 (new).** The rollover defence that `completed` provides comes from advancing
+**O11 (new, finding 1).** Revision 2 made `Stale` the answer to every identity the record does not
+know, which is safe against an old request and fatal to a new one. The two cases are distinguishable
+only against a freshly derived basis, because `branch_id` is a hash and cannot be inverted. So the
+classifier cannot be the place that decides: the cheap structural stage can only say "none of the
+identities I hold", and the stage that already mints the basis must resolve it. That stage exists in
+Agent 1's Flow S as S1b, which already compares a request identifier against a freshly minted basis
+and answers stale on mismatch, so the correction adds a comparison there rather than a new stage.
+
+**O12 (new, finding 2).** A6 shows the family assignment happens by filename before decryption and
+the scope domain is then required to match that family. "Same family, different sealing domain" is
+therefore self-contradictory in this codebase. The archive needs its own physical kind. What it does
+**not** need is its own accounting family: coverage, budget and the vault ceiling are separate
+concerns from physical identity, and `includes_intents()` can gate both kinds together.
+
+**O10.** The rollover defence that `completed` provides comes from advancing
 `minimum_new_basis_closed_epoch`, which disposal deliberately does not do (finding 3). The cheap
 replacement is not a history of acknowledgements but a **namespace**: if every request carries a
 branch identifier that includes a monotonic generation, an old request cannot collide with a new
@@ -188,10 +238,19 @@ impl StudioOverlayState {
     pub fn branch_id(&self) -> Option<[u8; 32]>;
     pub fn disposed(&self) -> Option<&StudioOverlayDisposal>;
 
-    /// Classification for an incoming Save request, evaluated before any basis mint, tenure
-    /// read, source lookup or media admission. Exactly one arm can match.
+    /// Structural classification for an incoming Save request, evaluated before any basis mint,
+    /// tenure read, source lookup or media admission. Exactly one arm can match. It cannot
+    /// distinguish a legitimate next-generation request from a stale one, because `branch_id` is
+    /// a hash of a basis it deliberately does not derive; that is what `Unmatched` means.
     pub fn classify_request(&self, target: StudioTarget, branch: [u8; 32], intent: &LocalIntent)
         -> Result<StudioOverlayRequestClass, ReplError>;
+
+    /// Resolution of `Unmatched`, called ONLY from the authorizing stage that has just minted a
+    /// fresh basis under live authority. Returns `New` exactly when there is no active branch and
+    /// `branch == H(domain, fresh.fingerprint(), branch_generation + 1)`, and `Stale` otherwise.
+    pub fn admit_new_branch(&self, target: StudioTarget, branch: [u8; 32],
+                            fresh: &StudioClosingOverlayBasis)
+        -> Result<StudioOverlayAdmission, ReplError>;
 
     /// The one transition that drops an active branch without transferring it. The caller has
     /// already proved authorization, archive durability (for `Preserved`) and explicit user
@@ -207,8 +266,17 @@ pub enum StudioOverlayRequestClass {
     Transferred(StudioHandoffOutcome),
     /// `branch` names the retained `disposed` manifest with a matching envelope.
     Disposed(StudioOverlayDisposal),
-    /// `branch` names nothing this record knows. NEVER a new acceptance. A genuinely new
-    /// branch carries the identifier minted now by `studio_overlay_begin` (6.6).
+    /// None of the identities this record holds. NOT a verdict: the authorizing stage resolves
+    /// it with `admit_new_branch`. Reaching this arm implies no terminal acknowledgement is
+    /// owed, so the request must either be a first acceptance or stale.
+    Unmatched,
+}
+pub enum StudioOverlayAdmission {
+    /// First acceptance of the derived next generation. The increment and the first accepted
+    /// envelope become durable in the SAME sealed replacement; there is no reserved, uncommitted
+    /// generation and no second durable transition.
+    New { generation: u64 },
+    /// An older generation, a skipped generation, an unrelated basis or an unknown identity.
     Stale,
 }
 
@@ -384,8 +452,42 @@ u32  count
                 bytes author(32), bytes operation (DomainOp::encode)
 ```
 
-Bounded by construction: every field comes from the already bounded record, so the payload is at
-most `MAX_RECORD_BYTES` plus framing. It carries no signature and no key material, and there is no
+**Size, derived rather than asserted (finding 3).** Revision 2 said the payload was "at most
+`MAX_RECORD_BYTES` plus framing" and then bounded the record by `MAX_RECORD_BYTES`, which cannot
+both hold. The archive is its own record kind (5.4), so it was never obliged to fit the intent
+record's cap. Three constants are derived from the actual field bounds:
+
+```rust
+// Fixed per-entry cost: id(32) + sequence(8) + ts(8) + author(32) + this encoder's length framing.
+const ARCHIVE_ENTRY_OVERHEAD_BYTES: usize = /* 80 + framing, computed from Encoder */;
+// version, provenance, replayable, document (MAX_SERVER_ID_BYTES + tag + MAX_LOGICAL_KEY_BYTES),
+// target, author/basis/branch/content (4 * 32), generation, optional provenance triple, framing.
+const ARCHIVE_HEADER_BYTES: usize = /* computed from the same fields */;
+
+pub const MAX_DRAFT_ARCHIVE_PAYLOAD_BYTES: usize = ARCHIVE_HEADER_BYTES
+    + MAX_RECEIPT_BYTES
+    + MAX_CHECKPOINT_BYTES                      // 2 MiB seed
+    + MAX_INTENT_BYTES_PER_DOCUMENT             // 4 MiB of encoded operations
+    + MAX_STUDIO_OVERLAY_OPS * ARCHIVE_ENTRY_OVERHEAD_BYTES;   // 256 entries
+pub const MAX_DRAFT_ARCHIVE_RECORD_BYTES: usize =
+    MAX_DRAFT_ARCHIVE_PAYLOAD_BYTES + MAX_ARCHIVE_SCOPE_BYTES + ARCHIVE_RECORD_FRAMING_BYTES;
+pub(super) const MAX_DRAFT_ARCHIVE_SEALED_BYTES: usize = MAX_DRAFT_ARCHIVE_RECORD_BYTES + 40;
+```
+
+That is approximately 6 MiB plus 26 KiB, which is deliberately **larger** than
+`MAX_RECORD_BYTES = 5 MiB + 1024`. The two 2 MiB and 4 MiB terms cannot both be saturated in a live
+record, because the intent cap already constrains seed plus ledger, so the practically reachable
+maximum is closer to `MAX_RECORD_BYTES` plus the entry table and header. The constant is
+nevertheless derived from the field bounds and not from that coincidence, so it stays correct if the
+intent cap moves. An implementation must carry a static assertion that the constant covers the
+maximal encodable shape, and N19c exercises a maximal accepted branch and a one-byte-over refusal.
+
+The three constants are threaded through: the archive reader's cap, the inventory family's
+`sealed_cap()` and its per-record authentication rail, `EpochIntentBudget`'s accounting, the 16 MiB
+archive sub-cap, and the native base64 bound, which stays inside `bounded_view`'s 32 MiB even at the
+derived maximum.
+
+The payload carries no signature and no key material, and there is no
 decoder in the vault direction: it cannot produce a `StudioClosingOverlayBasis`, a `StudioOverlay`,
 a `VerifiedReceipt` or any store record. `replayable == 0` is the raw-evidence case finding 5
 requires: exact seed, ordered complete envelopes, timestamps, scope and provenance, with the
@@ -394,11 +496,30 @@ reconstruction failure labelled rather than concealed.
 ### 5.4 Store: the draft archive record and the disposal transaction
 
 ```rust
+```rust
+// crates/catcoms-app/src/store/epoch_recovery/inventory.rs
+pub enum EpochRecordKind {
+    Recovery, OwnerReceipts, Intents, Registry, Studio,
+    /// Lossless disposed-draft evidence. A distinct PHYSICAL family with its own suffix,
+    /// sealing domain, scope, canonical path, reader and sealed cap, and its own inventory key,
+    /// but part of the INTENTS accounting class (finding 2, reviewer's 16.1 answer).
+    DraftArchive,
+}
+```
+
+`suffix()` returns `.draft-archive`; `domain()` returns the archive record domain; `scope()` returns
+the archive scope function; `sealed_cap()` returns `MAX_DRAFT_ARCHIVE_SEALED_BYTES`. `storage_name`
+gains the family in its iteration list, gated by `includes_intents()` so every coverage that scans
+intents also scans archives and no narrower coverage silently misses one. `decode_record_scope`'s
+existing domain and canonical re-derivation checks apply unchanged to the new domain, final and
+temporary names are recognised by the existing `record_name`, `epoch_files_absent` sees the family
+because it already scans at full coverage, and Agent 1's `epoch_mutation_guard` covers its writes.
+
+```rust
 impl ServerStore {
-    /// One archive record per (server, logical document), written to a sibling path in the SAME
-    /// Intents directory under a distinct sealing domain. Accounted in `EpochIntentBudget`
-    /// against `MAX_VAULT_INTENT_BYTES` and the archive ceiling of 6.5. Takes Agent 1's
-    /// `epoch_mutation_guard` like every other five-family writer.
+    /// One archive record per (server, logical document), in its own physical family.
+    /// Accounted in `EpochIntentBudget` against `MAX_VAULT_INTENT_BYTES` and the archive
+    /// ceiling of 6.5. Takes Agent 1's `epoch_mutation_guard` like every other family writer.
     #[allow(clippy::too_many_arguments)]
     pub(in crate::store) fn write_studio_draft_archive_with_io(
         &mut self, server: u64, document: &LogicalDocument, payload: &StudioDraftArchivePayload,
@@ -642,13 +763,20 @@ and hooks row says so.
 Placement, answering 16.1's requirement that any archive representation have its own bounded schema,
 provenance and coordinated inventory and writer design.
 
-- **Family.** One additional record kind **inside the existing Intents family**: a sibling path in
-  the same directory as the intent record, `epoch_draft_archive_path(&scope)`, under a distinct
-  sealing domain `b"catcoms/epoch-draft-archive-store/v1"`. This is not a sixth inventoried family;
-  it is one more record in a family the scan already walks (O2).
-- **Schema.** Plaintext is the scope bytes, an archive header (version, sequence, `at`, `branch`,
-  `content`, `generation`, `provenance`, `replayable`) and the section 5.3 payload. Bounded by
-  `MAX_ARCHIVE_RECORD_BYTES = MAX_RECORD_BYTES`; sealed by the same framing.
+- **Family, corrected (finding 2).** A distinct physical record kind
+  `EpochRecordKind::DraftArchive` with suffix `.draft-archive`, sealing domain
+  `b"catcoms/epoch-draft-archive-store/v1"`, its own scope function and canonical path
+  `epoch_draft_archive_path(&scope)`, its own authenticated reader and sealed cap, its own inventory
+  key, final and temporary recognition, `epoch_files_absent` participation and I-4 invalidation. It
+  is **not** an independent authority or storage-budget family: coverage is gated by
+  `includes_intents()` and every byte is charged to `EpochIntentBudget`. Revision 2's "one more
+  record inside the existing Intents family" is withdrawn: A6 shows the family is chosen by filename
+  before decryption and the authenticated scope domain must then equal that family's domain, so a
+  second record under `EpochRecordKind::Intents` has no representable identity.
+- **Schema.** Plaintext is the archive scope bytes, an archive header (version, sequence, `at`,
+  `branch`, `content`, `generation`, `provenance`, `replayable`) and the section 5.3 payload,
+  bounded by the derived `MAX_DRAFT_ARCHIVE_RECORD_BYTES` and sealed at
+  `MAX_DRAFT_ARCHIVE_SEALED_BYTES` (5.3).
 - **Cardinality and quotas.** At most **one archive per logical document**. A second preserving
   disposal on the same document requires the user to release the existing archive first, through
   the separate confirmed `studio_overlay_archive_release`. Vault-wide archives are capped at
@@ -657,12 +785,14 @@ provenance and coordinated inventory and writer design.
 - **Accounting.** Charged in `EpochIntentBudget.records`, `record_slots` and `bytes`, with the full
   replacement peak, temporary siblings and both generations invalidated on failed I/O, exactly as
   the intent record is.
-- **Inventory.** The Intents arm recognises the archive record kind and charges its bytes and slot.
-  The **reference** arm decodes its bounded canonical payload and collects the seed projection's
-  CIDs and every operation's CIDs, the same two sets `base_blob_cids()` and
-  `hold_creative_operation` produce for a live branch. A corrupt or unsupported archive fails closed
-  for reclamation, as every other record does. This is the coordinated inventory work 16.1 demands
-  and it must be agreed with Agent 1 (C-1, C-3, I-4) and Agent 3.
+- **Inventory.** The `DraftArchive` arm charges its bytes and its record slot into
+  `EpochIntentBudget` alongside `Intents`. The **reference** arm decodes its bounded canonical
+  payload and collects the seed projection's CIDs and every operation's CIDs, the same two sets
+  `base_blob_cids()` and `hold_creative_operation` produce for a live branch, so an archived CID is
+  part of the durable conservative set before the branch's own pins are allowed to disappear. A
+  corrupt or unsupported archive fails closed for reclamation, as every other record does. This is
+  the coordinated inventory work 16.1 demands and it must be agreed with Agent 1 (C-1, C-3, I-4)
+  and Agent 3.
 - **Ordering.** The archive is written and flushed as its own accounted replacement, taking Agent
   1's `epoch_mutation_guard`, **before** the disposal transaction. A crash between them leaves the
   archive durable and the branch intact; the exact retry re-verifies D4 and proceeds. A crash during
@@ -683,17 +813,37 @@ a namespace:
 - `branch_id = H("catcoms/studio-overlay-branch/v1", basis fingerprint, branch_generation)`.
 - `studio_overlay_begin` returns the branch id that a new acceptance would create or extend: the
   current id when an active branch exists on that basis, otherwise the id for
-  `branch_generation + 1`. `studio_overlay_read` returns the current branch's id.
-- Every Save, copy and disposal request carries that `branch`. `classify_request` (5.1) matches it
-  against the active branch, the `completed` manifest and the `disposed` manifest, in that order,
-  and returns **Stale** otherwise. **Stale is a refusal; it is never a new acceptance.**
+  `branch_generation + 1`. It is derived, never reserved, so nothing durable changes and a `begin`
+  result that another visit has overtaken simply stops matching. `studio_overlay_read` returns the
+  current branch's id.
+- Every Save, copy and disposal request carries that `branch`.
 
-The reviewer's trigger now resolves safely: accept and dispose G1 (generation 1), accept G2
-(generation 2), dispose G2 replacing the manifest, then deliver a delayed exact retry of a G1
-request. Its `branch` names generation 1, which matches neither the retained generation-2 manifest
-nor any live branch, so it returns Stale. G1's work is not resurrected and no unbounded history is
-kept. Retaining one manifest preserves the terminal acknowledgement for the most recent disposal;
-forgetting older ones degrades to refusal, which is the safe direction the reviewer required.
+**Two-stage resolution (finding 1).** Revision 2 collapsed "unknown identity" into `Stale`, which
+also refused the legitimate first Save of the next generation, so N17b could never reach its own
+second step. `branch_id` is a hash and cannot be inverted, so the cheap structural stage genuinely
+cannot tell the two apart; the stage that mints the basis can. The resolution therefore splits
+across Agent 1's existing Flow S stages, adding no new stage and preserving AG1-001:
+
+| Stage | Work | Answer |
+|---|---|---|
+| S1, structural, no basis | `classify_request` matches `branch` against the active branch, the `completed` manifest and the `disposed` manifest, in that order | `Active`, `Transferred`, `Disposed`, or `Unmatched` |
+| S1a | terminal acknowledgement for `Transferred` and `Disposed` | releases |
+| S1b, authorizing, basis minted here anyway | for `Unmatched` only: `admit_new_branch(target, branch, &fresh)` requires no active branch and `branch == H(domain, fresh.fingerprint(), branch_generation + 1)` | `New { generation }` or `Stale` |
+
+So the full answer set is: exact current branch to `Active`; retained terminal generation to its
+acknowledgement; **exact derived next generation under fresh live authority to `New`**; an older
+generation, a skipped generation, an unrelated basis and any unknown identity to `Stale`. The
+generation increment and the first accepted envelope become durable in the same sealed replacement
+at S3, so there is no reserved-but-uncommitted generation and no second durable transition.
+
+The reviewer's trigger now resolves safely end to end: accept G1 (generation 1 admitted as `New`),
+dispose G1, `begin` offers generation 2, the first G2 Save is admitted as `New`, dispose G2
+replacing the manifest, then deliver a delayed exact retry of a G1 request. G1's id names generation
+1, which matches no live branch and no retained manifest, and at S1b it is not the derived
+next generation either, so it returns `Stale`. G1's work is not resurrected, no unbounded history is
+kept, and the legitimate G2 acceptance is no longer collateral damage. Retaining one manifest
+preserves the terminal acknowledgement for the most recent disposal; forgetting older ones degrades
+to refusal, which is the safe direction and which the reviewer's 16.3 accepts.
 
 ## 7. Stale, rewound and nonpristine bases
 
@@ -914,13 +1064,34 @@ credential, while an update does not change it (A3). Under this rule the witness
 `Some(after.epoch)` and the rejoining device computes `Some(join epoch)`, which is the same value.
 L5's disagreement is closed.
 
-**Part 4: the residual of the residual, and its membership rule.** A re-add that reuses the same
-signature key **and** the same credential at the same leaf index would still be invisible. Two
-conditions exclude it, both testable: the invite path binds a fresh per-join nonce into the
-credential and the invite ledger refuses replay, so a legitimate rejoin cannot reuse a credential;
-and the commit builder refuses to remove and re-add the designated committer in one commit. This is
-the reviewer's "enforce a membership rule excluding this transition", applied only to the case part
-3 cannot see.
+**Part 4, corrected (SEC-PAIR-001 finding 4): the rule must bind every applier, not the builder.**
+Revision 2 excluded the invisible case with two conditions, and the reviewer showed neither binds a
+witness. The invite ledger is **local to the admitting party**: A7 records that
+`process_incoming`'s own comment says single-use nonce enforcement stays with the admitting
+committer's ledger, and that every other member can check only that an Add's credential names this
+group and matches its leaf key. A malicious, modified or simply buggy committer can therefore build
+a same-commit remove-and-re-add that reuses the signature key and credential bytes, and honest
+witnesses will merge it, preserve the old tenure start, and diverge from the rejoining device. The
+invite ledger is demoted to what it actually is: honest-join admission, not an authority invariant.
+
+The prohibition moves to the **receive side**, into the pre-merge staged-commit inspection that
+already exists at [group.rs:466-490](../crates/catcoms-mls/src/group.rs#L466):
+
+> **M-1.** A single commit must not both remove the **pre-commit designated committer** and add the
+> same `DeviceId`. Enforced on every staged commit before `merge_staged_commit`, and identically in
+> the local commit builder.
+
+Stated over `DeviceId`, not leaf index, so it does not depend on whether OpenMLS happens to recycle
+the same leaf. Both inputs are available at that point: the pre-merge roster is still the pre-commit
+roster, so `designated_committer()` and the removed leaves' device ids are both derivable, and the
+added device ids come from the `add_proposals()` walk the method already performs for its credential
+check. A violating commit is rejected before merge with the existing `InviteError`-style refusal
+path, so no member ever reaches the ambiguous position.
+
+What M-1 does not forbid: a device rotating to a new identity (remove A, add A', different
+`DeviceId`), or a genuine rejoin in a later commit. Only the one ambiguous shape is excluded. If a
+same-commit remove-and-re-add is ever needed, it requires an authenticated membership-incarnation
+value every member can verify independently, which is not proposed here.
 
 **Snapshot format.** `OwnerTenure::encode`/`decode` gain a versioned tail carrying the leaf digest;
 the 57-byte cap becomes 97. A v1 snapshot decodes by taking `owner` and `epoch` from the snapshot
@@ -1081,14 +1252,14 @@ Agent 1 must not register `studio_overlay_save` on the strength of this document
 | `.../studio/overlay/handoff.rs`, new `overlay/disposal.rs` | v3 encoding, `branch_generation`, `branch_id`, `classify_request`, the terminal `disposed` arm, extended `validate`, and the provenance guard on `prepare_handoff*` | Core; shared with Agent 1's C-1 |
 | `.../studio/provisional.rs` | retained `seed_bytes` and the scoped accessor (finding 6) | Core; boundary (b) |
 | `catcoms-sync/src/registry_seed/provisional/seed.rs` | `ProvisionalStudioSeedUse.seed_bytes` | Sync; boundary (b) |
-| `catcoms-mls/src/group.rs` | `designated_committer_leaf()`; the commit builder's remove-and-re-add refusal | **Authority-bearing; boundary (c)** |
+| `catcoms-mls/src/group.rs` | `designated_committer_leaf()`; **M-1 enforced in `process_incoming`'s existing pre-merge staged-commit inspection** and identically in the local commit builder | **Authority-bearing; boundary (c); every member's receive path** |
 | `catcoms-sync/src/owner_tenure.rs`, `lib.rs` | `Position.leaf`, the `applied` discontinuity arm, `joined`, the versioned snapshot tail, the `new_joined` call site | **Authority-bearing; boundary (c)** |
 | `catcoms-app/src/store/epoch_intents.rs` | `StudioOverlayLifecycle`; the Intents-arm archive record kind, provenance and unconfirmed byte counters | Shared with Agent 1 (C-1, C-3, I-4) and Agent 3 |
 | `.../store/epoch_intents/retirement.rs` | Unchanged; the overlay filter stays | Shared with Agent 3 |
 | new `.../store/epoch_intents/{disposal,archive}.rs` | The disposal transaction and the archive record | Agent 2 leaves |
 | `.../store/epoch_intents/inspection.rs` | `StudioInspectionPurpose`, `rebuild_for`, the composite copy capture and destination stamp | Shared with Agent 1 |
 | `.../store/epoch_studio.rs` | wider visibility for `read_studio_record` | Shared with Agent 3 |
-| `.../store/epoch_recovery/inventory.rs` | archive record kind and its reference collection | **Shared with Agent 1 and Agent 3; highest-risk item after I-4** |
+| `.../store/epoch_recovery/inventory.rs` | **`EpochRecordKind::DraftArchive`**: suffix, domain, scope, sealed cap, `storage_name` gating by `includes_intents()`, inventory key, temporary recognition, `epoch_files_absent`, and its reference collection | **Shared with Agent 1 and Agent 3; highest-risk item after I-4. A new physical family variant touches every `match` on `EpochRecordKind`** |
 | `catcoms-app/src/studio/restore.rs` | `history: &[&StudioProjection]`, `PlanScope`, `source_ops` | Agent 2 |
 | `catcoms-app/src/studio/{control,dispatch}.rs` | New actions and responses | **Central enum edit** |
 | `catcoms-app/src/studio/{inspection,settlement}.rs` | `rebuild_for` plumbing; two new settlement variants | Shared with Agent 1 |
@@ -1123,10 +1294,15 @@ retained memory rather than an assumed bound.
   ceiling; a document that has completed a 256-entry transfer and then accumulates a second
   256-entry branch can refuse disposal with `MetadataFull`, retaining the branch. Must be measured.
 - **L4.** `Discarded` destroys the operation bodies; only the bounded manifest survives.
-- **L5, superseded.** Revision 1's tenure residual is closed by 9.3 parts 3 and 4. What remains is
-  narrower: the discriminator depends on credentials binding a fresh per-join nonce and on the
-  commit builder refusing a same-commit remove-and-re-add of the committer. Both are testable
-  obligations, not assumptions, and N-T6b asserts them.
+- **L3b (new, finding 3).** `MAX_DRAFT_ARCHIVE_PAYLOAD_BYTES` is approximately 6 MiB plus 26 KiB by
+  derivation, so the 16 MiB archive sub-cap admits **two** archives at the derived maximum and about
+  three at the practically reachable maximum. A third refuses with `ArchiveCapacity` and the branch
+  stays retained. The sub-cap is a policy number, not a measurement, and belongs in 15.4.
+- **L5, superseded twice.** Revision 1's tenure residual is closed by 9.3 part 3, and revision 2's
+  reliance on the invite ledger and the local commit builder is closed by part 4's receive-side
+  M-1. What remains is a coverage obligation rather than a trust assumption: M-1 must be enforced on
+  every applier's staged commit before merge, and N-T6c proves it with an adversarial commit that
+  bypasses the local builder.
 - **L6.** A legacy-snapshot owner and an unobserved-gap owner remain Unknown and cannot rotate.
 - **L7.** The persisted unconfirmed base is the seed checkpoint, not the previewed tail.
 - **L8.** There is no import path for an export or an archive.
@@ -1138,24 +1314,25 @@ retained memory rather than an assumed bound.
 
 ## 16. Open questions for the re-review
 
-Revision 1's six questions were answered and those answers are adopted. Remaining:
+Revision 1's six questions and revision 2's five were answered, and every answer is adopted:
+the archive belongs to the Intents accounting class with a distinct physical kind (16.1); one
+archive per document plus explicit release (16.2); `Stale` for acknowledgements older than the
+retained manifest is acceptable (16.3); excluding the HPKE key from the leaf digest is correct and
+the membership rule is necessary but had to become receive-side (16.4); exact seed retention plus a
+detached re-parse is preferred (16.5). Remaining:
 
-1. **Archive placement.** Is a second record kind inside the existing Intents family, with its own
-   sealing domain, budget participation, inventory arm and reference collection, the right
-   representation, or should the archive be its own inventoried family despite the collision with
-   Agent 1's I-4 and Agent 3's writers?
-2. **Archive cardinality.** Is one archive per logical document plus an explicit release the right
-   bound, or should a small bounded set with an eviction rule exist? A set reintroduces the
-   eviction-versus-preservation tension the recovery rail already has.
-3. **Generational identity.** Does `branch_id` including `branch_generation` fully close finding 3,
-   and is returning `Stale` (rather than a terminal acknowledgement) acceptable for a retry of a
-   disposal older than the one retained manifest?
-4. **The leaf discriminator.** Is `blake3(index, signature_key, credential)`, excluding the HPKE
-   `encryption_key` so self-updates preserve knowledge, the right field set? Is the commit-builder
-   membership rule of 9.3 part 4 necessary, or does the invite ledger's fresh-nonce credential
-   binding already exclude the case on its own?
-5. **Preview seed retention.** Is retaining the exact verified seed bytes plus a detached re-parse
-   preferable to a bounded reconstruction API, given L10's memory cost?
+1. **Admission shape.** Is resolving `Unmatched` into `New` or `Stale` at the authorizing stage the
+   right placement, given that it keeps acknowledgement classification basis-free and adds no
+   durable transition, or is a durably reserved generation preferable despite the extra transition?
+2. **`DraftArchive` blast radius.** Adding a sixth `EpochRecordKind` variant touches every `match`
+   over that enum, including code Agents 1 and 3 are changing now. Should the variant land as an
+   isolated Agent 4 integration commit ahead of the Agent 2 implementation, rather than inside it?
+3. **The archive sub-cap.** L3b shows 16 MiB admits only two archives at the derived maximum. Is
+   that the right policy, or should the sub-cap scale with the vault's intent ceiling?
+4. **M-1's refusal semantics.** A staged commit that violates M-1 is rejected before merge, which
+   means a member that receives one cannot advance its MLS epoch at all while that commit stands.
+   Is a hard refusal correct, or should the member merge and fall back to `Unknown` tenure for that
+   owner, trading a liveness stop for an authority gap?
 
 ## 17. Test and mutation plan
 
@@ -1176,18 +1353,22 @@ schema changes of section 5. Added, changed or corrected:
 | N11 | store | **Finding 1 positive terminal case, `Preserved`.** Archive, then dispose, then reopen the vault | The archive is durable and decodes; exactly the annotated ids are gone; every ordinary intent remains; the record re-encodes canonically with `active == None`, `prepared == None` and `disposed` present; a second reopen is byte-identical. |
 | N12 | store | `Preserve` without a matching archive, and with an archive whose `content`, `branch`, `generation` or entry list differs | Each refuses at D4 with the branch fully retained. |
 | N13 | store | **Finding 1 positive terminal case, `Discarded`.** Dispose with the exact confirmation, then reopen | Manifest present with `mode:"discarded"`, entries gone, ordinary entries intact, canonical re-encode and reopen both succeed. |
-| N14 | store | Wrong `branch`, wrong `content`, wrong `accepted`, wrong author, wrong channel, a missing confirmation, and a confirmation with any other literal | Each refuses at its own check with the branch intact; each fixture passes every earlier check first. |
+| N14 | store | **Split by layer (finding 5).** Wrong `branch`, wrong `content`, wrong `accepted`, wrong author, wrong channel, and a `Preserve` request where the destructive branch is required | Each refuses at its own check with the branch intact; each fixture passes every earlier check first. The typed `StudioDiscardConfirmation` is present throughout, because at this layer it cannot be absent. |
+| N14n | native | **Finding 5, the layer where the literal exists.** `studio_overlay_dispose` with `mode:"discard"` and: no `confirm` field, an empty string, a near-miss literal, the release token, and a correct token with wrong case | Each refuses in the adapter **before any custody or store mutation**; the correct token reaches the typed request; the branch is unchanged in every case. |
 | N15 | store | Disposal under a transfer hold and under a live hold | Refused; read-only export and archiving still succeed under the transfer hold. |
 | N16 | store | Interrupt the archive write and the disposal write at each barrier | Reproduces section 12's table, including the `partial` state and the post-rename sync-only retry with no second manifest and no second sequence. |
 | N17 | store | Delayed Save retry for the most recently disposed branch | `classify_request` returns `Disposed` before any basis mint, tenure read, source lookup or media work; terminal acknowledgement; no new branch. |
-| N17b | store | **Finding 3 rollover.** Dispose G1 on basis B, accept G2 on B, dispose G2, restart, then deliver delayed exact retries of both G1 and G2 requests | G2's retry is acknowledged from the retained manifest; **G1's retry returns Stale and creates no branch, no entry and no second envelope**; `branch_generation` is monotonic across both disposals and across restart. |
+| N17a | store | **SEC-PAIR-001 finding 1, admission.** Dispose G1, call `begin`, then submit the first G2 Save | Admitted exactly once as `New { generation: 2 }`; the generation increment and the first envelope land in one sealed replacement; an immediate exact retry classifies as `Active`, not as a second `New`. Then submit, on the same record: G1's old id, a random id, the id for generation 4, and an id derived from a different basis at generation 2. **All four return Stale, and none creates a branch, an entry or a generation increment.** |
+| N17b | store | **Finding 3 rollover, now reachable.** Dispose G1 on basis B, accept G2 on B (through N17a's admission), dispose G2, restart, then deliver delayed exact retries of both G1 and G2 requests | G2's retry is acknowledged from the retained manifest; **G1's retry returns Stale and creates no branch, no entry and no second envelope**; `branch_generation` is monotonic across both disposals and across restart. |
 | N18 | store | Retirement naming both ordinary and disposed ids | Ordinary ids retire; disposed ids are already absent; no annotated id of a live branch is ever removed by that path. |
 | N19 | store | **Corrected reference lifecycle.** Base-only, superseded, removed-frame and pending CIDs, through: branch retained, archived, `Preserved` disposal, and `Discarded` disposal | Retained and archived: all four survive cleanup and reopen, the archived case proved by removing the branch and keeping only the archive. After `Preserved` disposal: still all four, held by the archive's reference collection. After `Discarded` disposal: a CID with no other holder becomes reclaimable and a CID still named by another holder does not. |
-| N19b | store | Archive record accounting and corruption | The archive charges its bytes and slot; the vault-wide 16 MiB ceiling and the one-per-document rule each refuse before any write; a corrupt archive fails closed for reclamation rather than releasing its references. |
+| N19b | store | **Archive physical identity (finding 2).** An archive and an ordinary intent record for the same document, coexisting | `storage_name` assigns each to its own family; the inventory keys them separately with no collision; `decode_record_scope` accepts each only under its own domain and rejects a record whose scope names the other family; `epoch_files_absent` reports the directory non-empty for an archive alone; a temporary archive sibling is recognised; the archive charges its bytes and slot into `EpochIntentBudget`; the one-per-document rule and the 16 MiB sub-cap each refuse before any write; a corrupt archive fails closed for reclamation rather than releasing its references; and a narrower coverage that excludes intents also excludes archives. |
+| N19c | store | **Archive size (finding 3).** A maximal accepted branch, archived, and a shape one byte over | The maximal branch archives successfully within `MAX_DRAFT_ARCHIVE_RECORD_BYTES`; the over-size shape refuses with no partial record and no budget spend; a static assertion covers the derived constant against the maximal encodable shape; the sealed record stays within the family's `sealed_cap()` and the native base64 form within `bounded_view`. |
 | N22 | store | **Finding 5 non-replayable branch** | Classification is `Manual(NotReplayable)`; export and archiving succeed and contain the exact seed, ordered envelopes, timestamps, scope and provenance with `replayable == 0`; `Preserved` disposal succeeds; only the typed projection and copy planning refuse; metadata readers do not fail. |
 | N25b | actor | **Finding 6 seed extraction.** Accept unconfirmed work from a preview whose tail is non-empty | The captured bytes equal the originally fetched seed, not a checkpoint of the tail-advanced projection; the detached re-parse against the candidate receipt succeeds; a mutated captured byte fails the re-parse with no durable change; after restart the branch reconstructs from its persisted bytes with the same projection. |
 | N-T6 | actor | Remove then rejoin in separate commits, the rejoining device becoming owner | The rejoining owner and every witness observe the same start; its receipts verify. |
-| N-T6b | actor | **Finding 7 same-commit case.** Remove and re-add the designated committer in one commit, with four observers: the rejoining owner, a known-tenure witness, an **Unknown-tenure newcomer** that requests a fresh owner proof, and a restarted copy of the witness | With 9.3 part 3 the witness and the rejoining owner agree, so the newcomer's proof-derived selection agrees too, and the restarted witness agrees after `decode`. Separately assert that the commit builder refuses to construct such a commit (part 4) and that an ordinary committer self-update does **not** reset the observed start. |
+| N-T6b | actor | **Finding 7 discriminator.** A committer leaf identity change across a contiguous step, with four observers: the rejoining owner, a known-tenure witness, an **Unknown-tenure newcomer** that requests a fresh owner proof, and a restarted copy of the witness | With 9.3 part 3 the witness and the rejoining owner agree, so the newcomer's proof-derived selection agrees too, and the restarted witness agrees after `decode`. Separately assert that an ordinary committer self-update, which rotates the HPKE key but keeps the credential, does **not** reset the observed start. |
+| N-T6c | mls, actor | **SEC-PAIR-001 finding 4, adversarial.** Construct the forbidden same-commit remove-and-re-add of the designated committer, reusing the same signature key and credential bytes, **bypassing the local commit builder**, and deliver the staged commit to an uninvolved witness | The witness refuses it **before `merge_staged_commit`**, so its epoch and its observed tenure are unchanged and no member reaches the ambiguous position. Assert separately that the local builder refuses to construct it, that a remove-and-re-add of a **different** `DeviceId` is still accepted, and that a genuine rejoin in a **later** commit is still accepted and produces agreement. The invite ledger is not consulted by the witness in any of these. |
 
 ### 17.2 Isolated mutations
 
@@ -1201,13 +1382,17 @@ Changed, added or corrected:
 | M3 | D3's `content` equality | N14 | "a stale request disposed a branch it had not seen". |
 | M3b | D3's `branch` equality (generation ignored) | N17b | "an old generation's request matched the current branch". |
 | M4 | D4's archive entry-list comparison, then separately its `content` comparison | N12 | "a branch was disposed against a non-matching archive": two mutations. |
-| M5 | D5's confirmation requirement, then separately the exact-literal check | N14 | "a discard proceeded without explicit confirmation"; "any string confirmed a discard". |
+| M5 | **Store layer only (finding 5).** D5's requirement that the destructive branch take a `StudioDiscardConfirmation` at all | N14 | "a disposal destroyed a branch through the preserving branch's checks". |
+| M5n | **Native layer (finding 5).** The exact-literal comparison in the adapter's `confirm` parser | N14n | "any string confirmed a discard": a near-miss literal reached the typed request. |
 | M9 | **Corrected.** Split the single sealed replacement into two writes, manifest first then ledger removal, leaving the intermediate state reachable | N16 | The fixture must reach the interruption **between the two writes** and observe "entries removed with no durable manifest" or "a manifest with the entries still present". A refusal caused by an invalid replacement does **not** count, so the mutant must produce two individually valid records. |
-| M10b | `classify_request` returning `Stale` for an unknown branch id (return a new-acceptance class instead) | N17b | "a disposed branch was resurrected by a delayed retry". |
+| M10b | **Corrected (finding 1).** `admit_new_branch`'s equality against the **derived expected-next** identity, weakened to "any identity the record does not hold" | N17a | "an arbitrary unknown identity was admitted as a new branch": G1's old id, or the generation-4 id, creates a branch. Mutating all-unknown-alike in the other direction, so that nothing is admitted, is a separate mutation failing N17a's first assertion. |
+| M10c | The `Unmatched` arm reaching S1b at all (treat it as terminal `Stale` in `classify_request`, restoring revision 2) | N17a | "a legitimate first acceptance of the derived next generation was refused". |
 | M15 | C4's `contains_exact_operation` retry shortcut | N7 | "a copy retry created a second destination operation". |
 | M22 | 9.3's `designated_committer == device` condition in `joined` | N-T2 | "a joiner that is not the committer invented the current owner's tenure". |
 | M22b | The `before.leaf != after.leaf` arm in `applied` | N-T6b | "a witness preserved a stale tenure across a real membership discontinuity": the witness and the rejoining owner disagree, and the Unknown-tenure newcomer accepts the value the witness refuses. |
 | M22c | The exclusion of `encryption_key` from the leaf digest | N-T6b's self-update case | "an ordinary committer self-update reset the observed tenure". |
+| M22d | **M-1's receive-side check in `process_incoming`**, leaving only the local commit builder's refusal | N-T6c | "a witness merged a forbidden same-commit remove-and-re-add": the commit is applied and the witness's observed tenure diverges from the rejoining owner's. A separate mutation removes only the builder's refusal and asserts N-T6c's builder case fails while the receive-side case still passes, so the two are proved independent. |
+| M28 | The `DraftArchive` arm of the reference collection | N19 | "archived pixels became reclaimable after a preserving disposal". |
 | M26 | **Corrected fixture.** The `Unconfirmed`-forbids-`prepared` rule in `validate` | N23 | The fixture must be a record that passes **every other** structural guard, including provenance encoding, zero source identifiers, entry ordering and canonical re-encode, so the failure isolates this prohibition. |
 | M27 | 8.1 part 3's detached re-parse of the captured seed bytes | N25b | "a mutated captured seed became a durable base". |
 
@@ -1231,9 +1416,91 @@ Fill `[FULL_HEAD_SHA]` with the commit that adds this revision before sending. D
 placeholder.
 
 ```text
+Review type: design re-review after SEC-PAIR-001 (CHANGES REQUIRED on all three boundaries).
+Base: 21ca8fa93c07b8bb65a00bc0bbc555518f8a7132. Head: [FULL_HEAD_SHA].
+Compare: https://github.com/Thalpy/Mewtual/compare/21ca8fa93c07b8bb65a00bc0bbc555518f8a7132...[FULL_HEAD_SHA]
+Scope/evidence: docs/GATE4-AGENT-2-DESIGN.md revision 3 and docs/GATE4-AGENT-2-STATUS.md.
+Design only: no production code, no test and no measurement exists. No Cargo command was run.
+Dependencies unchanged: e65bfd8 is still unreviewed; Agent 1's runtime design is unaccepted and is
+consumed by name only; Agent 3's design is not consumed except through the tenure seam; native Save
+stays unregistered and out of FLIPNOTE-UI-HOOKS; GATE4-AGENT-2-STATUS still states that Agent 1's
+P5 is false. Revision-1 findings 1, 2, 4, 5, 6, 8 and 9 were closed by SEC-PAIR-001 and are not
+reopened here.
+
+Please return three separable verdicts again: (a) manual lifecycle, stale bases and repeated-tenure
+integration; (b) the preview-local-work extension; (c) the locally observed tenure correction,
+which touches catcoms-mls on both the build and the receive path.
+
+Section 0 maps each of the five SEC-PAIR-001 findings to its correction. The four to attack:
+
+Finding 1 is corrected by splitting the verdict across two stages that already exist. classify_request
+is now structural and basis-free and returns Active, Transferred, Disposed or Unmatched; Unmatched is
+explicitly NOT a verdict, and admit_new_branch resolves it into New or Stale at Agent 1's S1b, which
+mints the basis anyway and already compares a request identifier against it. Confirm this preserves
+AG1-001, that no blob read, promotion, hold, possession check, tenure read or source lookup can
+precede a terminal acknowledgement, and that there is no reserved-but-uncommitted generation: the
+increment and the first envelope land in one sealed replacement at S3. Attack N17a, which now admits
+exactly one New and then requires Stale for G1's old id, a random id, a generation-4 id AND an id
+derived from a different basis at the same generation. M10b mutates the derived-expected-next
+equality rather than treating all unknown identities alike, and M10c restores revision 2's behaviour
+to prove the refusal it caused was real. Then check N17b is actually reachable now.
+
+Finding 2 is corrected by adopting your 16.1 answer literally: EpochRecordKind::DraftArchive, a
+distinct physical family with its own suffix, domain, scope, canonical path, reader, sealed cap,
+inventory key, temporary recognition and epoch_files_absent participation, gated in storage_name by
+includes_intents() and charged entirely to EpochIntentBudget. Revision 2's "one more record inside
+the existing Intents family" is withdrawn as unrepresentable; audit fact A6 records why. Verify the
+gating choice in particular: a coverage that excludes intents must also exclude archives, or a
+narrow scan would miss a record whose references it is responsible for. Attack N19b, which now
+requires no inventory key collision, per-family domain rejection, temporary-sibling recognition and
+correct coverage gating, and M28.
+
+Finding 3 is corrected by deriving three constants from the actual field bounds rather than reusing
+the intent cap, which the archive never had to obey once it is its own record kind. The derived
+payload maximum is about 6 MiB plus 26 KiB, larger than MAX_RECORD_BYTES; the two large terms cannot
+both be saturated in a live record, but the constant does not depend on that coincidence. Check the
+derivation covers the entry table, the receipt, the header and this encoder's framing, that a static
+assertion is required rather than assumed, and that the constants are threaded through the reader
+cap, the family's sealed_cap, the per-record authentication rail, EpochIntentBudget, the 16 MiB
+sub-cap and the native base64 bound. Attack N19c, and judge L3b: 16 MiB admits only two archives at
+the derived maximum (question 16.3).
+
+Finding 4 is the one to attack hardest. The invite ledger is demoted to honest-join admission and is
+no longer load-bearing: audit fact A7 quotes process_incoming's own comment saying single-use nonce
+enforcement stays with the admitting committer. M-1 now binds every applier: a single commit must not
+both remove the pre-commit designated committer and add the same DeviceId, enforced in the existing
+pre-merge staged-commit inspection before merge_staged_commit, and identically in the local builder.
+It is stated over DeviceId, not leaf index. Verify both inputs really are available pre-merge, that
+the add_proposals walk the method already performs supplies the added ids, and that the rule does not
+forbid a legitimate identity rotation or a genuine later rejoin. Attack N-T6c, which constructs the
+forbidden commit while bypassing the local builder and requires an uninvolved witness to refuse
+before merge, and M22d, which proves the receive-side and builder-side checks are independent. Then
+answer question 16.4: a hard pre-merge refusal stops that member's epoch from advancing at all while
+the commit stands. Is that the right trade against merging and falling back to Unknown tenure?
+
+Finding 5 is corrected by splitting the confirmation tests by layer: the native adapter tests
+absence and every wrong literal before any custody or store mutation (N14n, M5n), and the store tests
+that the destructive branch requires the typed confirmation at all (N14, M5). Confirm neither layer's
+test can pass for the other's reason.
+
+Answer the four questions in section 16. Question 16.2 is a process question you are better placed
+to judge than I am: adding a sixth EpochRecordKind variant touches every match over that enum,
+including code Agents 1 and 3 are changing right now, so it may belong in an isolated Agent 4
+integration commit ahead of the Agent 2 implementation.
+
+Return PASS for each of (a), (b) and (c) separately, or numbered findings with severity, file/line,
+trigger, impact, evidence and required correction, stating which boundary each belongs to and which
+earlier findings remain open. A PASS accepts design only: no implementation, no measurement and no
+native Save exposure is claimed, signed repair and combined runtime integration are separate, and
+full Gate 4 acceptance remains with Agent 4.
+```
+
+## 18b. Superseded revision-2 request (retained as the scope record)
+
+```text
 Review type: design re-review after CHANGES REQUIRED on all three boundaries.
-Base: a901f6b0f64df2b4ea9cc0221b64ac98276f582d. Head: [FULL_HEAD_SHA].
-Compare: https://github.com/Thalpy/Mewtual/compare/a901f6b0f64df2b4ea9cc0221b64ac98276f582d...[FULL_HEAD_SHA]
+Base: a901f6b0f64df2b4ea9cc0221b64ac98276f582d. Head: 21ca8fa93c07b8bb65a00bc0bbc555518f8a7132.
+Compare: https://github.com/Thalpy/Mewtual/compare/a901f6b0f64df2b4ea9cc0221b64ac98276f582d...21ca8fa93c07b8bb65a00bc0bbc555518f8a7132
 Scope/evidence: docs/GATE4-AGENT-2-DESIGN.md revision 2 and docs/GATE4-AGENT-2-STATUS.md.
 Design only: no production code, no test and no measurement exists. No Cargo command was run.
 Dependencies unchanged: e65bfd8 is still unreviewed; Agent 1's runtime design is unaccepted and is
