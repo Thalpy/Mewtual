@@ -15,7 +15,8 @@ Review preamble: 3. Current entries override older ones.
 | 2026-09-16 | Design revision 5, fourth-round findings answered | `ad023d2e5b514a8f9598b1fe433fd2b080ecad6c` | `3737f1d4fff6f2c08302b0ecb1b024008818a1cf` | design, docs only | **REQUEST CHANGES**: AG3-DES-021 **closed**; case 6c/N32, the sequence concept and M2 accepted; new AG3-DES-022 to AG3-DES-025; AG3-TEST-004 on N5c/N18/M12 |
 | 2026-09-16 | Design revision 6, fifth-round findings answered | `3737f1d4fff6f2c08302b0ecb1b024008818a1cf` | `135766ca9f290ab96d3133b771bc42da74fe7825` | design, docs only | **REQUEST CHANGES**: AG3-DES-023 and AG3-DES-024 **closed**; fresh-path AG3-DES-025 and the AG3-TEST-004 corrections accepted; new AG3-DES-026 to AG3-DES-029; AG3-TEST-005 |
 | 2026-09-16 | Design revision 7, sixth-round findings answered | `135766ca9f290ab96d3133b771bc42da74fe7825` | `6d498c2e901e5071104a2533e0a632dc5676b2a7` | design, docs only | **REQUEST CHANGES**: AG3-DES-029 **closed**; source-bound encoding shape and M14 accepted; new AG3-DES-030 to AG3-DES-033; AG3-TEST-006 |
-| 2026-09-16 | Design revision 8, seventh-round findings answered | `6d498c2e901e5071104a2533e0a632dc5676b2a7` | this commit | design, docs only | re-review requested |
+| 2026-09-16 | Design revision 8, seventh-round findings answered | `6d498c2e901e5071104a2533e0a632dc5676b2a7` | `b8bb5f3a3db6d0b8e450c82119f95e2cb929bce6` | design, docs only | re-review requested |
+| 2026-09-16 | Revision 8.1, `DraftArchive` seam consumed | `b8bb5f3a3db6d0b8e450c82119f95e2cb929bce6` | this commit | design, docs only | no rebase needed: `705d44b` is already an ancestor |
 
 Working checkout: `M:\Git (local)\CatComs`, shared with the parallel Agent 1 and Agent 2 sessions,
 which are now doing implementation and design work respectively. Agent 1 has the checkout on its
@@ -165,6 +166,30 @@ AG3-DES-008.
 | "`repair_install_pending()` is the ownership fence" (rev 7) | **Starts too late.** A B1-persisted repair is already nonterminal and owns the target, so a pre-B2 report could degrade a required replacement into a terminal screening. |
 | "Deferred live evidence keeps proofs suppressed" (rev 7) | **Not durably.** There was no capacity for it at the legal maximum and no persistent term in the proof refusal, so a restart resumed proving a disputed head. |
 | "`Transitioned` and `Screened` cover the dispositions" (rev 7) | **Incomplete.** Cases 6a and 6c mutate a source that was never Faulted and fitted neither value; the tag also had no place in the snapshot layout and was dropped by every successor path. |
+
+## The `DraftArchive` seam at `705d44b`
+
+Verified in code, and the reason no rebase action was needed: `705d44b` is already an **ancestor**
+of the branch head, landing two commits after Agent 3 revision 8, so the checkout already contains
+the seam and there is nothing to replay.
+
+- `EpochRecordKind` has six variants; `DraftArchive` is the sixth
+  (`store/epoch_recovery/inventory.rs:48-62`). The enum is closed, so a match missing the arm is a
+  compile error at this commit, not a silent default.
+- `intent_class()` returns true for `Intents | DraftArchive`
+  (`inventory.rs:67-69`): its own physical family, the Intents accounting class, charged against
+  `MAX_VAULT_INTENT_BYTES`.
+- Own suffix `.draft-archive`, own domain `catcoms/epoch-draft-archive-store/v1`, own scope, own
+  inventory key, own sealed cap `MAX_DRAFT_ARCHIVE_SEALED_BYTES` of about 6 MiB plus 35 KiB, and a
+  bounded authenticated reader in `store/epoch_draft_archive.rs` that performs **no typed decode**.
+- **No writer exists.** `write_studio_draft_archive_with_io` and
+  `release_studio_draft_archive_with_io` have zero matches in the tree, matching the module's own
+  statement that nothing there writes, releases or decodes an archive. So I-4 has nothing to guard
+  in this family today, and both names are already on I-4's audited participant list in
+  `GATE4-AGENT-1-DESIGN.md` 9.2 for when Agent 2 lands them.
+
+Agent 3 consequences are section 12.1 of the design: consume the variant, handle it in any match,
+add no writer, and never treat an archive as repairable history (I-12, N40).
 
 ## Facts established by the revision-8 audit
 
@@ -349,6 +374,8 @@ Full signatures are in [the design](GATE4-AGENT-3-DESIGN.md) section 5. Summary,
     frozen pair, no inferred issuer tenure.
 11. **I-11** An irrevocable owner decision is replaced only by a verified repair naming it as the
     loser, and its historical bytes are retained.
+12. **I-12** A `DraftArchive` record is a preserved local draft, never repairable history: no repair
+    path reads, decodes, replaces, retires or reclaims one, and none is ever evidence.
 
 Inherited and not weakened: HANDOFF-002's common source-write and reference-inventory fences, the
 Prepared source-replacement fence and publication hold, the four-slot shared preparation pool, the

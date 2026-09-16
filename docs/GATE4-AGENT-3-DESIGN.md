@@ -532,6 +532,8 @@ Invariants, each with a mutant in 15.2:
   a frozen pair with a third receipt or infers an issuer tenure.
 - **I-11** An irrevocable owner decision is replaced only by a verified repair naming it as the
   loser, and its historical bytes are retained.
+- **I-12** A `DraftArchive` record is a preserved local draft, never repairable history: no repair
+  path reads, decodes, replaces, retires or reclaims one, and none is ever evidence (12.1).
 
 ## 5. Concrete APIs
 
@@ -1258,7 +1260,7 @@ that write returns; signing alone grants no IO authority.
    `repair.verify_current_owner(group, issuer_tenure)` before any expensive source work, in the
    shape `seal_studio_with_io` already uses (`store/epoch_studio.rs:415-419`).
 2. `resolve_studio_handoff` (R10), before any journal, recovery or source side effect.
-3. `checked_studio_receive_source`, which enters the five-family budget, authenticates the actual
+3. `checked_studio_receive_source`, which enters the six-family budget, authenticates the actual
    wrapper and verifies its inventory record. Absence is an error: a repair never creates a source.
 4. Read `unit.repair_state()` **before** planning. This is the AG3-DES-004 correction:
 
@@ -1845,11 +1847,17 @@ This is AG3-DES-008's correction. A repair turn is four stages, not one call:
   only `Weak` handles and reaps dead owners, so a dropped native handle releases where the last
   `Arc` drops, matching Agent 1's I-2.
 
-**Mutation generation.** When Agent 1's resumable five-family scanner is used, rotating its
-mutation generation is **mandatory** for this scope, before the first possible IO of **every**
-repair-related path, not only the headline writes: B1, B2, B3, B4, B5, B6, the Flow R fault write,
-temporary siblings, cleanup and every failed operation. `verify_record` and reservation discipline
-do not invalidate a parked scan and are not substitutes.
+**Mutation generation.** When Agent 1's resumable scanner is used, rotating its mutation generation
+is **mandatory** for this scope, before the first possible IO of **every** repair-related path, not
+only the headline writes: B1, B2, B3, B4, B5, B6, the Flow R fault write, temporary siblings,
+cleanup and every failed operation. `verify_record` and reservation discipline do not invalidate a
+parked scan and are not substitutes.
+
+This scope adds **no writer** to the `DraftArchive` family (12.1), so I-4 imposes nothing new on it
+from here; Agent 2's `write_studio_draft_archive_with_io` and `release_studio_draft_archive_with_io`
+are already on I-4's audited participant list in `GATE4-AGENT-1-DESIGN.md` 9.2. Were a repair path
+ever to gain such a writer, it would take `epoch_mutation_guard` on the same terms as every other
+write above.
 
 **Fairness.** One repair job per actor turn per server. Faulted and repairing targets rotate
 round-robin using the same selection-index pattern as `rotate_owner`, so one permanently held fault
@@ -1882,6 +1890,41 @@ A repair is a common source writer and a common source reader. It therefore:
    visible, and the stale-basis manual path is Agent 2's. This design performs no disposal, no
    eviction and no automatic rebase.
 5. Introduces no competing source writer and no second preparation pool.
+
+## 12.1 The `DraftArchive` family is not repairable history
+
+`EpochRecordKind` gained a sixth variant, `DraftArchive`, at `705d44b`
+(`store/epoch_recovery/inventory.rs:48-69`). It is a closed shared enum, so this scope consumes the
+variant rather than inventing one, and any `match` it adds over that enum must handle the new arm.
+That is a compile-time obligation, not a judgement call: the existing arms are exhaustive at that
+commit, so a missed arm fails to build rather than silently defaulting.
+
+Physically it is its own family: a `.draft-archive` suffix, the
+`catcoms/epoch-draft-archive-store/v1` scope domain, its own inventory key, its own sealed cap of
+about 6 MiB plus 35 KiB, and a bounded authenticated reader in `store/epoch_draft_archive.rs`.
+Accounting is **shared with Intents** through `EpochRecordKind::intent_class()`, charged against
+`MAX_VAULT_INTENT_BYTES`, so it is a new physical family but not a new budget family. Coverage
+gating matches Intents, which is safe because `collect_creative_references` refuses any coverage but
+the complete scan.
+
+**The rule for this scope: an archive is a preserved local draft, never a signed document record.**
+
+- No repair path reads, decodes, replaces, retires, rewinds or reclaims an archive. The seam itself
+  decodes nothing inside one, and neither does anything here.
+- An archive is never evidence. It cannot supply a conflicting receipt, a pair, a repair, a seed,
+  a close or a tenure, and it is never consulted when classifying a source under C-2.
+- A repair's whole-version `Repair` recovery snapshot is computed from the source, exactly as
+  today. An archive is not part of that computation and is not folded into it.
+- Case 3, 4, 6a and 6c replacements leave archives untouched, on the same footing as the retained
+  overlay branch in section 11: a replacement changes the source, not a preserved draft, and
+  disposal of a draft is Agent 2's manual lifecycle.
+- The bytes still exist for admission purposes, because they are in the shared Intents class and
+  therefore in the budget a repair's writes are checked against. Counting them is the only
+  interaction this scope has with the family.
+
+This is **I-12** and 15.1 N40 asserts it. At the reviewed head the seam ships no writer and no
+guard, by Agent 2's deliberate I-4 sequencing decision, so there is nothing for this scope to guard
+today; section 10.3 records what would change if that stopped being true.
 
 ## 12. Registry dependencies for Index and Flipnote
 
@@ -1938,6 +1981,12 @@ Handed back: a replacement invalidates a retained overlay's Closing basis when t
 receipt changed and the branch was not derived from the new one. The work stays retained; the
 manual path is Agent 2's. Fail-closed `None` is correct but is not by itself evidence of eventual
 progress; 15.1 N14 and N15 demonstrate progress with legitimate evidence.
+
+**Consumed from Agent 2 at `705d44b`:** the `EpochRecordKind::DraftArchive` seam. This scope takes
+the variant rather than adding one, handles it explicitly in any match it introduces, adds no writer
+to the family, and treats an archive as a preserved local draft rather than repairable history. The
+contract is section 12.1, the invariant is I-12 and the regression is N40. No other Agent 2 contract
+is needed here beyond the tenure seam T1 to T5.
 
 ### 13.3 Agent 4: integration contract
 
@@ -2191,6 +2240,14 @@ Sync, app and native:
   **not** blocked by an unresolved record pair. Also assert the maximal shape, two distinct external
   pairs plus one repair, encodes, decodes and survives crash and reopen at every barrier, and that
   an aliased or half-duplicated pair is rejected (AG3-DES-018).
+- **N40** I-12, the `DraftArchive` seam (12.1). A document with a populated archive goes through a
+  full repair, including a case 3 rewind that replaces the source and stages `Repair` recovery.
+  Assert the archive file's **bytes are unchanged** at every barrier and after restart, that no
+  repair path opened, decoded or removed it, that it contributed nothing to the recovery snapshot or
+  to C-2 classification, and that its bytes were nonetheless counted in the Intents-class budget the
+  repair's writes were admitted against. Repeat with the archive absent, which must behave exactly
+  as a vault with no archive file does today. Also assert every `match` this scope adds over
+  `EpochRecordKind` handles `DraftArchive` explicitly rather than by a catch-all arm.
 - **N31b** AG3-DES-022's closure, the state revision 5 could not represent: two unresolved
   historical pairs are already retained **and** the local source then faults on a third,
   current-tenure pair. Assert the source's pair is selected as active without occupying a record
