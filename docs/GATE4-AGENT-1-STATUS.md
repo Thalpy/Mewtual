@@ -42,7 +42,8 @@ they are the highest-conflict changes, so they land last. The per-item verdict r
 | 2026-09-16 | I3-001 correction | `65e77d1` | `b7df00b` | bounded implementation | **PASS**: I3-001 **closed** |
 | 2026-09-16 | Flow S staged seams and N12(a) | `7b9cf3e` | `1c3a1e0` | bounded implementation | Split and N12(a) **PASS**; **FS-001** (P2) opened: new authoring could durably accept a missing PIX blob |
 | 2026-09-16 | FS-001 correction | `1c3a1e0` | `c57faee` | bounded implementation | S1b admission and S3 possession recheck, with N12(d) and M15 |
-| 2026-09-16 | Per-actor overlay admission | `c57faee` | uncommitted working tree | bounded implementation | I-2 as a self-contained seam with M3; consumer lands next |
+| 2026-09-16 | Per-actor overlay admission | `c57faee` | `bbfd5e5` | bounded implementation | Seam **PASS**, scoped to its own tests rather than end to end; **FS-002** (P2) opened against Flow S: a stale request still performed media admission before being identified as stale. One P3 API-hardening point on the capture's independent media parameters. |
+| 2026-09-16 | FS-002 correction and `AdmittedOverlayMedia` | `bbfd5e5` | uncommitted working tree | bounded implementation | Authorization moved ahead of media admission; media minted as one unforgeable value. New stale-basis regression with two hazards and two positive controls, plus M16. |
 
 Working checkout: `M:\Git (local)\CatComs`, branch `Create-suite-2`. **Other agents are working in
 this same checkout**: Agent 3's design landed at `7efc9c2` and Agent 2's documents are present
@@ -61,6 +62,8 @@ code and executed evidence, and the reviewer said so explicitly for each one.
 | AG1-003 | P2 | **Closed at the design boundary.** I-3 establishes ordinary protection before potentially durable I/O and before transient ownership is released. | Design 8.3, R7, 14 N12, M14 |
 | AG1-004 | P2 | **Closed** at revision 2. Prepared alone no longer prohibits nondestructive access; Agent 2 still owns the concrete lifecycle. | Design 12.1 |
 | AG1-005 | P3 | **Closed at the design boundary.** Admission depends on actual owners, not an actor-side strong reference awaiting cleanup. | Design 5.5, 7.1, 14 N14, M3 |
+| FS-001 | P2 | **Closed.** New authoring could durably accept an operation naming pixels the vault does not hold. S1b admission and the S3 possession recheck now exist, with N12(d) and M15. | Status "FS-001" |
+| FS-002 | P2 | **Corrected, awaiting review.** Classification is not authorization: a stale request still read, could promote and could hold pixels before the basis comparison refused it. Authorization now precedes media admission, and media is minted as one value that cannot be assembled by a caller. | Status "FS-002" |
 | AG1-TEST-001 | P3 | **Closed at the design boundary** (revision-4 review). The residual was that N31 required only `remaining() > 0`, which a visit deferring on the priority gate without signing also satisfies, so both the unchanged and the mutated implementation could pass. Revision 4 adds a positive signing precondition (`after < before`, `after > 0`, exact expected count derived from production `remaining()`), a deterministic injected-clock seam, authoritative work staged only after slice selection, and independent per-limit preconditions, with M5 split into M5a and M5b. The reviewer confirmed the production basis: `remaining()` delegates to the pending queue and `sign_next` removes exactly one item only after the signature succeeds, so the delta counts **successfully produced** signatures. | Design 7.3, 14.1 "N31 in full", 14.2 M5a/M5b |
 
 ## Audit claims corrected across revisions
@@ -515,6 +518,66 @@ passes.
 receiver's overlay runtime, which lands next and brings the job and result variants with it. The
 seam is exercised by its own tests and exposes no callable surface; the annotation and its comment
 must be deleted in that commit.
+
+### FS-002: authorization before media admission, and `AdmittedOverlayMedia`
+
+The FS-001 correction put media admission behind classification, which answers "has this request
+already been accepted". It does not answer "may this request be authored now". A request whose
+basis the document has legitimately moved past is neither an accepted retry nor authorized, but it
+still reached S1b: it read a blob, could promote one into the durable namespace, and consulted the
+job-owned hold rail, all on its way to being refused for a completely different reason. A stale
+editor was told its artwork was missing.
+
+`save_studio_closing_overlay_with_io` now runs the accepted order exactly:
+
+```text
+decode/bound request -> enter budget -> structural state read
+-> completed retry -> exact retry -> ordinary collision
+-> require live tenure -> read current Closing source -> derive fresh basis
+-> compare fresh fingerprint with the request basis
+-> ONLY NOW: validate and promote PIX, take the CreativeHold, capture, detach, commit
+```
+
+**A-1 is preserved.** Agent 2's invariant requires every acknowledgement, exact-retry and
+Prepared-resolution branch to stay reachable before any tenure is required. The reorder moves
+`tenure.ok_or_else` earlier, but still strictly after `completed_retry`, `exact_retry` and the
+ordinary-collision check, all three of which return or refuse before it. Save's tenure remains a
+parameter, so ordering is the only guard there; that ordering is now asserted by
+`studio_overlay_exact_retry_is_acknowledged_without_media_admission` (retry ahead of media) and by
+the new stale-basis regression (authorization ahead of media), and by N-T7b on Agent 2's side.
+
+**P3 hardening: `AdmittedOverlayMedia`.** The staged capture previously took the operation, the
+`CreativeHold` and the `(cid, bytes)` frame facts as three independent parameters, so a future
+caller could pass a hold for one operation with the frame facts of another, or pass `None` for
+either and silently disable the S3 recheck or N12(a)'s protection. Media is now one value with
+private fields, mintable only by `ServerStore::admit_studio_overlay_media`, which derives the
+frame reference from the operation itself, validates and promotes it, and takes the hold in the
+same call. The capture and the plan carry it whole; the commit destructures it and releases the
+hold after the write attempt, on success, error and unwind alike.
+
+`studio_overlay_stale_basis_is_refused_before_any_media_admission` advances the Closing source
+legitimately, by ingesting a separate sender's valid withheld edit, so the first basis becomes
+stale without any fixture editing a gate field, snapshot or stamp. It then submits new authoring
+against the stale basis under both hazards the reviewer named, each with a positive control on the
+fresh basis proving media admission was genuinely reachable and would have refused:
+
+| Hazard | Stale basis must report | Positive control on the fresh basis |
+|---|---|---|
+| The named pixels were never published | `Closing overlay basis changed` | `publish the frame PIX before saving its reference` |
+| Every job-owned hold slot legitimately occupied | `Closing overlay basis changed` | the reference-rail refusal |
+
+Each stale attempt also asserts the live transient-hold count is unchanged, the group's whole blob
+namespace is byte-identical including staging, and the durable intent record is unchanged.
+
+| Check | Result |
+|---|---|
+| `... --lib studio_overlay_stale_basis` | **1 passed, 0 failed**, 20.51 s. |
+| `... --lib store::epoch_studio` | **104 passed, 0 failed, 3 ignored**, 489.95 s. |
+| **M16**, moving media admission back above the basis comparison | Fails at the named assertion "a stale request was classified by its media instead of its basis", reporting `publish the frame PIX ...` where `Closing overlay basis changed` is required; restored source passes. |
+| `cargo clippy -p catcoms-app --all-targets -- -D warnings`, `cargo fmt --all --check` | Clean. |
+
+**Scope limitation carried forward.** The reviewer's I-2 note stands: the admission seam passed on
+its own tests, not end to end. Nothing here consumes `OverlayAdmission` yet.
 
 ### Not yet done for C-1
 

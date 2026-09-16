@@ -14,6 +14,44 @@ use catcoms_crypto::DeviceId;
 use catcoms_replication::studio::{StudioClosingOverlayBasis, StudioLocalDraft};
 use catcoms_replication::LocalIntent;
 
+/// Verified media facts for one new acceptance, together with the hold that protects them.
+///
+/// Only `admit_studio_overlay_media` can produce this, and it derives the frame reference from the
+/// operation itself. A caller therefore cannot present verified frame facts without the hold that
+/// protects them, nor a hold without the facts S3 needs, nor either one for an operation they do
+/// not belong to. Before this type existed the staged capture took the three independently and
+/// stored them, so a future caller could have disabled the S3 recheck or N12(a)'s protection by
+/// passing `None`.
+pub(crate) struct AdmittedOverlayMedia {
+    frame: Option<(catcoms_storage::Cid, u64)>,
+    hold: Option<CreativeHold>,
+}
+
+impl std::fmt::Debug for AdmittedOverlayMedia {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("AdmittedOverlayMedia { .. }")
+    }
+}
+
+/// The pixel reference a frame operation carries, with its declared size. Index operations and
+/// header edits carry none. This only reads the request; possession is a separate question.
+fn frame_pixels(
+    logical: &LogicalDocument,
+    operation: &DomainOp,
+) -> Result<Option<(catcoms_storage::Cid, u64)>, AppError> {
+    Ok(
+        match catcoms_replication::studio::FlipnoteOp::decode_domain(logical, operation)
+            .map_err(invalid)?
+        {
+            catcoms_replication::studio::FlipnoteOp::InsertFrame { cid, bytes, .. }
+            | catcoms_replication::studio::FlipnoteOp::ReplaceFrame { cid, bytes, .. } => {
+                Some((catcoms_storage::Cid::from_bytes(cid), bytes))
+            }
+            _ => None,
+        },
+    )
+}
+
 /// Record identity and public live context, captured under custody. It carries no plaintext, no
 /// key, no store handle, no Server and no budget, so it is safe to hold across a detach.
 pub(crate) struct StudioOverlayStamp {
@@ -44,10 +82,9 @@ pub(crate) struct StudioOverlayCapture {
     basis: StudioClosingOverlayBasis,
     intent: LocalIntent,
     ts: u64,
-    pixels: Option<CreativeHold>,
-    /// The request's frame reference and declared size, taken under custody at S1b. It says what
-    /// to recheck at S3; possession itself is never carried across the detach.
-    frame: Option<(catcoms_storage::Cid, u64)>,
+    /// Verified frame facts and the hold that protects them, minted together at S1b. Possession
+    /// itself is never carried across the detach; only what to recheck is.
+    media: AdmittedOverlayMedia,
 }
 
 impl std::fmt::Debug for StudioOverlayCapture {
@@ -62,8 +99,7 @@ pub(crate) struct StudioOverlayPlan {
     stamp: StudioOverlayStamp,
     state: EpochIntentState,
     draft: StudioLocalDraft,
-    pixels: Option<CreativeHold>,
-    frame: Option<(catcoms_storage::Cid, u64)>,
+    media: AdmittedOverlayMedia,
 }
 
 impl std::fmt::Debug for StudioOverlayPlan {
@@ -116,15 +152,86 @@ impl StudioOverlayCapture {
             stamp: self.stamp,
             state,
             draft,
-            pixels: self.pixels,
-            frame: self.frame,
+            media: self.media,
         })
     }
 }
 
 impl ServerStore {
-    /// Capture under custody, after classification has already proved this is new authoring.
-    /// The caller supplies the media hold it took for exactly that reason.
+    /// S1b media admission, for new authoring that has already been authorized.
+    ///
+    /// `operation_blob_cid` extracts an address and the typed layer checks declared sizes; neither
+    /// establishes that the bytes exist. Validate and promote them into the durable namespace, then
+    /// take the job-owned hold, and return both together so they cannot be separated.
+    ///
+    /// Callers must reach this only after classification has ruled out an acknowledgement AND
+    /// after the request's basis has been matched against a freshly derived one. An unmatched
+    /// stale request must be refused before any blob is read or promoted and before the reference
+    /// rails are consulted.
+    pub(crate) fn admit_studio_overlay_media(
+        &self,
+        target: StudioTarget,
+        document: &LogicalDocument,
+        operation: &DomainOp,
+    ) -> Result<AdmittedOverlayMedia, AppError> {
+        let frame = match target {
+            StudioTarget::Flipnote { .. } => frame_pixels(document, operation)?,
+            StudioTarget::Index { .. } => None,
+        };
+        let Some((cid, bytes)) = frame else {
+            return Ok(AdmittedOverlayMedia {
+                frame: None,
+                hold: None,
+            });
+        };
+        let mut blobs = self.blob_store(&hex::encode(&document.server_id))?;
+        let pixels = blobs
+            .get_bounded(&cid, bytes as usize)?
+            .ok_or_else(|| invalid("publish the frame PIX before saving its reference"))?;
+        if pixels.len() as u64 != bytes {
+            return Err(invalid("frame byte declaration differs from PIX"));
+        }
+        crate::creative::validate_pix(&pixels)?;
+        if pixels[4] != 191 || pixels[5] != 143 {
+            return Err(invalid("Flipnote frames must be 192x144"));
+        }
+        blobs.put_staged(&pixels)?;
+        if !blobs.promote_staged_bounded(&cid, pixels.len())? {
+            return Err(invalid("frame promotion failed"));
+        }
+        let hold = self.hold_creative_transient(
+            &document.server_id,
+            std::collections::BTreeSet::from([*cid.as_bytes()]),
+        )?;
+        Ok(AdmittedOverlayMedia {
+            frame: Some((cid, bytes)),
+            hold: Some(hold),
+        })
+    }
+
+    /// S3 possession recheck, immediately before the first durable acceptance. The transient hold
+    /// is a liveness claim over an address, not proof the bytes are still present: external
+    /// deletion or storage damage during the detached stage must refuse here rather than produce a
+    /// durable draft naming pixels the store does not possess. S1b already validated the content
+    /// addressed by this CID, so only presence and exact size are rechecked.
+    fn check_studio_frame_pixels(
+        &self,
+        group: &[u8],
+        cid: &catcoms_storage::Cid,
+        bytes: u64,
+    ) -> Result<(), AppError> {
+        let blobs = self.blob_store(&hex::encode(group))?;
+        match blobs.get_bounded(cid, bytes as usize)? {
+            Some(pixels) if pixels.len() as u64 == bytes => Ok(()),
+            Some(_) => Err(invalid("frame byte declaration differs from PIX")),
+            None => Err(invalid(
+                "accepted frame PIX is no longer held; republish it",
+            )),
+        }
+    }
+
+    /// Capture under custody, after classification has ruled out an acknowledgement, the basis has
+    /// been matched, and media has been admitted.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn capture_studio_overlay_save(
         &self,
@@ -135,8 +242,7 @@ impl ServerStore {
         basis: StudioClosingOverlayBasis,
         intent: LocalIntent,
         ts: u64,
-        pixels: Option<CreativeHold>,
-        frame: Option<(catcoms_storage::Cid, u64)>,
+        media: AdmittedOverlayMedia,
     ) -> Result<StudioOverlayCapture, AppError> {
         current_member(group, device)?;
         let document = target.document(&group.group_id()).map_err(invalid)?;
@@ -163,8 +269,7 @@ impl ServerStore {
             basis,
             intent,
             ts,
-            pixels,
-            frame,
+            media,
         })
     }
 
@@ -222,9 +327,9 @@ impl ServerStore {
             stamp,
             state,
             draft,
-            pixels,
-            frame,
+            media,
         } = plan;
+        let AdmittedOverlayMedia { frame, hold } = media;
         if stamp.server != server || stamp.target != target {
             return Err(invalid("overlay plan belongs to another target"));
         }
@@ -286,7 +391,7 @@ impl ServerStore {
             sync,
         );
         // Explicit: the hold outlives the write attempt, including its error path.
-        drop(pixels);
+        drop(hold);
         written?;
         Ok(draft)
     }

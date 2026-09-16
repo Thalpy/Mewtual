@@ -1243,24 +1243,16 @@ fn studio_overlay_detached_acceptance_survives_a_complete_scan_between_capture_a
         .unwrap(),
         7,
     );
+    let media = store
+        .admit_studio_overlay_media(f.target, &f.logical, &op)
+        .unwrap();
     let intent = catcoms_replication::LocalIntent {
         author: f.device.device_id(),
         operation: op,
     };
-    let held = store
-        .hold_creative_transient(&f.group.group_id(), BTreeSet::from([*cid.as_bytes()]))
-        .unwrap();
     let capture = store
         .capture_studio_overlay_save(
-            SERVER,
-            &f.group,
-            f.target,
-            &f.device,
-            basis,
-            intent,
-            300,
-            Some(held),
-            Some((cid, pixel_bytes)),
+            SERVER, &f.group, f.target, &f.device, basis, intent, 300, media,
         )
         .unwrap();
 
@@ -1323,9 +1315,12 @@ fn studio_overlay_detached_plan_is_refused_when_the_record_changed() {
         author: f.device.device_id(),
         operation: f.title(),
     };
+    let media = store
+        .admit_studio_overlay_media(f.target, &f.logical, &intent.operation)
+        .unwrap();
     let capture = store
         .capture_studio_overlay_save(
-            SERVER, &f.group, f.target, &f.device, basis, intent, 300, None, None,
+            SERVER, &f.group, f.target, &f.device, basis, intent, 300, media,
         )
         .unwrap();
     let plan = capture.plan().unwrap();
@@ -1448,24 +1443,16 @@ fn studio_overlay_new_acceptance_requires_pixels_at_admission_and_again_before_t
         .unwrap(),
         7,
     );
+    let media = store
+        .admit_studio_overlay_media(f.target, &f.logical, &op)
+        .unwrap();
     let intent = catcoms_replication::LocalIntent {
         author: f.device.device_id(),
         operation: op,
     };
-    let held = store
-        .hold_creative_transient(&f.group.group_id(), BTreeSet::from([*cid.as_bytes()]))
-        .unwrap();
     let capture = store
         .capture_studio_overlay_save(
-            SERVER,
-            &f.group,
-            f.target,
-            &f.device,
-            basis,
-            intent,
-            300,
-            Some(held),
-            Some((cid, pix().len() as u64)),
+            SERVER, &f.group, f.target, &f.device, basis, intent, 300, media,
         )
         .unwrap();
     let plan = capture.plan().unwrap();
@@ -1511,6 +1498,224 @@ fn studio_overlay_new_acceptance_requires_pixels_at_admission_and_again_before_t
         .unwrap()
         .local_draft()
         .unwrap()
+        .is_none());
+}
+
+/// Every file this group's blob namespace holds, staging included, by path and exact bytes. Used
+/// to prove a refused request neither promoted anything nor left a staged sibling behind.
+fn blob_namespace(store: &ServerStore, f: &Fixture) -> BTreeMap<String, Vec<u8>> {
+    let root = store
+        .dir
+        .join("blobs")
+        .join(hex::encode(f.group.group_id()));
+    let mut out = BTreeMap::new();
+    let mut stack = vec![root.clone()];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+            } else {
+                let name = path
+                    .strip_prefix(&root)
+                    .unwrap()
+                    .to_string_lossy()
+                    .replace('\\', "/");
+                out.insert(name, fs::read(&path).unwrap());
+            }
+        }
+    }
+    out
+}
+
+/// FS-002. Classification answers "has this already been accepted"; it does not answer "may this
+/// be authored now". A request carrying a basis the document has legitimately moved past is
+/// neither an accepted retry nor authorized, so it must be refused as stale before any pixel is
+/// read, promoted or held and before the shared reference rails are consulted. Otherwise a stale
+/// editor is told its artwork is missing, or a request destined for refusal promotes a blob and
+/// takes a rail slot on its way out.
+///
+/// Both hazards the reviewer named are exercised against the same advanced state, each with a
+/// positive control proving media admission was genuinely reachable and would have refused.
+#[test]
+fn studio_overlay_stale_basis_is_refused_before_any_media_admission() {
+    let root = tempfile::tempdir().unwrap();
+    let f = Fixture::new(true);
+    let mut store = open(root.path());
+    eligible(&f, &mut store);
+
+    // A separate sender's valid signed edit, withheld until the receiver has sealed. Ingesting it
+    // afterwards advances the persisted Closing source, which is what makes the first basis stale:
+    // no gate field, snapshot or stamp is edited by the fixture.
+    let mut sender = f.load(&store).unwrap();
+    let mut late = f.title();
+    late.nonce = [76; 16];
+    let packet = sender
+        .unit
+        .edit_or_reseal(&f.device, &f.group, &mut rng(), &late, 100)
+        .unwrap();
+    let (close, stale) = seal_source(&f, &mut store);
+
+    warm(&f, &mut store);
+    let mut b = budget(&mut store, &f);
+    let (admitted, _) = store
+        .ingest_studio_epoch_reusing(
+            SERVER,
+            &f.group,
+            f.target,
+            &f.device,
+            &packet,
+            &mut rng(),
+            &mut b,
+        )
+        .unwrap();
+    assert_eq!(admitted, Admission::Quarantined);
+    drop(store);
+
+    // Reopen so a cached source cannot stand in for the changed persisted one.
+    let mut store = open(root.path());
+    let mut b = budget(&mut store, &f);
+    let fresh = store
+        .prepare_studio_closing_overlay(
+            SERVER,
+            &f.group,
+            f.target,
+            &f.device,
+            &close,
+            Some(0),
+            &mut b,
+        )
+        .unwrap();
+    assert_ne!(
+        fresh.fingerprint(),
+        stale.fingerprint(),
+        "the Closing source did not actually advance"
+    );
+    let scope = crate::store::epoch_intents::scope_bytes(SERVER, &f.logical).unwrap();
+    let intent_path = store
+        .dir
+        .join("servers")
+        .join(format!("{}.intents", blake3::hash(&scope).to_hex()));
+    let intents_before = fs::read(&intent_path).ok();
+
+    let attempt = |store: &mut ServerStore, basis: [u8; 32], op: DomainOp| {
+        let mut b = budget(store, &f);
+        store
+            .save_studio_closing_overlay(
+                SERVER,
+                &f.group,
+                f.target,
+                &f.device,
+                &close,
+                Some(0),
+                basis,
+                op,
+                456,
+                &mut rng(),
+                &mut b,
+            )
+            .map(|_| ())
+            .unwrap_err()
+            .to_string()
+    };
+
+    // Hazard 1: the pixels this new frame names were never published. A stale request must not
+    // reach the possession check at all, so the editor learns its basis moved rather than being
+    // told, wrongly, that its artwork is missing.
+    let absent = f.domain(
+        FlipnoteOp::InsertFrame {
+            frame: [9; 16],
+            after: None,
+            cid: [0xAB; 32],
+            bytes: pix().len() as u64,
+        }
+        .encode()
+        .unwrap(),
+        7,
+    );
+    let live = store.live_transient_holds_for_test();
+    let blobs_before = blob_namespace(&store, &f);
+    assert_eq!(
+        attempt(&mut store, stale.fingerprint(), absent.clone()),
+        invalid("Closing overlay basis changed").to_string(),
+        "a stale request was classified by its media instead of its basis"
+    );
+    assert_eq!(
+        store.live_transient_holds_for_test(),
+        live,
+        "a stale request took a job-owned hold"
+    );
+    assert_eq!(
+        blob_namespace(&store, &f),
+        blobs_before,
+        "a stale request changed the blob namespace"
+    );
+    assert_eq!(fs::read(&intent_path).ok(), intents_before);
+    // Positive control: with the current basis this identical request does reach media admission,
+    // and is refused there. The stale refusal above was ordering, not an inert request.
+    assert!(
+        attempt(&mut store, fresh.fingerprint(), absent).contains("publish the frame PIX"),
+        "the absent-pixel hazard was not reachable, so the stale case proves nothing"
+    );
+
+    // Hazard 2: the pixels exist, but every job-owned hold slot is legitimately occupied. A stale
+    // request must not consume rail capacity, nor be refused for a rail it had no business
+    // consulting.
+    let (cid, bytes) = published_pix(&store, &f, 3);
+    let held = f.domain(
+        FlipnoteOp::InsertFrame {
+            frame: [10; 16],
+            after: None,
+            cid,
+            bytes,
+        }
+        .encode()
+        .unwrap(),
+        8,
+    );
+    let occupied: Vec<_> = (0..crate::store::creative_references::MAX_TRANSIENT_HOLD_OWNERS)
+        .map(|n| {
+            store
+                .hold_creative_transient(&f.group.group_id(), BTreeSet::from([[n as u8; 32]]))
+                .expect("the rail admits its stated number of owners")
+        })
+        .collect();
+    let live = store.live_transient_holds_for_test();
+    let blobs_before = blob_namespace(&store, &f);
+    assert_eq!(
+        attempt(&mut store, stale.fingerprint(), held.clone()),
+        invalid("Closing overlay basis changed").to_string(),
+        "a stale request consulted the reference rails before its basis"
+    );
+    assert_eq!(
+        store.live_transient_holds_for_test(),
+        live,
+        "a stale request disturbed the job-owned hold rail"
+    );
+    assert_eq!(
+        blob_namespace(&store, &f),
+        blobs_before,
+        "a stale request promoted a blob on its way to refusal"
+    );
+    assert_eq!(fs::read(&intent_path).ok(), intents_before);
+    // Positive control: the saturated rail does refuse this request once its basis is current.
+    assert_eq!(
+        attempt(&mut store, fresh.fingerprint(), held),
+        AppError::Invalid("creative reference scan incomplete, unsupported or over bound".into())
+            .to_string(),
+        "the saturated-rail hazard was not reachable, so the stale case proves nothing"
+    );
+    drop(occupied);
+
+    // Nothing durable was accepted by any of the four attempts.
+    assert_eq!(fs::read(&intent_path).ok(), intents_before);
+    assert!(store
+        .load_epoch_intents(SERVER, &f.logical)
+        .unwrap()
+        .overlay()
         .is_none());
 }
 

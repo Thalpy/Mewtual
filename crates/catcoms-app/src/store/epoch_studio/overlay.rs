@@ -4,72 +4,7 @@ use super::*;
 use catcoms_replication::studio::{StudioClosingOverlayBasis, StudioOverlaySave};
 use catcoms_replication::{CloseRecord, LocalIntent};
 
-/// The pixel reference a frame operation carries, with its declared size. Index operations and
-/// header edits carry none. This only reads the request; possession is a separate question.
-fn frame_pixels(
-    logical: &LogicalDocument,
-    operation: &DomainOp,
-) -> Result<Option<(catcoms_storage::Cid, u64)>, AppError> {
-    Ok(
-        match FlipnoteOp::decode_domain(logical, operation).map_err(invalid)? {
-            FlipnoteOp::InsertFrame { cid, bytes, .. }
-            | FlipnoteOp::ReplaceFrame { cid, bytes, .. } => {
-                Some((catcoms_storage::Cid::from_bytes(cid), bytes))
-            }
-            _ => None,
-        },
-    )
-}
-
 impl ServerStore {
-    /// S1b media admission, for new authoring only. A new local acceptance may not name pixels
-    /// the vault does not hold: `operation_blob_cid` extracts an address and the typed layer
-    /// checks declared sizes, but neither establishes that the bytes exist. Validate and promote
-    /// them into the durable namespace here, before the transient hold and before any detached
-    /// work, exactly as the ordinary Apply path does.
-    fn admit_studio_frame_pixels(
-        &self,
-        group: &[u8],
-        cid: &catcoms_storage::Cid,
-        bytes: u64,
-    ) -> Result<(), AppError> {
-        let mut blobs = self.blob_store(&hex::encode(group))?;
-        let pixels = blobs
-            .get_bounded(cid, bytes as usize)?
-            .ok_or_else(|| invalid("publish the frame PIX before saving its reference"))?;
-        if pixels.len() as u64 != bytes {
-            return Err(invalid("frame byte declaration differs from PIX"));
-        }
-        crate::creative::validate_pix(&pixels)?;
-        if pixels[4] != 191 || pixels[5] != 143 {
-            return Err(invalid("Flipnote frames must be 192x144"));
-        }
-        blobs.put_staged(&pixels)?;
-        if !blobs.promote_staged_bounded(cid, pixels.len())? {
-            return Err(invalid("frame promotion failed"));
-        }
-        Ok(())
-    }
-
-    /// S3 possession recheck, immediately before the first durable acceptance. The transient hold
-    /// is a liveness claim over an address, not proof the bytes are still present: external
-    /// deletion or storage damage during the detached stage must refuse here rather than produce
-    /// a durable draft naming pixels the store does not possess.
-    pub(super) fn check_studio_frame_pixels(
-        &self,
-        group: &[u8],
-        cid: &catcoms_storage::Cid,
-        bytes: u64,
-    ) -> Result<(), AppError> {
-        let blobs = self.blob_store(&hex::encode(group))?;
-        match blobs.get_bounded(cid, bytes as usize)? {
-            Some(pixels) if pixels.len() as u64 == bytes => Ok(()),
-            Some(_) => Err(invalid("frame byte declaration differs from PIX")),
-            None => Err(invalid(
-                "accepted frame PIX is no longer held; republish it",
-            )),
-        }
-    }
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn save_studio_closing_overlay(
         &mut self,
@@ -228,35 +163,12 @@ impl ServerStore {
                 )
                 .map(StudioOverlaySave::Local);
         }
-        // Everything from here is new authoring, so this is where media admission belongs. An
-        // already accepted request must never be refused because the reference rails are full or
-        // because its pixels were legitimately reclaimed after retirement; classification above is
-        // deliberately cheap and reaches no blob.
-        //
-        // I-3, first half: until this acceptance is durable, nothing in the vault names the
-        // operation's pixels, so a complete reference scan would install a set without them and
-        // they would become reclaimable. The hold is owned by the capture, carried through the
-        // detached stage, and released only when the commit returns.
-        let frame = match target {
-            StudioTarget::Flipnote { .. } => frame_pixels(&logical, &operation)?,
-            StudioTarget::Index { .. } => None,
-        };
-        // S1b: validate and promote the referenced pixels into the durable namespace BEFORE the
-        // hold, so a reference to bytes the vault never held is refused here rather than becoming
-        // a durable local draft. Only new authoring reaches this.
-        if let Some((cid, bytes)) = &frame {
-            self.admit_studio_frame_pixels(&logical.server_id, cid, *bytes)?;
-        }
-        let pixels: std::collections::BTreeSet<[u8; 32]> =
-            catcoms_replication::studio::operation_blob_cid(&operation)
-                .map_err(invalid)?
-                .into_iter()
-                .collect();
-        let pixels = if pixels.is_empty() {
-            None
-        } else {
-            Some(self.hold_creative_transient(&logical.server_id, pixels)?)
-        };
+        // Everything from here is new authoring. Authorization comes BEFORE media admission:
+        // "not previously accepted" is not the same as "authorized to author now". A request
+        // carrying a basis the document has legitimately moved past is stale, and must be told so
+        // without reading, promoting or holding any pixels, and without consulting the reference
+        // rails. Otherwise a stale request reports a media error, or promotes a blob into the
+        // durable namespace, on its way to being refused for an unrelated reason.
         let tenure_value =
             tenure.ok_or_else(|| invalid("Closing overlay needs observed owner tenure"))?;
         let (mut source, observed, _) =
@@ -271,11 +183,16 @@ impl ServerStore {
             return Err(invalid("Closing overlay basis changed"));
         }
         drop(source);
+        // S1b, now that this request is both unaccepted and authorized: validate and promote the
+        // referenced pixels into the durable namespace, then take the job-owned hold. The two are
+        // minted together so no caller can hold verified frame facts without the hold that
+        // protects them. The hold is carried through the detached stage and released only when the
+        // commit returns.
+        let media = self.admit_studio_overlay_media(target, &logical, &operation)?;
         // The three staged seams, composed inline. A scheduled caller runs the same three in the
         // same order with custody released around `plan`; there is no second algorithm.
-        let capture = self.capture_studio_overlay_save(
-            server, group, target, device, fresh, intent, ts, pixels, frame,
-        )?;
+        let capture = self
+            .capture_studio_overlay_save(server, group, target, device, fresh, intent, ts, media)?;
         let plan = capture.plan()?;
         self.commit_studio_overlay_save(
             server, group, target, device, close, tenure, plan, rng, budget, writer, sync,
