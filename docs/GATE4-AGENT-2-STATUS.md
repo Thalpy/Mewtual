@@ -8,12 +8,13 @@ Review preamble: [preamble 2](GATE4-REVIEW-PREAMBLES.md#review-2-manualprovision
 
 | Item | State |
 |---|---|
-| Design revision | 3, **awaiting re-review** |
+| Design revision | 4, **awaiting re-review** |
 | Original design base | `1bcb1bca204d721b848b17c0835faf931ae930e3` |
 | Revision 1 head, reviewed | `a901f6b0f64df2b4ea9cc0221b64ac98276f582d` |
 | Revision 2 head, reviewed as SEC-PAIR-001 | `21ca8fa93c07b8bb65a00bc0bbc555518f8a7132` |
-| Revision 3 base | `21ca8fa93c07b8bb65a00bc0bbc555518f8a7132` |
-| Revision 3 head SHA | `9097207`. Any later SHA recording this row is documentation-only and adds no design content. |
+| Revision 3 head, reviewed | `909720739b6c0a455d37761e8149d7eec21cb6f4` |
+| Revision 4 base | `909720739b6c0a455d37761e8149d7eec21cb6f4` |
+| Revision 4 head SHA | _pending: the commit that adds revision 4; fill before sending the review request_ |
 | Working checkout | main repository tree. Revision 2 was committed on branch `gate4-agent1-runtime`, which a parallel Agent 1 session had checked out; the user asked for no branch change. The design content is branch-independent, but Agent 4 should expect to move these two documents when the branches are integrated. No separate worktree yet; one is taken before any production edit. |
 | Production code | **None written.** |
 | Tests added | **None.** |
@@ -44,7 +45,15 @@ three boundaries, so the design itself is not yet accepted.
 |---|---|---|
 | 2026-09-15 | Design revision 1 (`a901f6b`) | **CHANGES REQUIRED on all three boundaries**, nine findings: 3 High, 6 Medium. Reviewer ran no Cargo commands and did not complete the `catcoms-sync/src/lib.rs` constructor/restore call-site trace. |
 | 2026-09-15 | Design revision 2 (`21ca8fa`) | **CHANGES REQUIRED on all three boundaries**, as SEC-PAIR-001, five findings: 3 High, 2 Medium. Revision-1 findings 1, 2, 4, 5, 6 and 8 closed; 9 closed at the API level with a test-layer correction; 3 and 7 open in narrower forms. Reviewer ran no Cargo commands. |
-| 2026-09-16 | Design revision 3 | Request prepared; head SHA pending. Three separable verdicts requested again. |
+| 2026-09-16 | Design revision 3 (`9097207`) | **CHANGES REQUIRED on all three boundaries**, two findings: 1 High, 1 Medium. All five SEC-PAIR-001 corrections accepted. Reviewer ran no Cargo commands. |
+| 2026-09-16 | Design revision 4 | Request prepared; head SHA pending. Three separable verdicts requested again. |
+
+### Revision-3 re-review findings and their disposition
+
+| # | Sev | Finding | Disposition |
+|---|---|---|---|
+| 1 | High | v1 tenure snapshots could promote historically ambiguous tenure into `Known`: a stale `start` written by the old preserve branch, with the live leaf digest grafted on | **Corrected.** `start == Some(epoch)` proved to be exactly the promotable set; a bare downgrade of the rest rejected as worse than the risk; the value split by consumer through a new `Imported(u64)` state, sound for verification and fail-closed for authoring, with `prepare_receipt_head_snapshot` moved to a new authoring accessor and a snapshot flag preventing save/reload laundering (N-T6d, M22e, M22f). The residual product decision is question 16.1. |
+| 2 | Med | Revision 3 still contained, in O2, the archive placement it declares impossible, plus two stale cross-references | **Corrected.** O2 rewritten so the design holds one archive placement; Agent 1's design recorded as user PASS; the pre-`Unmatched` shorthand removed from this note. |
 
 ### SEC-PAIR-001 findings and their disposition
 
@@ -62,7 +71,7 @@ three boundaries, so the design itself is not yet accepted.
 |---|---|---|---|
 | 1 | High | `Copied` disposal has no valid terminal representation: the mode required `copy`, `copy` was forbidden without `active`, and the transition cleared both | **Corrected by removing the cause.** Copy bookkeeping deleted from the durable record. The terminal manifest is self-contained and no rule of it refers to a live field. Positive encode/decode/reopen cases added for both modes (N11, N13), plus M1b, which makes the defect executable. |
 | 2 | High | The copy proof could account for the wrong source work; projection-level copying is not envelope-level preservation | **Corrected twice.** Copy is no longer a disposal precondition, and `source_entry` is deleted: `restore::plan` derives `source_ops`. Preservation moves to a lossless draft archive. C-P states the loss plainly. |
-| 3 | High | Repeated disposal erased the only defence against an old Save retry | **Corrected by a durable branch-generation namespace.** `branch_id` includes a monotonic generation; an unknown id returns Stale, never a new acceptance (N17b, M3b, M10b). |
+| 3 | High | Repeated disposal erased the only defence against an old Save retry | **Corrected by a durable branch-generation namespace.** `branch_id` includes a monotonic generation. The precise rule is invariant I-I below, as corrected in revision 3: an unmatched identity is Stale **unless** it is exactly the derived next generation under fresh live authority (N17b, M3b, M10b). |
 | 4 | Med | The unchanged inspection capture cannot supply copy's destination inputs | **Corrected.** Composite capture of both destination records under the same single permit, rechecked at preview and apply (N8b). The "only the rebuild function changes" claim is withdrawn. |
 | 5 | Med | A structurally valid, non-replayable branch had no lossless export path | **Corrected.** Export and the archive are structural, not reconstruction-dependent, so a preserving disposal works for such a branch (N22). |
 | 6 | Med | The preview mint had no way to obtain its seed-only bytes | **Corrected.** Retained verified seed bytes, scoped access, and a detached re-parse so the mint does not trust the retention. Memory accounted (L10). |
@@ -115,10 +124,14 @@ Full signatures are in design section 5. Changes against revision 1 are marked.
 - **I-E.** Preview expiry, eviction, replacement, unwatch, lock, remount, membership change and
   restart remove the live preview and never the durably accepted draft; a retained draft never
   revives a preview.
-- **I-F.** `StudioOwnerTenure::Unknown` is fail-closed for every authoring, signing,
-  repair-issuance, rotation and publication decision. A reused key, a Welcome, a hint, a candidate
-  receipt's claim, a fresh owner proof's claim and the current group epoch are each insufficient to
-  make it `Known`.
+- **I-F.** `StudioOwnerTenure::Unknown` **and `Imported`** are both fail-closed for every authoring,
+  signing, repair-issuance, rotation and publication decision. A reused key, a Welcome, a hint, a
+  candidate receipt's claim, a fresh owner proof's claim and the current group epoch are each
+  insufficient to make it `Known`.
+- **I-L (new, revision-3 finding 1).** A v1 tenure snapshot is promoted to leaf-aware `Observed`
+  only when `start == Some(epoch)`. Any other `start` becomes `Imported`: still reported to
+  verification, so a mismatched proof is still refused, and never reported to authoring. `Imported`
+  survives save and reload as `Imported` and is promoted only by a leaf-aware observed transition.
 - **I-G.** A returning owner in a new tenure observes a strictly different value from its earlier
   tenure, including across a same-commit membership discontinuity.
 - **I-H (new, finding 2).** No count of copied items, and no `source_ops` value, ever establishes
