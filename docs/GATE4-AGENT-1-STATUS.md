@@ -23,7 +23,7 @@ they are the highest-conflict changes, so they land last. The per-item verdict r
 |---|---|---|
 | 1 | C-1 structural decode, with C-2's digest fences and the R4 replay exclusion | **landed; reviewed PASS; no-replay boundary covered by N24; R4 selection covered by N25/M9** |
 | 2 | C-4 transient reference holds, with the I-3 transfer | **landed; seam reviewed PASS; transfer implemented and mutation-proven; dead-code markers removed** |
-| 3 | The runtime: Flows S, H and R, admission, scheduling, commit seams | **Flow S store seams landed: capture, detached plan, stamp-checked commit, with N12(a). Actor admission, scheduling and Flows H/R not started** |
+| 3 | The runtime: Flows S, H and R, admission, scheduling, commit seams | **Flow S store seams and per-actor admission landed. Receiver wiring, scheduling and Flows H/R not started** |
 | 4 | I-4 and C-3 | not started |
 
 ## Checkpoints
@@ -41,7 +41,8 @@ they are the highest-conflict changes, so they land last. The per-item verdict r
 | 2026-09-15 | I-3 protection transfer | `079e59a` | `65e77d1` | bounded implementation | Mechanism **PASS**; **I3-001** (P2) opened: media admission ran before retry classification |
 | 2026-09-16 | I3-001 correction | `65e77d1` | `b7df00b` | bounded implementation | **PASS**: I3-001 **closed** |
 | 2026-09-16 | Flow S staged seams and N12(a) | `7b9cf3e` | `1c3a1e0` | bounded implementation | Split and N12(a) **PASS**; **FS-001** (P2) opened: new authoring could durably accept a missing PIX blob |
-| 2026-09-16 | FS-001 correction | `1c3a1e0` | uncommitted working tree | bounded implementation | S1b admission and S3 possession recheck, with N12(d) and M15 |
+| 2026-09-16 | FS-001 correction | `1c3a1e0` | `c57faee` | bounded implementation | S1b admission and S3 possession recheck, with N12(d) and M15 |
+| 2026-09-16 | Per-actor overlay admission | `c57faee` | uncommitted working tree | bounded implementation | I-2 as a self-contained seam with M3; consumer lands next |
 
 Working checkout: `M:\Git (local)\CatComs`, branch `Create-suite-2`. **Other agents are working in
 this same checkout**: Agent 3's design landed at `7efc9c2` and Agent 2's documents are present
@@ -486,6 +487,34 @@ install that the store's own rotation fixtures perform uses private items that `
 cannot reach. The helper runs exactly that existing sequence. It is compiled out of production
 builds, adds no callable surface and grants no authority; the alternative was widening real
 production visibility for a test.
+
+### Per-actor overlay admission (I-2)
+
+`studio/overlay/admission.rs` implements the admission record and the ownership bundle.
+`OverlayAdmission` holds only `Weak` handles and reaps dead owners, so there is no release
+transition for any path to forget. `OverlayOwnership` binds the admission token, the shared
+preparation permit and any job-owned reference hold, and releases all three together.
+
+Three regressions cover I-2 by ending an owner's life a different way each time: ordinary
+completion; a cancelled background waiter whose blocking closure still owns the bundle; a retained
+result still holding a clone after the worker has gone; and an abandoned native preparation handle
+dropped without any second visit, which also checks the preparation permit came back. A fourth
+asserts the bundle's three pieces release together.
+
+**M3**: weakening the reap so a dead owner is treated as live fails all three at their named
+assertions, including "an abandoned native handle occupied admission permanently". Restored source
+passes.
+
+| Check | Result |
+|---|---|
+| `... --lib studio::overlay::admission` | **3 passed, 0 failed**. |
+| M3 | All three fail at their intended assertions; restored source passes. |
+| `cargo clippy -j 1 -p catcoms-app --lib --tests -- -D warnings`, `cargo fmt --all -- --check` | Clean. |
+
+**Marker to remove.** The module carries one `#[allow(dead_code)]` because its consumer is the
+receiver's overlay runtime, which lands next and brings the job and result variants with it. The
+seam is exercised by its own tests and exposes no callable surface; the annotation and its comment
+must be deleted in that commit.
 
 ### Not yet done for C-1
 

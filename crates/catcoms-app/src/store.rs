@@ -39,6 +39,7 @@ pub(crate) use epoch_registry::registry_full_loads_for_test;
 pub(crate) use epoch_registry::tests::performance::save_inventory_fixture;
 pub(crate) use epoch_registry::{RegistrySourceCapture, RegistrySourceStamp};
 mod epoch_studio;
+pub(crate) use creative_references::CreativeHold;
 pub use creative_references::{CreativeReferences, MAX_CREATIVE_REFERENCES};
 pub(crate) use epoch_intents::inspection::{
     StudioInspectedDraft, StudioInspectionCapture, StudioInspectionStamp,
