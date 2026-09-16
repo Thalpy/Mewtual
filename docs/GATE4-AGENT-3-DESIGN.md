@@ -1260,13 +1260,24 @@ later tenure, with both history slots full and a repair nonterminal, a fresh cur
 could neither fault the source, nor take the occupied slot, nor displace anything, and after the
 response nothing durable kept proof suppressed. So:
 
-1. at the next write after demotion, the pair **migrates** into `pairs` when there is room, freeing
-   the slot for a future live conflict. Migration happens **before** any B1 for that pair, so the
-   binding is deterministic (AG3-DES-047): a migrated pair is issued as `repair_kind 1` by index,
-   and `repair_kind 3` is used only while the pair is still in `reserved`, whether because it is
-   still live or because there was no room to migrate. The two are never both applicable;
+1. at the next write after demotion, the pair **migrates** into `pairs` when there is an
+   **admissible** slot, freeing the reserved slot for a future live conflict. Migration happens
+   **before** any B1 for that pair, so the binding is deterministic (AG3-DES-047): a migrated pair
+   is issued as `repair_kind 1` by index, and `repair_kind 3` is used while the pair is still in
+   `reserved`. The two are never both applicable.
+
+   **Admissible, not merely numerically free** (AG3-DES-051). The reserved slot's alias rule is
+   deliberately weaker than the external one: a reserved pair may share a single receipt with an
+   external, which the three-receipt case requires, while two externals sharing any receipt hash are
+   rejected. So `pairs[0] = {R1,R2}` with `reserved = {R1,R3}` is a legal state, and on demotion
+   with one numerically free slot, revision 11 would have demanded a migration the validator forbids
+   while also saying kind 3 applies only when there was "no room", leaving the pair with no legal B1
+   path at all. Room therefore means *a slot this pair may legally occupy after every external-set
+   invariant*, so a pair whose migration would violate the alias rule stays in `reserved` and is
+   issued as kind 3 even though a slot is numerically free;
 2. where `pairs` is full it stays put, derived-historical, and the slot is unavailable;
-3. a live conflict arriving with no slot sets `live_overflow` to the authoring tenure start instead
+3. a live conflict arriving with no slot records its pair **fingerprint** in the `OverflowHold`
+   under the derived current `tenure_id` instead
    of being dropped. That is the evidence-free hold: it suppresses proof on the same derived-live
    rule while the reporter retries, and it is cleared when the pair can be stored, when the source
    itself faults on it, or when its tenure stops being current.
@@ -1282,9 +1293,24 @@ computed on the already-checked source **without mutating it**:
 
 ```text
 pair_is_materialisable(source, pair) =
-    neither member is is_repaired_loser(source)
- && one member is the source's current head or its opening      // so the conflict forms against it
+    a DRY RUN of the exact typed admission, on a clone of the book and gate, ends with frozen
+    fault evidence byte-for-byte equal to `pair`
 ```
+
+**Why a dry run and not an analytical test** (AG3-DES-050). Revision 11 asked whether a member was
+"the source's current head or its opening", which is broader than what the opening path will
+actually accept. `receipts_conflict` admits a pair that shares a closed epoch **or** differs in
+`TenureSelection`, so `{O, R}` can be genuine conflicting evidence with *different* closed epochs;
+but `check_opening_receipt` additionally requires `receipt.closed_epoch == opening.closed_epoch` and
+`opening.closed_epoch + 1 == gate.epoch` (`epoch.rs:1678-1685`). Such a pair would have been called
+materialisable, the drain would fail with `EpochScope`, and direct kind-3 issuance would be
+forbidden because of that classification: the live pair wedges while proof stays suppressed.
+
+The dry run runs on a clone under the same exclusive custody, mutates nothing durable, performs no
+I/O, and answers the only question that matters, which is whether the real transition reproduces
+*this* pair rather than some other one. An analytical predicate would have to restate every
+precondition of both admission paths and stay in step with them; the reviewer's exactness
+requirement is cheaper to meet directly.
 
 - **materialisable** -> drain into a source fault, under the crash-safe order below, then repair it
   as the source's own pair through `repair_kind 2`;
