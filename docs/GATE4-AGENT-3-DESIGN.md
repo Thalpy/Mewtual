@@ -1795,6 +1795,15 @@ and the per-requester rail (5.6 W-1 step 4), and **before the response is decide
      meanwhile it is retained as historical evidence and never sealed under an owner it does not
      dispute (AG3-DES-037). Safety is not deferred with it: 6.6's durable proof gate covers the
      interval.
+
+     **The exact pair survives even when the seal cannot reproduce it** (AG3-DES-042, R33). The live
+     seal is not a general way to materialise a reported pair: `is_repaired_loser` screens before any
+     conflict comparison, so after `{R1,R2}` is repaired for `R2`, feeding `R1` yields `Stale` and
+     feeding `R3` against a head of `R2` yields `{R2,R3}`, not the reported `{R1,R3}`. Where the seal
+     cannot produce exactly the reported pair, admission keeps it **owner-side** in the reserved slot
+     under the proof gate, and it is repairable directly through `repair_kind 3` without ever passing
+     through `ReceiptBook::fault`. This is what actually lets the three-receipt case converge: N39
+     asserts the owner's durable evidence is exactly `{R1,R3}`, not merely that some fault occurred.
    - **Any earlier tenure** (the historical case): **nothing is passed through the live seal.**
      `StudioEpoch::seal` ends in current-owner verification and only handles its own gate epoch,
      opening and adoption shapes, so feeding it an old receipt would be exactly the confusion of
@@ -1858,11 +1867,18 @@ single predicate, evaluated from durable state on **every** head request, not on
 that admitted the report:
 
 ```text
-authoritative_proof_allowed(source, record, observed_tenure) =
+authoritative_proof_allowed(source, record, authoring_tenure) =
     !source.is_faulted()
- && !reserved_is_live(record, observed_tenure)
+ && authoring_tenure.is_some()                       // Imported/Unknown fail closed
+ && !reserved_is_live(record, authoring_tenure)
+ && !live_overflow_is_live(record, authoring_tenure) // the evidence-free hold
  && the receipt about to be proved is not a member of any pair this record retains
 ```
+
+The `authoring_tenure.is_some()` term is AG3-DES-040's fail-closed rule: when current tenure cannot
+be authoritatively classified for authoring, including `Imported`, proof is refused rather than
+permitted on verification-only evidence. The `live_overflow` term is AG3-DES-041's: a live conflict
+we know about but could not store still suppresses proof.
 
 Historical pairs do not suppress proof by themselves: they dispute an old tenure's head, not the
 current one. A **live** reserved pair does, which is why the slot exists rather than sharing
@@ -2067,6 +2083,26 @@ established starts too late: `advance_checkpoint` calls `install_studio_seed_ste
 source-mutating install, so a B1-persisted case 6c repair was unclaimed against ordinary discovery
 and could resume against a source whose shape no longer matched the decision B1 was made on, losing
 its replacement obligation exactly as the report path did.
+
+**The durable predicate is not enough on its own** (AG3-DES-043). It derives ownership from the
+owner record and from `resolved_repair`, and a **non-owner** peer applying a distributed repair has
+neither: U-9 keeps `EpochFaultRecord` owner-only, and before B2 its source carries no resolved
+repair. Flow A is identical for owner and peer, so a peer's job has a real detached window in which
+S2 runs while the actor continues and no durable state represents the job. S3's digest recheck
+refuses to commit a stale plan, but that only detects the race after the fact: if ordinary settlement
+wins, C-2's `Settled` arm holds and the repair becomes permanently unappliable. So the claim has a
+runtime half:
+
+```text
+target_is_claimed(record, source, target) =
+    repair_transaction_nonterminal(record, source)   // durable, owner side
+ || live_repair_job_claim(target)                    // runtime, any peer
+```
+
+`live_repair_job_claim` is acquired at S1 before any body read, owned by the queued, worker and
+ready-result bundle through S4, and released where the last `Arc` drops, with the same weak-handle
+bookkeeping as the admission token in 10.3. Cancellation never releases it while a worker or result
+still owns it. Every path below consults `target_is_claimed`, not just the durable half.
 
 Every path that can mutate or install into the source consults the same fence and defers while it
 holds:
