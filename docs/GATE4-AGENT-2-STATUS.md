@@ -14,7 +14,7 @@ Review preamble: [preamble 2](GATE4-REVIEW-PREAMBLES.md#review-2-manualprovision
 | Revision 2 head, reviewed as SEC-PAIR-001 | `21ca8fa93c07b8bb65a00bc0bbc555518f8a7132` |
 | Revision 3 head, reviewed | `909720739b6c0a455d37761e8149d7eec21cb6f4` |
 | Revision 4 base | `909720739b6c0a455d37761e8149d7eec21cb6f4` |
-| Revision 4 head SHA | _pending: the commit that adds revision 4; fill before sending the review request_ |
+| Revision 4 head SHA | `37fa877`. Any later SHA recording this row is documentation-only and adds no design content. |
 | Working checkout | main repository tree. Revision 2 was committed on branch `gate4-agent1-runtime`, which a parallel Agent 1 session had checked out; the user asked for no branch change. The design content is branch-independent, but Agent 4 should expect to move these two documents when the branches are integrated. No separate worktree yet; one is taken before any production edit. |
 | Production code | **None written.** |
 | Tests added | **None.** |
