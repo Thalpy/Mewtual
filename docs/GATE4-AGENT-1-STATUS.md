@@ -23,7 +23,7 @@ they are the highest-conflict changes, so they land last. The per-item verdict r
 |---|---|---|
 | 1 | C-1 structural decode, with C-2's digest fences and the R4 replay exclusion | **landed; reviewed PASS; no-replay boundary covered by N24; R4 selection covered by N25/M9** |
 | 2 | C-4 transient reference holds, with the I-3 transfer | **landed; seam reviewed PASS; transfer implemented and mutation-proven; dead-code markers removed** |
-| 3 | The runtime: Flows S, H and R, admission, scheduling, commit seams | not started |
+| 3 | The runtime: Flows S, H and R, admission, scheduling, commit seams | **Flow S store seams landed: capture, detached plan, stamp-checked commit, with N12(a). Actor admission, scheduling and Flows H/R not started** |
 | 4 | I-4 and C-3 | not started |
 
 ## Checkpoints
@@ -39,7 +39,8 @@ they are the highest-conflict changes, so they land last. The per-item verdict r
 | 2026-09-15 | C1-TEST-002 correction | `7ed6302` | `4d09869` | test only | **PASS**: C1-TEST-002 **closed**; R4-TEST-001 still open |
 | 2026-09-15 | R4-TEST-001 correction | `4d09869` | `079e59a` | test plus one cfg(test) helper | N25 and M9; pushed, awaiting the reviewer's source inspection to close |
 | 2026-09-15 | I-3 protection transfer | `079e59a` | `65e77d1` | bounded implementation | Mechanism **PASS**; **I3-001** (P2) opened: media admission ran before retry classification |
-| 2026-09-16 | I3-001 correction | `65e77d1` | `b7df00b` | bounded implementation | Hold moved behind classification, onto the new-authoring path only |
+| 2026-09-16 | I3-001 correction | `65e77d1` | `b7df00b` | bounded implementation | **PASS**: I3-001 **closed** |
+| 2026-09-16 | Flow S staged seams and N12(a) | `7b9cf3e` | uncommitted working tree | bounded implementation | First real detached window; runtime not acceptable until I-4/C-3 lands where H7 spans an inventory |
 
 Working checkout: `M:\Git (local)\CatComs`, branch `Create-suite-2`. **Other agents are working in
 this same checkout**: Agent 3's design landed at `7efc9c2` and Agent 2's documents are present
@@ -328,11 +329,51 @@ helper, which is why the retry now goes through the store API directly.
 | I3-001 mutation, taking the hold unconditionally | Fails at "an accepted retry was refused by media admission"; restored source passes. |
 | `cargo clippy -j 1 -p catcoms-app --lib --tests -- -D warnings`, `cargo fmt --all -- --check` | Clean. |
 
+### Flow S staged seams, and N12(a)
+
+`store/epoch_studio/overlay_capture.rs` adds the three stages the design specifies:
+
+- `capture_studio_overlay_save` (custody): authenticates the bounded intent record **without
+  decoding it**, captures the stamp (mount, numeric server, complete target, document, actor and
+  key, designated owner, MLS epoch, and the record's authenticated plaintext digest with its
+  physical size, absence explicit), and takes ownership of the caller's media hold.
+- `StudioOverlayCapture::plan` (detached): the expensive stage. Full `EpochIntentState::decode`,
+  which reconstructs any retained branch, then `append`, which replays it again with the new
+  operation. It owns authenticated plaintext, public context, the basis and the hold; no store,
+  Server, device key, MLS secret or writer, and it writes nothing. It repeats the
+  ordinary-collision check rather than trusting a decision taken against bytes it cannot see.
+- `commit_studio_overlay_save` (custody): re-mints the Closing basis from actual durable state and
+  requires the same fingerprint, checks stamp equality, runs the I-3 transfer, then performs one
+  accounted intent write. The hold is released only when it returns.
+
+`save_studio_closing_overlay_with_io` now **composes those three inline**, so there is one
+algorithm rather than a batch path that can drift from the scheduled one. The classification order
+established by I3-001 is preserved exactly: completed retry, exact retry and ordinary collision all
+precede media admission, and the exact-retry path returns before any capture.
+
+| Check | Result |
+|---|---|
+| `cargo test ... --lib studio_overlay -- --test-threads=1`, after the refactor and before the new tests | **40 passed, 0 failed, 2 ignored**, 1123.67 s. Behaviour equivalence for the staged composition. Log `logs/gate4-a1-flows-overlay.log`. |
+| `... --lib studio_overlay_detached` | **2 passed, 0 failed**, 22.52 s. |
+| `cargo clippy -j 1 -p catcoms-app --lib --tests -- -D warnings`, `cargo fmt --all -- --check` | Clean. |
+
+**N12(a) is now real.** `studio_overlay_detached_acceptance_survives_a_complete_scan_between_capture_and_commit`
+installs a known pin set excluding the new CID, captures, runs `plan` with custody genuinely
+released, and then completes a full reference scan and attempts protected deletion **while the job
+is detached**. The pixels survive; an unreferenced orphan still reclaims, so the scan is complete
+and usable rather than fail-closed. After the commit, with every owner gone and before any further
+scan, the ordinary holds keep them. Dropping the hold before the capture, so the detached job
+carries none, fails the test at "a complete scan reclaimed pixels held by a detached acceptance".
+That is a fixture-side check of the assertion's discriminating power, not an isolated production
+mutation.
+
+`studio_overlay_detached_plan_is_refused_when_the_record_changed` covers the other half: a plan
+derived from superseded bytes is refused at the stamp comparison, records are unchanged and the
+accepted branch is undisturbed.
+
 **What this does and does not cover.** The transfer and its ordering are real and mutation-proven.
-The detached window it exists to protect is not open yet: the synchronous acceptance path has no
-gap between the transient hold and the write, so these tests prove the transfer, not the window.
-The window appears with Flow S, and N12(a), which pauses a detached stage while a complete scan
-runs, remains outstanding until then.
+Those particular tests prove the transfer on the composed path; N12(a) above now proves the
+detached window itself.
 
 ### C1-TEST-002: N24 and the unconditional-replay mutation
 

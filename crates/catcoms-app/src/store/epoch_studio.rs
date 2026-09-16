@@ -23,6 +23,7 @@ mod adoption;
 mod discovery;
 mod handoff;
 mod overlay;
+mod overlay_capture;
 mod preparation;
 mod recovery_disposition;
 mod registry;

@@ -143,72 +143,67 @@ impl ServerStore {
         }
         // Recognize accepted retries BEFORE first/append eligibility. An installed successor,
         // a later fault or Unknown tenure cannot turn a saved exact request into a new append.
-        //
-        // Everything from here is new authoring, so this is also where media admission belongs.
-        // An already accepted request must never be refused because the reference rails are full
-        // or because its pixels were legitimately reclaimed after retirement: an acknowledgement
-        // adds no reference and needs no possession. Classification above is deliberately cheap
-        // and reaches no blob.
+        if exact {
+            return self
+                .write_studio_overlay_intent(
+                    server,
+                    &logical,
+                    target,
+                    device,
+                    group,
+                    basis,
+                    None,
+                    operation,
+                    ts,
+                    rng,
+                    &mut budget.storage,
+                    &mut budget.intents,
+                    writer,
+                    sync,
+                )
+                .map(StudioOverlaySave::Local);
+        }
+        // Everything from here is new authoring, so this is where media admission belongs. An
+        // already accepted request must never be refused because the reference rails are full or
+        // because its pixels were legitimately reclaimed after retirement; classification above is
+        // deliberately cheap and reaches no blob.
         //
         // I-3, first half: until this acceptance is durable, nothing in the vault names the
         // operation's pixels, so a complete reference scan would install a set without them and
-        // they would become reclaimable. This job-owned hold is released only when this scope
-        // ends, which is after the write attempt returns, whatever its outcome; the ordinary
-        // conservative holds that `write_studio_overlay_intent` installs before that write are
-        // what carry protection forward.
-        let _pixels = if exact {
+        // they would become reclaimable. The hold is owned by the capture, carried through the
+        // detached stage, and released only when the commit returns.
+        let pixels: std::collections::BTreeSet<[u8; 32]> =
+            catcoms_replication::studio::operation_blob_cid(&operation)
+                .map_err(invalid)?
+                .into_iter()
+                .collect();
+        let pixels = if pixels.is_empty() {
             None
         } else {
-            let pixels: std::collections::BTreeSet<[u8; 32]> =
-                catcoms_replication::studio::operation_blob_cid(&operation)
-                    .map_err(invalid)?
-                    .into_iter()
-                    .collect();
-            if pixels.is_empty() {
-                None
-            } else {
-                Some(self.hold_creative_transient(&logical.server_id, pixels)?)
-            }
+            Some(self.hold_creative_transient(&logical.server_id, pixels)?)
         };
-        let fresh = if exact {
-            None
-        } else {
-            let tenure =
-                tenure.ok_or_else(|| invalid("Closing overlay needs observed owner tenure"))?;
-            let (mut source, observed, _) = self.checked_studio_source(
-                server,
-                group,
-                target,
-                device,
-                false,
-                &mut budget.storage,
-            )?;
-            if observed.is_none() {
-                return Err(invalid("Closing overlay source is missing"));
-            }
-            let fresh = source
-                .prepare_closing_overlay(close, group, tenure)
-                .map_err(invalid)?;
-            if fresh.fingerprint() != basis {
-                return Err(invalid("Closing overlay basis changed"));
-            }
-            Some(fresh)
-        };
-        self.write_studio_overlay_intent(
-            server,
-            &logical,
-            target,
-            device,
-            group,
-            basis,
-            fresh.as_ref(),
-            operation,
-            ts,
-            rng,
-            &mut budget.storage,
-            &mut budget.intents,
-            writer,
-            sync,
+        let tenure_value =
+            tenure.ok_or_else(|| invalid("Closing overlay needs observed owner tenure"))?;
+        let (mut source, observed, _) =
+            self.checked_studio_source(server, group, target, device, false, &mut budget.storage)?;
+        if observed.is_none() {
+            return Err(invalid("Closing overlay source is missing"));
+        }
+        let fresh = source
+            .prepare_closing_overlay(close, group, tenure_value)
+            .map_err(invalid)?;
+        if fresh.fingerprint() != basis {
+            return Err(invalid("Closing overlay basis changed"));
+        }
+        drop(source);
+        // The three staged seams, composed inline. A scheduled caller runs the same three in the
+        // same order with custody released around `plan`; there is no second algorithm.
+        let capture = self.capture_studio_overlay_save(
+            server, group, target, device, fresh, intent, ts, pixels,
+        )?;
+        let plan = capture.plan()?;
+        self.commit_studio_overlay_save(
+            server, group, target, device, close, tenure, plan, rng, budget, writer, sync,
         )
         .map(StudioOverlaySave::Local)
     }
