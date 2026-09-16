@@ -44,12 +44,18 @@ they are the highest-conflict changes, so they land last. The per-item verdict r
 | 2026-09-16 | FS-001 correction | `1c3a1e0` | `c57faee` | bounded implementation | S1b admission and S3 possession recheck, with N12(d) and M15 |
 | 2026-09-16 | Per-actor overlay admission | `c57faee` | `bbfd5e5` | bounded implementation | Seam **PASS**, scoped to its own tests rather than end to end; **FS-002** (P2) opened against Flow S: a stale request still performed media admission before being identified as stale. One P3 API-hardening point on the capture's independent media parameters. |
 | 2026-09-16 | FS-002 correction and `AdmittedOverlayMedia` | `bbfd5e5` | `5a024a7` | bounded implementation | Authorization moved ahead of media admission; media minted as one unforgeable value. New stale-basis regression with two hazards and two positive controls, plus M16. Awaiting review. |
-| 2026-09-16 | `EpochRecordKind::DraftArchive` seam | `5a024a7` | uncommitted working tree | integration seam for Agent 2, option (a) | Physical family plumbing only: no payload, writer, release path, reference collector or sub-cap, and no I-4 guard. Two regressions, M17/M18/M19. Handover to Agent 3 pending. |
+| 2026-09-16 | `EpochRecordKind::DraftArchive` seam | `5a024a7` | `705d44b` | integration seam for Agent 2, option (a) | Physical family plumbing only: no payload, writer, release path, reference collector or sub-cap, and no I-4 guard. Two regressions, M17/M18/M19. Reported to Agent 2; handover sent to Agent 3. |
 
-Working checkout: `M:\Git (local)\CatComs`, branch `Create-suite-2`. **Other agents are working in
-this same checkout**: Agent 3's design landed at `7efc9c2` and Agent 2's documents are present
-untracked. All four Agent 1 passes touch only these two files, and any commit must be
-pathspec-scoped to them. Implementation must move to a separate branch or worktree.
+Working checkout: `M:\Git (local)\CatComs`. The four design passes were made on `Create-suite-2`;
+implementation is on `gate4-agent1-runtime`, which is the current branch.
+
+**Other agents are working in this same checkout, on this same branch.** Every commit must be
+pathspec-scoped so it carries no other agent's work. The hazard runs in both directions and both
+have now been observed: Agent 3's `63a11e1` and Agent 2's `bd878d7`/`21ca8fa` became ancestors of
+this branch, and on 2026-09-16 another session's push published Agent 1's `5a024a7` to
+`origin/gate4-agent1-runtime` without Agent 1 pushing it. A local head is therefore not reliably
+unpublished, and an Agent 1 commit can reach the remote before its evidence is complete. Resolve
+review SHAs against the actual remote rather than assuming.
 
 ## Finding ledger
 
@@ -611,8 +617,11 @@ are untouched.
 **The correctness condition Agent 2 asked to have preserved and stated.** Coverage gating by
 `includes_intents()` means `RecoveryOnly` and `RecoveryAndOwnerReceipts` do not see archive files.
 That is safe only while no coverage narrower than the full five-family scan installs a
-deletion-protection set. That rule is unchanged: `creative_pinned_cids` is the only installer and
-it runs `scan_epoch_storage_with_studio`, the full coverage.
+deletion-protection set. That rule is unchanged, and it is stronger than "the only caller uses full
+coverage": `EpochStorageScan::collect_creative_references` **refuses** to become a reference scan
+unless `coverage() == RecoveryOwnerReceiptsIntentsRegistryAndStudio` and no entry has been visited
+yet, and `finish_creative_references` is the only path to `Protection::install`. A narrower scan
+therefore cannot install protection at all, rather than merely not doing so today.
 
 **One addition beyond the requested list, flagged for Agent 2.** A reference scan that meets an
 archive would otherwise collect nothing from it and install a complete, "known" protection set with
@@ -634,6 +643,21 @@ the guard removed the scan returns `Ok(CreativeReferences { count: 0 })`.
 | **M18**, reverting `from_inventory` to `e.kind == Intents` | Both fail at "an archive's bytes were not charged to the intent accounting class"; restored source passes. |
 | **M19**, removing the fail-closed reference arm | Fails at "a reference scan installed a protection set for a vault holding an archive it cannot read", showing the scan returns a complete set of count 0; restored source passes. |
 | `cargo clippy -p catcoms-app --all-targets -- -D warnings`, `cargo fmt --all --check` | Clean. |
+| `cargo test -j 1 -p catcoms-app -- --test-threads=4`, at `705d44b` with no concurrent Cargo work | **630 passed, 0 failed, 11 ignored** in the lib, 1177.50 s, and 20 passed across the six integration binaries. This covers both `5a024a7` and `705d44b`. |
+
+**A masked assertion I found and corrected, recorded because the reviewer has caught this class
+before.** The fail-closed reference claim was first asserted as `creative_pinned_cids().is_err()`
+in the main fixture. Adding the positive control showed that vault's reference scan already failed
+for an unrelated reason, so the assertion could not discriminate. The claim moved to an isolated
+vault holding nothing but the archive, where the control proves the same vault completed a
+reference scan before the archive existed and the refusal names the archive specifically.
+
+**A contention result, not a regression.** An earlier full-suite run reported three failures in
+`studio_exchange` (`scheduling::studio_actor_owner_return_installs_both_classes_with_cancelled_preview_transport`,
+`..._with_three_retained_previews`, `succession::joining::studio_actor_post_succession_joiner_reads_open_history_provisionally`),
+all deadline assertions in actor scheduling. Foreground Cargo builds and tests were running
+concurrently with it, which this machine's serial-Cargo discipline forbids. All four pass serially,
+and the clean run above passes with no failure. Nothing in this scope touches `studio_exchange`.
 
 **One test-only fixture.** `write_draft_archive_for_test` seals and frames an archive at its
 canonical path, because there is deliberately no production writer to call. It bypasses nothing the
@@ -730,23 +754,26 @@ Accompanying prose:
 
 ## Next actions
 
-1. Finish C-1's evidence: complete the `studio_overlay` app run, then the broader app Studio suite,
-   then strict Clippy for both crates. C-1 touches `checked_epoch_replay_state`,
-   `prepare_epoch_intent_with_io`, retirement, the inventory scan and replay selection, so the
-   regression set is every Studio path, not only the overlay suite.
-2. Build N24: a hand-assembled two-entry branch whose operations are individually valid on the base
-   but invalid in sequence, so the structural decoder accepts it and the full decoder refuses. Until
-   that exists, C-1's stated validation boundary is asserted by argument rather than by a test.
-3. Add the R4 regression (N25): assert annotated ids are absent from `studio_replay_evidence`'s
-   `own` set, and the matching M9 mutation.
-4. Then C-4, then the runtime, then I-4 with C-3. See the revised sequencing table above.
-5. Produce design 13's measurements as each item lands; C-1's before-and-after is the first one and
-   is cheap, since the opt-in profile already exists.
+1. **The receiver's overlay runtime**, which is the actual next Agent 1 scope. Consume
+   `OverlayAdmission` and `OverlayOwnership`, add the `StudioBackgroundJob::OverlayPlan` job and its
+   result variants, and delete the `#[allow(dead_code)]` marker on `studio/overlay/admission.rs`
+   with that commit. Until then I-2 is a seam PASS only, and N14/N15 have to be proved end to end
+   against the real `preparation_pool()` rather than against an ad hoc four-permit semaphore.
+2. Then Flow H and Flow R, then I-4 with C-3. See the revised sequencing table above.
+3. Produce design 13's eight measurements as each item lands; C-1's before-and-after is the first
+   and is cheap, since the opt-in profile already exists. **No measurement exists yet.**
+4. R4-TEST-001 stays open until the reviewer can inspect `079e59a` on GitHub. C-1's call-site table
+   in design 5.1 still has no test asserting that no moved call site needs a projection.
+5. Track the Linux ordinary two-process smoke failure observed on `7b9cf3e` in the integration
+   ledger; it is unexplained and unrelated to this scope.
 6. Confirm with Agent 2 the prerequisites P1 to P5, the two-hold contract (design 12.1) and the copy
    requirements (design 12.2); give Agent 4 the central edit list in design 15. Agent 3's side of
    the I-4 coordination is already on record at `7efc9c2`, and their "unaffected if I-4 does not
    land" clause is an integration alternative, not an opt-out from a deployed cursor's discipline.
 7. Keep native Save unregistered and out of FLIPNOTE-UI-HOOKS until Agent 2's manual lifecycle
-   passes its own review and their status note says so.
+   passes its own review and their status note says so. Agent 2's P5 is still false.
 8. Do not send the design 18.3 implementation review until the scope it names has real evidence. A
    partial branch is not a checkpoint.
+9. When Agent 2's archive writer lands, delete `write_draft_archive_for_test`, replace the
+   fail-closed reference arm with their collector, and add their two archive writers to the I-4
+   audit as design 9.2 now records.
