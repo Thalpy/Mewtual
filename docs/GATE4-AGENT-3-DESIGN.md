@@ -1106,8 +1106,13 @@ pub struct EpochFaultRecord {
     pairs: Vec<FaultPair>,          // 0..=2, ordered by pair id
     /// The reserved slot of 5.2 below. Holds at most one pair deferred behind a nonterminal
     /// repair. Whether it is LIVE is derived from freshly observed tenure, never stored
-    /// (AG3-DES-037), so an owner change demotes it to historical for free.
+    /// (AG3-DES-037), so an owner change demotes it without a write.
     reserved: Option<FaultPair>,
+    /// Evidence-free durable hold, set when a live conflict is reported and no slot can take
+    /// its receipts (AG3-DES-041). It records the authoring tenure start it was observed under,
+    /// so it is live on exactly the same derived rule as `reserved`, and it suppresses proof
+    /// without claiming to know which receipts are in dispute.
+    live_overflow: Option<u64>,
     /// Signed only after an explicit current-owner decision. It may name the source's own
     /// fault pair, the reserved pair, or one of `pairs`.
     repair: Option<ReceiptRepair>,
@@ -1139,6 +1144,7 @@ sharing any receipt hash are rejected
 repair_kind 0 = none            repair_binding = empty, repair absent, applied = 0
 repair_kind 1 = external        repair_binding = u8 index into the external list
 repair_kind 2 = source-bound    repair_binding = the pair itself, inline
+repair_kind 3 = reserved        repair_binding = empty; binds to `reserved`, which must be present
 ```
 
 **A source-bound repair carries its pair inline** (AG3-DES-026). Revision 6 said the source's own
@@ -1185,10 +1191,38 @@ reserved_is_live(record, observed_tenure) =
 ```
 
 is recomputed from **freshly observed** tenure at every custody visit, consistent with T2's rule
-that tenure is never cached. Demotion therefore needs no write, cannot fail, and raises no capacity
-question: a demoted pair simply stops being live and remains retained, repairable as historical
-evidence like any other. Promotion is not possible in the other direction, since an old tenure
+that tenure is never cached. Promotion is not possible in the other direction, since an old tenure
 cannot become current again with the same id.
+
+**Demotion migrates; it does not squat** (AG3-DES-041). Revision 9 left a demoted pair in the slot
+and called that free, which closes one owner change and reopens AG3-DES-032 on the next: under a
+later tenure, with both history slots full and a repair nonterminal, a fresh current-tenure conflict
+could neither fault the source, nor take the occupied slot, nor displace anything, and after the
+response nothing durable kept proof suppressed. So:
+
+1. at the next write after demotion, the pair **migrates** into `pairs` when there is room, freeing
+   the slot for a future live conflict;
+2. where `pairs` is full it stays put, derived-historical, and the slot is unavailable;
+3. a live conflict arriving with no slot sets `live_overflow` to the authoring tenure start instead
+   of being dropped. That is the evidence-free hold: it suppresses proof on the same derived-live
+   rule while the reporter retries, and it is cleared when the pair can be stored, when the source
+   itself faults on it, or when its tenure stops being current.
+
+The marker deliberately carries no receipts. It cannot authorize anything, only refuse, which is the
+correct asymmetry for a fact we know but cannot yet substantiate.
+
+**The drain is its own crash-safe transaction** (AG3-DES-044). A live pair lives in the owner record
+and its eventual fault lives in the source: two durable objects with no atomic transition, and
+revision 9 gave no order between them. Clearing the slot first would, on a crash or a failed source
+write, leave a healthy source, no evidence and no proof suppression. So the order is fixed:
+
+1. write the exact source fault and **wait for its durability to return**;
+2. only then clear `reserved`.
+
+A crash between leaves the pair in both places, which is valid: the existing rule that a record slot
+duplicating the source's current fault pair is ignored for derivation and dropped at the next write
+cleans it idempotently. An uncertain or failed source write leaves the slot untouched and proof
+suppressed, and the drain is retried.
 
 **Validation** (AG3-DES-035). Revision 8 put `has_live_conflict` on the wire and read
 `record.live_conflict` in the proof gate while the struct and `check_scope` knew nothing about it,
