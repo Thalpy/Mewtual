@@ -60,6 +60,34 @@ this branch, and on 2026-09-16 another session's push published Agent 1's `5a024
 unpublished, and an Agent 1 commit can reach the remote before its evidence is complete. Resolve
 review SHAs against the actual remote rather than assuming.
 
+### Two mis-scoped Agent 1 commits, retained deliberately
+
+`0467e45` and `c3a702a` both carry the Agent 1 subject "A-001: bind admitted media to the operation
+that consumes it" but are **not** Agent 1 scope and must not be reviewed as such.
+
+| Commit | What it actually contains |
+|---|---|
+| `0467e45` | The genuine A-001 change to three `epoch_studio` files, **plus** two of Agent 2's untracked files, `studio/overlay/archive.rs` and `studio/epoch/owner/tests/archive.rs` |
+| `c3a702a` | Nothing of Agent 1's: four of Agent 2's modified files, including `docs/GATE4-AGENT-2-STATUS.md` |
+
+Cause: another session staged into the shared index between this session's `git add` and its
+`git commit`, so an explicitly pathspec-scoped `add` was not sufficient. The first attempt to
+correct it raced the same session and produced the second bad commit; by then `0467e45` had already
+been pushed by a third party and merged back at `cee38b3`, so it could not be removed locally.
+
+**These commits are load bearing and must not be rewritten.** Agent 2's two archive files and that
+version of their status note exist nowhere else in history. Dropping the commits would delete
+Agent 2's work from the branch. The clean Agent 1 versions are `35929a9` (A-001) and `1cac519`
+(B-001), and those are the review heads.
+
+The same incident cost Agent 3 uncommitted edits: a `git reset` and a `git stash` from this session
+discarded working-tree state they had not yet committed, and they recovered by landing revision 10
+in five parts, recorded at `f5ac522`. Nothing was permanently lost, in either direction.
+
+**Rule for this branch from here:** verify the staged set with `git status --short` **after**
+`git add` and immediately before `git commit`, in the same invocation, and never run `git reset`,
+`git stash` or any other index- or worktree-wide operation while another session may be active.
+
 ## Finding ledger
 
 Closure at the design boundary is not implementation acceptance: every mechanism below still needs
