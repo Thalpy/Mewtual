@@ -1,7 +1,7 @@
 # Gate 4 Agent 3 status: runtime signed fault repair
 
 Owner: Agent 3 ([assignment](GATE4-AGENT-HANDOFFS.md#agent-3-runtime-signed-fault-repair)).
-Proposal: [GATE4-AGENT-3-DESIGN](GATE4-AGENT-3-DESIGN.md), currently revision 10.
+Proposal: [GATE4-AGENT-3-DESIGN](GATE4-AGENT-3-DESIGN.md), currently revision 11.
 Review preamble: 3. Current entries override older ones.
 
 ## Checkpoints
@@ -18,7 +18,8 @@ Review preamble: 3. Current entries override older ones.
 | 2026-09-16 | Design revision 8, seventh-round findings answered | `6d498c2e901e5071104a2533e0a632dc5676b2a7` | `b8bb5f3a3db6d0b8e450c82119f95e2cb929bce6` | design, docs only | re-review requested |
 | 2026-09-16 | Revision 8.1, `DraftArchive` seam consumed | `b8bb5f3a3db6d0b8e450c82119f95e2cb929bce6` | `76b854494ff8f30eb0d5844e22a783d6927ba182` | design, docs only | no rebase needed: `705d44b` is already an ancestor |
 | 2026-09-16 | Design revision 9, eighth-round findings answered | `76b854494ff8f30eb0d5844e22a783d6927ba182` | `3b6a4b40462ae83a341f8f6741c93edff55b5ef7` | design, docs only | **REQUEST CHANGES**: AG3-DES-038 **closed**, owner-side AG3-DES-034 accepted; new AG3-DES-039 to AG3-DES-044; AG3-TEST-008 |
-| 2026-09-16 | Design revision 10, ninth-round findings answered | `3b6a4b40462ae83a341f8f6741c93edff55b5ef7` | this commit | design, docs only | re-review requested. Committed in five parts: a parallel session repeatedly `git reset` this shared tree and discarded uncommitted edits |
+| 2026-09-16 | Design revision 10, ninth-round findings answered | `3b6a4b40462ae83a341f8f6741c93edff55b5ef7` | `11ce6f1b58288e44d6ff14dc2a98f42f7cc5e13b` design body, `f5ac522eff264eeddca30c2c4176cacfd723a158` status | design, docs only | **REQUEST CHANGES**: AG3-DES-040 (6.3/13.2) and AG3-DES-043 **closed**, AG3-DES-044 write order accepted; new AG3-DES-045 to AG3-DES-049; AG3-TEST-009 |
+| 2026-09-17 | Design revision 11, tenth-round findings answered | `11ce6f1b58288e44d6ff14dc2a98f42f7cc5e13b` | this commit | design, docs only | re-review requested. Committed in parts, same shared-tree reset hazard |
 
 Working checkout: `M:\Git (local)\CatComs`, shared with the parallel Agent 1 and Agent 2 sessions,
 which are now doing implementation and design work respectively. Agent 1 has the checkout on its
@@ -27,6 +28,23 @@ documents with explicit pathspecs. `Create-suite-2` was fast-forwarded once, at 
 these documents off Agent 1's branch alone; it has not been moved since. **Agent 3 implementation
 must move to a separate branch or worktree before any code change**; no mutation harness may run
 against another agent's source.
+
+## Finding ledger, revision 10 round
+
+All five were internal contradictions in revision 10 itself, and all five are confirmed.
+
+| Finding | Severity | Status | Where answered |
+|---|---|---|---|
+| AG3-DES-045 | P1 | **Answered in revision 11.** The overflow hold was added to the struct and the proof gate but never to the codec, so the mechanism described as surviving restart had no bytes and N43 was impossible as written. It now has a canonical encoding, validation and a corruption rule. | Design 5.2, 15.1 N44(a) |
+| AG3-DES-046 | P1 | **Answered.** "Must drain first" and "cannot be drained, repair directly" both applied to `{R1,R3}`, leaving no legal next step. `pair_is_materialisable`, computed without mutating the source, splits the two. | Design 5.2, 15.1 N45(a)(b) |
+| AG3-DES-047 | P1 | **Answered.** Migration now precedes any B1 so the binding is deterministic, and recycling is binding-specific so a terminal kind-3 pair is cleared from `reserved` rather than stranded there. | Design 5.2, 15.1 N45(c)(d) |
+| AG3-DES-048 | P1 | **Answered.** The hold keeps up to four individually cleared pair fingerprints plus a sticky `unknown` flag, so one reporter's successful retry can no longer forget another known conflict. | Design 5.2, 6.6, 15.1 N44(b)(c) |
+| AG3-DES-049 | P1 | **Answered.** The stale `observed_tenure_id` pseudocode is gone; both predicates use one `tenure_id` derived from the authoring accessor, and the hold stores that id rather than a bare start epoch. | Design 5.2, 6.6, 15.1 N44(d) |
+| AG3-TEST-009 | P2 | **Answered.** N44 and N45. | Design 15.1 |
+
+Closed in the revision-10 round: **AG3-DES-040** in 6.3 and 13.2, and **AG3-DES-043**.
+AG3-DES-044's write order accepted. Still closed: AG3-DES-038, 030, 023, 024 and 029's exact-pair
+dedupe rule. Accepted: M1 to M19 where previously accepted.
 
 ## Finding ledger, revision 9 round
 
@@ -435,7 +453,7 @@ sections 5 and 13.3.
 
 ## Executed checks
 
-**None, in any of the ten passes.** No Cargo, npm or script command has been run: these
+**None, in any of the eleven passes.** No Cargo, npm or script command has been run: these
 checkpoints change no code, and the local machine keeps checks serial. Every number quoted in the design is a constant
 read from source at the base or an explicitly labelled estimate. The maximal-shape replacement
 cost, the custody time of the capture and commit stages, and the protocol-allowance arithmetic in
