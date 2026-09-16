@@ -383,12 +383,172 @@ fn a_queued_or_parked_overlay_keeps_the_actor_busy() {
     assert!(runtime.reserve_overlay().is_none(), "detached");
     runtime.overlay_detached = false;
 
-    // Parked result, ownership still alive inside it.
-    runtime.park_overlay_for_test(ownership);
-    assert!(
-        runtime.reserve_overlay().is_none(),
-        "a parked plan awaiting commit did not keep the actor busy"
-    );
-    runtime.overlay_planned = None;
+    drop(ownership);
     assert!(runtime.reserve_overlay().is_some());
+}
+
+/// RT-001. A plan that cannot be committed must release admission and its slot from the four-slot
+/// process-wide pool the moment the worker finishes, not when some later Save for the same target
+/// happens to collect them, and not never. Its media hold has already died with the capture, so
+/// nothing is being protected by keeping the rest parked.
+///
+/// The refusal is real: the document's ordinary intent ledger is at `MAX_INTENT_BYTES_PER_DOCUMENT`,
+/// so `IntentLedger::prepare` inside `plan()` refuses. Classification never calls `prepare`, which
+/// is why this is reachable only in the detached stage.
+#[tokio::test]
+async fn a_refused_plan_releases_admission_and_its_pool_slot_without_a_second_visit() {
+    let clock = ManualClock::new(1000);
+    let mut rng = ChaCha20Rng::seed_from_u64(407);
+    let mut server = Server::found(
+        Hub::new().join(PeerId::from_u64(1)),
+        MlsDevice::generate().unwrap(),
+        rng.clone(),
+        Box::new(clock.clone()),
+        "owner",
+    )
+    .unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let mut store = ServerStore::open(root.path(), b"refused-plan", &mut rng).unwrap();
+    let target = StudioTarget::Flipnote {
+        channel: crate::channel_id("general").to_be_bytes(),
+        object: [9; 16],
+    };
+    let capture = server.sync.with_registry_context(|g, d, _, _| {
+        crate::store::studio_closing_capture_fixture(&mut store, 83, g, d, target, true)
+    });
+
+    let mut receiver = StudioReceiver::default();
+    let pool = receiver.catchup.overlay_pool();
+    let free = pool.available_permits();
+    let ownership = receiver
+        .catchup
+        .reserve_overlay()
+        .expect("the job is admitted");
+    assert_eq!(pool.available_permits(), free - 1);
+    receiver
+        .catchup
+        .queue_overlay_for_test(capture, ownership, target);
+
+    let work = receiver
+        .detach(&mut server)
+        .expect("the overlay is selected");
+    assert!(matches!(work, StudioBackgroundJob::OverlayPlan(..)));
+    let result = work.run(None).await;
+    assert!(
+        matches!(&result, StudioBackgroundResult::OverlayPlanned(_, Err(_))),
+        "the fixture did not produce a real planning refusal, so this proves nothing"
+    );
+
+    // The ordinary completion path, and then NO second Save visit.
+    receiver.complete(&mut server, result);
+    assert!(
+        receiver.catchup.overlay_planned.is_none(),
+        "a plan that can never be committed was parked"
+    );
+    assert!(
+        receiver.catchup.overlay_admission_available_for_test(),
+        "a refused plan kept this actor's admission"
+    );
+    assert_eq!(
+        pool.available_permits(),
+        free,
+        "a refused plan kept a slot in the shared preparation pool"
+    );
+    // And the actor can immediately start new overlay work.
+    assert!(receiver.catchup.reserve_overlay().is_some());
+}
+
+/// RT-002. S2 is a heavy stage, so 7.3's placement rule applies: authoritative catch-up work is
+/// selected first and the overlay plan waits for `replay_ready()`. The design accepts that overlay
+/// work may starve under sustained catch-up (L7); the reverse was never accepted.
+#[tokio::test]
+async fn a_queued_overlay_waits_behind_authoritative_catch_up() {
+    let clock = ManualClock::new(1000);
+    let mut rng = ChaCha20Rng::seed_from_u64(311);
+    let mut server = Server::found(
+        Hub::new().join(PeerId::from_u64(1)),
+        MlsDevice::generate().unwrap(),
+        rng.clone(),
+        Box::new(clock.clone()),
+        "owner",
+    )
+    .unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let mut store = ServerStore::open(root.path(), b"priority", &mut rng).unwrap();
+    let target = StudioTarget::Flipnote {
+        channel: crate::channel_id("general").to_be_bytes(),
+        object: [9; 16],
+    };
+    server.sync.with_registry_context(|g, d, _, _| {
+        crate::store::save_studio_source_fixture(&mut store, 83, g, d, target)
+    });
+    let mut receiver = StudioReceiver::default();
+    receiver
+        .run(
+            &mut server,
+            &mut store,
+            83,
+            Some(StudioRequest::Read { target }),
+        )
+        .unwrap();
+    // Displace the sole graph so the owner turn parks a real source preparation.
+    let other = StudioTarget::Flipnote {
+        channel: target.channel(),
+        object: [8; 16],
+    };
+    server.sync.with_registry_context(|g, d, _, _| {
+        crate::store::save_studio_source_fixture(&mut store, 83, g, d, other)
+    });
+    server
+        .studio_transaction(&mut store, 83, StudioRequest::Read { target: other })
+        .unwrap();
+    receiver.run(&mut server, &mut store, 83, None).unwrap();
+    assert!(
+        receiver.catchup.preparation.is_some(),
+        "the fixture did not park a real source preparation"
+    );
+    assert!(!receiver.catchup.replay_ready());
+
+    // A local Save reserves and queues its capture while that authoritative work is waiting.
+    // `reserve_overlay` deliberately still succeeds: 7.2 reserves before the first bounded read so
+    // that classification and the terminal S1a acknowledgement are not deferred by catch-up.
+    let ownership = receiver
+        .catchup
+        .reserve_overlay()
+        .expect("classification must not be blocked by catch-up");
+    // A third document, so the capture fixture builds its own source without colliding with the
+    // two the catch-up fixtures above already wrote.
+    let saving = StudioTarget::Flipnote {
+        channel: target.channel(),
+        object: [7; 16],
+    };
+    let capture = server.sync.with_registry_context(|g, d, _, _| {
+        crate::store::studio_closing_capture_fixture(&mut store, 83, g, d, saving, false)
+    });
+    receiver
+        .catchup
+        .queue_overlay_for_test(capture, ownership, saving);
+
+    // The next detached turn must choose the authoritative preparation, not the overlay.
+    let work = receiver.detach(&mut server).expect("some work is selected");
+    assert!(
+        matches!(work, StudioBackgroundJob::Prepare(..)),
+        "an overlay plan overtook parked authoritative source preparation"
+    );
+    assert!(
+        receiver.catchup.overlay.is_some(),
+        "the overlay capture was consumed by a turn that should have deferred it"
+    );
+
+    // Once the authoritative work completes, the overlay becomes selectable.
+    receiver.complete(&mut server, work.run(None).await);
+    receiver.catchup.prepared = None;
+    assert!(receiver.catchup.replay_ready());
+    assert!(
+        matches!(
+            receiver.detach(&mut server),
+            Some(StudioBackgroundJob::OverlayPlan(..))
+        ),
+        "the overlay stayed deferred after catch-up cleared"
+    );
 }

@@ -67,7 +67,8 @@ pub use epoch_registry::{
 pub(crate) use epoch_studio::source::studio_full_restores_for_test;
 #[cfg(test)]
 pub(crate) use epoch_studio::tests::performance::{
-    fill_studio_epoch_fixture, save_studio_source_fixture, studio_owner_decision_fixture,
+    fill_studio_epoch_fixture, save_studio_source_fixture, studio_closing_capture_fixture,
+    studio_owner_decision_fixture,
 };
 #[cfg(test)]
 pub(crate) use epoch_studio::StudioRotationBoundary;

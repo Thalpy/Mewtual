@@ -306,6 +306,107 @@ fn measure(count: usize, clock: &dyn Clock) {
     assert_eq!(f.load(&store).unwrap().op_count(), initial + 3);
 }
 
+/// A real Flow S capture, produced entirely through the production path: source, owner decision,
+/// seal, basis, then `start_studio_closing_overlay` returning `Captured`. The runtime tests need a
+/// genuine `StudioOverlayCapture` and must not fabricate one.
+///
+/// `exhaust_intents` pre-fills the document's ordinary intent ledger to `MAX_INTENT_BYTES_PER_
+/// DOCUMENT`, which makes the capture's later `plan()` refuse at `IntentLedger::prepare`. That is
+/// a real refusal on a real capture: classification never calls `prepare`, so it is reachable only
+/// in the detached stage, which is exactly the RT-001 case. The pre-fill uses the production
+/// `prepare`, `encode`, `seal` and framing at the canonical path, as the existing per-document cap
+/// test does, so nothing it produces bypasses a check the reader performs.
+pub(crate) fn studio_closing_capture_fixture(
+    store: &mut ServerStore,
+    server: u64,
+    group: &ServerGroup,
+    device: &MlsDevice,
+    target: StudioTarget,
+    exhaust_intents: bool,
+) -> crate::store::StudioOverlayCapture {
+    // Creates the source and fills it to rotation eligibility, which an owner decision requires.
+    fill_studio_epoch_fixture(store, server, group, device, target);
+    let decision = studio_owner_decision_fixture(store, server, group, device, target, None);
+    let close = decision.close().clone();
+    let mut b = {
+        let inv = inventory(store);
+        store.studio_storage_budget(server, group, &inv).unwrap()
+    };
+    store
+        .seal_studio_epoch(
+            server,
+            group,
+            target,
+            device,
+            decision.receipt().clone(),
+            0,
+            &mut ChaCha20Rng::seed_from_u64(7),
+            &mut b,
+        )
+        .unwrap();
+    let basis = store
+        .prepare_studio_closing_overlay(server, group, target, device, &close, Some(0), &mut b)
+        .unwrap();
+
+    let logical = target.document(&group.group_id()).unwrap();
+    if exhaust_intents {
+        let mut ledger = catcoms_replication::IntentLedger::new(logical.clone());
+        let blank = title_op(target, 0);
+        let overhead = blank.encode().unwrap().len() - blank.body.len();
+        let mut left = catcoms_replication::epoch::MAX_INTENT_BYTES_PER_DOCUMENT;
+        let mut n = 0u128;
+        while left > 0 {
+            let len = left.min(catcoms_replication::epoch::MAX_DOMAIN_OP_BYTES);
+            let mut next = title_op(target, 0);
+            next.nonce = n.to_be_bytes();
+            next.body = vec![b'x'; len - overhead];
+            ledger.prepare(device.device_id(), next).unwrap();
+            left -= len;
+            n += 1;
+        }
+        let scope = crate::store::epoch_intents::scope_bytes(server, &logical).unwrap();
+        let state = crate::store::epoch_intents::EpochIntentState {
+            ledger,
+            overlay: None,
+        };
+        let sealed = seal(
+            &store.keys.db_key().unwrap(),
+            &state.encode(&scope).unwrap(),
+            &mut ChaCha20Rng::seed_from_u64(11),
+        )
+        .unwrap();
+        fs::write(store.epoch_intent_path(&scope), frame(&sealed)).unwrap();
+    }
+
+    let mut b = {
+        let inv = inventory(store);
+        store.studio_storage_budget(server, group, &inv).unwrap()
+    };
+    let mut op = title_op(target, 9_000);
+    op.nonce = [77; 16];
+    match store
+        .start_studio_closing_overlay(
+            server,
+            group,
+            target,
+            device,
+            &close,
+            Some(0),
+            basis.fingerprint(),
+            op,
+            300,
+            &mut ChaCha20Rng::seed_from_u64(13),
+            &mut b,
+        )
+        .unwrap()
+    {
+        crate::store::StudioOverlayStart::Captured(capture) => *capture,
+        crate::store::StudioOverlayStart::Settled(_) => {
+            panic!("the fixture request was classified as already accepted")
+        }
+    }
+}
+
 #[test]
 fn studio_source_profile_smoke() {
     measure(33, &ManualClock::new(0));

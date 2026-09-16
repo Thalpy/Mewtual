@@ -48,7 +48,8 @@ they are the highest-conflict changes, so they land last. The per-item verdict r
 | 2026-09-16 | FS-002 and seam review | `bbfd5e5` | `70eaad4` | bounded implementation, two scopes | **FS-002 closed**, A-1 confirmed preserved, stale-basis fixture and both controls confirmed valid. **A-001** (P3): admitted media not bound to the intent capture receives separately. **B-001** (P2): the shared scope decoder caps every family at Recovery's 501 bytes, refusing a legal 506-byte archive scope. |
 | 2026-09-16 | A-001 correction | `70eaad4` | `35929a9` | bounded implementation | **PASS, A-001 closed.** `AdmittedOverlayAuthoring` as one value plus a `MediaOrigin` rechecked at capture and commit; regression and M20. |
 | 2026-09-16 | B-001 correction | `35929a9` | `1cac519` | integration seam correction | **PASS, B-001 closed.** Per-family `scope_cap()`; two regressions and M21. |
-| 2026-09-16 | Overlay runtime, Flow S detached | `130a64b` | uncommitted working tree | bounded implementation | The store algorithm split so scheduled and synchronous share one path; the `OverlayPlan` job and result; admission and the shared permit consumed for real; the admission dead-code marker removed. Four regressions, M22 and M23. |
+| 2026-09-16 | Overlay runtime, Flow S detached | `130a64b` | `dda64a9` | bounded implementation | Split, job and result, admission consumed, marker removed. **REQUEST CHANGES**: the `OverlayOwnership` deviation **accepted** (design to change, not the code), the withdrawn control action **PASS**, M23 **PASS**; **RT-001** (P2) and **RT-002** (P2) opened; the cancellation half of N14(a) still open at P3. |
+| 2026-09-17 | RT-001 and RT-002 corrections | `dda64a9` | uncommitted working tree | bounded implementation | A refused plan releases admission and its pool slot in the worker; `OverlayPlan` selected only when `replay_ready()` holds. Two regressions on a real capture, M24 and M25, and the design 5.5 text corrected. |
 
 Working checkout: `M:\Git (local)\CatComs`. The four design passes were made on `Create-suite-2`;
 implementation is on `gate4-agent1-runtime`, which is the current branch.
@@ -104,7 +105,10 @@ code and executed evidence, and the reviewer said so explicitly for each one.
 | FS-001 | P2 | **Closed.** New authoring could durably accept an operation naming pixels the vault does not hold. S1b admission and the S3 possession recheck now exist, with N12(d) and M15. | Status "FS-001" |
 | FS-002 | P2 | **Closed** at the `70eaad4` review. Classification is not authorization: a stale request still read, could promote and could hold pixels before the basis comparison refused it. Authorization now precedes media admission, A-1 confirmed preserved, and both positive controls confirmed to discriminate. | Status "FS-002" |
 | A-001 | P3 | **Corrected, awaiting review.** `AdmittedOverlayMedia` prevented fabricated facts but was not bound to the `LocalIntent` capture received separately, so media for operation A could be captured against operation B. Now one combined `AdmittedOverlayAuthoring` value with a private `MediaOrigin` rechecked at capture and at commit. | Status "A-001" |
-| B-001 | P2 | **Corrected, awaiting review.** `decode_record_scope` prechecked every family at Recovery's 501-byte maximum, so a legal 506-byte maximum-shape `DraftArchive` scope was refused outright. The bound is now per family. | Status "B-001" |
+| B-001 | P2 | **Closed** at the `70eaad4` review. `decode_record_scope` prechecked every family at Recovery's 501-byte maximum, so a legal 506-byte maximum-shape `DraftArchive` scope was refused outright. The bound is now per family. | Status "B-001" |
+| RT-001 | P2 | **Corrected, awaiting review.** A refused plan parked `OverlayOwnership` against a plan that could never commit, holding this actor's admission and one of four process-wide preparation slots until some later Save collected it, or forever. The worker now releases both the moment planning fails. | Status "RT-001 and RT-002" |
+| RT-002 | P2 | **Corrected, awaiting review.** `detach` selected `OverlayPlan` ahead of authoritative catch-up with no `replay_ready()` check, reversing the accepted priority: L7 accepts overlay starving under catch-up, never the reverse. | Status "RT-001 and RT-002" |
+| N14(a) cancellation | P3 | **Open.** The current test models the worker-owned bundle instead of pausing a real `spawn_blocking` closure and firing a real `RequestCancellation`. The mechanism is right by inspection and M23 guards the reaping it depends on, but the race is not executed. | Design 14 N14 |
 | AG1-TEST-001 | P3 | **Closed at the design boundary** (revision-4 review). The residual was that N31 required only `remaining() > 0`, which a visit deferring on the priority gate without signing also satisfies, so both the unchanged and the mutated implementation could pass. Revision 4 adds a positive signing precondition (`after < before`, `after > 0`, exact expected count derived from production `remaining()`), a deterministic injected-clock seam, authoritative work staged only after slice selection, and independent per-limit preconditions, with M5 split into M5a and M5b. The reviewer confirmed the production basis: `remaining()` delegates to the pending queue and `sign_next` removes exactly one item only after the signature succeeds, so the delta counts **successfully produced** signatures. | Design 7.3, 14.1 "N31 in full", 14.2 M5a/M5b |
 
 ## Audit claims corrected across revisions
@@ -744,6 +748,66 @@ acquiring them means the saved close from the owner journal and a completed five
 and deciding when to pay for both is the manual lifecycle Agent 2 owns. A `StudioControlAction`
 variant was drafted and **withdrawn** rather than invent that shape unilaterally. No native command
 is registered; `studio_overlay_read` remains the only overlay command in `invoke_handler`.
+
+### RT-001 and RT-002: two runtime defects in the Flow S scheduling
+
+Both found by the `dda64a9` review, both real, and neither depends on Agent 2 or P5.
+
+**RT-001 (P2): a refused plan occupied a global slot until some later visit, or forever.** The
+result type carried `OverlayOwnership` on the error arm as well as the success arm, and `complete`
+parked either. But a refused plan can never be committed, and its media hold has already died with
+the capture, so the parked bundle protected nothing while holding this actor's admission and one of
+the four process-wide preparation slots. `reserve_overlay` refuses while `overlay_planned.is_some()`,
+so it was cleared only if some later Save for the same target happened to collect it. Four such
+actors could starve unrelated source and registry preparation indefinitely.
+
+The trigger is not contrived: C-1 deliberately lets a structurally valid branch pass the metadata
+read and fail full typed reconstruction later, which is precisely a capture that plans and fails.
+
+`OverlayPlanResult` is now `Result<(Box<StudioOverlayPlan>, OverlayOwnership), AppError>` as the
+design always specified, and the worker drops the ownership the moment planning fails. A refusal
+parks nothing.
+
+**RT-002 (P2): S2 overtook authoritative catch-up.** `detach` selected `OverlayPlan` first, with no
+`replay_ready()` check. Design 7.3 places heavy stages behind that gate, and L7 accepts that overlay
+work may starve under sustained catch-up: it never accepted catch-up starving under sustained local
+Saves, which is what the selection order actually did. `OverlayPlan` is now chosen only when
+`replay_ready()` holds, after source and registry preparation, network passes and discovery.
+
+The gate is in `detach`, not `reserve_overlay`, and that choice is deliberate: 7.2 requires the
+reservation before the first bounded read, and gating it would also defer the terminal S1a
+acknowledgement, which reads no source, mints no basis, touches no blob and is not a heavy stage.
+Only the detached reconstruction yields to catch-up.
+
+| Regression | What it proves |
+|---|---|
+| `a_refused_plan_releases_admission_and_its_pool_slot_without_a_second_visit` | A **real** planning refusal, through `run()` and the ordinary `complete()` path, with **no** second Save visit: nothing is parked, admission is immediately available, the pool permit has returned, and the actor can start new overlay work at once. The refusal is asserted to be a real `Err` before anything else is checked, so a fixture that silently succeeded could not satisfy it. |
+| `a_queued_overlay_waits_behind_authoritative_catch_up` | With a real source preparation parked and a real capture queued, the next detached turn selects `Prepare`, the overlay capture survives that turn unconsumed, and the overlay becomes selectable only once catch-up clears. |
+
+| Check | Result |
+|---|---|
+| **M24**, leaking the ownership instead of releasing it on a failed plan | Fails at "a refused plan kept this actor's admission"; restored source passes. |
+| **M25**, restoring `OverlayPlan` to the front of `detach` | Fails at "an overlay plan overtook parked authoritative source preparation"; restored source passes. |
+| `cargo clippy -j 1 -p catcoms-app --all-targets -- -D warnings`, `cargo fmt --all --check` | Clean. |
+| `cargo test -j 1 -p catcoms-app --lib`, no concurrent Cargo work | **641 passed, 0 failed, 11 ignored**, 1144.46 s. |
+
+**No fabricated capture.** Both regressions use `studio_closing_capture_fixture`, which runs the
+production path end to end: fill to rotation eligibility, owner decision, seal, basis, then
+`start_studio_closing_overlay` returning `Captured`. Its one non-production step is the optional
+pre-fill of the document's ordinary intent ledger to `MAX_INTENT_BYTES_PER_DOCUMENT`, which is what
+makes `plan()` refuse at `IntentLedger::prepare`; classification never calls `prepare`, so that
+refusal is reachable only in the detached stage. The pre-fill uses the production `prepare`,
+`encode`, `seal` and framing at the canonical path, exactly as the existing per-document cap test
+does, so it bypasses no check the reader performs.
+
+**Design text corrected, as the reviewer directed.** Design 5.5 now carries the revised
+`OverlayOwnership` and states the invariant that replaced it: the bundle is admission plus permit,
+the capture and plan hold the sole `CreativeHold`, and **the three do not always release together**.
+Two code comments that claimed they did are corrected; that claim is what RT-001 was.
+
+**Still open.** The cancellation half of N14(a) is P3 and not yet executed end to end: the current
+test models the worker-owned bundle rather than pausing a real `spawn_blocking` closure and firing a
+real `RequestCancellation`. N14(b) and (c) remain blocked on the native handle and P5.
 
 ### `EpochRecordKind::DraftArchive`, the shared enum seam for Agent 2
 

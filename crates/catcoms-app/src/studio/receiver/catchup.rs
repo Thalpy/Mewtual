@@ -47,11 +47,13 @@ struct ServiceWork {
 }
 type PreparedStudioResult = Result<(Box<PreparedStudioSource>, OwnedSemaphorePermit), AppError>;
 type PreparedRegistryResult = Result<Box<ServerPreparedRegistryPageSource>, AppError>;
-/// The plan and the ownership that must outlive it. Ownership travels with the result on failure
-/// too, so a refused plan releases admission, the shared permit and the job-owned reference hold
-/// together rather than stranding any of the three.
-type OverlayPlanResult =
-    Result<(Box<StudioOverlayPlan>, OverlayOwnership), (AppError, OverlayOwnership)>;
+/// A plan that can still be committed, and the ownership that must outlive it.
+///
+/// RT-001: an error carries **no** ownership. A refused plan can never be committed and its media
+/// hold has already died with the capture, so keeping admission and a slot from the four-slot
+/// process-wide pool parked against it would occupy both until some later Save for the same target
+/// happened to collect them, or forever if none ever came.
+type OverlayPlanResult = Result<(Box<StudioOverlayPlan>, OverlayOwnership), AppError>;
 
 /// Which overlay job a detached plan belongs to. Carries no plaintext, no key and no permit; it is
 /// only enough to route a completion back to the target that asked for it.
@@ -161,18 +163,26 @@ impl<T: MeshTransport + 'static> StudioBackgroundJob<T> {
                 // basis and the ownership bundle, and no store, Server, device key or writer.
                 //
                 // Ownership is moved into the closure, so a cancelled waiter cannot take it back:
-                // the worker runs to completion still holding admission, the shared permit and the
-                // job-owned reference hold, and releases all three when it ends.
+                // the worker runs to completion still holding admission and the shared permit,
+                // with the capture holding the job-owned reference hold alongside them. Those are
+                // two owners, not one, and they do not always end together: see the failure arm.
                 Self::OverlayPlan(capture, ownership, context) => {
                     let result = tokio::task::spawn_blocking(move || match capture.plan() {
                         Ok(plan) => Ok((Box::new(plan), ownership)),
-                        Err(error) => Err((error, ownership)),
+                        // RT-001. Release here, in the worker, the moment the plan becomes
+                        // impossible. The capture has already been dropped with its media hold, so
+                        // holding admission and a shared slot any longer protects nothing and
+                        // waits on a visit that may never come.
+                        Err(error) => {
+                            drop(ownership);
+                            Err(error)
+                        }
                     })
                     .await;
                     match result {
                         Ok(result) => StudioBackgroundResult::OverlayPlanned(context, result),
-                        // The worker itself died, taking the bundle with it. Its three pieces were
-                        // released by that unwinding, so there is nothing to hand back.
+                        // The worker itself died, taking both the bundle and the capture with it.
+                        // Unwinding released them, so there is nothing to hand back.
                         Err(_) => StudioBackgroundResult::CancelledOverlay,
                     }
                 }
@@ -210,7 +220,9 @@ pub(super) struct CatchupRuntime {
     /// the lifetime of an actor, nor the reverse. The shared four-slot pool is what bounds total
     /// process-wide work; this slot bounds per-actor concurrency only.
     overlay: Option<(Box<StudioOverlayCapture>, OverlayOwnership, OverlayContext)>,
-    overlay_planned: Option<(OverlayContext, OverlayPlanResult)>,
+    /// Only a committable plan is parked. A refusal parks nothing, because it owns nothing and the
+    /// next Save reclassifies from durable state anyway (RT-001).
+    overlay_planned: Option<(OverlayContext, Box<StudioOverlayPlan>, OverlayOwnership)>,
     /// True from the moment the job is handed to the runtime until its result or cancellation
     /// comes back. It is waiter bookkeeping, never the admission record: admission lives in
     /// `overlay_admission` and is proved by a live `Arc`, so a cancelled waiter clearing this
@@ -609,15 +621,12 @@ impl CatchupRuntime {
         &mut self,
         target: StudioTarget,
     ) -> Option<(Box<StudioOverlayPlan>, OverlayOwnership)> {
-        if !matches!(&self.overlay_planned, Some((c, _)) if c.target == target) {
+        if !matches!(&self.overlay_planned, Some((c, _, _)) if c.target == target) {
             return None;
         }
-        match self.overlay_planned.take() {
-            Some((_, Ok(planned))) => Some(planned),
-            // A refused plan releases its ownership here by dropping it. The refusal itself is not
-            // reported: the request is retryable and the next Save reclassifies from durable state.
-            Some((_, Err(_))) | None => None,
-        }
+        self.overlay_planned
+            .take()
+            .map(|(_, plan, ownership)| (plan, ownership))
     }
 
     #[cfg(test)]
@@ -631,17 +640,16 @@ impl CatchupRuntime {
         self.overlay_detached = false;
     }
 
-    /// Park a ready result whose plan is irrelevant to the test, so the bundle it owns is what
-    /// keeps the actor busy. The error arm is used because a `StudioOverlayPlan` cannot be
-    /// fabricated without a real capture, and the ownership is what this asserts on.
+    /// Queue a real capture for scheduling-order tests. The capture comes from the production
+    /// Flow S path via `studio_closing_capture_fixture`; nothing here fabricates one.
     #[cfg(test)]
-    fn park_overlay_for_test(&mut self, ownership: OverlayOwnership) {
-        self.overlay_planned = Some((
-            OverlayContext {
-                target: StudioTarget::Index { channel: [0; 16] },
-            },
-            Err((invalid("parked for test"), ownership)),
-        ));
+    pub(super) fn queue_overlay_for_test(
+        &mut self,
+        capture: StudioOverlayCapture,
+        ownership: OverlayOwnership,
+        target: StudioTarget,
+    ) {
+        self.overlay = Some((Box::new(capture), ownership, OverlayContext { target }));
     }
 
     fn prepare_for<T: MeshTransport, R: CryptoRngCore>(
@@ -929,14 +937,17 @@ impl StudioReceiver {
         if self.paused {
             return None;
         }
-        let work = if let Some((capture, ownership, context)) = self.catchup.overlay.take() {
-            // Local acceptance the user is waiting on goes first among detached work. It holds no
-            // network resource and its permit is already reserved, so running it ahead of source
-            // preparation costs catch-up nothing it was not already going to wait for.
-            Some(StudioBackgroundJob::OverlayPlan(
-                capture, ownership, context,
-            ))
-        } else if let Some((capture, permit, context)) = self.catchup.preparation.take() {
+        // RT-002. S2 is a heavy stage, so 7.3's placement rule applies to it: it runs only when
+        // `replay_ready()` holds, behind authoritative source and registry preparation, network
+        // passes and discovery. The design accepts that overlay work may starve under sustained
+        // catch-up (L7); it does not accept catch-up starving under sustained local Saves, and an
+        // earlier revision of this selection had exactly that backwards.
+        //
+        // The gate is here rather than in `reserve_overlay` deliberately. Reserving before the
+        // first bounded read is 7.2, and classification is cheap: gating the reservation would
+        // also defer the terminal S1a acknowledgement, which reads no source, mints no basis and
+        // is not a heavy stage. Only the detached reconstruction yields to catch-up.
+        let work = if let Some((capture, permit, context)) = self.catchup.preparation.take() {
             Some(StudioBackgroundJob::Prepare(capture, permit, context))
         } else if let Some((job, generation)) = self.catchup.registry_preparation.take() {
             Some(StudioBackgroundJob::PrepareRegistry(job, generation))
@@ -1012,6 +1023,12 @@ impl StudioReceiver {
                     None
                 }
             }
+        } else if self.catchup.replay_ready() && self.catchup.overlay.is_some() {
+            let (capture, ownership, context) =
+                self.catchup.overlay.take().expect("checked just above");
+            Some(StudioBackgroundJob::OverlayPlan(
+                capture, ownership, context,
+            ))
         } else {
             let generation = self.catchup.preview.generation();
             self.catchup
@@ -1107,10 +1124,16 @@ impl StudioReceiver {
             }
             StudioBackgroundResult::OverlayPlanned(context, result) => {
                 self.catchup.overlay_detached = false;
-                // The parked result still owns the bundle, so admission stays unavailable until a
+                // The parked plan still owns the bundle, so admission stays unavailable until a
                 // custody visit consumes it. That is deliberate: a plan waiting to commit is a
                 // live job, and its pixels are still protected only by its transient hold.
-                self.catchup.overlay_planned = Some((context, result));
+                //
+                // RT-001. A refusal parks nothing: the worker released admission and the shared
+                // slot when planning failed, and the capture took its media hold with it. The
+                // request stays retryable and the next Save reclassifies from durable state.
+                if let Ok((plan, ownership)) = result {
+                    self.catchup.overlay_planned = Some((context, plan, ownership));
+                }
             }
             StudioBackgroundResult::CancelledOverlay => {
                 // Clears the waiter only. The worker still owns the bundle and is still running,

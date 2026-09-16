@@ -14,13 +14,16 @@ use tokio::sync::OwnedSemaphorePermit;
 /// a native preparation handle must own for as long as it is alive. Dropping it releases both
 /// together, so a job cannot hold capacity after its admission has gone or vice versa.
 ///
-/// **Deviation from design 5.5, stated for review.** The design gave this a third member, the
-/// job-owned reference hold. A-001 made `AdmittedOverlayMedia` the single owner of that hold,
-/// minted with the verified frame facts it protects and carried inside the capture and the plan.
-/// Keeping a second `Option<CreativeHold>` here would create a competing owner and a way to hold
-/// pixels without the facts S3 rechecks, which is exactly what A-001 closed. The three pieces
-/// still release together in practice, because a job owns both this bundle and its capture, and
-/// dropping the job drops both.
+/// Design 5.5 originally gave this a third member, the job-owned reference hold; the revision
+/// accepting its removal is in that section. A-001 made `AdmittedOverlayMedia` the single owner of
+/// that hold, minted with the verified frame facts S3 rechecks and carried inside the capture and
+/// the plan. A second `Option<CreativeHold>` here would be a competing owner, and a way to hold
+/// pixels apart from the facts that justify holding them.
+///
+/// The three resources therefore do **not** always release together, and RT-001 is what happens
+/// when code assumes they do: a refused plan's media hold dies with its capture, so this bundle
+/// must be released in the worker at that moment rather than parked against a plan that can never
+/// commit.
 pub(crate) struct OverlayOwnership {
     // Held for their `Drop`, never read: the admission token's liveness IS the admission, and the
     // permit's existence IS the reserved slot. Reading either would be meaningless.
