@@ -2364,7 +2364,30 @@ Core:
   becomes issuable and that no new B1 transaction can open on the external meanwhile. (g)
   **AG3-DES-037, tenure change before the drain**: same setup, but ownership changes across the
   restart. Assert the pair is **retained**, is **not** live-sealed under the new owner, no longer
-  suppresses authoritative proof, and remains repairable as historical evidence.
+  suppresses authoritative proof, migrates into `pairs` when there is room, and is then actually
+  **repaired as historical evidence through `repair_kind 3`**, with a full B1 encode and reopen
+  (AG3-DES-039): revision 9 asserted repairability that its codec could not express.
+  (h) **AG3-DES-043, a non-owner pre-B2 job**: a peer receives a repair through Flow D and is paused
+  in S2 while ordinary adoption and then ordinary settlement try to mutate the same target. Assert
+  both defer on the runtime claim, that the claim survives cancellation of an unrelated job, that it
+  is released where the last owner drops, and that the repair still commits at S3 rather than being
+  refused as stale or stranded behind a `Settled` hold.
+  (i) **AG3-DES-044, failure during the drain**: inject a failing and then an uncertain source-fault
+  write mid-drain. Assert the slot and proof suppression survive both, that a crash between the
+  source write and the slot clear leaves valid duplicate evidence, and that reopening cleans the
+  duplicate idempotently without a second fault.
+- **N42** AG3-DES-040, the tenure states, for issuance, application, drain and proof in turn:
+  `Observed` permits, `Unknown` holds, and **`Imported(S)` holds for authoring while remaining
+  `Some(S)` for verification**. Assert an `Imported` server never drains a reserved pair, never
+  issues or applies a repair, and never releases proof suppression, and that the refusal comes from
+  the authoring accessor rather than from a coincidental later check. Assert identity is compared as
+  a derived `tenure_id`, by constructing two tenures that share a start epoch but differ in owner
+  key and showing they are not confused.
+- **N43** AG3-DES-041, repeated tenure at capacity: a live pair under tenure 1, an owner change
+  demoting it, both history slots already full so it cannot migrate, a nonterminal repair under
+  tenure 2, and then a **new tenure-2 conflict**. Assert `live_overflow` is set, that proof stays
+  suppressed across a restart and for unrelated later requests, that the reporter's retry is
+  accepted once a slot frees, and that no evidence was discarded at any point.
 - **N41** AG3-DES-035, direct owner-record negatives for the reserved slot: malformed receipts, a
   foreign document, a non-conflicting pair, a non-canonical `has_reserved` byte, and a reserved pair
   that duplicates an external or the inline source-bound pair. Each must reject the whole record
@@ -2388,7 +2411,11 @@ Core:
   heals. Assert P2's re-report of `{R1,R3}` is **admissible**, that the owner can issue a
   higher-sequence repair for it, and that P2 then heals. Run for both winner choices, and assert the
   record still refuses two externals sharing a receipt hash so P2 simply waits its turn rather than
-  being told it is already resolved.
+  being told it is already resolved. Per AG3-DES-042, assert the owner's durable evidence is
+  **exactly `{R1,R3}`**, not merely that some fault occurred: feeding R1 through the live seal yields
+  `Stale` and feeding R3 against a head of R2 yields `{R2,R3}`, so the test must show the exact pair
+  was preserved owner-side and repaired through `repair_kind 3` rather than reconstructed from the
+  source.
 - **N35** AG3-DES-024, at the **core** boundary on `StudioEpoch::apply_receipt_repair`, not only on
   `ReceiptBook::apply_repair`: an exact previously resolved repair, the same device key, an
   independently observed **different** current tenure, and an outstanding continuation
@@ -2555,10 +2582,12 @@ stated. No useful redundant validation is deleted to manufacture a failure.
 | M13 | a repair transaction fences report-induced source mutation (AG3-DES-027) | remove the **whole** `repair_transaction_nonterminal` fence from `report_studio_fault`, not just its `repair_install_pending()` arm as revision 7 proposed | N37(a): the predicate is still true after the report and RA completes through B6. Under the mutant the phase becomes `Fault`, the predicate goes false and the replacement is abandoned |
 | M15 | the fence covers the pre-B2 interval (AG3-DES-031) | remove only the **owner-record-pending** arm of `repair_transaction_nonterminal`, leaving the post-B2 arm intact | N37(b): the B1-persisted RA still resumes as `Retargeted` case 6c with its replacement. Under the mutant the source is sealed into `Fault(B)` and RA silently degrades to a terminal `Screened` 6d, which M13 alone cannot show |
 | M16 | the durable proof gate (AG3-DES-032) | remove the `reserved_is_live(...)` term from `authoritative_proof_allowed`, so head selection consults only the source's own fault | N37(d): after crash and reopen, an unrelated member's head request obtains no authoritative proof. Under the mutant it obtains one for a disputed receipt |
-| M17 | the claim fence covers ordinary adoption (AG3-DES-034) | remove `repair_transaction_nonterminal` **only** from `advance_checkpoint`, leaving the report path and the repair step fenced | N37(e): ordinary adoption defers and the B1-persisted repair still reaches B6 as `Retargeted` case 6c. Under the mutant the source is installed into from under the transaction and the replacement obligation is lost, which M13 and M15 cannot show because neither touches this writer |
+| M17 | the claim fence covers ordinary adoption (AG3-DES-034) | remove `target_is_claimed` **only** from `advance_checkpoint`, leaving the report path and the repair step fenced | N37(e): ordinary adoption defers and the B1-persisted repair still reaches B6 as `Retargeted` case 6c. Under the mutant the source is installed into from under the transaction and the replacement obligation is lost, which M13 and M15 cannot show because neither touches this writer |
+| M18 | the runtime half of the claim (AG3-DES-043) | remove the `live_repair_job_claim(target)` term from `target_is_claimed`, leaving the durable half | N37(h): a non-owner repair paused in S2 still commits at S3. Under the mutant ordinary settlement mutates the target first and the repair is refused or stranded behind a `Settled` hold. M17 cannot show this, because a peer has no durable claim to remove |
+| M19 | the fence covers settlement and rotation too | remove `target_is_claimed` **only** from ordinary settlement and owner rotation for the target | N37(h) second half: settlement defers while a repair job is claimed. Revision 9 asserted these paths consult the fence but proved it only for `advance_checkpoint` |
 | M14 | the report no-op is the exact pair only (AG3-DES-029) | broaden the no-op from "this exact pair" back to "contains any `is_repaired_loser` member" | N39: P2's `{R1,R3}` report is admitted and P2 eventually heals. Under the mutant it is silently treated as covered and P2 is stranded |
 
-M13 to M17 target guards unique to this scope: core knows nothing about report admission, owner
+M13 to M19 target guards unique to this scope: core knows nothing about report admission, owner
 records or head-proof gating, and `is_repaired_loser` deliberately cannot distinguish a peer's
 frozen pair from a screened arriving receipt (R28). M15 exists because M13 alone cannot reach the
 pre-B2 interval, M16 because N37(d)'s proof assertion otherwise has no mutated guard behind it, and
@@ -2618,12 +2647,13 @@ Copyable, with the common contract from
 sent alongside it.
 
 ```text
-Review type: design, revision 9, findings re-review.
-Base: b8bb5f3a3db6d0b8e450c82119f95e2cb929bce6 (revision 8). Head: [FULL_HEAD_SHA once pushed].
-Compare: https://github.com/Thalpy/Mewtual/compare/b8bb5f3a3db6d0b8e450c82119f95e2cb929bce6...[FULL_HEAD_SHA]
-Note: 76b8544 sits between them and consumed Agent 2's DraftArchive seam; it is additive and
-touches none of these findings.
-Earlier revisions: 6d498c2e901e5071104a2533e0a632dc5676b2a7 (revision 7),
+Review type: design, revision 10, findings re-review.
+Base: 3b6a4b40462ae83a341f8f6741c93edff55b5ef7 (revision 9). Head: [FULL_HEAD_SHA once pushed].
+Compare: https://github.com/Thalpy/Mewtual/compare/3b6a4b40462ae83a341f8f6741c93edff55b5ef7...[FULL_HEAD_SHA]
+Note: revision 10 was committed in five parts, because a parallel session repeatedly reset this
+shared working tree and discarded uncommitted edits. All five touch only the two Agent 3 documents.
+Earlier revisions: b8bb5f3a3db6d0b8e450c82119f95e2cb929bce6 (revision 8),
+6d498c2e901e5071104a2533e0a632dc5676b2a7 (revision 7),
 135766ca9f290ab96d3133b771bc42da74fe7825 (revision 6),
 3737f1d4fff6f2c08302b0ecb1b024008818a1cf (revision 5),
 ad023d2e5b514a8f9598b1fe433fd2b080ecad6c (revision 4),
@@ -2631,9 +2661,9 @@ a62178b94f20cd60a5363e6a3d6d6216edb9e516 (revision 3),
 63a11e1a6451c7ed373c90b0e81b59d8a748a72a (revision 2),
 7efc9c2aba0a37d9aec57e268d9ff63edaca1b8a (revision 1), original scope base
 1bcb1bca204d721b848b17c0835faf931ae930e3.
-Scope/evidence: docs/GATE4-AGENT-3-DESIGN.md revision 9 and docs/GATE4-AGENT-3-STATUS.md.
+Scope/evidence: docs/GATE4-AGENT-3-DESIGN.md revision 10 and docs/GATE4-AGENT-3-STATUS.md.
 Documentation only: no production code, test, shared contract document or workflow is changed, and
-no Cargo command was executed in any of the nine passes. Every number is a source constant or a
+no Cargo command was executed in any of the ten passes. Every number is a source constant or a
 labelled estimate. The commit sits on a branch shared with Agents 1 and 2, so a literal base-to-head
 comparison may again contain intervening Agent 1 production commits; only the two Agent 3 documents
 are mine.
@@ -2641,6 +2671,57 @@ Dependencies, corrected per your note: Agent 2's tenure design has now PASSED ad
 though none of it is implemented, so the section 13.2 contract is accepted-on-paper rather than
 available; Agent 1 remains partial with I-4/C-3 not started; the core signing split at e65bfd8
 remains unreviewed.
+
+This revision answers AG3-DES-039 to AG3-DES-044 and AG3-TEST-008, and absorbs a dependency change
+this scope had missed: Agent 2's accepted design REMOVES observed_owner_tenure_start for a
+verification/authoring split with a fail-closed Imported, which sections 6.3 and 13.2 were still
+written against. Section 0 is the disposition table. It reopens nothing you closed: AG3-DES-038
+stays closed alongside AG3-DES-030, 023, 024 and 029's dedupe rule, and M14 and M1 to M11 are
+unchanged.
+
+AG3-DES-039: a reserved pair could be selected as active work and then not be nameable at B1, since
+repair_kind covered only none, external index and source-bound inline. A fourth kind binds directly
+to the slot, which is cleaner than migration because migration has no guaranteed capacity. N37(g)
+now runs a full B1 encode and reopen for a historical reserved pair.
+
+AG3-DES-040: correct, and I had missed the contract change entirely. Section 6.3 now has an explicit
+per-use accessor table: issuance, application and the drain decision all bind to the AUTHORING
+accessor, where Imported and Unknown are holds rather than false; verification may only add
+refusals and can never authorize a drain, seal or issuance; and identity is compared as a derived
+tenure_id rather than a bare start epoch. T1 to T3 are restated for the accepted split and N42
+asserts the Imported case fails closed for authoring while staying Some for verification.
+
+AG3-DES-041: leaving a demoted pair in the slot closes one owner change and reopens AG3-DES-032 on
+the next, exactly as you show. Demotion now migrates into the history list when there is room, and
+where there is not, a new live conflict sets a durable evidence-free hold carrying the tenure it was
+seen under. It suppresses proof on the same derived rule while the reporter retries and cannot
+authorize anything. N43 runs the repeated-tenure-at-capacity path.
+
+AG3-DES-042: confirmed at the source. is_repaired_loser screens before any conflict comparison, so
+after {R1,R2} is repaired for R2, R1 yields Stale and R3 against a head of R2 yields {R2,R3}. The
+reported pair therefore cannot always be re-derived, and admission keeps it owner-side under the
+proof gate, repairable directly through the new binding. N39 now asserts the durable evidence is
+exactly {R1,R3}.
+
+AG3-DES-043: also correct. A peer has no owner record by U-9 and no resolved_repair before B2, so
+the durable predicate cannot represent its in-flight job and ordinary settlement could win into a
+Settled hold that makes the repair permanently unappliable. target_is_claimed adds a runtime claim
+acquired at S1 and owned through S4 with the same weak-handle discipline as the admission token.
+N37(h) pauses a peer job in S2 against both adoption and settlement, M18 removes the runtime half,
+and M19 covers settlement and rotation, which revision 9 claimed but proved only for
+advance_checkpoint.
+
+AG3-DES-044: the drain is now its own crash-safe transaction. The source fault write and its
+durability return first, the slot is cleared only afterwards, a crash between leaves valid duplicate
+evidence that the existing redundancy rule cleans idempotently, and an uncertain write leaves both
+the slot and proof suppression intact. N37(i) injects failures between the two writes.
+
+AG3-TEST-008: N39 gains exact-pair identity, N42 and N43 are new, N37 gains (h) and (i), and M18 and
+M19 are added.
+
+No U-questions remain open.
+
+Superseded text below is retained for the earlier round it answers:
 
 This revision answers AG3-DES-034 to AG3-DES-038 and AG3-TEST-007. Section 0 is the disposition
 table. It reopens nothing you closed or accepted: AG3-DES-030 stays closed alongside AG3-DES-023,
