@@ -1,17 +1,19 @@
 # Gate 4 Agent 2: overlay lifecycle, provisional local work and repeated tenure
 
-Status: **revision 4, design proposal, awaiting re-review. No production code is written, no test
-has been added and no Cargo command was executed.**
+Status: **revision 5, design proposal, awaiting re-review. Boundary (b) has PASSED. No production
+code is written, no test has been added and no Cargo command was executed.**
 
 Revision 1 (`a901f6b`) received CHANGES REQUIRED with nine findings. Revision 2 (`21ca8fa`)
-received CHANGES REQUIRED as SEC-PAIR-001 with five. Revision 3
-(`909720739b6c0a455d37761e8149d7eec21cb6f4`) received CHANGES REQUIRED with two: the five
-SEC-PAIR-001 corrections were accepted, and one new High issue was found in the v1 tenure snapshot
-migration together with one Medium design-record contradiction. This revision answers both.
-Section 0 maps each to its correction; verify each against the code, not the prose.
+received CHANGES REQUIRED as SEC-PAIR-001 with five. Revision 3 (`9097207`) received CHANGES
+REQUIRED with two. Revision 4 (`37fa87753d32a2c4f5d1172cc865910a93d90fa1`) **passed boundary (b)**
+and received CHANGES REQUIRED on (a) and (c) for a single Medium test and mutation gap: the
+`Imported` state's authoring refusal was stated in prose but not independently anchored at the app
+seam. This revision closes that gap, adopts two hardening notes and records the reviewer's product
+decision on 16.1. Section 0 maps each to its correction; verify each against the code, not the
+prose.
 
-Design base for this revision: `909720739b6c0a455d37761e8149d7eec21cb6f4`. Earlier bases:
-`21ca8fa93c07b8bb65a00bc0bbc555518f8a7132`,
+Design base for this revision: `37fa87753d32a2c4f5d1172cc865910a93d90fa1`. Earlier bases:
+`909720739b6c0a455d37761e8149d7eec21cb6f4`, `21ca8fa93c07b8bb65a00bc0bbc555518f8a7132`,
 `a901f6b0f64df2b4ea9cc0221b64ac98276f582d`, `1bcb1bca204d721b848b17c0835faf931ae930e3`. Scope is
 [Agent 2 of the four handoffs](GATE4-AGENT-HANDOFFS.md); progress is in
 [GATE4-AGENT-2-STATUS](GATE4-AGENT-2-STATUS.md). The applicable review scope is
@@ -40,7 +42,18 @@ only and
 section 14 records what breaks if they change. Agent 3's design is separate and is not consumed
 here except through the tenure seam of section 9.4.
 
-## 0. Disposition of the revision-3 re-review findings
+## 0. Disposition of the revision-4 re-review findings
+
+Boundary **(b), the preview-local-work extension, PASSED** at revision 4 and is not changed here.
+
+| Finding | Disposition in revision 5 | Where |
+|---|---|---|
+| **1 (Medium)** `Imported` is not mutation-isolated at the app authoring seam: N-T7 and M24 cover only `Unknown`, so an implementation could satisfy N-T6d, M22e and M22f while still mapping `Imported(S)` to `Known(S)` at the app boundary | **Corrected.** N-T7 is pulled out of the retained set and runs the full V1 authoring-refusal matrix for **both** fail-closed values, using a genuinely migrated v1 fixture rather than an injected one, and asserting in the same run that verification stays unaffected so it cannot pass by making `Imported` behave as `Unknown` everywhere. M24's scope is narrowed to `Unknown`, and the two halves of the app-boundary invariant get separate anchors: M22g for the conversion, M24b for the accessor. V7 states the invariant. | 9.4 V7, 17.1 N-T7, 17.2 M22g, M24, M24b |
+| Hardening note: `observed_owner_tenure_start`'s "independently observed" contract would become false for `Imported` | **Adopted, and taken further.** The accessor is **removed** rather than repointed, so no call site can inherit the wrong semantics by default and the compiler enumerates every one. `verification_owner_tenure_start` and `authoring_owner_tenure_start` replace it, with the intended per-site mapping listed. | 9.3 part 5 |
+| Hardening note: P4 still cited V1-V5 | Corrected to V1-V7 in both documents. | 13, status note |
+| 16.1 product decision | **Adopted as (a)**, over my own recommendation of (b): `Imported` ships fail-closed with no operator-adoption override. The "no fourth option" claim is refined to cover reconstruction only. | 16, 15 L11 |
+
+## 0b. Disposition of the revision-3 re-review findings
 
 | Finding | Disposition in revision 4 | Where |
 |---|---|---|
@@ -50,7 +63,7 @@ here except through the tenure seam of section 9.4.
 Revision-3's own corrections to SEC-PAIR-001 were accepted by that re-review and are unchanged here;
 the table below is retained as their record.
 
-## 0b. Disposition of the SEC-PAIR-001 findings (retained record)
+## 0c. Disposition of the SEC-PAIR-001 findings (retained record)
 
 | Finding | Disposition in revision 3 | Where |
 |---|---|---|
@@ -63,7 +76,7 @@ the table below is retained as their record.
 Revision-1 findings 1, 2, 4, 5, 6, 8 and 9 are closed by SEC-PAIR-001. Their corrections are
 unchanged in this revision and the table below is retained as the record of them.
 
-## 0c. Disposition of the revision-1 findings (retained record)
+## 0d. Disposition of the revision-1 findings (retained record)
 
 | Finding | Disposition in revision 2 | Where |
 |---|---|---|
@@ -1154,21 +1167,35 @@ pub enum ObservedOwnerTenure {
 }
 impl<T, R> ChannelSync<T, R> {
     pub fn observed_owner_tenure(&self) -> ObservedOwnerTenure;
-    /// EXISTING accessor, retained with its exact current meaning for verification callers:
-    /// `Observed` and `Imported` both yield `Some`. Keeping `Imported` visible here is strictly
-    /// safer than `Unknown`, because `complete_checkpoint_head_scoped`'s `is_some_and` accepts a
-    /// proof's claimed tenure when the local value is absent.
-    pub fn observed_owner_tenure_start(&self) -> Option<u64>;
-    /// NEW accessor for authoring callers: `Imported` and `Unknown` both yield `None`.
+    /// Verification callers: `Observed` and `Imported` both yield `Some`. Keeping `Imported`
+    /// visible here is strictly safer than `Unknown`, because `complete_checkpoint_head_scoped`'s
+    /// `is_some_and` accepts a proof's claimed tenure when the local value is absent, so this can
+    /// only add refusals, never an acceptance `Unknown` would have rejected.
+    pub fn verification_owner_tenure_start(&self) -> Option<u64>;
+    /// Authoring callers: only `Observed` yields `Some`.
     pub fn authoring_owner_tenure_start(&self) -> Option<u64>;
 }
 ```
 
-`prepare_receipt_head_snapshot` switches to `authoring_owner_tenure_start`, which is the single
-change that closes the safety hole: a device carrying a stale v1 start can no longer treat it as
-local authoring evidence. `head_snapshot_is_current` and the proof-signing path are unaffected,
-because they can only see a permit that `prepare` already refused to mint. Verification behaviour is
-unchanged in both directions.
+**`observed_owner_tenure_start` is removed, not repointed** (revision-4 hardening note, adopted).
+Its doc comment promises an "independently observed" tenure, which would become false for
+`Imported`, and leaving the old name in place would let a future call site inherit the wrong
+semantics by default. Deleting it forces every existing site to declare which it wants, and the
+compiler enumerates them. The intended mapping, from the audit:
+
+| Call site | Accessor |
+|---|---|
+| `receipt_head.rs:214`, `prepare_receipt_head_snapshot` | authoring |
+| `receipt_head.rs:237`, `head_snapshot_is_current` | authoring. A permit cannot exist for `Imported`, so either would be correct today; authoring is the semantics that stays correct if permit minting ever moves. |
+| `receipt_head.rs:526`, the proof-signing check in `serve_receipt_head_with_handoff` | authoring. Signing a proof as the owner is authoring, not verification. |
+| `detached.rs:175`, `complete_checkpoint_head_scoped` | verification |
+| `studio/overlay.rs`, all three of `handoff_studio_overlay`, `prepare_studio_closing_overlay`, `save_studio_closing_overlay` | authoring, through `require_observed_owner_tenure` |
+| `owner_tenure/tests.rs`, `studio_exchange/tests/*` | whichever the case asserts; several existing assertions become `verification_*` and must be read individually rather than renamed mechanically |
+
+`prepare_receipt_head_snapshot` switches to `authoring_owner_tenure_start`, which is the change that
+closes the safety hole at the sync layer: a device carrying a stale v1 start can no longer mint the
+durable owner permit, and every later step derives its tenure from that permit rather than minting
+authority independently. Verification behaviour is unchanged in both directions.
 
 `Imported(s)` becomes `Observed(s')` on the first leaf-aware transition that sets a start, which is
 a genuine owner change or part 3's leaf-discontinuity arm. It is never promoted by time, by a
@@ -1217,10 +1244,16 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
   device's own authoring tenure. A4 is why this separation matters.
 - **V5.** Agent 3 takes `require_observed_owner_tenure()` for issuance and holds, never substitutes,
   on `Unknown` and on `Imported`.
-- **V6 (new, 9.3 part 5).** `Imported` is never promoted by a restart, a save/reload, elapsed time,
-  a fresh owner proof or a peer's agreement, and it is never returned by
+- **V6 (9.3 part 5).** `Imported` is never promoted by a restart, a save/reload, elapsed time, a
+  fresh owner proof or a peer's agreement, and it is never returned by
   `authoring_owner_tenure_start`. It is visible to verification precisely because hiding it would
   make the device accept a proof's claimed tenure instead of comparing against what it holds.
+- **V7 (new, revision-4 finding 1).** The app-level conversion is total and lossy in one direction
+  only: `Observed(s)` becomes `Known(s)`, `Imported(s)` becomes `Imported(s)`, `Unknown` becomes
+  `Unknown`. No app path may collapse `Imported` into `Known`, and
+  `require_observed_owner_tenure()` succeeds for `Known` alone. The two halves of that statement are
+  separately anchored mutations, M22g and M24b, because an implementation can satisfy the sync-layer
+  tests while still laundering the value at the app boundary.
 
 ### 9.5 Not proposed for implementation
 
@@ -1335,7 +1368,7 @@ Agent 1's `LocalDraftRetained` and `LocalDraftHandedOff` are separate.
 | P1 reviewed manual lifecycle | 6.1-6.6, 12 | Designed, unimplemented, unreviewed |
 | P2 every `StudioOverlayHold` variant mapped to an actionable state | 7, 11 | Designed |
 | P3 truthful native results, events and hooks rows | 11, including the corrected three-state write outcome | Designed |
-| P4 live-tenure contract | 9.4 V1-V5, with 9.3's progress path | Designed |
+| P4 live-tenure contract | 9.4 V1-V7, with 9.3's progress path and migration rule | Designed |
 | P5 explicit statement that P1-P4 are implemented and reviewed | Status note | **No** |
 
 Agent 1 must not register `studio_overlay_save` on the strength of this document.
@@ -1404,10 +1437,10 @@ retained memory rather than an assumed bound.
   to, migrates to `Imported` and therefore **cannot issue receipts or rotate** until a genuine owner
   change occurs. For a single-owner server that is never. Verification and reading are unaffected,
   and no work is lost or at risk, but this is a real capability regression at upgrade for the
-  installed base, and it is the price of not promoting unprovable continuity. Question 16.1 puts the
-  policy to the user, because it is a product call and not a design one. There is deliberately no
-  technical escape: section 9.3 part 5 shows corroboration cannot help, since every pre-upgrade
-  participant holds the same stale value.
+  installed base, and it is the price of not promoting unprovable continuity. **Decided as option
+  (a) in 16.1: accepted with no operator-adoption override.** There is deliberately no technical
+  escape: section 9.3 part 5 shows corroboration cannot help, since every pre-upgrade participant
+  holds the same stale value.
 - **L6.** A legacy-snapshot owner and an unobserved-gap owner remain Unknown and cannot rotate.
 - **L7.** The persisted unconfirmed base is the seed checkpoint, not the previewed tail.
 - **L8.** There is no import path for an export or an archive.
@@ -1426,35 +1459,40 @@ retained manifest is acceptable (16.3); excluding the HPKE key from the leaf dig
 the membership rule is necessary but had to become receive-side (16.4); exact seed retention plus a
 detached re-parse is preferred (16.5). Remaining:
 
-Revision 3's four questions were answered and those answers are adopted: keep `Unmatched -> {New,
-Stale}` at S1b rather than a durable reservation (16.1); land `EpochRecordKind::DraftArchive` as an
-isolated Agent 4 integration commit ahead of the Agent 2 implementation, with Agents 1, 2 and 3
-rebasing onto that seam (16.2); keep the 16 MiB sub-cap as an explicit product policy to revisit
-after measurement (16.3); keep M-1's hard pre-merge refusal rather than merging into `Unknown`
-(16.4). One question remains, and it is a product decision rather than a design one:
+Every question is now answered and adopted. Revision 3's four: keep `Unmatched -> {New, Stale}` at
+S1b rather than a durable reservation; land `EpochRecordKind::DraftArchive` as an isolated Agent 4
+integration commit ahead of the Agent 2 implementation, with Agents 1, 2 and 3 rebasing onto that
+seam; keep the 16 MiB sub-cap as an explicit product policy to revisit after measurement; keep
+M-1's hard pre-merge refusal rather than merging into `Unknown`.
 
-1. **The v1 tenure migration policy (L11).** Section 9.3 part 5 establishes that a v1 `start <
-   epoch` cannot be promoted to leaf-aware knowledge from any evidence, local or remote, and that
-   the sound treatment is `Imported`: verification unchanged, authoring fail-closed. The cost is
-   that every existing server's owner loses receipt issuance and rotation at upgrade, permanently
-   for a single-owner server. Three options, and the user should choose rather than the design:
-   **(a)** ship `Imported` as specified and accept the regression, which is tolerable if the
-   installed base is small, since alpha.2 installs already require a manual reinstall;
-   **(b)** ship `Imported` plus a one-time, explicitly confirmed, clearly labelled operator action
-   that adopts the v1 value as `Observed` on a named server, making the residual an informed local
-   choice rather than a silent default;
-   **(c)** promote v1 `start < epoch` automatically, accepting the documented residual that a
-   pre-upgrade invisible remove-and-re-add leaves a device authoring under a stale tenure id.
-   I recommend **(b)**: it keeps the default sound, keeps the escape explicit and auditable, and
-   does not require the attestation protocol 9.5 rejected, which section 9.3 part 5 now shows would
-   not have worked anyway.
+**16.1, the v1 tenure migration policy (L11): decided as (a).** The reviewer chose option (a) over
+my recommendation of (b), and the reasoning is better than mine: (b) would create a new
+authority-bearing escape hatch whose whole purpose is to turn a value the design has just proved
+untrustworthy for authoring into trusted authoring evidence. That needs its own server scoping,
+confirmation, capability exposure, audit record, replay and restart semantics and tests, and it
+deliberately defeats V6's otherwise clean rule that `Imported` becomes `Observed` only through a
+real leaf-aware transition. For an alpha installed base already undergoing manual migration, the
+simpler security model is worth more than the recovered capability. **`Imported` ships fail-closed
+with no operator-adoption override**, and L11's regression is accepted as the price. Option (c) is
+rejected outright: it silently restores the revision-3 vulnerability.
+
+One refinement to section 9.3 part 5's "no fourth option" claim, from the same answer, is adopted:
+there is no fourth way to **reconstruct** the historical tenure from v1 evidence, which is what that
+argument asserts, but there is a separate future *migration class* that deliberately establishes a
+**fresh** tenure rather than recovering the old one, through a designed identity or owner transition
+or server recreation. That does not prove the old value and so is not a counterexample; it is
+future migration work and is explicitly not part of Gate 4.
+
+No open questions remain for this design.
 
 ## 17. Test and mutation plan
 
 ### 17.1 Normal regressions
 
-Revision 1's N1-N5, N20-N21, N23-N28, N30-N31 and N-T1 to N-T5, N-T7 to N-T8 are retained with the
-schema changes of section 5. Added, changed or corrected:
+Revision 1's N1-N5, N20-N21, N23-N28, N30-N31, N-T1 to N-T5 and N-T8 are retained with the schema
+changes of section 5. **N-T7 is no longer retained unchanged: it is corrected below**, because
+revision 4's `Imported` state added a second fail-closed value that its `Unknown`-only matrix could
+not see. Added, changed or corrected:
 
 | # | Level | Case | Independent observation |
 |---|---|---|---|
@@ -1483,7 +1521,8 @@ schema changes of section 5. Added, changed or corrected:
 | N25b | actor | **Finding 6 seed extraction.** Accept unconfirmed work from a preview whose tail is non-empty | The captured bytes equal the originally fetched seed, not a checkpoint of the tail-advanced projection; the detached re-parse against the candidate receipt succeeds; a mutated captured byte fails the re-parse with no durable change; after restart the branch reconstructs from its persisted bytes with the same projection. |
 | N-T6 | actor | Remove then rejoin in separate commits, the rejoining device becoming owner | The rejoining owner and every witness observe the same start; its receipts verify. |
 | N-T6b | actor | **Finding 7 discriminator.** A committer leaf identity change across a contiguous step, with four observers: the rejoining owner, a known-tenure witness, an **Unknown-tenure newcomer** that requests a fresh owner proof, and a restarted copy of the witness | With 9.3 part 3 the witness and the rejoining owner agree, so the newcomer's proof-derived selection agrees too, and the restarted witness agrees after `decode`. Separately assert that an ordinary committer self-update, which rotates the HPKE key but keeps the credential, does **not** reset the observed start. |
-| N-T6d | sync | **Revision-3 finding 1, the v1 migration.** Build old-format state with `start = Some(S)`, `S < epoch`; under the **old** observation rule apply the formerly invisible same-owner discontinuity and show `S` is preserved; serialize genuine v1 bytes; decode under the new implementation against the post-transition group | The result is **`Imported(S)`, not `Observed(S)`**: `observed_owner_tenure_start()` still returns `Some(S)` so verification is unchanged and a mismatched proof is still refused, while `authoring_owner_tenure_start()` returns `None` and `prepare_receipt_head_snapshot` refuses. Save and reload the new snapshot and require it is still `Imported`. Separately: a v1 state with `start == Some(epoch)`, and the founding `epoch == 0, start == Some(0)`, both decode to `Observed`; a v1 state with no start decodes to `Unknown`; a `start > epoch` v1 state is still rejected. Finally, apply a genuine owner change and require the promotion to `Observed` at the new epoch. |
+| N-T7 | actor | **Corrected (revision-4 finding 1). The V1 authoring-refusal matrix, run for BOTH fail-closed values.** Two fixtures reaching the app layer: one with `Unknown`, and one built by migrating a genuine ambiguous v1 snapshot as in N-T6d so the value is a real `Imported(S)` rather than an injected one | For each fixture: `Server::observed_owner_tenure()` reports the expected variant, and for the migrated one it reports **`StudioOwnerTenure::Imported(S)`, not `Known(S)`**; `require_observed_owner_tenure()` refuses; and every V1 authority entry point refuses at its own check, each fixture passing the earlier checks first: Closing basis minting, first local acceptance, handoff preparation, a signing turn, the commit, receipt issuance, rotation, Registry pointer publication, and Agent 3's repair issuance and application. The `Imported` fixture additionally asserts that verification is **unaffected** in the same run, so the test cannot pass by making `Imported` behave as `Unknown` everywhere. |
+| N-T6d | sync | **Revision-3 finding 1, the v1 migration.** Build old-format state with `start = Some(S)`, `S < epoch`; under the **old** observation rule apply the formerly invisible same-owner discontinuity and show `S` is preserved; serialize genuine v1 bytes; decode under the new implementation against the post-transition group | The result is **`Imported(S)`, not `Observed(S)`**: `verification_owner_tenure_start()` returns `Some(S)` so verification is unchanged and a mismatched proof is still refused, while `authoring_owner_tenure_start()` returns `None` and `prepare_receipt_head_snapshot` refuses. Save and reload the new snapshot and require it is still `Imported`. Separately: a v1 state with `start == Some(epoch)`, and the founding `epoch == 0, start == Some(0)`, both decode to `Observed`; a v1 state with no start decodes to `Unknown`; a `start > epoch` v1 state is still rejected. Finally, apply a genuine owner change and require the promotion to `Observed` at the new epoch. |
 | N-T6c | mls, actor | **SEC-PAIR-001 finding 4, adversarial.** Construct the forbidden same-commit remove-and-re-add of the designated committer, reusing the same signature key and credential bytes, **bypassing the local commit builder**, and deliver the staged commit to an uninvolved witness | The witness refuses it **before `merge_staged_commit`**, so its epoch and its observed tenure are unchanged and no member reaches the ambiguous position. Assert separately that the local builder refuses to construct it, that a remove-and-re-add of a **different** `DeviceId` is still accepted, and that a genuine rejoin in a **later** commit is still accepted and produces agreement. The invite ledger is not consulted by the witness in any of these. |
 
 ### 17.2 Isolated mutations
@@ -1510,6 +1549,9 @@ Changed, added or corrected:
 | M22d | **M-1's receive-side check in `process_incoming`**, leaving only the local commit builder's refusal | N-T6c | "a witness merged a forbidden same-commit remove-and-re-add": the commit is applied and the witness's observed tenure diverges from the rejoining owner's. A separate mutation removes only the builder's refusal and asserts N-T6c's builder case fails while the receive-side case still passes, so the two are proved independent. |
 | M22e | **The v1 migration's `start == epoch` condition**, restoring revision 3's behaviour of copying any v1 `start` into the leaf-aware state | N-T6d | "an unprovable v1 tenure was promoted to authoring evidence": `authoring_owner_tenure_start()` returns `Some(S)` and `prepare_receipt_head_snapshot` mints a permit for a stale start. |
 | M22f | The `Observed`/`Imported` flag in the snapshot tail (encode both as `Observed`) | N-T6d's save-and-reload case | "a restart laundered an imported tenure into an observed one". |
+| M22g | **New (revision-4 finding 1).** The `ObservedOwnerTenure::Imported` arm of the app-level conversion in `Server::observed_owner_tenure`, mapped to `StudioOwnerTenure::Known(S)` | N-T7's migrated fixture | "an imported tenure crossed the app boundary as observed knowledge": the app reports `Known(S)` for a value the sync layer holds as `Imported(S)`. |
+| M24 | **Retained, scope narrowed.** V1's fail-closed `Unknown` in `require_observed_owner_tenure` (substitute the current group epoch) | N-T7's `Unknown` fixture | "an Unknown-tenure device authored, signed or issued". |
+| M24b | **New (revision-4 finding 1).** The `Imported` arm of `require_observed_owner_tenure`, returning `Ok(S)` | N-T7's migrated fixture | "an imported tenure became authoring evidence": a Closing basis is minted, or a receipt is issued, under a value with no leaf-continuity proof. M22g and M24b must be separately anchored, so that fixing one cannot mask the other. |
 | M28 | The `DraftArchive` arm of the reference collection | N19 | "archived pixels became reclaimable after a preserving disposal". |
 | M26 | **Corrected fixture.** The `Unconfirmed`-forbids-`prepared` rule in `validate` | N23 | The fixture must be a record that passes **every other** structural guard, including provenance encoding, zero source identifiers, entry ordering and canonical re-encode, so the failure isolates this prohibition. |
 | M27 | 8.1 part 3's detached re-parse of the captured seed bytes | N25b | "a mutated captured seed became a durable base". |
@@ -1534,10 +1576,63 @@ Fill `[FULL_HEAD_SHA]` with the commit that adds this revision before sending. D
 placeholder.
 
 ```text
+Review type: design re-review after the revision-4 re-review. Boundary (b) PASSED there and is not
+resubmitted for reconsideration; (a) and (c) had one Medium test and mutation gap.
+Base: 37fa87753d32a2c4f5d1172cc865910a93d90fa1. Head: [FULL_HEAD_SHA].
+Compare: https://github.com/Thalpy/Mewtual/compare/37fa87753d32a2c4f5d1172cc865910a93d90fa1...[FULL_HEAD_SHA]
+Scope/evidence: docs/GATE4-AGENT-2-DESIGN.md revision 5 and docs/GATE4-AGENT-2-STATUS.md.
+Design only: no production code, no test and no measurement exists. No Cargo command was run.
+Dependencies unchanged from revision 4. Native Save stays unregistered; Agent 1's P5 is false.
+
+This revision is narrow. Please re-examine (a) and (c) and confirm (b) is undisturbed.
+
+The finding is closed by making the Imported authoring refusal executable rather than asserted.
+N-T7 leaves the retained set and runs the full V1 authoring-refusal matrix for BOTH fail-closed
+values. Its Imported fixture is built by migrating a genuine ambiguous v1 snapshot as in N-T6d, not
+by injecting the variant, so the test exercises the real conversion path; it asserts
+Server::observed_owner_tenure reports Imported(S) and not Known(S), that
+require_observed_owner_tenure refuses, and that every V1 entry point refuses at its own check with
+earlier checks passing first. It also asserts in the same run that verification is unaffected, so
+the test cannot be satisfied by making Imported behave as Unknown everywhere, which would quietly
+undo the reason Imported exists.
+
+The two halves of the app-boundary invariant are separately anchored, because you showed an
+implementation could satisfy N-T6d, M22e and M22f while still laundering the value one layer up:
+M22g mutates the Imported arm of the app conversion, M24b mutates the Imported arm of
+require_observed_owner_tenure, and M24's scope narrows to Unknown. Confirm the two anchors are
+genuinely independent, so that fixing one cannot mask the other, and that V7 states the invariant
+completely.
+
+Two hardening notes are adopted. observed_owner_tenure_start is REMOVED rather than repointed,
+because its "independently observed" contract would become false for Imported and leaving the name
+would let a future call site inherit the wrong semantics by default; deletion makes the compiler
+enumerate every site, and section 9.3 part 5 lists the intended mapping, including that the
+proof-signing check and head_snapshot_is_current are authoring rather than verification. Check that
+mapping against the actual call graph and say if any site is classified wrongly, particularly the
+existing test assertions, which must be read individually rather than renamed mechanically. P4 now
+cites V1-V7.
+
+Your 16.1 decision is adopted as (a) over my recommendation of (b), with your reasoning recorded:
+(b) would create an authority-bearing escape hatch whose purpose is to turn a value proved
+untrustworthy for authoring into trusted authoring evidence, and it defeats V6. Imported ships
+fail-closed with no operator override, and L11's regression is accepted. Your refinement to the "no
+fourth option" claim is also adopted: no fourth way to RECONSTRUCT the historical tenure exists,
+while deliberately establishing a FRESH tenure is a separate future migration class and not a
+counterexample. Section 16 now records no open questions; say if you disagree that it is closed.
+
+Return PASS for (a) and (c), or numbered findings with severity, file/line, trigger, impact,
+evidence and required correction. A PASS accepts design only: no implementation, no measurement and
+no native Save exposure is claimed, signed repair and combined runtime integration are separate, and
+full Gate 4 acceptance remains with Agent 4.
+```
+
+## 18b. Superseded revision-4 request (retained as the scope record)
+
+```text
 Review type: design re-review after the revision-3 re-review (CHANGES REQUIRED on all three
 boundaries, two findings).
-Base: 909720739b6c0a455d37761e8149d7eec21cb6f4. Head: [FULL_HEAD_SHA].
-Compare: https://github.com/Thalpy/Mewtual/compare/909720739b6c0a455d37761e8149d7eec21cb6f4...[FULL_HEAD_SHA]
+Base: 909720739b6c0a455d37761e8149d7eec21cb6f4. Head: 37fa87753d32a2c4f5d1172cc865910a93d90fa1.
+Compare: https://github.com/Thalpy/Mewtual/compare/909720739b6c0a455d37761e8149d7eec21cb6f4...37fa87753d32a2c4f5d1172cc865910a93d90fa1
 Scope/evidence: docs/GATE4-AGENT-2-DESIGN.md revision 4 and docs/GATE4-AGENT-2-STATUS.md.
 Design only: no production code, no test and no measurement exists. No Cargo command was run.
 Dependencies: e65bfd8 is still unreviewed; Agent 1's runtime design has since passed user review as
@@ -1596,7 +1691,7 @@ native Save exposure is claimed, signed repair and combined runtime integration 
 full Gate 4 acceptance remains with Agent 4.
 ```
 
-## 18b. Superseded revision-3 request (retained as the scope record)
+## 18c. Superseded revision-3 request (retained as the scope record)
 
 ```text
 Review type: design re-review after SEC-PAIR-001 (CHANGES REQUIRED on all three boundaries).
@@ -1678,7 +1773,7 @@ native Save exposure is claimed, signed repair and combined runtime integration 
 full Gate 4 acceptance remains with Agent 4.
 ```
 
-## 18c. Superseded revision-2 request (retained as the scope record)
+## 18d. Superseded revision-2 request (retained as the scope record)
 
 ```text
 Review type: design re-review after CHANGES REQUIRED on all three boundaries.

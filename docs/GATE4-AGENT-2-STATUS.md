@@ -8,13 +8,15 @@ Review preamble: [preamble 2](GATE4-REVIEW-PREAMBLES.md#review-2-manualprovision
 
 | Item | State |
 |---|---|
-| Design revision | 4, **awaiting re-review** |
+| Design revision | 5, **awaiting re-review on (a) and (c); boundary (b) has PASSED at revision 4** |
 | Original design base | `1bcb1bca204d721b848b17c0835faf931ae930e3` |
 | Revision 1 head, reviewed | `a901f6b0f64df2b4ea9cc0221b64ac98276f582d` |
 | Revision 2 head, reviewed as SEC-PAIR-001 | `21ca8fa93c07b8bb65a00bc0bbc555518f8a7132` |
 | Revision 3 head, reviewed | `909720739b6c0a455d37761e8149d7eec21cb6f4` |
 | Revision 4 base | `909720739b6c0a455d37761e8149d7eec21cb6f4` |
-| Revision 4 head SHA | `37fa877`. Any later SHA recording this row is documentation-only and adds no design content. |
+| Revision 4 head, reviewed | `37fa87753d32a2c4f5d1172cc865910a93d90fa1`. **Boundary (b) PASS.** |
+| Revision 5 base | `37fa87753d32a2c4f5d1172cc865910a93d90fa1` |
+| Revision 5 head SHA | _pending: the commit that adds revision 5; fill before sending the review request_ |
 | Working checkout | main repository tree. Revision 2 was committed on branch `gate4-agent1-runtime`, which a parallel Agent 1 session had checked out; the user asked for no branch change. The design content is branch-independent, but Agent 4 should expect to move these two documents when the branches are integrated. No separate worktree yet; one is taken before any production edit. |
 | Production code | **None written.** |
 | Tests added | **None.** |
@@ -32,7 +34,7 @@ P5 is FALSE. `studio_overlay_save` must not be registered.**
 | P1 reviewed manual lifecycle: inspect, export, copy-into-current, explicit disposition, lossless across restart and refusal | Designed, unimplemented, **design not yet accepted** | design 6.1-6.6, 12 |
 | P2 every `StudioOverlayHold` variant mapped to a user-visible actionable state | Designed | design 7, 11 |
 | P3 truthful native results, events and UI-hooks rows | Designed, including the corrected three-state write outcome | design 11 |
-| P4 live-tenure contract for `observed_owner_tenure_start()` | Designed | design 9.4 V1-V5 |
+| P4 live-tenure contract, now over `verification_owner_tenure_start()` and `authoring_owner_tenure_start()` | Designed | design 9.4 V1-V7 |
 | P5 explicit statement that P1-P4 are implemented and reviewed | **No** | this table |
 
 This row is the single authoritative source for P5. It changes only after implementation exists and
@@ -46,7 +48,17 @@ three boundaries, so the design itself is not yet accepted.
 | 2026-09-15 | Design revision 1 (`a901f6b`) | **CHANGES REQUIRED on all three boundaries**, nine findings: 3 High, 6 Medium. Reviewer ran no Cargo commands and did not complete the `catcoms-sync/src/lib.rs` constructor/restore call-site trace. |
 | 2026-09-15 | Design revision 2 (`21ca8fa`) | **CHANGES REQUIRED on all three boundaries**, as SEC-PAIR-001, five findings: 3 High, 2 Medium. Revision-1 findings 1, 2, 4, 5, 6 and 8 closed; 9 closed at the API level with a test-layer correction; 3 and 7 open in narrower forms. Reviewer ran no Cargo commands. |
 | 2026-09-16 | Design revision 3 (`9097207`) | **CHANGES REQUIRED on all three boundaries**, two findings: 1 High, 1 Medium. All five SEC-PAIR-001 corrections accepted. Reviewer ran no Cargo commands. |
-| 2026-09-16 | Design revision 4 | Request prepared; head SHA pending. Three separable verdicts requested again. |
+| 2026-09-16 | Design revision 4 (`37fa877`) | **(b) PASS.** (a) and (c) CHANGES REQUIRED for one Medium test and mutation gap. The revision-3 High tenure finding is closed at the design level. Reviewer ran no Cargo commands. |
+| 2026-09-16 | Design revision 5 | Request prepared; head SHA pending. Re-review requested for (a) and (c) only. |
+
+### Revision-4 re-review findings and their disposition
+
+| # | Sev | Finding | Disposition |
+|---|---|---|---|
+| 1 | Med | `Imported` was not mutation-isolated at the app authoring seam: N-T7 and M24 covered only `Unknown`, so an implementation could satisfy the sync-layer tests while mapping `Imported(S)` to `Known(S)` one layer up | **Corrected.** N-T7 leaves the retained set and runs the V1 matrix for both fail-closed values from a genuinely migrated fixture, asserting verification stays unaffected in the same run; M24 narrows to `Unknown`; M22g and M24b separately anchor the two halves of the app-boundary invariant; V7 states it. |
+| n/a | note | `observed_owner_tenure_start`'s "independently observed" contract would become false for `Imported` | **Adopted and taken further:** the accessor is removed rather than repointed, so the compiler enumerates every call site; `verification_owner_tenure_start` and `authoring_owner_tenure_start` replace it with a per-site mapping recorded in design 9.3 part 5. |
+| n/a | note | P4 cited V1-V5 | Corrected to V1-V7 in both documents. |
+| n/a | decision | 16.1 product decision | **Adopted as (a)**, over this design's recommendation of (b): `Imported` ships fail-closed with no operator-adoption override, because (b) would create an authority-bearing escape hatch that defeats V6. |
 
 ### Revision-3 re-review findings and their disposition
 
@@ -128,7 +140,11 @@ Full signatures are in design section 5. Changes against revision 1 are marked.
   signing, repair-issuance, rotation and publication decision. A reused key, a Welcome, a hint, a
   candidate receipt's claim, a fresh owner proof's claim and the current group epoch are each
   insufficient to make it `Known`.
-- **I-L (new, revision-3 finding 1).** A v1 tenure snapshot is promoted to leaf-aware `Observed`
+- **I-M (new, revision-4 finding 1).** The app-level tenure conversion is lossy in one direction
+  only: `Imported` never becomes `Known` at any layer, and `require_observed_owner_tenure()`
+  succeeds for `Known` alone. The conversion and the accessor are separately anchored mutations,
+  because the sync-layer tests cannot see a value laundered one layer up.
+- **I-L (revision-3 finding 1).** A v1 tenure snapshot is promoted to leaf-aware `Observed`
   only when `start == Some(epoch)`. Any other `start` becomes `Imported`: still reported to
   verification, so a mismatched proof is still refused, and never reported to authoring. `Imported`
   survives save and reload as `Imported` and is promoted only by a leaf-aware observed transition.
