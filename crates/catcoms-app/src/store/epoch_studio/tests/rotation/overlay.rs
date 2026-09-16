@@ -2,7 +2,7 @@ use super::*;
 use crate::store::epoch_intents::sync_intent;
 use catcoms_replication::studio::{StudioClosingOverlayBasis, StudioLocalDraft};
 use catcoms_replication::CloseRecord;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 mod handoff;
 mod source_version;
@@ -991,4 +991,368 @@ fn studio_overlay_store_replacement_counts_base_and_orphans_without_refunding_ol
         .unwrap();
     let accepted = save(&f, &mut store, &close, basis.fingerprint(), op, 124);
     assert_eq!(accepted.accepted(), 2);
+}
+
+/// I-3. A complete reference scan derives its pin set from durable state, so it cannot know a
+/// pixel reference that only an in-flight acceptance names. The job-owned transient hold covers
+/// that window, but a durable write does NOT repair a set the scan already installed: the
+/// acceptance path must transfer protection to the ordinary conservative holds before its write,
+/// while the transient owner is still alive. These cases exercise the transfer, not the window.
+#[test]
+fn studio_overlay_acceptance_transfers_pixel_protection_before_its_write() {
+    let root = tempfile::tempdir().unwrap();
+    let mut store = open(root.path());
+    let f = Fixture::new(true);
+    let (close, basis) = closing(&f, &mut store);
+    let group = hex::encode(f.group.group_id());
+
+    let mut blobs = store.blob_store(&group).unwrap();
+    let cid = blobs
+        .put(b"pixels named only by the new operation")
+        .unwrap();
+    let orphan = blobs.put(b"nothing will ever name this").unwrap();
+
+    // Establish a KNOWN pin set that predates the acceptance and excludes both CIDs, so the
+    // assertions below cannot pass merely because protection is fail-closed unknown.
+    store.creative_pinned_cids().unwrap();
+    assert!(store.creative_references_known());
+
+    let op = f.domain(
+        FlipnoteOp::InsertFrame {
+            frame: [9; 16],
+            after: None,
+            cid: *cid.as_bytes(),
+            bytes: 39,
+        }
+        .encode()
+        .unwrap(),
+        7,
+    );
+    let draft = save(&f, &mut store, &close, basis.fingerprint(), op, 300);
+    assert_eq!(draft.accepted(), 1);
+
+    // Every transient and result owner is gone, and no scan has run since. Only the ordinary
+    // holds installed during the acceptance can be protecting these bytes now.
+    let mut blobs = store.blob_store(&group).unwrap();
+    assert!(
+        !blobs.delete(&cid).unwrap(),
+        "an accepted operation's pixels were reclaimable before the next scan"
+    );
+    assert!(blobs.get_bounded(&cid, 200).unwrap().is_some());
+    // The control: protection is genuinely known and still reclaims an unreferenced CID, so the
+    // assertion above is not an unknown-protection refusal.
+    assert!(store.creative_references_known());
+    assert!(blobs.delete(&orphan).unwrap());
+}
+
+/// I-3 under uncertain persistence. A write that may have landed, and a write that fails leaving
+/// its temporary sibling, must both leave the new references protected: the transfer runs before
+/// the write attempt precisely so its outcome does not decide whether the pixels survive.
+#[test]
+fn studio_overlay_uncertain_acceptance_still_protects_its_pixels() {
+    for after_rename in [false, true] {
+        let root = tempfile::tempdir().unwrap();
+        let mut store = open(root.path());
+        let f = Fixture::new(true);
+        let (close, basis) = closing(&f, &mut store);
+        let group = hex::encode(f.group.group_id());
+        let mut blobs = store.blob_store(&group).unwrap();
+        let cid = blobs.put(b"pixels for an uncertain write").unwrap();
+        store.creative_pinned_cids().unwrap();
+        assert!(store.creative_references_known());
+
+        let op = f.domain(
+            FlipnoteOp::InsertFrame {
+                frame: [9; 16],
+                after: None,
+                cid: *cid.as_bytes(),
+                bytes: 39,
+            }
+            .encode()
+            .unwrap(),
+            7,
+        );
+        let mut b = budget(&mut store, &f);
+        let failed = store.save_studio_closing_overlay_with_io(
+            SERVER,
+            &f.group,
+            f.target,
+            &f.device,
+            &close,
+            Some(0),
+            basis.fingerprint(),
+            op,
+            300,
+            &mut rng(),
+            &mut b,
+            |path, bytes| {
+                if after_rename {
+                    // The record really lands; only the caller's result is lost.
+                    atomic_write(path, bytes)?;
+                } else {
+                    // A failure that leaves a temporary sibling behind.
+                    let mut staged = path.to_path_buf();
+                    staged.set_extension("intents.mewtual-stage-1-1.tmp");
+                    std::fs::write(&staged, bytes).unwrap();
+                }
+                Err(crate::AppError::Io("interrupted".into()))
+            },
+            sync_intent,
+        );
+        assert!(failed.is_err(), "the injected writer must fail the save");
+
+        let mut blobs = store.blob_store(&group).unwrap();
+        assert!(
+            !blobs.delete(&cid).unwrap(),
+            "an uncertain acceptance left its pixels reclaimable"
+        );
+        assert!(blobs.get_bounded(&cid, 200).unwrap().is_some());
+    }
+}
+
+/// I3-001. An already accepted request must be classified before any media admission. The pixel
+/// hold is new-authoring work: a retry adds no reference and needs no possession, so it must not
+/// be able to fail because the shared reference rails are full. This is the AG1-001 boundary
+/// applied to I-3's first half.
+#[test]
+fn studio_overlay_exact_retry_is_acknowledged_without_media_admission() {
+    let root = tempfile::tempdir().unwrap();
+    let mut store = open(root.path());
+    let f = Fixture::new(true);
+    let (close, basis) = closing(&f, &mut store);
+    let group = hex::encode(f.group.group_id());
+    let mut blobs = store.blob_store(&group).unwrap();
+    let cid = blobs.put(b"pixels for the accepted operation").unwrap();
+
+    let op = f.domain(
+        FlipnoteOp::InsertFrame {
+            frame: [9; 16],
+            after: None,
+            cid: *cid.as_bytes(),
+            bytes: 39,
+        }
+        .encode()
+        .unwrap(),
+        7,
+    );
+    let first = save(&f, &mut store, &close, basis.fingerprint(), op.clone(), 300);
+    assert_eq!(first.accepted(), 1);
+    let records = canonical(&store);
+
+    // Occupy every job-owned hold slot with unrelated legitimate work, so any attempt at media
+    // admission on the retry path must fail rather than silently succeed.
+    let occupied: Vec<_> = (0..crate::store::creative_references::MAX_TRANSIENT_HOLD_OWNERS)
+        .map(|n| {
+            store
+                .hold_creative_transient(&f.group.group_id(), BTreeSet::from([[n as u8; 32]]))
+                .expect("the rail admits its stated number of owners")
+        })
+        .collect();
+    assert!(store
+        .hold_creative_transient(&f.group.group_id(), BTreeSet::from([[200u8; 32]]))
+        .is_err());
+    let live = store.live_transient_holds_for_test();
+
+    // The exact accepted request must still be acknowledged. Call the store directly rather than
+    // through the fixture helper, so the failure names this boundary instead of unwrapping.
+    let mut b = budget(&mut store, &f);
+    let retried = store.save_studio_closing_overlay(
+        SERVER,
+        &f.group,
+        f.target,
+        &f.device,
+        &close,
+        Some(0),
+        basis.fingerprint(),
+        op,
+        301,
+        &mut rng(),
+        &mut b,
+    );
+    let retried = match retried {
+        Ok(saved) => local(saved),
+        Err(error) => panic!("an accepted retry was refused by media admission: {error}"),
+    };
+    assert_eq!(retried.accepted(), 1);
+    assert_eq!(
+        retried.projection(),
+        first.projection(),
+        "an exact retry must return the same accepted draft"
+    );
+    assert_eq!(
+        store.live_transient_holds_for_test(),
+        live,
+        "an accepted retry performed media admission"
+    );
+    assert_eq!(
+        canonical(&store),
+        records,
+        "an exact retry changed durable records"
+    );
+    drop(occupied);
+}
+
+/// N12(a). The window C-4 exists for, exercised for the first time on the real staged path: a
+/// complete reference scan installs a known set while an acceptance is detached between capture
+/// and commit. Only the job-owned hold can protect the new pixels there, because nothing durable
+/// names them yet and the scan derives its set from durable state alone.
+#[test]
+fn studio_overlay_detached_acceptance_survives_a_complete_scan_between_capture_and_commit() {
+    let root = tempfile::tempdir().unwrap();
+    let mut store = open(root.path());
+    let f = Fixture::new(true);
+    let (close, basis) = closing(&f, &mut store);
+    let group = hex::encode(f.group.group_id());
+    let mut blobs = store.blob_store(&group).unwrap();
+    let cid = blobs
+        .put(b"pixels created for a detached acceptance")
+        .unwrap();
+    let orphan = blobs.put(b"unreferenced throughout").unwrap();
+
+    // A known pin set that predates the acceptance and excludes the new CID, so nothing below
+    // can pass through fail-closed unknown protection.
+    store.creative_pinned_cids().unwrap();
+    assert!(store.creative_references_known());
+
+    let op = f.domain(
+        FlipnoteOp::InsertFrame {
+            frame: [9; 16],
+            after: None,
+            cid: *cid.as_bytes(),
+            bytes: 39,
+        }
+        .encode()
+        .unwrap(),
+        7,
+    );
+    let intent = catcoms_replication::LocalIntent {
+        author: f.device.device_id(),
+        operation: op,
+    };
+    let pixels = store
+        .hold_creative_transient(&f.group.group_id(), BTreeSet::from([*cid.as_bytes()]))
+        .unwrap();
+    let capture = store
+        .capture_studio_overlay_save(
+            SERVER,
+            &f.group,
+            f.target,
+            &f.device,
+            basis,
+            intent,
+            300,
+            Some(pixels),
+        )
+        .unwrap();
+
+    // The detached stage. Custody is genuinely released here: `plan` owns authenticated plaintext
+    // and the hold, and touches no store. While it is outstanding, another operation completes a
+    // full reference scan and attempts protected deletion.
+    let plan = capture.plan().unwrap();
+    store.creative_pinned_cids().unwrap();
+    let mut blobs = store.blob_store(&group).unwrap();
+    assert!(
+        !blobs.delete(&cid).unwrap(),
+        "a complete scan reclaimed pixels held by a detached acceptance"
+    );
+    assert!(blobs.get_bounded(&cid, 200).unwrap().is_some());
+    // The scan is genuinely complete and usable: an unreferenced CID still reclaims.
+    assert!(store.creative_references_known());
+    assert!(blobs.delete(&orphan).unwrap());
+
+    // Commit under reacquired custody. The transfer runs before the write and the hold is
+    // released only when this returns.
+    let mut b = budget(&mut store, &f);
+    let draft = store
+        .commit_studio_overlay_save(
+            SERVER,
+            &f.group,
+            f.target,
+            &f.device,
+            &close,
+            Some(0),
+            plan,
+            &mut rng(),
+            &mut b,
+            atomic_write,
+            sync_intent,
+        )
+        .unwrap();
+    assert_eq!(draft.accepted(), 1);
+    assert_eq!(store.live_transient_holds_for_test(), 0);
+
+    // After the commit, with every owner gone and before any further scan, the ordinary holds
+    // installed during the transfer are what keep the pixels.
+    let mut blobs = store.blob_store(&group).unwrap();
+    assert!(
+        !blobs.delete(&cid).unwrap(),
+        "the committed acceptance left its pixels reclaimable"
+    );
+    assert!(blobs.get_bounded(&cid, 200).unwrap().is_some());
+}
+
+/// The staged commit must refuse a plan whose record changed while it was detached, rather than
+/// writing a state derived from bytes that are no longer current.
+#[test]
+fn studio_overlay_detached_plan_is_refused_when_the_record_changed() {
+    let root = tempfile::tempdir().unwrap();
+    let mut store = open(root.path());
+    let f = Fixture::new(false);
+    let (close, basis) = closing(&f, &mut store);
+    let basis_fingerprint = basis.fingerprint();
+    let intent = catcoms_replication::LocalIntent {
+        author: f.device.device_id(),
+        operation: f.title(),
+    };
+    let capture = store
+        .capture_studio_overlay_save(
+            SERVER, &f.group, f.target, &f.device, basis, intent, 300, None,
+        )
+        .unwrap();
+    let plan = capture.plan().unwrap();
+
+    // A different acceptance lands while the first plan is detached.
+    let other = f.domain(
+        IndexOp::SetTitle {
+            object: [1; 16],
+            title: "a different accepted title".into(),
+        }
+        .encode()
+        .unwrap(),
+        8,
+    );
+    let landed = save(&f, &mut store, &close, basis_fingerprint, other, 301);
+    assert_eq!(landed.accepted(), 1);
+    let records = canonical(&store);
+
+    let mut b = budget(&mut store, &f);
+    let refused = store.commit_studio_overlay_save(
+        SERVER,
+        &f.group,
+        f.target,
+        &f.device,
+        &close,
+        Some(0),
+        plan,
+        &mut rng(),
+        &mut b,
+        atomic_write,
+        sync_intent,
+    );
+    assert!(
+        refused.is_err(),
+        "a plan derived from superseded bytes was committed"
+    );
+    assert_eq!(canonical(&store), records, "the refusal changed records");
+    assert_eq!(
+        store
+            .load_epoch_intents(SERVER, &f.logical)
+            .unwrap()
+            .local_draft()
+            .unwrap()
+            .unwrap()
+            .accepted(),
+        1,
+        "the refusal disturbed the accepted branch"
+    );
 }

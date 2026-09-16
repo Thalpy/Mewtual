@@ -63,7 +63,7 @@ impl ServerStore {
             .chain(recovery.staged())
             .map(|s| StudioRecovery::from_snapshot(s, &logical, target.channel()).map_err(invalid))
             .collect::<Result<Vec<_>, _>>()?;
-        let pending = self.load_epoch_intents(server, &logical)?;
+        let pending = self.load_epoch_intents_structural(server, &logical)?;
         let mut selected = BTreeMap::<[u8; 32], LocalIntent>::new();
         for (id, intent) in pending.pending().filter(|(id, _)| ids.contains(*id)) {
             if intent.author != device.device_id() {

@@ -342,7 +342,10 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
                     source,
                     versions,
                     eviction_pending: recovery.eviction_pending()?,
-                    pending_intents: store.load_epoch_intents(server, &logical)?.pending().len(),
+                    pending_intents: store
+                        .load_epoch_intents_structural(server, &logical)?
+                        .pending()
+                        .len(),
                 };
                 Ok(
                     if matches!(request.action, StudioControlAction::Acknowledge { .. }) {

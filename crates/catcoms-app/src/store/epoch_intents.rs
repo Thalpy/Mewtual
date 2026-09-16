@@ -89,10 +89,32 @@ impl EpochIntentState {
         Ok(Zeroizing::new(bytes))
     }
 
+    /// Full validation, including complete ordered reconstruction of any retained overlay branch.
+    /// Required before any projection, append, handoff preparation or export.
     pub(super) fn decode(
         bytes: &[u8],
         scope: &[u8],
         document: &LogicalDocument,
+    ) -> Result<Self, AppError> {
+        Self::decode_inner(bytes, scope, document, true)
+    }
+
+    /// Identity, ledger, entry and canonical-encoding validation without replaying the branch.
+    /// For metadata readers that need the ledger, accounting or overlay identity but no
+    /// projection. It mints no authority; a decoded Prepared flag is still only local evidence.
+    pub(super) fn decode_structural(
+        bytes: &[u8],
+        scope: &[u8],
+        document: &LogicalDocument,
+    ) -> Result<Self, AppError> {
+        Self::decode_inner(bytes, scope, document, false)
+    }
+
+    fn decode_inner(
+        bytes: &[u8],
+        scope: &[u8],
+        document: &LogicalDocument,
+        replay: bool,
     ) -> Result<Self, AppError> {
         if bytes.len() > MAX_RECORD_BYTES {
             return Err(invalid("record exceeds its bound"));
@@ -108,13 +130,15 @@ impl EpochIntentState {
             if d.get_u8().map_err(invalid)? != 2 {
                 return Err(invalid("unknown intent extension"));
             }
-            Some(
-                catcoms_replication::studio::StudioOverlayState::decode_vault(
-                    d.get_bytes().map_err(invalid)?,
-                    &ledger,
+            let extension = d.get_bytes().map_err(invalid)?;
+            let state = if replay {
+                catcoms_replication::studio::StudioOverlayState::decode_vault(extension, &ledger)
+            } else {
+                catcoms_replication::studio::StudioOverlayState::decode_vault_structural(
+                    extension, &ledger,
                 )
-                .map_err(invalid)?,
-            )
+            };
+            Some(state.map_err(invalid)?)
         };
         d.finish().map_err(invalid)?;
         if ledger.document() != document {
@@ -269,6 +293,18 @@ impl ServerStore {
             .map(|(state, _)| state)
     }
 
+    /// The same load without replaying a retained overlay branch, for callers that need the
+    /// ledger, its pending entries or overlay identity and never a projection. `local_draft` and
+    /// every other projection consumer must keep using `load_epoch_intents`.
+    pub(crate) fn load_epoch_intents_structural(
+        &self,
+        server: u64,
+        document: &LogicalDocument,
+    ) -> Result<EpochIntentState, AppError> {
+        self.read_epoch_intent_record_structural(&scope_bytes(server, document)?, document)
+            .map(|(state, _)| state)
+    }
+
     /// Read one saved envelope with BOTH inventories checked before a replay decision. This is
     /// not a write/flush permit and never creates missing data. The replay coordinator checks the
     /// original author and typed semantics, then uses the normal two-barrier edit path.
@@ -299,7 +335,9 @@ impl ServerStore {
     ) -> Result<EpochIntentState, AppError> {
         let scope = scope_bytes(server, document)?;
         let storage_scope = StorageScope::new(server, &document.server_id).map_err(invalid)?;
-        let (state, old) = match self.read_epoch_intent_record(&scope, document) {
+        // Selection and accounting only; no caller of this snapshot needs a projection, and a
+        // retained branch would otherwise be reconstructed on every Studio write transaction.
+        let (state, old) = match self.read_epoch_intent_record_structural(&scope, document) {
             Ok(loaded) => loaded,
             Err(error) => {
                 budget.invalidate();
@@ -331,7 +369,11 @@ impl ServerStore {
     ) -> Result<(), AppError> {
         self.checked_epoch_replay_state(server, document, budget, intents)?;
         let scope = scope_bytes(server, document)?;
-        let (_, bytes) = self.read_epoch_intent_record(&scope, document)?;
+        // The physical size is the only thing this flush needs; the record was authenticated and
+        // structurally checked immediately above.
+        let bytes = self
+            .read_scoped_intent_plain(&scope)?
+            .map(|record| record.physical_bytes);
         if let Some(bytes) = bytes {
             let record = storage_record(server, document, &scope, bytes)?;
             let reservation = budget
@@ -406,7 +448,9 @@ impl ServerStore {
         }
         self.hold_creative_operation(document, &operation);
         let storage_scope = StorageScope::new(server, &document.server_id).map_err(invalid)?;
-        let (mut state, old) = match self.read_epoch_intent_record(&scope, document) {
+        // An ordinary intent append needs the ledger and the overlay's identity, never its
+        // projection. The extension is preserved byte-identically by the canonical re-encode.
+        let (mut state, old) = match self.read_epoch_intent_record_structural(&scope, document) {
             Ok(value) => value,
             Err(error) => {
                 budget.invalidate();
@@ -531,6 +575,26 @@ impl ServerStore {
         scope: &[u8],
         document: &LogicalDocument,
     ) -> Result<(EpochIntentState, Option<u64>), AppError> {
+        self.read_epoch_intent_record_inner(scope, document, true)
+    }
+
+    /// Same authenticated read without replaying a retained branch. Callers that need the ledger,
+    /// the physical size, overlay identity or accounting, and never a projection, use this: a
+    /// retained branch otherwise costs a complete ordered reconstruction on every metadata read.
+    pub(in crate::store) fn read_epoch_intent_record_structural(
+        &self,
+        scope: &[u8],
+        document: &LogicalDocument,
+    ) -> Result<(EpochIntentState, Option<u64>), AppError> {
+        self.read_epoch_intent_record_inner(scope, document, false)
+    }
+
+    fn read_epoch_intent_record_inner(
+        &self,
+        scope: &[u8],
+        document: &LogicalDocument,
+        replay: bool,
+    ) -> Result<(EpochIntentState, Option<u64>), AppError> {
         match self.read_scoped_intent_plain(scope)? {
             None => Ok((
                 EpochIntentState {
@@ -540,14 +604,18 @@ impl ServerStore {
                 None,
             )),
             Some(bytes) => Ok((
-                EpochIntentState::decode(&bytes.plain, scope, document)?,
+                if replay {
+                    EpochIntentState::decode(&bytes.plain, scope, document)?
+                } else {
+                    EpochIntentState::decode_structural(&bytes.plain, scope, document)?
+                },
                 Some(bytes.physical_bytes),
             )),
         }
     }
 
     /// Authenticate framing under the ordinary directory/file rails, without typed replay.
-    fn read_scoped_intent_plain(
+    pub(in crate::store) fn read_scoped_intent_plain(
         &self,
         scope: &[u8],
     ) -> Result<Option<AuthenticatedEpochFileBytes>, AppError> {
