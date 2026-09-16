@@ -1945,18 +1945,20 @@ single predicate, evaluated from durable state on **every** head request, not on
 that admitted the report:
 
 ```text
-authoritative_proof_allowed(source, record, authoring_tenure) =
+authoritative_proof_allowed(source, record, authoring_start) =
     !source.is_faulted()
- && authoring_tenure.is_some()                       // Imported/Unknown fail closed
- && !reserved_is_live(record, authoring_tenure)
- && !live_overflow_is_live(record, authoring_tenure) // the evidence-free hold
+ && authoring_start.is_some()                        // Imported/Unknown fail closed
+ && { let expected = tenure_id(group_id, committer_key, authoring_start?);
+      !reserved_is_live(record, expected) && !overflow_is_live(record, expected) }
  && the receipt about to be proved is not a member of any pair this record retains
 ```
 
 The `authoring_tenure.is_some()` term is AG3-DES-040's fail-closed rule: when current tenure cannot
 be authoritatively classified for authoring, including `Imported`, proof is refused rather than
-permitted on verification-only evidence. The `live_overflow` term is AG3-DES-041's: a live conflict
-we know about but could not store still suppresses proof.
+permitted on verification-only evidence. The `overflow_is_live` term is AG3-DES-041's: a conflict we
+know about but could not store still suppresses proof, and per AG3-DES-048 it stays suppressed while
+**any** of its retained fingerprints, or its sticky `unknown` flag, is outstanding, not merely until
+one reporter's retry succeeds.
 
 Historical pairs do not suppress proof by themselves: they dispute an old tenure's head, not the
 current one. A **live** reserved pair does, which is why the slot exists rather than sharing
@@ -2461,6 +2463,24 @@ Core:
   the authoring accessor rather than from a coincidental later check. Assert identity is compared as
   a derived `tenure_id`, by constructing two tenures that share a start epoch but differ in owner
   key and showing they are not confused.
+- **N44** AG3-DES-045 and AG3-DES-048, the overflow hold as a durable object. (a) Encode, decode and
+  reopen a record where **only** the overflow hold is suppressing proof, with strict `0/1`
+  canonicality on `has_overflow` and `unknown`, a `fingerprint_count` above 4 rejected, and
+  corruption failing the whole record rather than silently clearing the hold. (b) Two **distinct**
+  current-tenure pairs overflow; one is later admitted and repaired; assert the other's fingerprint
+  still suppresses proof and is cleared only when that exact pair is stored or resolved. (c) A fifth
+  distinct pair sets `unknown`; assert no retry clears it and only the tenure ceasing to be current
+  does. (d) AG3-DES-049: two tenures sharing a start epoch but differing in owner key produce
+  different `tenure_id`s, and an overflow hold from one does not suppress or release under the
+  other.
+- **N45** AG3-DES-046 and AG3-DES-047, the reserved lifecycle. (a) The `{R1,R3}` pair after
+  `{R1,R2}` was repaired: assert `pair_is_materialisable` is false, that **no** source mutation is
+  attempted, that the active-pair rule permits direct issuance rather than demanding a drain, and
+  that `repair_kind 3` carries it to terminal. (b) A materialisable live pair takes the drain and is
+  then repaired as `repair_kind 2`. (c) Demotion **with** room: the pair migrates first and B1 uses
+  `repair_kind 1`; demotion **without** room: it stays and B1 uses `repair_kind 3`. Assert the two
+  are never both applicable. (d) A terminal `repair_kind 3` clears `reserved` exactly, and after
+  restart that pair can never become decidable again, the kind-3 analogue of N31c.
 - **N43** AG3-DES-041, repeated tenure at capacity: a live pair under tenure 1, an owner change
   demoting it, both history slots already full so it cannot migrate, a nonterminal repair under
   tenure 2, and then a **new tenure-2 conflict**. Assert `live_overflow` is set, that proof stays
