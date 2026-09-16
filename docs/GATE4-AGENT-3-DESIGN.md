@@ -2763,12 +2763,14 @@ Copyable, with the common contract from
 sent alongside it.
 
 ```text
-Review type: design, revision 10, findings re-review.
-Base: 3b6a4b40462ae83a341f8f6741c93edff55b5ef7 (revision 9). Head: [FULL_HEAD_SHA once pushed].
-Compare: https://github.com/Thalpy/Mewtual/compare/3b6a4b40462ae83a341f8f6741c93edff55b5ef7...[FULL_HEAD_SHA]
-Note: revision 10 was committed in five parts, because a parallel session repeatedly reset this
-shared working tree and discarded uncommitted edits. All five touch only the two Agent 3 documents.
-Earlier revisions: b8bb5f3a3db6d0b8e450c82119f95e2cb929bce6 (revision 8),
+Review type: design, revision 11, findings re-review.
+Base: 11ce6f1b58288e44d6ff14dc2a98f42f7cc5e13b (revision 10 design body). Head: [FULL_HEAD_SHA].
+Compare: https://github.com/Thalpy/Mewtual/compare/11ce6f1b58288e44d6ff14dc2a98f42f7cc5e13b...[FULL_HEAD_SHA]
+Note: like revision 10, this revision is committed in several parts because a parallel session
+repeatedly resets this shared working tree and discards uncommitted edits. Every part touches only
+the two Agent 3 documents; f5ac522 between the two revisions is status-only.
+Earlier revisions: 3b6a4b40462ae83a341f8f6741c93edff55b5ef7 (revision 9),
+b8bb5f3a3db6d0b8e450c82119f95e2cb929bce6 (revision 8),
 6d498c2e901e5071104a2533e0a632dc5676b2a7 (revision 7),
 135766ca9f290ab96d3133b771bc42da74fe7825 (revision 6),
 3737f1d4fff6f2c08302b0ecb1b024008818a1cf (revision 5),
@@ -2777,9 +2779,9 @@ a62178b94f20cd60a5363e6a3d6d6216edb9e516 (revision 3),
 63a11e1a6451c7ed373c90b0e81b59d8a748a72a (revision 2),
 7efc9c2aba0a37d9aec57e268d9ff63edaca1b8a (revision 1), original scope base
 1bcb1bca204d721b848b17c0835faf931ae930e3.
-Scope/evidence: docs/GATE4-AGENT-3-DESIGN.md revision 10 and docs/GATE4-AGENT-3-STATUS.md.
+Scope/evidence: docs/GATE4-AGENT-3-DESIGN.md revision 11 and docs/GATE4-AGENT-3-STATUS.md.
 Documentation only: no production code, test, shared contract document or workflow is changed, and
-no Cargo command was executed in any of the ten passes. Every number is a source constant or a
+no Cargo command was executed in any of the eleven passes. Every number is a source constant or a
 labelled estimate. The commit sits on a branch shared with Agents 1 and 2, so a literal base-to-head
 comparison may again contain intervening Agent 1 production commits; only the two Agent 3 documents
 are mine.
@@ -2787,6 +2789,46 @@ Dependencies, corrected per your note: Agent 2's tenure design has now PASSED ad
 though none of it is implemented, so the section 13.2 contract is accepted-on-paper rather than
 available; Agent 1 remains partial with I-4/C-3 not started; the core signing split at e65bfd8
 remains unreviewed.
+
+This revision answers AG3-DES-045 to AG3-DES-049 and AG3-TEST-009. All five were internal
+contradictions in revision 10 and all five are confirmed. Section 0 is the disposition table. It
+reopens nothing you closed: AG3-DES-040 in 6.3 and 13.2, AG3-DES-043, AG3-DES-044's write order,
+AG3-DES-038, 030, 023, 024 and 029's dedupe rule all stand, and M1 to M19 are unchanged.
+
+AG3-DES-045 is the one you called sharpest and it was exactly that: I added the hold to the struct
+and to the proof gate and never to the codec, so the mechanism advertised as surviving restart had
+no bytes, and N43 as written was impossible. It now has a canonical encoding with strict 0/1
+canonicality, an explicit count bound, validation and corruption failing the record rather than
+silently releasing the hold. N44(a) reopens a record where only the hold is suppressing proof.
+
+AG3-DES-046: the two rules really did leave no legal next step for {R1,R3}. A
+pair_is_materialisable predicate, computed on the already-checked source WITHOUT mutating it, splits
+drainable from direct-repair-only, so the impossible case is never reached by first faulting the
+source into some other pair. N45(a) asserts no source mutation is attempted and that issuance is
+permitted without the drain.
+
+AG3-DES-047: both halves were wrong. Migration now happens before any B1, so a migrated pair is
+kind 1 and kind 3 applies only while the pair is still reserved; N37(g)'s "migrates and then kind 3"
+was incoherent and N45(c) picks one per case. Recycling is binding-specific, so a terminal kind-3
+repair clears reserved instead of stranding its pair there, which N45(d) asserts across restart.
+
+AG3-DES-048: clearing a pairless marker on one retry forgets every other known conflict, which is
+the safety half of AG3-DES-032 returning one tenure later. The hold keeps up to four pair
+fingerprints cleared individually, plus a sticky unknown flag for the overflow-of-overflow case that
+only a tenure change clears. It still stores no receipts, so it can only refuse, never authorize.
+N44(b) and N44(c) cover both.
+
+AG3-DES-049: the stale observed_tenure_id pseudocode is gone, both predicates compare against one
+tenure_id derived in the same custody visit from the authoring accessor, the group id and the
+committer key, and the hold stores that derived id rather than a bare start. N44(d) constructs two
+tenures sharing a start epoch with different owner keys and shows they are not confused.
+
+AG3-TEST-009: N44 and N45 are new and cover the codec, multiple overflows, tenure identity,
+materialisability, the migration and binding choice, and terminal kind-3 clearing.
+
+No U-questions remain open.
+
+Superseded text below is retained for the earlier round it answers:
 
 This revision answers AG3-DES-039 to AG3-DES-044 and AG3-TEST-008, and absorbs a dependency change
 this scope had missed: Agent 2's accepted design REMOVES observed_owner_tenure_start for a
