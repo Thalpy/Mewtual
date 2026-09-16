@@ -1,7 +1,7 @@
 # Gate 4 Agent 3 status: runtime signed fault repair
 
 Owner: Agent 3 ([assignment](GATE4-AGENT-HANDOFFS.md#agent-3-runtime-signed-fault-repair)).
-Proposal: [GATE4-AGENT-3-DESIGN](GATE4-AGENT-3-DESIGN.md), currently revision 6.
+Proposal: [GATE4-AGENT-3-DESIGN](GATE4-AGENT-3-DESIGN.md), currently revision 7.
 Review preamble: 3. Current entries override older ones.
 
 ## Checkpoints
@@ -13,7 +13,8 @@ Review preamble: 3. Current entries override older ones.
 | 2026-09-16 | Design revision 3, second-round findings answered | `63a11e1a6451c7ed373c90b0e81b59d8a748a72a` | `a62178b94f20cd60a5363e6a3d6d6216edb9e516` | design, docs only | **REQUEST CHANGES**: historical-pair direction, 2a/2b split, v2 framing, U-7, U-8 and M12 **accepted**; new AG3-DES-013 to AG3-DES-016; M2 still masked; U-9 and U-10 decided |
 | 2026-09-16 | Design revision 4, third-round findings answered | `a62178b94f20cd60a5363e6a3d6d6216edb9e516` | `ad023d2e5b514a8f9598b1fe433fd2b080ecad6c` | design, docs only | **REQUEST CHANGES**: C-8 epoch-zero fix, reconciled lifecycle, healthy-source clobber fix and M2 **accepted**; new AG3-DES-017 to AG3-DES-021; AG3-TEST-003 on M12/N24/N5d; U-11 agreed |
 | 2026-09-16 | Design revision 5, fourth-round findings answered | `ad023d2e5b514a8f9598b1fe433fd2b080ecad6c` | `3737f1d4fff6f2c08302b0ecb1b024008818a1cf` | design, docs only | **REQUEST CHANGES**: AG3-DES-021 **closed**; case 6c/N32, the sequence concept and M2 accepted; new AG3-DES-022 to AG3-DES-025; AG3-TEST-004 on N5c/N18/M12 |
-| 2026-09-16 | Design revision 6, fifth-round findings answered | `3737f1d4fff6f2c08302b0ecb1b024008818a1cf` | this commit | design, docs only | re-review requested |
+| 2026-09-16 | Design revision 6, fifth-round findings answered | `3737f1d4fff6f2c08302b0ecb1b024008818a1cf` | `135766ca9f290ab96d3133b771bc42da74fe7825` | design, docs only | **REQUEST CHANGES**: AG3-DES-023 and AG3-DES-024 **closed**; fresh-path AG3-DES-025 and the AG3-TEST-004 corrections accepted; new AG3-DES-026 to AG3-DES-029; AG3-TEST-005 |
+| 2026-09-16 | Design revision 7, sixth-round findings answered | `135766ca9f290ab96d3133b771bc42da74fe7825` | this commit | design, docs only | re-review requested |
 
 Working checkout: `M:\Git (local)\CatComs`, shared with the parallel Agent 1 and Agent 2 sessions,
 which are now doing implementation and design work respectively. Agent 1 has the checkout on its
@@ -22,6 +23,19 @@ documents with explicit pathspecs. `Create-suite-2` was fast-forwarded once, at 
 these documents off Agent 1's branch alone; it has not been moved since. **Agent 3 implementation
 must move to a separate branch or worktree before any code change**; no mutation harness may run
 against another agent's source.
+
+## Finding ledger, revision 6 round
+
+| Finding | Severity | Status | Where answered |
+|---|---|---|---|
+| AG3-DES-026 | P1 | **Answered in revision 7.** Revision 6's own headline fix could not cross B1: the codec required a repair to match a retained pair while the correction said the source's pair is never retained. The repair is now tagged, kind 2 being source-bound with its pair **inline**, which keeps the record self-validating given that `decode` sees only the logical document. Bound follows to seven receipt-sized values. | Design 3 R26, 5.2, 10.1, 15.1 N36 |
+| AG3-DES-027 | P1 | **Answered.** `Closing -> Fault` is permitted and `repair_install_pending()` requires `Closing`, so a current-tenure report through the live seal would silently abandon an outstanding recovery and replacement. A nonterminal repair now fences report-induced source mutation; proof stays suppressed meanwhile. | Design 3 R27, 6.5, 15.1 N37, M13 |
+| AG3-DES-028 | P2 | **Answered.** A disposition tag is persisted in the Studio restart unit's snapshot (version 3), not in core's tested `ResolvedRepair` codec, so an exact retry after a screening application returns `Screened` rather than the false `Repaired`. | Design 5.1 C-5, 5.3, 15.1 N38 |
+| AG3-DES-029 | P1 | **Answered.** `is_repaired_loser` is an admission guard, not proof that a different frozen pair is resolved; the old rule would have stranded a peer frozen on `{R1,R3}` after `{R1,R2}` was repaired. The no-op is now the exact pair only. | Design 3 R28, 6.5, 15.1 N39, M14 |
+| AG3-TEST-005 | P2 | **Answered.** N36 to N39 cover the four new boundaries; M13 and M14 mutate the two guards this revision adds. | Design 15.1, 15.2 |
+
+Closed in the revision-6 round: **AG3-DES-023** and **AG3-DES-024**. Accepted and not reopened: the
+fresh-path half of AG3-DES-025, the AG3-TEST-004 corrections, M2 and M1/M3-M11.
 
 ## Finding ledger, revision 5 round
 
@@ -129,10 +143,28 @@ AG3-DES-008.
 | "MAX_RECORD_BYTES ... 3 * MAX_RECEIPT_BYTES" (rev 5, second statement) | **Stale duplicate.** Revision 5 added the correct five-receipt formula but left the old one later in the same section and 11.4 KiB in section 10.1. |
 | "Sequence and retry classify before anything else" (rev 5) | **Unsafe ordering.** Core deliberately verifies current owner before its retry shortcut; inverting that inside an authority-bearing API reintroduces the M4 bug one layer up. |
 | "B2 means the fault has durably ended" (rev 5, after case 6d) | **False for the screening cases.** A terminal disposition is not the same as a usable document. |
+| "The source's pair is never stored, and the repair may still name it" (rev 6) | **Unrepresentable.** The codec required a repair to match a retained pair, so the source-bound case the correction existed for could not be encoded at all. A source-bound repair now carries its pair inline. |
+| "A nonterminal repair owns the target" (rev 6) | **Only against discovery.** The report path could still seal a current-tenure pair, move the phase to `Fault` and collapse `repair_install_pending()`, abandoning an outstanding replacement. |
+| "`Screened` separates terminal from usable" (rev 6) | **Only on the fresh path.** No provenance was persisted, so an exact retry reported `Repaired`. |
+| "A report whose members are already screened is a no-op" (rev 6) | **Over-broad.** `is_repaired_loser` governs receipt admission, not whether a different frozen pair is resolved; it would strand a peer on `{R1,R3}` after `{R1,R2}` was repaired. |
+
+## Facts established by the revision-7 audit
+
+New this revision, verified in code:
+
+- `transition_verified_receipt` permits `Open | Closing | Fault -> Fault` and clears the receipt
+  hash (`epoch.rs:2539-2549`), so a report driven through the live seal collapses
+  `repair_install_pending()`, which requires `Closing`.
+- `EpochOwnerReceiptState::decode` and `check_scope` take only `(bytes, scope, document)`
+  (`store/epoch_owner.rs:66-124`): no source is available, so a source-bound repair must carry its
+  evidence inline to stay self-validating.
+- `StudioEpoch::snapshot` already carries a version byte distinguishing ordinary from adopting
+  (`studio/epoch.rs:432`), so the disposition tag extends the restart unit rather than core's
+  already-tested `ResolvedRepair` codec.
 
 ## Facts established by the revision-6 audit
 
-New this revision, verified in code:
+Verified in code and still relied on:
 
 - `ReceiptBook.fault` is a single `Option<(Receipt, Receipt)>` alongside the single
   `resolved_repair` (`epoch.rs:1571-1575`), so the source holds exactly one unresolved pair and
@@ -238,10 +270,10 @@ Full signatures are in [the design](GATE4-AGENT-3-DESIGN.md) section 5. Summary,
   version-2 journal with its `reconciled` slot and that slot's promotion, retirement and
   tenure-clearing lifecycle (C-7); the repair-bearing book document derivation (C-8).
 - Store: `EpochFaultRecord` holding up to two canonically ordered **external** pairs plus at most
-  one repair, with active status **derived** on load (pending repair, else the source's own fault
-  pair from the book, else the lowest external pair) and an explicit terminal-pair recycling
-  transition; the owner record's version-3 section bounded for five receipt-sized values, stated
-  once; `prepare_epoch_repair`
+  one **tagged** repair, either external-indexed or source-bound with its pair inline, with active
+  status **derived** on load (pending repair, else the source's own fault pair from the book, else
+  the lowest external pair) and an explicit terminal-pair recycling transition; the owner record's
+  version-3 section bounded for seven receipt-sized values, stated once; `prepare_epoch_repair`
   (which also reconciles the journal) and `mark_epoch_repair_applied`; `apply_studio_repair`,
   `issue_studio_repair`, `report_studio_fault`, `studio_fault_evidence`, `StudioRepairOutcome`,
   `StudioRepairHold`, `CheckedRepairRecovery`, `stage_studio_repair_recovery`, `servable_repair`;
@@ -299,7 +331,7 @@ sections 5 and 13.3.
 
 ## Executed checks
 
-**None, in any of the six passes.** No Cargo, npm or script command has been run: these
+**None, in any of the seven passes.** No Cargo, npm or script command has been run: these
 checkpoints change no code, and the local machine keeps checks serial. Every number quoted in the design is a constant
 read from source at the base or an explicitly labelled estimate. The maximal-shape replacement
 cost, the custody time of the capture and commit stages, and the protocol-allowance arithmetic in
@@ -311,16 +343,16 @@ design section 10.1 are **unverified**.
 |---|---|---|---|
 | Design verdict on revision 2 | user / independent reviewer | requested | no implementation starts |
 | Core handoff signing split `e65bfd8` | Agent 1 / core | unreviewed | unaffected: no repair path uses it |
-| Live tenure contract T1 to T5 (design 13.2) | Agent 2 | design not written | repair verification holds on `Unknown`; fails closed, never substitutes |
+| Live tenure contract T1 to T5 (design 13.2) | Agent 2 | design **PASSED** adversarial review; no implementation | accepted on paper but not available; repair verification holds on `Unknown`, fails closed, never substitutes |
 | Prepared overlay fence and source custody (design 13.1) | Agent 1 | design revision 3, unreviewed | repair relies only on the existing `resolve_studio_handoff` and `save_studio_source_checked`; if `inventory_generation` lands, rotating it becomes mandatory over the full list in design 10.3 |
 | Native registration, UI hooks, INTERFACES rows | Agent 4 | not started | commands stay unregistered and nothing is callable from the renderer |
 
 U-1 through U-11 are all decided and carried. No U-question remains open.
 
 At the reviewed head, Agent 1's runtime implementation is only partial and its I-4 and C-3 work has
-not landed, and Agent 2's tenure design is awaiting re-review with no implementation. Neither
-blocks this design checkpoint, but both are real prerequisites before Agent 3 implementation
-integrates.
+not started. Agent 2's tenure design has since **passed** adversarial review, correcting the stale
+statement carried in earlier revisions, but none of it is implemented. Neither blocks this design
+checkpoint; both are real prerequisites before Agent 3 implementation integrates.
 
 ## Coordination summary
 
