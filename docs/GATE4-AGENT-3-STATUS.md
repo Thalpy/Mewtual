@@ -1,7 +1,7 @@
 # Gate 4 Agent 3 status: runtime signed fault repair
 
 Owner: Agent 3 ([assignment](GATE4-AGENT-HANDOFFS.md#agent-3-runtime-signed-fault-repair)).
-Proposal: [GATE4-AGENT-3-DESIGN](GATE4-AGENT-3-DESIGN.md), currently revision 2.
+Proposal: [GATE4-AGENT-3-DESIGN](GATE4-AGENT-3-DESIGN.md), currently revision 3.
 Review preamble: 3. Current entries override older ones.
 
 ## Checkpoints
@@ -9,14 +9,34 @@ Review preamble: 3. Current entries override older ones.
 | Date | Checkpoint | Base | Head | Kind | Verdict |
 |---|---|---|---|---|---|
 | 2026-09-15 | Design revision 1 | `1bcb1bca204d721b848b17c0835faf931ae930e3` | `7efc9c2aba0a37d9aec57e268d9ff63edaca1b8a` | design, docs only | **REQUEST CHANGES**: AG3-DES-001 to AG3-DES-008, AG3-TEST-001; U-1 to U-6 decided |
-| 2026-09-15 | Design revision 2, findings answered | `7efc9c2aba0a37d9aec57e268d9ff63edaca1b8a` | this commit | design, docs only | re-review requested |
+| 2026-09-15 | Design revision 2, findings answered | `7efc9c2aba0a37d9aec57e268d9ff63edaca1b8a` | `63a11e1a6451c7ed373c90b0e81b59d8a748a72a` | design, docs only | **REQUEST CHANGES**: AG3-DES-003, 005, 007, 008 corrections **accepted**; new AG3-DES-009 to AG3-DES-012; M2 and M12 non-isolating; U-7 and U-8 decided |
+| 2026-09-16 | Design revision 3, second-round findings answered | `63a11e1a6451c7ed373c90b0e81b59d8a748a72a` | this commit | design, docs only | re-review requested |
 
-Working checkout: `M:\Git (local)\CatComs`, branch `Create-suite-2`, shared with the parallel Agent
-1 and Agent 2 documentation passes. This pass touches only the two Agent 3 documents and commits
-with explicit pathspecs. **Implementation must move to a separate branch or worktree before any
-code change**; no mutation harness may run against another agent's source.
+Working checkout: `M:\Git (local)\CatComs`, shared with the parallel Agent 1 and Agent 2 sessions,
+which are now doing implementation and design work respectively. Agent 1 has the checkout on its
+own branch, so this pass commits there rather than switching branch, touching only the two Agent 3
+documents with explicit pathspecs. `Create-suite-2` was fast-forwarded once, at revision 2, to keep
+these documents off Agent 1's branch alone; it has not been moved since. **Agent 3 implementation
+must move to a separate branch or worktree before any code change**; no mutation harness may run
+against another agent's source.
 
-## Finding ledger
+## Finding ledger, revision 2 round
+
+| Finding | Severity | Status | Where answered |
+|---|---|---|---|
+| AG3-DES-009 | P1 | **Answered in revision 3, and the diagnosis is confirmed at the source.** `ingest_verified`, `ingest_adoption` and `check_opening_receipt` all return `Fault` before considering the incoming receipt, so a repair is the only exit and revision 2's "the new owner's first receipt converges it" was false. Reports now carry the complete frozen pair, historical pairs are admissible and land in an owner-side evidence record rather than through the live seal, and cross-tenure repair is a distinct `Unblocked` transition that installs nothing. | Design 3 R14, 5.1 C-2 case 5, 5.2, 5.6 W-1, 6.3, 6.5, 15.1 N5b, N17 |
+| AG3-DES-010 | P1 | **Answered.** Case 2 splits into ordinary-seal and adoption modes, and the committed `repair_state()` becomes the sole terminality oracle after B2, so the plan can no longer contradict `install_pending`. A cross-tenure source is never claimed for a forbidden install. | Design 5.1 C-2, C-5, 5.3 S-2 step 6, 15.1 N5 |
+| AG3-DES-011 | P1 | **Answered.** Clearing a losing `in_flight` returns the owner to its older high water for both selection and adjacency, so the journal gains a distinct `reconciled` canonical decision and `canonical_head()`, deliberately not the publication bit. The size arithmetic is stated and the journal bound raised rather than relying on ~128 bytes of headroom. | Design 3 R15, 5.1 C-7, 6.7, 15.1 N7, N28 |
+| AG3-DES-012 | P2 (P1 for Registry) | **Answered.** Studio and Registry v2 encodings both specified, tag is an unambiguous `2` with a counted report list of 0 or 2, and the parse and charge order corrected against the real seam by splitting the decode so the report stays opaque until after the per-requester rail. | Design 3 R16, 5.6 W-1, 12, 15.1 N26, N26b |
+| M2 non-isolating | P2 | **Answered.** The mutant now weakens the "durable save returned successfully" predicate into `Ok(Some(capability))`; minting on an `Err` path leaked nothing. | Design 15.2 M2 |
+| M12 non-isolating | P2 | **Answered.** Retargeted at the frozen-pair replacement refusal in the owner record, a guard core never sees, plus a report-boundary side-effect assertion. | Design 15.2 M12 |
+| U-7 | decision | **Reviewer's answer adopted over my proposal**: admit before answering, no proof for a disputed receipt, fail closed on an uncertain write. | Design 6.5, 6.6 |
+| U-8 | decision | **Confirmed**: no pre-B2 `Repairing`. | Design 5.7, 6.4 |
+
+Accepted in the revision-2 round and not reopened: AG3-DES-003, AG3-DES-005, AG3-DES-007 and
+AG3-DES-008.
+
+## Finding ledger, revision 1 round
 
 | Finding | Severity | Status | Where answered |
 |---|---|---|---|
@@ -40,10 +60,39 @@ code change**; no mutation harness may run against another agent's source.
 | "Preserve a newer head when it is outside the pair and does not conflict" (rev 1) | **Withdrawn as unsound.** `receipts_conflict` compares same-tenure epoch and inheritance conflicts and is not an ancestry proof; a head descending from the loser passes it and then blocks the adoption planner's `latest == receipt` precondition. |
 | "A duplicate repair means the transaction is complete" (rev 1) | **Wrong.** `ReceiptRepairIngest::Duplicate` establishes only that the book's disposition happened. Recovery and installation can still be outstanding. |
 | "The repair holds keep Fault after B2" (rev 1) | **Wrong.** B2 clears the fault. The truthful state is a read-only `Repairing` hold with the whole branch retained. |
+| "A cross-tenure fault converges through the current owner's ordinary first receipt" (rev 2) | **Wrong, and the most serious error in revision 2.** Every admission path returns `Fault` before considering the incoming receipt, so no receipt from any owner or tenure can clear a fault. A repair is the only exit. |
+| "A report naming an older tenure may be refused" (rev 2) | **Withdrawn.** Combined with the above, that rule would have made cross-tenure repair permanently unreachable, which is the case the v2 record format exists to serve. Historical pairs are admissible; the authority question lives with the repair, not the report. |
+| "One reported receipt is enough" (rev 2) | **Wrong for the historical case.** A new owner may hold neither member, so the reporter, which is faulted and holds both, always sends both. |
+| "The per-requester rail and pending cap precede the v2 decode" (rev 2) | **Wrong.** `queue_checkpoint_head` decodes the scoped query before charging the per-requester rail, so the decode is split instead. |
+| "Clearing a losing `in_flight` reconciles the journal" (rev 2) | **Insufficient.** Both the head selector and `prepare_verified` key off the retained high water, so the owner falls back to an older receipt and reads its next one as a gap. |
+
+## Facts established by the revision-3 audit
+
+New this revision, verified in code:
+
+- `ingest_verified` returns `Ok(ReceiptIngest::Fault)` on `self.fault.is_some()` before the
+  repaired-loser screen, the tenure comparison and the high-water logic (`epoch.rs:1615-1619`);
+  `ingest_adoption` does the same before its anchor search (`epoch/adoption.rs:27-29`); and
+  `check_opening_receipt` returns early too (`epoch.rs:1687-1689`). **A repair is the only exit
+  from Fault. No receipt from any owner or tenure can clear one.**
+- `prepare_verified` requires a same-tenure receipt to be exactly one epoch beyond `high_water`
+  (`epoch.rs:1993-1998`), and the head selector's `own_choice` is `pending().or(published())`
+  (`store/epoch_studio/discovery.rs:229`), so clearing a losing pending decision returns the owner
+  to its older high water for both selection and adjacency.
+- `OwnerReceiptJournal::encode` is version 1 with `high_water`, `in_flight` and `tenure`
+  (`epoch.rs:2061-2068`), and its decoder enforces a `(high_water, in_flight)` adjacency invariant
+  (`epoch.rs:2105-2116`). Adding a third retained receipt leaves roughly 128 bytes of headroom
+  against `MAX_OWNER_RECEIPT_JOURNAL_BYTES = 3 * MAX_RECEIPT_BYTES + 256`, so the design raises the
+  constant rather than relying on that margin.
+- `encode_scoped_query` delegates `CheckpointTarget::Registry` to `encode_query`, a different
+  framing from the Studio channel/object one (`receipt_head/wire.rs:70-97`).
+- `queue_checkpoint_head` charges the global preauth rail and authenticates, then calls
+  `decode_scoped_query`, and only afterwards charges the per-requester rail
+  (`receipt_head.rs:378-415`).
 
 ## Facts established by the revision-2 audit
 
-New this revision, verified in code at the base:
+Verified in code at the base and still relied on:
 
 - `begin_checkpoint_adoption` sets `self.adopting = true` whenever the outcome is not `Stale` and
   the source was not already faulted (`studio/epoch/adoption.rs:75-77`), so **a fault produced by
@@ -73,22 +122,25 @@ any `RecoveryReason::Repair` constructor, the `pub(crate)`/private status of
 
 Full signatures are in [the design](GATE4-AGENT-3-DESIGN.md) section 5. Summary, revision 2:
 
-- Core: `EpochGate::commit_repair` (C-1); `ReceiptBook::plan_repair` with `RepairSource`,
-  `RepairTransition`, `RepairPlan`, `RepairHold`, and `StudioEpoch`/`RegistryEpoch`
-  `apply_receipt_repair` committing atomically (C-2); the repaired-loser-is-not-an-anchor
-  predicates (C-3); `conflicting_receipt_pair` plus `ReceiptRepair::check_evidence` layered on it
-  (C-4); `StudioRepairState`, `repair_state`, `repair_install_pending`, `fault_evidence`,
-  `ReceiptBook::repair_sequence` (C-5); `prepare_repair_adoption` (C-6);
-  `OwnerReceiptJournal::resolve_repair` (C-7).
-- Store: `EpochRepairDecision` and the owner record's version-3 section; `prepare_epoch_repair`
+- Core: `EpochGate::commit_repair` (C-1); `ReceiptBook::plan_repair` taking the two full receipts
+  explicitly, with `RepairSource`, `RepairTransition`, `RepairPlan`, `RepairHold`, and
+  `StudioEpoch`/`RegistryEpoch` `apply_receipt_repair` committing atomically (C-2); the
+  repaired-loser-is-not-an-anchor predicates (C-3); `conflicting_receipt_pair` plus
+  `ReceiptRepair::check_evidence` layered on it (C-4); `StudioRepairState`, `repair_state`,
+  `repair_install_pending`, `fault_evidence`, `ReceiptBook::repair_sequence` (C-5);
+  `prepare_repair_adoption` (C-6); `OwnerReceiptJournal::resolve_repair`, `canonical_head` and the
+  version-2 journal with its `reconciled` slot (C-7).
+- Store: `EpochFaultRecord` and the owner record's version-3 section; `prepare_epoch_repair`
   (which also reconciles the journal) and `mark_epoch_repair_applied`; `apply_studio_repair`,
   `issue_studio_repair`, `report_studio_fault`, `studio_fault_evidence`, `StudioRepairOutcome`,
   `StudioRepairHold`, `CheckedRepairRecovery`, `stage_studio_repair_recovery`, `servable_repair`;
   the Registry mirrors.
 - Sync: `ReceiptHeadSelection.repair` served instead of `None`;
-  `AuthenticatedCheckpointHint::repair`; `select_repaired_checkpoint`; the version-2 scoped head
-  query with its optional report and raised cap. All new symbols are named `receipt_repair` or
-  `fault_repair` to avoid the existing MLS delivery `repair_outbox` family.
+  `AuthenticatedCheckpointHint::repair`; `select_repaired_checkpoint`; the version-2 **Studio and
+  Registry** scoped head queries, each with a counted report list of 0 or 2 receipts, a raised cap
+  of `MAX_QUERY + 2 * MAX_RECEIPT_BYTES`, and a header-only decode that keeps the report opaque
+  until after the per-requester rail. All new symbols are named `receipt_repair` or `fault_repair`
+  to avoid the existing MLS delivery `repair_outbox` family.
 - App: `StudioControlAction::{ReadFault, RepairFault}`,
   `StudioControlResponse::{Fault, Repaired}`, `StudioFaultView`, `StudioFaultCandidate`,
   `StudioFaultRepairRequest`, `StudioRepairStatus`, `StudioRepairBlocker`,
@@ -136,8 +188,8 @@ sections 5 and 13.3.
 
 ## Executed checks
 
-**None, in either pass.** No Cargo, npm or script command has been run: these checkpoints change no
-code, and the local machine keeps checks serial. Every number quoted in the design is a constant
+**None, in any of the three passes.** No Cargo, npm or script command has been run: these
+checkpoints change no code, and the local machine keeps checks serial. Every number quoted in the design is a constant
 read from source at the base or an explicitly labelled estimate. The maximal-shape replacement
 cost, the custody time of the capture and commit stages, and the protocol-allowance arithmetic in
 design section 10.1 are **unverified**.
@@ -152,9 +204,8 @@ design section 10.1 are **unverified**.
 | Prepared overlay fence and source custody (design 13.1) | Agent 1 | design revision 3, unreviewed | repair relies only on the existing `resolve_studio_handoff` and `save_studio_source_checked`; if `inventory_generation` lands, rotating it becomes mandatory over the full list in design 10.3 |
 | Native registration, UI hooks, INTERFACES rows | Agent 4 | not started | commands stay unregistered and nothing is callable from the renderer |
 
-U-1 is no longer an open dependency: the reviewer chose option (a) and revision 2 carries the
-completed contract. Two smaller questions, U-7 and U-8, are open in design section 16 and block
-nothing.
+U-1 through U-8 are all decided and carried. Two smaller questions, U-9 and U-10, are open in design
+section 16 and block nothing.
 
 ## Coordination summary
 
@@ -181,5 +232,8 @@ nothing.
 3. Create a separate branch or worktree; do not implement on the shared documentation checkout.
 4. Implement in the design's order: core C-1 to C-7 with N1 to N7, then the owner record and its
    transitions with N8 to N10, then the Studio transaction with N11 to N20, then Registry with N21,
-   then W-1 and the report path with N26, then distribution with N23 to N25 and N27, then the
-   runtime, control and native surface with N28 to N30, then the twelve mutants.
+   then W-1 and both report paths with N26 and N26b, then distribution with N23 to N25 and N27,
+   then the runtime, control and native surface with N28 to N30, then the twelve mutants.
+5. Treat N17 as the gating acceptance case: it is the one that proves a fault is reachable, is
+   otherwise permanently unexitable, and is actually healed without injecting state on the new
+   owner.
