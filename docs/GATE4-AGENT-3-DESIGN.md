@@ -1,6 +1,13 @@
 # Gate 4 Agent 3: runtime signed fault repair
 
-Status: **revision 7, design proposal, awaiting re-review. No production code is written.**
+Status: **revision 8, design proposal, awaiting re-review. No production code is written.**
+
+Revision 7 (`6d498c2e901e5071104a2533e0a632dc5676b2a7`) received **REQUEST CHANGES** with
+AG3-DES-030 to AG3-DES-033 and AG3-TEST-006. The reviewer **closed AG3-DES-029**, kept AG3-DES-023
+and AG3-DES-024 closed, accepted the source-bound encoding shape, M14 and M1 to M11. Revision 8
+answers the five and reopens none of that. Its disposition table is section 0.
+
+
 
 Revision 6 (`135766ca9f290ab96d3133b771bc42da74fe7825`) received **REQUEST CHANGES** with
 AG3-DES-026 to AG3-DES-029 and AG3-TEST-005. The reviewer **closed AG3-DES-023 and AG3-DES-024**,
@@ -46,14 +53,27 @@ passed. Scope is
 [Agent 3 of the four handoffs](GATE4-AGENT-HANDOFFS.md#agent-3-runtime-signed-fault-repair);
 progress is in [GATE4-AGENT-3-STATUS](GATE4-AGENT-3-STATUS.md). Review preamble 3.
 
-**Unmet dependencies, unchanged.** The [core signing split](GATE4-HANDOFF-SIGNING-REVIEW.md) at
-`e65bfd8` is unreviewed; Agent 1's runtime seams and Agent 2's live-tenure contract are design
-proposals. Sections 13.1 and 13.2 state what this scope needs and what it does without each.
+**Unmet dependencies.** The [core signing split](GATE4-HANDOFF-SIGNING-REVIEW.md) at `e65bfd8` is
+unreviewed and Agent 1's runtime seams remain a partly implemented proposal with I-4 and C-3 not
+started. **Agent 2's live-tenure design has now passed adversarial review**, correcting the stale
+"design proposal" wording carried here through revision 7, but none of it is implemented, so the
+section 13.2 contract is accepted on paper rather than available. Sections 13.1 and 13.2 state what
+this scope needs and what it does without each.
 
 No Cargo command was executed for this pass either. Every number is a source constant read at the
 base or an explicitly labelled estimate.
 
-## 0. Disposition of the revision-6 findings
+## 0. Disposition of the revision-7 findings
+
+| Finding | Disposition in revision 8 | Where |
+|---|---|---|
+| AG3-DES-030, source-bound validation becomes impossible after B2 | **Corrected.** `apply_repair` sets `fault = None` on success, so revision 7's "inline hashes must match the live `ReceiptBook::fault`" rule necessarily fails after B2 and stranded exactly the resumes it was meant to protect. Binding is now **two-phase**: before B2 against `fault_evidence()`, after B2 against the pair named by the committed `repair_state()`, with a live fault expected absent for transitioned cases. Anything else, and a missing or corrupt source, refuses. | 3 R29, 5.2, 15.1 N36 |
+| AG3-DES-031, the report fence misses the whole ownership interval | **Corrected.** `repair_install_pending()` only starts after B2, so a B1-persisted repair was unfenced: a current-tenure report could seal the source into a different fault and silently degrade a pending case 6c replacement into a terminal 6d screening, leaving the source on the repudiated branch. One predicate, `repair_transaction_nonterminal(record, source)`, now spans B1 through recycling and is what the fence and M13 use. | 6.5, 10.3, 15.1 N37, M13, M15 |
+| AG3-DES-032, deferred live evidence is not capacity-closed and proof suppression is not durable | **Corrected.** At the legal maximum, two externals plus a pending source-bound repair, a current-tenure report could neither fault, nor be stored, nor replace anything, and section 6.6's refusal named only the same-exchange pair and a faulted source, so nothing durable kept proofs suppressed across a restart. A dedicated **live-conflict slot** is reserved outside the two history slots, and one durable `authoritative_proof_allowed` predicate is consumed on **every** head request. | 5.2, 6.6, 10.1, 15.1 N37, M16 |
+| AG3-DES-033, `RepairDisposition` is not a complete state contract | **Corrected on all three points.** Cases 6a and 6c fitted neither documented value, so the disposition is now defined by the operation performed and has three values covering every C-2 case. Snapshot v3 carries the adoption mode explicitly, since a bare leading `3` would have destroyed the one bit that decides `decode` versus `decode_adoption`. And `RepairTransition` carries the disposition, which every successor and clone path that carries `resolved_repair` must carry too, bound to the exact repair: `adopted_successor` copies only the book, so a screened source that later adopted would otherwise have lost its provenance and reproduced the AG3-DES-028 bug. | 3 R30, 5.1 C-2, C-5, 15.1 N38 |
+| AG3-TEST-006 | **Corrected.** N36 gains the post-B2 resume states, N37 gains the pre-B2 interleaving, a maximal-capacity variant and a restart-then-unrelated-request proof assertion, N38 gains 6a/6c and the successor lifecycle, M13 is widened to the full ownership fence, and M15 and M16 are added. | 15.1, 15.2 |
+
+## 0.0 Disposition of the revision-6 findings
 
 | Finding | Disposition in revision 7 | Where |
 |---|---|---|
@@ -439,6 +459,26 @@ this peer's frozen pair been resolved". With three genuine conflicting receipts,
 `{R1,R2}` makes `R1` a repaired loser without saying anything about a peer frozen on `{R1,R3}`,
 whose `apply_repair` still demands its own exact pair. This is AG3-DES-029.
 
+### R29: a successful repair clears the source's fault
+
+`apply_repair` sets `self.fault = None` and installs `resolved_repair` in the same mutation
+(`epoch.rs:1765-1774`). So after B2 the source is, correctly, no longer carrying the pair. Any rule
+that validates a persisted source-bound repair by matching the live `ReceiptBook::fault` therefore
+fails exactly when a resume is needed. This is AG3-DES-030.
+
+### R30: a successor carries the book but no Studio-layer provenance
+
+`adopted_successor` builds a fresh unit with `from_checkpoint`, then copies `self.receipts` and
+marks the latest installed (`studio/epoch/adoption.rs:140-150`). Nothing else crosses. Since the
+disposition tag deliberately lives in the Studio restart unit rather than in `ResolvedRepair`, a
+screened source that later adopts would keep the resolved repair and lose its disposition, which is
+the AG3-DES-028 bug again one transition later. This is AG3-DES-033(C).
+
+Relatedly, `StudioEpoch::snapshot` writes `if self.adopting { 2 } else { 1 }`
+(`studio/epoch.rs:432`) and that byte is the only thing telling restore whether to call
+`ReceiptBook::decode` or `decode_adoption`. A version 3 that merely replaces it would destroy that
+bit, which is AG3-DES-033(B).
+
 ### R12: the store cannot validate a conflicting pair today
 
 `Receipt::restore_verified_from_vault` is `pub(crate)` (`epoch.rs:1125`) and `receipts_conflict` is
@@ -541,6 +581,9 @@ pub(crate) struct RepairTransition {
     /// Some means the selected checkpoint must replace this source.
     pub install: Option<Receipt>,
     pub losing: Receipt,
+    /// Which C-2 case this is, persisted with the source (C-5). Revision 7 omitted it, so
+    /// cases 6a and 6c had no representable provenance at all (AG3-DES-033A).
+    pub disposition: RepairDisposition,
 }
 
 pub(crate) enum RepairPlan {
@@ -635,6 +678,10 @@ reshaped by a repair **unless it is itself sitting on the repudiated branch** (c
 | 4 | faulted on the pair, same-tenure, `source.adopting`, none of the above | `Closing` | `S.hash()` | `true` | `Some(S)` |
 | 5 | **faulted on the pair**, cross-tenure: `Unblocked` | `Open` | none | `false` | none |
 | 8 | otherwise | refuse: `Held(UnsupportedShape)` | | | |
+
+Dispositions, one per case, with no case unmapped (AG3-DES-033A): 1a, 1b, 2a, 2b, 3, 4 and 5 are
+`Transitioned`; 6a and 6c are `Retargeted`; 6b and 6d are `Screened`. Cases 7 and 8 refuse and
+record nothing.
 
 **Case 6c is AG3-DES-017's correction.** An "own anchor is covered" when any of `latest`, `opening`
 or the retained adoption target is the exact loser, or satisfies `is_repaired_loser`, which also
@@ -795,11 +842,18 @@ pub struct StudioRepairState {
     pub disposition: RepairDisposition,
 }
 
+/// Defined by the OPERATION PERFORMED, not by "did a fault end", so every C-2 case maps to
+/// exactly one value (AG3-DES-033A). Revision 7 had only two values and cases 6a and 6c fitted
+/// neither: they mutate a source that was never Faulted.
 pub enum RepairDisposition {
-    /// Cases 1 to 5: this source's own Fault was ended by this repair.
+    /// The source was Faulted on this pair and this repair ended that Fault.
+    /// Cases 1a, 1b, 2a, 2b, 3, 4, 5.
     Transitioned,
-    /// Cases 6b and 6d: the disposition is terminal, but this source's own state was
-    /// deliberately untouched and any different Fault still stands.
+    /// The source was NOT Faulted but was itself on the repudiated branch, so it was moved
+    /// onto the winner. A replacement is required. Cases 6a and 6c.
+    Retargeted,
+    /// The source was left untouched; the disposition is terminal for this pair only, and any
+    /// different Fault still stands. Cases 6b and 6d.
     Screened,
 }
 
@@ -816,13 +870,34 @@ impl ReceiptBook { pub fn repair_sequence(&self) -> u64; }
 `resolved_repair.is_some() && self.adopting && self.phase() == Closing && latest == selected &&
 !installed`. It is the single eligibility predicate both runtime steps use (10.3).
 
-**Where the disposition tag lives.** In the **Studio restart unit's own snapshot**, whose version
-byte already distinguishes ordinary from adopting (`studio/epoch.rs:432`); version 3 adds the tag.
-It deliberately does **not** go into core's `ResolvedRepair` encoding, because book versions 4 and 5
-are existing, accepted and tested code and changing their byte layout for a Studio-layer concern
-would reopen them for no benefit. `RegistryEpoch` mirrors this in its own restart format. The tag is
-never inferred from the current phase: after later transitions the phase is not reliable provenance,
-which is precisely why revision 6's retry returned the wrong outcome.
+**Where the disposition tag lives.** In the **Studio restart unit's own snapshot**, not in core's
+`ResolvedRepair` encoding, because book versions 4 and 5 are existing, accepted and tested code and
+changing their byte layout for a Studio-layer concern would reopen them for no benefit.
+`RegistryEpoch` mirrors this in its own restart format. The tag is never inferred from the current
+phase: after later transitions the phase is not reliable provenance, which is precisely why revision
+6's retry returned the wrong outcome.
+
+**Snapshot version 3 keeps the adoption bit explicit** (AG3-DES-033B, R30). The existing leading
+byte is `1` or `2` and is the **only** thing telling restore whether to call `ReceiptBook::decode`
+or `decode_adoption`, so revision 7's "version 3 adds the tag" would have destroyed it. The layout
+is:
+
+```text
+v1 / v2 : <1|2> | channel | ...            unchanged, byte compatible
+v3      : 3 | u8 adopting | u8 disposition | u8 repair_bound | repair_hash[32] | channel | ...
+```
+
+`repair_bound` and `repair_hash` bind the disposition to the **exact** resolved repair, by its
+record hash together with the book's `repair_sequence`; restore rejects a disposition that names a
+repair the book does not hold, a `Transitioned` or `Retargeted` tag with no resolved repair, and a
+`Retargeted` or `Transitioned` tag whose book and gate cannot have come from that case. A v3 unit
+with no resolved repair is rejected outright, so the tag can never float free.
+
+**Every path that carries `resolved_repair` carries the disposition** (AG3-DES-033C, R30).
+`RepairTransition` gains a `disposition` field, and `adopted_successor`, `checkpoint_successor` and
+any other constructor that clones `self.receipts` copies the matching tag and its repair binding.
+Revision 7 said `adopted_successor` was unchanged, which meant a screened source that later adopted
+kept the resolved repair and lost its provenance, reproducing AG3-DES-028 one transition later.
 
 **`repair_state()` is the sole terminality oracle after B2** (AG3-DES-010). The in-memory
 `RepairTransition.install` decides only what the transition itself must do; once the transition is
@@ -964,6 +1039,7 @@ prose had already moved to two pairs):
 
 ```text
 3 | u8 external_count (0..=2) | external_count * pair
+  | u8 has_live_conflict | live_conflict_pair?
   | u8 repair_kind | repair_binding | repair? | u8 applied
 
 pair            = two canonical Receipts, ascending by hash
@@ -981,10 +1057,30 @@ pair is never stored and then left a codec that demanded `pair_count` of 1 or 2 
 matching a retained pair, so the one path that correction existed to unblock, an owner faulted on
 `C` with zero or two externals, could not be written at all. Inlining is the right shape rather than
 a lazy source lookup, because R26 shows `decode` and `check_scope` see only the logical document:
-with the pair inline the record stays self-validating and fails closed on restart, and the runtime
-separately binds those hashes to the authenticated source's actual `ReceiptBook::fault` before
-acting. A source-bound repair whose inline hashes do not match the live source's fault pair is
-refused, and a missing or corrupt source is a refusal, never an assumption.
+with the pair inline the record stays self-validating and fails closed on restart.
+
+**Binding the inline pair to the source is two-phase** (AG3-DES-030, R29). Revision 7 said the
+inline hashes must match the authenticated source's `ReceiptBook::fault`, which is right only before
+B2. `apply_repair` clears `fault` on success, so that rule fails exactly when a resume is needed and
+strands both an `AwaitingSeed` or `RecoveryPending` replacement and a terminal transition waiting on
+B3 and recycling. The runtime therefore binds by phase:
+
+| Source state | Required binding |
+|---|---|
+| no resolved repair equal to this one | inline pair **must equal** `fault_evidence()`; this is the pre-B2 case |
+| `repair_state()` names exactly this repair | inline pair **must equal** that state's `(selected, losing)`; a live fault is expected **absent** for `Transitioned` and `Retargeted` dispositions; resume, finish or recycle |
+| anything else | refuse |
+
+A missing or corrupt source is a refusal in every phase, never an assumption.
+
+**A dedicated live-conflict slot** (AG3-DES-032). The two external slots hold historical evidence.
+A **current-tenure** pair deferred behind a nonterminal repair (6.5) gets its own reserved slot, so
+the state is closed at the legal maximum: revision 7 allowed two externals plus a pending
+source-bound repair, and a current-tenure report arriving then could neither fault the source, nor
+enter the record, nor displace frozen evidence. That was not merely a liveness gap, because 6.6's
+refusal named only the same-exchange pair and a faulted source, so nothing durable kept proofs
+suppressed after the response or across a restart. The slot holds at most one pair, is filled only
+by the deferral in 6.5, and is drained into a real source fault once the owning repair terminates.
 
 Sections appear in ascending tag order with no duplicates. Old readers already reject any tag other
 than 2 (`epoch_owner.rs:141-143`), which is the stated intent of the v2 extension.
@@ -997,15 +1093,16 @@ against **the pair its `repair_kind` binds it to**, whether that is an external 
 pair; an index out of range is rejected; and `applied` is false whenever `repair_kind` is 0.
 Corruption is an error, never a silent reset.
 
-**Bound, stated once and nowhere else.** The maximal state is **seven** receipt-sized values: two
-external pairs (four receipts), a source-bound repair's inline pair (two receipts) and the repair
-itself. So `MAX_RECORD_BYTES` becomes
-`MAX_OWNER_RECEIPT_JOURNAL_BYTES + MAX_CLOSE_RECORD_BYTES + 7 * MAX_RECEIPT_BYTES + 1280`, which
-with C-7's raised journal constant is about 16.5 KiB, and `MAX_SEALED_BYTES` follows. This matters
+**Bound, stated once and nowhere else.** The maximal state is **nine** receipt-sized values: two
+external pairs (four receipts), the live-conflict pair (two), a source-bound repair's inline pair
+(two) and the repair itself. So `MAX_RECORD_BYTES` becomes
+`MAX_OWNER_RECEIPT_JOURNAL_BYTES + MAX_CLOSE_RECORD_BYTES + 9 * MAX_RECEIPT_BYTES + 1280`, which
+with C-7's raised journal constant is about 18.5 KiB, and `MAX_SEALED_BYTES` follows. This matters
 beyond accounting: `read_epoch_owner_plain` caps the file before unsealing, so an under-sized
 contract would make the maximal valid state that N31 and N36 exercise impossible to write or reopen.
-Revision 5 carried three contradictory figures and revision 6 fixed them at five, which the inline
-pair now supersedes; section 10.1 repeats this number and nothing else does.
+Revision 5 carried three contradictory figures, revision 6 fixed them at five and revision 7 raised
+them to seven for the inline pair; the live-conflict slot makes nine. Section 10.1 repeats this
+number and nothing else does.
 
 **Active status is derived, never stored** (AG3-DES-018). A source fault and this record are
 separate durable objects with no atomic transition between them, so revision 4's talk of
@@ -1484,15 +1581,27 @@ and the per-requester rail (5.6 W-1 step 4), and **before the response is decide
    - **Same tenure as the current owner** (the rollback case): the reported receipt genuinely is a
      current-owner receipt, so the existing typed seal is a legitimate admission and the provider's
      own source durably enters Fault through the common source fences, stopping its head service
-     and rotation for that document. **Unless a nonterminal repair owns this source**
-     (AG3-DES-027): `transition_verified_receipt` permits `Closing -> Fault` and clears the receipt
-     hash (R27), so sealing here while a repair is awaiting its seed or recovery would turn
-     `repair_install_pending()` false and abandon an outstanding recovery and replacement that this
-     peer has already promised. While that repair is nonterminal the pair is retained as evidence
-     instead, exactly like a historical one, and the seal is deferred until the repair terminates,
-     at which point the runtime applies it. Safety is not deferred with it: once such evidence is
-     held, authoritative head proof for that document is suppressed under 6.6, so a disputed head
-     is never proved in the interval.
+     and rotation for that document. **Unless a repair transaction owns this source**
+     (AG3-DES-027, AG3-DES-031): `transition_verified_receipt` permits `Closing -> Fault` and clears
+     the receipt hash (R27), so sealing here mid-transaction abandons work this peer has already
+     promised. The fence is:
+
+     ```text
+     repair_transaction_nonterminal(record, source) =
+         record holds a repair whose committed state is not terminal      // B1 persisted, incl. pre-B2
+      || source.repair_install_pending()                                  // AwaitingSeed, RecoveryPending
+      || an unfinished replacement or recycling is outstanding
+     ```
+
+     Revision 7 used only `repair_install_pending()`, which **starts after B2**, so a B1-persisted
+     repair was unfenced. That is worse than a lost predicate: a healthy source on the loser of
+     pair A needs case 6c and a replacement, and if a current-tenure report seals it into `Fault(B)`
+     before B2, the resumed repair sees a source faulted on a different pair, takes case 6d instead,
+     and becomes **terminal without ever performing the replacement** that would have moved it off
+     the repudiated branch. While the predicate holds, the reported pair goes to the reserved
+     live-conflict slot (5.2) and the seal is deferred until the repair terminates, at which point
+     the runtime drains that slot into a real source fault. Safety is not deferred with it: 6.6's
+     durable proof gate covers the interval.
    - **Any earlier tenure** (the historical case): **nothing is passed through the live seal.**
      `StudioEpoch::seal` ends in current-owner verification and only handles its own gate epoch,
      opening and adoption shapes, so feeding it an old receipt would be exactly the confusion of
@@ -1548,9 +1657,23 @@ such a peer refused all seed service while faulted (`studio/epoch.rs:199-204`). 
 that receives the repair crosses B2, stops being faulted, and can serve its installed opening's
 seed, which is exactly the selected checkpoint's seed for the peers that had installed the winner.
 
-Two refusals sit alongside this predicate, both from U-7: no authoritative proof is served for
-either member of a pair recorded in this same exchange, and none at all while the local source for
-that document is Faulted. A repair being servable is never a licence to prove a disputed receipt.
+**One durable proof gate** (AG3-DES-032). Revision 7's refusals named only the pair recorded in
+*this same exchange* and a source that is *itself Faulted*. A live pair deferred behind a repair
+leaves the source deliberately un-faulted, so once the response was sent, or once the process
+restarted, nothing durable told the next unrelated request to keep refusing. The gate is now a
+single predicate, evaluated from durable state on **every** head request, not only on the request
+that admitted the report:
+
+```text
+authoritative_proof_allowed(source, record) =
+    !source.is_faulted()
+ && record.live_conflict.is_none()
+ && the receipt about to be proved is not a member of any pair this record retains
+```
+
+Historical external pairs do not suppress proof by themselves: they dispute an old tenure's head,
+not the current one. The live-conflict slot does, which is why it is reserved rather than sharing
+capacity with history. A repair being servable is never a licence to prove a disputed receipt.
 
 ### 6.7 Owner journal reconciliation
 
@@ -1683,7 +1806,7 @@ conservative holds that run before either barrier.
 
 | Write | Purpose | Pool | Peak |
 |---|---|---|---|
-| owner record (B1, B3) | `Settlement` | protocol allowance, 16 MiB per server | old plus new, about 16.5 KiB each at maximum (5.2's single canonical bound) |
+| owner record (B1, B3) | `Settlement` | protocol allowance, 16 MiB per server | old plus new, about 18.5 KiB each at maximum (5.2's single canonical bound) |
 | recovery stage (B4, B5) | `Settlement` | settlement reserve, 48 MiB, staged slot | up to 6 MiB plus the existing replacement peak |
 | source transition (B2) and successor (B6) | `Settlement` | settlement reserve | old plus new source |
 | report fault write (Flow R) | `Settlement` | settlement reserve | old plus new source |
@@ -1912,18 +2035,36 @@ Core:
   survive crash and reopen; (c) a repair whose inline hashes **differ** from the live source's fault
   pair, which must be refused at use; (d) an external-bound repair whose index is out of range,
   refused at decode; (e) a source-bound repair reopened while the source is **missing or corrupt**,
-  which must fail closed rather than assume.
-- **N37** AG3-DES-027: repair RA crosses B2 and sits at `AwaitingSeed`, then a **current-tenure**
-  conflicting report arrives and would otherwise be driven through the live seal. Assert the source
-  is **not** faulted while RA is nonterminal, that `repair_install_pending()` stays true across a
-  crash and restart, that RA completes through B6, that the reported evidence survives and becomes
-  actionable only afterwards, and that no authoritative proof was served for that document in the
-  interval. This is distinct from N33(b), which surrounds an active repair with a second pair but
-  never forces the report-to-seal path.
-- **N38** AG3-DES-028: apply a repair through case 6d, crash after B2, and assert the exact retry
-  returns `Screened` and **not** `Repaired`, with the source still reporting Fault on pair B. Repeat
-  for a healthy case 6b source. Assert the disposition survives restart in the restart unit's
-  snapshot and is not inferred from the current phase.
+  which must fail closed rather than assume. Plus AG3-DES-030's **post-B2 resume states**, which
+  revision 7 could not express: (f) crash after B2 with `install_pending` true, reopen, and assert
+  the inline pair binds against the committed `repair_state()` and the replacement resumes through
+  B6 even though the live fault is legitimately gone; (g) crash after B2 on a terminal transition
+  awaiting B3 and recycling, reopen, and assert it completes rather than refusing.
+- **N37** AG3-DES-027, AG3-DES-031 and AG3-DES-032, four variants, all forcing the report-to-seal
+  path that N33(b) never reaches. (a) **Post-B2**: RA sits at `AwaitingSeed`, a current-tenure
+  report arrives, the source is not faulted, `repair_install_pending()` survives crash and restart,
+  RA completes through B6, and the evidence becomes actionable only afterwards. (b) **Pre-B2**, the
+  case revision 7 left unfenced: a healthy source on the loser of pair A, RA persisted at B1 needing
+  case 6c, crash before B2, then a current-tenure report. Assert the source is **not** sealed into a
+  different fault and that RA resumes as **6c with its replacement**, not as a terminal 6d
+  `Screened`. (c) **Maximal capacity**: two external pairs plus a pending source-bound repair, then
+  a current-tenure report; assert it lands in the reserved live-conflict slot rather than being lost
+  or displacing frozen evidence. (d) **Durable proof gate**: after (c), crash and reopen, then let
+  an **unrelated member** request the head; assert no authoritative proof escapes even though the
+  source is deliberately not Faulted and the admitting exchange is long over.
+- **N38** AG3-DES-028 and AG3-DES-033, the complete disposition contract. (a) Apply through 6d,
+  crash after B2, assert the exact retry returns `Screened` and **not** `Repaired`, with the source
+  still Faulted on pair B; repeat for a healthy 6b source. (b) The same for **6a and 6c**, which
+  revision 7 could not represent at all: assert `Retargeted`, that the required replacement is still
+  outstanding after restart, and that they are never reported as `Screened`. (c) **Snapshot v3
+  layout**: a v3 unit round-trips with `adopting` true and false and the decoder picks
+  `decode_adoption` correctly, while v1 and v2 stay byte-identical. (d) **Successor lifecycle**:
+  a `Screened` source undergoes ordinary adoption, and assert the successor carries both the
+  resolved repair **and** its matching disposition, so an exact old repair retry against the
+  successor still returns `Screened`. Revision 7's unchanged `adopted_successor` would drop the tag
+  here. (e) Restore rejects a disposition naming a repair the book does not hold, a v3 unit with no
+  resolved repair, and a `Transitioned` or `Retargeted` tag whose book and gate could not have come
+  from that case.
 - **N39** AG3-DES-029, three genuine conflicting receipts and two peers: P1 freezes `{R1,R2}`, P2
   freezes `{R1,R3}`. The owner repairs `{R1,R2}` selecting R2, so R1 becomes a repaired loser. P1
   heals. Assert P2's re-report of `{R1,R3}` is **admissible**, that the owner can issue a
@@ -2085,12 +2226,17 @@ stated. No useful redundant validation is deleted to manufacture a failure.
 | M10 | losing-baseline screening (I-9) | remove `is_repaired_loser`'s losing-baseline arm | a covered losing-baseline descendant remains `Stale` **without re-faulting**. (Revision 1's assertion here was wrong and is withdrawn) |
 | M11 | no over-suppression (I-9) | make `is_repaired_loser` return true for any same-tenure receipt | a genuine third differing baseline still faults |
 | M12 | report admission (I-10) | **Corrected twice.** Revision 2's mutant was masked by core's independent `Fault`/`Stale`; revision 3's assertion was then invalidated by AG3-DES-016, because a second distinct pair now legitimately fills the free slot, so the restored design would fail its own named assertion. The fixture starts with **both record slots occupied by unresolved HISTORICAL pairs and a third HISTORICAL report arriving**, which AG3-TEST-004 requires: a current-tenure report must still durably fault the source even when the record is full, so suppressing that write would be unsafe and must not be what this mutant appears to test. The mutant removes the refusal so the third pair displaces retained evidence | N26 and N31: with both slots occupied, a third distinct historical report leaves both retained pairs byte-unchanged **and** reaches no source writer, reservation or seal |
-| M13 | an active repair fences report-induced source mutation (AG3-DES-027) | remove the `repair_install_pending()` check in `report_studio_fault`, so a current-tenure report seals and faults the source while a repair is nonterminal | N37: `repair_install_pending()` is still true after the report and RA completes through B6. Under the mutant the phase becomes `Fault`, the predicate goes false, and the outstanding replacement is abandoned |
+| M13 | a repair transaction fences report-induced source mutation (AG3-DES-027) | remove the **whole** `repair_transaction_nonterminal` fence from `report_studio_fault`, not just its `repair_install_pending()` arm as revision 7 proposed | N37(a): the predicate is still true after the report and RA completes through B6. Under the mutant the phase becomes `Fault`, the predicate goes false and the replacement is abandoned |
+| M15 | the fence covers the pre-B2 interval (AG3-DES-031) | remove only the **owner-record-pending** arm of `repair_transaction_nonterminal`, leaving the post-B2 arm intact | N37(b): the B1-persisted RA still resumes as `Retargeted` case 6c with its replacement. Under the mutant the source is sealed into `Fault(B)` and RA silently degrades to a terminal `Screened` 6d, which M13 alone cannot show |
+| M16 | the durable proof gate (AG3-DES-032) | remove the `record.live_conflict.is_none()` term from `authoritative_proof_allowed`, so head selection consults only the source's own fault | N37(d): after crash and reopen, an unrelated member's head request obtains no authoritative proof. Under the mutant it obtains one for a disputed receipt |
 | M14 | the report no-op is the exact pair only (AG3-DES-029) | broaden the no-op from "this exact pair" back to "contains any `is_repaired_loser` member" | N39: P2's `{R1,R3}` report is admitted and P2 eventually heals. Under the mutant it is silently treated as covered and P2 is stranded |
 
-M13 and M14 target the two guards this revision adds. Both are unique to this scope: core knows
-nothing about report admission, and `is_repaired_loser` deliberately cannot distinguish a peer's
-frozen pair from a screened arriving receipt (R28).
+M13 to M16 target guards unique to this scope: core knows nothing about report admission, owner
+records or head-proof gating, and `is_repaired_loser` deliberately cannot distinguish a peer's
+frozen pair from a screened arriving receipt (R28). M15 exists because M13 alone cannot reach the
+pre-B2 interval, and M16 because N37(d)'s proof assertion otherwise has no mutated guard behind it.
+The disposition codec is covered by N38's direct round-trip and transition assertions rather than by
+another mutant, since its failures are representation errors rather than a removable check.
 
 ### 15.3 Harness
 
@@ -2143,18 +2289,19 @@ Copyable, with the common contract from
 sent alongside it.
 
 ```text
-Review type: design, revision 7, findings re-review.
-Base: 135766ca9f290ab96d3133b771bc42da74fe7825 (revision 6). Head: [FULL_HEAD_SHA once pushed].
-Compare: https://github.com/Thalpy/Mewtual/compare/135766ca9f290ab96d3133b771bc42da74fe7825...[FULL_HEAD_SHA]
-Earlier revisions: 3737f1d4fff6f2c08302b0ecb1b024008818a1cf (revision 5),
+Review type: design, revision 8, findings re-review.
+Base: 6d498c2e901e5071104a2533e0a632dc5676b2a7 (revision 7). Head: [FULL_HEAD_SHA once pushed].
+Compare: https://github.com/Thalpy/Mewtual/compare/6d498c2e901e5071104a2533e0a632dc5676b2a7...[FULL_HEAD_SHA]
+Earlier revisions: 135766ca9f290ab96d3133b771bc42da74fe7825 (revision 6),
+3737f1d4fff6f2c08302b0ecb1b024008818a1cf (revision 5),
 ad023d2e5b514a8f9598b1fe433fd2b080ecad6c (revision 4),
 a62178b94f20cd60a5363e6a3d6d6216edb9e516 (revision 3),
 63a11e1a6451c7ed373c90b0e81b59d8a748a72a (revision 2),
 7efc9c2aba0a37d9aec57e268d9ff63edaca1b8a (revision 1), original scope base
 1bcb1bca204d721b848b17c0835faf931ae930e3.
-Scope/evidence: docs/GATE4-AGENT-3-DESIGN.md revision 7 and docs/GATE4-AGENT-3-STATUS.md.
+Scope/evidence: docs/GATE4-AGENT-3-DESIGN.md revision 8 and docs/GATE4-AGENT-3-STATUS.md.
 Documentation only: no production code, test, shared contract document or workflow is changed, and
-no Cargo command was executed in any of the seven passes. Every number is a source constant or a
+no Cargo command was executed in any of the eight passes. Every number is a source constant or a
 labelled estimate. The commit sits on a branch shared with Agents 1 and 2, so a literal base-to-head
 comparison may again contain intervening Agent 1 production commits; only the two Agent 3 documents
 are mine.
@@ -2163,49 +2310,52 @@ though none of it is implemented, so the section 13.2 contract is accepted-on-pa
 available; Agent 1 remains partial with I-4/C-3 not started; the core signing split at e65bfd8
 remains unreviewed.
 
-This revision answers AG3-DES-026 to AG3-DES-029 and AG3-TEST-005. Section 0 is the disposition
-table. It reopens nothing you closed or accepted: AG3-DES-023 and AG3-DES-024 stay closed, the
-fresh-path half of AG3-DES-025 stands, the AG3-TEST-004 corrections stand, and M2 and M1/M3-M11 are
-unchanged.
+This revision answers AG3-DES-030 to AG3-DES-033 and AG3-TEST-006. Section 0 is the disposition
+table. It reopens nothing you closed or accepted: AG3-DES-029 stays closed alongside AG3-DES-023 and
+AG3-DES-024, the source-bound encoding shape stands, and M14 and M1 to M11 are unchanged. The stale
+Agent 2 wording at the top of the design is corrected to the design PASS.
 
-AG3-DES-026 is the one that mattered most, and you are right that revision 6's own headline fix
-could not cross B1. The codec demanded pair_count of 1 or 2 with the repair matching a retained
-pair, while the correction said the source's pair is never retained, so an owner faulted on C with
-zero or two externals had nowhere valid to write RC. The repair is now tagged: kind 1 indexes an
-external pair, kind 2 is source-bound and carries its pair INLINE. Inlining rather than a lazy
-source lookup is deliberate, because decode and check_scope see only the logical document, so the
-record stays self-validating and fails closed on restart; the runtime separately binds the inline
-hashes to the authenticated source's actual ReceiptBook::fault before acting, refuses a mismatch,
-and treats a missing or corrupt source as a refusal. The maximal shape is now seven receipt-sized
-values and the single canonical bound and section 10.1 both say 16.5 KiB. N36 round-trips the
-source-bound repair with zero and with two externals, plus the mismatch, out-of-range-index and
-absent-source refusals.
+AG3-DES-030 is confirmed at the source and is the sharpest of the four. apply_repair sets
+fault = None on success, so revision 7's rule that the inline hashes must match the live
+ReceiptBook::fault could only ever hold before B2 and necessarily failed afterwards, stranding both
+an AwaitingSeed or RecoveryPending replacement and a terminal transition waiting on B3 and
+recycling. Binding is now two-phase: with no matching resolved repair the inline pair must equal
+fault_evidence(); once repair_state() names exactly this repair the inline pair must equal that
+state's selected and losing pair, with a live fault expected ABSENT for Transitioned and Retargeted
+dispositions; anything else, and a missing or corrupt source, refuses. N36 gains both post-B2 resume
+states.
 
-AG3-DES-027: confirmed at the source. transition_verified_receipt permits Closing to Fault and
-clears the receipt hash, and repair_install_pending() requires Closing, so a current-tenure report
-driven through the live seal during an awaiting-seed repair would silently make the sole
-continuation predicate false and abandon a recovery and replacement this peer had already promised.
-A nonterminal repair now fences report-induced source mutation as well as discovery: the pair is
-retained as evidence, the seal is deferred until the repair terminates, and authoritative proof for
-that document stays suppressed in the interval so nothing unsafe is deferred with it. N37 forces
-exactly the report-to-seal path that N33(b) does not, and M13 removes the new fence.
+AG3-DES-031: also correct, and worse than a lost predicate. repair_install_pending() starts after
+B2, so a B1-persisted repair was unfenced, and your path is concrete: a healthy source on the loser
+of pair A needs case 6c and a replacement, but if a current-tenure report seals it into Fault(B)
+before B2 the resumed repair sees a different pair, takes case 6d instead, and becomes terminal
+without ever performing the replacement. One predicate, repair_transaction_nonterminal(record,
+source), now spans B1 through recycling; the fence and M13 use it, and M15 removes only its
+owner-record arm so the pre-B2 interval has its own failing assertion.
 
-AG3-DES-028: correct. StudioRepairState carried no provenance, so an exact retry after a screening
-application fell through to the terminal Repaired while the document was still Faulted on another
-pair. A disposition tag is now persisted, and deliberately in the Studio restart unit's own snapshot
-version 3 rather than in core's ResolvedRepair encoding, since book versions 4 and 5 are existing
-tested code and a Studio-layer concern should not reopen them. It is never inferred from the current
-phase, which is exactly why revision 6 got it wrong. N38 asserts retry equality for both 6b and 6d.
+AG3-DES-032: the capacity argument holds and the safety half was the real gap. At the legal maximum
+of two externals plus a pending source-bound repair, a current-tenure report could neither fault,
+nor be stored, nor displace frozen evidence, and 6.6 named only the same-exchange pair and a faulted
+source, so after the response or a restart nothing durable kept proofs suppressed. There is now a
+reserved live-conflict slot outside the two history slots, and one authoritative_proof_allowed
+predicate evaluated from durable state on EVERY head request. Historical externals deliberately do
+not suppress proof, since they dispute an old tenure's head rather than the current one. N37(c) and
+N37(d) cover capacity and the post-restart unrelated request, and M16 removes the gate's new term.
 
-AG3-DES-029: also correct, and it is the U-5 third-conflict case. is_repaired_loser answers "should
-this arriving receipt be screened", not "has this peer's frozen pair been resolved", so with three
-genuine receipts a repair of {R1,R2} would have permanently stranded a peer frozen on {R1,R3}: its
-apply_repair needs its own exact pair, no ordinary receipt can clear a fault, and the owner would
-never be asked for the higher-sequence repair. The no-op is now the exact pair only, the recycling
-idempotence wording follows, and N39 runs the two-peer three-receipt convergence for both winner
-choices while M14 broadens the rule back to show the strand.
+AG3-DES-033, all three points. (A) Cases 6a and 6c fitted neither value, so disposition is now
+defined by the operation performed and has three values, Transitioned, Retargeted and Screened, with
+an explicit mapping covering every C-2 case. (B) Snapshot v3 carries the adoption bit explicitly:
+that byte is the only thing choosing decode versus decode_adoption, so a bare leading 3 would have
+destroyed it, and v3 also binds the disposition to the exact repair hash and sequence with restore
+rejecting illegal combinations. (C) RepairTransition carries the disposition and every successor or
+clone path that copies resolved_repair copies it too, since adopted_successor copies only the book
+and would otherwise have dropped the tag, reproducing AG3-DES-028 one transition later. N38 covers
+6a and 6c, the v3 layout for both adoption modes, the successor lifecycle and the illegal
+combinations.
 
-AG3-TEST-005: the four boundary tests are N36 to N39 and the two new-guard mutants are M13 and M14.
+AG3-TEST-006: N36 gains (f) and (g), N37 becomes four variants including the pre-B2 interleaving and
+the maximal-capacity and post-restart proof cases, N38 covers the full disposition lifecycle, M13 is
+widened to the whole ownership fence, and M15 and M16 are added.
 
 No U-questions remain open.
 

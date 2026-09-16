@@ -1,7 +1,7 @@
 # Gate 4 Agent 3 status: runtime signed fault repair
 
 Owner: Agent 3 ([assignment](GATE4-AGENT-HANDOFFS.md#agent-3-runtime-signed-fault-repair)).
-Proposal: [GATE4-AGENT-3-DESIGN](GATE4-AGENT-3-DESIGN.md), currently revision 7.
+Proposal: [GATE4-AGENT-3-DESIGN](GATE4-AGENT-3-DESIGN.md), currently revision 8.
 Review preamble: 3. Current entries override older ones.
 
 ## Checkpoints
@@ -14,7 +14,8 @@ Review preamble: 3. Current entries override older ones.
 | 2026-09-16 | Design revision 4, third-round findings answered | `a62178b94f20cd60a5363e6a3d6d6216edb9e516` | `ad023d2e5b514a8f9598b1fe433fd2b080ecad6c` | design, docs only | **REQUEST CHANGES**: C-8 epoch-zero fix, reconciled lifecycle, healthy-source clobber fix and M2 **accepted**; new AG3-DES-017 to AG3-DES-021; AG3-TEST-003 on M12/N24/N5d; U-11 agreed |
 | 2026-09-16 | Design revision 5, fourth-round findings answered | `ad023d2e5b514a8f9598b1fe433fd2b080ecad6c` | `3737f1d4fff6f2c08302b0ecb1b024008818a1cf` | design, docs only | **REQUEST CHANGES**: AG3-DES-021 **closed**; case 6c/N32, the sequence concept and M2 accepted; new AG3-DES-022 to AG3-DES-025; AG3-TEST-004 on N5c/N18/M12 |
 | 2026-09-16 | Design revision 6, fifth-round findings answered | `3737f1d4fff6f2c08302b0ecb1b024008818a1cf` | `135766ca9f290ab96d3133b771bc42da74fe7825` | design, docs only | **REQUEST CHANGES**: AG3-DES-023 and AG3-DES-024 **closed**; fresh-path AG3-DES-025 and the AG3-TEST-004 corrections accepted; new AG3-DES-026 to AG3-DES-029; AG3-TEST-005 |
-| 2026-09-16 | Design revision 7, sixth-round findings answered | `135766ca9f290ab96d3133b771bc42da74fe7825` | this commit | design, docs only | re-review requested |
+| 2026-09-16 | Design revision 7, sixth-round findings answered | `135766ca9f290ab96d3133b771bc42da74fe7825` | `6d498c2e901e5071104a2533e0a632dc5676b2a7` | design, docs only | **REQUEST CHANGES**: AG3-DES-029 **closed**; source-bound encoding shape and M14 accepted; new AG3-DES-030 to AG3-DES-033; AG3-TEST-006 |
+| 2026-09-16 | Design revision 8, seventh-round findings answered | `6d498c2e901e5071104a2533e0a632dc5676b2a7` | this commit | design, docs only | re-review requested |
 
 Working checkout: `M:\Git (local)\CatComs`, shared with the parallel Agent 1 and Agent 2 sessions,
 which are now doing implementation and design work respectively. Agent 1 has the checkout on its
@@ -23,6 +24,19 @@ documents with explicit pathspecs. `Create-suite-2` was fast-forwarded once, at 
 these documents off Agent 1's branch alone; it has not been moved since. **Agent 3 implementation
 must move to a separate branch or worktree before any code change**; no mutation harness may run
 against another agent's source.
+
+## Finding ledger, revision 7 round
+
+| Finding | Severity | Status | Where answered |
+|---|---|---|---|
+| AG3-DES-030 | P1 | **Answered in revision 8.** `apply_repair` clears `fault` on success, so "inline hashes must match the live fault" could only hold before B2 and stranded every resume afterwards. Binding is now two-phase, against `fault_evidence()` pre-B2 and against the committed `repair_state()` pair post-B2, with a missing or corrupt source refusing in either phase. | Design 3 R29, 5.2, 15.1 N36(f)(g) |
+| AG3-DES-031 | P1 | **Answered.** `repair_install_pending()` starts after B2, so a B1-persisted repair was unfenced and a current-tenure report could degrade a pending case 6c replacement into a terminal 6d screening. One `repair_transaction_nonterminal` predicate spans B1 to recycling. | Design 6.5, 15.1 N37(b), M13, M15 |
+| AG3-DES-032 | P1 | **Answered.** A reserved live-conflict slot closes the maximal-capacity state, and one durable `authoritative_proof_allowed` predicate is consumed on every head request rather than only on the admitting exchange. | Design 5.2, 6.6, 15.1 N37(c)(d), M16 |
+| AG3-DES-033 | P1 | **Answered on all three points.** Disposition is defined by the operation performed with three values covering every C-2 case; snapshot v3 keeps the adoption bit explicit and binds the tag to the exact repair; and `RepairTransition` plus every successor path carries it, since `adopted_successor` copies only the book. | Design 3 R30, 5.1 C-2, C-5, 15.1 N38 |
+| AG3-TEST-006 | P2 | **Answered.** N36 gains post-B2 resumes, N37 becomes four variants including pre-B2 and maximal capacity, N38 covers the full disposition lifecycle, M13 is widened and M15 and M16 added. | Design 15.1, 15.2 |
+
+Closed in the revision-7 round: **AG3-DES-029**. Accepted and not reopened: the source-bound
+encoding shape, M14, and M1 to M11.
 
 ## Finding ledger, revision 6 round
 
@@ -147,10 +161,28 @@ AG3-DES-008.
 | "A nonterminal repair owns the target" (rev 6) | **Only against discovery.** The report path could still seal a current-tenure pair, move the phase to `Fault` and collapse `repair_install_pending()`, abandoning an outstanding replacement. |
 | "`Screened` separates terminal from usable" (rev 6) | **Only on the fresh path.** No provenance was persisted, so an exact retry reported `Repaired`. |
 | "A report whose members are already screened is a no-op" (rev 6) | **Over-broad.** `is_repaired_loser` governs receipt admission, not whether a different frozen pair is resolved; it would strand a peer on `{R1,R3}` after `{R1,R2}` was repaired. |
+| "The inline pair must match the live `ReceiptBook::fault`" (rev 7) | **Only true before B2.** `apply_repair` clears `fault` on success, so the rule necessarily failed exactly when a resume was needed. |
+| "`repair_install_pending()` is the ownership fence" (rev 7) | **Starts too late.** A B1-persisted repair is already nonterminal and owns the target, so a pre-B2 report could degrade a required replacement into a terminal screening. |
+| "Deferred live evidence keeps proofs suppressed" (rev 7) | **Not durably.** There was no capacity for it at the legal maximum and no persistent term in the proof refusal, so a restart resumed proving a disputed head. |
+| "`Transitioned` and `Screened` cover the dispositions" (rev 7) | **Incomplete.** Cases 6a and 6c mutate a source that was never Faulted and fitted neither value; the tag also had no place in the snapshot layout and was dropped by every successor path. |
+
+## Facts established by the revision-8 audit
+
+New this revision, verified in code:
+
+- `ReceiptBook::apply_repair` sets `self.fault = None` and installs `resolved_repair` in the same
+  mutation (`epoch.rs:1765-1774`), so a persisted source-bound repair cannot be validated against a
+  live fault after B2.
+- `adopted_successor` builds a fresh unit, copies `self.receipts` and marks the latest installed
+  (`studio/epoch/adoption.rs:140-150`). Nothing Studio-layer crosses, so a disposition tag held
+  outside the book is dropped by that path unless it is copied explicitly.
+- `StudioEpoch::snapshot`'s leading byte is `if self.adopting { 2 } else { 1 }`
+  (`studio/epoch.rs:432`) and is the only value telling restore whether to call
+  `ReceiptBook::decode` or `decode_adoption`.
 
 ## Facts established by the revision-7 audit
 
-New this revision, verified in code:
+Verified in code and still relied on:
 
 - `transition_verified_receipt` permits `Open | Closing | Fault -> Fault` and clears the receipt
   hash (`epoch.rs:2539-2549`), so a report driven through the live seal collapses
@@ -273,7 +305,8 @@ Full signatures are in [the design](GATE4-AGENT-3-DESIGN.md) section 5. Summary,
   one **tagged** repair, either external-indexed or source-bound with its pair inline, with active
   status **derived** on load (pending repair, else the source's own fault pair from the book, else
   the lowest external pair) and an explicit terminal-pair recycling transition; the owner record's
-  version-3 section bounded for seven receipt-sized values, stated once; `prepare_epoch_repair`
+  version-3 section carrying a reserved live-conflict slot and bounded for nine receipt-sized
+  values, stated once; `prepare_epoch_repair`
   (which also reconciles the journal) and `mark_epoch_repair_applied`; `apply_studio_repair`,
   `issue_studio_repair`, `report_studio_fault`, `studio_fault_evidence`, `StudioRepairOutcome`,
   `StudioRepairHold`, `CheckedRepairRecovery`, `stage_studio_repair_recovery`, `servable_repair`;
@@ -331,7 +364,7 @@ sections 5 and 13.3.
 
 ## Executed checks
 
-**None, in any of the seven passes.** No Cargo, npm or script command has been run: these
+**None, in any of the eight passes.** No Cargo, npm or script command has been run: these
 checkpoints change no code, and the local machine keeps checks serial. Every number quoted in the design is a constant
 read from source at the base or an explicitly labelled estimate. The maximal-shape replacement
 cost, the custody time of the capture and commit stages, and the protocol-allowance arithmetic in
