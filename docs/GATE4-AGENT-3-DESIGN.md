@@ -2842,9 +2842,9 @@ Copyable, with the common contract from
 sent alongside it.
 
 ```text
-Review type: design, revision 11, findings re-review.
-Base: 11ce6f1b58288e44d6ff14dc2a98f42f7cc5e13b (revision 10 design body). Head: [FULL_HEAD_SHA].
-Compare: https://github.com/Thalpy/Mewtual/compare/11ce6f1b58288e44d6ff14dc2a98f42f7cc5e13b...[FULL_HEAD_SHA]
+Review type: design, revision 12, findings re-review.
+Base: 333924318a65210375fa992bc49006c2fac3c236 (revision 11). Head: [FULL_HEAD_SHA].
+Compare: https://github.com/Thalpy/Mewtual/compare/333924318a65210375fa992bc49006c2fac3c236...[FULL_HEAD_SHA]
 Note: like revision 10, this revision is committed in several parts because a parallel session
 repeatedly resets this shared working tree and discards uncommitted edits. Every part touches only
 the two Agent 3 documents; f5ac522 between the two revisions is status-only.
@@ -2858,9 +2858,9 @@ a62178b94f20cd60a5363e6a3d6d6216edb9e516 (revision 3),
 63a11e1a6451c7ed373c90b0e81b59d8a748a72a (revision 2),
 7efc9c2aba0a37d9aec57e268d9ff63edaca1b8a (revision 1), original scope base
 1bcb1bca204d721b848b17c0835faf931ae930e3.
-Scope/evidence: docs/GATE4-AGENT-3-DESIGN.md revision 11 and docs/GATE4-AGENT-3-STATUS.md.
+Scope/evidence: docs/GATE4-AGENT-3-DESIGN.md revision 12 and docs/GATE4-AGENT-3-STATUS.md.
 Documentation only: no production code, test, shared contract document or workflow is changed, and
-no Cargo command was executed in any of the eleven passes. Every number is a source constant or a
+no Cargo command was executed in any of the twelve passes. Every number is a source constant or a
 labelled estimate. The commit sits on a branch shared with Agents 1 and 2, so a literal base-to-head
 comparison may again contain intervening Agent 1 production commits; only the two Agent 3 documents
 are mine.
@@ -2868,6 +2868,41 @@ Dependencies, corrected per your note: Agent 2's tenure design has now PASSED ad
 though none of it is implemented, so the section 13.2 contract is accepted-on-paper rather than
 available; Agent 1 remains partial with I-4/C-3 not started; the core signing split at e65bfd8
 remains unreviewed.
+
+This revision answers AG3-DES-050 to AG3-DES-053 and AG3-TEST-010. Section 0 is the disposition
+table. It reopens nothing you closed: AG3-DES-045, 048 and 049 stay closed, as do 040, 043, 044's
+write order, 038, 030, 023, 024 and 029's dedupe rule, and M1 to M19 are unchanged.
+
+AG3-DES-050 is confirmed and the fix is to stop approximating. receipts_conflict admits a pair that
+merely differs in TenureSelection, while check_opening_receipt additionally demands equal closed
+epochs and the exact gate predecessor, so {O,R} across different epochs was classified
+materialisable, would have failed the drain with EpochScope, and was barred from direct issuance by
+that very classification, wedging a live pair while proof stayed suppressed. pair_is_materialisable
+is now a dry run of the exact typed admission on a clone, declared true only when the resulting
+frozen evidence is byte-for-byte the reported pair. It mutates nothing durable and does no I/O, and
+it answers the only question that matters rather than restating both admission paths' preconditions
+and having to stay in step with them. N45(e) is your negative fixture.
+
+AG3-DES-051: also confirmed, and it is my own alias asymmetry biting back. A reserved pair may share
+one receipt with an external because the three-receipt case needs it, while two externals may not,
+so pairs[0]={R1,R2} with reserved={R1,R3} is legal, numerically has room, and is structurally
+inadmissible. Room now means a slot the pair may legally occupy after every external-set invariant,
+and a pair that cannot legally migrate stays reserved and is issued as kind 3 rather than being left
+with no legal B1 path. N45(c) adds that exact state as a third migration case.
+
+AG3-DES-052: check_scope still described the old two-binding list. All four bindings and their
+illegal combinations are now enumerated, so a valid repair for pair Q cannot be coupled to reserved
+pair P by encoding it as kind 3. N45(f) is the decode negative.
+
+AG3-DES-053: the demotion prose still set a bare tenure start, which contradicted the whole
+AG3-DES-049 correction, and N37(g) still combined migration with kind 3, which AG3-DES-047 makes
+incoherent. Both are rewritten, and the hold gains canonical invariants: distinct ordered
+fingerprints, strict 0/1 bytes, and rejection of the inert has_overflow=1/count=0/unknown=false
+shape that would decode into something on which overflow_is_live is false. N44(e) covers them.
+
+No U-questions remain open.
+
+Superseded text below is retained for the earlier round it answers:
 
 This revision answers AG3-DES-045 to AG3-DES-049 and AG3-TEST-009. All five were internal
 contradictions in revision 10 and all five are confirmed. Section 0 is the disposition table. It
