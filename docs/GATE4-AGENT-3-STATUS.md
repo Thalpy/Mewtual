@@ -1,7 +1,7 @@
 # Gate 4 Agent 3 status: runtime signed fault repair
 
 Owner: Agent 3 ([assignment](GATE4-AGENT-HANDOFFS.md#agent-3-runtime-signed-fault-repair)).
-Proposal: [GATE4-AGENT-3-DESIGN](GATE4-AGENT-3-DESIGN.md), currently revision 9.
+Proposal: [GATE4-AGENT-3-DESIGN](GATE4-AGENT-3-DESIGN.md), currently revision 10.
 Review preamble: 3. Current entries override older ones.
 
 ## Checkpoints
@@ -17,7 +17,8 @@ Review preamble: 3. Current entries override older ones.
 | 2026-09-16 | Design revision 7, sixth-round findings answered | `135766ca9f290ab96d3133b771bc42da74fe7825` | `6d498c2e901e5071104a2533e0a632dc5676b2a7` | design, docs only | **REQUEST CHANGES**: AG3-DES-029 **closed**; source-bound encoding shape and M14 accepted; new AG3-DES-030 to AG3-DES-033; AG3-TEST-006 |
 | 2026-09-16 | Design revision 8, seventh-round findings answered | `6d498c2e901e5071104a2533e0a632dc5676b2a7` | `b8bb5f3a3db6d0b8e450c82119f95e2cb929bce6` | design, docs only | re-review requested |
 | 2026-09-16 | Revision 8.1, `DraftArchive` seam consumed | `b8bb5f3a3db6d0b8e450c82119f95e2cb929bce6` | `76b854494ff8f30eb0d5844e22a783d6927ba182` | design, docs only | no rebase needed: `705d44b` is already an ancestor |
-| 2026-09-16 | Design revision 9, eighth-round findings answered | `76b854494ff8f30eb0d5844e22a783d6927ba182` | this commit | design, docs only | re-review requested; the round-8 review pinned `b8bb5f3`, which predates the seam commit |
+| 2026-09-16 | Design revision 9, eighth-round findings answered | `76b854494ff8f30eb0d5844e22a783d6927ba182` | `3b6a4b40462ae83a341f8f6741c93edff55b5ef7` | design, docs only | **REQUEST CHANGES**: AG3-DES-038 **closed**, owner-side AG3-DES-034 accepted; new AG3-DES-039 to AG3-DES-044; AG3-TEST-008 |
+| 2026-09-16 | Design revision 10, ninth-round findings answered | `3b6a4b40462ae83a341f8f6741c93edff55b5ef7` | this commit | design, docs only | re-review requested. Committed in five parts: a parallel session repeatedly `git reset` this shared tree and discarded uncommitted edits |
 
 Working checkout: `M:\Git (local)\CatComs`, shared with the parallel Agent 1 and Agent 2 sessions,
 which are now doing implementation and design work respectively. Agent 1 has the checkout on its
@@ -26,6 +27,21 @@ documents with explicit pathspecs. `Create-suite-2` was fast-forwarded once, at 
 these documents off Agent 1's branch alone; it has not been moved since. **Agent 3 implementation
 must move to a separate branch or worktree before any code change**; no mutation harness may run
 against another agent's source.
+
+## Finding ledger, revision 9 round
+
+| Finding | Severity | Status | Where answered |
+|---|---|---|---|
+| AG3-DES-039 | P1 | **Answered in revision 10.** `repair_kind` had no value for the reserved slot, so a pair there could be selected as active work and then not be nameable at B1. A fourth kind binds directly to it. | Design 5.2, 15.1 N37(g) |
+| AG3-DES-040 | P1 | **Answered, and a missed dependency change absorbed.** Agent 2's accepted design removes `observed_owner_tenure_start` for a verification/authoring split with a fail-closed `Imported`; 6.3 now has a per-use accessor table binding every mutation, drain and issuance to the authoring accessor, with identity compared as a derived `tenure_id`. T1 to T3 restated. | Design 3 R32, 6.3, 6.6, 13.2, 15.1 N42 |
+| AG3-DES-041 | P1 | **Answered.** Demotion migrates into the history list when there is room; where there is not, a new live conflict sets a durable evidence-free hold carrying its tenure, which suppresses proof while the reporter retries. | Design 5.2, 6.6, 15.1 N43 |
+| AG3-DES-042 | P1 | **Answered.** `is_repaired_loser` screens before conflict handling, so a reported pair cannot always be re-derived through the live seal. Admission keeps it owner-side under the proof gate, repairable through `repair_kind 3`. | Design 3 R33, 6.5, 15.1 N39 |
+| AG3-DES-043 | P1 | **Answered.** A peer has no owner record and no `resolved_repair` before B2, so `target_is_claimed` adds a runtime claim acquired at S1 and owned through S4. | Design 10.3, 15.1 N37(h), M18, M19 |
+| AG3-DES-044 | P1 | **Answered.** The drain is its own crash-safe transaction: source fault write and durability first, slot cleared second, duplicates idempotently cleaned. | Design 5.2, 15.1 N37(i) |
+| AG3-TEST-008 | P2 | **Answered.** N39 exact-pair identity, N42 tenure states, N43 repeated-tenure capacity, N37(h)(i), M18 and M19. | Design 15.1, 15.2 |
+
+Closed in the revision-9 round: **AG3-DES-038**, and the owner-side half of AG3-DES-034. Still
+closed: AG3-DES-030, 023, 024 and 029's exact-pair dedupe rule. Accepted: M14 and M1 to M11.
 
 ## Finding ledger, revision 8 round
 
@@ -419,7 +435,7 @@ sections 5 and 13.3.
 
 ## Executed checks
 
-**None, in any of the nine passes.** No Cargo, npm or script command has been run: these
+**None, in any of the ten passes.** No Cargo, npm or script command has been run: these
 checkpoints change no code, and the local machine keeps checks serial. Every number quoted in the design is a constant
 read from source at the base or an explicitly labelled estimate. The maximal-shape replacement
 cost, the custody time of the capture and commit stages, and the protocol-allowance arithmetic in
@@ -431,7 +447,7 @@ design section 10.1 are **unverified**.
 |---|---|---|---|
 | Design verdict on revision 2 | user / independent reviewer | requested | no implementation starts |
 | Core handoff signing split `e65bfd8` | Agent 1 / core | unreviewed | unaffected: no repair path uses it |
-| Live tenure contract T1 to T5 (design 13.2) | Agent 2 | design **PASSED** adversarial review; no implementation | accepted on paper but not available; repair verification holds on `Unknown`, fails closed, never substitutes |
+| Live tenure contract T1 to T5 (design 13.2) | Agent 2 | design **PASSED** adversarial review; no implementation. Its accepted shape **removes** `observed_owner_tenure_start` for `verification_owner_tenure_start` / `authoring_owner_tenure_start` over `Observed \| Imported(u64) \| Unknown` | accepted on paper but not available; only the single accessor exists in the tree today. Repair issuance, application and drain bind to the **authoring** accessor, where `Imported` and `Unknown` are holds |
 | Prepared overlay fence and source custody (design 13.1) | Agent 1 | design revision 3, unreviewed | repair relies only on the existing `resolve_studio_handoff` and `save_studio_source_checked`; if `inventory_generation` lands, rotating it becomes mandatory over the full list in design 10.3 |
 | Native registration, UI hooks, INTERFACES rows | Agent 4 | not started | commands stay unregistered and nothing is callable from the renderer |
 
