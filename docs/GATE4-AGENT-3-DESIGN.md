@@ -1357,8 +1357,30 @@ than 2 (`epoch_owner.rs:141-143`), which is the stated intent of the v2 extensio
 document; `conflicting_receipt_pair(document, &a, &b)` passes for each pair, external or inline; the
 externals are distinct and share no receipt hash, so an aliased or half-duplicated pair is rejected;
 a repair, if present, has `repair.document` equal to this document and passes `check_evidence`
-against **the pair its `repair_kind` binds it to**, whether that is an external index or its inline
-pair; an index out of range is rejected; and `applied` is false whenever `repair_kind` is 0.
+against **the pair its `repair_kind` binds it to**. All four bindings are enumerated, since
+revision 11 added kind 3 to the wire and left this contract describing only the older two
+(AG3-DES-052):
+
+| `repair_kind` | Required |
+|---|---|
+| 0 | no repair present, `applied` false, `repair_binding` empty |
+| 1 | index in range for `pairs`, and `check_evidence` matches that entry exactly |
+| 2 | inline pair present, and `check_evidence` matches it exactly |
+| 3 | `reserved` is `Some`, and `check_evidence` matches it exactly |
+
+Illegal combinations are rejected outright rather than tolerated: kind 3 with `reserved` absent,
+kind 1 with an out-of-range or absent index, kind 2 with no inline pair, any kind above 3, a repair
+present with kind 0, and `applied` true with kind 0. So a valid repair for some pair Q can never be
+coupled to a reserved pair P by encoding it as kind 3.
+
+**Overflow canonicality** (AG3-DES-053). The hold has one encoding per logical state: fingerprints
+are **distinct and canonically ordered**, `has_overflow` and `unknown` are strictly `0` or `1`,
+`fingerprint_count` is at most 4, and `has_overflow = 1` may not encode an empty, not-unknown hold.
+A hold whose last fingerprint is cleared and whose `unknown` is false canonicalises to
+`has_overflow = 0` at the next write. Without that rule the inert shape
+`has_overflow=1, count=0, unknown=0` would decode to something on which `overflow_is_live` is false,
+which is precisely a malformed state quietly releasing proof suppression.
+
 Corruption is an error, never a silent reset.
 
 **Bound, stated once and nowhere else.** The maximal state is **nine** receipt-sized values: two
@@ -2488,9 +2510,11 @@ Core:
   becomes issuable and that no new B1 transaction can open on the external meanwhile. (g)
   **AG3-DES-037, tenure change before the drain**: same setup, but ownership changes across the
   restart. Assert the pair is **retained**, is **not** live-sealed under the new owner, no longer
-  suppresses authoritative proof, migrates into `pairs` when there is room, and is then actually
-  **repaired as historical evidence through `repair_kind 3`**, with a full B1 encode and reopen
-  (AG3-DES-039): revision 9 asserted repairability that its codec could not express.
+  suppresses authoritative proof, and is then actually **repaired as historical evidence** with a
+  full B1 encode and reopen (AG3-DES-039): revision 9 asserted repairability that its codec could
+  not express. The binding follows N45(c) rather than being asserted here: `repair_kind 1` when the
+  pair migrated into an admissible slot, `repair_kind 3` when it stayed in `reserved`. Revision 11's
+  wording combined migration with kind 3, which AG3-DES-047 makes incoherent (AG3-DES-053).
   (h) **AG3-DES-043, a non-owner pre-B2 job**: a peer receives a repair through Flow D and is paused
   in S2 while ordinary adoption and then ordinary settlement try to mutate the same target. Assert
   both defer on the runtime claim, that the claim survives cancellation of an unrelated job, that it
@@ -2516,15 +2540,27 @@ Core:
   distinct pair sets `unknown`; assert no retry clears it and only the tenure ceasing to be current
   does. (d) AG3-DES-049: two tenures sharing a start epoch but differing in owner key produce
   different `tenure_id`s, and an overflow hold from one does not suppress or release under the
-  other.
+  other. (e) **Canonicality negatives** (AG3-DES-053): duplicate fingerprints, out-of-order
+  fingerprints and the inert `has_overflow=1, count=0, unknown=false` shape are each rejected at
+  decode rather than decoding into a hold on which `overflow_is_live` is false; and a hold whose
+  last fingerprint is cleared canonicalises to `has_overflow=0` at the next write.
 - **N45** AG3-DES-046 and AG3-DES-047, the reserved lifecycle. (a) The `{R1,R3}` pair after
   `{R1,R2}` was repaired: assert `pair_is_materialisable` is false, that **no** source mutation is
   attempted, that the active-pair rule permits direct issuance rather than demanding a drain, and
   that `repair_kind 3` carries it to terminal. (b) A materialisable live pair takes the drain and is
-  then repaired as `repair_kind 2`. (c) Demotion **with** room: the pair migrates first and B1 uses
-  `repair_kind 1`; demotion **without** room: it stays and B1 uses `repair_kind 3`. Assert the two
-  are never both applicable. (d) A terminal `repair_kind 3` clears `reserved` exactly, and after
-  restart that pair can never become decidable again, the kind-3 analogue of N31c.
+  then repaired as `repair_kind 2`. (c) The three migration cases, asserting the two bindings are
+  never both applicable: **admissible room**, the pair migrates and B1 uses `repair_kind 1`; **no
+  slot at all**, it stays and B1 uses `repair_kind 3`; and **numerically free but inadmissible**
+  (AG3-DES-051), `pairs[0] = {R1,R2}` with `reserved = {R1,R3}` and one empty slot, where migration
+  would create two externals sharing `R1`, so the pair stays and B1 uses `repair_kind 3` rather than
+  being left with no legal path. (d) A terminal `repair_kind 3` clears `reserved` exactly, and after
+  restart that pair can never become decidable again, the kind-3 analogue of N31c. (e) **The
+  AG3-DES-050 negative**: an opening `O` and a same-tenure `R` that closes a **different** epoch with
+  a differing `TenureSelection`, so `conflicting_receipt_pair` accepts it but `check_opening_receipt`
+  would reject it. Assert the dry run reports it not materialisable, that no drain is attempted, and
+  that it takes direct `repair_kind 3`. (f) Restore negatives for AG3-DES-052: a valid repair for
+  pair Q encoded as `repair_kind 3` beside a reserved pair P, kind 3 with `reserved` absent, kind 1
+  with an out-of-range index, and kind 0 with a repair present or `applied` true, each rejected.
 - **N43** AG3-DES-041, repeated tenure at capacity: a live pair under tenure 1, an owner change
   demoting it, both history slots already full so it cannot migrate, a nonterminal repair under
   tenure 2, and then a **new tenure-2 conflict**. Assert `live_overflow` is set, that proof stays
