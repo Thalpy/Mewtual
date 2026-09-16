@@ -1,6 +1,14 @@
 # Gate 4 Agent 3: runtime signed fault repair
 
-Status: **revision 11, design proposal, awaiting re-review. No production code is written.**
+Status: **revision 12, design proposal, awaiting re-review. No production code is written.**
+
+Revision 11 (`3339243`) received **REQUEST CHANGES** with AG3-DES-050 to AG3-DES-053 and
+AG3-TEST-010. The reviewer **closed AG3-DES-045, AG3-DES-048 and AG3-DES-049**. The two remaining
+blockers are narrow: make materialisability equal what the real typed transition can reproduce, and
+let a demoted pair stay kind 3 when migration is structurally inadmissible. Disposition table is
+section 0.
+
+
 
 Revision 10 (design body through `11ce6f1`) received **REQUEST CHANGES** with AG3-DES-045 to
 AG3-DES-049 and AG3-TEST-009. The reviewer **closed AG3-DES-040 in 6.3 and 13.2** and **closed
@@ -89,7 +97,16 @@ this scope needs and what it does without each.
 No Cargo command was executed for this pass either. Every number is a source constant read at the
 base or an explicitly labelled estimate.
 
-## 0. Disposition of the revision-10 findings
+## 0. Disposition of the revision-11 findings
+
+| Finding | Disposition in revision 12 | Where |
+|---|---|---|
+| AG3-DES-050, `pair_is_materialisable` is broader than the real transition | **Corrected by replacing the predicate with a dry run.** `receipts_conflict` admits a pair differing only in `TenureSelection`, while `check_opening_receipt` also demands equal closed epochs and the exact gate predecessor, so `{O,R}` across different epochs was called materialisable, would fail the drain with `EpochScope`, and was barred from direct issuance by its own classification. Materialisability is now a dry run on a clone that must end with fault evidence byte-for-byte equal to the pair. | 5.2, 15.1 N45(e) |
+| AG3-DES-051, mandatory migration breaks a state the alias rule permits | **Corrected.** A reserved pair may share one receipt with an external, two externals may not, so `pairs[0] = {R1,R2}` with `reserved = {R1,R3}` is legal and numerically has room while being structurally inadmissible. "Room" now means an admissible slot after every external-set invariant, and a pair that cannot legally migrate stays reserved and is issued as kind 3. | 5.2, 15.1 N45(c) |
+| AG3-DES-052, the validator does not specify `repair_kind 3` | **Corrected.** `check_scope` now enumerates all four bindings and the illegal combinations, so a repair for one pair cannot be coupled to a reserved pair it does not name. | 5.2, 15.1 N45(f) |
+| AG3-DES-053 and AG3-TEST-010 | **Corrected.** The demotion prose that still set a bare tenure start is rewritten to the `OverflowHold` algorithm, the hold gains canonical invariants including rejection of the inert non-live shape, and N37(g) is realigned with N45(c) instead of combining migration with kind 3. | 5.2, 15.1 N37(g), N44(e) |
+
+## 0.0 Disposition of the revision-10 findings
 
 | Finding | Disposition in revision 11 | Where |
 |---|---|---|
