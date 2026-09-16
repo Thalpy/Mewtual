@@ -1,6 +1,15 @@
 # Gate 4 Agent 3: runtime signed fault repair
 
-Status: **revision 4, design proposal, awaiting re-review. No production code is written.**
+Status: **revision 5, design proposal, awaiting re-review. No production code is written.**
+
+Revision 4 (`ad023d2e5b514a8f9598b1fe433fd2b080ecad6c`) received **REQUEST CHANGES** with
+AG3-DES-017 to AG3-DES-021 and AG3-TEST-003, and agreement on U-11. The reviewer accepted C-8's
+epoch-zero fix, the reconciled publication lifecycle, the healthy-source half of AG3-DES-013 and the
+now-unmasked M2. Revision 5 answers the five new findings, realigns the three tests that contradicted
+revision 4's own state machine, and reopens none of the accepted work. Its disposition table is
+section 0.
+
+
 
 Revision 3 (`a62178b94f20cd60a5363e6a3d6d6216edb9e516`) received **REQUEST CHANGES** with
 AG3-DES-013 to AG3-DES-016 and AG3-TEST-002, and decisions on U-9 and U-10. The reviewer accepted
@@ -28,7 +37,19 @@ proposals. Sections 13.1 and 13.2 state what this scope needs and what it does w
 No Cargo command was executed for this pass either. Every number is a source constant read at the
 base or an explicitly labelled estimate.
 
-## 0. Disposition of the revision-3 findings
+## 0. Disposition of the revision-4 findings
+
+| Finding | Disposition in revision 5 | Where |
+|---|---|---|
+| AG3-DES-017, case 6b can leave the repaired loser as the live target | **Corrected.** Revision 4 equated "not faulted" with "safe to leave unchanged", which is false: neither `prepare_checkpoint_adoption` nor `prepare_settlement` screens the receipt it already holds, so a source sitting on the loser would install or settle it after the repair. A new case 6c retargets a source whose own `latest`, opening or adoption target is the loser or a provably losing baseline; 6b now applies only when none of them is covered, and the same-baseline higher-head limitation is preserved rather than papered over. | 3 R21, 5.1 C-2, 15.1 N32 |
+| AG3-DES-018, the active/deferred record has no codec or bound | **Corrected.** Revision 4 introduced `active`/`deferred` but left the singular encoding and a bound sized for three receipt-sized values, so the very state N31 requires could not be persisted. The extension is re-specified for two pairs plus one repair, the bound is raised to five receipt-sized values, and canonical ordering, duplicate and alias rejection, and the rule that only the active pair may carry a repair are stated. Active status is **derived** on load from the source and the record rather than durably stored, so no atomic source-plus-record transition is implied. | 3 R22, 5.2, 15.1 N31 |
+| AG3-DES-019, a later source fault can deadlock a durable repair decision | **Corrected.** Once B1 exists that repair owns the target until its committed state is terminal. A repair naming a pair the source is not faulted on is now screening-only rather than `PairMismatch`, which is what dissolves the deadlock: the historical repair completes locally without needing the source, freeing the slot. Separately, a different repair or a competing pair is refused while `repair_install_pending()` is true, so the single `resolved_repair` slot cannot be overwritten mid-replacement. | 3 R24, 5.1 C-2, 5.2, 10.3, 15.1 N33 |
+| AG3-DES-020, the screening path bypasses the repair-sequence guard | **Corrected.** The non-faulted path skipped `apply_repair` and therefore the `repair_sequence > self.repair_sequence` check, so a delayed lower-sequence repair could overwrite a newer one now that Flow D applies repairs regardless of fault status. Sequence and retry classification now runs **before** the fault-status cases and applies uniformly to every path. | 5.1 C-2, 15.1 N34 |
+| AG3-DES-021, the reconciled-only journal restore shape is implicit | **Corrected.** Journal decode derives its document from `high_water.or(in_flight)`, so the shape C-7 permits and N7 requires would fail its presence check. Version 2 derives identity from the effective retained set including `reconciled`. This is the journal analogue of C-8. | 3 R23, 5.1 C-7 |
+| AG3-TEST-003 | **Corrected.** M2 accepted unchanged. M12 retargeted, since revision 4 made a second distinct pair legitimately land in the deferred slot, so its old assertion would fail on the restored design. N24 and N5d rewritten: N24 still claimed repairs are discarded without a local fault, and N5d asserted unchanged stored bytes where case 6b durably adds repair evidence. | 15.1 N5d, N24, 15.2 M12 |
+| U-11 | **Agreed by the reviewer and adopted.** The deferred slot accepts evidence only from a reporter that is itself faulted. | 5.2, 16 |
+
+## 0.0 Disposition of the revision-3 findings
 
 | Finding | Disposition in revision 4 | Where |
 |---|---|---|
@@ -308,6 +329,44 @@ recovery write failure every later `reserve` fails with `BudgetError::Reconcile`
 merely lies about the recovery barrier's result is caught by that independent guard rather than by
 the intended assertion. This is AG3-TEST-002.
 
+### R21: neither installer screens the receipt it already holds
+
+`prepare_checkpoint_adoption` requires only `adopting`, `Closing`, not faulted, and
+`latest == receipt` (`studio/epoch/adoption.rs:89-95`). `prepare_settlement` requires not
+`adopting`, `Closing`, not faulted, and then takes `receipts.latest()` and verifies **current
+owner** authority (`studio/epoch/settlement.rs:71-79`). Neither asks whether the receipt it is
+about to act on is a repaired loser: `is_repaired_loser` screens receipts arriving at admission,
+never one already sitting in `latest`.
+
+So a peer that saw only the losing receipt never faulted, and revision 4's case 6b would leave it
+Closing or adopting under that loser after the repair arrived. It would then install or settle the
+repudiated branch. This is AG3-DES-017, and it is why "not faulted" cannot mean "safe to leave
+unchanged".
+
+### R22: the record extension and its bound were never updated for two pairs
+
+Revision 4's `EpochFaultRecord` gained `active` and `deferred`, but §5.2 still specified the
+singular `3 | a | b | has_repair | repair? | applied` encoding and still sized `MAX_RECORD_BYTES`
+for three receipt-sized values. The maximal state is five: two active receipts, one repair, two
+deferred receipts. Since `read_epoch_owner_plain` caps the file before unsealing
+(`store/epoch_owner.rs:530-540`), an under-sized contract means the maximal valid state cannot be
+written or reopened at all. This is AG3-DES-018.
+
+### R23: the owner journal derives its identity from `high_water` or `in_flight` only
+
+`OwnerReceiptJournal::decode` sets
+`document: high_water.as_ref().or(in_flight.as_ref()).map(..)` and then requires
+`journal.document.is_some() == journal.tenure.is_some()` (`epoch.rs:2084-2094`). C-7 permits, and
+N7 requires, a restored shape with both absent and only `reconciled` present, which fails that
+check. This is the journal analogue of R17, and it is AG3-DES-021.
+
+### R24: a receipt book has exactly one resolved-repair slot
+
+`ReceiptBook.resolved_repair` is a single `Option` (`epoch.rs:1575`) and `apply_repair` overwrites
+it. So applying a second repair to a source whose first repair still has an outstanding recovery or
+replacement would erase the evidence that `repair_install_pending()` is derived from, abandoning the
+in-flight transaction. This is the second half of AG3-DES-019.
+
 ### R12: the store cannot validate a conflicting pair today
 
 `Receipt::restore_verified_from_vault` is `pub(crate)` (`epoch.rs:1125`) and `receipts_conflict` is
@@ -451,16 +510,37 @@ its own single transition.
 Classification. Let `S` be the selected receipt, `L` the loser, `H` the pre-application `latest`,
 `E` the gate epoch, `O` the opening.
 
-**Fault status classifies first** (AG3-DES-013). Revision 3 put the tenure test first and let case 5
+**Sequence and retry classify before anything else** (AG3-DES-020). The faulted path delegates to
+`apply_repair`, which enforces `repair.repair_sequence > self.repair_sequence`; revision 4's
+non-faulted path skipped `apply_repair` and so skipped that guard, while Flow D began applying
+repairs regardless of fault status. A delayed lower-sequence repair could therefore overwrite a
+newer resolved repair, reviving older loser screening and making a spent sequence reusable. So,
+uniformly and before any fault or tenure test:
+
+| Precondition | Result |
+|---|---|
+| exactly this repair is already the resolved disposition | `AlreadyResolved`, continuation decided from the committed source (C-5) |
+| a different repair, `repair_sequence <= book.repair_sequence` | `Held(SequenceNotNewer)`, nothing changes |
+| a different repair with `repair_install_pending()` true | `Held(RepairInProgress)`, nothing changes (R24) |
+| strictly newer | continue to classification below |
+
+`Held(RepairInProgress)` is what protects the single `resolved_repair` slot: while a repair's
+committed state still owes recovery or a replacement, no other repair may overwrite the evidence
+that transaction is driving. It is released when the state becomes terminal, not when `applied` is
+set.
+
+**Fault status classifies next** (AG3-DES-013). Revision 3 put the tenure test first and let case 5
 match "cross-tenure, any shape", so an owner applying a historical repair to its **own healthy
 source** would reopen a correctly sealed epoch and replace a legitimate current head with its
 opening, losing unrelated newer progress. A source that is not faulted on the named pair is never
-reshaped by a repair.
+reshaped by a repair **unless it is itself sitting on the repudiated branch** (case 6c).
 
 | Case | Condition | phase | receipt_hash | adopting | install |
 |---|---|---|---|---|---|
 | 6a | **not faulted**, same-tenure, `O == Some(L)` | `Closing` | `S.hash()` | `true` | `Some(S)` |
-| 6b | **not faulted**, anything else: screening only | unchanged | unchanged | unchanged | none |
+| 6c | **not faulted**, same-tenure, an own anchor is covered by the repair (below) | `Closing` | `S.hash()` | `true` | `Some(S)` |
+| 6b | **not faulted**, no own anchor covered: screening only | unchanged | unchanged | unchanged | none |
+| 6d | **faulted on a different pair**: screening only | unchanged | unchanged | unchanged | none |
 | 1a | faulted on the pair, same-tenure, `O == Some(S)`, `H` qualifies (below) | `Closing` | `H.hash()` | `false` | none |
 | 1b | faulted on the pair, same-tenure, `O == Some(S)`, `H` does not qualify | `Open` | none | `false` | none |
 | 2a | faulted on the pair, same-tenure, `S.closed_epoch == E`, `!source.adopting` | `Closing` | `S.hash()` | `false` | none |
@@ -468,13 +548,40 @@ reshaped by a repair.
 | 3 | faulted on the pair, same-tenure, `O == Some(L)` | `Closing` | `S.hash()` | `true` | `Some(S)` |
 | 4 | faulted on the pair, same-tenure, `source.adopting`, none of the above | `Closing` | `S.hash()` | `true` | `Some(S)` |
 | 5 | **faulted on the pair**, cross-tenure: `Unblocked` | `Open` | none | `false` | none |
-| 7 | faulted on a **different** pair | refuse: `Held(PairMismatch)` | | | |
 | 8 | otherwise | refuse: `Held(UnsupportedShape)` | | | |
 
-Case 6b is the only outcome for a healthy source, whatever the tenure: it records
-`resolved_repair` and `repair_sequence` so the loser and its baseline descendants are screened, and
-touches no gate, head, adoption mode or retained progress. Case 6a keeps the descendant-convergence
-path, but only same-tenure, because a cross-tenure selected receipt cannot be installed at all.
+**Case 6c is AG3-DES-017's correction.** An "own anchor is covered" when any of `latest`, `opening`
+or the retained adoption target is the exact loser, or satisfies `is_repaired_loser`, which also
+catches a head on a provably losing inherited baseline. Such a source is not healthy; it is sitting
+on the repudiated branch and, per R21, both installers would happily act on it because neither
+screens the receipt it already holds. Case 6c therefore retargets it with the same adoption shape
+as case 3: `latest = S`, `Closing` under `S`, `adopting = true`, `install = Some(S)`, so the whole
+current version is preserved as `Repair` recovery and the selected checkpoint replaces it through
+the accepted transaction. Retargeting uses the adoption shape even when the source was not
+adopting, because a peer must fetch `S`'s seed; the owner's own close-bearing settlement path is
+reached only from a faulted source, so case 2a is untouched.
+
+**The same-baseline limitation is preserved, not papered over.** When the selected and losing
+receipts carry the same `TenureSelection`, `is_repaired_loser` deliberately classifies only the
+exact loser, because receipts carry no ancestry chain and a higher same-baseline head cannot be
+shown to descend from either side. Such a head falls to case 6b and is left alone. This design
+invents no ancestry for it; 15.1 N32 asserts that explicitly so the limitation is visible rather
+than accidental.
+
+Case 6b is now the outcome only for a source with **no** covered anchor: it records
+`resolved_repair` and `repair_sequence` so the loser and its baseline descendants are screened from
+then on, and touches no gate, head, adoption mode or retained progress. Case 6a keeps the
+descendant-convergence path, but only same-tenure, because a cross-tenure selected receipt cannot be
+installed at all.
+
+**Case 6d is the first half of AG3-DES-019's correction.** Revision 4 refused a repair whose pair
+the source is not faulted on with `Held(PairMismatch)`, which deadlocks the sequence the reviewer
+found: a durable repair for pair A, a crash, then the source faulting on an unrelated pair B, after
+which A could never be applied and B could never be issued. A repair for a pair this source is not
+blocked on is not a mismatch, it is simply not about this source's blocker: it is recorded as
+screening, becomes terminal, and frees the record's repair slot so the source's own pair can be
+decided next. The source's own fault is retained untouched. `Held(PairMismatch)` is therefore
+removed as an outcome; a genuinely malformed pair is still caught by `check_evidence`.
 
 `H` qualifies in case 1a only under a **positive** justification, never merely the absence of a
 conflict: `H.closed_epoch == E`, `H.tenure_id == S.tenure_id`, `H != L`, and `O == Some(S)`, so the
@@ -509,8 +616,9 @@ that rewinds this branch, stages an ordinary `Rewound` snapshot. A same-tenure h
 with the tenure that is over, which is safe precisely because this case requires the source to have
 been faulted: an unfaulted source keeps everything through case 6b.
 
-`RepairHold` distinguishes `PairMismatch`, `SequenceNotNewer`, `ScopeMismatch`, `NoFault`,
-`Settled` and `UnsupportedShape`. A `Held` result is a successful observation the caller reports,
+`RepairHold` distinguishes `SequenceNotNewer`, `RepairInProgress`, `ScopeMismatch`, `Settled` and
+`UnsupportedShape`. `PairMismatch` and `NoFault` are gone: both of those shapes are now the
+screening cases 6d and 6b, which is what removes the AG3-DES-019 deadlock. A `Held` result is a successful observation the caller reports,
 never an error that discards evidence, exactly as `StudioAdoptionOutcome::Fault` is handled at
 `store/epoch_studio/adoption.rs:103-104`.
 
@@ -698,6 +806,13 @@ no valid path at all; and a stale `reconciled` keeps overriding a newer high wat
 5. **Decode constraints.** Version 2 rejects a `reconciled` that is not same-tenure, or whose
    `closed_epoch` is not strictly greater than `high_water`'s, and expresses the existing
    `in_flight` adjacency invariant against `canonical_head()` rather than `high_water`.
+6. **Identity derivation** (AG3-DES-021, R23). `decode` currently derives its document from
+   `high_water.as_ref().or(in_flight.as_ref())` and then requires document presence to agree with
+   tenure presence, so the shape this section permits and N7 requires, both absent with only
+   `reconciled` present, would fail. Version 2 derives document and tenure identity from the
+   **effective retained set**, including `reconciled` when the other two are absent, and validates
+   every retained receipt against that identity. Version 1 is unchanged. This is the journal
+   analogue of C-8, and it makes the codec contract match the test rather than the other way round.
 
 15.1 N28 follows this through: prove `S(e)`, complete it, restart, publish `e+1`, then prepare
 `e+2`. Revision 3 stopped at "can issue at e+1", which is exactly where the missing lifecycle
@@ -736,15 +851,48 @@ Splitting the pair from the repair is what makes AG3-DES-009 solvable. `apply_re
 a peer has nowhere to live. This slot is that home: it is the issuance input, it is written by the
 report path before any decision exists, and it survives independently of the source.
 
-Encoding appends, after the existing optional `2 | hash | close`, an optional
-`3 | a | b | u8 has_repair | repair? | u8 applied`. Sections must appear in ascending tag order
-with no duplicates. Old readers already reject any tag other than 2 (`epoch_owner.rs:141-143`),
-which is the stated intent of the v2 extension.
+Encoding appends, after the existing optional `2 | hash | close`, an optional section for **one or
+two pairs plus at most one repair** (AG3-DES-018; revision 4 left the singular form here while the
+prose had already moved to two pairs):
 
-`check_scope` gains: both receipts re-decode byte-exactly; both documents equal this document;
-`conflicting_receipt_pair(document, &a, &b)` passes; and when a repair is present,
-`repair.document` equals this document and `repair.check_evidence(&a, &b)` passes. Corruption is an
-error, never a silent reset.
+```text
+3 | u8 pair_count (1 or 2) | pair_count * (a | b) | u8 has_repair | repair? | u8 applied
+pair            = two canonical Receipts, ascending by hash
+pair id         = the smaller receipt hash
+pairs are ordered by ascending pair id; equal pair ids are rejected
+```
+
+Sections appear in ascending tag order with no duplicates. Old readers already reject any tag other
+than 2 (`epoch_owner.rs:141-143`), which is the stated intent of the v2 extension.
+
+`check_scope` gains: every retained receipt re-decodes byte-exactly; every document equals this
+document; `conflicting_receipt_pair(document, &a, &b)` passes for each pair; the two pairs are
+distinct and share no receipt hash, so an aliased or half-duplicated pair is rejected; a repair, if
+present, has `repair.document` equal to this document, passes `check_evidence` against **one** of
+the retained pairs, and `applied` is false whenever no repair is present. Corruption is an error,
+never a silent reset.
+
+**Bound.** The maximal state is five receipt-sized values, not three: two active receipts, one
+repair, two deferred receipts. So `MAX_RECORD_BYTES` becomes
+`MAX_OWNER_RECEIPT_JOURNAL_BYTES + MAX_CLOSE_RECORD_BYTES + 5 * MAX_RECEIPT_BYTES + 1280`, which
+with C-7's raised journal constant is about 14.4 KiB, and `MAX_SEALED_BYTES` follows. This matters
+beyond accounting: `read_epoch_owner_plain` caps the file before unsealing, so an under-sized
+contract would make the maximal valid state that N31 exercises impossible to write or reopen.
+
+**Active status is derived, never stored** (AG3-DES-018). A source fault and this record are
+separate durable objects with no atomic transition between them, so revision 4's talk of
+"demoting" a pair implied a write that does not exist. Instead, on every load the active pair is
+derived, in this order:
+
+1. a persisted repair that is not yet terminal names the active pair (AG3-DES-019: once B1 exists,
+   that transaction owns the target);
+2. otherwise, if the source is Faulted and its pair is retained here, that pair;
+3. otherwise the single retained pair;
+4. otherwise the lower pair id, deterministically.
+
+A source fault whose pair this record does not yet hold is recorded on the next admission; until
+then rule 2 simply does not fire, and nothing is inconsistent. Crash at any point leaves at most two
+pairs and one repair on disk, and the derivation is a pure function of what survived.
 
 **The frozen pair is never replaced while unresolved** (I-10). A report naming a different pair
 while this slot holds an unresolved one is refused, exactly as a third receipt never replaces a
@@ -757,29 +905,27 @@ source faulted on `B1/B2` with a record frozen on a historical `A1/A2` admitted 
 cross B2 in either direction: `apply_repair` demands the book's own pair, and the record refuses
 replacement. The rule, with a deterministic priority:
 
-- **A source fault is always the active pair.** It is what makes the local document read-only, so it
-  is what must be decided first. It is never suppressed or deferred: refusing to record a genuine
-  local equivocation would leave a disputed head servable, which is worse than a wait.
-- The record therefore holds at most one **active** pair and at most one **deferred** pair:
-
-```rust
-pub struct EpochFaultRecord {
-    active: FaultPair,              // a, b, optional signed repair, applied
-    deferred: Option<FaultPair>,    // evidence retained, not yet decidable
-}
-```
-
-- If a report arrives while the source is faulted on a different pair, the reported pair is written
-  to `deferred` rather than refused, so the evidence is not lost and the reporter need not hold it
-  alone. If both slots are occupied by different pairs, the report is refused with a defer reason
-  and the reporter retries later.
-- If the source faults while the record's own pair is unresolved, that pair is demoted to
-  `deferred` and the source's becomes active. Nothing is discarded.
-- `issue_studio_repair` only ever decides the **active** pair. When it resolves, a `deferred` pair
-  is promoted and becomes decidable, so sequential repair is always possible and the record stays
-  constant-sized at two pairs plus one repair.
+- **A pending repair owns the target.** Once B1 has persisted a signed repair, that transaction is
+  the active one until its committed state is terminal, which is derivation rule 1 above. Revision
+  4 gave a later source fault priority instead, which is the deadlock AG3-DES-019 found.
+- **A source fault is never suppressed.** Refusing to record a genuine local equivocation would
+  leave a disputed head servable, which is worse than a wait. It simply may not preempt a pending
+  repair; it waits its turn through rule 2.
+- The record holds at most two pairs, so a report arriving while a different pair is unresolved
+  takes the free slot rather than being lost or replacing anything. If both slots are occupied by
+  different pairs, the report is refused with a defer reason and the reporter retries later.
+- `issue_studio_repair` only ever decides the derived active pair. When that repair becomes
+  terminal, the other retained pair becomes active by the same derivation, so sequential repair is
+  always possible and the record stays constant-sized.
 - `StudioFaultView` reports which pair is currently decidable and that another is waiting, so the
   user is never asked to choose between two faults at once.
+
+**Why this no longer deadlocks.** The reviewer's sequence was: historical pair A active, B1 persists
+repair RA, crash, then the source faults on an unrelated pair B. Under revision 4, RA could not
+cross B2 because the book's pair was B, and RB could not be issued because RA was held unapplied.
+Now RA applies through case 6d as screening only, which is terminal for a repair this source is not
+blocked on, so the slot frees and the source's own pair B becomes active and decidable. The source
+keeps its fault throughout and nothing is discarded.
 
 Issuance of ordinary receipts is **not** blocked by an unresolved record pair. A new receipt cannot
 manufacture a fault on its own; only equivocation can, and an honest owner does not equivocate. The
@@ -1554,11 +1700,32 @@ Core:
 - **N5c** Case 6b: a non-faulted source holding a descendant of the repudiated branch records the
   resolved repair, screens the loser, and performs no transition; case 6a rewinds only when the
   repair is same-tenure and the opening is the loser.
-- **N5d** AG3-DES-013: owner B holds a **healthy Closing source with newer B-tenure progress** and
+- **N5d** AG3-DES-013, with AG3-TEST-003's correction to the assertion: owner B holds a **healthy
+  Closing source with newer B-tenure progress**, none of whose anchors is covered by the repair, and
   applies a historical A repair. Assert the exact phase, head, `previous_until_installed`, adoption
-  mode, accepted operation set and stored bytes are unchanged, and that the only difference is the
-  recorded repair evidence and the screening it enables. Run the same for a healthy Open source and
-  for a peer reached through Flow D, which must no longer discard the repair.
+  mode, accepted operation set, projection and **all non-repair source content** are unchanged, and
+  that the source's receipt-book bytes differ **only** by the expected repair evidence and the
+  advanced `repair_sequence`. Revision 4 claimed the stored bytes were unchanged, which case 6b
+  makes impossible. Run the same for a healthy Open source and for a peer reached through Flow D.
+- **N32** AG3-DES-017, four sources, none faulted, each given the same repair:
+  (a) `adopting` with `latest == L`; (b) ordinary `Closing` with `latest == L`; (c) a head on a
+  provably losing inherited baseline. All three must take case 6c, retarget to `S`, preserve the
+  whole prior version as `Repair` recovery, and **must not subsequently install or settle the
+  repudiated branch** through `prepare_checkpoint_adoption` or `prepare_settlement`, which is the
+  assertion revision 4 would fail. (d) a same-baseline higher head whose ancestry is unknowable
+  must take case 6b and be left alone, asserting the limitation explicitly rather than inventing
+  ancestry.
+- **N33** AG3-DES-019, both halves. (a) B1 persists repair RA for a historical pair, crash before
+  B2, then the source faults on an unrelated pair B: assert RA still applies as screening and
+  becomes terminal, that the source keeps its own fault untouched, and that a repair for pair B can
+  then be issued and applied. (b) repair RA is at `AwaitingSeed` or `RecoveryPending` with
+  `repair_install_pending()` true when a second pair arrives: assert the second pair is retained in
+  the free record slot, that a different repair is `Held(RepairInProgress)`, that the single
+  `resolved_repair` slot is not overwritten, and that RA's replacement still completes afterwards.
+- **N34** AG3-DES-020: a **healthy** source holds resolved repair sequence N; a valid, correctly
+  signed, current-tenure repair with sequence N-1 for a different pair arrives through Flow D.
+  Assert `Held(SequenceNotNewer)` and that the complete book and source are byte-unchanged. Repeat
+  with the source faulted, where `apply_repair` already enforced this, to show both paths agree.
 - **N6** `conflicting_receipt_pair` rejects each of its five conditions individually and
   `check_evidence` each of its four, with an independent positive oracle for the otherwise
   identical valid pair. `ResolvedRepair::verify` still rejects a wrong role, a foreign enclosing
@@ -1620,8 +1787,10 @@ Sync, app and native:
 - **N23** A served answer carries the repair exactly under the 6.6 predicate: not after B1 alone,
   yes after B2/B3, from both the record and the book origins, and only after the required flush.
   `encode_answer` rejects a foreign-document repair.
-- **N24** `complete_checkpoint_hint` returns a hint carrying a repair, still refuses one carrying a
-  proof, and the app discards a repair for a document it has no fault for.
+- **N24** `complete_checkpoint_hint` returns a hint carrying a repair and still refuses one carrying
+  a proof. Per AG3-TEST-003 the discard claim is **withdrawn**: a verified repair for a document
+  with no local fault is now applied as screening through case 6b, 6c or 6d, and only a repair that
+  fails verification, or names a document this peer does not hold, is discarded.
 - **N25** `select_repaired_checkpoint` fails closed cross-tenure, succeeds same-tenure, and spends
   one retained slot and three paced attempts.
 - **N26** AG3-DES-001 acceptance, with no injected owner state: roll back the owner's
@@ -1660,7 +1829,9 @@ Sync, app and native:
   source's pair becomes active, and both are repaired in turn. In both, assert no evidence is
   discarded, the record stays at two pairs plus one repair, a third distinct pair is refused with a
   defer reason, `StudioFaultView` names which pair is decidable, and ordinary receipt issuance is
-  **not** blocked by an unresolved record pair.
+  **not** blocked by an unresolved record pair. Also assert the maximal shape, two distinct pairs
+  plus one repair, encodes, decodes and survives crash and reopen at every barrier, and that an
+  aliased or half-duplicated pair is rejected (AG3-DES-018).
 - **N30** Custody and fairness: pause a real repair reconstruction in S2 while authoritative
   discovery, page receive and a second server complete; assert the permit is still owned, that
   cancellation does not refund it, that a dropped native handle releases it, and that after all
@@ -1686,7 +1857,7 @@ stated. No useful redundant validation is deleted to manufacture a failure.
 | M9 | the single eligibility guard | remove the `eviction_pending` refusal in `stage_studio_repair_recovery` before the mint | N15: no successor bytes are written while the warning is pending and before its deadline. A due promotion without acknowledgement is a separate positive control |
 | M10 | losing-baseline screening (I-9) | remove `is_repaired_loser`'s losing-baseline arm | a covered losing-baseline descendant remains `Stale` **without re-faulting**. (Revision 1's assertion here was wrong and is withdrawn) |
 | M11 | no over-suppression (I-9) | make `is_repaired_loser` return true for any same-tenure receipt | a genuine third differing baseline still faults |
-| M12 | report admission (I-10) | **Corrected:** the old mutant was masked, because the book independently returns `Fault`/`Stale` whatever the report layer does. The report layer's own unique guard is the **frozen-pair replacement refusal in the owner record** (5.2), which core never sees because the owner's book is not involved on that path. The mutant removes it | N26: after a second report naming a different pair, the recorded evidence and the offered candidates are unchanged, **and** the no-op path reaches no source writer, reservation or seal |
+| M12 | report admission (I-10) | **Corrected twice.** Revision 2's mutant was masked by core's independent `Fault`/`Stale`; revision 3's assertion was then invalidated by AG3-DES-016, because a second distinct pair now legitimately fills the free slot, so the restored design would fail its own named assertion. The fixture starts with **both** record slots occupied by distinct pairs and a third distinct report arriving; the mutant removes the refusal so the third pair displaces retained evidence | N26 and N31: with both slots occupied, a third distinct report leaves both retained pairs byte-unchanged **and** reaches no source writer, reservation or seal |
 
 ### 15.3 Harness
 
@@ -1724,13 +1895,13 @@ expiry; an unresolved frozen pair lives until a verified repair resolves it or t
 destroyed by its normal lifecycle, because expiring it could strand faulted peers whose only
 evidence was deliberately retained there.
 
-One smaller question is opened by this revision:
+**U-11** is agreed by the reviewer and adopted: the second record slot accepts evidence only from a
+reporter that is itself faulted, consistent with U-9. A member that merely witnessed an
+equivocation without installing either side cannot forward it, which keeps the durable
+member-controlled evidence surface exactly as narrow as U-9 decided. U-10's no-expiry rule still
+applies once a report has been accepted.
 
-**U-11. Should the `deferred` slot accept a pair from a peer that is not itself faulted?** Proposed
-no, consistent with U-9: only a faulted reporter sends, so the deferred slot can only ever hold a
-pair some peer is actually blocked on. The cost is that a member which merely witnessed an
-equivocation, without installing either side, cannot forward it. Relaxing this would turn the
-deferred slot into the general relay surface U-9 declined.
+No new questions are opened by this revision. Every U-question is now decided.
 
 ## 17. Re-review request
 
@@ -1739,69 +1910,77 @@ Copyable, with the common contract from
 sent alongside it.
 
 ```text
-Review type: design, revision 4, findings re-review.
-Base: a62178b94f20cd60a5363e6a3d6d6216edb9e516 (revision 3). Head: [FULL_HEAD_SHA once pushed].
-Compare: https://github.com/Thalpy/Mewtual/compare/a62178b94f20cd60a5363e6a3d6d6216edb9e516...[FULL_HEAD_SHA]
-Earlier revisions: 63a11e1a6451c7ed373c90b0e81b59d8a748a72a (revision 2),
+Review type: design, revision 5, findings re-review.
+Base: ad023d2e5b514a8f9598b1fe433fd2b080ecad6c (revision 4). Head: [FULL_HEAD_SHA once pushed].
+Compare: https://github.com/Thalpy/Mewtual/compare/ad023d2e5b514a8f9598b1fe433fd2b080ecad6c...[FULL_HEAD_SHA]
+Earlier revisions: a62178b94f20cd60a5363e6a3d6d6216edb9e516 (revision 3),
+63a11e1a6451c7ed373c90b0e81b59d8a748a72a (revision 2),
 7efc9c2aba0a37d9aec57e268d9ff63edaca1b8a (revision 1), original scope base
 1bcb1bca204d721b848b17c0835faf931ae930e3.
-Scope/evidence: docs/GATE4-AGENT-3-DESIGN.md revision 4 and docs/GATE4-AGENT-3-STATUS.md.
+Scope/evidence: docs/GATE4-AGENT-3-DESIGN.md revision 5 and docs/GATE4-AGENT-3-STATUS.md.
 Documentation only: no production code, test, shared contract document or workflow is changed, and
-no Cargo command was executed in any of the three passes. Every number is a source constant or a
-labelled estimate. The commit sits on a branch shared with Agents 1 and 2; it touches only the two
-Agent 3 documents.
+no Cargo command was executed in any of the five passes. Every number is a source constant or a
+labelled estimate. The commit sits on a branch shared with Agents 1 and 2, so a literal base-to-head
+comparison may again contain intervening Agent 1 production commits; only the two Agent 3 documents
+are mine.
 Dependencies unchanged: tenure seam is Agent 2's section 13.2 contract, with a design of record but
 no implementation or accepted review; Agent 1's runtime integration is separately unreviewed; the
 core signing split at e65bfd8 remains unreviewed.
 
-This revision answers AG3-DES-013 to AG3-DES-016 and AG3-TEST-002, and adopts your U-9 and U-10
-decisions. Section 0 is the disposition table. It reopens nothing you accepted: the historical-pair
-report direction, the 2a/2b split with the committed-state terminality oracle, the Studio and
-Registry v2 framing and parse-order correction, U-7, U-8, the retargeted M12, and the earlier
-AG3-DES-003, 005, 007 and 008 corrections are all unchanged.
+This revision answers AG3-DES-017 to AG3-DES-021 and AG3-TEST-003, and adopts your U-11 agreement.
+Section 0 is the disposition table. It reopens nothing you accepted: C-8's epoch-zero fix, the
+reconciled publication lifecycle, the healthy-source half of AG3-DES-013, M2, the historical-pair
+report direction, the 2a/2b split, the Studio and Registry v2 framing, U-7 to U-10, and
+AG3-DES-003, 005, 007 and 008 are all unchanged.
 
-AG3-DES-013: fault status now classifies BEFORE tenure. Revision 3's case 5 matched "cross-tenure,
-any shape", so an owner applying a historical repair to its own healthy source would have reopened
-a correctly sealed epoch and replaced a legitimate current head with its opening. Cases 6a and 6b
-now come first: a source not faulted on the named pair is never reshaped, and a healthy source can
-only ever record the resolved disposition for screening. The reachability contradiction you also
-spotted is fixed in the same place: Flow D no longer discards a repair for a document with no local
-fault, so case 6b is actually reached by ordinary distribution. N5d asserts the exact phase, head,
-previous_until_installed, adoption mode, accepted operations and stored bytes of a healthy Closing
-source with newer B-tenure progress are unchanged across a historical repair.
+AG3-DES-017 is confirmed at the source and is the sharpest of the five. Neither installer screens
+the receipt it already holds: prepare_checkpoint_adoption asks only for adopting, Closing, not
+faulted and latest == receipt, and prepare_settlement takes receipts.latest() and verifies only
+current-owner authority. So revision 4's equation of "not faulted" with "safe to leave unchanged"
+was wrong, and a peer sitting on the loser would install or settle the repudiated branch. A new
+case 6c retargets any non-faulted source whose own latest, opening or adoption target is the exact
+loser or satisfies is_repaired_loser, using the same adoption shape as case 3 so the whole prior
+version is preserved as Repair recovery. Case 6b now applies only when no anchor is covered. The
+same-baseline higher head, whose ancestry receipts cannot express, is deliberately left to 6b and
+N32(d) asserts that limitation explicitly rather than inventing ancestry. N32(a)(b)(c) assert the
+three covered shapes never subsequently install or settle the loser.
 
-AG3-DES-014: confirmed at the source and revision 3's claim was simply wrong. decode_mode derives
-its document from latest alone and ResolvedRepair::verify then requires equality, so the epoch-zero
-shape failed ReceiptConflict. C-8 widens that one derivation for repair-bearing versions 4 and 5
-only, then checks every retained receipt against the derived document and keeps the
-tenure.is_some() == latest.is_some() rule. N2b is a direct ReceiptBook encode/decode regression for
-the shape, run before any Studio or Registry round-trip depends on it.
+AG3-DES-018: the extension is re-specified for one or two pairs plus at most one repair, with
+canonical pair ordering by pair id, rejection of equal ids and of pairs sharing a receipt hash, and
+the rule that applied is false whenever no repair is present. MAX_RECORD_BYTES now covers five
+receipt-sized values rather than three, which matters because read_epoch_owner_plain caps the file
+before unsealing, so the under-sized contract would have made N31's maximal state impossible to
+write or reopen at all. Crucially, active status is now DERIVED on every load from the source and
+the record rather than durably stored, so nothing implies the atomic source-plus-record transition
+you correctly said does not exist; revision 4's talk of demoting a pair implied exactly that write.
 
-AG3-DES-015: the whole lifecycle is now specified, not just creation. mark_published accepts the
-reconciled winner and promotes it, which is what revision 3 left with no valid path at all; a
-reconciled head is retired whenever a high water at or beyond its epoch is set, so
-canonical_head() cannot regress; a tenure change clears it; stale completion retries stay inert;
-and version-2 decode constrains the coexistence of high_water, in_flight and reconciled. N28 now
-runs prove S(e), complete it, restart, publish e+1, then prepare e+2, which is exactly the
-transition revision 3 stopped short of.
+AG3-DES-019: your deadlock is real and the fix is to stop treating a repair for an unrelated pair
+as a mismatch. Case 6d applies such a repair as screening only, which is terminal for a repair this
+source is not blocked on, so the historical repair completes, the record's repair slot frees, and
+the source's own pair becomes active and decidable. Held(PairMismatch) is removed as an outcome.
+For the second half, R24 records that ReceiptBook has exactly one resolved_repair slot, so a
+different repair is now Held(RepairInProgress) while repair_install_pending() is true, released
+only when the committed state is terminal rather than when applied is set; the existing
+one-claim-per-target rule in 10.3 already keeps discovery off such a source. N33 runs both halves.
 
-AG3-DES-016: a single active pair now spans both durable locations, with a deterministic priority.
-A source fault is always the active pair, because it is what makes the local document read-only and
-suppressing it would leave a disputed head servable; an undecided record pair is demoted to one
-bounded deferred slot rather than discarded, and a third distinct pair is refused with a defer
-reason. issue_studio_repair only decides the active pair, and a deferred pair is promoted when it
-resolves, so sequential repair works in both orderings. N31 runs both. I also decided explicitly,
-as you asked: ordinary receipt issuance is NOT blocked by an unresolved record pair, because a new
-receipt cannot manufacture a fault on its own.
+AG3-DES-020: sequence and retry classification moved ahead of the fault and tenure tests and now
+applies to every path, because the non-faulted path skipped apply_repair and therefore its
+repair_sequence > book.repair_sequence guard, exactly as you describe, while Flow D had begun
+applying repairs regardless of fault status. N34 replays a valid delayed N-1 repair against a
+healthy source holding N and asserts the complete book and source are byte-unchanged.
 
-AG3-TEST-002: confirmed at the source. EpochStorageBudget::reserve sets ready = false and a failed
-write never commits, so the successor reserve fails on Reconcile whatever the mutant mints. M2 now
-bypasses the recovery save entirely, before it reserves, leaving the budget valid so the successor
-writer is genuinely reachable, and the assertion becomes that the losing projection is not readable
-from recovery. Please say whether M2 is finally unmasked and whether the other eleven still hold.
+AG3-DES-021: journal v2 now derives document and tenure identity from the effective retained set
+including reconciled, which is the journal analogue of C-8 and makes the codec match what N7
+already demanded.
 
-Section 16 opens one smaller question, U-11: whether the deferred slot should accept a pair from a
-peer that is not itself faulted, which I propose it should not, consistent with your U-9 answer.
+AG3-TEST-003: M12 is retargeted, since your AG3-DES-016 correction made a second distinct pair land
+legitimately in the free slot, so its old assertion would have failed on the restored design; the
+fixture now starts with both slots occupied and a third distinct report arriving. N24's discard
+claim is withdrawn to match Flow D. N5d's "stored bytes unchanged" is replaced by "all non-repair
+content unchanged, receipt-book bytes differ only by the expected repair evidence", since case 6b
+durably adds it.
+
+No U-questions remain open.
 
 Return a design verdict for this bounded repair scope, or numbered findings with concrete failure
 paths and required corrections. Implementation, integration and full Gate 4 remain separate.
