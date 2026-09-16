@@ -38,7 +38,8 @@ they are the highest-conflict changes, so they land last. The per-item verdict r
 | 2026-09-15 | C-1 and C-4 implementation | `5a899c2` | `d67e649`, `7ed6302` | bounded implementation, PR #27 | **PASS by source inspection** for the C-1 decoder, the C-2 digest changes, the R4 filter and the C-4 seam; no production defect found. Two coverage findings: **C1-TEST-002** (P2) and **R4-TEST-001** (P3). C-1 evidence not a completed checkpoint. |
 | 2026-09-15 | C1-TEST-002 correction | `7ed6302` | `4d09869` | test only | **PASS**: C1-TEST-002 **closed**; R4-TEST-001 still open |
 | 2026-09-15 | R4-TEST-001 correction | `4d09869` | `079e59a` | test plus one cfg(test) helper | N25 and M9; pushed, awaiting the reviewer's source inspection to close |
-| 2026-09-15 | I-3 protection transfer | `079e59a` | uncommitted working tree | bounded implementation | Gives C-4 its production consumer; markers removed |
+| 2026-09-15 | I-3 protection transfer | `079e59a` | `65e77d1` | bounded implementation | Mechanism **PASS**; **I3-001** (P2) opened: media admission ran before retry classification |
+| 2026-09-16 | I3-001 correction | `65e77d1` | `b7df00b` | bounded implementation | Hold moved behind classification, onto the new-authoring path only |
 
 Working checkout: `M:\Git (local)\CatComs`, branch `Create-suite-2`. **Other agents are working in
 this same checkout**: Agent 3's design landed at `7efc9c2` and Agent 2's documents are present
@@ -320,6 +321,12 @@ Moving the hold back above classification fails it at "an accepted retry was ref
 admission: creative reference scan incomplete, unsupported or over bound"; the restored source
 passes. The first attempt at this mutation surfaced as a generic `.unwrap()` inside the fixture
 helper, which is why the retry now goes through the store API directly.
+
+| Check | Result |
+|---|---|
+| `cargo test ... -p catcoms-app --lib studio_overlay -- --test-threads=1` | **40 passed, 0 failed, 2 ignored**, 995.49 s. Log `logs/gate4-a1-i3001-overlay.log`. |
+| I3-001 mutation, taking the hold unconditionally | Fails at "an accepted retry was refused by media admission"; restored source passes. |
+| `cargo clippy -j 1 -p catcoms-app --lib --tests -- -D warnings`, `cargo fmt --all -- --check` | Clean. |
 
 **What this does and does not cover.** The transfer and its ordering are real and mutation-proven.
 The detached window it exists to protect is not open yet: the synchronous acceptance path has no
