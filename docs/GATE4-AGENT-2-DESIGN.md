@@ -1,18 +1,20 @@
 # Gate 4 Agent 2: overlay lifecycle, provisional local work and repeated tenure
 
-Status: **revision 5, design proposal, awaiting re-review. Boundary (b) has PASSED. No production
-code is written, no test has been added and no Cargo command was executed.**
+Status: **revision 6, design proposal, awaiting re-review on (a) and (c). Boundary (b) has PASSED.
+No production code is written, no test has been added and no Cargo command was executed.**
 
 Revision 1 (`a901f6b`) received CHANGES REQUIRED with nine findings. Revision 2 (`21ca8fa`)
 received CHANGES REQUIRED as SEC-PAIR-001 with five. Revision 3 (`9097207`) received CHANGES
-REQUIRED with two. Revision 4 (`37fa87753d32a2c4f5d1172cc865910a93d90fa1`) **passed boundary (b)**
-and received CHANGES REQUIRED on (a) and (c) for a single Medium test and mutation gap: the
-`Imported` state's authoring refusal was stated in prose but not independently anchored at the app
-seam. This revision closes that gap, adopts two hardening notes and records the reviewer's product
-decision on 16.1. Section 0 maps each to its correction; verify each against the code, not the
-prose.
+REQUIRED with two. Revision 4 (`37fa877`) **passed boundary (b)** and received CHANGES REQUIRED on
+(a) and (c) for a single Medium gap. Revision 5
+(`f2257b018d396a835529742c40d4b282bbc127d9`) closed that gap, and received CHANGES REQUIRED on (a)
+and (c) for one new Medium finding introduced by its own accessor-removal hardening: two app
+wrappers were classified as pure authoring although their accepted store ordering deliberately
+acknowledges and recovers before requiring a tenure. This revision corrects that with invariant A-1.
+Section 0 maps each finding to its correction; verify each against the code, not the prose.
 
-Design base for this revision: `37fa87753d32a2c4f5d1172cc865910a93d90fa1`. Earlier bases:
+Design base for this revision: `f2257b018d396a835529742c40d4b282bbc127d9`. Earlier bases:
+`37fa87753d32a2c4f5d1172cc865910a93d90fa1`,
 `909720739b6c0a455d37761e8149d7eec21cb6f4`, `21ca8fa93c07b8bb65a00bc0bbc555518f8a7132`,
 `a901f6b0f64df2b4ea9cc0221b64ac98276f582d`, `1bcb1bca204d721b848b17c0835faf931ae930e3`. Scope is
 [Agent 2 of the four handoffs](GATE4-AGENT-HANDOFFS.md); progress is in
@@ -42,9 +44,18 @@ only and
 section 14 records what breaks if they change. Agent 3's design is separate and is not consumed
 here except through the tenure seam of section 9.4.
 
-## 0. Disposition of the revision-4 re-review findings
+## 0. Disposition of the revision-5 re-review findings
 
 Boundary **(b), the preview-local-work extension, PASSED** at revision 4 and is not changed here.
+
+| Finding | Disposition in revision 6 | Where |
+|---|---|---|
+| **1 (Medium)** the accessor-removal table moved tenure refusal ahead of legitimate retry and recovery paths: `save_studio_closing_overlay` and `handoff_studio_overlay` were classified as pure authoring, although their accepted store ordering deliberately acknowledges and recovers first | **Corrected, and generalised into one rule.** A-1: an app wrapper reads `authoring_owner_tenure_start()` and passes the `Option<u64>` through unchanged; the store owns every refusal, at the stage that needs it. The committed orderings that make this necessary are cited by line. A-1 replaces a per-wrapper "pure or mixed" classification deliberately, because a classification invites the next person to judge a new wrapper and judging it wrong is exactly this finding. V1 is refined to "new authoring", V8 states the complementary reachability, and N-T7b plus M24c make it executable. | 9.3 part 5 A-1, 9.4 V1/V8, 15 L11, 17.1 N-T7b, 17.2 M24c |
+
+Revision 5's own correction, the `Imported` app-seam anchoring, was accepted by that re-review and
+is unchanged here.
+
+## 0b. Disposition of the revision-4 re-review findings
 
 | Finding | Disposition in revision 5 | Where |
 |---|---|---|
@@ -53,7 +64,7 @@ Boundary **(b), the preview-local-work extension, PASSED** at revision 4 and is 
 | Hardening note: P4 still cited V1-V5 | Corrected to V1-V7 in both documents. | 13, status note |
 | 16.1 product decision | **Adopted as (a)**, over my own recommendation of (b): `Imported` ships fail-closed with no operator-adoption override. The "no fourth option" claim is refined to cover reconstruction only. | 16, 15 L11 |
 
-## 0b. Disposition of the revision-3 re-review findings
+## 0c. Disposition of the revision-3 re-review findings
 
 | Finding | Disposition in revision 4 | Where |
 |---|---|---|
@@ -63,7 +74,7 @@ Boundary **(b), the preview-local-work extension, PASSED** at revision 4 and is 
 Revision-3's own corrections to SEC-PAIR-001 were accepted by that re-review and are unchanged here;
 the table below is retained as their record.
 
-## 0c. Disposition of the SEC-PAIR-001 findings (retained record)
+## 0d. Disposition of the SEC-PAIR-001 findings (retained record)
 
 | Finding | Disposition in revision 3 | Where |
 |---|---|---|
@@ -76,7 +87,7 @@ the table below is retained as their record.
 Revision-1 findings 1, 2, 4, 5, 6, 8 and 9 are closed by SEC-PAIR-001. Their corrections are
 unchanged in this revision and the table below is retained as the record of them.
 
-## 0d. Disposition of the revision-1 findings (retained record)
+## 0e. Disposition of the revision-1 findings (retained record)
 
 | Finding | Disposition in revision 2 | Where |
 |---|---|---|
@@ -1189,8 +1200,40 @@ compiler enumerates them. The intended mapping, from the audit:
 | `receipt_head.rs:237`, `head_snapshot_is_current` | authoring. A permit cannot exist for `Imported`, so either would be correct today; authoring is the semantics that stays correct if permit minting ever moves. |
 | `receipt_head.rs:526`, the proof-signing check in `serve_receipt_head_with_handoff` | authoring. Signing a proof as the owner is authoring, not verification. |
 | `detached.rs:175`, `complete_checkpoint_head_scoped` | verification |
-| `studio/overlay.rs`, all three of `handoff_studio_overlay`, `prepare_studio_closing_overlay`, `save_studio_closing_overlay` | authoring, through `require_observed_owner_tenure` |
+| `studio/overlay.rs`, all three of `handoff_studio_overlay`, `prepare_studio_closing_overlay`, `save_studio_closing_overlay` | authoring accessor, **value passed through as `Option<u64>`; the refusal stays in the store.** See the rule below |
 | `owner_tenure/tests.rs`, `studio_exchange/tests/*` | whichever the case asserts; several existing assertions become `verification_*` and must be read individually rather than renamed mechanically |
+
+> **A-1 (revision-5 finding 1). The accessor choice and the refusal site are separate decisions.**
+> An app wrapper reads `authoring_owner_tenure_start()` and passes the resulting `Option<u64>`
+> through unchanged. It does **not** call `require_observed_owner_tenure()` on the way in. The store
+> owns every refusal, at the stage that actually needs a tenure.
+
+Revision 5 classified all three wrappers as "authoring, through `require_observed_owner_tenure`",
+which would have moved the refusal above work that deliberately precedes it. The committed store
+ordering is:
+
+| Function | Order |
+|---|---|
+| `epoch_studio/handoff.rs` `handoff_studio_overlay_with_io` | `completed_branch` (:86), then `resolve_studio_handoff_with_io` (:109), then `completed_branch` again (:121), and **only then** `tenure.ok_or_else` (:127) |
+| `epoch_studio/overlay.rs` `save_studio_closing_overlay_with_io` | `completed_retry` (:107), then `exact_retry` (:129), and **only then** `tenure.ok_or_else` (:185). Its own comment at :145 says a later fault or Unknown tenure must not turn a saved exact request into a new append |
+| `epoch_studio/overlay.rs` `prepare_studio_closing_overlay` | `tenure.ok_or_else` at :53, immediately. This one really is pure authoring, and A-1 still holds for it: the store refuses, the wrapper does not |
+
+Hoisting the check would therefore have broken two accepted properties: idempotent acknowledgement
+surviving the loss of authoring authority, which is Agent 1's AG1-001 rule that acknowledgement
+needs no fresh basis or tenure; and restart recovery of an **already durable** `Prepared` handoff,
+which needs no authority to *start* a new one. The second is the worse of the two under L11, because
+an `Imported` single-owner server stays `Imported` indefinitely by design, so a crash leaving a
+Prepared overlay would have become permanently unresolvable.
+
+A-1 is stated as one rule rather than a per-wrapper "pure or mixed" classification on purpose: a
+classification invites the next person to judge a new wrapper, and judging it wrong is exactly this
+finding. Under A-1 there is nothing to judge, and `require_observed_owner_tenure()` is reserved for
+call sites that are a single authoring stage with no acknowledgement or recovery branch at all,
+which today means Agent 1's S1b basis mint and Agent 3's repair issuance.
+
+These line numbers are the committed ordering at this design's base. Agent 1 has in-flight changes
+to `epoch_studio/overlay.rs`, so A-1's precondition must be reverified at integration rather than
+assumed; N-T7b is what makes that reverification executable.
 
 `prepare_receipt_head_snapshot` switches to `authoring_owner_tenure_start`, which is the change that
 closes the safety hole at the sync layer: a device carrying a stale v1 start can no longer mint the
@@ -1231,8 +1274,9 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
 }
 ```
 
-- **V1.** `Unknown` **and `Imported`** are both fail-closed for minting a Closing overlay basis,
-  first local acceptance,
+- **V1.** `Unknown` **and `Imported`** are both fail-closed for **new authoring**, refused at the
+  stage that needs the tenure and not at the wrapper that reads it (A-1): minting a Closing overlay
+  basis, first local acceptance,
   handoff preparation, every signing turn, the commit, receipt issuance, rotation, Registry pointer
   publication, and Agent 3's live v2 repair issuance and application.
 - **V2.** A returning owner in a new tenure observes a strictly different value from its earlier
@@ -1254,6 +1298,12 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
   `require_observed_owner_tenure()` succeeds for `Known` alone. The two halves of that statement are
   separately anchored mutations, M22g and M24b, because an implementation can satisfy the sync-layer
   tests while still laundering the value at the app boundary.
+- **V8 (new, revision-5 finding 1).** Fail-closed means **new authoring is refused**, not that every
+  path is refused. Under `Imported` and under `Unknown`, all of these stay reachable and must keep
+  working: an exact accepted Save retry returning its saved entry, a completed-handoff
+  acknowledgement, and resolution of an already durable `Prepared` handoff. V1's refusals and V8's
+  reachability are complementary halves of the same contract, tested as N-T7 and N-T7b, so that
+  "fail closed" can never degrade into "refuse everything whenever the tenure is unusable".
 
 ### 9.5 Not proposed for implementation
 
@@ -1440,7 +1490,10 @@ retained memory rather than an assumed bound.
   installed base, and it is the price of not promoting unprovable continuity. **Decided as option
   (a) in 16.1: accepted with no operator-adoption override.** There is deliberately no technical
   escape: section 9.3 part 5 shows corroboration cannot help, since every pre-upgrade participant
-  holds the same stale value.
+  holds the same stale value. What such a server does **not** lose, by A-1 and V8, is
+  acknowledgement of work it already accepted and resolution of a handoff it had already prepared;
+  without that the indefinite `Imported` state would turn a crash during Prepared into permanent
+  data limbo, which is why N-T7b exists.
 - **L6.** A legacy-snapshot owner and an unobserved-gap owner remain Unknown and cannot rotate.
 - **L7.** The persisted unconfirmed base is the seed checkpoint, not the previewed tail.
 - **L8.** There is no import path for an export or an archive.
@@ -1522,6 +1575,7 @@ not see. Added, changed or corrected:
 | N-T6 | actor | Remove then rejoin in separate commits, the rejoining device becoming owner | The rejoining owner and every witness observe the same start; its receipts verify. |
 | N-T6b | actor | **Finding 7 discriminator.** A committer leaf identity change across a contiguous step, with four observers: the rejoining owner, a known-tenure witness, an **Unknown-tenure newcomer** that requests a fresh owner proof, and a restarted copy of the witness | With 9.3 part 3 the witness and the rejoining owner agree, so the newcomer's proof-derived selection agrees too, and the restarted witness agrees after `decode`. Separately assert that an ordinary committer self-update, which rotates the HPKE key but keeps the credential, does **not** reset the observed start. |
 | N-T7 | actor | **Corrected (revision-4 finding 1). The V1 authoring-refusal matrix, run for BOTH fail-closed values.** Two fixtures reaching the app layer: one with `Unknown`, and one built by migrating a genuine ambiguous v1 snapshot as in N-T6d so the value is a real `Imported(S)` rather than an injected one | For each fixture: `Server::observed_owner_tenure()` reports the expected variant, and for the migrated one it reports **`StudioOwnerTenure::Imported(S)`, not `Known(S)`**; `require_observed_owner_tenure()` refuses; and every V1 authority entry point refuses at its own check, each fixture passing the earlier checks first: Closing basis minting, first local acceptance, handoff preparation, a signing turn, the commit, receipt issuance, rotation, Registry pointer publication, and Agent 3's repair issuance and application. The `Imported` fixture additionally asserts that verification is **unaffected** in the same run, so the test cannot pass by making `Imported` behave as `Unknown` everywhere. |
+| N-T7b | actor | **New (revision-5 finding 1). The positive complement to N-T7.** Using the same genuinely migrated `Imported(S)` fixture, and repeated for `Unknown` | Each of these still works with no authoring tenure available: an exact accepted Save retry returns its saved entry with no new envelope, no new sequence and no generation increment; a completed-handoff request returns its terminal acknowledgement; and an already durable `Prepared` handoff runs its existing resolution path to Active, Complete or Hold according to the actual evidence. In the same run, a genuinely new Save and a fresh handoff preparation both still refuse. The `Prepared` case is the one that matters most under L11, because an `Imported` single-owner server never regains authoring, so a permanent hold here would be permanent data limbo. |
 | N-T6d | sync | **Revision-3 finding 1, the v1 migration.** Build old-format state with `start = Some(S)`, `S < epoch`; under the **old** observation rule apply the formerly invisible same-owner discontinuity and show `S` is preserved; serialize genuine v1 bytes; decode under the new implementation against the post-transition group | The result is **`Imported(S)`, not `Observed(S)`**: `verification_owner_tenure_start()` returns `Some(S)` so verification is unchanged and a mismatched proof is still refused, while `authoring_owner_tenure_start()` returns `None` and `prepare_receipt_head_snapshot` refuses. Save and reload the new snapshot and require it is still `Imported`. Separately: a v1 state with `start == Some(epoch)`, and the founding `epoch == 0, start == Some(0)`, both decode to `Observed`; a v1 state with no start decodes to `Unknown`; a `start > epoch` v1 state is still rejected. Finally, apply a genuine owner change and require the promotion to `Observed` at the new epoch. |
 | N-T6c | mls, actor | **SEC-PAIR-001 finding 4, adversarial.** Construct the forbidden same-commit remove-and-re-add of the designated committer, reusing the same signature key and credential bytes, **bypassing the local commit builder**, and deliver the staged commit to an uninvolved witness | The witness refuses it **before `merge_staged_commit`**, so its epoch and its observed tenure are unchanged and no member reaches the ambiguous position. Assert separately that the local builder refuses to construct it, that a remove-and-re-add of a **different** `DeviceId` is still accepted, and that a genuine rejoin in a **later** commit is still accepted and produces agreement. The invite ledger is not consulted by the witness in any of these. |
 
@@ -1552,6 +1606,7 @@ Changed, added or corrected:
 | M22g | **New (revision-4 finding 1).** The `ObservedOwnerTenure::Imported` arm of the app-level conversion in `Server::observed_owner_tenure`, mapped to `StudioOwnerTenure::Known(S)` | N-T7's migrated fixture | "an imported tenure crossed the app boundary as observed knowledge": the app reports `Known(S)` for a value the sync layer holds as `Imported(S)`. |
 | M24 | **Retained, scope narrowed.** V1's fail-closed `Unknown` in `require_observed_owner_tenure` (substitute the current group epoch) | N-T7's `Unknown` fixture | "an Unknown-tenure device authored, signed or issued". |
 | M24b | **New (revision-4 finding 1).** The `Imported` arm of `require_observed_owner_tenure`, returning `Ok(S)` | N-T7's migrated fixture | "an imported tenure became authoring evidence": a Closing basis is minted, or a receipt is issued, under a value with no leaf-continuity proof. M22g and M24b must be separately anchored, so that fixing one cannot mask the other. |
+| M24c | **New (revision-5 finding 1).** A-1 itself: hoist `require_observed_owner_tenure()` to the top of `save_studio_closing_overlay` and, separately, of `handoff_studio_overlay`, in place of passing the `Option` through | N-T7b | "acknowledgement or recovery was refused for want of authoring authority": the accepted-retry case loses its saved entry, and the `Prepared` case cannot resolve. Two mutations, one per wrapper, because the two failure modes differ and the handoff one is the permanent-limbo case. N-T7 must still pass under both mutants, which is what proves M24c is testing A-1 and not V1. |
 | M28 | The `DraftArchive` arm of the reference collection | N19 | "archived pixels became reclaimable after a preserving disposal". |
 | M26 | **Corrected fixture.** The `Unconfirmed`-forbids-`prepared` rule in `validate` | N23 | The fixture must be a record that passes **every other** structural guard, including provenance encoding, zero source identifiers, entry ordering and canonical re-encode, so the failure isolates this prohibition. |
 | M27 | 8.1 part 3's detached re-parse of the captured seed bytes | N25b | "a mutated captured seed became a durable base". |
@@ -1576,10 +1631,63 @@ Fill `[FULL_HEAD_SHA]` with the commit that adds this revision before sending. D
 placeholder.
 
 ```text
+Review type: design re-review after the revision-5 re-review. Boundary (b) PASSED at revision 4 and
+is not resubmitted; (a) and (c) had one Medium finding.
+Base: f2257b018d396a835529742c40d4b282bbc127d9. Head: [FULL_HEAD_SHA].
+Compare: https://github.com/Thalpy/Mewtual/compare/f2257b018d396a835529742c40d4b282bbc127d9...[FULL_HEAD_SHA]
+Scope/evidence: docs/GATE4-AGENT-2-DESIGN.md revision 6 and docs/GATE4-AGENT-2-STATUS.md.
+Design only: no production code, no test and no measurement exists. No Cargo command was run.
+Dependencies unchanged. Native Save stays unregistered; Agent 1's P5 is false.
+
+This revision is narrow. Please re-examine (a) and (c) and confirm (b) is undisturbed.
+
+You were right, and I verified the ordering you described at the committed base rather than taking
+it from the prose: handoff_studio_overlay_with_io runs completed_branch (:86), then
+resolve_studio_handoff_with_io (:109), then completed_branch again (:121), and only then
+tenure.ok_or_else (:127); save_studio_closing_overlay_with_io runs completed_retry (:107), then
+exact_retry (:129), and only then tenure.ok_or_else (:185), with its own comment at :145 saying a
+later fault or Unknown tenure must not turn a saved exact request into a new append. Only
+prepare_studio_closing_overlay requires immediately, at :53.
+
+The correction is invariant A-1, and I generalised it rather than adopting your per-wrapper table.
+An app wrapper reads authoring_owner_tenure_start() and passes the Option<u64> through unchanged;
+the store owns every refusal at the stage that needs it. I chose one rule over a "pure or mixed"
+classification because a classification invites the next person to judge a new wrapper, and judging
+it wrong is precisely this finding; under A-1 there is nothing to judge, and
+require_observed_owner_tenure() is reserved for call sites that are a single authoring stage with no
+acknowledgement or recovery branch, which today means Agent 1's S1b basis mint and Agent 3's repair
+issuance. Please say if you think the per-wrapper table is safer despite that, or if A-1 is too
+blunt for a wrapper that might later need an app-level refusal of its own.
+
+V1 now says "new authoring" explicitly, and V8 states the complementary reachability so that fail
+closed cannot degrade into refuse everything: under both Imported and Unknown, an exact accepted
+Save retry, a completed-handoff acknowledgement and resolution of an already durable Prepared
+handoff all stay reachable. N-T7b is the positive complement to N-T7 on the same migrated fixture,
+and M24c hoists require_observed_owner_tenure() to the top of each mixed wrapper, one mutation each,
+with N-T7 required to keep passing under both mutants so M24c is demonstrably testing A-1 and not
+V1. Attack whether N-T7b can pass for the wrong reason, in particular whether its Prepared case
+genuinely exercises resolve_studio_handoff_with_io rather than an earlier completed_branch
+short-circuit.
+
+One honesty note: the line numbers above are the committed ordering at this design's base, and
+Agent 1 has in-flight uncommitted changes to epoch_studio/overlay.rs. A-1's precondition must be
+reverified at integration rather than assumed, which is what N-T7b makes executable.
+
+Section 16 records no open questions and your 16.1 decision stands as (a).
+
+Return PASS for (a) and (c), or numbered findings with severity, file/line, trigger, impact,
+evidence and required correction. A PASS accepts design only: no implementation, no measurement and
+no native Save exposure is claimed, signed repair and combined runtime integration are separate, and
+full Gate 4 acceptance remains with Agent 4.
+```
+
+## 18b. Superseded revision-5 request (retained as the scope record)
+
+```text
 Review type: design re-review after the revision-4 re-review. Boundary (b) PASSED there and is not
 resubmitted for reconsideration; (a) and (c) had one Medium test and mutation gap.
-Base: 37fa87753d32a2c4f5d1172cc865910a93d90fa1. Head: [FULL_HEAD_SHA].
-Compare: https://github.com/Thalpy/Mewtual/compare/37fa87753d32a2c4f5d1172cc865910a93d90fa1...[FULL_HEAD_SHA]
+Base: 37fa87753d32a2c4f5d1172cc865910a93d90fa1. Head: f2257b018d396a835529742c40d4b282bbc127d9.
+Compare: https://github.com/Thalpy/Mewtual/compare/37fa87753d32a2c4f5d1172cc865910a93d90fa1...f2257b018d396a835529742c40d4b282bbc127d9
 Scope/evidence: docs/GATE4-AGENT-2-DESIGN.md revision 5 and docs/GATE4-AGENT-2-STATUS.md.
 Design only: no production code, no test and no measurement exists. No Cargo command was run.
 Dependencies unchanged from revision 4. Native Save stays unregistered; Agent 1's P5 is false.
@@ -1626,7 +1734,7 @@ no native Save exposure is claimed, signed repair and combined runtime integrati
 full Gate 4 acceptance remains with Agent 4.
 ```
 
-## 18b. Superseded revision-4 request (retained as the scope record)
+## 18c. Superseded revision-4 request (retained as the scope record)
 
 ```text
 Review type: design re-review after the revision-3 re-review (CHANGES REQUIRED on all three
@@ -1691,7 +1799,7 @@ native Save exposure is claimed, signed repair and combined runtime integration 
 full Gate 4 acceptance remains with Agent 4.
 ```
 
-## 18c. Superseded revision-3 request (retained as the scope record)
+## 18d. Superseded revision-3 request (retained as the scope record)
 
 ```text
 Review type: design re-review after SEC-PAIR-001 (CHANGES REQUIRED on all three boundaries).
@@ -1773,7 +1881,7 @@ native Save exposure is claimed, signed repair and combined runtime integration 
 full Gate 4 acceptance remains with Agent 4.
 ```
 
-## 18d. Superseded revision-2 request (retained as the scope record)
+## 18e. Superseded revision-2 request (retained as the scope record)
 
 ```text
 Review type: design re-review after CHANGES REQUIRED on all three boundaries.

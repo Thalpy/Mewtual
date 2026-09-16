@@ -8,7 +8,7 @@ Review preamble: [preamble 2](GATE4-REVIEW-PREAMBLES.md#review-2-manualprovision
 
 | Item | State |
 |---|---|
-| Design revision | 5, **awaiting re-review on (a) and (c); boundary (b) has PASSED at revision 4** |
+| Design revision | 6, **awaiting re-review on (a) and (c); boundary (b) has PASSED at revision 4** |
 | Original design base | `1bcb1bca204d721b848b17c0835faf931ae930e3` |
 | Revision 1 head, reviewed | `a901f6b0f64df2b4ea9cc0221b64ac98276f582d` |
 | Revision 2 head, reviewed as SEC-PAIR-001 | `21ca8fa93c07b8bb65a00bc0bbc555518f8a7132` |
@@ -16,7 +16,9 @@ Review preamble: [preamble 2](GATE4-REVIEW-PREAMBLES.md#review-2-manualprovision
 | Revision 4 base | `909720739b6c0a455d37761e8149d7eec21cb6f4` |
 | Revision 4 head, reviewed | `37fa87753d32a2c4f5d1172cc865910a93d90fa1`. **Boundary (b) PASS.** |
 | Revision 5 base | `37fa87753d32a2c4f5d1172cc865910a93d90fa1` |
-| Revision 5 head SHA | `f2257b0`. Any later SHA recording this row is documentation-only and adds no design content. |
+| Revision 5 head, reviewed | `f2257b018d396a835529742c40d4b282bbc127d9` |
+| Revision 6 base | `f2257b018d396a835529742c40d4b282bbc127d9` |
+| Revision 6 head SHA | _pending: the commit that adds revision 6; fill before sending the review request_ |
 | Working checkout | main repository tree. Revision 2 was committed on branch `gate4-agent1-runtime`, which a parallel Agent 1 session had checked out; the user asked for no branch change. The design content is branch-independent, but Agent 4 should expect to move these two documents when the branches are integrated. No separate worktree yet; one is taken before any production edit. |
 | Production code | **None written.** |
 | Tests added | **None.** |
@@ -49,7 +51,14 @@ three boundaries, so the design itself is not yet accepted.
 | 2026-09-15 | Design revision 2 (`21ca8fa`) | **CHANGES REQUIRED on all three boundaries**, as SEC-PAIR-001, five findings: 3 High, 2 Medium. Revision-1 findings 1, 2, 4, 5, 6 and 8 closed; 9 closed at the API level with a test-layer correction; 3 and 7 open in narrower forms. Reviewer ran no Cargo commands. |
 | 2026-09-16 | Design revision 3 (`9097207`) | **CHANGES REQUIRED on all three boundaries**, two findings: 1 High, 1 Medium. All five SEC-PAIR-001 corrections accepted. Reviewer ran no Cargo commands. |
 | 2026-09-16 | Design revision 4 (`37fa877`) | **(b) PASS.** (a) and (c) CHANGES REQUIRED for one Medium test and mutation gap. The revision-3 High tenure finding is closed at the design level. Reviewer ran no Cargo commands. |
-| 2026-09-16 | Design revision 5 | Request prepared; head SHA pending. Re-review requested for (a) and (c) only. |
+| 2026-09-16 | Design revision 5 (`f2257b0`) | **(b) PASS remains.** (a) and (c) CHANGES REQUIRED for one new Medium finding introduced by revision 5's own accessor-removal hardening. The revision-4 finding is closed. Reviewer ran no Cargo commands. |
+| 2026-09-16 | Design revision 6 | Request prepared; head SHA pending. Re-review requested for (a) and (c) only. |
+
+### Revision-5 re-review findings and their disposition
+
+| # | Sev | Finding | Disposition |
+|---|---|---|---|
+| 1 | Med | The accessor-removal table moved tenure refusal ahead of legitimate retry and recovery paths: `save_studio_closing_overlay` and `handoff_studio_overlay` were classified as pure authoring, although their accepted store ordering acknowledges and recovers before requiring a tenure | **Corrected as invariant A-1**, generalised from the reviewer's per-wrapper table: an app wrapper reads `authoring_owner_tenure_start()` and passes the `Option<u64>` through; the store owns every refusal at the stage that needs it. The committed orderings are cited by line and verified, not taken from prose. V1 refined to "new authoring", V8 states the complementary reachability, N-T7b and M24c make it executable. |
 
 ### Revision-4 re-review findings and their disposition
 
@@ -140,7 +149,13 @@ Full signatures are in design section 5. Changes against revision 1 are marked.
   signing, repair-issuance, rotation and publication decision. A reused key, a Welcome, a hint, a
   candidate receipt's claim, a fresh owner proof's claim and the current group epoch are each
   insufficient to make it `Known`.
-- **I-M (new, revision-4 finding 1).** The app-level tenure conversion is lossy in one direction
+- **I-N (new, revision-5 finding 1).** Fail-closed means new authoring is refused, not that every
+  path is refused. An app wrapper reads the authoring accessor and passes the `Option` through; the
+  store refuses at the stage that needs a tenure. Under `Imported` and `Unknown`, an exact accepted
+  Save retry, a completed-handoff acknowledgement and resolution of an already durable `Prepared`
+  handoff all stay reachable. Without this, an indefinitely `Imported` single-owner server would
+  turn a crash during Prepared into permanent data limbo.
+- **I-M (revision-4 finding 1).** The app-level tenure conversion is lossy in one direction
   only: `Imported` never becomes `Known` at any layer, and `require_observed_owner_tenure()`
   succeeds for `Known` alone. The conversion and the accessor are separately anchored mutations,
   because the sync-layer tests cannot see a value laundered one layer up.
