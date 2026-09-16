@@ -1662,12 +1662,35 @@ sequence.
 
 ### 6.3 Current owner and issuer tenure
 
-`expected_issuer_tenure_start` comes from exactly one place,
-`ChannelSync::observed_owner_tenure_start()` (`owner_tenure.rs:151`), read inside the same
-synchronous custody visit that uses it. `None` is a hold, never a substitution. The repair path
-never uses `group.epoch()`, a receipt's carried `tenure_start_group_epoch`, or the repair's own
-claimed field as its own evidence. Issuance additionally requires a `ServerOwnerSnapshot`, rechecked
-by `with_durable_owner_snapshot` at the moment of use.
+**Which accessor, and for what** (AG3-DES-040, R32). Agent 2's accepted design removes
+`observed_owner_tenure_start` rather than repointing it, so every call site must choose explicitly
+between `verification_owner_tenure_start()` and `authoring_owner_tenure_start()` over an
+`Observed | Imported(u64) | Unknown` state. Revisions 1 to 9 of this design were written against the
+single accessor, which is superseded. The mapping for this scope:
+
+| Use | Accessor | `Imported(S)` | `Unknown` |
+|---|---|---|---|
+| issuing a repair (B1) and every mutation or drain it authorizes | **authoring** | hold | hold |
+| applying a repair to a source (B2 and the replacement) | **authoring** | hold | hold |
+| deriving `reserved_is_live` for the drain decision | **authoring** | hold | hold |
+| deciding whether a repair or receipt is refused | verification may add refusals | may refuse | may refuse |
+| suppressing authoritative proof | fail closed when unclassifiable | suppress | suppress |
+
+`None` from the authoring accessor is a **hold**, never a `false` that silently permits something.
+That distinction is the whole point of `Imported`: it is deliberately fail-closed for this scope, so
+treating its absence as "not live" would demote a real live conflict and release proof suppression
+using verification-only evidence. The verification accessor may only ever add refusals; it can never
+authorize a live drain, a seal or an issuance.
+
+**Tenure identity, not start epoch.** A pair's tenure is compared by `tenure_id`, derived through
+the existing `tenure_id(server_id, owner_public_key, group_epoch)` (`epoch.rs:178`), not by
+comparing a bare `u64` start against a pair's field. The expected current id is derived from the
+authoring start, the current designated committer's signature key and the group id, all read in the
+same custody visit.
+
+The repair path never uses `group.epoch()`, a receipt's carried `tenure_start_group_epoch`, or the
+repair's own claimed field as its own evidence. Issuance additionally requires a
+`ServerOwnerSnapshot`, rechecked by `with_durable_owner_snapshot` at the moment of use.
 
 Two identities, never conflated: `repair.tenure_id` is the **fault tenure**, matched against the
 receipts; `repair.issuer_tenure_start_group_epoch` is the **issuer tenure start**, matched against
@@ -2157,12 +2180,17 @@ design adds only the variants named in 5.7 and changes no existing one.
 
 ### 13.2 Agent 2: live tenure and stale bases
 
-- **T1** One accessor returning `Option<u64>` for the current owner tenure start, no fallback.
-- **T2** `None` stays a hold; no substitution from the group epoch, a receipt's carried field or a
-  repair's claimed field.
-- **T3** A new authenticated tenure protocol must expose the same `Option<u64>` shape plus a
-  freshness binding rechecked at **every** custody visit: verification, application, serving and
-  report admission. No tenure value is cached across an await or a store borrow.
+- **T1** *(restated for the accepted split, AG3-DES-040.)* The seam is
+  `verification_owner_tenure_start()` and `authoring_owner_tenure_start()` over
+  `Observed | Imported(u64) | Unknown`. This scope binds every mutation, drain and issuance to the
+  **authoring** accessor and never to the verification one; the mapping is the table in 6.3.
+- **T2** `None` from the authoring accessor, including `Imported`, stays a **hold**. It is never a
+  `false` that permits a demotion, a drain or a release of proof suppression, and there is no
+  substitution from the group epoch, a receipt's carried field or a repair's claimed field.
+- **T3** Any further tenure work must keep both accessors' shapes and a freshness binding rechecked
+  at **every** custody visit: verification, application, serving, drain and report admission. No
+  tenure value is cached across an await or a store borrow, and identity is compared as a derived
+  `tenure_id`, never as a bare start epoch.
 - **T4** Fault tenure and issuer tenure are distinct (6.3) and must not be collapsed.
 - **T5** The preview path must not render or act on a receipt the local book screens as a repaired
   loser.
