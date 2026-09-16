@@ -11,11 +11,11 @@ use crate::LocalIntent;
 /// and the body's own length prefix, with this encoder's framing on each byte string.
 /// `draft_archive_constants_cover_the_real_encoder` measures the true value and fails if it ever
 /// exceeds this; the margin is headroom for a future field, not a guess about the current one.
-const ENTRY_OVERHEAD_BYTES: usize = 160;
+pub(in crate::studio) const ENTRY_OVERHEAD_BYTES: usize = 160;
 /// Version, provenance and replayable bytes, the document at its largest admissible shape, the
 /// target, four 32-byte digests, the generation, the optional unconfirmed triple, and framing.
 /// Measured against the real encoder by the same test.
-const HEADER_BYTES: usize = 2048;
+pub(in crate::studio) const HEADER_BYTES: usize = 2048;
 
 /// Bound on the canonical payload, from the field maxima rather than from the intent record's
 /// cap, which the archive is not obliged to obey: it is its own record kind. The seed and

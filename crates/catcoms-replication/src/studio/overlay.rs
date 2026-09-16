@@ -10,7 +10,7 @@ pub const MAX_STUDIO_OVERLAY_OPS: usize = 256;
 const MAX_METADATA: usize = 64 * 1024;
 const MAX_EXTENSION: usize = MAX_CHECKPOINT_BYTES + MAX_METADATA;
 
-mod archive;
+pub(in crate::studio) mod archive;
 mod handoff;
 pub use archive::{StudioDraftArchive, StudioOverlayProvenance, MAX_STUDIO_DRAFT_ARCHIVE_BYTES};
 pub use handoff::{

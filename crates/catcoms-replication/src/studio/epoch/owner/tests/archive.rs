@@ -2,8 +2,13 @@
 //! synthetic basis would need a test-only constructor on `StudioClosingOverlayBasis`, which is
 //! exactly the back door the overlay design forbids, so these reuse the settlement fixture.
 use super::*;
-use crate::studio::{StudioDraftArchive, StudioOverlayProvenance, MAX_STUDIO_DRAFT_ARCHIVE_BYTES};
-use crate::IntentLedger;
+use crate::epoch::{MAX_INTENT_BYTES_PER_DOCUMENT, MAX_RECEIPT_BYTES};
+use crate::studio::overlay::archive::{ENTRY_OVERHEAD_BYTES, HEADER_BYTES};
+use crate::studio::{
+    StudioDraftArchive, StudioOverlayProvenance, MAX_STUDIO_DRAFT_ARCHIVE_BYTES,
+    MAX_STUDIO_OVERLAY_OPS,
+};
+use crate::{IntentLedger, MAX_CHECKPOINT_BYTES};
 
 /// A real accepted branch: real Closing basis, real ledger, real typed acceptance. Returns the
 /// branch, its ledger, and the authored (body, timestamp) pairs in acceptance order.
@@ -280,11 +285,6 @@ fn draft_archive_round_trips_unconfirmed_provenance() {
     );
 }
 
-// The codec's constants, mirrored so a change on either side has to be made deliberately in
-// both places rather than drifting silently past the proof below.
-const ENTRY_OVERHEAD_BYTES_FOR_TEST: usize = 160;
-const HEADER_BYTES_FOR_TEST: usize = 2048;
-
 #[test]
 fn draft_archive_constants_cover_the_real_encoder() {
     // ENTRY_OVERHEAD_BYTES and HEADER_BYTES are padding constants, not schema-derived
@@ -325,10 +325,11 @@ fn draft_archive_constants_cover_the_real_encoder() {
         .unwrap();
     let (one, two) = (encode(&single), encode(overlay));
 
-    // One entry's complete cost, then its framing alone.
+    // One entry's complete cost, then its framing alone. Compared against the PRODUCTION
+    // constant, not a copy of it: a mirrored value only ever proves the mirror is generous.
     let entry_framing = (two - one).saturating_sub(body);
     assert!(
-        entry_framing <= ENTRY_OVERHEAD_BYTES_FOR_TEST,
+        entry_framing <= ENTRY_OVERHEAD_BYTES,
         "measured per-entry framing {entry_framing} exceeds ENTRY_OVERHEAD_BYTES"
     );
 
@@ -348,19 +349,35 @@ fn draft_archive_constants_cover_the_real_encoder() {
     let at_maximum =
         header + (max_server - document.server_id.len()) + (max_key - document.logical_key.len());
     assert!(
-        at_maximum <= HEADER_BYTES_FOR_TEST,
+        at_maximum <= HEADER_BYTES,
         "header at the maximal document shape is {at_maximum}, over HEADER_BYTES"
+    );
+
+    // The two per-term assertions above are what catch a constant being narrowed. This one is
+    // the property that actually matters, and it is deliberately not a substitute for them:
+    // slack in the header term would otherwise mask a deficit in the entry term, so an
+    // aggregate-only check can survive exactly the mutation the per-term checks exist to kill.
+    let required = at_maximum
+        + MAX_RECEIPT_BYTES
+        + MAX_CHECKPOINT_BYTES
+        + MAX_INTENT_BYTES_PER_DOCUMENT
+        + MAX_STUDIO_OVERLAY_OPS * entry_framing;
+    assert!(
+        MAX_STUDIO_DRAFT_ARCHIVE_BYTES >= required,
+        "production bound {MAX_STUDIO_DRAFT_ARCHIVE_BYTES} is below the measured legal \
+         maximum {required}"
     );
 }
 
 #[test]
-fn draft_archive_rejects_an_entry_id_that_does_not_bind_its_body() {
-    // An entry's id binds its author and nonce. If the codec accepted an id that disagreed
-    // with the body beside it, an archive could name accepted work it does not actually
-    // contain, and a preserving disposal would destroy the real operation while claiming to
-    // have kept it. Swap two ids so each entry names the other's operation: every other field
-    // stays canonical, the count and sequences are untouched, and the manifest still looks
-    // internally ordered, so only the id-to-body check can reject this.
+fn draft_archive_rejects_an_entry_id_that_does_not_match_its_operation_identity() {
+    // An entry's id binds the operation's IDENTITY: its logical key, author and nonce. It does
+    // not bind the body, which is what the envelope covers and what
+    // `draft_archive_rejects_a_changed_body_under_an_unchanged_id` exercises. This test is
+    // about the other half: an entry that names a different accepted operation than the one it
+    // carries. Swap two ids so each entry claims the other's identity; every other field stays
+    // canonical, the count and sequences are untouched, and the manifest still looks internally
+    // ordered, so only the id comparison can reject it.
     let mut f = Fixture::new(false);
     let (metadata, ledger, ordered, _basis) = branch(&mut f, 2);
     let bytes = archive(&metadata, &ledger, true).encode().unwrap();
@@ -382,7 +399,7 @@ fn draft_archive_rejects_an_entry_id_that_does_not_bind_its_body() {
 
     assert!(
         StudioDraftArchive::decode(&swapped).is_err(),
-        "an entry id that does not derive from its own author and body must reject"
+        "an entry id that does not derive from its own operation identity must reject"
     );
 }
 
