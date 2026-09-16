@@ -251,6 +251,46 @@ nothing else; source restored byte for byte and all 6 pass again. Without that c
 could name accepted work it does not contain, and a preserving disposal would destroy the real
 operation while claiming to have kept it.
 
+### Slice 1 review and corrections
+
+Adversarial review of slice 1 returned **CHANGES REQUIRED** with three Medium findings and one
+Low, no Critical or High. All four are corrected; none required an architectural change.
+
+| # | Finding | Correction |
+|---|---|---|
+| 1 | The non-replayable regression was **vacuous**. Every branch built through `append` is replayable by construction, because `append` calls `read` before accepting, so passing `replayable: false` for one of those proved nothing: an implementation that called `read` inside `from_branch` would have passed it. | The fixture is now C1-TEST-002's genuinely structural-but-not-replayable branch. **Mutation: adding `overlay.read` to `from_branch` fails that test at its intended assertion and nothing else**; restored byte for byte, reverified. |
+| 2 | The entry-id check **did not prove what its comment claimed**. `DomainOp::id` hashes the logical key, author and nonce and **not the body**, so a different body under the same nonce keeps the same id; the swapped-id test only ever caught a changed identity. | The archive now **carries the envelope**, which does hash the body and is what the live branch compares in `checked_entries`, so a decoded archive stands on its own rather than on the provenance of whatever built it. A new test alters one character of a title in place, leaving every length, nonce and id untouched. **Mutation: removing the envelope comparison fails exactly that test while the swapped-id test still passes**, which is how the two are shown to cover different properties. `validate` also restores the author, doc-type and logical-key invariants. |
+| 3 | The bound constants were **padding described as derived**. | Still padding, no longer unproven: a test differences two real encodings to recover the per-entry framing and fixed header, **proves the document maxima rather than assuming them**, extrapolates every variable field to its maximum and requires the result to fit. A future field, wider framing or larger maximum fails there instead of silently narrowing the payload bound. The envelope pushed the per-entry cost to exactly 128, so the constant moved to 160. |
+| Low | `Unconfirmed` provenance was the untested wire branch, and it is the one the preview path will use. | Round-trip added, asserting the provenance is in the bytes and not merely in the returned value. |
+
+Evidence after correction: `cargo test -j 1 -p catcoms-replication`, 217 + 14 + 25 + 8 passed,
+0 failed, 0 ignored. Strict clippy and fmt clean, **scoped to this package** rather than the
+workspace.
+
+**Accepted sequencing constraint from that review, carried forward:** do not narrow Agent 1's
+fail-closed `DraftArchive` reference arm until the real PIX-bearing operation-CID test and M28
+both pass. That is I-5's precondition and it now has an external reviewer holding it too.
+
+### Commit provenance on the shared branch: a recorded hazard
+
+Slice 1 was committed locally as `f559889`. **That SHA does not exist on the remote, and no
+longer exists in local history either.** A parallel session rebased the shared branch, and the
+archive files were re-committed inside `0467e45`, which carries **Agent 1's** commit message and
+also contains Agent 1 app changes. The file content survived intact, verified by diffing the
+working tree against the remote, so nothing was lost; the attribution and the message were.
+
+The effective slice-1 source boundary is therefore `3b6a4b4` to `c3a702a`, **contaminated by
+concurrent Agent 1 work**. Shared history is not being rewritten to tidy this.
+
+Consequence, adopted as a rule for the rest of this scope: a local "tree clean, only my files"
+report is **not** sufficient evidence that a slice landed as its own commit. Every slice must be
+followed by checking the **exact remote SHA and its file list**, and any review request must
+name the boundary that actually reached the remote rather than the local commit. Agents on this
+branch are committing one another's staged and uncommitted work; the remote history proves it.
+
+Related, and smaller: `cargo fmt --all` on this shared checkout spans other agents' uncommitted
+files. Formatting is now scoped with `-p`.
+
 ### Not yet built
 
 The app-side archive record writer and reader, the reference collector that narrows Agent 1's
