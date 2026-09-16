@@ -235,17 +235,26 @@ executed test count, the ignored cases, the run URL and the actual checkout SHA.
 
 The design is accepted; implementation has not started. Before it does:
 
-1. **`EpochRecordKind::DraftArchive` must land first, as an isolated Agent 4 integration commit**
-   (design 16.2, the reviewer's answer). It adds a sixth variant to a closed shared enum and touches
-   every `match` over it, including files Agents 1 and 3 are editing now. Agents 1, 2 and 3 rebase
-   onto that seam rather than each adding the variant.
-2. **A-1's precondition must be reverified, not assumed.** Its ordering citations are the committed
-   state at `f2257b0`, and Agent 1 has in-flight changes to `epoch_studio/overlay.rs`. N-T7b is what
-   makes that check executable.
-3. **Branch placement needs a decision.** Revisions 1 to 7 were committed on `gate4-agent1-runtime`,
-   which a parallel Agent 1 session had checked out. The documents are branch-independent; Agent 4
-   should expect to relocate them at integration.
-4. The shared central edits listed above stay coordinated with Agent 4: the control and dispatch
+1. **`EpochRecordKind::DraftArchive` must land first, as an isolated seam commit.** Requested from
+   Agent 1 on 2026-09-16, accepted by Agent 1, and **it will land without a writer and therefore
+   without `epoch_mutation_guard`**, which does not exist yet: I-4 is last in Agent 1's sequence.
+   Agent 2 declined to have I-4 pulled forward, because the seam contains nothing to guard.
+   The obligation is instead carried in I-4's participant list, see prerequisite 2. Agent 1 informs
+   Agent 3 once landed.
+2. **The archive writers must appear in I-4's participant list.** `write_studio_draft_archive_with_io`
+   and `release_studio_draft_archive_with_io` join the recovery, owner, Registry, Studio source,
+   intent and cleanup writers that rotate nothing today. Until I-4 lands, the archive writers are in
+   the same position as every other five-family writer. This is a tracked obligation on both sides,
+   not a commit-message note.
+3. **A-1's precondition: REVERIFIED by Agent 1, and stronger than requested.** Save still
+   acknowledges and exact-retries before any tenure, and handoff's Prepared resolution cannot
+   require one at all, because `resolve_studio_handoff_with_io` takes no tenure parameter. The L11
+   limbo case cannot arise from statement-level drift; only from adding an argument. N-T7b is
+   retained as defence in depth and as the reachability proof. The Save path has no equivalent
+   structural guarantee and remains guarded by ordering plus N-T7b.
+4. **Branch placement: settled.** Everything stays on `gate4-agent1-runtime` for now, by the user's
+   decision. Agent 4 may still relocate these documents at integration.
+5. The shared central edits listed above stay coordinated with Agent 4: the control and dispatch
    enums, `StudioSettlementState`, the inventory family and the `catcoms-mls` receive rule.
 
 ## Open questions

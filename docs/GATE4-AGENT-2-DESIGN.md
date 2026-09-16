@@ -856,12 +856,25 @@ provenance and coordinated inventory and writer design.
   the coordinated inventory work 16.1 demands and it must be agreed with Agent 1 (C-1, C-3, I-4)
   and Agent 3.
 - **Ordering.** The archive is written and flushed as its own accounted replacement, taking Agent
-  1's `epoch_mutation_guard`, **before** the disposal transaction. A crash between them leaves the
+  1's `epoch_mutation_guard` once that exists (see the sequencing note below), **before** the
+  disposal transaction. A crash between them leaves the
   archive durable and the branch intact; the exact retry re-verifies D4 and proceeds. A crash during
   the archive write removes nothing.
 - **Authority.** The archive is never `StudioRecovery`, never replay evidence, never a source,
   never importable, and never occupies a recovery slot or an eviction deadline. It is readable and
   exportable, and it is destroyed only by the explicit release action.
+
+**Sequencing against I-4.** Agent 1's `epoch_mutation_guard` does not exist yet; I-4 is last in its
+sequence. The seam commit that adds the `DraftArchive` family deliberately contains **no writer**,
+so there is nothing for it to guard and the seam is landable without I-4. Pulling I-4 forward for
+this would reorder Agent 1's remaining work for no present benefit and is not requested. The
+obligation instead attaches where it will be acted on: **`write_studio_draft_archive_with_io` and
+`release_studio_draft_archive_with_io` are enumerated in I-4's participant list**, alongside the
+recovery, owner, Registry, Studio source, intent and cleanup writers that also rotate nothing today.
+Until I-4 lands, the archive writers are in exactly the same position as every other five-family
+writer, which is the position I-4 exists to fix. A commit-message note alone would not be enough,
+because nobody greps commit messages; the participant list is the checklist the sweep actually
+follows.
 
 ### 6.6 Request identity and rollover (finding 3)
 
@@ -1244,9 +1257,19 @@ ordering is:
 
 | Function | Order |
 |---|---|
-| `epoch_studio/handoff.rs` `handoff_studio_overlay_with_io` | `completed_branch` (:86), then `resolve_studio_handoff_with_io` (:109), then `completed_branch` again (:121), and **only then** `tenure.ok_or_else` (:127) |
-| `epoch_studio/overlay.rs` `save_studio_closing_overlay_with_io` | `completed_retry` (:107), then `exact_retry` (:129), and **only then** `tenure.ok_or_else` (:185). Its own comment at :145 says a later fault or Unknown tenure must not turn a saved exact request into a new append |
+| `epoch_studio/handoff.rs` `handoff_studio_overlay_with_io` | `completed_branch` (:86), then `resolve_studio_handoff_with_io` (:109), then `completed_branch` again (:121), and **only then** `tenure.ok_or_else` (:128) |
+| `epoch_studio/overlay.rs` `save_studio_closing_overlay_with_io` | `completed_retry` (:172), then `exact_retry` (:194) with the exact path returning at :212, then media admission (:248), and **only then** `tenure.ok_or_else` (:261). Its own comment says a later fault or Unknown tenure must not turn a saved exact request into a new append |
 | `epoch_studio/overlay.rs` `prepare_studio_closing_overlay` | `tenure.ok_or_else` at :53, immediately. This one really is pure authoring, and A-1 still holds for it: the store refuses, the wrapper does not |
+
+**A-1's precondition is structural, not merely ordering.** Agent 1's reverification against its
+in-flight tree established something stronger than the ordering this design asked it to confirm:
+`resolve_studio_handoff_with_io` **takes no tenure parameter at all**. The Prepared-resolution path
+therefore cannot acquire a tenure requirement by someone moving a statement; it would take someone
+adding an argument to a signature that has no use for one. The L11 limbo case that A-1 exists to
+prevent cannot arise from ordinary drift. N-T7b is retained anyway, as defence in depth and as the
+end-to-end reachability proof, but it is no longer the only thing standing between a refactor and
+permanent data limbo. The Save path has no equivalent structural guarantee, because its tenure is a
+parameter, so there the ordering and N-T7b remain the guard.
 
 Hoisting the check would therefore have broken two accepted properties: idempotent acknowledgement
 surviving the loss of authoring authority, which is Agent 1's AG1-001 rule that acknowledgement
@@ -1261,9 +1284,9 @@ finding. Under A-1 there is nothing to judge, and `require_observed_owner_tenure
 call sites that are a single authoring stage with no acknowledgement or recovery branch at all,
 which today means Agent 1's S1b basis mint and Agent 3's repair issuance.
 
-These line numbers are the committed ordering at this design's base. Agent 1 has in-flight changes
-to `epoch_studio/overlay.rs`, so A-1's precondition must be reverified at integration rather than
-assumed; N-T7b is what makes that reverification executable.
+The line numbers above are Agent 1's reverified positions in its in-flight tree, not this design's
+base; they will move again and are recorded for locating the checks, not as an invariant. What is
+invariant is the order and, for handoff, the signature.
 
 `prepare_receipt_head_snapshot` switches to `authoring_owner_tenure_start`, which is the change that
 closes the safety hole at the sync layer: a device carrying a stale v1 start can no longer mint the
