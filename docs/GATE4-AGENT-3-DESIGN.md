@@ -1108,11 +1108,10 @@ pub struct EpochFaultRecord {
     /// repair. Whether it is LIVE is derived from freshly observed tenure, never stored
     /// (AG3-DES-037), so an owner change demotes it without a write.
     reserved: Option<FaultPair>,
-    /// Evidence-free durable hold, set when a live conflict is reported and no slot can take
-    /// its receipts (AG3-DES-041). It records the authoring tenure start it was observed under,
-    /// so it is live on exactly the same derived rule as `reserved`, and it suppresses proof
-    /// without claiming to know which receipts are in dispute.
-    live_overflow: Option<u64>,
+    /// Durable hold for conflicts known but not storable (AG3-DES-041). It keeps no receipts,
+    /// only enough identity to clear precisely (AG3-DES-048) and to stop being live when the
+    /// tenure it belongs to stops being current (AG3-DES-049).
+    overflow: Option<OverflowHold>,
     /// Signed only after an explicit current-owner decision. It may name the source's own
     /// fault pair, the reserved pair, or one of `pairs`.
     repair: Option<ReceiptRepair>,
@@ -1134,7 +1133,11 @@ prose had already moved to two pairs):
 ```text
 3 | u8 external_count (0..=2) | external_count * pair
   | u8 has_reserved (0 or 1) | reserved_pair?
+  | u8 has_overflow (0 or 1) | overflow?
   | u8 repair_kind | repair_binding | repair? | u8 applied
+
+overflow        = tenure_id[32] | u8 fingerprint_count (0..=4) | count * fingerprint[32] | u8 unknown
+fingerprint     = H("catcoms-fault-pair:v1", lower receipt hash, higher receipt hash)
 
 pair            = two canonical Receipts, ascending by hash
 pair id         = the smaller receipt hash
@@ -1186,13 +1189,52 @@ adjacent rule that historical externals do not suppress the current owner's proo
 stores only the pair, and
 
 ```text
-reserved_is_live(record, observed_tenure) =
-    record.reserved.is_some_and(|p| p.tenure_id == observed_tenure_id)
+reserved_is_live(record, expected_tenure_id)      // defined precisely below
 ```
 
 is recomputed from **freshly observed** tenure at every custody visit, consistent with T2's rule
 that tenure is never cached. Promotion is not possible in the other direction, since an old tenure
 cannot become current again with the same id.
+
+**One derived identity for both slots** (AG3-DES-049). Revision 10 left stale pseudocode naming an
+`observed_tenure_id` the accepted seam does not expose, and stored the overflow hold as a bare
+`u64` start, which cannot distinguish two tenures that share a start epoch and differ in owner key,
+exactly the confusion N42 exists to rule out. Both predicates now compare against one value derived
+in the same custody visit, from the **authoring** accessor per 6.3:
+
+```text
+expected = tenure_id(group.group_id(), current_committer_signature_key, authoring_start)
+
+reserved_is_live(record, expected) = record.reserved.is_some_and(|p| p.tenure_id == expected)
+overflow_is_live(record, expected) = record.overflow.as_ref().is_some_and(|o|
+        o.tenure_id == expected && (o.unknown || !o.fingerprints.is_empty()))
+```
+
+`authoring_start` being `None`, including `Imported`, is a hold: neither predicate is evaluated to
+`false` on missing evidence, and 6.6's proof gate refuses outright.
+
+**The overflow hold keeps identity, not receipts** (AG3-DES-048). Revision 10 collapsed every
+unstorable conflict into a single tenure value, so two distinct reports became indistinguishable and
+clearing on one reporter's successful retry silently forgot the other, which is the safety half of
+AG3-DES-032 returning. The hold therefore carries:
+
+```rust
+struct OverflowHold {
+    tenure_id: Hash32,           // the tenure this knowledge belongs to
+    fingerprints: Vec<Hash32>,   // 0..=4 distinct pairs, hashed, no receipts retained
+    unknown: bool,               // a fifth distinct pair arrived; sticky within this tenure
+}
+```
+
+A fingerprint is removed **individually**, and only when that exact pair becomes stored in `pairs`
+or `reserved`, or is resolved by a repair. `unknown` is never cleared by a retry: it is cleared only
+by the whole hold ceasing to be live when its tenure stops being current. That is deliberately
+pessimistic in the rare five-distinct-conflicts case and safe, which is the right direction for a
+fact the owner has already authenticated. It stores no receipts, so it can only refuse, never
+authorize.
+
+The hold adds about 170 bytes at maximum and no receipt-sized values, so the nine-receipt bound
+below is unchanged.
 
 **Demotion migrates; it does not squat** (AG3-DES-041). Revision 9 left a demoted pair in the slot
 and called that free, which closes one owner change and reopens AG3-DES-032 on the next: under a
