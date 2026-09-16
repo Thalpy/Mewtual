@@ -29,6 +29,7 @@ use zeroize::{Zeroize, Zeroizing};
 use crate::AppError;
 
 mod creative_references;
+mod epoch_draft_archive;
 mod epoch_intents;
 mod epoch_owner;
 mod epoch_recovery;

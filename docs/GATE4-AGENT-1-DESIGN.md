@@ -791,6 +791,14 @@ writer and sealing, rotation and adoption writers, receive, `epoch_recovery/clea
 steps, the injected-failure writer seams used by tests, and any raw or tooling adapter. N17 and M20
 keep per-family evidence for exactly this reason.
 
+Agent 2's manual-lifecycle archive writers join this list on the same terms:
+`write_studio_draft_archive_with_io` and `release_studio_draft_archive_with_io`. They write and
+unlink `EpochRecordKind::DraftArchive` records, which live in the Studio family's directory and are
+therefore inventoried like every other five-family file. The enum discriminant lands ahead of I-4
+as an isolated seam commit with no guard and no writer, so the audit obligation attaches to the
+writers when Agent 2 builds them, not to the discriminant; recording them here rather than only in
+that commit's message is what keeps the audited list the single place coverage is proved.
+
 A sync-repair is included even though it changes no bytes: the existing code already treats an
 unchanged-file flush attempt as invalidating a captured inventory, and over-rotation is the safe
 direction under I-4. Conversely, a budget mint or entry alone must **not** rotate, which is what

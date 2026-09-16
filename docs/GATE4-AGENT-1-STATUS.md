@@ -43,7 +43,8 @@ they are the highest-conflict changes, so they land last. The per-item verdict r
 | 2026-09-16 | Flow S staged seams and N12(a) | `7b9cf3e` | `1c3a1e0` | bounded implementation | Split and N12(a) **PASS**; **FS-001** (P2) opened: new authoring could durably accept a missing PIX blob |
 | 2026-09-16 | FS-001 correction | `1c3a1e0` | `c57faee` | bounded implementation | S1b admission and S3 possession recheck, with N12(d) and M15 |
 | 2026-09-16 | Per-actor overlay admission | `c57faee` | `bbfd5e5` | bounded implementation | Seam **PASS**, scoped to its own tests rather than end to end; **FS-002** (P2) opened against Flow S: a stale request still performed media admission before being identified as stale. One P3 API-hardening point on the capture's independent media parameters. |
-| 2026-09-16 | FS-002 correction and `AdmittedOverlayMedia` | `bbfd5e5` | uncommitted working tree | bounded implementation | Authorization moved ahead of media admission; media minted as one unforgeable value. New stale-basis regression with two hazards and two positive controls, plus M16. |
+| 2026-09-16 | FS-002 correction and `AdmittedOverlayMedia` | `bbfd5e5` | `5a024a7` | bounded implementation | Authorization moved ahead of media admission; media minted as one unforgeable value. New stale-basis regression with two hazards and two positive controls, plus M16. Awaiting review. |
+| 2026-09-16 | `EpochRecordKind::DraftArchive` seam | `5a024a7` | uncommitted working tree | integration seam for Agent 2, option (a) | Physical family plumbing only: no payload, writer, release path, reference collector or sub-cap, and no I-4 guard. Two regressions, M17/M18/M19. Handover to Agent 3 pending. |
 
 Working checkout: `M:\Git (local)\CatComs`, branch `Create-suite-2`. **Other agents are working in
 this same checkout**: Agent 3's design landed at `7efc9c2` and Agent 2's documents are present
@@ -578,6 +579,73 @@ namespace is byte-identical including staging, and the durable intent record is 
 
 **Scope limitation carried forward.** The reviewer's I-2 note stands: the admission seam passed on
 its own tests, not end to end. Nothing here consumes `OverlayAdmission` yet.
+
+### `EpochRecordKind::DraftArchive`, the shared enum seam for Agent 2
+
+Not Agent 1 work. Agent 2's design adds a sixth variant to a closed shared enum, so every match
+over it changes in files Agent 1 and Agent 3 are editing concurrently. Their reviewer directed that
+it land as an isolated integration commit ahead of Agent 2's implementation, and Agent 2 asked for
+it here because this tree is furthest along. Agent 2 then chose **option (a): land the seam without
+the mutation guard, and do not pull I-4 forward.**
+
+Built: the variant; `.draft-archive`; the `catcoms/epoch-draft-archive-store/v1` domain;
+`epoch_draft_archive::scope_bytes` in the same shape as the intent scope so `decode_record_scope`'s
+domain check and canonical re-derivation work unmodified; `MAX_DRAFT_ARCHIVE_SEALED_BYTES` and its
+inputs; `epoch_draft_archive_path`; a bounded authenticated reader mirroring
+`read_epoch_intent_plain`; `storage_name` gated by `includes_intents()`; final and temporary
+recognition through the unchanged `record_name`; a distinct inventory key; a separate
+`draft_archive_records` counter; and Intents-class accounting through a new
+`EpochRecordKind::intent_class()`, used by both `storage_name`'s gate and
+`EpochIntentBudget::from_inventory`.
+
+Not built, by instruction: the payload schema and serializer, the writer, the release path, the
+disposal transaction, the reference collector, the 16 MiB archive sub-cap, and anything that
+decodes archive contents.
+
+**The scan rails did not move.** The archive's sealed cap is 6,328,360 bytes, about 6 MiB + 35 KiB,
+deliberately larger than the intent record's 5 MiB + 1024. Recovery remains the largest family at
+`MAX_RECOVERY_SLOTS_BYTES + 1024 + 40` = 18 MiB + 2088, and `MAX_AUTHENTICATED_BYTES` already
+derives from recovery's cap, so `ENTRIES_PER_STEP`, the one-body-per-step rail and the byte rail
+are untouched.
+
+**The correctness condition Agent 2 asked to have preserved and stated.** Coverage gating by
+`includes_intents()` means `RecoveryOnly` and `RecoveryAndOwnerReceipts` do not see archive files.
+That is safe only while no coverage narrower than the full five-family scan installs a
+deletion-protection set. That rule is unchanged: `creative_pinned_cids` is the only installer and
+it runs `scan_epoch_storage_with_studio`, the full coverage.
+
+**One addition beyond the requested list, flagged for Agent 2.** A reference scan that meets an
+archive would otherwise collect nothing from it and install a complete, "known" protection set with
+the archive's CIDs missing, which is exactly the silent reclamation the coverage condition exists to
+prevent. The reference arm therefore fails closed with "draft archive reference collection is not
+implemented" until Agent 2's collector replaces it. M19 below shows this is not theoretical: with
+the guard removed the scan returns `Ok(CreativeReferences { count: 0 })`.
+
+| Regression | What it proves |
+|---|---|
+| `draft_archive_is_its_own_physical_family_sharing_the_intent_accounting_class` | A vault with no archive file is unchanged, record for record and byte for byte, with the new counter at zero. Then: the archive is inventoried with its own key and content footprint; the pre-existing records are byte-identical; it charges bytes and a record slot to `EpochIntentBudget` under `MAX_VAULT_INTENT_BYTES`; a coverage excluding intents excludes it; final and temporary names are recognised and noncanonical spellings refused; archive and intent scopes reject each other's domains; the addressed reader reaches the file and an intent scope addresses nothing in it; and a reference scan fails closed, with a positive control proving the same isolated vault completed one before the archive existed. |
+| `a_draft_archive_coexists_with_the_same_document_intent_ledger_in_one_accounting_class` | Against a **real** intent ledger written by the production writer: both records exist for one logical document, share a `document` id, hold different record ids, do not displace each other, and sum in one budget. A temporary archive sibling is attributed to the archive family and charged. Cleanup at intent coverage leaves both finals byte-identical. |
+
+| Check | Result |
+|---|---|
+| `... --lib draft_archive` | **2 passed, 0 failed**. |
+| `... --lib store::` | **292 passed, 0 failed, 8 ignored**, 474.61 s. |
+| **M17**, reverting the coverage gate to `family == Intents` | Both tests fail at "a coverage that excludes intents inventoried an archive"; restored source passes. |
+| **M18**, reverting `from_inventory` to `e.kind == Intents` | Both fail at "an archive's bytes were not charged to the intent accounting class"; restored source passes. |
+| **M19**, removing the fail-closed reference arm | Fails at "a reference scan installed a protection set for a vault holding an archive it cannot read", showing the scan returns a complete set of count 0; restored source passes. |
+| `cargo clippy -p catcoms-app --all-targets -- -D warnings`, `cargo fmt --all --check` | Clean. |
+
+**One test-only fixture.** `write_draft_archive_for_test` seals and frames an archive at its
+canonical path, because there is deliberately no production writer to call. It bypasses nothing the
+seam validates: the scope, sealing, framing and path are the production ones, so filename grammar,
+filename-to-scope agreement, the bound, authentication, the domain check and canonical scope
+re-derivation are all exercised for real; only the opaque body is synthetic, which is precisely what
+this family does not interpret. It is `#[cfg(test)]` and `pub(in crate::store)`, and must be deleted
+when Agent 2's writer lands.
+
+I-4's participant list in design 9.2 now names `write_studio_draft_archive_with_io` and
+`release_studio_draft_archive_with_io`, so the audit obligation attaches to those writers when
+Agent 2 builds them rather than to this discriminant.
 
 ### Not yet done for C-1
 

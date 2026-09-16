@@ -8,7 +8,7 @@ use std::collections::BTreeMap;
 
 use super::*;
 use crate::store::epoch_budget::MAX_ACCOUNTED_RECORDS;
-use crate::store::{epoch_intents, epoch_owner};
+use crate::store::{epoch_draft_archive, epoch_intents, epoch_owner};
 use catcoms_wire::DocType;
 pub(in crate::store) mod cache;
 
@@ -52,6 +52,9 @@ pub enum EpochRecordKind {
     OwnerReceipts,
     /// Device-local replay instructions, never inbound peer submissions.
     Intents,
+    /// Device-local preserved draft archives. A distinct physical family that shares the Intents
+    /// accounting class; its contents are Agent 2's manual lifecycle and are not decoded here.
+    DraftArchive,
     /// Checked registry document/gate/receipt restart units.
     Registry,
     /// Checked Index/art document/gate/receipt restart units.
@@ -59,11 +62,17 @@ pub enum EpochRecordKind {
 }
 
 impl EpochRecordKind {
+    /// True for the families charged to `EpochIntentBudget` against `MAX_VAULT_INTENT_BYTES`.
+    /// Physical identity is per variant; accounting is per class.
+    pub(in crate::store) fn intent_class(self) -> bool {
+        matches!(self, Self::Intents | Self::DraftArchive)
+    }
     fn suffix(self) -> &'static str {
         match self {
             Self::Recovery => ".recovery",
             Self::OwnerReceipts => ".owner-receipts",
             Self::Intents => ".intents",
+            Self::DraftArchive => ".draft-archive",
             Self::Registry => ".registry-epoch",
             Self::Studio => ".studio-epoch",
         }
@@ -73,6 +82,7 @@ impl EpochRecordKind {
             Self::Recovery => RECORD_DOMAIN,
             Self::OwnerReceipts => epoch_owner::RECORD_DOMAIN,
             Self::Intents => epoch_intents::RECORD_DOMAIN,
+            Self::DraftArchive => epoch_draft_archive::RECORD_DOMAIN,
             Self::Registry => super::super::epoch_registry::RECORD_DOMAIN,
             Self::Studio => super::super::epoch_studio::RECORD_DOMAIN,
         }
@@ -82,6 +92,7 @@ impl EpochRecordKind {
             Self::Recovery => scope_bytes(server, document),
             Self::OwnerReceipts => epoch_owner::scope_bytes(server, document),
             Self::Intents => epoch_intents::scope_bytes(server, document),
+            Self::DraftArchive => epoch_draft_archive::scope_bytes(server, document),
             Self::Registry => super::super::epoch_registry::scope_bytes(server, document),
             Self::Studio => super::super::epoch_studio::scope_bytes(server, document),
         }
@@ -91,6 +102,7 @@ impl EpochRecordKind {
             Self::Recovery => MAX_SEALED_BYTES,
             Self::OwnerReceipts => epoch_owner::MAX_SEALED_BYTES,
             Self::Intents => epoch_intents::MAX_SEALED_BYTES,
+            Self::DraftArchive => epoch_draft_archive::MAX_DRAFT_ARCHIVE_SEALED_BYTES,
             Self::Registry => super::super::epoch_registry::MAX_SEALED_BYTES,
             Self::Studio => super::super::epoch_studio::MAX_SEALED_BYTES,
         }
@@ -116,6 +128,8 @@ pub struct EpochStorageScanProgress {
     pub owner_receipt_records: usize,
     /// Authenticated local intent ledgers; zero unless coverage explicitly includes intents.
     pub intent_records: usize,
+    /// Authenticated preserved draft archives; gated by the same coverage as intents.
+    pub draft_archive_records: usize,
     /// Authenticated checked registry epochs; zero unless coverage explicitly includes them.
     pub registry_records: usize,
     /// Checked Studio epoch files; zero unless explicitly included by coverage.
@@ -288,6 +302,9 @@ impl EpochStorageInventory {
                     EpochRecordKind::Intents => {
                         b"catcoms/epoch-intent-temp-inventory/v1".as_slice()
                     }
+                    EpochRecordKind::DraftArchive => {
+                        b"catcoms/epoch-draft-archive-temp-inventory/v1".as_slice()
+                    }
                     EpochRecordKind::Registry => {
                         b"catcoms/epoch-registry-temp-inventory/v1".as_slice()
                     }
@@ -305,6 +322,7 @@ impl EpochStorageInventory {
                     footprint: if matches!(
                         orphan.kind(),
                         EpochRecordKind::Intents
+                            | EpochRecordKind::DraftArchive
                             | EpochRecordKind::Registry
                             | EpochRecordKind::Studio
                     ) {
@@ -591,6 +609,9 @@ impl EpochStorageScan<'_> {
                         EpochRecordKind::Intents => {
                             self.store.read_epoch_intent_plain(&entry.path())
                         }
+                        EpochRecordKind::DraftArchive => {
+                            self.store.read_epoch_draft_archive_plain(&entry.path())
+                        }
                         EpochRecordKind::Registry => {
                             self.store.read_epoch_registry_plain(&entry.path())
                         }
@@ -692,6 +713,20 @@ impl EpochStorageScan<'_> {
                                 }
                                 epoch_intents::storage_record(server, &document, scope, size)?
                             }
+                            EpochRecordKind::DraftArchive => {
+                                // The seam authenticates, names and accounts an archive without
+                                // knowing what is inside it. A reference scan is the one case that
+                                // cannot proceed on that basis: its deletion-protection set would
+                                // omit the archive's CIDs and archived pixels would be reclaimed,
+                                // destroying the preservation guarantee. Fail closed until Agent 2
+                                // lands the collector that reads the payload and yields its CIDs.
+                                if self.references.is_some() {
+                                    return Err(invalid(
+                                        "draft archive reference collection is not implemented",
+                                    ));
+                                }
+                                epoch_draft_archive::storage_record(server, &document, scope, size)?
+                            }
                             EpochRecordKind::Registry => {
                                 super::super::epoch_registry::inventory_record(
                                     &plain, server, &document, scope, size,
@@ -746,6 +781,7 @@ impl EpochStorageScan<'_> {
                         EpochRecordKind::Recovery => self.progress.recovery_records += 1,
                         EpochRecordKind::OwnerReceipts => self.progress.owner_receipt_records += 1,
                         EpochRecordKind::Intents => self.progress.intent_records += 1,
+                        EpochRecordKind::DraftArchive => self.progress.draft_archive_records += 1,
                         EpochRecordKind::Registry => self.progress.registry_records += 1,
                         EpochRecordKind::Studio => self.progress.studio_records += 1,
                     }
@@ -875,10 +911,15 @@ pub(super) fn storage_name(
         EpochRecordKind::Recovery,
         EpochRecordKind::OwnerReceipts,
         EpochRecordKind::Intents,
+        EpochRecordKind::DraftArchive,
         EpochRecordKind::Registry,
         EpochRecordKind::Studio,
     ] {
-        if family == EpochRecordKind::Intents && !coverage.includes_intents() {
+        // Archives are gated with intents because they share the Intents accounting class. That
+        // is only safe while no coverage narrower than the full five-family scan installs a
+        // deletion-protection set: a narrower scan would omit archived CIDs from the known set
+        // and archived pixels would be reclaimed. Reference scans run at full coverage.
+        if family.intent_class() && !coverage.includes_intents() {
             continue;
         }
         if family == EpochRecordKind::Registry
@@ -1010,6 +1051,16 @@ mod tests {
                 &mut ChaCha20Rng::seed_from_u64(epoch),
             )
             .unwrap();
+    }
+
+    /// Drive one scan to EOF at an explicit coverage.
+    fn collect_with(
+        store: &mut ServerStore,
+        coverage: EpochInventoryCoverage,
+    ) -> EpochStorageInventory {
+        let mut scan = store.scan_epoch_files(coverage).unwrap();
+        while !scan.step().unwrap().complete {}
+        scan.finish().unwrap()
     }
 
     fn collect(store: &mut ServerStore) -> Result<EpochStorageInventory, AppError> {
@@ -1418,6 +1469,196 @@ mod tests {
         let mut wrong = scope;
         wrong[4] ^= 1;
         assert!(decode_scope(&wrong).is_err());
+    }
+
+    /// The `DraftArchive` seam: physical identity of its own, accounting shared with Intents,
+    /// and no knowledge of what an archive contains. Agent 2 builds the payload, the writer, the
+    /// release path and the reference collector on top of this.
+    ///
+    /// The first half is the one that matters most: a vault with no archive file must behave
+    /// exactly as it did before the variant existed.
+    #[test]
+    fn draft_archive_is_its_own_physical_family_sharing_the_intent_accounting_class() {
+        let root = tempfile::tempdir().unwrap();
+        let mut store = open(root.path());
+        let doc = document(b"archive-group", b"private-key");
+        stage(&mut store, 7, &doc, 1);
+
+        // No archive file: every existing observation is unchanged, and the new counter is zero.
+        let before = collect_with(
+            &mut store,
+            EpochInventoryCoverage::RecoveryOwnerReceiptsAndIntents,
+        );
+        let baseline: Vec<_> = before.records().map(|e| (e.kind, e.record)).collect();
+        assert_eq!(baseline.len(), 1);
+        assert_eq!(before.orphans().len(), 0);
+        let baseline_budget = EpochIntentBudget::from_inventory(&before).unwrap();
+        assert_eq!(baseline_budget.bytes(), 0);
+        assert!(!epoch_files_absent(&root.path().join("servers")).unwrap());
+        // Positive control for the fail-closed claim below: without an archive present, this
+        // exact vault completes a full reference scan and installs a known set.
+
+        // A directory holding ONLY an archive is not empty, which is what protects the cheap
+        // empty-vault shortcut from starting a mount with an unprotected reference cache. The
+        // same isolated vault is where the fail-closed reference claim is tested, because there
+        // the only thing that can refuse a reference scan is the archive.
+        let bare = tempfile::tempdir().unwrap();
+        let mut spare = open(bare.path());
+        assert!(epoch_files_absent(&bare.path().join("servers")).unwrap());
+        spare
+            .creative_pinned_cids()
+            .expect("an empty vault must complete a reference scan");
+        assert!(spare.creative_references_known());
+        epoch_draft_archive::write_draft_archive_for_test(
+            &spare,
+            7,
+            &doc,
+            b"opaque archive body",
+            &mut ChaCha20Rng::seed_from_u64(3),
+        )
+        .unwrap();
+        assert!(!epoch_files_absent(&bare.path().join("servers")).unwrap());
+        // A reference scan must not silently collect nothing from an archive it cannot read: an
+        // installed protection set missing the archive's CIDs would make archived pixels
+        // reclaimable, which is the preservation guarantee the archive exists to provide. Fail
+        // closed until Agent 2's collector lands. The control above proves this exact vault
+        // completed a reference scan before the archive existed.
+        let refused = spare.creative_pinned_cids();
+        assert!(
+            refused.as_ref().err().is_some_and(|error| error
+                .to_string()
+                .contains("draft archive reference collection is not implemented")),
+            "a reference scan installed a protection set for a vault holding an archive it \
+             cannot read, so the archive's pixels are reclaimable: {refused:?}"
+        );
+        assert!(
+            !spare.creative_references_known(),
+            "a refused reference scan left protection claiming to be known"
+        );
+        drop(spare);
+
+        // Now the same vault with an archive beside its recovery record.
+        let path = epoch_draft_archive::write_draft_archive_for_test(
+            &store,
+            7,
+            &doc,
+            b"opaque archive body",
+            &mut ChaCha20Rng::seed_from_u64(4),
+        )
+        .unwrap();
+        let physical = fs::metadata(&path).unwrap().len();
+        let after = collect_with(
+            &mut store,
+            EpochInventoryCoverage::RecoveryOwnerReceiptsAndIntents,
+        );
+        let archive = after
+            .records()
+            .find(|e| e.kind == EpochRecordKind::DraftArchive)
+            .expect("the archive was not inventoried");
+        assert_eq!(archive.server, 7);
+        assert_eq!(archive.document, doc);
+        assert_eq!(archive.record.footprint.content, physical);
+        assert_eq!(archive.record.footprint.settlement, 0);
+        assert_eq!(after.records().count(), baseline.len() + 1);
+        // Everything that was there before is byte-identical, so the new family added a record
+        // rather than disturbing one.
+        for (kind, record) in &baseline {
+            assert!(after
+                .records()
+                .any(|e| e.kind == *kind && e.record == *record));
+        }
+
+        // It charges a record slot and its bytes into the Intents class, under the vault cap.
+        let budget = EpochIntentBudget::from_inventory(&after).unwrap();
+        assert_eq!(
+            budget.bytes(),
+            baseline_budget.bytes() + physical,
+            "an archive's bytes were not charged to the intent accounting class"
+        );
+        assert!(budget.bytes() < MAX_VAULT_INTENT_BYTES);
+        assert_eq!(
+            budget.record_slots_for_test(),
+            baseline_budget.record_slots_for_test() + 1,
+            "an archive did not claim a record slot in the intent accounting class"
+        );
+        assert!(EpochRecordKind::DraftArchive.intent_class());
+        assert!(EpochRecordKind::Intents.intent_class());
+        assert!(!EpochRecordKind::Studio.intent_class());
+
+        // A coverage that excludes intents excludes archives, by the same gate.
+        let narrow = collect_with(&mut store, EpochInventoryCoverage::RecoveryAndOwnerReceipts);
+        assert!(
+            narrow
+                .records()
+                .all(|e| e.kind != EpochRecordKind::DraftArchive),
+            "a coverage that excludes intents inventoried an archive"
+        );
+        assert_eq!(
+            narrow.records().count(),
+            baseline.len(),
+            "a coverage that excludes intents inventoried an archive"
+        );
+        assert!(EpochIntentBudget::from_inventory(&narrow).is_err());
+
+        // A temporary archive sibling is recognised as temporary, and an archive scope is not an
+        // intent scope in either direction even though the two share an accounting class.
+        let hash = "ab".repeat(32);
+        assert!(matches!(
+            storage_name(
+                OsStr::new(&format!("{hash}.draft-archive")),
+                EpochInventoryCoverage::RecoveryOwnerReceiptsAndIntents
+            )
+            .unwrap(),
+            Some((EpochRecordKind::DraftArchive, RecoveryName::Final(_)))
+        ));
+        assert!(matches!(
+            storage_name(
+                OsStr::new(&format!(
+                    ".{hash}.draft-archive.mewtual-stage-4294967295-18446744073709551615.tmp"
+                )),
+                EpochInventoryCoverage::RecoveryOwnerReceiptsAndIntents
+            )
+            .unwrap(),
+            Some((EpochRecordKind::DraftArchive, RecoveryName::Temporary(_)))
+        ));
+        for bad in [
+            format!("{hash}.DRAFT-ARCHIVE"),
+            format!(".{hash}.draft-archive.mewtual-stage-01-1.tmp"),
+            format!(".{hash}.draft-archive.mewtual-stage-1-+1.tmp"),
+        ] {
+            assert!(storage_name(
+                OsStr::new(&bad),
+                EpochInventoryCoverage::RecoveryOwnerReceiptsAndIntents
+            )
+            .is_err());
+            assert!(storage_name(
+                OsStr::new(&bad),
+                EpochInventoryCoverage::RecoveryAndOwnerReceipts
+            )
+            .unwrap()
+            .is_none());
+        }
+        let archive_scope = epoch_draft_archive::scope_bytes(7, &doc).unwrap();
+        let intent_scope = epoch_intents::scope_bytes(7, &doc).unwrap();
+        assert_ne!(archive_scope, intent_scope);
+        assert_eq!(
+            decode_record_scope(&archive_scope, EpochRecordKind::DraftArchive).unwrap(),
+            (7, doc.clone())
+        );
+        assert!(decode_record_scope(&archive_scope, EpochRecordKind::Intents).is_err());
+        assert!(decode_record_scope(&intent_scope, EpochRecordKind::DraftArchive).is_err());
+
+        // The addressed reader reaches the same file the scanner inventoried, under this family's
+        // own cap, and an intent scope addresses nothing in it.
+        let read = store
+            .read_scoped_draft_archive_plain(&archive_scope)
+            .unwrap()
+            .expect("the archive is not readable at its canonical path");
+        assert_eq!(read.physical_bytes, physical);
+        assert!(store
+            .read_scoped_draft_archive_plain(&intent_scope)
+            .unwrap()
+            .is_none());
     }
 
     #[cfg(unix)]

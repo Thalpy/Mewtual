@@ -198,20 +198,18 @@ impl EpochIntentBudget {
         }
         let mut records = BTreeMap::new();
         let mut bytes = 0u64;
-        for entry in inventory
-            .records()
-            .filter(|e| e.kind == EpochRecordKind::Intents)
-        {
+        // The Intents accounting class, not the Intents physical family: preserved draft archives
+        // are their own record kind but charge records, record slots and bytes here, against the
+        // same vault-wide ceiling. Their ids derive from a different scope domain, so an archive
+        // and an intent ledger for one logical document are two records and cannot collide.
+        for entry in inventory.records().filter(|e| e.kind.intent_class()) {
             let size = entry.record.footprint.total().map_err(invalid)?;
             bytes = bytes
                 .checked_add(size)
                 .ok_or_else(|| invalid("vault intent limit reached"))?;
             records.insert(entry.record.id, size);
         }
-        for orphan in inventory
-            .orphans()
-            .filter(|o| o.kind() == EpochRecordKind::Intents)
-        {
+        for orphan in inventory.orphans().filter(|o| o.kind().intent_class()) {
             bytes = bytes
                 .checked_add(orphan.bytes())
                 .ok_or_else(|| invalid("vault intent limit reached"))?;
@@ -224,7 +222,7 @@ impl EpochIntentBudget {
             record_slots: records.len()
                 + inventory
                     .orphans()
-                    .filter(|o| o.kind() == EpochRecordKind::Intents)
+                    .filter(|o| o.kind().intent_class())
                     .count(),
             records,
             bytes,
@@ -243,6 +241,13 @@ impl EpochIntentBudget {
     /// Observed physical intent occupancy. It is not free space or an editing permit.
     pub fn bytes(&self) -> u64 {
         self.bytes
+    }
+
+    /// Test-only: metadata slots claimed by this accounting class, so a regression can prove a
+    /// new physical family charges a slot rather than only bytes.
+    #[cfg(test)]
+    pub(in crate::store) fn record_slots_for_test(&self) -> usize {
+        self.record_slots
     }
 
     fn preflight(
