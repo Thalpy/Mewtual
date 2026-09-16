@@ -291,6 +291,33 @@ branch are committing one another's staged and uncommitted work; the remote hist
 Related, and smaller: `cargo fmt --all` on this shared checkout spans other agents' uncommitted
 files. Formatting is now scoped with `-p`.
 
+### Slice 2 (in progress): the operation-CID debt, paid
+
+| Item | State |
+|---|---|
+| `crates/catcoms-app/src/store/epoch_studio/tests/rotation/overlay/archive.rs` | New. Two tests against the app's PIX-bearing Flipnote fixture. |
+| The debt from slice 1 | **Paid.** `blob_cids` is now compared against the live branch's own sets on **both** halves, base and operations, assembled the way the inventory arm assembles them. |
+| Non-vacuity | Asserted in the test: each operation CID must be present through an accepted operation and absent from the base, so the halves are provably separable and the comparison cannot degenerate the way its predecessor did. |
+| Mutation | Deleting operation-CID collection from `blob_cids` fails at "the archive's reference set must equal the live branch's". **That is the exact mutation that survived slice 1.** Restored byte for byte, verified against HEAD, both tests pass again. |
+| Evidence | `cargo test -j 1 -p catcoms-app --lib rotation::overlay::archive`, 2 passed. This file is fmt-clean. |
+| **Not verified** | Crate-wide clippy and fmt for `catcoms-app`. Agent 1's uncommitted `catchup` work currently fails both; every fmt diff and the clippy error is in its files. Owed once their tree settles. |
+
+I-5's precondition is now half met: the operation-CID test passes. M28 still requires the
+collector, so Agent 1's fail-closed `DraftArchive` reference arm stays as it is.
+
+### Shared-checkout conditions during slice 2
+
+The `catcoms-app` test build broke and recovered twice inside a single verification pass, from
+Agent 1's in-flight `receiver/catchup.rs`: first a type mismatch, then a missing
+`queue_overlay_for_test`. Nothing of Agent 2's was involved. Verification had to be retried
+rather than trusted on first result.
+
+An isolated worktree was considered to get a stable build and **rejected**: `target` measures
+**138 GB**, so a second target directory is not affordable on this machine, which is the same
+constraint the handoffs record about exhausted RAM and disk. The alternative of stashing Agent
+1's file was also rejected: reverting a peer's work mid-edit could corrupt their session. The
+working answer is to retry and to report which signals could not be obtained.
+
 ### Not yet built
 
 The app-side archive record writer and reader, the reference collector that narrows Agent 1's
