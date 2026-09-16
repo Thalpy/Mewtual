@@ -284,6 +284,43 @@ Two regressions in `store/epoch_studio/tests/rotation/overlay.rs`:
 | M14, removing only the two ordinary holds from `write_studio_overlay_intent` | Fails at "an accepted operation's pixels were reclaimable before the next scan". `git diff` confirms the restored file differs from `079e59a` only by the new comment, so the two calls are byte-identical. |
 | `cargo clippy -j 1 -p catcoms-app --lib --tests -- -D warnings`, `cargo fmt --all -- --check` | Clean, with no `allow(dead_code)` remaining in `creative_references.rs`. |
 
+### I3-001: media admission moved behind classification
+
+The first placement of I-3's transient hold was wrong: it ran before `completed_retry` and
+`exact_retry`, so an already accepted request could be refused by new-authoring reference
+admission when the shared rails were full. That is the coupling AG1-001 closed, reintroduced.
+
+The hold now sits after classification and only on the new-authoring path:
+
+```
+decode and bound the operation
+  -> enter budget, read structural state
+  -> completed_retry            -> acknowledge and return
+  -> exact_retry                -> flush-only, no media admission
+  -> ordinary-intent collision  -> refuse
+  -> ONLY IF genuinely new authoring:
+       operation_blob_cid, hold_creative_transient
+       fresh Closing eligibility and basis
+       ordinary I-3 holds, write attempt
+  -> drop the transient owner after the attempt returns
+```
+
+The ordinary-collision check is hoisted to the same classification stage; the writer keeps its own
+copy as defence in depth, which the reviewer explicitly permitted.
+
+`studio_overlay_exact_retry_is_acknowledged_without_media_admission` accepts a pixel-bearing
+operation, fills every job-owned hold slot with unrelated live work, proves a further hold is
+refused, then retries the exact accepted request. It requires the retry to succeed, to return the
+same accepted draft, to leave the durable records unchanged, and to leave the live hold count
+unchanged. It calls the store directly rather than through the fixture helper so the failure names
+this boundary instead of unwrapping. A `#[cfg(test)] live_transient_holds_for_test` counter makes
+"took no hold" an observation rather than an inference from a successful result.
+
+Moving the hold back above classification fails it at "an accepted retry was refused by media
+admission: creative reference scan incomplete, unsupported or over bound"; the restored source
+passes. The first attempt at this mutation surfaced as a generic `.unwrap()` inside the fixture
+helper, which is why the retry now goes through the store API directly.
+
 **What this does and does not cover.** The transfer and its ordering are real and mutation-proven.
 The detached window it exists to protect is not open yet: the synchronous acceptance path has no
 gap between the transient hold and the write, so these tests prove the transfer, not the window.

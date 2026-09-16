@@ -232,6 +232,22 @@ impl ServerStore {
         })
     }
 
+    /// Test-only: how many job-owned holds are currently live. Used to prove that a path which
+    /// must not perform media admission genuinely took none, rather than inferring it from a
+    /// successful result.
+    #[cfg(test)]
+    pub(crate) fn live_transient_holds_for_test(&self) -> usize {
+        self.creative_protection
+            .lock()
+            .map(|state| {
+                state
+                    .transient
+                    .iter()
+                    .filter(|hold| hold.owner.strong_count() != 0)
+                    .count()
+            })
+            .unwrap_or(0)
+    }
     pub(crate) fn creative_references_known(&self) -> bool {
         self.creative_protection
             .lock()

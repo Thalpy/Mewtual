@@ -2,7 +2,7 @@ use super::*;
 use crate::store::epoch_intents::sync_intent;
 use catcoms_replication::studio::{StudioClosingOverlayBasis, StudioLocalDraft};
 use catcoms_replication::CloseRecord;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 mod handoff;
 mod source_version;
@@ -1108,4 +1108,86 @@ fn studio_overlay_uncertain_acceptance_still_protects_its_pixels() {
         );
         assert!(blobs.get_bounded(&cid, 200).unwrap().is_some());
     }
+}
+
+/// I3-001. An already accepted request must be classified before any media admission. The pixel
+/// hold is new-authoring work: a retry adds no reference and needs no possession, so it must not
+/// be able to fail because the shared reference rails are full. This is the AG1-001 boundary
+/// applied to I-3's first half.
+#[test]
+fn studio_overlay_exact_retry_is_acknowledged_without_media_admission() {
+    let root = tempfile::tempdir().unwrap();
+    let mut store = open(root.path());
+    let f = Fixture::new(true);
+    let (close, basis) = closing(&f, &mut store);
+    let group = hex::encode(f.group.group_id());
+    let mut blobs = store.blob_store(&group).unwrap();
+    let cid = blobs.put(b"pixels for the accepted operation").unwrap();
+
+    let op = f.domain(
+        FlipnoteOp::InsertFrame {
+            frame: [9; 16],
+            after: None,
+            cid: *cid.as_bytes(),
+            bytes: 39,
+        }
+        .encode()
+        .unwrap(),
+        7,
+    );
+    let first = save(&f, &mut store, &close, basis.fingerprint(), op.clone(), 300);
+    assert_eq!(first.accepted(), 1);
+    let records = canonical(&store);
+
+    // Occupy every job-owned hold slot with unrelated legitimate work, so any attempt at media
+    // admission on the retry path must fail rather than silently succeed.
+    let occupied: Vec<_> = (0..crate::store::creative_references::MAX_TRANSIENT_HOLD_OWNERS)
+        .map(|n| {
+            store
+                .hold_creative_transient(&f.group.group_id(), BTreeSet::from([[n as u8; 32]]))
+                .expect("the rail admits its stated number of owners")
+        })
+        .collect();
+    assert!(store
+        .hold_creative_transient(&f.group.group_id(), BTreeSet::from([[200u8; 32]]))
+        .is_err());
+    let live = store.live_transient_holds_for_test();
+
+    // The exact accepted request must still be acknowledged. Call the store directly rather than
+    // through the fixture helper, so the failure names this boundary instead of unwrapping.
+    let mut b = budget(&mut store, &f);
+    let retried = store.save_studio_closing_overlay(
+        SERVER,
+        &f.group,
+        f.target,
+        &f.device,
+        &close,
+        Some(0),
+        basis.fingerprint(),
+        op,
+        301,
+        &mut rng(),
+        &mut b,
+    );
+    let retried = match retried {
+        Ok(saved) => local(saved),
+        Err(error) => panic!("an accepted retry was refused by media admission: {error}"),
+    };
+    assert_eq!(retried.accepted(), 1);
+    assert_eq!(
+        retried.projection(),
+        first.projection(),
+        "an exact retry must return the same accepted draft"
+    );
+    assert_eq!(
+        store.live_transient_holds_for_test(),
+        live,
+        "an accepted retry performed media admission"
+    );
+    assert_eq!(
+        canonical(&store),
+        records,
+        "an exact retry changed durable records"
+    );
+    drop(occupied);
 }

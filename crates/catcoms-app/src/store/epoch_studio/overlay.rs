@@ -91,22 +91,6 @@ impl ServerStore {
                 FlipnoteOp::decode_domain(&logical, &operation).map_err(invalid)?;
             }
         }
-        // I-3, first half. Until this acceptance is durable, nothing in the vault names the
-        // operation's pixels, so a complete reference scan would install a set without them and
-        // they would become reclaimable. Take a job-owned hold before any durable step. It is
-        // released only when this scope ends, which is after the write attempt returns, whatever
-        // its outcome; the ordinary conservative holds installed before that write are what carry
-        // protection forward. See `write_studio_overlay_intent`.
-        let pixels: std::collections::BTreeSet<[u8; 32]> =
-            catcoms_replication::studio::operation_blob_cid(&operation)
-                .map_err(invalid)?
-                .into_iter()
-                .collect();
-        let _pixels = if pixels.is_empty() {
-            None
-        } else {
-            Some(self.hold_creative_transient(&logical.server_id, pixels)?)
-        };
         self.enter_studio_budget(server, group, budget)?;
         let state = self.checked_epoch_replay_state(
             server,
@@ -147,8 +131,45 @@ impl ServerStore {
             Some(_) => return Err(invalid("overlay belongs to another channel")),
             None => false,
         };
+        // Equal nonce and body from an ordinary failed Save is not accepted local draft evidence.
+        // That is classification rather than authoring, so it also precedes media admission; the
+        // writer keeps its own copy of this check as defence in depth.
+        if !exact
+            && state
+                .pending()
+                .any(|(id, _)| *id == intent.operation.id(&intent.author))
+        {
+            return Err(invalid("ordinary intent cannot become an accepted overlay"));
+        }
         // Recognize accepted retries BEFORE first/append eligibility. An installed successor,
         // a later fault or Unknown tenure cannot turn a saved exact request into a new append.
+        //
+        // Everything from here is new authoring, so this is also where media admission belongs.
+        // An already accepted request must never be refused because the reference rails are full
+        // or because its pixels were legitimately reclaimed after retirement: an acknowledgement
+        // adds no reference and needs no possession. Classification above is deliberately cheap
+        // and reaches no blob.
+        //
+        // I-3, first half: until this acceptance is durable, nothing in the vault names the
+        // operation's pixels, so a complete reference scan would install a set without them and
+        // they would become reclaimable. This job-owned hold is released only when this scope
+        // ends, which is after the write attempt returns, whatever its outcome; the ordinary
+        // conservative holds that `write_studio_overlay_intent` installs before that write are
+        // what carry protection forward.
+        let _pixels = if exact {
+            None
+        } else {
+            let pixels: std::collections::BTreeSet<[u8; 32]> =
+                catcoms_replication::studio::operation_blob_cid(&operation)
+                    .map_err(invalid)?
+                    .into_iter()
+                    .collect();
+            if pixels.is_empty() {
+                None
+            } else {
+                Some(self.hold_creative_transient(&logical.server_id, pixels)?)
+            }
+        };
         let fresh = if exact {
             None
         } else {
