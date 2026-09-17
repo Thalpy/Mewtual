@@ -18,6 +18,14 @@ pub(super) enum HandoffSync {
     Intents,
 }
 
+/// What H1 concluded. `Settled` is terminal and already durable: an acknowledgement of a branch
+/// this device already transferred. `Captured` is work whose expensive reconstruction has not
+/// happened yet.
+pub(super) enum StudioHandoffStart {
+    Settled(StudioHandoffOutcome),
+    Captured(Box<StudioHandoffCapture>),
+}
+
 /// Minted only here, after the Prepared record crosses its first durability barrier.
 pub(super) struct CheckedHandoffWrite {
     metadata: [u8; 32],
@@ -54,6 +62,10 @@ impl ServerStore {
             },
         )
     }
+
+    /// The synchronous adapter: H1, H2, then H3 to H5, with no detach between them. Every caller
+    /// that cannot release custody, and every existing test, takes this path. The scheduled
+    /// runtime runs the same stages with custody released around H2.
     #[allow(clippy::too_many_arguments)]
     pub(super) fn handoff_studio_overlay_with_io(
         &mut self,
@@ -68,6 +80,43 @@ impl ServerStore {
         writer: &mut impl FnMut(HandoffWrite, &Path, &[u8]) -> Result<(), AppError>,
         sync: &mut impl FnMut(HandoffSync, &Path, u64) -> Result<(), AppError>,
     ) -> Result<StudioHandoffOutcome, AppError> {
+        let capture = match self.start_studio_handoff_with_io(
+            server, group, target, device, basis, tenure, rng, budget, writer, sync,
+        )? {
+            StudioHandoffStart::Settled(outcome) => return Ok(outcome),
+            StudioHandoffStart::Captured(capture) => capture,
+        };
+        // H1 already required a live tenure to mint the authority, so this cannot be absent here.
+        let tenure =
+            tenure.ok_or_else(|| invalid("overlay handoff needs observed owner tenure"))?;
+        let plan = capture.prepare()?;
+        self.commit_studio_handoff_with_io(
+            server, group, target, device, plan, tenure, rng, budget, writer, sync,
+        )
+    }
+
+    /// H1: classify, resolve an interrupted Prepared record, authorize, and capture.
+    ///
+    /// Everything here is cheap by construction: bounded authenticated reads, a structural decode
+    /// for classification, and the short live-authority mint. The full branch reconstruction and
+    /// the private successor restore belong to H2, which runs detached.
+    ///
+    /// Both the synchronous adapter and the scheduled runtime enter through this, so there is one
+    /// classification and one authorization, not two that can drift.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn start_studio_handoff_with_io(
+        &mut self,
+        server: u64,
+        group: &ServerGroup,
+        target: StudioTarget,
+        device: &MlsDevice,
+        basis: [u8; 32],
+        tenure: Option<u64>,
+        rng: &mut impl CryptoRngCore,
+        budget: &mut EpochStudioBudget,
+        writer: &mut impl FnMut(HandoffWrite, &Path, &[u8]) -> Result<(), AppError>,
+        sync: &mut impl FnMut(HandoffSync, &Path, u64) -> Result<(), AppError>,
+    ) -> Result<StudioHandoffStart, AppError> {
         current_member(group, device)?;
         self.enter_studio_budget(server, group, budget)?;
         let document = target.document(&group.group_id()).map_err(invalid)?;
@@ -97,7 +146,7 @@ impl ServerStore {
                 writer,
                 sync,
             )?;
-            return Ok(outcome);
+            return Ok(StudioHandoffStart::Settled(outcome));
         }
         let overlay = metadata
             .overlay()
@@ -121,7 +170,7 @@ impl ServerStore {
                 .completed_branch(target, device.device_id(), basis)
                 .map_err(invalid)?
             {
-                return Ok(outcome);
+                return Ok(StudioHandoffStart::Settled(outcome));
             }
         }
         let tenure =
@@ -146,23 +195,75 @@ impl ServerStore {
                 }
             }
         }
-        let (mut source, observed, before) =
+        // The short live-authority mint. Structural metadata is enough: this reads the target,
+        // the active branch's author and its receipt, and checks them against live membership,
+        // MLS epoch and the observed tenure. It reconstructs nothing.
+        let authority = state
+            .handoff_metadata()
+            .ok_or_else(|| invalid("overlay metadata missing"))?
+            .handoff_authority(device, group, tenure)
+            .map_err(invalid)?;
+        self.capture_studio_handoff(server, group, target, device, &document, basis, authority)
+            .map(Box::new)
+            .map(StudioHandoffStart::Captured)
+    }
+
+    /// H3, H4 and H5 composed under one custody visit: sign every remaining operation, assemble
+    /// the candidate, then run the accepted Prepared -> whole Source -> Completed transaction.
+    ///
+    /// The scheduled runtime will split H3 into bounded slices and move H4 to a worker; this is
+    /// the batch form the synchronous transaction keeps, and the durable half below is unchanged.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn commit_studio_handoff_with_io(
+        &mut self,
+        server: u64,
+        group: &ServerGroup,
+        target: StudioTarget,
+        device: &MlsDevice,
+        plan: StudioHandoffPlan,
+        tenure: u64,
+        rng: &mut impl CryptoRngCore,
+        budget: &mut EpochStudioBudget,
+        writer: &mut impl FnMut(HandoffWrite, &Path, &[u8]) -> Result<(), AppError>,
+        sync: &mut impl FnMut(HandoffSync, &Path, u64) -> Result<(), AppError>,
+    ) -> Result<StudioHandoffOutcome, AppError> {
+        current_member(group, device)?;
+        self.enter_studio_budget(server, group, budget)?;
+        if !self.studio_handoff_is_current(group, device, &plan.stamp)? {
+            return Err(invalid("overlay records or context changed; retry"));
+        }
+        let StudioHandoffPlan {
+            stamp,
+            basis,
+            mut signing,
+        } = plan;
+        if stamp.server != server || stamp.target != target {
+            return Err(invalid("overlay plan belongs to another target"));
+        }
+        let document = stamp.document.clone();
+        // H3, batched here. Every turn rechecks device, membership, MLS epoch, observed tenure
+        // and the current-owner receipt before its one signature.
+        while signing.sign_next(device, group, tenure).map_err(invalid)? {}
+        // H4.
+        let candidate = signing.finish().map_err(invalid)?;
+        let state = self.checked_epoch_replay_state(
+            server,
+            &document,
+            &mut budget.storage,
+            &mut budget.intents,
+        )?;
+        let (source, observed, before) =
             self.checked_studio_source(server, group, target, device, false, &mut budget.storage)?;
         if observed.is_none() {
             return Err(invalid("overlay destination source missing"));
         }
+        drop(source);
         let original_source = self
             .read_studio_record(&scope_bytes(server, &document)?)?
             .ok_or_else(|| invalid("overlay destination source missing"))?;
         let original_source_hash = blake3::hash(&original_source.plain);
         drop(original_source);
-        let metadata = state
-            .handoff_metadata()
-            .ok_or_else(|| invalid("overlay metadata missing"))?;
-        let candidate = metadata
-            .prepare_handoff(&mut source, &state.ledger, device, group, tenure, rng)
-            .map_err(invalid)?;
-        drop(source);
+        let mut state = state;
         let (mut candidate, prepared) = candidate.into_parts();
         let completed = prepared
             .complete(&candidate, &state.ledger)

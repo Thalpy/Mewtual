@@ -22,6 +22,8 @@ use std::sync::Arc;
 mod adoption;
 mod discovery;
 mod handoff;
+mod handoff_capture;
+pub(crate) use handoff_capture::{StudioHandoffCapture, StudioHandoffPlan};
 mod overlay;
 pub(crate) use overlay::StudioOverlayStart;
 mod overlay_capture;

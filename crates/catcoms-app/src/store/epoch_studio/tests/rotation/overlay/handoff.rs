@@ -74,6 +74,86 @@ fn prepare(f: &Fixture, store: &mut ServerStore) -> (CloseRecord, [u8; 32], Stud
     (close, basis.fingerprint(), expected)
 }
 
+/// H1/H2. A plan built from records that have since moved on is a stale proposal, however well
+/// formed it is, and the commit visit must refuse it before any signature becomes durable.
+///
+/// This is the handoff analogue of `studio_overlay_detached_plan_is_refused_when_the_record
+/// _changed`, and it is what makes the H5 stamp recheck load bearing: the synchronous adapter
+/// never leaves a gap, so nothing else in this suite can exercise it.
+#[test]
+fn studio_overlay_handoff_plan_is_refused_when_its_records_changed() {
+    let root = tempfile::tempdir().unwrap();
+    let f = Fixture::new(false);
+    let mut store = open(root.path());
+    let (close, basis, _) = prepare(&f, &mut store);
+    let records = canonical(&store);
+
+    // H1 under custody, then H2 detached. Nothing durable exists yet.
+    let mut b = budget(&mut store, &f);
+    let capture = match store
+        .start_studio_handoff_with_io(
+            SERVER,
+            &f.group,
+            f.target,
+            &f.device,
+            basis,
+            Some(0),
+            &mut rng(),
+            &mut b,
+            &mut |_, p, bytes| atomic_write(p, bytes),
+            &mut flush,
+        )
+        .unwrap()
+    {
+        crate::store::epoch_studio::handoff::StudioHandoffStart::Captured(capture) => capture,
+        crate::store::epoch_studio::handoff::StudioHandoffStart::Settled(_) => {
+            panic!("the fixture branch was classified as already transferred")
+        }
+    };
+    let plan = capture.prepare().expect("H2 reconstructs the candidate");
+    assert_eq!(
+        canonical(&store),
+        records,
+        "H1 or H2 wrote something durable"
+    );
+
+    // The vault is closed and reopened while the plan is detached, which is what a crash between
+    // H2 and H5 looks like. The plan still holds the previous mount, so the context it was built
+    // against no longer exists even though every byte on disk is identical.
+    let _ = close;
+    drop(store);
+    let mut store = open(root.path());
+    assert_eq!(canonical(&store), records);
+
+    let mut b = budget(&mut store, &f);
+    let refused = store.commit_studio_handoff_with_io(
+        SERVER,
+        &f.group,
+        f.target,
+        &f.device,
+        plan,
+        0,
+        &mut rng(),
+        &mut b,
+        &mut |_, p, bytes| atomic_write(p, bytes),
+        &mut flush,
+    );
+    match refused {
+        Err(error) => assert!(
+            error
+                .to_string()
+                .contains("overlay records or context changed"),
+            "a stale handoff plan was refused for an unrelated reason: {error}"
+        ),
+        Ok(_) => panic!("a handoff plan built from superseded records was committed"),
+    }
+    assert_eq!(
+        canonical(&store),
+        records,
+        "a refused handoff plan changed durable records"
+    );
+}
+
 #[test]
 fn studio_overlay_handoff_signs_the_whole_branch_once_and_keeps_pending_intents() {
     for art in [false, true] {

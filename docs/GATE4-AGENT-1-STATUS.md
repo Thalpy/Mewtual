@@ -50,7 +50,8 @@ they are the highest-conflict changes, so they land last. The per-item verdict r
 | 2026-09-16 | B-001 correction | `35929a9` | `1cac519` | integration seam correction | **PASS, B-001 closed.** Per-family `scope_cap()`; two regressions and M21. |
 | 2026-09-16 | Overlay runtime, Flow S detached | `130a64b` | `dda64a9` | bounded implementation | Split, job and result, admission consumed, marker removed. **REQUEST CHANGES**: the `OverlayOwnership` deviation **accepted** (design to change, not the code), the withdrawn control action **PASS**, M23 **PASS**; **RT-001** (P2) and **RT-002** (P2) opened; the cancellation half of N14(a) still open at P3. |
 | 2026-09-17 | RT-001 and RT-002 corrections | `dda64a9` | `3893ee2` | bounded implementation | **PASS, both closed.** The `detach`-not-`reserve_overlay` gate placement explicitly signed off. A refused plan releases admission and its pool slot in the worker; `OverlayPlan` selected only when `replay_ready()` holds. M24, M25, design 5.5 corrected. |
-| 2026-09-17 | N14(a), the real cancellation race | `3893ee2` | uncommitted working tree | test plus one cfg(test) seam | Taken before Flow H at the reviewer's direction, because Flow H rewrites the machinery N14(a) guards. A real paused worker, a real `RequestCancellation`, and M26. |
+| 2026-09-17 | N14(a), the real cancellation race | `3893ee2` | `746c0e2` | test plus one cfg(test) seam | **PASS, N14(a) closed.** Taken before Flow H at the reviewer's direction, because Flow H rewrites the machinery N14(a) guards. A real paused worker, a real `RequestCancellation`, and M26. One non-blocking ergonomics point, since addressed at `3d46016`. |
+| 2026-09-17 | Flow H stages H1 and H2 | `3d46016` | uncommitted working tree | bounded implementation | The custody boundary settled with the reviewer first. H1 bounded and cheap, H2 detached with captured public context only. One algorithm for both callers. New stamp regression and M27. |
 
 Working checkout: `M:\Git (local)\CatComs`. The four design passes were made on `Create-suite-2`;
 implementation is on `gate4-agent1-runtime`, which is the current branch.
@@ -853,6 +854,59 @@ tree deliberately, because reverting it risks their in-progress work, and it is 
 
 **Still open.** N14(b) and (c) remain blocked on the native `PrepareOverlaySave` handle and Agent
 2's P5, as the reviewer agrees. They are not worth pursuing before that exists.
+
+### Flow H, stages H1 and H2
+
+The custody boundary question was put to the reviewer before building, because getting it wrong
+would have put live MLS state in a detached worker. Their resolution, verified against source
+before use: `StudioEpoch::restore` reduces immediately to
+`restore_scoped(bytes, &group.group_id(), target, actor, owner(group)?)`, and
+`prepare_vault_source` has an identical body with a capability-narrowed signature. So the answer is
+"the restore belongs in H2" **and** "no `ServerGroup` crosses the boundary" — design 6.1's stage
+table needed no correction.
+
+`StudioSourceCapture::rebuild`, the existing detached source preparation, already has exactly this
+shape: cheap framing extraction, then `prepare_vault_source` with captured public context. Flow H
+follows it rather than inventing a second pattern.
+
+| Stage | Where | What |
+|---|---|---|
+| H1 `start_studio_handoff_with_io` | custody | classification, interrupted-Prepared resolution, the Index reference check, and the live-authority mint. Bounded authenticated reads only; no reconstruction, no restore. |
+| H2 `StudioHandoffCapture::prepare` | detached | full `decode_vault`, private successor reconstruction through `prepare_vault_source`, and `prepare_handoff_detached`. |
+
+**Nothing live crosses the boundary.** The worker receives the group id, the designated-owner
+`DeviceId`, the target and the actor. No `ServerGroup`, `MlsDevice`, MLS secret, store handle or
+writer. `copy_handoff_source(group)` is deliberately not called from this path; it is the
+synchronous compatibility helper, and using it would move live membership state into a worker for
+no reason.
+
+**Capturing that context is not continuing authority.** `sign_next` rechecks device, membership,
+MLS epoch, observed tenure and the current-owner receipt before every single signature, so a
+change during H2 leaves at worst a stale proposal that H3 refuses to sign. Independently,
+`prepare_handoff_detached` checks H2's freshly decoded metadata against the authority H1 minted, so
+a record that moved under the capture refuses before any signature exists.
+
+**One algorithm.** The synchronous adapter now composes H1, H2 and H3-H5, so there is one
+classification and one authorization rather than two that can drift. The durable half is unchanged.
+
+| Check | Result |
+|---|---|
+| `... --lib handoff` | **36 passed, 0 failed, 2 ignored**, 139.98 s, including the crash-barrier matrix and the fences. |
+| `... --lib store::epoch_studio` | **112 passed, 0 failed, 3 ignored**, 443.05 s. Against ~478-490 s for 103-104 tests earlier in this session, so the split is not a regression. |
+| `... --lib` (full) | **647 passed, 0 failed, 11 ignored**. Its 20,639 s wall clock is **not** usable evidence: another session was building concurrently for most of it. The two subsets above were measured on a verified quiet machine and are the timing evidence. |
+| **M27**, deleting the H5 stamp recheck | Fails at "a handoff plan built from superseded records was committed"; restored source passes. |
+| `cargo clippy -j 1 -p catcoms-app --all-targets -- -D warnings`, `cargo fmt --all --check` | Clean. |
+
+**A guard that would have shipped unproven.** The H5 stamp recheck had no test: the synchronous
+adapter never leaves a gap, so every existing handoff test passes with the check deleted.
+`studio_overlay_handoff_plan_is_refused_when_its_records_changed` runs H1, then H2, then closes and
+reopens the vault, which is what a crash between H2 and H5 looks like, and requires the commit to
+refuse. M27 shows that without the check a plan built against a dead mount commits successfully.
+
+**Not done.** H3 is still batched inside the commit visit as `while sign_next {}`, and H4 runs
+there too. The next commit splits H3 into bounded slices under design 7.3's placement and slice
+rules, and moves H4 to a worker. That is where N31 and M5a/M5b live, and where the reviewer has
+set a hard condition on the two-event distinction.
 
 ### `EpochRecordKind::DraftArchive`, the shared enum seam for Agent 2
 
