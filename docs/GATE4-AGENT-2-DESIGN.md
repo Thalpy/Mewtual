@@ -890,11 +890,23 @@ verified in source by Agent 2):
 > fails closed for reclamation is that same guard after narrowing, and it must be visible in the
 > diff as a narrowing rather than a deletion.
 
-Mutation succession: Agent 1's M19 asserts that removing the seam's arm lets a scan return
-`Ok(CreativeReferences { count: 0 })` for a vault holding an archive. When the collector lands, M19
-is **superseded by M28**, whose assertion is different: removing the collector arm yields a set that
-is non-empty but **missing the archive's CIDs**, failing N19. Both must not persist as "the archive
-reference guard"; M19 retires with the arm it guards.
+Mutation succession, **corrected after implementation**. The original wording said M19 "retires
+with the arm it guards". That was wrong, because the arm narrows rather than vanishes: an archive
+the collector cannot read must still fail the scan closed, which is exactly what M19's vault
+exercises. What retires is the **name and the message assertion**, not the coverage.
+
+- **M19 is retired as a mutation.** Its test survives, reclassified as an **empty-vault
+  corrupt-archive regression**: it reaches the refusal from a vault with no branch at all, which
+  none of the collector-side tests do, and it asserts the refusal rather than its wording, because
+  the narrowing necessarily changes the reason.
+- **M28** replaces it as the archive reference guard, with a different assertion: removing the
+  collector arm yields a set missing the archive's CIDs, failing N19.
+- Two further mutations are required alongside M28, because M28's whole-arm deletion cannot
+  distinguish them: **M28a** removes the payload-to-outer-scope document binding, which would
+  otherwise install one group's references under another and leave the pin set looking complete;
+  **M28b** swallows a reference-extraction failure into an empty set, which would turn uncertainty
+  into an installed, known, incomplete pin set. Both are fail-closed paths that the whole-arm
+  mutation passes straight through.
 
 Also retiring with the collector: `write_draft_archive_for_test`, Agent 1's `cfg(test)`,
 `pub(in crate::store)` hand-sealer, which exists only because the family currently has no writer. It

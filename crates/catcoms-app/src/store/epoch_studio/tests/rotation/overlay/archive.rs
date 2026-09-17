@@ -220,6 +220,143 @@ fn an_undecodable_draft_archive_still_fails_a_reference_scan_closed() {
     );
 }
 
+/// The payload's claim about which document it belongs to is load-bearing, because the scanner
+/// installs the CIDs it returns under the **outer** record's group. A canonical archive for
+/// group B, sealed into a correctly authenticated record whose scope names group A, would have
+/// B's references installed under A. Deletion is group-scoped, so when B's blob store asks
+/// whether its pixel is protected, A's pin does not save it: the pixels are reclaimable while
+/// the pin set looks complete.
+///
+/// Neither refusal test reaches this comparison, because both fail earlier at `decode`. It
+/// therefore needs its own fixture and its own mutation.
+#[test]
+fn a_draft_archive_naming_another_document_fails_a_reference_scan_closed() {
+    let root = tempfile::tempdir().unwrap();
+    // Distinct devices, groups and logical documents: the consequence is cross-group.
+    let a = Fixture::new(true);
+    let b = Fixture::new(true);
+    assert_ne!(a.group.group_id(), b.group.group_id());
+    let mut store = open(root.path());
+
+    // A real, canonical archive payload for B, built in this same vault.
+    let (close_b, basis_b) = closing(&b, &mut store);
+    frame_branch(&b, &mut store, &close_b, &basis_b);
+    let state_b = store.load_epoch_intents(SERVER, &b.logical).unwrap();
+    let payload_b = StudioDraftArchive::from_branch(
+        state_b.overlay().unwrap(),
+        &state_b.ledger,
+        StudioOverlayProvenance::Closing,
+        true,
+        [3; 32],
+        [4; 32],
+        1,
+    )
+    .unwrap()
+    .encode()
+    .unwrap();
+    drop(state_b);
+    // It really is canonical on its own terms; only its placement is wrong.
+    assert!(StudioDraftArchive::decode(&payload_b).is_ok());
+
+    // Give A its own branch, so the scan has ordinary work beside the misplaced archive.
+    let (close_a, basis_a) = closing(&a, &mut store);
+    frame_branch(&a, &mut store, &close_a, &basis_a);
+
+    // Seal B's archive into a record whose outer scope names A.
+    crate::store::epoch_draft_archive::write_draft_archive_for_test(
+        &store,
+        SERVER,
+        &a.logical,
+        &payload_b,
+        &mut rng(),
+    )
+    .unwrap();
+    drop(store);
+
+    let mut store = open(root.path());
+    assert!(
+        store.creative_pinned_cids().is_err(),
+        "an archive naming another logical document must fail the scan closed, or its \
+         references are installed under the wrong group and its pixels become reclaimable"
+    );
+}
+
+/// The collector has two fallible stages, and only the first was anchored. `decode` treats the
+/// seed as bounded opaque bytes; the seed is not parsed until `blob_cids` reaches
+/// `UnconfirmedStudioSeed::parse`. So an archive can decode cleanly and still fail to yield its
+/// references.
+///
+/// That second stage must fail the scan closed for the same reason as the first: turning
+/// uncertainty into an installed, *known*, incomplete pin set is permission to reclaim. A
+/// mutation replacing the error with an empty set would satisfy every other test here, because
+/// theirs either collect successfully or fail at `decode`.
+#[test]
+fn a_draft_archive_whose_references_cannot_be_extracted_fails_the_scan_closed() {
+    let root = tempfile::tempdir().unwrap();
+    let f = Fixture::new(true);
+    let mut store = open(root.path());
+    let (close, basis) = closing(&f, &mut store);
+    frame_branch(&f, &mut store, &close, &basis);
+
+    let state = store.load_epoch_intents(SERVER, &f.logical).unwrap();
+    let overlay = state.overlay().unwrap();
+    let mut payload = StudioDraftArchive::from_branch(
+        overlay,
+        &state.ledger,
+        StudioOverlayProvenance::Closing,
+        true,
+        [3; 32],
+        [4; 32],
+        1,
+    )
+    .unwrap()
+    .encode()
+    .unwrap();
+    drop(state);
+
+    // Corrupt one byte inside the seed, in place. The length is unchanged, so the payload stays
+    // canonical and re-encodes identically; only the checkpoint it carries is no longer the one
+    // its receipt names.
+    let seed = StudioDraftArchive::decode(&payload)
+        .unwrap()
+        .seed()
+        .to_vec();
+    let at = payload
+        .windows(seed.len())
+        .position(|w| w == seed)
+        .expect("the seed must appear verbatim in the payload");
+    payload[at] ^= 0xff;
+
+    // Guard the guard: this fixture must reach the SECOND stage, not the first.
+    let decoded = StudioDraftArchive::decode(&payload)
+        .expect("a corrupted seed must still decode: the codec does not parse it");
+    assert!(
+        decoded.blob_cids().is_err(),
+        "the fixture must fail at reference extraction, or it is testing `decode` again"
+    );
+
+    crate::store::epoch_draft_archive::write_draft_archive_for_test(
+        &store,
+        SERVER,
+        &f.logical,
+        &payload,
+        &mut rng(),
+    )
+    .unwrap();
+    drop(store);
+
+    let mut store = open(root.path());
+    assert!(
+        store.creative_pinned_cids().is_err(),
+        "an archive whose references cannot be extracted must fail the scan closed, not be \
+         collected as an empty set"
+    );
+    assert!(
+        !store.creative_references_known(),
+        "a refused reference scan left protection claiming to be known"
+    );
+}
+
 #[test]
 fn draft_archive_of_a_frame_branch_round_trips_through_real_storage() {
     // The replication round trip uses header edits. Frame operations carry a CID and a declared

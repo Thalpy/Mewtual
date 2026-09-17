@@ -181,6 +181,12 @@ impl StudioDraftArchive {
     pub fn accepted(&self) -> usize {
         self.entries.len()
     }
+    /// The exact checkpoint bytes this branch was based on. Local vault content the caller is
+    /// already holding as the encoded payload, surfaced because reading an archive back is the
+    /// point of having one. It is bytes, not a basis: nothing here can rebuild authority from it.
+    pub fn seed(&self) -> &[u8] {
+        &self.seed
+    }
 
     /// The conservative reference set this archive keeps alive: the seed-derived base CIDs plus
     /// every archived operation's CID. This is the same pair the live-branch inventory arm

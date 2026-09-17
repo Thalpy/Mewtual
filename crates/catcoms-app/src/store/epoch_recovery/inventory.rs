@@ -744,8 +744,12 @@ impl EpochStorageScan<'_> {
                                 // That refusal is NARROWED here, not removed. `inventory_references`
                                 // still refuses an archive whose bounded canonical payload will not
                                 // decode, which is the rule every other family applies to a corrupt
-                                // record; what it no longer refuses is an archive it can read. An
-                                // accounting-only scan still needs no payload, exactly as before.
+                                // record; what it no longer refuses is an archive it can read.
+                                //
+                                // An accounting-only scan still reads and authenticates the file,
+                                // as it does for every family; what it does not do is decode or
+                                // interpret the archive payload. That distinction matters at an
+                                // I/O boundary and is not the same as touching nothing.
                                 if let Some(collected) = self.references.as_mut() {
                                     let inspected = epoch_draft_archive::inventory_references(
                                         &plain, server, &document, scope, size,

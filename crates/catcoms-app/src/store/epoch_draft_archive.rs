@@ -1,16 +1,18 @@
-//! Physical family plumbing for the local draft archive: naming, scope, bounds, an authenticated
-//! bounded reader and accounting. It knows nothing about what an archive contains.
+//! The local draft archive's physical family: naming, scope, bounds, an authenticated bounded
+//! reader, accounting, and the reference collector that reads a payload to find the blobs it
+//! protects.
 //!
 //! The archive is a distinct **physical** record kind, with its own suffix, domain, scope, path,
 //! reader and cap, while sharing the **Intents accounting class**: its records, record slots and
 //! bytes are charged to [`EpochIntentBudget`](super::EpochIntentBudget) against
 //! `MAX_VAULT_INTENT_BYTES`. It is not a new budget family.
 //!
-//! This module is Agent 2's seam, landed ahead of their implementation so that all three agents
-//! rebase onto one variant rather than each adding the same conceptual enum arm. Nothing here
-//! writes, releases or decodes an archive: the payload schema, the writer, the release path, the
-//! disposal transaction, the reference collector and the archive sub-cap are Agent 2's, and are
-//! built on top of this. A vault with no archive file therefore behaves exactly as it did before.
+//! This module began as Agent 1's seam, landed ahead of Agent 2's implementation so that all
+//! three agents rebase onto one enum variant rather than each adding the same conceptual arm.
+//! The seam itself decoded nothing and failed every reference scan closed. The collector below
+//! narrows that refusal to an archive it cannot read. Still to come on top of this: the writer,
+//! the release path, the disposal transaction and the archive sub-cap. A vault with no archive
+//! file behaves exactly as it did before.
 
 use std::collections::BTreeSet;
 use std::io::Read;
@@ -57,8 +59,9 @@ impl ServerStore {
     }
 
     /// Authenticate framing under the same parent-directory and regular-file rails the intent
-    /// reader uses, with this family's own cap. It performs no typed decode: there is no archive
-    /// payload type yet, and the scanner needs only the authenticated scope and physical size.
+    /// reader uses, with this family's own cap. It performs no typed decode: reading yields the
+    /// authenticated plaintext and physical size, and only a reference scan goes on to interpret
+    /// the payload through `inventory_references`.
     pub(super) fn read_epoch_draft_archive_plain(
         &self,
         path: &Path,
