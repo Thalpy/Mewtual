@@ -104,6 +104,122 @@ fn draft_archive_collects_the_same_references_a_live_branch_protects() {
     );
 }
 
+/// N19. The preservation guarantee, end to end through the real scanner: after a preserving
+/// disposal the archive is the only thing keeping the branch's pixels alive, and a complete
+/// reference scan must still protect them.
+///
+/// Two ways this could pass while proving nothing, both designed against:
+///
+/// 1. **Another holder.** If the live branch, the source or recovery still named the CIDs, the
+///    assertion would hold with the archive collector deleted. So the intent record and the
+///    source are removed first, leaving the archive as the sole durable namer.
+/// 2. **Fail-closed protection.** A scan that refuses installs no known set, and deletions are
+///    then refused wholesale. Membership in the returned pin set is a positive assertion, so an
+///    empty or unknown protection cannot satisfy it; and the control below shows the same vault,
+///    minus only the archive, does NOT pin them.
+///
+/// The control is what makes the result attributable: the CIDs are absent before the archive
+/// exists and present after, in one vault, with nothing else changed.
+#[test]
+fn draft_archive_references_survive_a_complete_scan_as_the_sole_holder() {
+    let root = tempfile::tempdir().unwrap();
+    let f = Fixture::new(true);
+    let mut store = open(root.path());
+    let (close, basis) = closing(&f, &mut store);
+    let operation_cids = frame_branch(&f, &mut store, &close, &basis);
+
+    // The payload, taken while the live branch still exists.
+    let state = store.load_epoch_intents(SERVER, &f.logical).unwrap();
+    let payload = StudioDraftArchive::from_branch(
+        state.overlay().unwrap(),
+        &state.ledger,
+        StudioOverlayProvenance::Closing,
+        true,
+        [3; 32],
+        [4; 32],
+        1,
+    )
+    .unwrap()
+    .encode()
+    .unwrap();
+    let base_cids = state.overlay().unwrap().base_blob_cids().unwrap();
+    drop(state);
+
+    // Remove every other durable namer of those pixels: the accepted branch and the source.
+    // The bare `scope_bytes` in scope here is the Studio family's; the intent record has its
+    // own, and addressing it with the wrong one silently names a file that does not exist.
+    let intent_scope = crate::store::epoch_intents::scope_bytes(SERVER, &f.logical).unwrap();
+    fs::remove_file(store.epoch_intent_path(&intent_scope)).unwrap();
+    fs::remove_file(f.path(&store)).unwrap();
+    drop(store);
+
+    // Control: with no archive, nothing pins them.
+    let mut store = open(root.path());
+    let pins = store.creative_pinned_cids().unwrap();
+    let pinned = |pins: &crate::store::CreativeReferences, cid: &[u8; 32]| {
+        pins.for_group(&f.group.group_id())
+            .any(|held| *held == catcoms_storage::Cid::from_bytes(*cid))
+    };
+    for cid in operation_cids.iter().chain(base_cids.iter()) {
+        assert!(
+            !pinned(&pins, cid),
+            "control is broken: {cid:?} is still held by something other than the archive, so \
+             the assertion below would pass with the collector deleted"
+        );
+    }
+    drop(pins);
+
+    // Now the archive is the sole holder.
+    crate::store::epoch_draft_archive::write_draft_archive_for_test(
+        &store,
+        SERVER,
+        &f.logical,
+        &payload,
+        &mut rng(),
+    )
+    .unwrap();
+    drop(store);
+    let mut store = open(root.path());
+    let pins = store.creative_pinned_cids().unwrap();
+    for cid in operation_cids.iter().chain(base_cids.iter()) {
+        assert!(
+            pinned(&pins, cid),
+            "archived pixel {cid:?} became reclaimable: the archive is the only thing naming it"
+        );
+    }
+}
+
+/// I-5's other half: the arm is narrowed, not removed. An archive whose payload will not decode
+/// must still fail the scan closed, exactly as a corrupt record of any other family does, rather
+/// than completing with a known set that silently omits whatever it was protecting.
+#[test]
+fn an_undecodable_draft_archive_still_fails_a_reference_scan_closed() {
+    let root = tempfile::tempdir().unwrap();
+    let f = Fixture::new(true);
+    let mut store = open(root.path());
+    let (close, basis) = closing(&f, &mut store);
+    frame_branch(&f, &mut store, &close, &basis);
+
+    // A well-framed record whose body is not a draft archive. Everything the seam validates
+    // still holds: canonical scope, filename agreement, sealing, framing and the bound.
+    crate::store::epoch_draft_archive::write_draft_archive_for_test(
+        &store,
+        SERVER,
+        &f.logical,
+        b"not a draft archive payload",
+        &mut rng(),
+    )
+    .unwrap();
+    drop(store);
+    let mut store = open(root.path());
+
+    let refused = store.creative_pinned_cids();
+    assert!(
+        refused.is_err(),
+        "an archive whose payload cannot be decoded must fail the scan closed, not be skipped"
+    );
+}
+
 #[test]
 fn draft_archive_of_a_frame_branch_round_trips_through_real_storage() {
     // The replication round trip uses header edits. Frame operations carry a CID and a declared

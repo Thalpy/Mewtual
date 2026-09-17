@@ -12,10 +12,12 @@
 //! disposal transaction, the reference collector and the archive sub-cap are Agent 2's, and are
 //! built on top of this. A vault with no archive file therefore behaves exactly as it did before.
 
+use std::collections::BTreeSet;
 use std::io::Read;
 
 use catcoms_replication::checkpoint::MAX_CHECKPOINT_BYTES;
 use catcoms_replication::epoch::{MAX_INTENT_BYTES_PER_DOCUMENT, MAX_RECEIPT_BYTES};
+use catcoms_replication::studio::ContentId;
 use catcoms_replication::studio::MAX_STUDIO_OVERLAY_OPS;
 use catcoms_replication::LogicalDocument;
 
@@ -138,6 +140,47 @@ pub(super) fn storage_record(
             content: bytes,
             ..Footprint::default()
         },
+    })
+}
+
+/// One archive's accounting record and the conservative reference set it keeps alive.
+pub(super) struct InspectedDraftArchive {
+    pub(super) record: StorageRecord,
+    pub(super) cids: BTreeSet<ContentId>,
+}
+
+/// Decode an archive body and yield the blob references it protects.
+///
+/// This is the narrowing of the seam's fail-closed reference arm, not its removal: it no longer
+/// refuses every archive, it refuses one whose bounded canonical payload will not decode, which
+/// is the rule every other family already applies to a corrupt record. Refusing is what keeps a
+/// complete scan from installing a known set that omits an archive's CIDs and so making archived
+/// pixels reclaimable, which is the single failure the archive exists to prevent.
+///
+/// The caller has already authenticated the file, validated the scope's domain against this
+/// family, re-derived the scope canonically and checked that the filename matches it. What is
+/// left to bind is the payload's own claim: an archive naming a different logical document than
+/// the record it sits in would have its references attributed to the wrong group.
+pub(super) fn inventory_references(
+    plain: &[u8],
+    server: u64,
+    document: &LogicalDocument,
+    scope: &[u8],
+    bytes: u64,
+) -> Result<InspectedDraftArchive, AppError> {
+    let mut d = Decoder::new(plain);
+    if d.get_bytes().map_err(invalid)? != scope {
+        return Err(invalid("wrong sealed scope"));
+    }
+    let body = d.get_bytes().map_err(invalid)?;
+    d.finish().map_err(invalid)?;
+    let archive = catcoms_replication::studio::StudioDraftArchive::decode(body).map_err(invalid)?;
+    if archive.document() != document {
+        return Err(invalid("draft archive names another logical document"));
+    }
+    Ok(InspectedDraftArchive {
+        record: storage_record(server, document, scope, bytes)?,
+        cids: archive.blob_cids().map_err(invalid)?,
     })
 }
 

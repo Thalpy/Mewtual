@@ -738,14 +738,25 @@ impl EpochStorageScan<'_> {
                                 // knowing what is inside it. A reference scan is the one case that
                                 // cannot proceed on that basis: its deletion-protection set would
                                 // omit the archive's CIDs and archived pixels would be reclaimed,
-                                // destroying the preservation guarantee. Fail closed until Agent 2
-                                // lands the collector that reads the payload and yields its CIDs.
-                                if self.references.is_some() {
-                                    return Err(invalid(
-                                        "draft archive reference collection is not implemented",
-                                    ));
+                                // destroying the preservation guarantee. The seam therefore failed
+                                // closed for EVERY archive until the collector existed.
+                                //
+                                // That refusal is NARROWED here, not removed. `inventory_references`
+                                // still refuses an archive whose bounded canonical payload will not
+                                // decode, which is the rule every other family applies to a corrupt
+                                // record; what it no longer refuses is an archive it can read. An
+                                // accounting-only scan still needs no payload, exactly as before.
+                                if let Some(collected) = self.references.as_mut() {
+                                    let inspected = epoch_draft_archive::inventory_references(
+                                        &plain, server, &document, scope, size,
+                                    )?;
+                                    collected.refs.add(&document.server_id, inspected.cids)?;
+                                    inspected.record
+                                } else {
+                                    epoch_draft_archive::storage_record(
+                                        server, &document, scope, size,
+                                    )?
                                 }
-                                epoch_draft_archive::storage_record(server, &document, scope, size)?
                             }
                             EpochRecordKind::Registry => {
                                 super::super::epoch_registry::inventory_record(
@@ -1540,14 +1551,20 @@ mod tests {
         assert!(!epoch_files_absent(&bare.path().join("servers")).unwrap());
         // A reference scan must not silently collect nothing from an archive it cannot read: an
         // installed protection set missing the archive's CIDs would make archived pixels
-        // reclaimable, which is the preservation guarantee the archive exists to provide. Fail
-        // closed until Agent 2's collector lands. The control above proves this exact vault
-        // completed a reference scan before the archive existed.
+        // reclaimable, which is the preservation guarantee the archive exists to provide. The
+        // control above proves this exact vault completed a reference scan before the archive
+        // existed.
+        //
+        // The seam refused EVERY archive, because it had no collector. Agent 2's collector
+        // narrowed that to refusing an archive whose bounded canonical payload will not decode,
+        // which is what `b"opaque archive body"` is. The property this test guards is unchanged
+        // and still holds; only the reason, and so the message, moved. Asserting the refusal
+        // rather than its wording keeps this test honest across that narrowing, and
+        // `an_undecodable_draft_archive_still_fails_a_reference_scan_closed` covers the same
+        // property from the collector's side against a real branch.
         let refused = spare.creative_pinned_cids();
         assert!(
-            refused.as_ref().err().is_some_and(|error| error
-                .to_string()
-                .contains("draft archive reference collection is not implemented")),
+            refused.is_err(),
             "a reference scan installed a protection set for a vault holding an archive it \
              cannot read, so the archive's pixels are reclaimable: {refused:?}"
         );
