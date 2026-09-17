@@ -1296,14 +1296,37 @@ at a custody visit with a VALID authoring tenure identity `expected`:
     record.overflow is stale iff record.overflow.tenure_id != expected
 
 admitting a current-tenure conflict that needs overflow, in ONE durable owner-record write:
-    record.overflow = OverflowHold {
-        tenure_id:    expected,
-        fingerprints: [fingerprint(pair)],
-        unknown:      false,
+
+    match record.overflow {
+        None =>
+            OverflowHold { tenure_id: expected, fingerprints: [fp], unknown: false },
+
+        Some(h) if h.tenure_id != expected =>          // STALE previous-tenure metadata
+            OverflowHold { tenure_id: expected, fingerprints: [fp], unknown: false },
+
+        Some(h) =>                                    // SAME tenure: accumulate, never replace
+            if h.fingerprints.contains(fp)      { h }                       // no-op
+            else if h.fingerprints.len() < 4    { h.insert_canonical(fp) }
+            else                                { h.unknown = true; h },
     }
+
+with authoring tenure None, Imported or Unknown:
+    do not create, clear, replace or reclassify the hold; fail closed
 ```
 
-Four qualifications, each load-bearing:
+**The replacement branch is guarded by staleness** (AG3-DES-055). Revision 13 wrote the assignment
+unconditionally, and although the surrounding prose only ever described turnover from a *previous*
+tenure, an implementation following the algorithm literally would also replace a hold that is
+already current, dropping every fingerprint but the newest. That is precisely the failure
+AG3-DES-048 closed: `{T2,[C1]}` admitting a distinct `C2` would become `{T2,[C2]}`, `C1` would be
+forgotten, and once `C2` was resolved a restart would find no durable evidence of `C1` and could
+resume proving. The two rules now compose rather than compete: **stale means replace, current means
+accumulate**, and only a positively observed authoring tenure moves either.
+
+Five qualifications, each load-bearing:
+
+- replacement applies **only** when `overflow.tenure_id != expected`. A hold that is already for the
+  current tenure accumulates under AG3-DES-048's rules and is never overwritten (AG3-DES-055);
 
 - turnover happens **only** with a positively observed authoring tenure. With `None`, `Imported` or
   `Unknown` nothing is cleared or replaced and 6.6 keeps refusing, so a stale hold is never dropped
@@ -2602,11 +2625,16 @@ Core:
 - **N44** AG3-DES-045 and AG3-DES-048, the overflow hold as a durable object. (a) Encode, decode and
   reopen a record where **only** the overflow hold is suppressing proof, with strict `0/1`
   canonicality on `has_overflow` and `unknown`, a `fingerprint_count` above 4 rejected, and
-  corruption failing the whole record rather than silently clearing the hold. (b) Two **distinct**
-  current-tenure pairs overflow; one is later admitted and repaired; assert the other's fingerprint
-  still suppresses proof and is cleared only when that exact pair is stored or resolved. (c) A fifth
-  distinct pair sets `unknown`; assert no retry clears it and only the tenure ceasing to be current
-  does. (d) AG3-DES-049: two tenures sharing a start epoch but differing in owner key produce
+  corruption failing the whole record rather than silently clearing the hold. (b) Distinct
+  current-tenure pairs overflow one at a time, asserting the **exact durable transition after each
+  admission**, not merely the end state: `[fp(C1)]`, then `[fp(C1), fp(C2)]`, then
+  `[fp(C1), fp(C2), fp(C3)]`, each in canonical order, and asserting explicitly that same-tenure
+  admission **never takes the cross-tenure replacement branch** (AG3-DES-055, AG3-TEST-012). Then one
+  is admitted and repaired; assert the others' fingerprints still suppress proof and each is cleared
+  only when that exact pair is stored or resolved. A re-admission of a fingerprint already present is
+  a no-op. (c) A fifth distinct pair sets `unknown`; assert no retry clears it and only the tenure
+  ceasing to be current does. N46 covers the complementary stale-tenure branch, and between them the
+  two branches are distinguishable: neither test passes under the other branch's behaviour. (d) AG3-DES-049: two tenures sharing a start epoch but differing in owner key produce
   different `tenure_id`s, and an overflow hold from one does not suppress or release under the
   other. (e) **Canonicality negatives** (AG3-DES-053): duplicate fingerprints, out-of-order
   fingerprints and the inert `has_overflow=1, count=0, unknown=false` shape are each rejected at
@@ -2907,8 +2935,12 @@ Base: 04b27f7dc59f917e556c5a30d1a609f6b211ab32 (revision 12). Head: [FULL_HEAD_S
 Compare: https://github.com/Thalpy/Mewtual/compare/04b27f7dc59f917e556c5a30d1a609f6b211ab32...[FULL_HEAD_SHA]
 Note: like revision 10, this revision is committed in several parts because a parallel session
 repeatedly resets this shared working tree and discards uncommitted edits. Every part touches only
-the two Agent 3 documents; f5ac522 between the two revisions is status-only.
-Earlier revisions: 3b6a4b40462ae83a341f8f6741c93edff55b5ef7 (revision 9),
+the two Agent 3 documents. Isolate the revision by walking back from the head: its commits are
+contiguous, and the first one's parent is the correct isolation base, since unrelated Agent 1 and
+Agent 2 work interleaves in the literal range.
+Earlier revisions: 333924318a65210375fa992bc49006c2fac3c236 (revision 11),
+11ce6f1b58288e44d6ff14dc2a98f42f7cc5e13b (revision 10 design body),
+3b6a4b40462ae83a341f8f6741c93edff55b5ef7 (revision 9),
 b8bb5f3a3db6d0b8e450c82119f95e2cb929bce6 (revision 8),
 6d498c2e901e5071104a2533e0a632dc5676b2a7 (revision 7),
 135766ca9f290ab96d3133b771bc42da74fe7825 (revision 6),
