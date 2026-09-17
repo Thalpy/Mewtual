@@ -1,13 +1,50 @@
 # Gate 4: Flow H scheduled-runtime corrections
 
-Status: **awaiting adversarial review.** The compare URL below resolves only once
-`gate4-agent1-runtime` is pushed; at the time of writing the branch is ahead of `origin`. Push
-before sending, or the reviewer gets a 404 instead of a pinned diff.
+Status: **REQUEST CHANGES received on `da7b8fa`; corrections implemented and awaiting re-review.**
 
-**Reviewed head is `da7b8fa`, which is not the branch tip.** Later commits on
+The reviewer confirmed NEW-1, NEW-2's original bug, NEW-4, NEW-5, NEW-10 and both new H5 guards as
+genuine, and accepted M34 and M35 as strong isolated oracles. It then found **two further
+capacity-stranding P1s and a load-bearing check the accepted design specifies**, which is the same
+pattern the round before had shown: a correction introducing the defect class it was closing.
+
+| Finding | Verified against source | Disposition |
+|---|---|---|
+| **FLOWH-001** P1: backoff neither enforced under load nor self-waking at idle | confirmed: `background_step` gated H5 on stage alone, and `pending` uses `runnable`, which is false while held | fixed, M36 + M37 |
+| **FLOWH-002** P1: a worker completing after a pause re-strands the permit | confirmed: `complete` has no `paused` check and no release after | fixed, M38 |
+| **FLOWH-003** P2: H3 performs no per-visit wrapper reauthentication | confirmed: design 6.1 line 549 specifies it and §13 names **M4** as its mutation; `handoff_sign` had no store access at all | fixed, M39 |
+| **FLOWH-004** P2: H1 reads intent bodies before admission | confirmed: design §7.2 is *titled* "Reservation precedes every body read" | fixed, M40 |
+| **FLOWH-TEST-001** P2: the H3 time bound has no discriminator | **refuted**, see below | no change |
+
+FLOWH-TEST-001 does not hold. Case 3 of `studio_handoff_signs_in_bounded_slices` disables the
+count limiter with `usize::MAX` and drives a 200 ms-per-read `SteppingClock` against the 250 ms
+budget, asserting `signed() == 2` with `remaining() > 0`; case 2 disables the time limiter so only
+the turn cap can stop it. **M5b** is recorded in the status document and fails at a *different*
+assertion, "the slice budget did not bound the slice", 8 signed where 2 was required. Both landed
+in `c676749`, outside the reviewed range — a diff-scoped read would not see them. The reviewer's
+*derived* conclusion, that the open-items list was incomplete again, stands regardless: FLOWH-001
+through -004 were all absent from it.
+
+Two fixes went beyond the literal finding, and the reasoning should be checked rather than taken:
+
+- **FLOWH-004's reservation is placed after an in-memory eligibility test**, not at the very top of
+  the probe. Reserving unconditionally would take a process-wide permit on every background turn
+  of a quiescent vault and could transiently refuse a concurrent Save — the opposite of what 7.2's
+  memo exists for. The test uses only `intent_generation`, `is_quiet` and `held`, none of which
+  read a body. If that reasoning is wrong, the fix is wrong.
+- **A failed reservation now records no backoff.** That also closes the previously-disclosed item
+  about capacity contention escalating like genuine ineligibility, but it is a behaviour change
+  the finding did not ask for.
+
+The compare URL below resolves only once `gate4-agent1-runtime` is pushed.
+
+**The reviewed head was `da7b8fa`, which is not the branch tip.** Later commits on
 `gate4-agent1-runtime` that only touch this document are documentation-only and carry no reviewed
 code; the common contract asks reviewers to make exactly this distinction, and this round creates
-the case. Review `da7b8fa`, not whatever the branch currently points at. This round exists because the previous adversarial
+the case.
+
+## Background: why this thread exists
+
+This round exists because the previous adversarial
 review of `808ef2f` returned **REQUEST CHANGES**, and because a material part of what it found
 was that the implementer's own account of the preceding round was wrong. That is the context the
 next reviewer should carry in, and it is the reason this request asks for the corrections to be
@@ -98,6 +135,70 @@ Flow R (R1/R2/R3), invariant I-4, change C-3 and design §13's eight measurement
 Native exposure remains gated on Agent 2's P5, still false.
 
 ## The review request
+
+### Round 3 request: FLOWH-001 to FLOWH-004
+
+```text
+Review type: finding re-review of FLOWH-001..FLOWH-004.
+Base: da7b8fa8993547268c403d78158fcfb02e9ca6b6. Head: [FULL_HEAD_SHA].
+Compare: [IMMUTABLE_COMPARE_URL].
+Scope/evidence: docs/GATE4-FLOW-H-CORRECTIONS-REVIEW.md, docs/GATE4-AGENT-1-STATUS.md,
+docs/GATE4-AGENT-1-DESIGN.md sections 6.1, 7.1, 7.2, 7.3 and 13.
+Dependencies: your REQUEST CHANGES verdict on da7b8fa, and the corrections it confirmed as
+genuine there (NEW-1, NEW-2's original bug, NEW-4, NEW-5, NEW-10, M34, M35).
+
+This is the third consecutive round in which a correction introduced the defect class it was
+closing. FLOWH-001 was created by NEW-8's own fix; FLOWH-002 sits on the other side of the
+Detached transition NEW-9 handled. Assume the same has happened again and look for it before
+anything else. Four specific candidates, in the shape the last three rounds took:
+
+Backoff now gates execution through can_sign/can_commit and publishes a deadline through
+wake_in, and pending still uses runnable. That is three predicates over one piece of state.
+Establish whether they can disagree: a stage that is due but publishes no deadline, a deadline
+that outlives the job, a job whose target changes, or progressed() clearing next_at while a
+gate has already read it. The previous two P1s were both predicates disagreeing about one fact.
+
+wake_in deliberately covers only a live job, on the reasoning that a job is what holds a
+resource and an abandoned target holds nothing. Break that: find a state where something
+scarce is held with no live job, or where the actor needs to wake and no other term will
+wake it. The actor merges this into the delivery-throttle sleep; confirm a Studio-only
+deadline actually causes a loop iteration that re-signals studio_pending, and that firing
+recompute_due_delivery with an empty dirty set is genuinely inert.
+
+handoff_complete now calls release_if_stalled when paused. Confirm this covers every arm that
+can install ownership, that it cannot fire while a worker still owns a bundle, and that the
+abandon it performs records backoff for the right target. Check whether an unpaused completion
+can reach a stage that is equally unreachable for some other reason.
+
+H3's new reauthentication runs once per visit, before the first sign_next. Establish that it
+is genuinely before the first signature and not merely before the loop; that a read failure
+answering "not current" cannot be turned into a denial of service by an unrelated transient;
+and that abandoning on mismatch is right rather than parking. Design section 9.1 says a stamp
+mismatch discards the candidate and never falls back - check the implementation agrees.
+
+FLOWH-004's reservation is NOT at the top of the probe. It sits after an in-memory eligibility
+test over intent_generation, is_quiet and held, because reserving unconditionally would take a
+process-wide permit on every background turn of a quiescent vault and could transiently refuse
+a concurrent Save. Verify that test reads no body, that no path reaches load_epoch_intents_
+structural without the permit, and that a rail where every target is quiet or held still
+cannot read anything. If the eligibility test can be wrong about a target, the fix is wrong.
+
+Also re-derive, since a failed reservation now records no backoff at all: prove no target can
+be starved by a permanently contended pool, and that removing the hold has not reintroduced a
+hot loop somewhere the previous rounds closed one.
+
+I dispute FLOWH-TEST-001 and have set out the citation above. If you still believe the H3 time
+bound is unguarded after reading case 3 of studio_handoff_signs_in_bounded_slices and M5b in
+the status document, say specifically what those do not establish.
+
+Do not accept the open-items list as complete. It has been incomplete in all three rounds, by
+five items, then by four. Report what it omits, and say plainly if the pattern persists.
+
+Return a verdict for these corrections only. Flow R, I-4, C-3, the section 13 measurements and
+native exposure are out of scope and not claimed.
+```
+
+### Round 2 request, as sent (verdict: REQUEST CHANGES)
 
 ```text
 Review type: finding re-review, plus bounded implementation review of the new work.

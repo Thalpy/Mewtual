@@ -264,17 +264,20 @@ impl StudioReceiver {
         // Among themselves the order is H5, then H3, then H1: an assembled transfer is holding
         // admission, a shared slot and a signed candidate, and finishing it frees all three,
         // while starting new work is the least urgent.
+        // Both gates take the clock, so the scheduler and `pending` consult the same backoff.
+        // A refusal that records a hold the next turn ignores is not pacing at all.
+        let handoff_now = server.runtime_clock().monotonic_ms();
         let ready = self.catchup.replay_ready();
-        if ready && self.handoff.can_commit() {
+        if ready && self.handoff.can_commit(handoff_now) {
             let updated = self.handoff_commit(server, store, id);
             return Ok((StudioSavedTransaction::empty(), updated));
         }
-        if self.handoff.can_sign() {
+        if self.handoff.can_sign(handoff_now) {
             let priority = self.handoff_priority(server);
             // A yield consumes no turn: it signed nothing, so the turn goes to whatever it
             // yielded to. A slice that signed at least one operation has used the turn, whether
             // it stopped at its turn cap, at its deadline, or by finishing the branch.
-            if let Some(slice) = self.handoff_sign(server, priority) {
+            if let Some(slice) = self.handoff_sign(server, store, priority) {
                 if !slice.yielded() && slice.signed() != 0 {
                     return Ok((StudioSavedTransaction::empty(), None));
                 }
@@ -345,6 +348,29 @@ impl StudioReceiver {
                     .handoff
                     .runnable(server.runtime_clock().monotonic_ms())
                 || self.catchup.pending(server, &self.watches))
+    }
+    /// Milliseconds until this receiver has time-gated work to do, if any.
+    ///
+    /// `pending` answers "is there work right now"; this answers "when is there work next", and a
+    /// held handoff job needs both. Without it a paced refusal is indistinguishable from a stall:
+    /// the job reports not-runnable, `pending` goes false, and a quiescent actor schedules no
+    /// further Studio turn while the job still holds admission and a process-wide permit.
+    pub(crate) fn wake_in<T: MeshTransport, R: CryptoRngCore>(
+        &self,
+        server: &Server<T, R>,
+    ) -> Option<u64> {
+        if self.paused {
+            return None;
+        }
+        self.handoff.wake_in(server.runtime_clock().monotonic_ms())
+    }
+    /// Put the receiver in the state a storage fault leaves it in.
+    ///
+    /// Only the precondition is simulated. What a completion arriving in that state does, and
+    /// whether the bundle it carries is released, are production paths.
+    #[cfg(test)]
+    pub(crate) fn pause_for_test(&mut self) {
+        self.paused = true;
     }
     pub(crate) fn take_pause_notice(&mut self) -> bool {
         std::mem::take(&mut self.pause_notice)

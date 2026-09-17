@@ -94,18 +94,24 @@ impl HandoffRuntime {
     /// True when a signing slice could run right now. Signing needs no new permit and no retained
     /// source, so it is allowed on any background turn, which is why the gate is about priority
     /// rather than about capacity.
-    pub(super) fn can_sign(&self) -> bool {
-        matches!(
-            self.job.as_ref().map(|j| &j.stage),
-            Some(HandoffStage::Signing(..))
-        )
+    ///
+    /// Both this and `can_commit` take `now` and consult the same `held` that `runnable` does.
+    /// They must: a scheduler predicate that ignores the backoff its own failure path records is
+    /// not pacing, it is a hot loop with a bookkeeping side effect. That is precisely what an H5
+    /// budget refusal became: `hold_target` wrote the deadline and the commit arm never read it,
+    /// so the most expensive stage in the flow retried on every turn.
+    pub(super) fn can_sign(&self, now: u64) -> bool {
+        self.stage_due(now, |stage| matches!(stage, HandoffStage::Signing(..)))
     }
 
-    pub(super) fn can_commit(&self) -> bool {
-        matches!(
-            self.job.as_ref().map(|j| &j.stage),
-            Some(HandoffStage::Ready(..))
-        )
+    pub(super) fn can_commit(&self, now: u64) -> bool {
+        self.stage_due(now, |stage| matches!(stage, HandoffStage::Ready(..)))
+    }
+
+    fn stage_due(&self, now: u64, want: impl Fn(&HandoffStage) -> bool) -> bool {
+        self.job
+            .as_ref()
+            .is_some_and(|job| want(&job.stage) && !self.held(job.target, now))
     }
 
     fn hold_target(&mut self, target: StudioTarget, now: u64) {
@@ -147,6 +153,30 @@ impl HandoffRuntime {
             Some((_, target)) => !self.held(target, now),
             None => false,
         }
+    }
+
+    /// Milliseconds until the live job's backoff expires, if one is held.
+    ///
+    /// Gating execution on the hold is only half of pacing; without this the other half is a
+    /// stall. A held job reports `runnable() == false`, so `pending()` is false, so a quiescent
+    /// actor schedules no further Studio turn — and a `Ready` job holds this actor's admission
+    /// and one of four process-wide preparation permits for as long as that lasts. Nothing else
+    /// in the loop is watching this deadline, so four quiescent actors could take the whole pool
+    /// and never give it back. The actor merges this into the same injected-clock wake it already
+    /// computes for delivery throttling.
+    ///
+    /// Only a live job counts. An abandoned target holds no resource, so re-probing it can wait
+    /// for ordinary Studio work; waking the actor for it would be a timer per remembered target
+    /// rather than a timer per held resource.
+    pub(super) fn wake_in(&self, now: u64) -> Option<u64> {
+        let job = self.job.as_ref()?;
+        if matches!(job.stage, HandoffStage::Detached) {
+            return None;
+        }
+        self.next_at
+            .get(&job.target)
+            .filter(|at| now < **at)
+            .map(|at| at.saturating_sub(now))
     }
 
     fn remaining(&self) -> Option<usize> {
@@ -240,6 +270,29 @@ impl HandoffRuntime {
         }
     }
 
+    /// Record the backoff an H5 budget refusal records, without contriving a budget failure.
+    ///
+    /// Only the precondition is simulated. The gate that reads the hold, the deadline the actor
+    /// wakes on and the receiver's behaviour either side of it are all production.
+    #[cfg(test)]
+    pub(super) fn hold_live_job_for_test(&mut self, now: u64) {
+        if let Some(target) = self.job.as_ref().map(|job| job.target) {
+            self.hold_target(target, now);
+        }
+    }
+
+    /// Whether the rail scan ran. It advances the cursor, and nothing else does, so an unchanged
+    /// cursor means the probe returned before reading any intent body.
+    #[cfg(test)]
+    pub(super) fn selection_for_test(&self) -> usize {
+        self.selection
+    }
+
+    #[cfg(test)]
+    pub(super) fn held_for_test(&self, target: StudioTarget, now: u64) -> bool {
+        self.held(target, now)
+    }
+
     #[cfg(test)]
     pub(super) fn token_for_test(&self) -> Option<u64> {
         self.job.as_ref().map(|job| job.token)
@@ -310,7 +363,33 @@ impl StudioReceiver {
             return;
         }
         let now = server.runtime_clock().monotonic_ms();
+        // 7.2, whose section title is "Reservation precedes every body read". The rail scan below
+        // is body reads: `load_epoch_intents_structural` reads and structurally decodes an
+        // authenticated intent record per candidate. Reserving after it, which is what "before the
+        // first authorization read" amounted to, let a background probe decode several records
+        // per turn while holding neither this actor's admission nor one of the four process-wide
+        // permits, defeating the admission control the pool exists to provide.
+        //
+        // Failing to reserve is now free: no target is selected yet, so nothing is backed off.
+        // That is deliberate. Charging a doubling per-target hold for losing a race on capacity
+        // penalised a perfectly eligible document for being unlucky, and escalated contention the
+        // same way it escalates genuine ineligibility.
         let generation = store.intent_generation();
+        let rail: Vec<_> = self.watches.iter().map(|(w, _)| w.target).collect();
+        // Whether any target could need a body read at all is decided from memoised state and
+        // deadlines alone: `intent_generation` is a token comparison, and `is_quiet`/`held` are
+        // in-memory lookups. Reserving before *this* would take a process-wide permit on every
+        // background turn of a wholly quiescent vault and could transiently refuse a concurrent
+        // Save, which is the opposite of what 7.2's memo is for.
+        if !rail
+            .iter()
+            .any(|t| !self.handoff.is_quiet(&generation, *t) && !self.handoff.held(*t, now))
+        {
+            return;
+        }
+        let Some(ownership) = self.catchup.reserve_overlay() else {
+            return;
+        };
         let group = server.group_id();
         let device = server
             .sync
@@ -320,7 +399,6 @@ impl StudioReceiver {
         // A read error is recorded as an error, never silently memoised as "nothing here": doing
         // that would suppress every handoff on this actor until an unrelated intent write
         // happened to rotate the generation token.
-        let rail: Vec<_> = self.watches.iter().map(|(w, _)| w.target).collect();
         let start = self.handoff.selection % rail.len();
         self.handoff.selection = start.wrapping_add(1);
         let mut found = None;
@@ -354,6 +432,8 @@ impl StudioReceiver {
         for target in quiet {
             self.handoff.quiet_for(&generation, target);
         }
+        // Nothing to schedule: 7.2's other half, releasing immediately, which dropping
+        // `ownership` on return does.
         let Some((target, basis)) = found else {
             if let Some(bad) = unreadable {
                 self.handoff.hold_target(bad, now);
@@ -361,14 +441,6 @@ impl StudioReceiver {
             return;
         };
 
-        // 7.2: reserve admission and the shared slot before the first authorization read, and
-        // release by dropping if H1 concludes there is nothing to schedule.
-        let Some(ownership) = self.catchup.reserve_overlay() else {
-            // Admission is busy, or the shared pool is full. Back this target off rather than
-            // re-reading the rail on every turn while a Save holds the slot.
-            self.handoff.hold_target(target, now);
-            return;
-        };
         // A transfer needs a live tenure to mint its authority. Without one there is nothing to
         // capture, and the reservation is released by dropping `ownership` on return.
         let Some(tenure) = server.sync.observed_owner_tenure_start() else {
@@ -436,9 +508,11 @@ impl StudioReceiver {
     pub(super) fn handoff_sign<T: MeshTransport + 'static, R: CryptoRngCore>(
         &mut self,
         server: &mut Server<T, R>,
+        store: &mut ServerStore,
         priority: bool,
     ) -> Option<crate::store::SigningSlice> {
-        if !self.handoff.can_sign() {
+        let now = server.runtime_clock().monotonic_ms();
+        if !self.handoff.can_sign(now) {
             return None;
         }
         // Nothing left to sign: H4 detaches next turn. Re-entering `sign_next` here would
@@ -447,6 +521,17 @@ impl StudioReceiver {
             return None;
         }
         let tenure = server.sync.observed_owner_tenure_start()?;
+        // Per-visit wrapper reauthentication, before the first `sign_next` of the slice.
+        //
+        // Design 6.1's stage table puts this at H3, and `sign_next`'s live-authority recheck is
+        // not a substitute: it proves who is signing and under what epoch and tenure, not that
+        // the bytes H2 reconstructed from are still the bytes on disk. A same-size authenticated
+        // wrapper replacement between visits passes every authority check and is signed against.
+        // A mismatch signs zero, abandons and backs off, exactly as a refused signature does.
+        if !self.handoff_plan_is_current(server, store, tenure) {
+            self.handoff.abandon(now);
+            return None;
+        }
         let job = self.handoff.job.as_mut()?;
         let HandoffStage::Signing(plan, _) = &mut job.stage else {
             return None;
@@ -477,6 +562,28 @@ impl StudioReceiver {
         }
     }
 
+    /// Whether the live `Signing` plan's stamp still matches the store and the live context.
+    ///
+    /// A read failure answers "not current". This runs on a background turn where nothing may
+    /// fail the turn, and the conservative answer costs one abandoned handoff, which is cheap to
+    /// redo from H1; the permissive answer would sign against records that could not be read back.
+    fn handoff_plan_is_current<T: MeshTransport + 'static, R: CryptoRngCore>(
+        &self,
+        server: &mut Server<T, R>,
+        store: &mut ServerStore,
+        tenure: u64,
+    ) -> bool {
+        let Some(HandoffStage::Signing(plan, _)) = self.handoff.job.as_ref().map(|job| &job.stage)
+        else {
+            return false;
+        };
+        server.sync.with_registry_context(|group, device, _, _| {
+            store
+                .studio_handoff_plan_is_current(group, device, Some(tenure), plan)
+                .unwrap_or(false)
+        })
+    }
+
     /// H5 and H6. Commit the assembled transfer, then notify.
     ///
     /// Nothing here can fail the background turn. A refused stamp, a budget that will not build,
@@ -489,10 +596,10 @@ impl StudioReceiver {
         store: &mut ServerStore,
         id: u64,
     ) -> Option<StudioTarget> {
-        if !self.handoff.can_commit() {
+        let now = server.runtime_clock().monotonic_ms();
+        if !self.handoff.can_commit(now) {
             return None;
         }
-        let now = server.runtime_clock().monotonic_ms();
         let target = self
             .handoff
             .job
@@ -591,6 +698,18 @@ impl StudioReceiver {
             // A completion for something this actor is not working on. Ignore it entirely: the
             // current job, whatever stage it is in, is untouched.
             _ => {}
+        }
+        // A worker can finish after the receiver has paused, and a successful one hands its bundle
+        // back: the job leaves `Detached`, which `release_if_stalled` deliberately exempts, and
+        // arrives at `Signing` or `Ready` holding admission and a process-wide permit. `pending`
+        // begins with `!self.paused`, so no further turn is ever scheduled and the release hook in
+        // `run`'s paused path is never reached. The bundle would sit there until the user happened
+        // to open a Studio document successfully.
+        //
+        // The pause check belongs here rather than in the caller because this is the only point
+        // where a job can re-enter a holding stage from `Detached`.
+        if self.paused {
+            self.handoff.release_if_stalled(now);
         }
     }
 

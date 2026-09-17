@@ -1081,8 +1081,86 @@ explicitly, with a comment at the site saying why the job-reading variant must n
 | **NEW-8**, P3 | `pending()` used `busy()`, which is true for a job that cannot run — held by backoff or already detached — holding the driver at its active cadence for the job's whole life. Now `runnable(now)`. |
 | **NEW-9**, P3 | A `Captured` job survived the storage pause holding a process-wide permit with no path to release it. `release_if_stalled` now abandons any non-detached job when the receiver pauses. |
 
-**Still open, corrected and completed after the second review pointed out the first list was
-incomplete.** The earlier list named three items; it should have named eight.
+### The third review: two more capacity-stranding P1s, and a check the design specified
+
+The external reviewer returned **REQUEST CHANGES** on `da7b8fa`. The important prior fixes held up
+— NEW-1, NEW-2's original bug, NEW-4, NEW-5, NEW-10 and both new H5 guards were confirmed genuine
+— but the round still contained two P1s of the *same class* it was written to close, plus a
+load-bearing check the accepted design specifies and this implementation never had.
+
+All four were verified against source before being acted on.
+
+**FLOWH-001, P1: the backoff was neither enforced nor self-waking.** NEW-3 made an H5 budget
+refusal record a hold and keep the signed `Ready` job rather than discarding a detached vault
+decode and every signature. But `can_commit` looked only at the stage, so on a busy actor H5
+retried on every turn, draining a five-family inventory each time — the recorded deadline did
+nothing at all. And NEW-8's own fix created the opposite failure: a held job reports not-runnable,
+so `pending` is false, so a quiescent actor schedules no further Studio turn while the job holds
+admission and one of four process-wide permits. Four such actors take the whole pool for ever.
+
+Corrected in both halves. `can_sign`/`can_commit` take `now` and consult the same `held` that
+`runnable` does, so the scheduler and `pending` cannot disagree. `HandoffRuntime::wake_in`
+publishes the live job's deadline, `StudioReceiver::wake_in` exposes it, and the actor merges it
+into the injected-clock wake it already computes for delivery throttling — no new timer.
+
+**FLOWH-002, P1: a worker finishing after a pause re-stranded its bundle.** `release_if_stalled`
+exempts `Detached` because the worker owns the bundle — correct — but a worker that *succeeds*
+hands it back, and the job leaves `Detached` for `Signing` or `Ready` holding admission and a
+permit. `pending` begins with `!self.paused`, so no further turn is ever scheduled and the release
+hook on `run`'s paused path is never reached. `handoff_complete` is now pause-aware, which is the
+only point where a job can re-enter a holding stage from `Detached`.
+
+**FLOWH-003, P2: H3 never reauthenticated the wrappers.** Design 6.1's stage table specifies
+"per-visit wrapper reauthentication" at H3, and §13 names **M4** as its mutation. I shipped
+neither. `sign_next`'s live-authority recheck is not a substitute: it proves who is signing and
+under what epoch and tenure, not that the records H2 reconstructed from are still the bytes on
+disk. H5 refuses the result later, so nothing durable is wrong — the device's signing authority is
+simply spent on a proposal the contract says to reject first. `handoff_sign` now takes the store
+and checks the stamp through a new capability-narrowed `studio_handoff_plan_is_current` seam.
+
+**FLOWH-004, P2: the probe read intent bodies before reserving.** §7.2 is *titled* "Reservation
+precedes every body read", and the probe reserved after its rail scan — one authenticated intent
+record read and structurally decoded per candidate, under custody, holding nothing. The comment at
+the reserve site claimed 7.2 while describing "before the first authorization read", which is not
+what 7.2 says. The reservation now precedes the scan. A failure to reserve costs nothing and
+records no hold, which also closes the previously-disclosed open item that capacity contention
+escalated exactly like genuine ineligibility.
+
+**FLOWH-TEST-001 is refuted**, with citation. The reviewer reported that H3's time bound has no
+discriminator and that the omission pattern therefore persists. The discriminator exists: case 3
+of `studio_handoff_signs_in_bounded_slices` disables the count limiter with `usize::MAX` and
+drives a 200 ms-per-read `SteppingClock` against the 250 ms budget, asserting `signed() == 2` and
+`remaining() > 0`; case 2 disables the time limiter so only the turn cap can stop it. **M5b** is
+recorded at §"Mutations" and fails at a *different* assertion, "the slice budget did not bound the
+slice", 8 signed where 2 was required. Both landed in `c676749`, outside the reviewed range, which
+is how a diff-scoped read missed them. The reviewer's derived conclusion — that the open-items
+list was incomplete again — is nonetheless **correct**, on the strength of FLOWH-001 through -004,
+none of which the list named.
+
+| Mutation | Effect |
+|---|---|
+| M36: `stage_due` ignores the hold | "H5 ran inside its own backoff": the job commits instead of staying `Ready` |
+| M37: `wake_in` publishes nothing | "a held job published no deadline, so a quiescent actor would never revisit it" |
+| M38: `handoff_complete` not pause-aware | "a completion arriving during a pause parked the bundle in a stage no turn will ever visit" |
+| M39 (design **M4**): no per-visit reauthentication | "H3 signed against records that are no longer the ones it authenticated" |
+| M40: reserve after the rail scan | the selection cursor advances, proving the scan ran holding no admission and no permit |
+
+**The known `studio_exchange` contention flake recurred, and is recorded rather than glossed.**
+One full-suite run reported `scheduling::studio_actor_owner_return_installs_both_classes_with_cancelled_preview_transport`
+failing: the same test, in the same module, already recorded above as a deadline assertion that
+fails under concurrent Cargo load and passes serially. It passes in isolation in 6.6 s, the
+checkpoint run at 660 passed with *more* global-permit churn than the final code has, and a clean
+re-run with no competing Cargo process passed 660 with zero failures.
+
+That is the hypothesis confirmed rather than assumed, and the reason it was worth confirming is
+specific: FLOWH-004 makes the H1 probe hold a **process-wide** permit across its rail scan, and
+the `studio_exchange` tests use the real four-slot pool rather than an injected one. A genuine
+starvation there would look exactly like a flake. It is not one — but "it was flaky before" was
+not sufficient evidence on its own.
+
+**Still open.** The earlier list named three items; it should have named eight; the reviewer then
+showed it should have named twelve. What follows is what is known to be open, and is again not
+offered as a guarantee of completeness.
 
 1. **H1 and H5 each drain a full epoch-storage inventory under custody**, which design 6.1 does not
    put in H1 and which C-3's resumable cursor is meant to bound. The scheduled sequence is shipping
@@ -1096,6 +1174,16 @@ incomplete.** The earlier list named three items; it should have named eight.
 5. **Design 7.3's `explicit_retry` relief is not wired to the handoff maps**, though the code
    comment cites 7.3's pacing as satisfied.
 6. **`next_at`, `hold_ms` and `quiet` are never pruned** against the current watch rail.
+7. **An abandoned target is not re-probed on a timer.** `wake_in` publishes a deadline only for a
+   live job, because a job is what holds a resource. After an `abandon` there is no job, so a
+   quiescent actor waits for ordinary Studio work before re-probing. That delays opportunistic
+   transfer; it strands nothing. Raised by the third review as analogous to FLOWH-001 and
+   deliberately not folded into it: a timer per remembered target is a different bargain from a
+   timer per held resource, and item 6 would have to be fixed first for it to be safe.
+8. **H1's "cheap by construction" claim does not hold for the interrupted-`Prepared` branch**,
+   which still enters the synchronous `resolve_studio_handoff_with_io` backstop under custody.
+   Flow R is what removes that, and Flow R is not started. Noted by the third review; it is
+   excluded from this round's claim but must not disappear from the later custody review.
 
 The two coverage debts that were items 3 and 4 in the previous revision are now closed, both by
 tests that were checked against a deliberately broken build before being trusted:

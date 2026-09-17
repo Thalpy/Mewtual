@@ -314,6 +314,29 @@ impl ServerStore {
     /// Reacquired custody. Compares mount identity, numeric server, complete target, document,
     /// actor and key, designated owner, MLS epoch, and both authenticated record digests with
     /// their physical sizes. It decodes nothing.
+    /// Whether a signing plan's stamp still describes the store and live context.
+    ///
+    /// The capability-narrowed seam H3 reauthenticates through. Design 6.1's stage table requires
+    /// per-visit wrapper reauthentication before the bounded `sign_next` turns of a slice, and the
+    /// live-authority recheck inside `sign_next` is **not** that: it proves the device, its key,
+    /// its membership, the MLS epoch, the tenure and the current owner, and says nothing about
+    /// whether the authenticated source and intent wrappers H2 reconstructed from are still the
+    /// bytes on disk. Without this, a same-size authenticated wrapper replacement between visits
+    /// is signed against, spending the live device's signing authority on a proposal the contract
+    /// says to reject before the first signature of the visit. H5 refuses it later, so nothing
+    /// durable is wrong; the signatures are simply wasted and the contract is not met.
+    ///
+    /// The stamp stays private: the receiver passes the plan and gets an answer.
+    pub(crate) fn studio_handoff_plan_is_current(
+        &self,
+        group: &ServerGroup,
+        device: &MlsDevice,
+        tenure: Option<u64>,
+        plan: &StudioHandoffPlan,
+    ) -> Result<bool, AppError> {
+        self.studio_handoff_is_current(group, device, tenure, &plan.stamp)
+    }
+
     pub(super) fn studio_handoff_is_current(
         &self,
         group: &ServerGroup,

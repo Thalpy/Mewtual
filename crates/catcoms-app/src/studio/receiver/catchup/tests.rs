@@ -558,7 +558,9 @@ async fn handoff_signing_pages_across_turns_and_a_priority_turn_signs_nothing() 
     // A priority turn signs nothing and leaves the count untouched. This is the two-event rule:
     // a yield is a different outcome from a bounded slice, even though both leave work remaining.
     let before = receiver.handoff.remaining_for_test();
-    let yielded = receiver.handoff_sign(&mut server, true).expect("a slice");
+    let yielded = receiver
+        .handoff_sign(&mut server, &mut store, true)
+        .expect("a slice");
     assert!(
         yielded.yielded(),
         "a priority turn was not reported as a yield"
@@ -567,7 +569,9 @@ async fn handoff_signing_pages_across_turns_and_a_priority_turn_signs_nothing() 
     assert_eq!(receiver.handoff.remaining_for_test(), before);
 
     // An ordinary slice is bounded by the turn cap, so it cannot finish this branch in one go.
-    let first = receiver.handoff_sign(&mut server, false).expect("a slice");
+    let first = receiver
+        .handoff_sign(&mut server, &mut store, false)
+        .expect("a slice");
     assert!(!first.yielded());
     assert_eq!(
         first.signed(),
@@ -578,7 +582,9 @@ async fn handoff_signing_pages_across_turns_and_a_priority_turn_signs_nothing() 
     assert!(!first.complete());
 
     // A second slice finishes it, which is what "paged across turns" means.
-    let second = receiver.handoff_sign(&mut server, false).expect("a slice");
+    let second = receiver
+        .handoff_sign(&mut server, &mut store, false)
+        .expect("a slice");
     assert_eq!(second.signed(), 5);
     assert!(second.complete());
 
@@ -700,6 +706,406 @@ async fn authority_change_during_signing(moved: AuthorityMove) {
 
     // And the receiver keeps working: another turn runs without error.
     receiver.run(&mut server, &mut store, 83, None).unwrap();
+}
+
+/// Design 7.2, whose section title is "Reservation precedes every body read".
+///
+/// The H1 probe's rail scan is body reads: one authenticated intent record read and structurally
+/// decoded per candidate. Reserving after it meant a background probe could decode several
+/// records per turn while holding neither this actor's admission nor one of the four process-wide
+/// permits — defeating the admission control the pool exists to provide, in the one flow that
+/// runs with no user behind it.
+///
+/// The second assertion is the other half. Charging a doubling per-target hold for losing a race
+/// on capacity penalises a perfectly eligible document for being unlucky, and escalates
+/// contention exactly the way it escalates genuine ineligibility.
+#[tokio::test]
+async fn an_exhausted_pool_stops_the_probe_before_it_reads_any_intent_body() {
+    let clock = ManualClock::new(1000);
+    let mut rng = ChaCha20Rng::seed_from_u64(1709);
+    let mut server = Server::found(
+        Hub::new().join(PeerId::from_u64(1)),
+        MlsDevice::generate().unwrap(),
+        rng.clone(),
+        Box::new(clock.clone()),
+        "owner",
+    )
+    .unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let mut store = ServerStore::open(root.path(), b"flow-h-admission", &mut rng).unwrap();
+    let target = StudioTarget::Flipnote {
+        channel: crate::channel_id("general").to_be_bytes(),
+        object: [19; 16],
+    };
+    server.sync.with_registry_context(|g, d, _, _| {
+        crate::store::studio_handoff_ready_fixture(&mut store, 88, g, d, target, 1)
+    });
+    let mut receiver = StudioReceiver::default();
+    receiver
+        .run(
+            &mut server,
+            &mut store,
+            88,
+            Some(StudioRequest::Read { target }),
+        )
+        .unwrap();
+    let pool = receiver.catchup.inject_overlay_pool_for_test(4);
+
+    // Every slot taken, as four other actors preparing would take them.
+    let taken: Vec<_> = (0..4)
+        .map(|_| {
+            pool.clone()
+                .try_acquire_owned()
+                .expect("the injected pool should start empty of holders")
+        })
+        .collect();
+    assert_eq!(pool.available_permits(), 0);
+
+    let before = receiver.handoff.selection_for_test();
+    receiver.run(&mut server, &mut store, 88, None).unwrap();
+
+    assert!(
+        receiver.handoff.stage_for_test().is_none(),
+        "a job was captured with no permit to hold"
+    );
+    assert_eq!(
+        receiver.handoff.selection_for_test(),
+        before,
+        "the probe scanned the rail, reading intent bodies, while holding no admission and no \
+         process-wide permit"
+    );
+    let now = server.runtime_clock().monotonic_ms();
+    assert!(
+        !receiver.handoff.held_for_test(target, now),
+        "losing a race for capacity charged an eligible document a doubling backoff, escalating \
+         contention the same way genuine ineligibility escalates"
+    );
+
+    // With capacity back, the same target is picked up normally: the refusal left no trace.
+    drop(taken);
+    assert_eq!(pool.available_permits(), 4);
+    receiver.run(&mut server, &mut store, 88, None).unwrap();
+    assert!(
+        receiver.handoff.stage_for_test().is_some(),
+        "the probe did not recover once capacity returned"
+    );
+}
+
+/// Design 6.1's M4: H3 reauthenticates the wrappers before the first `sign_next` of a visit.
+///
+/// `sign_next`'s own live-authority recheck is not this. It proves the device, its key, its
+/// membership, the MLS epoch, the tenure and the current owner — who is signing, and under what
+/// authority. It says nothing about whether the authenticated records H2 reconstructed the
+/// candidate from are still the bytes on disk. Between two signing visits they can change, and
+/// without this check the device's signing authority is spent on a proposal the contract says to
+/// reject before the first signature.
+///
+/// H5 refuses the result later, so nothing durable goes wrong; the signatures are simply wasted.
+/// That is why this is not a P1, and also why an end-to-end happy path can never catch it.
+#[tokio::test]
+async fn a_wrapper_change_between_signing_visits_signs_nothing_and_abandons() {
+    let clock = ManualClock::new(1000);
+    let mut rng = ChaCha20Rng::seed_from_u64(1601);
+    let mut server = Server::found(
+        Hub::new().join(PeerId::from_u64(1)),
+        MlsDevice::generate().unwrap(),
+        rng.clone(),
+        Box::new(clock.clone()),
+        "owner",
+    )
+    .unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let mut store = ServerStore::open(root.path(), b"flow-h-stamp", &mut rng).unwrap();
+    let target = StudioTarget::Flipnote {
+        channel: crate::channel_id("general").to_be_bytes(),
+        object: [17; 16],
+    };
+    server.sync.with_registry_context(|g, d, _, _| {
+        crate::store::studio_handoff_ready_fixture(&mut store, 87, g, d, target, 8)
+    });
+    let mut receiver = StudioReceiver::default();
+    receiver
+        .run(
+            &mut server,
+            &mut store,
+            87,
+            Some(StudioRequest::Read { target }),
+        )
+        .unwrap();
+    receiver.catchup.inject_overlay_pool_for_test(4);
+
+    // Stop at H3 with work still to do.
+    for _ in 0..30 {
+        receiver.run(&mut server, &mut store, 87, None).unwrap();
+        if let Some(work) = receiver.detach(&mut server) {
+            receiver.complete(&mut server, work.run(None).await);
+        }
+        if receiver.handoff.stage_for_test() == Some("signing") {
+            break;
+        }
+    }
+    assert_eq!(
+        receiver.handoff.stage_for_test(),
+        Some("signing"),
+        "the fixture never reached H3, so this proves nothing"
+    );
+    let before = receiver.handoff.remaining_for_test();
+    assert!(
+        before.is_some_and(|n| n > 0),
+        "nothing left to sign, so a refusal to sign proves nothing"
+    );
+
+    // An ordinary local edit between visits rewrites the intent wrapper H2 read. Authority is
+    // untouched: same device, same key, same membership, same epoch, same owner, same tenure.
+    let epoch_id = server
+        .sync
+        .with_registry_context(|g, d, _, _| store.load_studio_epoch(87, g, target, d))
+        .unwrap()
+        .expect("the installed successor")
+        .doc_id();
+    receiver
+        .run(
+            &mut server,
+            &mut store,
+            87,
+            Some(StudioRequest::Apply {
+                target,
+                epoch_id,
+                nonce: [93; 16],
+                body: FlipnoteOp::SetHeader(FlipnoteHeader::Title("moved on".into()))
+                    .encode()
+                    .unwrap(),
+            }),
+        )
+        .expect("an ordinary edit must still succeed");
+
+    // The next signing visit must sign nothing and give the job up.
+    let slice = receiver.handoff_sign(&mut server, &mut store, false);
+    assert!(
+        slice.is_none(),
+        "H3 signed against records that are no longer the ones it authenticated"
+    );
+    assert!(
+        receiver.handoff.stage_for_test().is_none(),
+        "a stale plan was left signable"
+    );
+}
+
+/// A worker that finishes after the receiver pauses must not re-strand its bundle.
+///
+/// `release_if_stalled` exempts `Detached` on purpose: the worker owns the bundle, so there is
+/// nothing to release. But a worker that succeeds hands the bundle **back**, and the job leaves
+/// `Detached` for `Signing` or `Ready` holding this actor's admission and one of four
+/// process-wide preparation permits. `pending` begins with `!self.paused`, so the driver
+/// schedules no further turn, and the release hook on `run`'s paused path is never reached. The
+/// bundle would sit there until the user happened to open a Studio document successfully.
+///
+/// The whole point is that no further `run` happens after the pause: this test must prove the
+/// release without one, because in production there would not be one.
+#[tokio::test]
+async fn a_worker_finishing_after_a_pause_releases_its_bundle_without_another_visit() {
+    let clock = ManualClock::new(1000);
+    let mut rng = ChaCha20Rng::seed_from_u64(1511);
+    let mut server = Server::found(
+        Hub::new().join(PeerId::from_u64(1)),
+        MlsDevice::generate().unwrap(),
+        rng.clone(),
+        Box::new(clock.clone()),
+        "owner",
+    )
+    .unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let mut store = ServerStore::open(root.path(), b"flow-h-pause", &mut rng).unwrap();
+    let target = StudioTarget::Flipnote {
+        channel: crate::channel_id("general").to_be_bytes(),
+        object: [15; 16],
+    };
+    server.sync.with_registry_context(|g, d, _, _| {
+        crate::store::studio_handoff_ready_fixture(&mut store, 86, g, d, target, 1)
+    });
+    let mut receiver = StudioReceiver::default();
+    receiver
+        .run(
+            &mut server,
+            &mut store,
+            86,
+            Some(StudioRequest::Read { target }),
+        )
+        .unwrap();
+    let pool = receiver.catchup.inject_overlay_pool_for_test(4);
+    let free = pool.available_permits();
+
+    // Get a real detached worker holding the bundle.
+    let mut detached = None;
+    for _ in 0..30 {
+        receiver.run(&mut server, &mut store, 86, None).unwrap();
+        if let Some(work) = receiver.detach(&mut server) {
+            detached = Some(work);
+            break;
+        }
+    }
+    let work = detached.expect("no detached handoff stage, so this proves nothing");
+    assert_eq!(
+        receiver.handoff.stage_for_test(),
+        Some("detached"),
+        "the job did not actually detach"
+    );
+    assert_eq!(
+        pool.available_permits(),
+        free - 1,
+        "the worker is not holding a shared slot, so there is nothing to strand"
+    );
+
+    // The receiver faults while the worker is still running.
+    receiver.pause_for_test();
+
+    // The worker succeeds anyway and hands the bundle back. No `run` follows, deliberately.
+    let result = work.run(None).await;
+    receiver.complete(&mut server, result);
+
+    assert!(
+        receiver.handoff.stage_for_test().is_none(),
+        "a completion arriving during a pause parked the bundle in a stage no turn will ever visit"
+    );
+    assert_eq!(
+        pool.available_permits(),
+        free,
+        "the shared preparation slot was stranded by the pause"
+    );
+    assert!(
+        receiver.catchup.overlay_admission_available_for_test(),
+        "this actor's admission was stranded by the pause"
+    );
+}
+
+/// A paced refusal has to stop the retry **and** schedule the revisit. One without the other is
+/// not pacing.
+///
+/// An H5 budget refusal records a per-target hold and deliberately keeps the signed `Ready` job
+/// rather than discarding a detached vault decode and every signature. Two things then have to be
+/// true, and the first version of this had neither.
+///
+/// The commit gate must read the hold its own failure path wrote. It did not: `can_commit` looked
+/// only at the stage, so on a busy actor the most expensive stage in the flow retried on every
+/// turn, draining a five-family inventory each time, while the recorded deadline did nothing.
+///
+/// And a quiescent actor must still come back. A held job reports not-runnable, so `pending` is
+/// false and the driver schedules no further Studio turn — while the job holds this actor's
+/// admission and one of four process-wide preparation permits. Four such actors take the whole
+/// pool and never give it back. The deadline is published so the actor can wake on it.
+#[tokio::test]
+async fn a_held_handoff_job_neither_retries_inside_its_backoff_nor_stalls_past_it() {
+    let clock = ManualClock::new(1000);
+    let mut rng = ChaCha20Rng::seed_from_u64(1409);
+    let mut server = Server::found(
+        Hub::new().join(PeerId::from_u64(1)),
+        MlsDevice::generate().unwrap(),
+        rng.clone(),
+        Box::new(clock.clone()),
+        "owner",
+    )
+    .unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let mut store = ServerStore::open(root.path(), b"flow-h-pacing", &mut rng).unwrap();
+    let target = StudioTarget::Flipnote {
+        channel: crate::channel_id("general").to_be_bytes(),
+        object: [13; 16],
+    };
+    server.sync.with_registry_context(|g, d, _, _| {
+        crate::store::studio_handoff_ready_fixture(&mut store, 85, g, d, target, 1)
+    });
+    let mut receiver = StudioReceiver::default();
+    receiver
+        .run(
+            &mut server,
+            &mut store,
+            85,
+            Some(StudioRequest::Read { target }),
+        )
+        .unwrap();
+    let pool = receiver.catchup.inject_overlay_pool_for_test(4);
+    let free = pool.available_permits();
+
+    // Drive all the way to Ready, which is the stage an H5 refusal parks.
+    for _ in 0..40 {
+        receiver.run(&mut server, &mut store, 85, None).unwrap();
+        if let Some(work) = receiver.detach(&mut server) {
+            receiver.complete(&mut server, work.run(None).await);
+        }
+        if receiver.handoff.stage_for_test() == Some("ready") {
+            break;
+        }
+    }
+    assert_eq!(
+        receiver.handoff.stage_for_test(),
+        Some("ready"),
+        "the fixture never reached H5, so this proves nothing"
+    );
+    assert_eq!(
+        pool.available_permits(),
+        free - 1,
+        "a Ready job is holding a shared slot, which is what makes stalling here expensive"
+    );
+
+    // What an H5 budget refusal records.
+    let now = server.runtime_clock().monotonic_ms();
+    receiver.handoff.hold_live_job_for_test(now);
+
+    // A busy actor keeps giving the receiver turns. None of them may run H5.
+    for _ in 0..10 {
+        receiver.run(&mut server, &mut store, 85, None).unwrap();
+        assert_eq!(
+            receiver.handoff.stage_for_test(),
+            Some("ready"),
+            "H5 ran inside its own backoff, so the hold is bookkeeping rather than pacing"
+        );
+    }
+
+    // A quiescent actor is told when to come back, rather than simply being told there is
+    // nothing to do. The handoff term is asserted directly: advancing tens of seconds also moves
+    // unrelated owner-rotation and replay deadlines, so `pending` alone cannot isolate it.
+    assert!(!receiver.pending(&server), "a held job reported pending");
+    let wake = receiver
+        .wake_in(&server)
+        .expect("a held job published no deadline, so a quiescent actor would never revisit it");
+    clock.advance_ms(wake - 1);
+    let now = server.runtime_clock().monotonic_ms();
+    assert!(
+        !receiver.handoff.runnable(now),
+        "the job became runnable before its deadline"
+    );
+    assert_eq!(
+        receiver.wake_in(&server),
+        Some(1),
+        "the published deadline did not track the clock"
+    );
+
+    clock.advance_ms(1);
+    let now = server.runtime_clock().monotonic_ms();
+    assert!(
+        receiver.handoff.runnable(now),
+        "the deadline passed and the job never became runnable again"
+    );
+    assert!(
+        receiver.wake_in(&server).is_none(),
+        "an expired hold is still publishing a deadline"
+    );
+    assert!(
+        receiver.pending(&server),
+        "a runnable job did not reach the driver"
+    );
+
+    // And the revisit actually commits, rather than merely becoming eligible to.
+    receiver.run(&mut server, &mut store, 85, None).unwrap();
+    assert!(
+        receiver.handoff.stage_for_test().is_none(),
+        "the job was runnable and the turn still did not run H5"
+    );
+    assert_eq!(
+        pool.available_permits(),
+        free,
+        "the committed job kept its shared preparation slot"
+    );
 }
 
 /// A completion has to be routed by job token, not by target.

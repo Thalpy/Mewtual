@@ -3563,8 +3563,17 @@ where
             #[cfg(test)]
             studio_preparation_signal.send_replace(studio_receiver.preparing_for_test());
             let delivery_clock = server.runtime_clock();
-            let delivery_delay =
-                next_delivery_delay(delivery_clock.monotonic_ms(), &delivery, &delivery_dirty);
+            // The Studio receiver's own deadline shares this wake. A handoff job held by backoff
+            // reports no pending work, so without merging its deadline here a quiescent actor
+            // would never revisit it, and a job parked at `Ready` holds admission and one of four
+            // process-wide preparation permits for as long as that lasts.
+            let delivery_delay = match (
+                next_delivery_delay(delivery_clock.monotonic_ms(), &delivery, &delivery_dirty),
+                studio_receiver.wake_in(&server),
+            ) {
+                (Some(a), Some(b)) => Some(a.min(b)),
+                (only, None) | (None, only) => only,
+            };
             let delivery_wake = async move {
                 match delivery_delay {
                     Some(delay_ms) => {
