@@ -1,6 +1,13 @@
 # Gate 4 Agent 3: runtime signed fault repair
 
-Status: **revision 13, design proposal, awaiting re-review. No production code is written.**
+Status: **revision 14, design proposal, awaiting re-review. No production code is written.**
+
+Revision 13 (`df1a8fe`) received **REQUEST CHANGES** with one finding, AG3-DES-055, plus
+AG3-TEST-012 and two editorial leftovers. The reviewer accepted AG3-DES-054's mechanism and closed
+everything else. Revision 14 answers the single remaining branch: the turnover assignment had to be
+conditioned on the hold actually being stale. Disposition table is section 0.
+
+
 
 Revision 12 (`04b27f7`) received **REQUEST CHANGES** with one new finding, AG3-DES-054, plus
 AG3-TEST-011 and one editorial correction. The reviewer **closed AG3-DES-050, 051, 052 and 053**.
@@ -104,7 +111,16 @@ this scope needs and what it does without each.
 No Cargo command was executed for this pass either. Every number is a source constant read at the
 base or an explicitly labelled estimate.
 
-## 0. Disposition of the revision-12 findings
+## 0. Disposition of the revision-13 findings
+
+| Finding | Disposition in revision 14 | Where |
+|---|---|---|
+| AG3-DES-055, the turnover assignment is not conditioned on staleness | **Corrected.** The prose only ever described replacing a *previous* tenure's hold, but the algorithm was written unconditionally, so a literal implementation would also overwrite a hold already for the current tenure and keep only the newest fingerprint, reopening AG3-DES-048. The transition is now total and explicit, with three branches: absent creates, stale replaces, same tenure accumulates under AG3-DES-048's rules. | 5.2, 15.1 N44(b) |
+| AG3-TEST-012, N46 cannot distinguish the two branches | **Corrected.** N44(b) now asserts the exact durable transition after each same-tenure admission rather than the end state, and asserts explicitly that same-tenure admission never takes the replacement branch. With N46 covering the stale branch, neither test passes under the other branch's behaviour. | 15.1 N44(b) |
+| Editorial: `f5ac522` named as the interleaving commit | **Corrected.** That hash belongs to an earlier round; the preamble now describes how to isolate a revision generally, since unrelated work interleaves in every literal range. | 17 |
+| Editorial: "Earlier revisions" skipped 10 to 12 | **Corrected.** | 17 |
+
+## 0.0 Disposition of the revision-12 findings
 
 | Finding | Disposition in revision 13 | Where |
 |---|---|---|
@@ -2930,9 +2946,9 @@ Copyable, with the common contract from
 sent alongside it.
 
 ```text
-Review type: design, revision 13, findings re-review.
-Base: 04b27f7dc59f917e556c5a30d1a609f6b211ab32 (revision 12). Head: [FULL_HEAD_SHA].
-Compare: https://github.com/Thalpy/Mewtual/compare/04b27f7dc59f917e556c5a30d1a609f6b211ab32...[FULL_HEAD_SHA]
+Review type: design, revision 14, findings re-review.
+Base: df1a8fe8828b6e7abfeaf0bbed42eed75ef3f9a6 (revision 13). Head: [FULL_HEAD_SHA].
+Compare: https://github.com/Thalpy/Mewtual/compare/df1a8fe8828b6e7abfeaf0bbed42eed75ef3f9a6...[FULL_HEAD_SHA]
 Note: like revision 10, this revision is committed in several parts because a parallel session
 repeatedly resets this shared working tree and discards uncommitted edits. Every part touches only
 the two Agent 3 documents. Isolate the revision by walking back from the head: its commits are
@@ -2950,9 +2966,9 @@ a62178b94f20cd60a5363e6a3d6d6216edb9e516 (revision 3),
 63a11e1a6451c7ed373c90b0e81b59d8a748a72a (revision 2),
 7efc9c2aba0a37d9aec57e268d9ff63edaca1b8a (revision 1), original scope base
 1bcb1bca204d721b848b17c0835faf931ae930e3.
-Scope/evidence: docs/GATE4-AGENT-3-DESIGN.md revision 13 and docs/GATE4-AGENT-3-STATUS.md.
+Scope/evidence: docs/GATE4-AGENT-3-DESIGN.md revision 14 and docs/GATE4-AGENT-3-STATUS.md.
 Documentation only: no production code, test, shared contract document or workflow is changed, and
-no Cargo command was executed in any of the thirteen passes. Every number is a source constant or a
+no Cargo command was executed in any of the fourteen passes. Every number is a source constant or a
 labelled estimate. The commit sits on a branch shared with Agents 1 and 2, so a literal base-to-head
 comparison may again contain intervening Agent 1 production commits; only the two Agent 3 documents
 are mine.
@@ -2960,6 +2976,34 @@ Dependencies, corrected per your note: Agent 2's tenure design has now PASSED ad
 though none of it is implemented, so the section 13.2 contract is accepted-on-paper rather than
 available; Agent 1 remains partial with I-4/C-3 not started; the core signing split at e65bfd8
 remains unreviewed.
+
+This revision answers AG3-DES-055, AG3-TEST-012 and the two editorial leftovers. Section 0 is the
+disposition table. It reopens nothing: AG3-DES-054's mechanism stands as you accepted it, and
+050 to 053, 045, 048, 049, 040, 043, 044's write order, 038, 030, 023, 024 and 029's dedupe rule all
+stay closed, with M1 to M19 unchanged.
+
+AG3-DES-055 is correct and the gap was exactly where you place it: every sentence around the rule
+described turnover from a PREVIOUS tenure, and the algorithm was written unconditionally, so a
+literal implementation would also overwrite a hold already for the current tenure and keep only the
+newest fingerprint. That is AG3-DES-048's failure restored, with the same consequence: after the
+surviving fingerprint is resolved, a restart finds no durable evidence of the one that was dropped
+and proving can resume. The transition is now total and explicit, with absent creating, stale
+replacing and same-tenure accumulating through the existing insert-or-set-unknown rules, and with
+None, Imported or Unknown moving nothing at all. A fifth qualification states the guard directly, so
+the replacement can no longer be read as unconditional.
+
+AG3-TEST-012: agreed that N46 cannot see this, because the bug is the inverse operation. N44(b) now
+asserts the exact durable transition after each same-tenure admission rather than the end state, and
+asserts explicitly that same-tenure admission never takes the replacement branch, so N44(b) and N46
+fail under each other's behaviour. No mutant added.
+
+Both editorial leftovers are fixed: the stale f5ac522 reference is replaced by a general isolation
+instruction, since unrelated Agent 1 and Agent 2 work interleaves in every literal range, and the
+earlier-revisions list no longer skips 10 to 12.
+
+No U-questions remain open.
+
+Superseded text below is retained for the earlier round it answers:
 
 This revision answers AG3-DES-054 and AG3-TEST-011, plus the N43 naming correction. Section 0 is
 the disposition table. It reopens nothing you closed: AG3-DES-050, 051, 052 and 053 stay closed
