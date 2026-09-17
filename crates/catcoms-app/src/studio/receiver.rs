@@ -336,10 +336,14 @@ impl StudioReceiver {
                         || server.sync.studio_has_page_request(&watch.inner)
                 })
                 // A parked handoff job holds this actor's admission and one of four process-wide
-                // preparation permits. Without this term the driver can stop scheduling turns
-                // while a job sits in `Captured`, `Signing` or `Ready`, and nothing would ever
-                // recover either resource.
-                || self.handoff.busy()
+                // preparation permits, so the driver must keep scheduling turns while one exists.
+                // `runnable`, not `busy`: a job held by backoff or already detached cannot make
+                // progress this turn, and reporting it as pending would hold the driver at its
+                // active cadence for the whole life of the job. Every other term here is time- or
+                // state-gated for the same reason.
+                || self
+                    .handoff
+                    .runnable(server.runtime_clock().monotonic_ms())
                 || self.catchup.pending(server, &self.watches))
     }
     pub(crate) fn take_pause_notice(&mut self) -> bool {
@@ -494,6 +498,11 @@ impl StudioReceiver {
             keep
         });
         if self.paused {
+            // A paused receiver never reaches `background_step`, so a held handoff job can never
+            // advance. Release it rather than letting it hold admission and a process-wide
+            // preparation permit until the user happens to open a Studio document.
+            self.handoff
+                .release_if_stalled(server.runtime_clock().monotonic_ms());
             return Ok((empty(), None));
         }
         let serving = server.sync.has_epoch_service_interest()

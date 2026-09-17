@@ -1003,7 +1003,7 @@ survived deletion of essentially every guard the work claimed to establish, and 
 | Finding | What was wrong | Correction |
 |---|---|---|
 | **P1** | A routine MLS epoch advance during H3 made `sign_next` refuse, that error propagated through `background_step`, and `run` set the receiver's storage pause. Catch-up, replay and receive all stop until the user next opens a Studio document, **and** the job stays parked holding this actor's admission and one of four process-wide permits, with no path that releases either. | Every Flow H stage now absorbs expected refusals: abandon the job, release the bundle, back that target off, return `Ok`. Only genuine storage errors reach the receiver, and no Flow H stage returns `Result` to it any more. |
-| **P1** | `Signing` was a terminal trap. The code commented "the next visit with a live tenure resumes it", which is false: `observed_owner_tenure_start` returns `None` **exactly** when the epoch or owner moved, and the plan's authority pins the old epoch, so it could never be signed again. Nothing anywhere abandoned a `Signing` job. | `handoff_check_authority` runs as a lifecycle step on every turn, at any stage, and abandons a job whose tenure has moved. Placed there rather than in the scheduler so releasing a dead job cannot depend on which branch a turn takes. |
+| **P1** | `Signing` was a terminal trap. The code commented "the next visit with a live tenure resumes it", which is false: the plan's authority pins the MLS epoch, so once it moved the job could never be signed again. Nothing anywhere abandoned a `Signing` job. | `handoff_check_authority` runs as a lifecycle step on every turn, at any stage, and abandons a job whose authority has moved. Placed there rather than in the scheduler so releasing a dead job cannot depend on which branch a turn takes. **This fix was wrong on its first attempt; see the second review below.** |
 | **P2** | The tenure check was **lost** in the split. The single visit passed tenure into `prepare_handoff`; `commit_studio_handoff_with_io` took no tenure at all, so a tenure restart for the same owner at the same MLS epoch passed every conjunct. A batch signed under one tenure could become durable under the next. | `tenure` is part of `StudioHandoffStamp` and compared at H5. |
 | **P2** | The Index reference check ran only at H1. The stamp covers the Index document's own records, so the referenced Flipnote's source could be evicted, retired or cleaned up during H2 to H4 and H5 would still commit, leaving a durable Index entry pointing at nothing. | `check_index_object_sources` runs at both H1 and H5. |
 | **P2** | **RT-002 again.** The handoff detach arm was placed ahead of all catch-up, with a comment arguing that an already-reserved permit earned it. That is the same inversion RT-002 was opened for. H5 and H1 had no `replay_ready()` gate at all. | H2, H4, H5 and H1 are behind `replay_ready()`; the detach arm sits with the Flow S plan, behind catch-up. H3 stays ungated, which is 7.3's documented exception. |
@@ -1040,14 +1040,68 @@ pool, so they contended with every other test in the process; two of them failed
 directions when run together. All four now inject a private pool through the seam that already
 existed for this.
 
-**Still open from the review, and not fixed here.** H1 and H5 each drain a full epoch-storage
-inventory under custody, which design 6.1 does not put in H1 and which C-3's resumable cursor is
-meant to bound. That is the tracked I-4/C-3 gap, but the scheduled sequence is now shipping ahead
-of the mechanism intended to bound its custody, and that deserves to be stated rather than left
-implicit. Also unfixed: `handoff_priority` omits `studio_has_page_request`, which `run` itself
-treats as authoritative; and a detached Flow H waiter inherits an unrelated request's cancellation,
-discarding multi-turn signing progress. Neither is new to this commit, but both are worse for
-Flow H than for Flow S.
+### The second review: two of my own fixes were wrong
+
+A second independent review of `808ef2f` checked whether the ten corrections above were real. Six
+were. **Three were partial and one did not cover its own named trigger**, and it found two further
+P1s, both of which are the same defects this work was written to close, reintroduced by the fixes.
+That is the useful lesson of this pass: a fix written under pressure is a defect site, and the
+first review's approval of a *description* is not approval of the code.
+
+**NEW-1, P1: the authority check was blind to the failure it was named after.**
+`observed_owner_tenure_start` reports when the current owner's tenure *began*, not the current
+epoch. `OwnerTenure::applied` takes its "same owner preserves knowledge" branch on a same-owner
+commit, so the value is **unchanged** — and a same-owner MLS commit is the commonest way a job
+dies. My status entry above asserted the opposite as fact. The fallback that was supposed to catch
+it, `sign_next` refusing, never runs on a priority turn, because `sign_slice` yields before it
+signs. So the P1 was reported closed while its main trigger was still open.
+
+Corrected: `HandoffJob` now records the MLS epoch as well as the tenure, and
+`handoff_check_authority` compares **both**. `an_mls_commit_during_signing_...` covers the case;
+**M32**, reverting to the tenure-only comparison, fails **only** that test while the owner-change
+case still passes, which is precisely the shape of the blind spot.
+
+**NEW-2, P1: I found this class of bug, fixed one of four instances, and wrote it up as closed.**
+`HandoffRuntime::hold` read `self.job`, and all three of its remaining call sites had already
+removed the job, so every H5 refusal recorded **no backoff at all**. H5 has refusals H1 does not —
+the three-write preflights and the reference check — so a vault without headroom would replay the
+whole pipeline every turn: two inventory drains, a full detached decode, every signature re-signed,
+then fail identically, holding admission for most of each cycle. Strictly worse than the original,
+because H5 is the expensive end.
+
+Corrected by deleting `hold` entirely. There is now only `hold_target`, which takes the target
+explicitly, with a comment at the site saying why the job-reading variant must not come back.
+
+| Also corrected | Was |
+|---|---|
+| **NEW-3**, P2 | `handoff_commit` took the job *before* building the budget, so a transient inventory or generation failure discarded H1 to H4 entirely: a detached full vault decode plus every signature, thrown away for a retryable error. The budget is now built first. |
+| **NEW-4**, P2 | The probe's read-error backoff held `rail[start]`, not the target that failed, so the bad record was re-read every turn while an innocent document was penalised — and because the cursor advances, one bad record walked the whole rail to the 300 s cap. |
+| **NEW-5**, P3 | `HandoffCompletion::Cancelled` carried no target, so its arm cleared whatever job was live. It now carries one and is gated like the other three. |
+| **NEW-8**, P3 | `pending()` used `busy()`, which is true for a job that cannot run — held by backoff or already detached — holding the driver at its active cadence for the job's whole life. Now `runnable(now)`. |
+| **NEW-9**, P3 | A `Captured` job survived the storage pause holding a process-wide permit with no path to release it. `release_if_stalled` now abandons any non-detached job when the receiver pauses. |
+
+**Still open, corrected and completed after the second review pointed out the first list was
+incomplete.** The earlier list named three items; it should have named eight.
+
+1. **H1 and H5 each drain a full epoch-storage inventory under custody**, which design 6.1 does not
+   put in H1 and which C-3's resumable cursor is meant to bound. The scheduled sequence is shipping
+   ahead of the mechanism intended to bound its custody.
+2. **The new H5 index check adds its own unbounded under-custody read loop**, one `load_studio_epoch`
+   per `PutObject`, and belongs with item 1.
+3. **That H5 index check has no test at all.** Every runtime test uses a Flipnote target, where the
+   function returns immediately; the one `unavailable Flipnote` test trips at H1. Deleting the H5
+   call changes no test. In a document whose thesis is that untested guards are not guards, this
+   has to be said plainly.
+4. **The H5 tenure conjunct is untested**: nothing moves tenure between H1 and H5.
+5. **`handoff_priority` omits `studio_has_page_request`**, which `run` itself treats as
+   authoritative.
+6. **A detached Flow H waiter inherits an unrelated request's cancellation**, discarding multi-turn
+   signing progress. One type change away from NEW-5's shape.
+7. **Design 7.3's `explicit_retry` relief is not wired to the handoff maps**, though the code
+   comment cites 7.3's pacing as satisfied.
+8. **`next_at`, `hold_ms` and `quiet` are never pruned** against the current watch rail.
+
+Items 3 and 4 are coverage debts on guards this work claims; the rest are bounded and recorded.
 
 ### `EpochRecordKind::DraftArchive`, the shared enum seam for Agent 2
 

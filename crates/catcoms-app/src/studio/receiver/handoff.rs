@@ -39,9 +39,17 @@ pub(super) enum HandoffStage {
 pub(super) struct HandoffJob {
     pub(super) target: StudioTarget,
     pub(super) stage: HandoffStage,
-    /// The observed owner tenure H1 minted this job's authority under. A job whose tenure has
-    /// moved can never be signed or committed again, so it is abandoned rather than parked.
+    /// The observed owner tenure H1 minted this job's authority under.
     pub(super) tenure: u64,
+    /// The MLS epoch H1 minted it under.
+    ///
+    /// Tenure alone is **not** enough, and assuming it was is what made the first version of this
+    /// check blind to the very failure it was written for. `observed_owner_tenure_start` reports
+    /// when the current owner's tenure *began*, and a same-owner MLS commit preserves that value
+    /// (`OwnerTenure::applied` takes the "same owner preserves knowledge" branch). But
+    /// `StudioHandoffAuthority` pins `group.epoch()`, so that same commit makes the job
+    /// permanently unsignable while the tenure comparison still matches.
+    pub(super) mls: u64,
 }
 
 /// Per-actor handoff scheduling. Holds at most one job.
@@ -101,12 +109,10 @@ impl HandoffRuntime {
         self.next_at.get(&target).is_some_and(|at| now < *at)
     }
 
-    /// Hold the job's own target. Used by every stage that gives up on a live job.
-    fn hold(&mut self, now: u64) {
-        if let Some(target) = self.job.as_ref().map(|job| job.target) {
-            self.hold_target(target, now);
-        }
-    }
+    // There is deliberately no `hold(&mut self)` that reads `self.job`. Every caller that gives up
+    // on a job has already removed it, so such a method silently records nothing — which is
+    // exactly how an H5 refusal became an unpaced retry of the most expensive stage in the flow.
+    // `hold_target` takes the target explicitly so the mistake cannot recur.
 
     /// Durable progress resets that target's pacing, so a server that transfers successfully does
     /// not inherit a long hold from an earlier refusal.
@@ -115,14 +121,41 @@ impl HandoffRuntime {
         self.next_at.remove(&target);
     }
 
-    fn tenure(&self) -> u64 {
-        self.job.as_ref().map_or(0, |job| job.tenure)
+    /// The tenure and MLS epoch the live job was minted under, if there is one.
+    fn authority(&self) -> Option<(u64, u64)> {
+        self.job.as_ref().map(|job| (job.tenure, job.mls))
+    }
+
+    /// A job that could make progress this turn. `busy` alone is not that: a job held by backoff,
+    /// or one waiting on a gate, cannot run, and treating it as pending keeps the driver awake at
+    /// its active cadence for the whole life of the job.
+    pub(super) fn runnable(&self, now: u64) -> bool {
+        match self.job.as_ref().map(|job| (&job.stage, job.target)) {
+            Some((HandoffStage::Detached, _)) => false,
+            Some((_, target)) => !self.held(target, now),
+            None => false,
+        }
     }
 
     fn remaining(&self) -> Option<usize> {
         match self.job.as_ref().map(|job| &job.stage) {
             Some(HandoffStage::Signing(plan, _)) => Some(plan.remaining()),
             _ => None,
+        }
+    }
+
+    /// Release a job that cannot advance because the receiver is paused.
+    ///
+    /// A paused receiver never reaches `background_step` and `detach` returns nothing, so a
+    /// `Captured`, `Signing` or `Ready` job can never progress, while `pending` is false so the
+    /// driver idles. Unlike Flow S, where a parked capture implies a user Save, Flow H creates
+    /// these automatically on any background turn, so paused actors could otherwise exhaust the
+    /// four-slot process-wide pool with no user action anywhere. `Detached` is left alone: its
+    /// worker owns the bundle and releases it when it ends.
+    pub(super) fn release_if_stalled(&mut self, now: u64) {
+        if matches!(self.job.as_ref().map(|job| &job.stage), Some(stage) if !matches!(stage, HandoffStage::Detached))
+        {
+            self.abandon(now);
         }
     }
 
@@ -173,13 +206,25 @@ impl HandoffRuntime {
         })
     }
 
-    /// Move the job's recorded tenure away from the live one, which is what an MLS commit or an
-    /// owner change does. Only the precondition is simulated: the comparison, the abandonment and
-    /// the receiver's reaction to it are all the production paths.
+    /// Move the job's recorded **owner tenure** away from the live one, which is what an owner
+    /// change or an unobserved gap does.
     #[cfg(test)]
     pub(super) fn stale_tenure_for_test(&mut self) {
         if let Some(job) = self.job.as_mut() {
             job.tenure = u64::MAX;
+        }
+    }
+
+    /// Move the job's recorded **MLS epoch** away from the live one, which is what any commit
+    /// does: a member joining or leaving, or a key rotating.
+    ///
+    /// This is the case the first version of the authority check could not see, because a
+    /// same-owner commit leaves the observed tenure start untouched. Only the precondition is
+    /// simulated; the comparison, the abandonment and the receiver's reaction are production.
+    #[cfg(test)]
+    pub(super) fn stale_mls_for_test(&mut self) {
+        if let Some(job) = self.job.as_mut() {
+            job.mls = job.mls.wrapping_add(1);
         }
     }
 
@@ -195,23 +240,34 @@ impl HandoffRuntime {
 impl StudioReceiver {
     /// Abandon a job whose authority has moved, at **any** stage.
     ///
-    /// `observed_owner_tenure_start` returns `None` exactly when the MLS epoch or the designated
-    /// owner has changed, and a job's `StudioHandoffAuthority` pins the epoch it was minted under.
-    /// Once either moves, the job can never be signed (H3 rechecks before every signature) and can
-    /// never be committed (the H5 stamp carries the tenure). Parking it would strand this actor's
-    /// admission and one of four process-wide preparation permits permanently, and letting the
-    /// refusal surface as an error would pause the receiver's whole background loop.
+    /// A job's `StudioHandoffAuthority` pins **both** the owner tenure and the MLS epoch it was
+    /// minted under, so both have to be compared. `observed_owner_tenure_start` alone is not a
+    /// proxy for the pair: it reports when the current owner's tenure *began*, and a same-owner
+    /// commit leaves that value untouched, so a check written on tenure alone cannot see the
+    /// commonest way a job dies.
+    ///
+    /// Once either fact moves, the job can never be signed (H3 rechecks before every signature)
+    /// and can never be committed (the H5 stamp carries the tenure). Parking it would strand this
+    /// actor's admission and one of four process-wide preparation permits permanently, and letting
+    /// the refusal surface as an error would pause the receiver's whole background loop.
     ///
     /// So: drop it, release the bundle, back that target off, and carry on. Signed work is cheap
     /// to redo from H1; the capacity is not.
     pub(super) fn handoff_check_authority<T: MeshTransport, R: CryptoRngCore>(
         &mut self,
-        server: &Server<T, R>,
+        server: &mut Server<T, R>,
     ) {
-        if !self.handoff.busy() {
+        let Some((tenure, mls)) = self.handoff.authority() else {
             return;
-        }
-        if server.sync.observed_owner_tenure_start() != Some(self.handoff.tenure()) {
+        };
+        // BOTH facts, not just tenure. Comparing tenure alone missed a same-owner MLS commit
+        // entirely, which is the commonest way a job dies: a member joins or leaves, or a key
+        // rotates, `OwnerTenure::applied` takes its "same owner preserves knowledge" branch so
+        // the tenure start is unchanged, and the job is silently unsignable for ever. The
+        // fallback that was meant to catch it, `sign_next` refusing, never runs on a priority
+        // turn, because `sign_slice` yields before it signs.
+        let live_mls = server.sync.with_registry_context(|g, _, _, _| g.epoch());
+        if server.sync.observed_owner_tenure_start() != Some(tenure) || live_mls != mls {
             self.handoff.abandon(server.runtime_clock().monotonic_ms());
         }
     }
@@ -251,7 +307,11 @@ impl StudioReceiver {
         let start = self.handoff.selection % rail.len();
         self.handoff.selection = start.wrapping_add(1);
         let mut found = None;
-        let mut unreadable = false;
+        // The target that actually failed to read, not the cursor's origin. Holding the origin
+        // left the failing record to be re-read every turn while penalising an innocent,
+        // eligible document, and because the cursor advances each turn a single bad record
+        // walked the whole rail to the 300 s cap.
+        let mut unreadable: Option<StudioTarget> = None;
         let mut quiet = Vec::new();
         for offset in 0..rail.len() {
             let target = rail[(start + offset) % rail.len()];
@@ -270,7 +330,7 @@ impl StudioReceiver {
                     }
                     _ => quiet.push(target),
                 },
-                Err(_) => unreadable = true,
+                Err(_) => unreadable = unreadable.or(Some(target)),
             }
         }
         // Only targets actually read and found to have nothing are memoised.
@@ -278,9 +338,8 @@ impl StudioReceiver {
             self.handoff.quiet_for(&generation, target);
         }
         let Some((target, basis)) = found else {
-            if unreadable {
-                // Back off the cursor's own target rather than spinning on a bad read.
-                self.handoff.hold_target(rail[start], now);
+            if let Some(bad) = unreadable {
+                self.handoff.hold_target(bad, now);
             }
             return;
         };
@@ -312,6 +371,7 @@ impl StudioReceiver {
                     target,
                     stage: HandoffStage::Captured(capture, ownership),
                     tenure,
+                    mls: server.sync.with_registry_context(|g, _, _, _| g.epoch()),
                 });
             }
             Ok(crate::store::StudioHandoffStart::Settled(_)) => {
@@ -413,16 +473,23 @@ impl StudioReceiver {
             return None;
         }
         let now = server.runtime_clock().monotonic_ms();
+        let target = self
+            .handoff
+            .job
+            .as_ref()
+            .expect("checked just above")
+            .target;
+        // The budget is built BEFORE the job is taken. Taking first meant any transient inventory
+        // or generation failure discarded H1 to H4 entirely: a detached full vault decode plus
+        // every signature, thrown away for a retryable error. Flow S gets this right by taking its
+        // plan only when the commit is about to run.
+        let Ok(mut budget) = self.handoff_budget(server, store, id) else {
+            self.handoff.hold_target(target, now);
+            return None;
+        };
         let job = self.handoff.job.take().expect("checked just above");
-        let target = job.target;
         let HandoffStage::Ready(commit, ownership) = job.stage else {
             unreachable!("can_commit checked the stage")
-        };
-        let Ok(mut budget) = self.handoff_budget(server, store, id) else {
-            // `ownership` drops here, so a budget failure strands nothing.
-            drop(ownership);
-            self.handoff.hold(now);
-            return None;
         };
         let tenure = server.sync.observed_owner_tenure_start();
         let committed = server.sync.with_registry_context(|group, device, _, rng| {
@@ -449,7 +516,13 @@ impl StudioReceiver {
                 Some(target)
             }
             Err(_) => {
-                self.handoff.hold(now);
+                // `hold_target`, not `hold`: the job is already taken, so the job-reading variant
+                // would record nothing and the probe would re-capture the same target on the very
+                // next turn, replaying two inventory drains, a full detached decode and every
+                // signature before failing identically. H5 has refusals H1 does not — the
+                // three-write preflights and the reference check — so this is reachable and not
+                // self-limiting.
+                self.handoff.hold_target(target, now);
                 None
             }
         }
@@ -486,9 +559,11 @@ impl StudioReceiver {
             }
             // The waiter was cancelled. The worker still owns its bundle and releases it when it
             // ends, so nothing is freed here; the job is simply no longer tracked.
-            HandoffCompletion::Cancelled => {
+            HandoffCompletion::Cancelled(target) if mine(&self.handoff.job, target) => {
+                // `hold_target`, not `hold`: the job is cleared here, so the job-reading variant
+                // would record no backoff at all.
                 self.handoff.job = None;
-                self.handoff.hold(now);
+                self.handoff.hold_target(target, now);
             }
             // A completion for something this actor is not working on. Ignore it entirely: the
             // current job, whatever stage it is in, is untouched.

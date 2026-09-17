@@ -117,7 +117,11 @@ pub(crate) enum HandoffCompletion {
         Result<(Box<StudioHandoffCommit>, OverlayOwnership), AppError>,
     ),
     /// The waiter was cancelled, or the worker died. Either way the bundle went with it.
-    Cancelled,
+    ///
+    /// It carries its target like the other two, so the receiver can tell whether the cancellation
+    /// belongs to the job it currently holds. Without that it would clear whatever job happened to
+    /// be live, which is the same mistake the other arms were corrected for.
+    Cancelled(StudioTarget),
 }
 pub(crate) enum StudioBackgroundResult {
     Preview(Arc<()>, PreviewCompletion),
@@ -219,8 +223,8 @@ impl<T: MeshTransport + 'static> StudioBackgroundJob<T> {
             }
             Self::OverlayPlan(..) => StudioBackgroundResult::CancelledOverlay,
             // Same rule as the overlay plan: the worker owns the bundle and keeps it.
-            Self::HandoffPrepare(..) | Self::HandoffAssemble(..) => {
-                StudioBackgroundResult::Handoff(HandoffCompletion::Cancelled)
+            Self::HandoffPrepare(_, _, context) | Self::HandoffAssemble(_, _, context) => {
+                StudioBackgroundResult::Handoff(HandoffCompletion::Cancelled(context.target))
             }
             _ => StudioBackgroundResult::Cancelled { preparation: None },
         };
@@ -315,7 +319,7 @@ impl<T: MeshTransport + 'static> StudioBackgroundJob<T> {
                     .await;
                     StudioBackgroundResult::Handoff(match result {
                         Ok(result) => HandoffCompletion::Prepared(target, result),
-                        Err(_) => HandoffCompletion::Cancelled,
+                        Err(_) => HandoffCompletion::Cancelled(target),
                     })
                 }
                 // H4. Same ownership discipline.
@@ -331,7 +335,7 @@ impl<T: MeshTransport + 'static> StudioBackgroundJob<T> {
                     .await;
                     StudioBackgroundResult::Handoff(match result {
                         Ok(result) => HandoffCompletion::Assembled(target, result),
-                        Err(_) => HandoffCompletion::Cancelled,
+                        Err(_) => HandoffCompletion::Cancelled(target),
                     })
                 }
             }

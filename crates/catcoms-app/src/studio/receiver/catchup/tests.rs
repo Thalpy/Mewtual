@@ -590,14 +590,35 @@ async fn handoff_signing_pages_across_turns_and_a_priority_turn_signs_nothing() 
         .is_some());
 }
 
+/// Which half of a job's pinned authority moved. Both must abandon it, and an earlier version of
+/// this check covered only the first: a same-owner MLS commit leaves the observed tenure start
+/// untouched, so `Mls` is the case that was silently unhandled.
+#[derive(Clone, Copy, Debug)]
+enum AuthorityMove {
+    Owner,
+    Mls,
+}
+
+#[tokio::test]
+async fn an_owner_change_during_signing_abandons_the_job_without_pausing_the_receiver() {
+    authority_change_during_signing(AuthorityMove::Owner).await;
+}
+
+/// The case the first version of the authority check could not see. A member joining or leaving,
+/// or a key rotating, advances the MLS epoch while the owner and their tenure start are unchanged,
+/// so a tenure-only comparison matches and the job is silently unsignable for ever.
+#[tokio::test]
+async fn an_mls_commit_during_signing_abandons_the_job_without_pausing_the_receiver() {
+    authority_change_during_signing(AuthorityMove::Mls).await;
+}
+
 /// The two P1s from the Flow H review, which the end-to-end happy path could not see.
 ///
-/// A routine MLS epoch advance during H3 must not (a) reach the receiver's storage pause, which
-/// would stop catch-up, replay and receive until the user next opened a Studio document, and must
-/// not (b) leave the job parked holding this actor's admission and one of four process-wide
-/// preparation permits with no path that ever releases them.
-#[tokio::test]
-async fn an_authority_change_during_signing_abandons_the_job_without_pausing_the_receiver() {
+/// An authority change during H3 must not (a) reach the receiver's storage pause, which would stop
+/// catch-up, replay and receive until the user next opened a Studio document, and must not (b)
+/// leave the job parked holding this actor's admission and one of four process-wide preparation
+/// permits with no path that ever releases them.
+async fn authority_change_during_signing(moved: AuthorityMove) {
     let clock = ManualClock::new(1000);
     let mut rng = ChaCha20Rng::seed_from_u64(1201);
     let mut server = Server::found(
@@ -648,10 +669,12 @@ async fn an_authority_change_during_signing_abandons_the_job_without_pausing_the
     );
     assert_eq!(pool.available_permits(), free - 1, "H3 holds a shared slot");
 
-    // The authority moves out from under the parked plan, which is what an MLS commit or an owner
-    // change does. Only that precondition is simulated; the comparison, the abandonment and the
-    // receiver's reaction to it are production paths.
-    receiver.handoff.stale_tenure_for_test();
+    // The authority moves out from under the parked plan. Only that precondition is simulated;
+    // the comparison, the abandonment and the receiver's reaction to it are production paths.
+    match moved {
+        AuthorityMove::Owner => receiver.handoff.stale_tenure_for_test(),
+        AuthorityMove::Mls => receiver.handoff.stale_mls_for_test(),
+    }
 
     // A few ordinary turns. Not every turn reaches the background step, so this gives the
     // receiver a fair chance to notice rather than asserting on one particular scheduling path.
