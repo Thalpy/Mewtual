@@ -1,8 +1,13 @@
 # Gate 4: Flow H scheduled-runtime corrections
 
 Status: **awaiting adversarial review.** The compare URL below resolves only once
-`gate4-agent1-runtime` is pushed; at the time of writing the branch is two commits ahead of
-`origin`. Push before sending, or the reviewer gets a 404 instead of a pinned diff. This round exists because the previous adversarial
+`gate4-agent1-runtime` is pushed; at the time of writing the branch is ahead of `origin`. Push
+before sending, or the reviewer gets a 404 instead of a pinned diff.
+
+**Reviewed head is `da7b8fa`, which is not the branch tip.** Later commits on
+`gate4-agent1-runtime` that only touch this document are documentation-only and carry no reviewed
+code; the common contract asks reviewers to make exactly this distinction, and this round creates
+the case. Review `da7b8fa`, not whatever the branch currently points at. This round exists because the previous adversarial
 review of `808ef2f` returned **REQUEST CHANGES**, and because a material part of what it found
 was that the implementer's own account of the preceding round was wrong. That is the context the
 next reviewer should carry in, and it is the reason this request asks for the corrections to be
