@@ -438,8 +438,11 @@ async fn a_cancelled_waiter_leaves_a_real_paused_worker_holding_admission_and_it
     // Run the real job concurrently with the race. `join!` polls the job first, so the blocking
     // worker starts before the second future waits on its entry signal.
     let (result, ()) = tokio::join!(work.run(Some(cancellation)), async {
-        entered
+        // Bounded, so a future regression where the worker never reaches the barrier fails with
+        // this named assertion instead of hanging the test process.
+        tokio::time::timeout(std::time::Duration::from_secs(60), entered)
             .await
+            .expect("the worker never reached its barrier")
             .expect("the worker entered while owning the bundle");
         cancel.send(true).expect("the cancellation signal is live");
     });
