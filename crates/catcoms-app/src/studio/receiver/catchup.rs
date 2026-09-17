@@ -60,6 +60,10 @@ type OverlayPlanResult = Result<(Box<StudioOverlayPlan>, OverlayOwnership), AppE
 /// only enough to route a completion back to the target that asked for it.
 pub(crate) struct OverlayContext {
     target: StudioTarget,
+    /// Flow H only: the `HandoffJob::token` this work was detached for, so a completion can be
+    /// matched against the job that asked for it rather than against its target. Flow S leaves it
+    /// zero: a parked Save capture is user-initiated and there is only ever one.
+    token: u64,
     /// Test-only barrier, in the shape `PreviewJob::pause_for_test` established: the blocking
     /// worker signals once it has entered and then blocks until released. It is taken out of the
     /// context before the closure is built, so the pause happens **after** `OverlayOwnership` has
@@ -75,6 +79,16 @@ impl OverlayContext {
     fn new(target: StudioTarget) -> Self {
         Self {
             target,
+            token: 0,
+            #[cfg(test)]
+            pause: None,
+        }
+    }
+
+    fn handoff(target: StudioTarget, token: u64) -> Self {
+        Self {
+            target,
+            token,
             #[cfg(test)]
             pause: None,
         }
@@ -106,22 +120,23 @@ pub(crate) enum StudioBackgroundJob<T: MeshTransport> {
     HandoffAssemble(Box<StudioHandoffPlan>, OverlayOwnership, OverlayContext),
 }
 
-/// A finished Flow H detached stage, as the receiver's handoff runtime sees it.
+/// A finished Flow H detached stage, tagged with the `HandoffJob::token` it was detached for.
+///
+/// Every arm is routed on that token, never on the target. A worker outlives the job that spawned
+/// it whenever authority moves mid-detachment, and after the target's backoff expires the actor
+/// may legitimately hold a *different* job for the *same* target; matching on target alone would
+/// hand the new job the dead worker's result.
 pub(crate) enum HandoffCompletion {
     Prepared(
-        StudioTarget,
+        u64,
         Result<(Box<StudioHandoffPlan>, OverlayOwnership), AppError>,
     ),
     Assembled(
-        StudioTarget,
+        u64,
         Result<(Box<StudioHandoffCommit>, OverlayOwnership), AppError>,
     ),
     /// The waiter was cancelled, or the worker died. Either way the bundle went with it.
-    ///
-    /// It carries its target like the other two, so the receiver can tell whether the cancellation
-    /// belongs to the job it currently holds. Without that it would clear whatever job happened to
-    /// be live, which is the same mistake the other arms were corrected for.
-    Cancelled(StudioTarget),
+    Cancelled(u64),
 }
 pub(crate) enum StudioBackgroundResult {
     Preview(Arc<()>, PreviewCompletion),
@@ -148,15 +163,17 @@ impl<T: MeshTransport> StudioBackgroundJob<T> {
         capture: Box<StudioHandoffCapture>,
         ownership: OverlayOwnership,
         target: StudioTarget,
+        token: u64,
     ) -> Self {
-        Self::HandoffPrepare(capture, ownership, OverlayContext::new(target))
+        Self::HandoffPrepare(capture, ownership, OverlayContext::handoff(target, token))
     }
     pub(super) fn handoff_assemble(
         plan: Box<StudioHandoffPlan>,
         ownership: OverlayOwnership,
         target: StudioTarget,
+        token: u64,
     ) -> Self {
-        Self::HandoffAssemble(plan, ownership, OverlayContext::new(target))
+        Self::HandoffAssemble(plan, ownership, OverlayContext::handoff(target, token))
     }
 }
 
@@ -224,7 +241,7 @@ impl<T: MeshTransport + 'static> StudioBackgroundJob<T> {
             Self::OverlayPlan(..) => StudioBackgroundResult::CancelledOverlay,
             // Same rule as the overlay plan: the worker owns the bundle and keeps it.
             Self::HandoffPrepare(_, _, context) | Self::HandoffAssemble(_, _, context) => {
-                StudioBackgroundResult::Handoff(HandoffCompletion::Cancelled(context.target))
+                StudioBackgroundResult::Handoff(HandoffCompletion::Cancelled(context.token))
             }
             _ => StudioBackgroundResult::Cancelled { preparation: None },
         };
@@ -270,6 +287,8 @@ impl<T: MeshTransport + 'static> StudioBackgroundJob<T> {
                 Self::OverlayPlan(capture, ownership, context) => {
                     let OverlayContext {
                         target,
+                        // Flow S routes on target; the handoff token is not used here.
+                        token: _,
                         #[cfg(test)]
                         pause,
                     } = context;
@@ -307,7 +326,7 @@ impl<T: MeshTransport + 'static> StudioBackgroundJob<T> {
                 // device key, MLS secret or writer. The ownership moves in with it, so a
                 // cancelled waiter cannot reclaim admission from a worker that is still running.
                 Self::HandoffPrepare(capture, ownership, context) => {
-                    let target = context.target;
+                    let token = context.token;
                     let result = tokio::task::spawn_blocking(move || match capture.prepare() {
                         Ok(plan) => Ok((Box::new(plan), ownership)),
                         // RT-001's rule: a plan that can never exist releases both immediately.
@@ -318,13 +337,13 @@ impl<T: MeshTransport + 'static> StudioBackgroundJob<T> {
                     })
                     .await;
                     StudioBackgroundResult::Handoff(match result {
-                        Ok(result) => HandoffCompletion::Prepared(target, result),
-                        Err(_) => HandoffCompletion::Cancelled(target),
+                        Ok(result) => HandoffCompletion::Prepared(token, result),
+                        Err(_) => HandoffCompletion::Cancelled(token),
                     })
                 }
                 // H4. Same ownership discipline.
                 Self::HandoffAssemble(plan, ownership, context) => {
-                    let target = context.target;
+                    let token = context.token;
                     let result = tokio::task::spawn_blocking(move || match plan.assemble() {
                         Ok(commit) => Ok((Box::new(commit), ownership)),
                         Err(error) => {
@@ -334,8 +353,8 @@ impl<T: MeshTransport + 'static> StudioBackgroundJob<T> {
                     })
                     .await;
                     StudioBackgroundResult::Handoff(match result {
-                        Ok(result) => HandoffCompletion::Assembled(target, result),
-                        Err(_) => HandoffCompletion::Cancelled(target),
+                        Ok(result) => HandoffCompletion::Assembled(token, result),
+                        Err(_) => HandoffCompletion::Cancelled(token),
                     })
                 }
             }

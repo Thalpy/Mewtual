@@ -702,6 +702,107 @@ async fn authority_change_during_signing(moved: AuthorityMove) {
     receiver.run(&mut server, &mut store, 83, None).unwrap();
 }
 
+/// A completion has to be routed by job token, not by target.
+///
+/// `handoff_check_authority` abandons at any stage, `Detached` included, so a worker already
+/// holding the bundle keeps running after its job is gone. Once that target's backoff expires the
+/// actor legitimately captures a **new** job for the **same** target, and a completion matched on
+/// target alone would then let the dead worker's result land on it: for `Cancelled`, clearing a
+/// live job outright; for `Prepared`, installing a plan pinned to the superseded epoch, which can
+/// never be signed, over a capture that was fine.
+///
+/// Both jobs here are real, and so is the abandonment between them. Only the late delivery of the
+/// first worker's outcome is synthesised, because the point is which job receives it.
+#[tokio::test]
+async fn a_superseded_workers_completion_leaves_a_new_job_for_the_same_target_alone() {
+    let clock = ManualClock::new(1000);
+    let mut rng = ChaCha20Rng::seed_from_u64(1301);
+    let mut server = Server::found(
+        Hub::new().join(PeerId::from_u64(1)),
+        MlsDevice::generate().unwrap(),
+        rng.clone(),
+        Box::new(clock.clone()),
+        "owner",
+    )
+    .unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let mut store = ServerStore::open(root.path(), b"flow-h-token", &mut rng).unwrap();
+    let target = StudioTarget::Flipnote {
+        channel: crate::channel_id("general").to_be_bytes(),
+        object: [11; 16],
+    };
+    server.sync.with_registry_context(|g, d, _, _| {
+        crate::store::studio_handoff_ready_fixture(&mut store, 84, g, d, target, 1)
+    });
+    let mut receiver = StudioReceiver::default();
+    receiver
+        .run(
+            &mut server,
+            &mut store,
+            84,
+            Some(StudioRequest::Read { target }),
+        )
+        .unwrap();
+    receiver.catchup.inject_overlay_pool_for_test(4);
+
+    // The first job, which is about to be superseded.
+    for _ in 0..30 {
+        receiver.run(&mut server, &mut store, 84, None).unwrap();
+        if let Some(work) = receiver.detach(&mut server) {
+            receiver.complete(&mut server, work.run(None).await);
+        }
+        if receiver.handoff.stage_for_test() == Some("signing") {
+            break;
+        }
+    }
+    let superseded = receiver
+        .handoff
+        .token_for_test()
+        .expect("the fixture never produced a first job, so this proves nothing");
+
+    // Authority moves, so the job is abandoned and its target is backed off.
+    receiver.handoff.stale_mls_for_test();
+    for _ in 0..5 {
+        receiver.run(&mut server, &mut store, 84, None).unwrap();
+    }
+    assert!(
+        receiver.handoff.stage_for_test().is_none(),
+        "the superseded job was not abandoned, so the race under test cannot arise"
+    );
+
+    // Past the backoff, the same target is eligible again and a second job is captured.
+    clock.advance_ms(60_000);
+    let mut live = None;
+    for _ in 0..30 {
+        receiver.run(&mut server, &mut store, 84, None).unwrap();
+        if let Some(token) = receiver.handoff.token_for_test() {
+            live = Some(token);
+            break;
+        }
+    }
+    let live = live.expect("no second job for the same target, so this proves nothing");
+    assert_ne!(
+        live, superseded,
+        "tokens must not be reused, or they cannot tell two jobs apart"
+    );
+    let stage = receiver.handoff.stage_for_test();
+
+    // The first worker finally comes back. It is for this target, and for no live job.
+    let now = server.runtime_clock().monotonic_ms();
+    receiver.handoff_complete(HandoffCompletion::Cancelled(superseded), now);
+    assert_eq!(
+        receiver.handoff.token_for_test(),
+        Some(live),
+        "a superseded worker's cancellation cleared the live job for the same target"
+    );
+    assert_eq!(
+        receiver.handoff.stage_for_test(),
+        stage,
+        "a superseded worker's completion moved the live job's stage"
+    );
+    receiver.run(&mut server, &mut store, 84, None).unwrap();
+}
+
 /// N14(a), the real race rather than a model of it. A background overlay worker is paused after
 /// `OverlayOwnership` has moved inside its blocking closure; the waiter is then genuinely
 /// cancelled, so `run` returns `CancelledOverlay` and `complete` clears the waiter flag. While the

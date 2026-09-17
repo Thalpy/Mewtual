@@ -1076,7 +1076,8 @@ explicitly, with a comment at the site saying why the job-reading variant must n
 |---|---|
 | **NEW-3**, P2 | `handoff_commit` took the job *before* building the budget, so a transient inventory or generation failure discarded H1 to H4 entirely: a detached full vault decode plus every signature, thrown away for a retryable error. The budget is now built first. |
 | **NEW-4**, P2 | The probe's read-error backoff held `rail[start]`, not the target that failed, so the bad record was re-read every turn while an innocent document was penalised — and because the cursor advances, one bad record walked the whole rail to the 300 s cap. |
-| **NEW-5**, P3 | `HandoffCompletion::Cancelled` carried no target, so its arm cleared whatever job was live. It now carries one and is gated like the other three. |
+| **NEW-5**, P3 | `HandoffCompletion::Cancelled` carried no target, so its arm cleared whatever job was live. All three arms are now gated. |
+| **NEW-10**, P3 | Completions were routed by target. Since `handoff_check_authority` abandons at any stage including `Detached`, a worker outlives its job, and after that target's backoff expires a new job for the same target is legitimate — so the dead worker's result landed on it. Every completion now carries a never-reused `HandoffJob::token` and is matched on that. |
 | **NEW-8**, P3 | `pending()` used `busy()`, which is true for a job that cannot run — held by backoff or already detached — holding the driver at its active cadence for the job's whole life. Now `runnable(now)`. |
 | **NEW-9**, P3 | A `Captured` job survived the storage pause holding a process-wide permit with no path to release it. `release_if_stalled` now abandons any non-detached job when the receiver pauses. |
 
@@ -1088,20 +1089,24 @@ incomplete.** The earlier list named three items; it should have named eight.
    ahead of the mechanism intended to bound its custody.
 2. **The new H5 index check adds its own unbounded under-custody read loop**, one `load_studio_epoch`
    per `PutObject`, and belongs with item 1.
-3. **That H5 index check has no test at all.** Every runtime test uses a Flipnote target, where the
-   function returns immediately; the one `unavailable Flipnote` test trips at H1. Deleting the H5
-   call changes no test. In a document whose thesis is that untested guards are not guards, this
-   has to be said plainly.
-4. **The H5 tenure conjunct is untested**: nothing moves tenure between H1 and H5.
-5. **`handoff_priority` omits `studio_has_page_request`**, which `run` itself treats as
+3. **`handoff_priority` omits `studio_has_page_request`**, which `run` itself treats as
    authoritative.
-6. **A detached Flow H waiter inherits an unrelated request's cancellation**, discarding multi-turn
+4. **A detached Flow H waiter inherits an unrelated request's cancellation**, discarding multi-turn
    signing progress. One type change away from NEW-5's shape.
-7. **Design 7.3's `explicit_retry` relief is not wired to the handoff maps**, though the code
+5. **Design 7.3's `explicit_retry` relief is not wired to the handoff maps**, though the code
    comment cites 7.3's pacing as satisfied.
-8. **`next_at`, `hold_ms` and `quiet` are never pruned** against the current watch rail.
+6. **`next_at`, `hold_ms` and `quiet` are never pruned** against the current watch rail.
 
-Items 3 and 4 are coverage debts on guards this work claims; the rest are bounded and recorded.
+The two coverage debts that were items 3 and 4 in the previous revision are now closed, both by
+tests that were checked against a deliberately broken build before being trusted:
+
+| Guard | Test | Mutation |
+|---|---|---|
+| H5 index reference recheck | `studio_overlay_handoff_rechecks_index_object_sources_at_commit_not_only_at_capture` | **M34**: delete the H5 call site. Without it the commit **succeeds**, durably writing an Index entry (`epoch: 1, accepted: 1`) pointing at a source that is no longer there. H1 is asserted to have succeeded, so the test can only be passing because of the H5 call. |
+| H5 tenure conjunct | `studio_overlay_handoff_refuses_a_batch_signed_under_a_superseded_tenure` | **M35**: drop `tenure != Some(stamp.tenure)` from `studio_handoff_is_current`. The batch commits under the superseded tenure. |
+
+Both mutated files were confirmed byte-identical to `HEAD` afterwards, and both tests pass on the
+restored tree.
 
 ### `EpochRecordKind::DraftArchive`, the shared enum seam for Agent 2
 

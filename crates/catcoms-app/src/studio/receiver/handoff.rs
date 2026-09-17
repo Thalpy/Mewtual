@@ -39,6 +39,15 @@ pub(super) enum HandoffStage {
 pub(super) struct HandoffJob {
     pub(super) target: StudioTarget,
     pub(super) stage: HandoffStage,
+    /// Which job this is, counted per actor and never reused.
+    ///
+    /// The target is **not** an identity. `handoff_check_authority` abandons at any stage,
+    /// `Detached` included, and a worker that has already been given the bundle keeps running
+    /// after its job is gone. Once that target's backoff expires a fresh job can be captured for
+    /// it, and a completion routed on target alone would then install the dead worker's result
+    /// into the live job: a plan pinned to the superseded epoch, unsignable for ever, in place of
+    /// a capture that was fine.
+    pub(super) token: u64,
     /// The observed owner tenure H1 minted this job's authority under.
     pub(super) tenure: u64,
     /// The MLS epoch H1 minted it under.
@@ -69,6 +78,9 @@ pub(super) struct HandoffRuntime {
     /// Round-robin cursor over the watch rail, so selection rotates instead of always taking the
     /// first eligible target.
     selection: usize,
+    /// Source of `HandoffJob::token`. Monotonic per actor; a value is never reused, so a
+    /// completion from an abandoned job can always be told from a live one.
+    next_token: u64,
 }
 
 const FIRST_HOLD_MS: u64 = 30_000;
@@ -229,6 +241,11 @@ impl HandoffRuntime {
     }
 
     #[cfg(test)]
+    pub(super) fn token_for_test(&self) -> Option<u64> {
+        self.job.as_ref().map(|job| job.token)
+    }
+
+    #[cfg(test)]
     pub(super) fn remaining_for_test(&self) -> Option<usize> {
         match self.job.as_ref().map(|job| &job.stage) {
             Some(HandoffStage::Signing(plan, _)) => Some(plan.remaining()),
@@ -367,9 +384,11 @@ impl StudioReceiver {
         });
         match started {
             Ok(crate::store::StudioHandoffStart::Captured(capture)) => {
+                self.handoff.next_token = self.handoff.next_token.saturating_add(1);
                 self.handoff.job = Some(HandoffJob {
                     target,
                     stage: HandoffStage::Captured(capture, ownership),
+                    token: self.handoff.next_token,
                     tenure,
                     mls: server.sync.with_registry_context(|g, _, _, _| g.epoch()),
                 });
@@ -393,13 +412,14 @@ impl StudioReceiver {
     pub(super) fn handoff_detach<T: MeshTransport>(&mut self) -> Option<StudioBackgroundJob<T>> {
         let job = self.handoff.job.as_mut()?;
         let target = job.target;
+        let token = job.token;
         match std::mem::replace(&mut job.stage, HandoffStage::Detached) {
             HandoffStage::Captured(capture, ownership) => Some(
-                StudioBackgroundJob::handoff_prepare(capture, ownership, target),
+                StudioBackgroundJob::handoff_prepare(capture, ownership, target, token),
             ),
             // H4 detaches only once the whole branch is signed; a partly signed plan goes back.
             HandoffStage::Signing(plan, ownership) if plan.remaining() == 0 => Some(
-                StudioBackgroundJob::handoff_assemble(plan, ownership, target),
+                StudioBackgroundJob::handoff_assemble(plan, ownership, target, token),
             ),
             stage => {
                 job.stage = stage;
@@ -534,36 +554,39 @@ impl StudioReceiver {
     /// not belong to the job this actor is currently running must be ignored, never used to clear
     /// it: that job may be mid-signing with real work and a live `OverlayOwnership`, and dropping
     /// it there would discard both.
+    ///
+    /// "Belongs to" means the job **token**, not the target. Authority can move while a stage is
+    /// detached, and `handoff_check_authority` abandons at any stage including `Detached`, so the
+    /// worker outlives its job. Once that target's backoff expires a new job for the same target
+    /// is legitimate, and a target match would then let the dead worker overwrite it.
     pub(super) fn handoff_complete(&mut self, result: HandoffCompletion, now: u64) {
         let mine =
-            |job: &Option<HandoffJob>, target| job.as_ref().is_some_and(|job| job.target == target);
+            |job: &Option<HandoffJob>, token| job.as_ref().is_some_and(|job| job.token == token);
         match result {
-            HandoffCompletion::Prepared(target, Ok((plan, ownership)))
-                if mine(&self.handoff.job, target) =>
+            HandoffCompletion::Prepared(token, Ok((plan, ownership)))
+                if mine(&self.handoff.job, token) =>
             {
                 self.handoff.job.as_mut().expect("checked").stage =
                     HandoffStage::Signing(plan, ownership);
             }
-            HandoffCompletion::Assembled(target, Ok((commit, ownership)))
-                if mine(&self.handoff.job, target) =>
+            HandoffCompletion::Assembled(token, Ok((commit, ownership)))
+                if mine(&self.handoff.job, token) =>
             {
                 self.handoff.job.as_mut().expect("checked").stage =
                     HandoffStage::Ready(commit, ownership);
             }
             // A stage this actor asked for refused. The worker already released its bundle.
-            HandoffCompletion::Prepared(target, Err(_))
-            | HandoffCompletion::Assembled(target, Err(_))
-                if mine(&self.handoff.job, target) =>
+            HandoffCompletion::Prepared(token, Err(_))
+            | HandoffCompletion::Assembled(token, Err(_))
+                if mine(&self.handoff.job, token) =>
             {
                 self.handoff.abandon(now);
             }
             // The waiter was cancelled. The worker still owns its bundle and releases it when it
-            // ends, so nothing is freed here; the job is simply no longer tracked.
-            HandoffCompletion::Cancelled(target) if mine(&self.handoff.job, target) => {
-                // `hold_target`, not `hold`: the job is cleared here, so the job-reading variant
-                // would record no backoff at all.
-                self.handoff.job = None;
-                self.handoff.hold_target(target, now);
+            // ends, so nothing is freed here; the job is simply no longer tracked. `abandon` both
+            // clears it and backs its target off, which is what this arm has to do.
+            HandoffCompletion::Cancelled(token) if mine(&self.handoff.job, token) => {
+                self.handoff.abandon(now);
             }
             // A completion for something this actor is not working on. Ignore it entirely: the
             // current job, whatever stage it is in, is untouched.
