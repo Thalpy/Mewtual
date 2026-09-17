@@ -1,6 +1,13 @@
 # Gate 4 Agent 3: runtime signed fault repair
 
-Status: **revision 14, design proposal, awaiting re-review. No production code is written.**
+Status: **revision 14, design PASS at `d48280012cc653b458b1e3ce00b49f6ae2f23c0e`. No production code
+is written.**
+
+The bounded repair design is accepted. Implementation, integration, mutation execution, CI evidence,
+Agent 2's unimplemented tenure seam, Agent 1's remaining I-4 and C-3 work, and full Gate 4
+acceptance all remain separate and unaccepted. A design PASS is not permission to start Gate 5.
+
+
 
 Revision 13 (`df1a8fe`) received **REQUEST CHANGES** with one finding, AG3-DES-055, plus
 AG3-TEST-012 and two editorial leftovers. The reviewer accepted AG3-DES-054's mechanism and closed
@@ -2954,7 +2961,8 @@ repeatedly resets this shared working tree and discards uncommitted edits. Every
 the two Agent 3 documents. Isolate the revision by walking back from the head: its commits are
 contiguous, and the first one's parent is the correct isolation base, since unrelated Agent 1 and
 Agent 2 work interleaves in the literal range.
-Earlier revisions: 333924318a65210375fa992bc49006c2fac3c236 (revision 11),
+Earlier revisions: 04b27f7dc59f917e556c5a30d1a609f6b211ab32 (revision 12),
+333924318a65210375fa992bc49006c2fac3c236 (revision 11),
 11ce6f1b58288e44d6ff14dc2a98f42f7cc5e13b (revision 10 design body),
 3b6a4b40462ae83a341f8f6741c93edff55b5ef7 (revision 9),
 b8bb5f3a3db6d0b8e450c82119f95e2cb929bce6 (revision 8),

@@ -22,7 +22,8 @@ Review preamble: 3. Current entries override older ones.
 | 2026-09-17 | Design revision 11, tenth-round findings answered | `11ce6f1b58288e44d6ff14dc2a98f42f7cc5e13b` | `333924318a65210375fa992bc49006c2fac3c236` | design, docs only | **REQUEST CHANGES**: AG3-DES-045, 048 and 049 **closed**; new AG3-DES-050 to AG3-DES-053; AG3-TEST-010 |
 | 2026-09-17 | Design revision 12, eleventh-round findings answered | `333924318a65210375fa992bc49006c2fac3c236` | `04b27f7dc59f917e556c5a30d1a609f6b211ab32` | design, docs only | **REQUEST CHANGES**: AG3-DES-050, 051, 052 and 053 **closed**; one new finding, AG3-DES-054, plus AG3-TEST-011 |
 | 2026-09-17 | Design revision 13, twelfth-round finding answered | `04b27f7dc59f917e556c5a30d1a609f6b211ab32` | `df1a8fe8828b6e7abfeaf0bbed42eed75ef3f9a6` | design, docs only | **REQUEST CHANGES**: AG3-DES-054's mechanism accepted; one new finding, AG3-DES-055, plus AG3-TEST-012 and two editorials |
-| 2026-09-17 | Design revision 14, thirteenth-round finding answered | `df1a8fe8828b6e7abfeaf0bbed42eed75ef3f9a6` | this commit | design, docs only | re-review requested |
+| 2026-09-17 | Design revision 14, thirteenth-round finding answered | `df1a8fe8828b6e7abfeaf0bbed42eed75ef3f9a6` | `d48280012cc653b458b1e3ce00b49f6ae2f23c0e` | design, docs only | **PASS**: AG3-DES-055 and AG3-TEST-012 closed; bounded repair design accepted |
+| 2026-09-17 | Editorial follow-up to the PASS | `d48280012cc653b458b1e3ce00b49f6ae2f23c0e` | this commit | docs only | the reviewer's remaining nit; no design change |
 
 Working checkout: `M:\Git (local)\CatComs`, shared with the parallel Agent 1 and Agent 2 sessions,
 which are now doing implementation and design work respectively. Agent 1 has the checkout on its
@@ -31,6 +32,24 @@ documents with explicit pathspecs. `Create-suite-2` was fast-forwarded once, at 
 these documents off Agent 1's branch alone; it has not been moved since. **Agent 3 implementation
 must move to a separate branch or worktree before any code change**; no mutation harness may run
 against another agent's source.
+
+## Design verdict
+
+**PASS at `d48280012cc653b458b1e3ce00b49f6ae2f23c0e`**, bounded to the Agent 3 repair **design**.
+Fourteen revisions, fifty-five numbered findings and twelve test-plan findings, all closed.
+
+What this PASS does **not** cover, and what therefore gates the next step:
+
+| Not accepted | Owner | State |
+|---|---|---|
+| Any implementation of this design | Agent 3 | not started; must move to a separate branch or worktree first |
+| Mutation execution and CI evidence | Agent 3 | **no Cargo, npm or script command has been run in any of the fourteen passes** |
+| Live tenure seam T1 to T3 | Agent 2 | design PASSED, no implementation |
+| I-4 and C-3 runtime seams | Agent 1 | not started |
+| Core handoff signing split `e65bfd8` | core | still unreviewed |
+| Integration and full Gate 4 acceptance | Agent 4 | separate review |
+
+Gate 5 stays closed.
 
 ## Finding ledger, revision 13 round
 
@@ -531,16 +550,22 @@ checkpoint; both are real prerequisites before Agent 3 implementation integrates
 
 ## Next actions
 
-1. Push and fill the head SHA into the re-review request in
-   [design section 17](GATE4-AGENT-3-DESIGN.md#17-re-review-request). Do not send it with the
-   placeholder.
-2. Agree the tenure seam (T1 to T5) with Agent 2 and the custody points with Agent 1 in writing
-   before the first line of code.
-3. Create a separate branch or worktree; do not implement on the shared documentation checkout.
-4. Implement in the design's order: core C-1 to C-7 with N1 to N7, then the owner record and its
+The design is accepted, so these are implementation actions.
+
+1. **Create a separate branch or worktree first.** Do not implement on the shared documentation
+   checkout: another session resets it, which has already discarded uncommitted work twice.
+2. Agree the tenure seam (T1 to T3, in its accepted verification/authoring form) with Agent 2 and
+   the custody points with Agent 1 in writing before the first line of code. Both are design-only
+   today, so an implementation that assumes either is available will not compile or will fail
+   closed.
+3. Implement in the design's order: core C-1 to C-8 with N1 to N7, then the owner record and its
    transitions with N8 to N10, then the Studio transaction with N11 to N20, then Registry with N21,
    then W-1 and both report paths with N26 and N26b, then distribution with N23 to N25 and N27,
-   then the runtime, control and native surface with N28 to N30, then the twelve mutants.
-5. Treat N17 as the gating acceptance case: it is the one that proves a fault is reachable, is
+   then the runtime, control and native surface with N28 to N30, then the reserved-slot and overflow
+   lifecycle with N31b, N31c and N36 to N46, then the nineteen mutants.
+4. Treat **N17** as the gating acceptance case: it is the one that proves a fault is reachable, is
    otherwise permanently unexitable, and is actually healed without injecting state on the new
    owner.
+5. Request **review preamble 3** for the bounded implementation when there is executed evidence.
+   The design PASS does not carry over: implementation, mutation execution and CI evidence are a
+   separate verdict, and Gate 5 stays closed either way.
