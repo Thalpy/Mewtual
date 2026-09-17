@@ -387,6 +387,100 @@ fn a_queued_or_parked_overlay_keeps_the_actor_busy() {
     assert!(runtime.reserve_overlay().is_some());
 }
 
+/// N14(a), the real race rather than a model of it. A background overlay worker is paused after
+/// `OverlayOwnership` has moved inside its blocking closure; the waiter is then genuinely
+/// cancelled, so `run` returns `CancelledOverlay` and `complete` clears the waiter flag. While the
+/// worker is still running, a second overlay job must remain inadmissible and the shared slot must
+/// stay taken, because the closure holds the only strong admission `Arc` and nobody sends any
+/// release message. When the worker finishes on its own, both recover with no second visit.
+#[tokio::test]
+async fn a_cancelled_waiter_leaves_a_real_paused_worker_holding_admission_and_its_slot() {
+    let clock = ManualClock::new(1000);
+    let mut rng = ChaCha20Rng::seed_from_u64(613);
+    let mut server = Server::found(
+        Hub::new().join(PeerId::from_u64(1)),
+        MlsDevice::generate().unwrap(),
+        rng.clone(),
+        Box::new(clock.clone()),
+        "owner",
+    )
+    .unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let mut store = ServerStore::open(root.path(), b"cancel-race", &mut rng).unwrap();
+    let first = StudioTarget::Flipnote {
+        channel: crate::channel_id("general").to_be_bytes(),
+        object: [9; 16],
+    };
+    let capture = server.sync.with_registry_context(|g, d, _, _| {
+        crate::store::studio_closing_capture_fixture(&mut store, 83, g, d, first, false)
+    });
+
+    let mut receiver = StudioReceiver::default();
+    let pool = receiver.catchup.overlay_pool();
+    let free = pool.available_permits();
+    let ownership = receiver
+        .catchup
+        .reserve_overlay()
+        .expect("the first job is admitted");
+    receiver
+        .catchup
+        .queue_overlay_for_test(capture, ownership, first);
+    let work = receiver
+        .detach(&mut server)
+        .expect("the overlay is selected");
+    assert!(receiver.catchup.overlay_detached);
+    let (work, entered, release) = work.pause_overlay_for_test();
+
+    // A real cancellation signal, of the kind the actor's lease publishes.
+    let (cancel, signal) = tokio::sync::watch::channel(false);
+    let cancellation = catcoms_rt::RequestCancellation::new(signal, None);
+
+    // Run the real job concurrently with the race. `join!` polls the job first, so the blocking
+    // worker starts before the second future waits on its entry signal.
+    let (result, ()) = tokio::join!(work.run(Some(cancellation)), async {
+        entered
+            .await
+            .expect("the worker entered while owning the bundle");
+        cancel.send(true).expect("the cancellation signal is live");
+    });
+    assert!(
+        matches!(result, StudioBackgroundResult::CancelledOverlay),
+        "a cancelled overlay waiter did not report cancellation"
+    );
+
+    // The ordinary completion path. It clears the waiter flag and nothing else: the worker is
+    // still paused inside `plan`, still owning admission and the shared permit.
+    receiver.complete(&mut server, result);
+    assert!(!receiver.catchup.overlay_detached);
+    assert!(
+        receiver.catchup.reserve_overlay().is_none(),
+        "a cancelled waiter admitted a second overlay job while its worker was still running"
+    );
+    assert_eq!(
+        pool.available_permits(),
+        free - 1,
+        "a cancelled waiter refunded a shared slot its worker still owns"
+    );
+
+    // Release the worker. It finishes by itself, with no release call from the actor.
+    release.send(()).expect("the worker is still running");
+    for _ in 0..600 {
+        if pool.available_permits() == free {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+    assert_eq!(
+        pool.available_permits(),
+        free,
+        "the finished worker never returned its shared slot"
+    );
+    assert!(
+        receiver.catchup.reserve_overlay().is_some(),
+        "admission never recovered after the worker finished"
+    );
+}
+
 /// RT-001. A plan that cannot be committed must release admission and its slot from the four-slot
 /// process-wide pool the moment the worker finishes, not when some later Save for the same target
 /// happens to collect them, and not never. Its media hold has already died with the capture, so

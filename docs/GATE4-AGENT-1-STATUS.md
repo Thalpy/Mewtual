@@ -49,7 +49,8 @@ they are the highest-conflict changes, so they land last. The per-item verdict r
 | 2026-09-16 | A-001 correction | `70eaad4` | `35929a9` | bounded implementation | **PASS, A-001 closed.** `AdmittedOverlayAuthoring` as one value plus a `MediaOrigin` rechecked at capture and commit; regression and M20. |
 | 2026-09-16 | B-001 correction | `35929a9` | `1cac519` | integration seam correction | **PASS, B-001 closed.** Per-family `scope_cap()`; two regressions and M21. |
 | 2026-09-16 | Overlay runtime, Flow S detached | `130a64b` | `dda64a9` | bounded implementation | Split, job and result, admission consumed, marker removed. **REQUEST CHANGES**: the `OverlayOwnership` deviation **accepted** (design to change, not the code), the withdrawn control action **PASS**, M23 **PASS**; **RT-001** (P2) and **RT-002** (P2) opened; the cancellation half of N14(a) still open at P3. |
-| 2026-09-17 | RT-001 and RT-002 corrections | `dda64a9` | uncommitted working tree | bounded implementation | A refused plan releases admission and its pool slot in the worker; `OverlayPlan` selected only when `replay_ready()` holds. Two regressions on a real capture, M24 and M25, and the design 5.5 text corrected. |
+| 2026-09-17 | RT-001 and RT-002 corrections | `dda64a9` | `3893ee2` | bounded implementation | **PASS, both closed.** The `detach`-not-`reserve_overlay` gate placement explicitly signed off. A refused plan releases admission and its pool slot in the worker; `OverlayPlan` selected only when `replay_ready()` holds. M24, M25, design 5.5 corrected. |
+| 2026-09-17 | N14(a), the real cancellation race | `3893ee2` | uncommitted working tree | test plus one cfg(test) seam | Taken before Flow H at the reviewer's direction, because Flow H rewrites the machinery N14(a) guards. A real paused worker, a real `RequestCancellation`, and M26. |
 
 Working checkout: `M:\Git (local)\CatComs`. The four design passes were made on `Create-suite-2`;
 implementation is on `gate4-agent1-runtime`, which is the current branch.
@@ -108,7 +109,7 @@ code and executed evidence, and the reviewer said so explicitly for each one.
 | B-001 | P2 | **Closed** at the `70eaad4` review. `decode_record_scope` prechecked every family at Recovery's 501-byte maximum, so a legal 506-byte maximum-shape `DraftArchive` scope was refused outright. The bound is now per family. | Status "B-001" |
 | RT-001 | P2 | **Corrected, awaiting review.** A refused plan parked `OverlayOwnership` against a plan that could never commit, holding this actor's admission and one of four process-wide preparation slots until some later Save collected it, or forever. The worker now releases both the moment planning fails. | Status "RT-001 and RT-002" |
 | RT-002 | P2 | **Corrected, awaiting review.** `detach` selected `OverlayPlan` ahead of authoritative catch-up with no `replay_ready()` check, reversing the accepted priority: L7 accepts overlay starving under catch-up, never the reverse. | Status "RT-001 and RT-002" |
-| N14(a) cancellation | P3 | **Open.** The current test models the worker-owned bundle instead of pausing a real `spawn_blocking` closure and firing a real `RequestCancellation`. The mechanism is right by inspection and M23 guards the reaping it depends on, but the race is not executed. | Design 14 N14 |
+| N14(a) cancellation | P3 | **Closed.** The race is now executed rather than modelled: a real paused worker, a real `RequestCancellation`, the ordinary `complete` path, and the recovery when the worker ends by itself. M26 guards it. | Status "N14(a)" |
 | AG1-TEST-001 | P3 | **Closed at the design boundary** (revision-4 review). The residual was that N31 required only `remaining() > 0`, which a visit deferring on the priority gate without signing also satisfies, so both the unchanged and the mutated implementation could pass. Revision 4 adds a positive signing precondition (`after < before`, `after > 0`, exact expected count derived from production `remaining()`), a deterministic injected-clock seam, authoritative work staged only after slice selection, and independent per-limit preconditions, with M5 split into M5a and M5b. The reviewer confirmed the production basis: `remaining()` delegates to the pending queue and `sign_next` removes exactly one item only after the signature succeeds, so the delta counts **successfully produced** signatures. | Design 7.3, 14.1 "N31 in full", 14.2 M5a/M5b |
 
 ## Audit claims corrected across revisions
@@ -791,23 +792,67 @@ Only the detached reconstruction yields to catch-up.
 | `cargo clippy -j 1 -p catcoms-app --all-targets -- -D warnings`, `cargo fmt --all --check` | Clean. |
 | `cargo test -j 1 -p catcoms-app --lib`, no concurrent Cargo work | **641 passed, 0 failed, 11 ignored**, 1144.46 s. |
 
-**No fabricated capture.** Both regressions use `studio_closing_capture_fixture`, which runs the
-production path end to end: fill to rotation eligibility, owner decision, seal, basis, then
-`start_studio_closing_overlay` returning `Captured`. Its one non-production step is the optional
-pre-fill of the document's ordinary intent ledger to `MAX_INTENT_BYTES_PER_DOCUMENT`, which is what
-makes `plan()` refuse at `IntentLedger::prepare`; classification never calls `prepare`, so that
-refusal is reachable only in the detached stage. The pre-fill uses the production `prepare`,
-`encode`, `seal` and framing at the canonical path, exactly as the existing per-document cap test
-does, so it bypasses no check the reader performs.
+**No fabricated capture, with one precise limit.** Both regressions use
+`studio_closing_capture_fixture`, and the **capture itself** is genuinely produced end to end:
+source, fill to rotation eligibility, owner decision, seal, basis, then
+`start_studio_closing_overlay` returning `Captured`.
+
+The pre-filled ledger is a different matter and should not be overstated. Its 64 operations are
+prepared through the production `IntentLedger::prepare` and written through the production
+`EpochIntentState::encode`, `seal` and framing at the canonical path, so the record the reader
+authenticates is real. But they are **synthesized at the durable-record level**: an ordinary Studio
+Apply typed-decodes and validates each operation before persisting its intent, and this fixture does
+not go through that. The reviewer made this correction and did not treat it as a finding, because
+RT-001 is an ownership invariant for **any** real `plan()` error and the fixture reaches the real
+capture and the real `plan()` code rather than injecting an error.
 
 **Design text corrected, as the reviewer directed.** Design 5.5 now carries the revised
 `OverlayOwnership` and states the invariant that replaced it: the bundle is admission plus permit,
 the capture and plan hold the sole `CreativeHold`, and **the three do not always release together**.
 Two code comments that claimed they did are corrected; that claim is what RT-001 was.
 
-**Still open.** The cancellation half of N14(a) is P3 and not yet executed end to end: the current
-test models the worker-owned bundle rather than pausing a real `spawn_blocking` closure and firing a
-real `RequestCancellation`. N14(b) and (c) remain blocked on the native handle and P5.
+### N14(a): the real cancellation race
+
+Closed by executing it rather than modelling it. The reviewer asked for this **before** Flow H, and
+the reason is right: Flow H modifies the exact machinery N14(a) protects, so pinning the race first
+means a later failure is unambiguous about which change caused it.
+
+`StudioBackgroundJob::pause_overlay_for_test` arms a barrier in the shape
+`PreviewJob::pause_for_test` already established: the blocking worker signals once it has entered
+and then blocks until released. The barrier is taken out of `OverlayContext` before the closure is
+built, so the pause happens **after** `OverlayOwnership` has moved inside the worker, which is the
+state the invariant is about.
+
+`a_cancelled_waiter_leaves_a_real_paused_worker_holding_admission_and_its_slot` then runs the real
+job: a genuine capture, a real `RequestCancellation` built from a watch channel and fired while the
+worker is paused, `run` returning `CancelledOverlay`, and the ordinary `complete` path clearing the
+waiter flag. While the worker is still paused it requires that a second overlay job is refused and
+that the shared pool is still one permit down; after release it requires both to recover, with no
+release message sent from anywhere.
+
+**Why it is not vacuous.** If the barrier were a no-op the worker would finish and `run` would
+return `OverlayPlanned`, failing the cancellation assertion. If the worker never entered, the entry
+signal would never arrive and the test would hang rather than pass. And the permit assertion is the
+anti-vacuity guard for the admission one: a worker that had already finished would have returned its
+slot, so `free - 1` would fail.
+
+| Check | Result |
+|---|---|
+| `... --lib a_cancelled_waiter_leaves_a_real_paused_worker` | **1 passed, 0 failed**, 9.18 s. |
+| **M26**, clearing the admission record when a cancelled waiter is completed | Fails at "a cancelled waiter admitted a second overlay job while its worker was still running"; restored source passes. |
+| `cargo clippy -j 1 -p catcoms-app --all-targets -- -D warnings`, `cargo fmt --all --check` | Clean. |
+| `cargo test -j 1 -p catcoms-app --lib`, no concurrent Cargo work | **644 passed, 0 failed, 11 ignored**, 1027.03 s. |
+
+**A build failure that was not one.** The first attempt to link this test failed with
+`LNK1104: cannot open file ...catcoms_app-<hash>.exe`. A process listing showed another agent's
+session running that exact test binary out of the shared `target/` directory. The fix was to wait
+for their run to end, not to change any code. Worth recognising, because it presents as a compiler
+error. Relatedly, `cargo fmt -p catcoms-app` reformats the whole package, including other agents'
+uncommitted files: it touched Agent 2's `epoch_draft_archive.rs` here. That reformat is left in the
+tree deliberately, because reverting it risks their in-progress work, and it is not committed here.
+
+**Still open.** N14(b) and (c) remain blocked on the native `PrepareOverlaySave` handle and Agent
+2's P5, as the reviewer agrees. They are not worth pursuing before that exists.
 
 ### `EpochRecordKind::DraftArchive`, the shared enum seam for Agent 2
 

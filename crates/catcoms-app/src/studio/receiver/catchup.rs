@@ -57,9 +57,27 @@ type OverlayPlanResult = Result<(Box<StudioOverlayPlan>, OverlayOwnership), AppE
 
 /// Which overlay job a detached plan belongs to. Carries no plaintext, no key and no permit; it is
 /// only enough to route a completion back to the target that asked for it.
-#[derive(Clone)]
 pub(crate) struct OverlayContext {
     target: StudioTarget,
+    /// Test-only barrier, in the shape `PreviewJob::pause_for_test` established: the blocking
+    /// worker signals once it has entered and then blocks until released. It is taken out of the
+    /// context before the closure is built, so the pause happens **after** `OverlayOwnership` has
+    /// moved inside the worker, which is the state N14(a) is about.
+    #[cfg(test)]
+    pause: Option<(
+        tokio::sync::oneshot::Sender<()>,
+        std::sync::mpsc::Receiver<()>,
+    )>,
+}
+
+impl OverlayContext {
+    fn new(target: StudioTarget) -> Self {
+        Self {
+            target,
+            #[cfg(test)]
+            pause: None,
+        }
+    }
 }
 
 /// One tracked network attempt and preparation waiter per actor. Cancellation may leave a
@@ -102,6 +120,26 @@ pub(crate) enum StudioBackgroundResult {
     },
 }
 impl<T: MeshTransport + 'static> StudioBackgroundJob<T> {
+    /// Arm the overlay worker's barrier. Returns the job, a receiver that resolves once the
+    /// blocking closure has entered while owning the bundle, and the sender that releases it.
+    #[cfg(test)]
+    pub(crate) fn pause_overlay_for_test(
+        mut self,
+    ) -> (
+        Self,
+        tokio::sync::oneshot::Receiver<()>,
+        std::sync::mpsc::Sender<()>,
+    ) {
+        let Self::OverlayPlan(_, _, context) = &mut self else {
+            panic!("overlay plan job");
+        };
+        let (entered, entry) = tokio::sync::oneshot::channel();
+        let (release, released) = std::sync::mpsc::channel();
+        assert!(context.pause.is_none());
+        context.pause = Some((entered, released));
+        (self, entry, release)
+    }
+
     #[cfg(test)]
     pub(crate) fn is_preparation_for_test(&self) -> bool {
         matches!(self, Self::Prepare(..) | Self::PrepareRegistry(..))
@@ -167,20 +205,36 @@ impl<T: MeshTransport + 'static> StudioBackgroundJob<T> {
                 // with the capture holding the job-owned reference hold alongside them. Those are
                 // two owners, not one, and they do not always end together: see the failure arm.
                 Self::OverlayPlan(capture, ownership, context) => {
-                    let result = tokio::task::spawn_blocking(move || match capture.plan() {
-                        Ok(plan) => Ok((Box::new(plan), ownership)),
-                        // RT-001. Release here, in the worker, the moment the plan becomes
-                        // impossible. The capture has already been dropped with its media hold, so
-                        // holding admission and a shared slot any longer protects nothing and
-                        // waits on a visit that may never come.
-                        Err(error) => {
-                            drop(ownership);
-                            Err(error)
+                    let OverlayContext {
+                        target,
+                        #[cfg(test)]
+                        pause,
+                    } = context;
+                    let result = tokio::task::spawn_blocking(move || {
+                        // Ownership and the capture are already inside this closure.
+                        #[cfg(test)]
+                        if let Some((entered, release)) = pause {
+                            let _ = entered.send(());
+                            let _ = release.recv();
+                        }
+                        match capture.plan() {
+                            Ok(plan) => Ok((Box::new(plan), ownership)),
+                            // RT-001. Release here, in the worker, the moment the plan becomes
+                            // impossible. The capture has already been dropped with its media
+                            // hold, so holding admission and a shared slot any longer protects
+                            // nothing and waits on a visit that may never come.
+                            Err(error) => {
+                                drop(ownership);
+                                Err(error)
+                            }
                         }
                     })
                     .await;
                     match result {
-                        Ok(result) => StudioBackgroundResult::OverlayPlanned(context, result),
+                        Ok(result) => StudioBackgroundResult::OverlayPlanned(
+                            OverlayContext::new(target),
+                            result,
+                        ),
                         // The worker itself died, taking both the bundle and the capture with it.
                         // Unwinding released them, so there is nothing to hand back.
                         Err(_) => StudioBackgroundResult::CancelledOverlay,
@@ -611,7 +665,7 @@ impl CatchupRuntime {
         ownership: OverlayOwnership,
         target: StudioTarget,
     ) {
-        self.overlay = Some((Box::new(capture), ownership, OverlayContext { target }));
+        self.overlay = Some((Box::new(capture), ownership, OverlayContext::new(target)));
     }
 
     /// Take a completed plan for the custody visit that will commit it, if it belongs to `target`.
@@ -649,7 +703,7 @@ impl CatchupRuntime {
         ownership: OverlayOwnership,
         target: StudioTarget,
     ) {
-        self.overlay = Some((Box::new(capture), ownership, OverlayContext { target }));
+        self.overlay = Some((Box::new(capture), ownership, OverlayContext::new(target)));
     }
 
     fn prepare_for<T: MeshTransport, R: CryptoRngCore>(
