@@ -21,7 +21,9 @@
 use super::super::epoch_intents::{self, EpochIntentState};
 use super::*;
 use catcoms_crypto::DeviceId;
-use catcoms_replication::studio::{StudioHandoffAuthority, StudioHandoffSigning};
+use catcoms_replication::studio::{
+    StudioHandoffAuthority, StudioHandoffSigning, StudioOverlayState,
+};
 
 /// Record identity and public live context, captured under custody. It carries no key, no store
 /// handle, no `Server` and no budget, so it is safe to hold across a detach.
@@ -34,6 +36,13 @@ pub(crate) struct StudioHandoffStamp {
     actor_key: Vec<u8>,
     owner: DeviceId,
     mls: u64,
+    /// The observed owner tenure H1 minted the authority under.
+    ///
+    /// The single-visit transaction got this for free, because it passed the tenure straight into
+    /// `prepare_handoff`. Splitting it into H1 to H5 lost that: a tenure restart for the **same**
+    /// owner device at the **same** MLS epoch passes every other conjunct below, and a batch
+    /// signed under one tenure would become durable under the next.
+    tenure: u64,
     /// The exact authenticated records H2 reconstructs from. H5 requires both to be unchanged
     /// before anything durable happens, because a plan derived from superseded bytes is a stale
     /// proposal however well formed it is.
@@ -70,6 +79,10 @@ pub(crate) struct StudioHandoffPlan {
     pub(super) stamp: StudioHandoffStamp,
     pub(super) basis: [u8; 32],
     pub(super) signing: StudioHandoffSigning,
+    /// Decoded once by H2 and carried, so H4 can assemble without the store. The stamp is what
+    /// makes this sound: H5 requires the intent record to be byte-identical to the one H2 read,
+    /// so this is still the current state or the plan is refused before anything durable happens.
+    pub(super) state: EpochIntentState,
 }
 
 impl std::fmt::Debug for StudioHandoffPlan {
@@ -78,16 +91,36 @@ impl std::fmt::Debug for StudioHandoffPlan {
     }
 }
 
+/// An assembled, fully signed candidate and the exact records H5 will write. Still a proposal:
+/// nothing here is durable, and H5 revalidates the stamp before the first write.
+pub(crate) struct StudioHandoffCommit {
+    pub(super) stamp: StudioHandoffStamp,
+    pub(super) basis: [u8; 32],
+    pub(super) candidate: StudioEpoch,
+    pub(super) prepared: StudioOverlayState,
+    /// The state as H2 read it, before the prepared overlay is installed. The reference check
+    /// runs against this, exactly as it did when H4 and H5 were one function.
+    pub(super) state: EpochIntentState,
+    pub(super) snapshot: Zeroizing<Vec<u8>>,
+    pub(super) prepared_bytes: u64,
+    pub(super) completed_bytes: u64,
+    pub(super) source_bytes: u64,
+}
+
+impl std::fmt::Debug for StudioHandoffCommit {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("StudioHandoffCommit { .. }")
+    }
+}
+
 /// An experiment configuration, not a responsiveness guarantee. The deadline is checked between
 /// signatures and can overrun by one whole operation including its authority checks, so both must
 /// be recalibrated against the measured largest admitted individual operation and roster shape
 /// (design 13, measurement 3, still outstanding).
 //
-// The synchronous transaction holds custody throughout and so passes neither limit. These are the
-// scheduled runtime's, which lands with the H3 visit; delete this marker with that commit.
-#[allow(dead_code)]
+// The synchronous transaction holds custody throughout and passes neither limit; these are the
+// scheduled H3 visit's.
 pub(crate) const MAX_SIGNING_TURNS_PER_VISIT: usize = 32;
-#[allow(dead_code)]
 pub(crate) const SIGNING_SLICE_BUDGET_MS: u64 = 250;
 
 /// What one H3 visit actually did, recorded so the two distinct outcomes of design 7.3 stay
@@ -112,10 +145,6 @@ pub(crate) struct SigningSlice {
 
 impl SigningSlice {
     /// Production `sign_next` calls this visit made, derived from the core's own counter.
-    //
-    // This reporting surface is what the scheduled H3 visit pages and reports on; the synchronous
-    // transaction only needs `complete`. Delete this marker with that commit.
-    #[allow(dead_code)]
     pub(crate) fn signed(&self) -> usize {
         self.before - self.after
     }
@@ -125,7 +154,6 @@ impl SigningSlice {
     }
     /// True only for a priority yield, which is a different event from a bounded slice even when
     /// both leave work remaining.
-    #[allow(dead_code)]
     pub(crate) fn yielded(&self) -> bool {
         self.yielded
     }
@@ -135,7 +163,6 @@ impl SigningSlice {
 }
 
 impl StudioHandoffPlan {
-    #[allow(dead_code)]
     pub(crate) fn remaining(&self) -> usize {
         self.signing.remaining()
     }
@@ -191,6 +218,55 @@ impl StudioHandoffPlan {
             yielded: false,
         })
     }
+
+    /// H4, on a blocking worker and off custody. `finish` revalidates the complete signed history
+    /// and typed projection and builds the manifest, `snapshot` serializes the candidate source,
+    /// and the two intent records are encoded to size the transaction. All of that is expensive
+    /// and none of it touches the store.
+    ///
+    /// It refuses an unfinished batch rather than assembling a partial one: `finish` would fail
+    /// anyway, but saying so here names the actual mistake.
+    pub(crate) fn assemble(self) -> Result<StudioHandoffCommit, AppError> {
+        if self.signing.remaining() != 0 {
+            return Err(invalid("handoff signing did not complete"));
+        }
+        let StudioHandoffPlan {
+            stamp,
+            basis,
+            signing,
+            state,
+        } = self;
+        let (mut candidate, prepared) = signing.finish().map_err(invalid)?.into_parts();
+        let completed = prepared
+            .complete(&candidate, &state.ledger)
+            .map_err(invalid)?;
+        let scope = epoch_intents::scope_bytes(stamp.server, &stamp.document)?;
+        let mut prepared_state = state.clone();
+        prepared_state.overlay = Some(prepared.clone());
+        let mut completed_state = state.clone();
+        completed_state.overlay = Some(completed);
+        let prepared_bytes = prepared_state.encode(&scope)?.len() as u64 + 40;
+        let completed_bytes = completed_state.encode(&scope)?.len() as u64 + 40;
+        let source_scope = scope_bytes(stamp.server, &stamp.document)?;
+        let snapshot = Zeroizing::new(candidate.snapshot().map_err(invalid)?);
+        let mut e = Encoder::new();
+        e.put_bytes(&source_scope).map_err(invalid)?;
+        e.put_bytes(&stamp.target.channel()).map_err(invalid)?;
+        e.put_bytes(&snapshot).map_err(invalid)?;
+        e.put_u8(1); // Durable source-to-intent link, also charged by the common writer.
+        let source_bytes = e.finish().len() as u64 + 40;
+        Ok(StudioHandoffCommit {
+            stamp,
+            basis,
+            candidate,
+            prepared,
+            state,
+            snapshot,
+            prepared_bytes,
+            completed_bytes,
+            source_bytes,
+        })
+    }
 }
 
 impl StudioHandoffCapture {
@@ -229,6 +305,7 @@ impl StudioHandoffCapture {
             stamp: self.stamp,
             basis: self.basis,
             signing,
+            state,
         })
     }
 }
@@ -241,6 +318,7 @@ impl ServerStore {
         &self,
         group: &ServerGroup,
         device: &MlsDevice,
+        tenure: Option<u64>,
         stamp: &StudioHandoffStamp,
     ) -> Result<bool, AppError> {
         if !Arc::ptr_eq(&stamp.mount, &self.registry_mount())
@@ -249,6 +327,7 @@ impl ServerStore {
             || stamp.actor_key != device.public_key_bytes()
             || Some(stamp.owner) != group.designated_committer()
             || stamp.mls != group.epoch()
+            || tenure != Some(stamp.tenure)
         {
             return Ok(false);
         }
@@ -278,6 +357,7 @@ impl ServerStore {
         device: &MlsDevice,
         document: &LogicalDocument,
         basis: [u8; 32],
+        tenure: u64,
         authority: StudioHandoffAuthority,
     ) -> Result<StudioHandoffCapture, AppError> {
         let intent_scope = epoch_intents::scope_bytes(server, document)?;
@@ -301,6 +381,7 @@ impl ServerStore {
                     .designated_committer()
                     .ok_or_else(|| invalid("no current owner"))?,
                 mls: group.epoch(),
+                tenure,
                 intent: (blake3::hash(&intent.plain), intent.physical_bytes),
                 source: (blake3::hash(&source.plain), source.physical_bytes),
             },

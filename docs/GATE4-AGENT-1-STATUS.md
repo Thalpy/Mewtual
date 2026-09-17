@@ -23,7 +23,7 @@ they are the highest-conflict changes, so they land last. The per-item verdict r
 |---|---|---|
 | 1 | C-1 structural decode, with C-2's digest fences and the R4 replay exclusion | **landed; reviewed PASS; no-replay boundary covered by N24; R4 selection covered by N25/M9** |
 | 2 | C-4 transient reference holds, with the I-3 transfer | **landed; seam reviewed PASS; transfer implemented and mutation-proven; dead-code markers removed** |
-| 3 | The runtime: Flows S, H and R, admission, scheduling, commit seams | **Flow S landed end to end as a detached job, with per-actor admission consumed and the shared pool proved. Flows H and R not started; no native command, gated on Agent 2's P5** |
+| 3 | The runtime: Flows S, H and R, admission, scheduling, commit seams | **Flow S and Flow H both land end to end as scheduled jobs. Flow R not started; no native command, gated on Agent 2's P5** |
 | 4 | I-4 and C-3 | not started |
 
 ## Checkpoints
@@ -51,7 +51,9 @@ they are the highest-conflict changes, so they land last. The per-item verdict r
 | 2026-09-16 | Overlay runtime, Flow S detached | `130a64b` | `dda64a9` | bounded implementation | Split, job and result, admission consumed, marker removed. **REQUEST CHANGES**: the `OverlayOwnership` deviation **accepted** (design to change, not the code), the withdrawn control action **PASS**, M23 **PASS**; **RT-001** (P2) and **RT-002** (P2) opened; the cancellation half of N14(a) still open at P3. |
 | 2026-09-17 | RT-001 and RT-002 corrections | `dda64a9` | `3893ee2` | bounded implementation | **PASS, both closed.** The `detach`-not-`reserve_overlay` gate placement explicitly signed off. A refused plan releases admission and its pool slot in the worker; `OverlayPlan` selected only when `replay_ready()` holds. M24, M25, design 5.5 corrected. |
 | 2026-09-17 | N14(a), the real cancellation race | `3893ee2` | `746c0e2` | test plus one cfg(test) seam | **PASS, N14(a) closed.** Taken before Flow H at the reviewer's direction, because Flow H rewrites the machinery N14(a) guards. A real paused worker, a real `RequestCancellation`, and M26. One non-blocking ergonomics point, since addressed at `3d46016`. |
-| 2026-09-17 | Flow H stages H1 and H2 | `3d46016` | uncommitted working tree | bounded implementation | The custody boundary settled with the reviewer first. H1 bounded and cheap, H2 detached with captured public context only. One algorithm for both callers. New stamp regression and M27. |
+| 2026-09-17 | Flow H stages H1 and H2 | `3d46016` | `92b55ca` | bounded implementation | The custody boundary settled with the reviewer first. H1 bounded and cheap, H2 detached with captured public context only. One algorithm for both callers. New stamp regression and M27. |
+| 2026-09-17 | Flow H stage H3 | `92b55ca` | `c676749` | bounded implementation | The one signing loop, with the two events separable. N31 and M5a/M5b/M28. |
+| 2026-09-17 | Flow H stages H4 to H6, scheduled | `c676749` | uncommitted working tree | bounded implementation | H4 detached; the receiver stage machine, probe, slice visit, commit and notify. **Self-reviewed adversarially before commit**: two P1s, six P2s and seven P3s found, ten corrected here. M29, M30, M31. |
 
 Working checkout: `M:\Git (local)\CatComs`. The four design passes were made on `Create-suite-2`;
 implementation is on `gate4-agent1-runtime`, which is the current branch.
@@ -957,10 +959,95 @@ test, back in the normal band. The cause was hibernation, exactly as the operato
 M5a and M5b failing at different named assertions is the point: it shows each limiter is doing its
 own work and that neither one, nor bare "work remains", is standing in for the other.
 
-**Not done.** H3 is still called in batch from the commit visit, and H4 runs there too. The
-scheduled visit that pages slices across background turns, applies 7.3's placement gate and moves
-H4 to a worker is the next commit; it is what consumes `signed`, `remaining`, `yielded` and the two
-constants, which carry `#[allow(dead_code)]` markers naming it until then.
+### Flow H, stage H4: detached assembly
+
+`StudioHandoffPlan::assemble` is the second detached stage. It runs `finish`, which revalidates the
+complete signed history and typed projection and builds the manifest; `complete`, which derives the
+Completed overlay; `snapshot`, which serializes the candidate source; and the two intent-record
+encodings that size the transaction. All of that is expensive and none of it touches the store.
+
+**How H4 can encode without the store.** H2 already decodes the intent record, so the plan carries
+that `EpochIntentState` forward. The stamp is what makes this sound rather than a cached guess:
+H5 requires the intent record to be byte-identical to the one H2 read, so the carried state is
+either still the current state or the plan is refused before anything durable happens. The
+reference check still runs against the state **as H2 read it**, before the prepared overlay is
+installed, exactly as it did when H4 and H5 were one function.
+
+`assemble` refuses a batch that has not finished signing. `finish` would fail anyway, but somewhere
+inside manifest construction; refusing up front names the actual mistake, which is a scheduled
+caller assembling a plan it has only partly signed.
+
+| Check | Result |
+|---|---|
+| `... --lib handoff` | **38 passed, 0 failed, 2 ignored**, 275.02 s. |
+| `studio_overlay_handoff_assembly_refuses_a_partly_signed_batch` | Signs a bounded 2-of-4 slice, then requires assembly to refuse with that specific error. |
+| `studio_overlay_handoff_plan_is_refused_when_its_records_changed` | Now runs H1 to H4 and asserts none of them wrote anything durable, before the reopened-vault refusal. |
+| `cargo clippy -j 1 -p catcoms-app --all-targets -- -D warnings`, `cargo fmt --all --check` | Clean. |
+
+### Flow H, the scheduled runtime: H1 to H6
+
+`studio/receiver/handoff.rs` carries the stage machine, the H1 eligibility probe, the H3 slice
+visit and H5/H6. `StudioBackgroundJob::HandoffPrepare` and `::HandoffAssemble` run H2 and H4 on a
+worker with the same ownership discipline as `OverlayPlan`: the bundle moves into the closure, a
+cancelled waiter cannot reclaim it, and a refusal releases it there (RT-001's rule).
+
+A handoff shares Flow S's per-actor admission rather than having its own. "One overlay operation is
+live per server at a time" is a property of the actor, so a Save and a transfer compete for one
+slot instead of doubling per-actor concurrency.
+
+**Reviewed adversarially before commit, and it found more than the tests did.** An independent
+review of the whole Flow H diff returned two P1s, six P2s and seven P3s. What follows is what was
+wrong and what changed; the review's central charge was that the passing end-to-end test would have
+survived deletion of essentially every guard the work claimed to establish, and it was right.
+
+| Finding | What was wrong | Correction |
+|---|---|---|
+| **P1** | A routine MLS epoch advance during H3 made `sign_next` refuse, that error propagated through `background_step`, and `run` set the receiver's storage pause. Catch-up, replay and receive all stop until the user next opens a Studio document, **and** the job stays parked holding this actor's admission and one of four process-wide permits, with no path that releases either. | Every Flow H stage now absorbs expected refusals: abandon the job, release the bundle, back that target off, return `Ok`. Only genuine storage errors reach the receiver, and no Flow H stage returns `Result` to it any more. |
+| **P1** | `Signing` was a terminal trap. The code commented "the next visit with a live tenure resumes it", which is false: `observed_owner_tenure_start` returns `None` **exactly** when the epoch or owner moved, and the plan's authority pins the old epoch, so it could never be signed again. Nothing anywhere abandoned a `Signing` job. | `handoff_check_authority` runs as a lifecycle step on every turn, at any stage, and abandons a job whose tenure has moved. Placed there rather than in the scheduler so releasing a dead job cannot depend on which branch a turn takes. |
+| **P2** | The tenure check was **lost** in the split. The single visit passed tenure into `prepare_handoff`; `commit_studio_handoff_with_io` took no tenure at all, so a tenure restart for the same owner at the same MLS epoch passed every conjunct. A batch signed under one tenure could become durable under the next. | `tenure` is part of `StudioHandoffStamp` and compared at H5. |
+| **P2** | The Index reference check ran only at H1. The stamp covers the Index document's own records, so the referenced Flipnote's source could be evicted, retired or cleaned up during H2 to H4 and H5 would still commit, leaving a durable Index entry pointing at nothing. | `check_index_object_sources` runs at both H1 and H5. |
+| **P2** | **RT-002 again.** The handoff detach arm was placed ahead of all catch-up, with a comment arguing that an already-reserved permit earned it. That is the same inversion RT-002 was opened for. H5 and H1 had no `replay_ready()` gate at all. | H2, H4, H5 and H1 are behind `replay_ready()`; the detach arm sits with the Flow S plan, behind catch-up. H3 stays ungated, which is 7.3's documented exception. |
+| **P2** | Scalar backoff and no round-robin cursor, so one permanently ineligible document would be selected every turn, fail, drive the shared hold to 300 s and starve every other target for the life of the actor. | Per-target `next_at`/`hold_ms` maps and a selection cursor, as design 5.5 specifies. |
+| **P2** | `pending()` ignored handoff entirely, so the driver could stop scheduling turns with a job parked and nothing would ever recover its admission or permit. | `self.handoff.busy()` is a wake condition. |
+| **P2** | `handoff_complete`'s catch-all conflated a refusal, a mis-targeted completion and a cancellation, and cleared the **current** job for all three. A completion for a target the actor had moved on from would destroy a live job mid-signing. | Four arms. A mis-targeted completion is ignored outright. |
+| **P3** | The probe read the whole rail before reserving, and a failed reservation set no backoff, so it re-read every turn while a Save held admission. A read error was also memoised as "nothing here", suppressing all handoff until an unrelated write rotated the generation. | Reservation failure backs off; only targets actually read and found empty are memoised; a read error backs off instead. |
+| **P3** | `sign_slice` was re-entered on a fully signed plan, rechecking live authority for no signature. | Early return at `remaining() == 0`. |
+
+**A bug of my own, found while fixing those.** `abandon` cleared the job *before* `hold` read it,
+so no backoff was recorded and the probe restarted the same job on the very next turn: a release
+that was actually a hot loop. The new P1 regression caught it.
+
+**The tests the review said proved nothing.** Its sharpest point was that the end-to-end test used
+a one-operation branch, so H3 finished in a single slice and could not discriminate the turn cap,
+the two-event rule or the priority gate. The fixture now takes an operation count.
+
+| Regression | What it proves |
+|---|---|
+| `studio_handoff_runs_through_every_scheduled_stage_and_notifies` | The whole flow on a real vault, asserting on **what actually detached** (`handoff-prepare`, `handoff-assemble`) rather than on a transient field, so an inline implementation fails it. |
+| `handoff_signing_pages_across_turns_and_a_priority_turn_signs_nothing` | On a 37-operation branch: a priority turn signs **zero** and leaves the count untouched; an ordinary slice stops at exactly the turn cap with work left; a second slice finishes it; nothing is durable throughout. |
+| `an_authority_change_during_signing_abandons_the_job_without_pausing_the_receiver` | Both P1s: the receiver is not paused, the job is gone, the shared slot is returned, admission is available, and the next turn still runs. |
+
+| Check | Result |
+|---|---|
+| `... --lib handoff` | **40 passed, 0 failed, 2 ignored**, 152.18 s. |
+| **M29**, making H4's detach condition unreachable | The transfer stalls after `handoff-prepare`; fails at the completion assertion. |
+| **M30**, removing `handoff_check_authority` | Fails at "the unsignable job was left parked". |
+| **M31**, removing the turn cap from the scheduled slice | Fails at "the slice was not bounded by the turn cap", 37 signed where 32 was required. |
+| `cargo clippy -j 1 -p catcoms-app --all-targets -- -D warnings`, `cargo fmt --all --check` | Clean. |
+
+**Permit assertions no longer race.** Four tests measured `available_permits()` on the **global**
+pool, so they contended with every other test in the process; two of them failed in opposite
+directions when run together. All four now inject a private pool through the seam that already
+existed for this.
+
+**Still open from the review, and not fixed here.** H1 and H5 each drain a full epoch-storage
+inventory under custody, which design 6.1 does not put in H1 and which C-3's resumable cursor is
+meant to bound. That is the tracked I-4/C-3 gap, but the scheduled sequence is now shipping ahead
+of the mechanism intended to bound its custody, and that deserves to be stated rather than left
+implicit. Also unfixed: `handoff_priority` omits `studio_has_page_request`, which `run` itself
+treats as authoritative; and a detached Flow H waiter inherits an unrelated request's cancellation,
+discarding multi-turn signing progress. Neither is new to this commit, but both are worse for
+Flow H than for Flow S.
 
 ### `EpochRecordKind::DraftArchive`, the shared enum seam for Agent 2
 

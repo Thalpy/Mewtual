@@ -68,7 +68,7 @@ pub(crate) use epoch_studio::source::studio_full_restores_for_test;
 #[cfg(test)]
 pub(crate) use epoch_studio::tests::performance::{
     fill_studio_epoch_fixture, save_studio_source_fixture, studio_closing_capture_fixture,
-    studio_owner_decision_fixture,
+    studio_handoff_ready_fixture, studio_owner_decision_fixture,
 };
 #[cfg(test)]
 pub(crate) use epoch_studio::StudioRotationBoundary;
@@ -77,8 +77,9 @@ pub use epoch_studio::{
     StudioRotationOutcome,
 };
 pub(crate) use epoch_studio::{
-    PreparedStudioSource, StudioOverlayCapture, StudioOverlayPlan, StudioOverlayStart,
-    StudioSourceCapture,
+    PreparedStudioSource, SigningSlice, StudioHandoffCapture, StudioHandoffCommit,
+    StudioHandoffPlan, StudioHandoffStart, StudioOverlayCapture, StudioOverlayPlan,
+    StudioOverlayStart, StudioSourceCapture, MAX_SIGNING_TURNS_PER_VISIT, SIGNING_SLICE_BUDGET_MS,
 };
 pub mod epoch_budget;
 

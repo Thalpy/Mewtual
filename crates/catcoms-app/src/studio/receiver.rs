@@ -9,8 +9,9 @@ use std::sync::Arc;
 mod catchup;
 #[cfg(test)]
 pub(crate) use catchup::PreviewHarness;
+mod handoff;
 mod replay;
-pub(crate) use catchup::StudioBackgroundResult;
+pub(crate) use catchup::{HandoffCompletion, StudioBackgroundJob, StudioBackgroundResult};
 
 /// Recently accessed targets, bounded by the existing sync watch rail. Reopening the same exact
 /// source preserves its inbox; eviction explicitly revokes the old subscription and queued work.
@@ -24,6 +25,7 @@ pub(crate) struct StudioReceiver {
     settlement: SettlementNotices,
     replay: replay::ReplayRuntime,
     replay_turn: bool,
+    handoff: handoff::HandoffRuntime,
 }
 /// What one custody visit of the scheduled Flow S concluded.
 #[allow(dead_code)]
@@ -250,6 +252,37 @@ impl StudioReceiver {
         store: &mut ServerStore,
         id: u64,
     ) -> Result<(StudioSavedTransaction, Option<StudioTarget>), AppError> {
+        // Flow H, in stage order, behind design 7.3's placement gate.
+        //
+        // RT-002's rule applies to every heavy stage, and H5 and H1 are heavy: H5 drains an
+        // inventory, reads the whole source and performs three accounted writes with flushes; H1
+        // drains an inventory too. Both wait for `replay_ready()`, so authoritative catch-up is
+        // never starved by transfer work. H3 is the documented exception: a signing slice needs
+        // no permit and no retained source, so 7.3 lets it run on any turn, subject to the
+        // priority answer, which is a yield rather than a gate.
+        //
+        // Among themselves the order is H5, then H3, then H1: an assembled transfer is holding
+        // admission, a shared slot and a signed candidate, and finishing it frees all three,
+        // while starting new work is the least urgent.
+        let ready = self.catchup.replay_ready();
+        if ready && self.handoff.can_commit() {
+            let updated = self.handoff_commit(server, store, id);
+            return Ok((StudioSavedTransaction::empty(), updated));
+        }
+        if self.handoff.can_sign() {
+            let priority = self.handoff_priority(server);
+            // A yield consumes no turn: it signed nothing, so the turn goes to whatever it
+            // yielded to. A slice that signed at least one operation has used the turn, whether
+            // it stopped at its turn cap, at its deadline, or by finishing the branch.
+            if let Some(slice) = self.handoff_sign(server, priority) {
+                if !slice.yielded() && slice.signed() != 0 {
+                    return Ok((StudioSavedTransaction::empty(), None));
+                }
+            }
+        }
+        if ready {
+            self.handoff_probe(server, store, id);
+        }
         self.replay_turn = !self.replay_turn;
         if self.replay_turn {
             if let Some(saved) = self.replay_step(server, store, id)? {
@@ -258,6 +291,17 @@ impl StudioReceiver {
         }
         let updated = self.catchup_step(server, store, id)?;
         Ok((StudioSavedTransaction::empty(), updated))
+    }
+
+    /// 7.3's placement answer for a signing slice: yield immediately to authoritative service
+    /// interest, to inbound on any watch, or to a background result already parked.
+    fn handoff_priority<T: MeshTransport, R: CryptoRngCore>(&self, server: &Server<T, R>) -> bool {
+        server.sync.has_epoch_service_interest()
+            || self
+                .watches
+                .iter()
+                .any(|(w, _)| server.sync.studio_has_inbound(&w.inner))
+            || self.catchup.result_parked()
     }
     /// Notify before any bounded event-channel await: native work never waits on the event
     /// consumer, and event backpressure must not conceal an already-queued inbox packet.
@@ -291,6 +335,11 @@ impl StudioReceiver {
                     server.sync.studio_has_inbound(&watch.inner)
                         || server.sync.studio_has_page_request(&watch.inner)
                 })
+                // A parked handoff job holds this actor's admission and one of four process-wide
+                // preparation permits. Without this term the driver can stop scheduling turns
+                // while a job sits in `Captured`, `Signing` or `Ready`, and nothing would ever
+                // recover either resource.
+                || self.handoff.busy()
                 || self.catchup.pending(server, &self.watches))
     }
     pub(crate) fn take_pause_notice(&mut self) -> bool {
@@ -367,6 +416,11 @@ impl StudioReceiver {
         self.catchup.preview.maintain(server, store, id);
         let mls = server.sync.with_registry_context(|g, _, _, _| g.epoch());
         self.replay.lifecycle(store, id, mls);
+        // A lifecycle step, not a scheduling one: a handoff job whose authority has moved can
+        // never be signed or committed again, and releasing it must not depend on which branch
+        // this turn happens to take. Holding it would strand this actor's admission and one of
+        // four process-wide preparation permits indefinitely.
+        self.handoff_check_authority(server);
         if let Some(request) = request {
             let read_target = (!request.changes_state()).then(|| request.target());
             let updated = request.changes_state().then(|| request.target());

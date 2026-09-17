@@ -22,8 +22,12 @@ use std::sync::Arc;
 mod adoption;
 mod discovery;
 mod handoff;
+pub(crate) use handoff::StudioHandoffStart;
 mod handoff_capture;
-pub(crate) use handoff_capture::{StudioHandoffCapture, StudioHandoffPlan};
+pub(crate) use handoff_capture::{
+    SigningSlice, StudioHandoffCapture, StudioHandoffCommit, StudioHandoffPlan,
+    MAX_SIGNING_TURNS_PER_VISIT, SIGNING_SLICE_BUDGET_MS,
+};
 mod overlay;
 pub(crate) use overlay::StudioOverlayStart;
 mod overlay_capture;

@@ -301,6 +301,13 @@ impl ServerStore {
     /// The same load without replaying a retained overlay branch, for callers that need the
     /// ledger, its pending entries or overlay identity and never a projection. `local_draft` and
     /// every other projection consumer must keep using `load_epoch_intents`.
+    /// The token every intent write rotates. A caller may memoise a conclusion it drew from an
+    /// intent record against this and discard the memo when it changes; it grants nothing and
+    /// proves nothing about any particular record.
+    pub(crate) fn intent_generation(&self) -> Arc<()> {
+        self.intent_generation.clone()
+    }
+
     pub(crate) fn load_epoch_intents_structural(
         &self,
         server: u64,

@@ -6,7 +6,8 @@ use crate::registry_catchup::{
 };
 use crate::registry_head::ServerOwnerSnapshot;
 use crate::store::{
-    PreparedStudioSource, StudioOverlayCapture, StudioOverlayPlan, StudioSourceCapture,
+    PreparedStudioSource, StudioHandoffCapture, StudioHandoffCommit, StudioHandoffPlan,
+    StudioOverlayCapture, StudioOverlayPlan, StudioSourceCapture,
 };
 use crate::studio::overlay::{OverlayAdmission, OverlayOwnership};
 use crate::studio_exchange::discovery::{
@@ -99,6 +100,24 @@ pub(crate) enum StudioBackgroundJob<T: MeshTransport> {
     /// Flow S, stage S2. The capture moves in whole: nothing here decomposes it or rebuilds its
     /// contents, which is the condition attached to A-001's combined authoring value.
     OverlayPlan(Box<StudioOverlayCapture>, OverlayOwnership, OverlayContext),
+    /// Flow H, stage H2: full `decode_vault`, private successor restore, change set.
+    HandoffPrepare(Box<StudioHandoffCapture>, OverlayOwnership, OverlayContext),
+    /// Flow H, stage H4: `finish`, `complete`, snapshot and the record encodings.
+    HandoffAssemble(Box<StudioHandoffPlan>, OverlayOwnership, OverlayContext),
+}
+
+/// A finished Flow H detached stage, as the receiver's handoff runtime sees it.
+pub(crate) enum HandoffCompletion {
+    Prepared(
+        StudioTarget,
+        Result<(Box<StudioHandoffPlan>, OverlayOwnership), AppError>,
+    ),
+    Assembled(
+        StudioTarget,
+        Result<(Box<StudioHandoffCommit>, OverlayOwnership), AppError>,
+    ),
+    /// The waiter was cancelled, or the worker died. Either way the bundle went with it.
+    Cancelled,
 }
 pub(crate) enum StudioBackgroundResult {
     Preview(Arc<()>, PreviewCompletion),
@@ -109,6 +128,7 @@ pub(crate) enum StudioBackgroundResult {
     Prepared(PreparationContext, PreparedStudioResult),
     PreparedRegistry(Option<Arc<()>>, PreparedRegistryResult),
     OverlayPlanned(OverlayContext, OverlayPlanResult),
+    Handoff(HandoffCompletion),
     /// A cancelled overlay waiter carries **no** ownership, deliberately. The blocking closure
     /// still owns the bundle and is still running, so admission and the shared slot must stay
     /// occupied until it finishes. This variant exists to clear the actor's waiter bookkeeping
@@ -119,6 +139,23 @@ pub(crate) enum StudioBackgroundResult {
         preparation: Option<PreparationContext>,
     },
 }
+impl<T: MeshTransport> StudioBackgroundJob<T> {
+    pub(super) fn handoff_prepare(
+        capture: Box<StudioHandoffCapture>,
+        ownership: OverlayOwnership,
+        target: StudioTarget,
+    ) -> Self {
+        Self::HandoffPrepare(capture, ownership, OverlayContext::new(target))
+    }
+    pub(super) fn handoff_assemble(
+        plan: Box<StudioHandoffPlan>,
+        ownership: OverlayOwnership,
+        target: StudioTarget,
+    ) -> Self {
+        Self::HandoffAssemble(plan, ownership, OverlayContext::new(target))
+    }
+}
+
 impl<T: MeshTransport + 'static> StudioBackgroundJob<T> {
     /// Arm the overlay worker's barrier. Returns the job, a receiver that resolves once the
     /// blocking closure has entered while owning the bundle, and the sender that releases it.
@@ -138,6 +175,24 @@ impl<T: MeshTransport + 'static> StudioBackgroundJob<T> {
         assert!(context.pause.is_none());
         context.pause = Some((entered, released));
         (self, entry, release)
+    }
+
+    /// Which detached stage this job is, for tests that must prove a stage genuinely detached
+    /// rather than infer it from a transient field.
+    #[cfg(test)]
+    pub(crate) fn kind_for_test(&self) -> &'static str {
+        match self {
+            Self::Preview(..) => "preview",
+            Self::RegistryPage(..) => "registry-page",
+            Self::Page(..) => "page",
+            Self::Head(..) => "head",
+            Self::Seed(..) => "seed",
+            Self::Prepare(..) => "prepare",
+            Self::PrepareRegistry(..) => "prepare-registry",
+            Self::OverlayPlan(..) => "overlay-plan",
+            Self::HandoffPrepare(..) => "handoff-prepare",
+            Self::HandoffAssemble(..) => "handoff-assemble",
+        }
     }
 
     #[cfg(test)]
@@ -163,6 +218,10 @@ impl<T: MeshTransport + 'static> StudioBackgroundJob<T> {
                 StudioBackgroundResult::CancelledRegistry(generation.clone())
             }
             Self::OverlayPlan(..) => StudioBackgroundResult::CancelledOverlay,
+            // Same rule as the overlay plan: the worker owns the bundle and keeps it.
+            Self::HandoffPrepare(..) | Self::HandoffAssemble(..) => {
+                StudioBackgroundResult::Handoff(HandoffCompletion::Cancelled)
+            }
             _ => StudioBackgroundResult::Cancelled { preparation: None },
         };
         let work = async move {
@@ -239,6 +298,41 @@ impl<T: MeshTransport + 'static> StudioBackgroundJob<T> {
                         // Unwinding released them, so there is nothing to hand back.
                         Err(_) => StudioBackgroundResult::CancelledOverlay,
                     }
+                }
+                // H2. Owns authenticated plaintext and captured public context; no store, Server,
+                // device key, MLS secret or writer. The ownership moves in with it, so a
+                // cancelled waiter cannot reclaim admission from a worker that is still running.
+                Self::HandoffPrepare(capture, ownership, context) => {
+                    let target = context.target;
+                    let result = tokio::task::spawn_blocking(move || match capture.prepare() {
+                        Ok(plan) => Ok((Box::new(plan), ownership)),
+                        // RT-001's rule: a plan that can never exist releases both immediately.
+                        Err(error) => {
+                            drop(ownership);
+                            Err(error)
+                        }
+                    })
+                    .await;
+                    StudioBackgroundResult::Handoff(match result {
+                        Ok(result) => HandoffCompletion::Prepared(target, result),
+                        Err(_) => HandoffCompletion::Cancelled,
+                    })
+                }
+                // H4. Same ownership discipline.
+                Self::HandoffAssemble(plan, ownership, context) => {
+                    let target = context.target;
+                    let result = tokio::task::spawn_blocking(move || match plan.assemble() {
+                        Ok(commit) => Ok((Box::new(commit), ownership)),
+                        Err(error) => {
+                            drop(ownership);
+                            Err(error)
+                        }
+                    })
+                    .await;
+                    StudioBackgroundResult::Handoff(match result {
+                        Ok(result) => HandoffCompletion::Assembled(target, result),
+                        Err(_) => HandoffCompletion::Cancelled,
+                    })
                 }
             }
         };
@@ -326,6 +420,13 @@ pub(super) struct CatchupRuntime {
 }
 impl CatchupRuntime {
     /// Never evict the source of a ready/active page or checkpoint just to start replay.
+    /// A detached result is waiting for a custody visit to consume it. 7.3 makes that a reason for
+    /// a signing slice to yield: the parked result is holding a shared slot.
+    pub(super) fn result_parked(&self) -> bool {
+        self.prepared.is_some()
+            || self.registry_prepared.is_some()
+            || self.overlay_planned.is_some()
+    }
     pub(super) fn replay_ready(&self) -> bool {
         !self.in_flight
             && !self.preparing
@@ -686,6 +787,18 @@ impl CatchupRuntime {
     #[cfg(test)]
     pub(super) fn overlay_admission_available_for_test(&mut self) -> bool {
         self.overlay_admission.can_admit()
+    }
+
+    /// Give this actor a private preparation pool, so permit arithmetic is deterministic instead
+    /// of contending with every other test in the process on the one global semaphore.
+    #[cfg(test)]
+    pub(super) fn inject_overlay_pool_for_test(
+        &mut self,
+        permits: usize,
+    ) -> Arc<tokio::sync::Semaphore> {
+        let pool = Arc::new(tokio::sync::Semaphore::new(permits));
+        self.overlay_pool = Some(pool.clone());
+        pool
     }
 
     /// Exactly what `complete` does for a cancelled overlay waiter, without needing a Server.
@@ -1083,6 +1196,18 @@ impl StudioReceiver {
             Some(StudioBackgroundJob::OverlayPlan(
                 capture, ownership, context,
             ))
+        } else if let Some(job) = self
+            .catchup
+            .replay_ready()
+            .then(|| self.handoff_detach())
+            .flatten()
+        {
+            // H2 and H4 are heavy stages, so 7.3's placement gate applies to them exactly as it
+            // does to Flow S's plan: behind source and registry preparation, network passes and
+            // discovery. An earlier revision put them first on the argument that their permit was
+            // already reserved; that is the RT-002 inversion again, and reserving capacity is not
+            // a licence to preempt authoritative work.
+            Some(job)
         } else {
             let generation = self.catchup.preview.generation();
             self.catchup
@@ -1102,6 +1227,11 @@ impl StudioReceiver {
             Some(StudioBackgroundJob::Prepare(..)) => self.catchup.preparing = true,
             Some(StudioBackgroundJob::PrepareRegistry(..)) => self.catchup.preparing = true,
             Some(StudioBackgroundJob::OverlayPlan(..)) => self.catchup.overlay_detached = true,
+            // The handoff runtime moved its own stage to `Detached` when it produced this job;
+            // the catch-up flags are not its bookkeeping.
+            Some(
+                StudioBackgroundJob::HandoffPrepare(..) | StudioBackgroundJob::HandoffAssemble(..),
+            ) => {}
             Some(StudioBackgroundJob::Page(..) | StudioBackgroundJob::RegistryPage(..)) => {
                 self.catchup.in_flight = true
             }
@@ -1193,6 +1323,10 @@ impl StudioReceiver {
                 // Clears the waiter only. The worker still owns the bundle and is still running,
                 // so admission and the shared slot remain occupied until it ends by itself.
                 self.catchup.overlay_detached = false;
+            }
+            StudioBackgroundResult::Handoff(completion) => {
+                let now = server.runtime_clock().monotonic_ms();
+                self.handoff_complete(completion, now);
             }
             StudioBackgroundResult::Page(completed) => {
                 self.catchup.in_flight = false;

@@ -387,6 +387,298 @@ fn a_queued_or_parked_overlay_keeps_the_actor_busy() {
     assert!(runtime.reserve_overlay().is_some());
 }
 
+/// Flow H end to end through the scheduled runtime: H1 probe, H2 detached, H3 paged across
+/// background turns, H4 detached, H5 commit and H6 notify.
+///
+/// Nothing here is simulated. The vault is left exactly where automatic transfer becomes
+/// possible by production calls, the probe rediscovers the basis for itself, and each detached
+/// stage runs through the real `StudioBackgroundJob::run`.
+#[tokio::test]
+async fn studio_handoff_runs_through_every_scheduled_stage_and_notifies() {
+    let clock = ManualClock::new(1000);
+    let mut rng = ChaCha20Rng::seed_from_u64(929);
+    let mut server = Server::found(
+        Hub::new().join(PeerId::from_u64(1)),
+        MlsDevice::generate().unwrap(),
+        rng.clone(),
+        Box::new(clock.clone()),
+        "owner",
+    )
+    .unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let mut store = ServerStore::open(root.path(), b"flow-h", &mut rng).unwrap();
+    let target = StudioTarget::Flipnote {
+        channel: crate::channel_id("general").to_be_bytes(),
+        object: [9; 16],
+    };
+    server.sync.with_registry_context(|g, d, _, _| {
+        crate::store::studio_handoff_ready_fixture(&mut store, 83, g, d, target, 1)
+    });
+
+    let mut receiver = StudioReceiver::default();
+    // An ordinary read establishes the watch the probe walks.
+    receiver
+        .run(
+            &mut server,
+            &mut store,
+            83,
+            Some(StudioRequest::Read { target }),
+        )
+        .unwrap();
+    // A private pool: permit arithmetic must not contend with other tests in this process on the
+    // one global preparation semaphore.
+    let pool = receiver.catchup.inject_overlay_pool_for_test(4);
+    let free = pool.available_permits();
+
+    // Drive background turns until the transfer completes, detaching whenever the runtime asks.
+    // What detaches is recorded, because that is the observable proof that H2 and H4 genuinely
+    // left custody rather than running inline.
+    let mut detached = Vec::new();
+    let mut signing_visits = 0;
+    let mut updated = None;
+    for _ in 0..60 {
+        let (_, changed) = receiver.run(&mut server, &mut store, 83, None).unwrap();
+        if receiver.handoff.remaining_for_test().is_some() {
+            signing_visits += 1;
+        }
+        if let Some(work) = receiver.detach(&mut server) {
+            detached.push(work.kind_for_test());
+            receiver.complete(&mut server, work.run(None).await);
+        }
+        if changed == Some(target) {
+            updated = changed;
+            break;
+        }
+    }
+    assert_eq!(
+        updated,
+        Some(target),
+        "the scheduled handoff never completed; detached: {detached:?}"
+    );
+
+    // Both expensive stages really detached. A runtime that ran them inline would finish the
+    // transfer just as well and would be exactly the defect this whole flow exists to avoid.
+    assert!(
+        detached.contains(&"handoff-prepare"),
+        "H2 did not detach: {detached:?}"
+    );
+    assert!(
+        detached.contains(&"handoff-assemble"),
+        "H4 did not detach: {detached:?}"
+    );
+    assert!(
+        signing_visits >= 1,
+        "H3 never ran under custody: {detached:?}"
+    );
+
+    // H6: the transfer is durable and reported, and the actor is free again.
+    let saved = store
+        .load_epoch_intents(83, &target.document(&server.group_id()).unwrap())
+        .unwrap();
+    assert!(
+        saved.overlay().is_none(),
+        "the transferred branch was retained"
+    );
+    assert!(
+        receiver.handoff.stage_for_test().is_none(),
+        "a job was left behind"
+    );
+    assert_eq!(
+        pool.available_permits(),
+        free,
+        "the finished transfer kept a shared preparation slot"
+    );
+    assert!(receiver.catchup.overlay_admission_available_for_test());
+    assert!(
+        receiver
+            .take_settlement_notices()
+            .iter()
+            .any(|(t, _)| *t == target),
+        "H6 published no settlement notice for the completed transfer"
+    );
+}
+
+/// H3 really pages, and the priority yield really yields.
+///
+/// The happy-path test uses a one-operation branch, so H3 finishes in a single slice and cannot
+/// discriminate the turn cap, the two-event rule or the priority gate. This one uses a branch
+/// longer than `MAX_SIGNING_TURNS_PER_VISIT`, so signing must span turns, and drives a priority
+/// turn in the middle to prove a yield signs nothing and costs no progress.
+#[tokio::test]
+async fn handoff_signing_pages_across_turns_and_a_priority_turn_signs_nothing() {
+    let clock = ManualClock::new(1000);
+    let mut rng = ChaCha20Rng::seed_from_u64(1303);
+    let mut server = Server::found(
+        Hub::new().join(PeerId::from_u64(1)),
+        MlsDevice::generate().unwrap(),
+        rng.clone(),
+        Box::new(clock.clone()),
+        "owner",
+    )
+    .unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let mut store = ServerStore::open(root.path(), b"flow-h-paging", &mut rng).unwrap();
+    let target = StudioTarget::Flipnote {
+        channel: crate::channel_id("general").to_be_bytes(),
+        object: [9; 16],
+    };
+    // Longer than one slice, so paging is forced rather than hoped for.
+    let operations = crate::store::MAX_SIGNING_TURNS_PER_VISIT + 5;
+    server.sync.with_registry_context(|g, d, _, _| {
+        crate::store::studio_handoff_ready_fixture(&mut store, 83, g, d, target, operations)
+    });
+    let mut receiver = StudioReceiver::default();
+    receiver
+        .run(
+            &mut server,
+            &mut store,
+            83,
+            Some(StudioRequest::Read { target }),
+        )
+        .unwrap();
+    receiver.catchup.inject_overlay_pool_for_test(4);
+
+    // Reach H3.
+    for _ in 0..30 {
+        receiver.run(&mut server, &mut store, 83, None).unwrap();
+        if let Some(work) = receiver.detach(&mut server) {
+            receiver.complete(&mut server, work.run(None).await);
+        }
+        if receiver.handoff.stage_for_test() == Some("signing") {
+            break;
+        }
+    }
+    assert_eq!(receiver.handoff.stage_for_test(), Some("signing"));
+    assert_eq!(
+        receiver.handoff.remaining_for_test(),
+        Some(operations),
+        "the branch is not the length this test needs"
+    );
+
+    // A priority turn signs nothing and leaves the count untouched. This is the two-event rule:
+    // a yield is a different outcome from a bounded slice, even though both leave work remaining.
+    let before = receiver.handoff.remaining_for_test();
+    let yielded = receiver.handoff_sign(&mut server, true).expect("a slice");
+    assert!(
+        yielded.yielded(),
+        "a priority turn was not reported as a yield"
+    );
+    assert_eq!(yielded.signed(), 0, "a priority turn signed something");
+    assert_eq!(receiver.handoff.remaining_for_test(), before);
+
+    // An ordinary slice is bounded by the turn cap, so it cannot finish this branch in one go.
+    let first = receiver.handoff_sign(&mut server, false).expect("a slice");
+    assert!(!first.yielded());
+    assert_eq!(
+        first.signed(),
+        crate::store::MAX_SIGNING_TURNS_PER_VISIT,
+        "the slice was not bounded by the turn cap"
+    );
+    assert_eq!(first.remaining(), 5, "signing did not page");
+    assert!(!first.complete());
+
+    // A second slice finishes it, which is what "paged across turns" means.
+    let second = receiver.handoff_sign(&mut server, false).expect("a slice");
+    assert_eq!(second.signed(), 5);
+    assert!(second.complete());
+
+    // Still nothing durable: H5 alone writes.
+    assert!(store
+        .load_epoch_intents(83, &target.document(&server.group_id()).unwrap())
+        .unwrap()
+        .overlay()
+        .is_some());
+}
+
+/// The two P1s from the Flow H review, which the end-to-end happy path could not see.
+///
+/// A routine MLS epoch advance during H3 must not (a) reach the receiver's storage pause, which
+/// would stop catch-up, replay and receive until the user next opened a Studio document, and must
+/// not (b) leave the job parked holding this actor's admission and one of four process-wide
+/// preparation permits with no path that ever releases them.
+#[tokio::test]
+async fn an_authority_change_during_signing_abandons_the_job_without_pausing_the_receiver() {
+    let clock = ManualClock::new(1000);
+    let mut rng = ChaCha20Rng::seed_from_u64(1201);
+    let mut server = Server::found(
+        Hub::new().join(PeerId::from_u64(1)),
+        MlsDevice::generate().unwrap(),
+        rng.clone(),
+        Box::new(clock.clone()),
+        "owner",
+    )
+    .unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let mut store = ServerStore::open(root.path(), b"flow-h-authority", &mut rng).unwrap();
+    let target = StudioTarget::Flipnote {
+        channel: crate::channel_id("general").to_be_bytes(),
+        object: [9; 16],
+    };
+    server.sync.with_registry_context(|g, d, _, _| {
+        crate::store::studio_handoff_ready_fixture(&mut store, 83, g, d, target, 1)
+    });
+    let mut receiver = StudioReceiver::default();
+    receiver
+        .run(
+            &mut server,
+            &mut store,
+            83,
+            Some(StudioRequest::Read { target }),
+        )
+        .unwrap();
+    // A private pool: permit arithmetic must not contend with other tests in this process on the
+    // one global preparation semaphore.
+    let pool = receiver.catchup.inject_overlay_pool_for_test(4);
+    let free = pool.available_permits();
+
+    // Drive to the Signing stage, which is where a plan holds a bundle across turns.
+    for _ in 0..30 {
+        receiver.run(&mut server, &mut store, 83, None).unwrap();
+        if let Some(work) = receiver.detach(&mut server) {
+            receiver.complete(&mut server, work.run(None).await);
+        }
+        if receiver.handoff.stage_for_test() == Some("signing") {
+            break;
+        }
+    }
+    assert_eq!(
+        receiver.handoff.stage_for_test(),
+        Some("signing"),
+        "the fixture never reached H3, so this proves nothing"
+    );
+    assert_eq!(pool.available_permits(), free - 1, "H3 holds a shared slot");
+
+    // The authority moves out from under the parked plan, which is what an MLS commit or an owner
+    // change does. Only that precondition is simulated; the comparison, the abandonment and the
+    // receiver's reaction to it are production paths.
+    receiver.handoff.stale_tenure_for_test();
+
+    // A few ordinary turns. Not every turn reaches the background step, so this gives the
+    // receiver a fair chance to notice rather than asserting on one particular scheduling path.
+    for _ in 0..5 {
+        receiver
+            .run(&mut server, &mut store, 83, None)
+            .expect("an authority change must not fail the background turn");
+        assert!(
+            !receiver.take_pause_notice(),
+            "an authority change paused the receiver"
+        );
+    }
+    assert!(
+        receiver.handoff.stage_for_test().is_none(),
+        "the unsignable job was left parked"
+    );
+    assert_eq!(
+        pool.available_permits(),
+        free,
+        "the abandoned job kept its shared preparation slot"
+    );
+    assert!(receiver.catchup.overlay_admission_available_for_test());
+
+    // And the receiver keeps working: another turn runs without error.
+    receiver.run(&mut server, &mut store, 83, None).unwrap();
+}
+
 /// N14(a), the real race rather than a model of it. A background overlay worker is paused after
 /// `OverlayOwnership` has moved inside its blocking closure; the waiter is then genuinely
 /// cancelled, so `run` returns `CancelledOverlay` and `complete` clears the waiter flag. While the
@@ -416,7 +708,9 @@ async fn a_cancelled_waiter_leaves_a_real_paused_worker_holding_admission_and_it
     });
 
     let mut receiver = StudioReceiver::default();
-    let pool = receiver.catchup.overlay_pool();
+    // A private pool: permit arithmetic must not contend with other tests in this process on the
+    // one global preparation semaphore.
+    let pool = receiver.catchup.inject_overlay_pool_for_test(4);
     let free = pool.available_permits();
     let ownership = receiver
         .catchup
@@ -515,7 +809,9 @@ async fn a_refused_plan_releases_admission_and_its_pool_slot_without_a_second_vi
     });
 
     let mut receiver = StudioReceiver::default();
-    let pool = receiver.catchup.overlay_pool();
+    // A private pool: permit arithmetic must not contend with other tests in this process on the
+    // one global preparation semaphore.
+    let pool = receiver.catchup.inject_overlay_pool_for_test(4);
     let free = pool.available_permits();
     let ownership = receiver
         .catchup

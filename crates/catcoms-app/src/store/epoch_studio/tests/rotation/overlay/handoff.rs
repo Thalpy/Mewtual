@@ -226,6 +226,52 @@ fn studio_overlay_handoff_signing_slice_reports_yield_bound_and_completion_apart
     );
 }
 
+/// H4 refuses a batch that is not finished signing. `finish` would fail anyway, but it would fail
+/// somewhere inside manifest construction; refusing here names the actual mistake, and a scheduled
+/// caller that assembles a plan it has only partly signed is exactly the mistake worth naming.
+#[test]
+fn studio_overlay_handoff_assembly_refuses_a_partly_signed_batch() {
+    let root = tempfile::tempdir().unwrap();
+    let f = Fixture::new(false);
+    let mut store = open(root.path());
+    let (basis, _) = performance::fixture(&f, &mut store, 4);
+    let mut b = budget(&mut store, &f);
+    let capture = match store
+        .start_studio_handoff_with_io(
+            SERVER,
+            &f.group,
+            f.target,
+            &f.device,
+            basis,
+            Some(0),
+            &mut rng(),
+            &mut b,
+            &mut |_, p, bytes| atomic_write(p, bytes),
+            &mut flush,
+        )
+        .unwrap()
+    {
+        crate::store::epoch_studio::handoff::StudioHandoffStart::Captured(capture) => capture,
+        crate::store::epoch_studio::handoff::StudioHandoffStart::Settled(_) => {
+            panic!("the fixture branch was classified as already transferred")
+        }
+    };
+    let mut plan = capture.prepare().unwrap();
+    // One bounded slice, deliberately short of the whole branch.
+    let slice = plan
+        .sign_slice(&f.device, &f.group, 0, false, 2, None)
+        .unwrap();
+    assert_eq!(slice.signed(), 2);
+    assert_eq!(slice.remaining(), 2);
+    match plan.assemble() {
+        Err(error) => assert!(
+            error.to_string().contains("signing did not complete"),
+            "a partly signed batch was refused for an unrelated reason: {error}"
+        ),
+        Ok(_) => panic!("a partly signed batch was assembled"),
+    }
+}
+
 /// H1/H2. A plan built from records that have since moved on is a stale proposal, however well
 /// formed it is, and the commit visit must refuse it before any signature becomes durable.
 ///
@@ -262,11 +308,18 @@ fn studio_overlay_handoff_plan_is_refused_when_its_records_changed() {
             panic!("the fixture branch was classified as already transferred")
         }
     };
-    let plan = capture.prepare().expect("H2 reconstructs the candidate");
+    let mut plan = capture.prepare().expect("H2 reconstructs the candidate");
+    assert!(
+        plan.sign_slice(&f.device, &f.group, 0, false, usize::MAX, None)
+            .unwrap()
+            .complete(),
+        "H3 did not sign the whole branch"
+    );
+    let commit = plan.assemble().expect("H4 assembles the candidate");
     assert_eq!(
         canonical(&store),
         records,
-        "H1 or H2 wrote something durable"
+        "H1 to H4 wrote something durable"
     );
 
     // The vault is closed and reopened while the plan is detached, which is what a crash between
@@ -283,8 +336,8 @@ fn studio_overlay_handoff_plan_is_refused_when_its_records_changed() {
         &f.group,
         f.target,
         &f.device,
-        plan,
-        0,
+        commit,
+        Some(0),
         &mut rng(),
         &mut b,
         &mut |_, p, bytes| atomic_write(p, bytes),
