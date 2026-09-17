@@ -1268,6 +1268,42 @@ pessimistic in the rare five-distinct-conflicts case and safe, which is the righ
 fact the owner has already authenticated. It stores no receipts, so it can only refuse, never
 authorize.
 
+**Cross-tenure turnover** (AG3-DES-054). Ceasing to be live is a *classification*, and the field is
+a single `Option<OverflowHold>` carrying one `tenure_id`, so a stale hold from a previous tenure
+still occupies it. Revision 12 said what a new conflict records but not what becomes of those bytes,
+which left three readings, one of which (refuse because the slot is occupied) reopens AG3-DES-032:
+the admitting response would fail closed, but after a restart the only durable overflow would be the
+non-live old one, and an unrelated later request could be given an authoritative proof for a tenure
+whose equivocation the owner had already authenticated. So the rule is explicit:
+
+```text
+at a custody visit with a VALID authoring tenure identity `expected`:
+    record.overflow is stale iff record.overflow.tenure_id != expected
+
+admitting a current-tenure conflict that needs overflow, in ONE durable owner-record write:
+    record.overflow = OverflowHold {
+        tenure_id:    expected,
+        fingerprints: [fingerprint(pair)],
+        unknown:      false,
+    }
+```
+
+Four qualifications, each load-bearing:
+
+- turnover happens **only** with a positively observed authoring tenure. With `None`, `Imported` or
+  `Unknown` nothing is cleared or replaced and 6.6 keeps refusing, so a stale hold is never dropped
+  on the strength of evidence this scope is not allowed to author from;
+- the replacement is **atomic with admitting the new fingerprint**, so there is no durable window in
+  which neither tenure is represented;
+- a stale hold is never **merged** into the new one. The field has one tenure id and merging would
+  make its liveness meaningless;
+- discarding it loses nothing repairable: the hold retained no receipts and could never have
+  authorized a repair, and the faulted reporter still holds the actual pair and may report it again
+  as historical evidence.
+
+The field therefore has one complete meaning: **at most one overflow hold, and once a current-tenure
+overflow has been admitted it is for the currently authorable tenure.**
+
 The hold adds about 170 bytes at maximum and no receipt-sized values, so the nine-receipt bound
 below is unchanged.
 
@@ -2580,9 +2616,18 @@ Core:
   with an out-of-range index, and kind 0 with a repair present or `applied` true, each rejected.
 - **N43** AG3-DES-041, repeated tenure at capacity: a live pair under tenure 1, an owner change
   demoting it, both history slots already full so it cannot migrate, a nonterminal repair under
-  tenure 2, and then a **new tenure-2 conflict**. Assert `live_overflow` is set, that proof stays
+  tenure 2, and then a **new tenure-2 conflict**. Assert the `OverflowHold` is set, that proof stays
   suppressed across a restart and for unrelated later requests, that the reporter's retry is
   accepted once a slot frees, and that no evidence was discarded at any point.
+- **N46** AG3-DES-054, overflow turnover across consecutive tenures. Under T1, exhaust capacity so
+  the hold carries `C1` and `C2`, optionally with `unknown` set. Change ownership to T2. With both
+  external slots and `reserved` unavailable and a nonterminal repair preventing a live source fault,
+  admit a genuine T2 conflict `D`. Assert: the T1 hold no longer suppresses T2 proofs by identity
+  alone; admitting `D` **atomically replaces** the stale hold with a T2 hold containing exactly
+  `fingerprint(D)`; the T1 fingerprints are **not merged** into it; crash and reopen preserve the T2
+  hold; an unrelated T2 head request receives no authoritative proof; and with the authoring tenure
+  `Unknown` or `Imported` **no turnover occurs at all** and proof stays fail-closed on the stale
+  hold. This is a representation and lifecycle assertion, so it needs no new mutant.
 - **N41** AG3-DES-035, direct owner-record negatives for the reserved slot: malformed receipts, a
   foreign document, a non-conflicting pair, a non-canonical `has_reserved` byte, and a reserved pair
   that duplicates an external or the inline source-bound pair. Each must reject the whole record
