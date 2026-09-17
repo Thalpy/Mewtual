@@ -78,6 +78,121 @@ impl std::fmt::Debug for StudioHandoffPlan {
     }
 }
 
+/// An experiment configuration, not a responsiveness guarantee. The deadline is checked between
+/// signatures and can overrun by one whole operation including its authority checks, so both must
+/// be recalibrated against the measured largest admitted individual operation and roster shape
+/// (design 13, measurement 3, still outstanding).
+//
+// The synchronous transaction holds custody throughout and so passes neither limit. These are the
+// scheduled runtime's, which lands with the H3 visit; delete this marker with that commit.
+#[allow(dead_code)]
+pub(crate) const MAX_SIGNING_TURNS_PER_VISIT: usize = 32;
+#[allow(dead_code)]
+pub(crate) const SIGNING_SLICE_BUDGET_MS: u64 = 250;
+
+/// What one H3 visit actually did, recorded so the two distinct outcomes of design 7.3 stay
+/// separable in observation and not only in code.
+///
+/// A visit that returns with work remaining proves nothing on its own, because it may have
+/// deferred before signing anything. `remaining` at entry and at exit is the discriminator: the
+/// core decrements it by exactly one per successful `sign_next`, so `signed` is a count of
+/// signatures actually produced, never an inference from "work remains".
+///
+/// ```text
+/// priority yield     signed == 0            and remaining unchanged
+/// count/time slice   0 < signed < before    and remaining > 0
+/// completion         remaining == 0
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct SigningSlice {
+    before: usize,
+    after: usize,
+    yielded: bool,
+}
+
+impl SigningSlice {
+    /// Production `sign_next` calls this visit made, derived from the core's own counter.
+    //
+    // This reporting surface is what the scheduled H3 visit pages and reports on; the synchronous
+    // transaction only needs `complete`. Delete this marker with that commit.
+    #[allow(dead_code)]
+    pub(crate) fn signed(&self) -> usize {
+        self.before - self.after
+    }
+    #[allow(dead_code)]
+    pub(crate) fn remaining(&self) -> usize {
+        self.after
+    }
+    /// True only for a priority yield, which is a different event from a bounded slice even when
+    /// both leave work remaining.
+    #[allow(dead_code)]
+    pub(crate) fn yielded(&self) -> bool {
+        self.yielded
+    }
+    pub(crate) fn complete(&self) -> bool {
+        self.after == 0
+    }
+}
+
+impl StudioHandoffPlan {
+    #[allow(dead_code)]
+    pub(crate) fn remaining(&self) -> usize {
+        self.signing.remaining()
+    }
+
+    /// H3. Sign a bounded slice of the branch, rechecking live authority before every signature.
+    ///
+    /// `priority` is the caller's answer to "is authoritative work waiting". A yield returns
+    /// having signed **zero**, which is why it is reported separately rather than inferred.
+    ///
+    /// `deadline` is optional because the two callers differ honestly: the scheduled runtime
+    /// passes the injected clock and a slice budget, while the synchronous transaction holds
+    /// custody throughout and has no one to yield to. Both run this same function; there is no
+    /// second signing loop.
+    pub(crate) fn sign_slice(
+        &mut self,
+        device: &MlsDevice,
+        group: &ServerGroup,
+        tenure: u64,
+        priority: bool,
+        turns: usize,
+        deadline: Option<(&dyn catcoms_rt::Clock, u64)>,
+    ) -> Result<SigningSlice, AppError> {
+        let before = self.signing.remaining();
+        if priority {
+            return Ok(SigningSlice {
+                before,
+                after: before,
+                yielded: true,
+            });
+        }
+        let deadline =
+            deadline.map(|(clock, budget)| (clock, clock.monotonic_ms().saturating_add(budget)));
+        let mut turn = 0;
+        while turn < turns {
+            // Every turn rechecks device, membership, MLS epoch, observed tenure and the
+            // current-owner receipt before its one signature.
+            if !self
+                .signing
+                .sign_next(device, group, tenure)
+                .map_err(invalid)?
+            {
+                break;
+            }
+            turn += 1;
+            // Between signatures, never inside one: a slice may overrun by one whole operation.
+            if deadline.is_some_and(|(clock, at)| clock.monotonic_ms() >= at) {
+                break;
+            }
+        }
+        Ok(SigningSlice {
+            before,
+            after: self.signing.remaining(),
+            yielded: false,
+        })
+    }
+}
+
 impl StudioHandoffCapture {
     /// H2, on a blocking worker and off custody. This is the expensive stage: the full
     /// `decode_vault` of any retained branch, the private successor reconstruction, and the

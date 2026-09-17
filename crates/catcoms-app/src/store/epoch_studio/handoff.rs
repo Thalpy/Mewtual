@@ -220,7 +220,7 @@ impl ServerStore {
         group: &ServerGroup,
         target: StudioTarget,
         device: &MlsDevice,
-        plan: StudioHandoffPlan,
+        mut plan: StudioHandoffPlan,
         tenure: u64,
         rng: &mut impl CryptoRngCore,
         budget: &mut EpochStudioBudget,
@@ -232,18 +232,19 @@ impl ServerStore {
         if !self.studio_handoff_is_current(group, device, &plan.stamp)? {
             return Err(invalid("overlay records or context changed; retry"));
         }
-        let StudioHandoffPlan {
-            stamp,
-            basis,
-            mut signing,
-        } = plan;
-        if stamp.server != server || stamp.target != target {
+        if plan.stamp.server != server || plan.stamp.target != target {
             return Err(invalid("overlay plan belongs to another target"));
         }
-        let document = stamp.document.clone();
-        // H3, batched here. Every turn rechecks device, membership, MLS epoch, observed tenure
-        // and the current-owner receipt before its one signature.
-        while signing.sign_next(device, group, tenure).map_err(invalid)? {}
+        let document = plan.stamp.document.clone();
+        let basis = plan.basis;
+        // H3, batched here: the same slice the runtime uses, with no turn cap, no deadline and
+        // nothing to yield to, because this transaction holds custody throughout. There is one
+        // signing loop and this is it.
+        let slice = plan.sign_slice(device, group, tenure, false, usize::MAX, None)?;
+        if !slice.complete() {
+            return Err(invalid("handoff signing did not complete"));
+        }
+        let StudioHandoffPlan { signing, .. } = plan;
         // H4.
         let candidate = signing.finish().map_err(invalid)?;
         let state = self.checked_epoch_replay_state(

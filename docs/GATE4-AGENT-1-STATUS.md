@@ -893,7 +893,15 @@ classification and one authorization rather than two that can drift. The durable
 |---|---|
 | `... --lib handoff` | **36 passed, 0 failed, 2 ignored**, 139.98 s, including the crash-barrier matrix and the fences. |
 | `... --lib store::epoch_studio` | **112 passed, 0 failed, 3 ignored**, 443.05 s. Against ~478-490 s for 103-104 tests earlier in this session, so the split is not a regression. |
-| `... --lib` (full) | **647 passed, 0 failed, 11 ignored**. Its 20,639 s wall clock is **not** usable evidence: another session was building concurrently for most of it. The two subsets above were measured on a verified quiet machine and are the timing evidence. |
+| `... --lib` (full) | **647 passed, 0 failed, 11 ignored**. Its 20,639 s wall clock is **not** usable evidence: the machine was hibernated mid-run, and the elapsed timer kept counting while it slept. The two subsets above were measured end to end on a waking machine and are the timing evidence. |
+
+**A measurement that looked like a regression and was not.** That 20,639 s is roughly 20x every
+previous run of the same suite, which is exactly what a real performance defect would look like.
+Re-measuring the two subsets settled it before any conclusion was drawn: `handoff` at 139.98 s
+against 145.78 s for the same code, and `store::epoch_studio` at 443.05 s for 112 tests against
+478-490 s for 103-104 tests earlier, which is faster with more tests. The cause was hibernation,
+not contention as first supposed and not this change. Recorded because a bare 20,639 s in a log is
+otherwise a booby trap for whoever reads it next.
 | **M27**, deleting the H5 stamp recheck | Fails at "a handoff plan built from superseded records was committed"; restored source passes. |
 | `cargo clippy -j 1 -p catcoms-app --all-targets -- -D warnings`, `cargo fmt --all --check` | Clean. |
 
@@ -903,10 +911,56 @@ adapter never leaves a gap, so every existing handoff test passes with the check
 reopens the vault, which is what a crash between H2 and H5 looks like, and requires the commit to
 refuse. M27 shows that without the check a plan built against a dead mount commits successfully.
 
-**Not done.** H3 is still batched inside the commit visit as `while sign_next {}`, and H4 runs
-there too. The next commit splits H3 into bounded slices under design 7.3's placement and slice
-rules, and moves H4 to a worker. That is where N31 and M5a/M5b live, and where the reviewer has
-set a hard condition on the two-event distinction.
+### Flow H, stage H3: the signing slice
+
+`StudioHandoffPlan::sign_slice` is the one signing loop. The synchronous transaction calls it with
+no turn cap, no deadline and nothing to yield to, because it holds custody throughout; the
+scheduled runtime will call the same function with the injected clock, a slice budget and the
+priority answer. There is deliberately no second loop for a scheduler to drift from.
+
+`SigningSlice` records `remaining` at entry and at exit. The core decrements that counter by
+exactly one per successful `sign_next`, so the difference is a count of signatures **produced**,
+never an inference from "work remains" — which is the AG1-TEST-001 correction, and the reviewer's
+hard condition for this stage:
+
+| Outcome | Condition |
+|---|---|
+| priority yield | `signed == 0`, `remaining` unchanged, and reported as a yield in its own right |
+| count or time slice | `0 < signed < before` and `remaining > 0` |
+| completion | `remaining == 0` |
+
+The deadline is checked **between** signatures, never inside one, so a slice may overrun by one
+whole operation including its authority checks. `MAX_SIGNING_TURNS_PER_VISIT = 32` and
+`SIGNING_SLICE_BUDGET_MS = 250` remain an experiment configuration, not a responsiveness
+guarantee, until design 13's measurement 3 exists.
+
+`studio_overlay_handoff_signing_slice_reports_yield_bound_and_completion_apart` (N31) walks all
+four outcomes on a real 40-operation branch through the real H1 and H2, and asserts that no
+signature became durable at any point. Each limiter is exercised with **the other one disabled**,
+so neither can stand in for it: the count case passes no deadline at all, and the time case passes
+`usize::MAX` turns against a clock that advances 200 ms per read into a 250 ms budget, which
+crosses the deadline by construction rather than by hoping operations fall either side of a
+wall-clock threshold.
+
+| Check | Result |
+|---|---|
+| `... --lib handoff` | **37 passed, 0 failed, 2 ignored**, 132.89 s. |
+| **M5a**, disabling only the turn cap while time stays below budget | Fails at "the turn cap did not bound the slice", 40 signed where 32 was required. |
+| **M5b**, disabling only the deadline while the turn cap stays below its limit | Fails at **a different** assertion, "the slice budget did not bound the slice", 8 signed where 2 was required. |
+| **M28**, removing the priority early return | Fails at "a priority yield was not reported as one". |
+| `cargo test -j 1 -p catcoms-app --lib`, no concurrent Cargo work | **648 passed, 0 failed, 11 ignored**, 1070.66 s. |
+| `cargo clippy -j 1 -p catcoms-app --all-targets -- -D warnings`, `cargo fmt --all --check` | Clean. |
+
+That 1070.66 s also settles the earlier 20,639 s independently: same machine, same suite, one more
+test, back in the normal band. The cause was hibernation, exactly as the operator said.
+
+M5a and M5b failing at different named assertions is the point: it shows each limiter is doing its
+own work and that neither one, nor bare "work remains", is standing in for the other.
+
+**Not done.** H3 is still called in batch from the commit visit, and H4 runs there too. The
+scheduled visit that pages slices across background turns, applies 7.3's placement gate and moves
+H4 to a worker is the next commit; it is what consumes `signed`, `remaining`, `yielded` and the two
+constants, which carry `#[allow(dead_code)]` markers naming it until then.
 
 ### `EpochRecordKind::DraftArchive`, the shared enum seam for Agent 2
 
