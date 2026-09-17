@@ -1,7 +1,7 @@
 # Gate 4 Agent 3 status: runtime signed fault repair
 
 Owner: Agent 3 ([assignment](GATE4-AGENT-HANDOFFS.md#agent-3-runtime-signed-fault-repair)).
-Proposal: [GATE4-AGENT-3-DESIGN](GATE4-AGENT-3-DESIGN.md), currently revision 12.
+Proposal: [GATE4-AGENT-3-DESIGN](GATE4-AGENT-3-DESIGN.md), currently revision 13.
 Review preamble: 3. Current entries override older ones.
 
 ## Checkpoints
@@ -20,7 +20,8 @@ Review preamble: 3. Current entries override older ones.
 | 2026-09-16 | Design revision 9, eighth-round findings answered | `76b854494ff8f30eb0d5844e22a783d6927ba182` | `3b6a4b40462ae83a341f8f6741c93edff55b5ef7` | design, docs only | **REQUEST CHANGES**: AG3-DES-038 **closed**, owner-side AG3-DES-034 accepted; new AG3-DES-039 to AG3-DES-044; AG3-TEST-008 |
 | 2026-09-16 | Design revision 10, ninth-round findings answered | `3b6a4b40462ae83a341f8f6741c93edff55b5ef7` | `11ce6f1b58288e44d6ff14dc2a98f42f7cc5e13b` design body, `f5ac522eff264eeddca30c2c4176cacfd723a158` status | design, docs only | **REQUEST CHANGES**: AG3-DES-040 (6.3/13.2) and AG3-DES-043 **closed**, AG3-DES-044 write order accepted; new AG3-DES-045 to AG3-DES-049; AG3-TEST-009 |
 | 2026-09-17 | Design revision 11, tenth-round findings answered | `11ce6f1b58288e44d6ff14dc2a98f42f7cc5e13b` | `333924318a65210375fa992bc49006c2fac3c236` | design, docs only | **REQUEST CHANGES**: AG3-DES-045, 048 and 049 **closed**; new AG3-DES-050 to AG3-DES-053; AG3-TEST-010 |
-| 2026-09-17 | Design revision 12, eleventh-round findings answered | `333924318a65210375fa992bc49006c2fac3c236` | this commit | design, docs only | re-review requested. Committed in parts, same shared-tree reset hazard |
+| 2026-09-17 | Design revision 12, eleventh-round findings answered | `333924318a65210375fa992bc49006c2fac3c236` | `04b27f7dc59f917e556c5a30d1a609f6b211ab32` | design, docs only | **REQUEST CHANGES**: AG3-DES-050, 051, 052 and 053 **closed**; one new finding, AG3-DES-054, plus AG3-TEST-011 |
+| 2026-09-17 | Design revision 13, twelfth-round finding answered | `04b27f7dc59f917e556c5a30d1a609f6b211ab32` | this commit | design, docs only | re-review requested |
 
 Working checkout: `M:\Git (local)\CatComs`, shared with the parallel Agent 1 and Agent 2 sessions,
 which are now doing implementation and design work respectively. Agent 1 has the checkout on its
@@ -29,6 +30,18 @@ documents with explicit pathspecs. `Create-suite-2` was fast-forwarded once, at 
 these documents off Agent 1's branch alone; it has not been moved since. **Agent 3 implementation
 must move to a separate branch or worktree before any code change**; no mutation harness may run
 against another agent's source.
+
+## Finding ledger, revision 12 round
+
+| Finding | Severity | Status | Where answered |
+|---|---|---|---|
+| AG3-DES-054 | P1 | **Answered in revision 13.** A stale hold from a previous tenure still occupied the single slot, and nothing said what became of it when the next tenure overflowed; the "refuse, slot occupied" reading reopens AG3-DES-032 after a restart. Turnover is now an explicit atomic replacement in the same owner-record write, only under a positively observed authoring tenure, never a merge. | Design 5.2, 15.1 N46 |
+| AG3-TEST-011 | P2 | **Answered.** N46 covers T1 overflow, owner change, T2 conflict at exhausted capacity, replacement rather than merge, crash and reopen, no proof for an unrelated T2 request, and no turnover under `Unknown` or `Imported`. | Design 15.1 N46 |
+| Editorial, N43 named `live_overflow` | - | **Corrected** to the `OverflowHold` field. | Design 15.1 N43 |
+
+Closed in the revision-12 round: **AG3-DES-050, 051, 052 and 053**. Still closed: AG3-DES-045, 048,
+049, 040, 043, 044's write order, 038, 030, 023, 024 and 029's exact-pair dedupe rule. Accepted:
+M1 to M19.
 
 ## Finding ledger, revision 11 round
 
@@ -467,7 +480,7 @@ sections 5 and 13.3.
 
 ## Executed checks
 
-**None, in any of the twelve passes.** No Cargo, npm or script command has been run: these
+**None, in any of the thirteen passes.** No Cargo, npm or script command has been run: these
 checkpoints change no code, and the local machine keeps checks serial. Every number quoted in the design is a constant
 read from source at the base or an explicitly labelled estimate. The maximal-shape replacement
 cost, the custody time of the capture and commit stages, and the protocol-allowance arithmetic in
