@@ -1,7 +1,7 @@
 # Gate 4 Agent 3 status: runtime signed fault repair
 
 Owner: Agent 3 ([assignment](GATE4-AGENT-HANDOFFS.md#agent-3-runtime-signed-fault-repair)).
-Proposal: [GATE4-AGENT-3-DESIGN](GATE4-AGENT-3-DESIGN.md), currently revision 13.
+Proposal: [GATE4-AGENT-3-DESIGN](GATE4-AGENT-3-DESIGN.md), currently revision 14.
 Review preamble: 3. Current entries override older ones.
 
 ## Checkpoints
@@ -21,7 +21,8 @@ Review preamble: 3. Current entries override older ones.
 | 2026-09-16 | Design revision 10, ninth-round findings answered | `3b6a4b40462ae83a341f8f6741c93edff55b5ef7` | `11ce6f1b58288e44d6ff14dc2a98f42f7cc5e13b` design body, `f5ac522eff264eeddca30c2c4176cacfd723a158` status | design, docs only | **REQUEST CHANGES**: AG3-DES-040 (6.3/13.2) and AG3-DES-043 **closed**, AG3-DES-044 write order accepted; new AG3-DES-045 to AG3-DES-049; AG3-TEST-009 |
 | 2026-09-17 | Design revision 11, tenth-round findings answered | `11ce6f1b58288e44d6ff14dc2a98f42f7cc5e13b` | `333924318a65210375fa992bc49006c2fac3c236` | design, docs only | **REQUEST CHANGES**: AG3-DES-045, 048 and 049 **closed**; new AG3-DES-050 to AG3-DES-053; AG3-TEST-010 |
 | 2026-09-17 | Design revision 12, eleventh-round findings answered | `333924318a65210375fa992bc49006c2fac3c236` | `04b27f7dc59f917e556c5a30d1a609f6b211ab32` | design, docs only | **REQUEST CHANGES**: AG3-DES-050, 051, 052 and 053 **closed**; one new finding, AG3-DES-054, plus AG3-TEST-011 |
-| 2026-09-17 | Design revision 13, twelfth-round finding answered | `04b27f7dc59f917e556c5a30d1a609f6b211ab32` | this commit | design, docs only | re-review requested |
+| 2026-09-17 | Design revision 13, twelfth-round finding answered | `04b27f7dc59f917e556c5a30d1a609f6b211ab32` | `df1a8fe8828b6e7abfeaf0bbed42eed75ef3f9a6` | design, docs only | **REQUEST CHANGES**: AG3-DES-054's mechanism accepted; one new finding, AG3-DES-055, plus AG3-TEST-012 and two editorials |
+| 2026-09-17 | Design revision 14, thirteenth-round finding answered | `df1a8fe8828b6e7abfeaf0bbed42eed75ef3f9a6` | this commit | design, docs only | re-review requested |
 
 Working checkout: `M:\Git (local)\CatComs`, shared with the parallel Agent 1 and Agent 2 sessions,
 which are now doing implementation and design work respectively. Agent 1 has the checkout on its
@@ -30,6 +31,16 @@ documents with explicit pathspecs. `Create-suite-2` was fast-forwarded once, at 
 these documents off Agent 1's branch alone; it has not been moved since. **Agent 3 implementation
 must move to a separate branch or worktree before any code change**; no mutation harness may run
 against another agent's source.
+
+## Finding ledger, revision 13 round
+
+| Finding | Severity | Status | Where answered |
+|---|---|---|---|
+| AG3-DES-055 | P1 | **Answered in revision 14.** The turnover assignment was unconditional, so read literally it also overwrote a hold already for the current tenure and kept only the newest fingerprint, reopening AG3-DES-048. The transition is now total: absent creates, stale replaces, same tenure accumulates. | Design 5.2, 15.1 N44(b) |
+| AG3-TEST-012 | P2 | **Answered.** N44(b) asserts the exact durable transition after each same-tenure admission and that it never takes the replacement branch, so N44(b) and N46 fail under each other's behaviour. | Design 15.1 N44(b) |
+| Editorials: stale `f5ac522` reference, and an earlier-revisions list skipping 10 to 12 | - | **Both corrected.** | Design 17 |
+
+Closed in the revision-13 round: everything except AG3-DES-055; AG3-DES-054's mechanism accepted.
 
 ## Finding ledger, revision 12 round
 
@@ -480,7 +491,7 @@ sections 5 and 13.3.
 
 ## Executed checks
 
-**None, in any of the thirteen passes.** No Cargo, npm or script command has been run: these
+**None, in any of the fourteen passes.** No Cargo, npm or script command has been run: these
 checkpoints change no code, and the local machine keeps checks serial. Every number quoted in the design is a constant
 read from source at the base or an explicitly labelled estimate. The maximal-shape replacement
 cost, the custody time of the capture and commit stages, and the protocol-allowance arithmetic in
