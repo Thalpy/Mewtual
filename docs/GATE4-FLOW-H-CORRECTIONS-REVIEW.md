@@ -1,6 +1,9 @@
 # Gate 4: Flow H scheduled-runtime corrections
 
-Status: **REQUEST CHANGES received on `da7b8fa`; corrections implemented and awaiting re-review.**
+Status: **REQUEST CHANGES received on `da7b8fa`; corrections implemented at `d711485` and
+awaiting re-review.** Send the round-3 request at the end of this document. The compare URL
+resolves only once `gate4-agent1-runtime` is pushed; the branch is ahead of `origin`. Later
+documentation-only commits do not change the reviewed code SHA, which is `d711485`.
 
 The reviewer confirmed NEW-1, NEW-2's original bug, NEW-4, NEW-5, NEW-10 and both new H5 guards as
 genuine, and accepted M34 and M35 as strong isolated oracles. It then found **two further
@@ -140,8 +143,16 @@ Native exposure remains gated on Agent 2's P5, still false.
 
 ```text
 Review type: finding re-review of FLOWH-001..FLOWH-004.
-Base: da7b8fa8993547268c403d78158fcfb02e9ca6b6. Head: [FULL_HEAD_SHA].
-Compare: [IMMUTABLE_COMPARE_URL].
+Base: da7b8fa8993547268c403d78158fcfb02e9ca6b6.
+Head: d711485d0e366d3a2139ec9290f29c4664e5e412.
+Compare: https://github.com/Thalpy/Mewtual/compare/da7b8fa8993547268c403d78158fcfb02e9ca6b6...d711485d0e366d3a2139ec9290f29c4664e5e412
+Evidence: 660 passed, 0 failed, 11 ignored at this head; cargo fmt and clippy --all-targets
+-D warnings clean. Local only, run at -j 1 with --test-threads=4; no CI run against this head.
+One earlier run failed studio_exchange scheduling's cancelled-preview-transport deadline test,
+which is recorded as contention-sensitive; it passes in 6.6 s alone and a clean re-run with no
+competing Cargo process passed 660 with none. That was worth confirming rather than assuming,
+because FLOWH-004 makes the H1 probe hold a process-wide permit and those tests use the real
+four-slot pool, so genuine starvation there would look exactly like a flake.
 Scope/evidence: docs/GATE4-FLOW-H-CORRECTIONS-REVIEW.md, docs/GATE4-AGENT-1-STATUS.md,
 docs/GATE4-AGENT-1-DESIGN.md sections 6.1, 7.1, 7.2, 7.3 and 13.
 Dependencies: your REQUEST CHANGES verdict on da7b8fa, and the corrections it confirmed as
