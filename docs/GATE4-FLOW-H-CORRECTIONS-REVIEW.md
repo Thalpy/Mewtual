@@ -1,6 +1,8 @@
 # Gate 4: Flow H scheduled-runtime corrections
 
-Status: **awaiting adversarial review.** This round exists because the previous adversarial
+Status: **awaiting adversarial review.** The compare URL below resolves only once
+`gate4-agent1-runtime` is pushed; at the time of writing the branch is two commits ahead of
+`origin`. Push before sending, or the reviewer gets a 404 instead of a pinned diff. This round exists because the previous adversarial
 review of `808ef2f` returned **REQUEST CHANGES**, and because a material part of what it found
 was that the implementer's own account of the preceding round was wrong. That is the context the
 next reviewer should carry in, and it is the reason this request asks for the corrections to be
@@ -46,7 +48,10 @@ Plus two tests for H5 guards that previously had none, and a rewritten open-item
 
 ## Evidence, offered as pointers rather than proof
 
-Full `catcoms-app` lib suite, `cargo fmt` and `cargo clippy --all-targets -D warnings` clean.
+Full `catcoms-app` lib suite at the head commit: 656 passed, 0 failed, 11 ignored, 1307 s.
+`cargo fmt` and `cargo clippy --all-targets -D warnings` clean. Run locally at `-j 1` with
+`--test-threads=4`; no CI run has been made against this head. The eleven ignored are the
+pre-existing opt-in profiles, unchanged by this round.
 
 Four mutations were executed against the new guards. Each failed at a named assertion and each
 mutated file was confirmed byte-identical to `HEAD` afterwards:
@@ -92,7 +97,8 @@ Native exposure remains gated on Agent 2's P5, still false.
 ```text
 Review type: finding re-review, plus bounded implementation review of the new work.
 Base: 808ef2fc6cd171d1fe4c4cfbf0c7e498db0a47c4.
-Head: [FULL_HEAD_SHA]. Compare: [IMMUTABLE_COMPARE_URL].
+Head: da7b8fa8993547268c403d78158fcfb02e9ca6b6.
+Compare: https://github.com/Thalpy/Mewtual/compare/808ef2fc6cd171d1fe4c4cfbf0c7e498db0a47c4...da7b8fa8993547268c403d78158fcfb02e9ca6b6
 Scope/evidence: docs/GATE4-FLOW-H-CORRECTIONS-REVIEW.md, docs/GATE4-AGENT-1-STATUS.md,
 docs/GATE4-AGENT-1-DESIGN.md sections 6.1, 7.1, 7.2 and 7.3.
 Dependencies: the prior REQUEST CHANGES verdict on 808ef2f and its blocking set
