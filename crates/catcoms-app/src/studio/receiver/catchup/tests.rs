@@ -708,6 +708,108 @@ async fn authority_change_during_signing(moved: AuthorityMove) {
     receiver.run(&mut server, &mut store, 83, None).unwrap();
 }
 
+/// "Is there work now" and "when is there work next" must come from one clock read.
+///
+/// Sampling them separately leaves a window the size of whatever runs between the two calls. Take
+/// `pending` at `D - 1`, let the clock cross `D`, then ask for a deadline: a `wake_in` that only
+/// publishes future deadlines answers "nothing to wait for" — correctly, by its own rule — and
+/// the actor arms no timer while `studio_pending` is false. The `Ready` job goes on holding
+/// admission and a process-wide permit until unrelated work happens by. Same strand as the
+/// original finding, squeezed into the expiry boundary.
+///
+/// The clock here returns `D - 1` to the first read of the pair and `D` to the second, which is
+/// the interleaving that window admits. One sample makes the two answers exhaustive: runnable and
+/// pending at or past `D`, a strictly positive delay below it, and no third case.
+#[tokio::test]
+async fn pending_and_the_wake_deadline_come_from_one_clock_read() {
+    let clock = ManualClock::new(1000);
+    let mut rng = ChaCha20Rng::seed_from_u64(1811);
+    let mut server = Server::found(
+        Hub::new().join(PeerId::from_u64(1)),
+        MlsDevice::generate().unwrap(),
+        rng.clone(),
+        Box::new(clock.clone()),
+        "owner",
+    )
+    .unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let mut store = ServerStore::open(root.path(), b"flow-h-boundary", &mut rng).unwrap();
+    let target = StudioTarget::Flipnote {
+        channel: crate::channel_id("general").to_be_bytes(),
+        object: [21; 16],
+    };
+    server.sync.with_registry_context(|g, d, _, _| {
+        crate::store::studio_handoff_ready_fixture(&mut store, 89, g, d, target, 1)
+    });
+    let mut receiver = StudioReceiver::default();
+    receiver
+        .run(
+            &mut server,
+            &mut store,
+            89,
+            Some(StudioRequest::Read { target }),
+        )
+        .unwrap();
+    let pool = receiver.catchup.inject_overlay_pool_for_test(4);
+    let free = pool.available_permits();
+
+    for _ in 0..40 {
+        receiver.run(&mut server, &mut store, 89, None).unwrap();
+        if let Some(work) = receiver.detach(&mut server) {
+            receiver.complete(&mut server, work.run(None).await);
+        }
+        if receiver.handoff.stage_for_test() == Some("ready") {
+            break;
+        }
+    }
+    assert_eq!(
+        receiver.handoff.stage_for_test(),
+        Some("ready"),
+        "the fixture never reached H5, so this proves nothing"
+    );
+    assert_eq!(pool.available_permits(), free - 1);
+
+    let now = server.runtime_clock().monotonic_ms();
+    receiver.handoff.hold_live_job_for_test(now);
+    let deadline = now + 30_000;
+    let rail: Vec<_> = [target].to_vec();
+
+    // The invariant that makes a single sample sufficient: at every instant there is either work
+    // to do now or a deadline to wait for. A window with neither is the strand, and with two
+    // clock reads the pair could land either side of the boundary and fall into it.
+    for at in [deadline - 2, deadline - 1, deadline, deadline + 1] {
+        let runnable = receiver.handoff.runnable(at);
+        let wake = receiver.handoff.wake_in(at, &rail);
+        assert!(
+            runnable || wake.is_some(),
+            "at {at} (deadline {deadline}) the job was neither runnable nor waited on, so \
+             nothing would ever run it and its permit is stranded"
+        );
+        assert!(
+            !(runnable && wake.is_some()),
+            "at {at} the job is runnable and still publishing a deadline, which is a spin"
+        );
+    }
+
+    // And the production pairing agrees with it, taken as one call rather than two.
+    clock.advance_ms(29_999);
+    let signal = tokio::sync::watch::channel(false).0;
+    assert_eq!(
+        receiver.signal_and_wake(&server, &signal),
+        Some(1),
+        "one millisecond short of the deadline, no timer would be armed"
+    );
+    clock.advance_ms(1);
+    assert!(
+        receiver.signal_and_wake(&server, &signal).is_none(),
+        "an expired deadline is still being published"
+    );
+    assert!(
+        *signal.borrow(),
+        "at the deadline the job was not reported pending, so the driver would never run it"
+    );
+}
+
 /// Design 7.2, whose section title is "Reservation precedes every body read".
 ///
 /// The H1 probe's rail scan is body reads: one authenticated intent record read and structurally
@@ -781,6 +883,22 @@ async fn an_exhausted_pool_stops_the_probe_before_it_reads_any_intent_body() {
          contention the same way genuine ineligibility escalates"
     );
 
+    // A refusal must still leave something to come back for. The reservation is a `try_acquire`,
+    // so this actor is not queued behind the permit and nothing will tell it when capacity
+    // returns; with no job, no per-target hold and no deadline, an eligible draft would sit
+    // untransferred until unrelated Studio work happened to produce another custody turn. The
+    // earlier version of this test hid that by calling `run` again itself, which production does
+    // not get for free.
+    let rail: Vec<_> = [target].to_vec();
+    let retry = receiver
+        .handoff
+        .wake_in(now, &rail)
+        .expect("a capacity refusal left no future retry, so the transfer is dormant");
+    assert!(
+        retry > 0 && retry <= 2_000,
+        "a capacity retry should be short and flat, not a doubling ineligibility backoff: {retry}"
+    );
+
     // With capacity back, the same target is picked up normally: the refusal left no trace.
     drop(taken);
     assert_eq!(pool.available_permits(), 4);
@@ -788,6 +906,10 @@ async fn an_exhausted_pool_stops_the_probe_before_it_reads_any_intent_body() {
     assert!(
         receiver.handoff.stage_for_test().is_some(),
         "the probe did not recover once capacity returned"
+    );
+    assert!(
+        receiver.handoff.wake_in(now, &rail).is_none(),
+        "the capacity retry outlived the reservation that succeeded"
     );
 }
 
@@ -879,7 +1001,29 @@ async fn a_wrapper_change_between_signing_visits_signs_nothing_and_abandons() {
         )
         .expect("an ordinary edit must still succeed");
 
-    // The next signing visit must sign nothing and give the job up.
+    // A priority turn yields first and reauthenticates nothing. 7.3 says a priority turn gives
+    // way immediately, and the stamp check reads and hashes the whole intent record plus the
+    // bounded source record: body work under custody, which is what the priority gate exists to
+    // get out of the way of. The wrapper is already stale here, so a check that ran would abandon
+    // the job — on a turn that was never allowed to start a signing visit at all.
+    let yielded = receiver
+        .handoff_sign(&mut server, &mut store, true)
+        .expect("a priority turn must report its yield, not vanish");
+    assert!(yielded.yielded(), "a priority turn did not report a yield");
+    assert_eq!(yielded.signed(), 0, "a priority yield signed something");
+    assert_eq!(
+        receiver.handoff.remaining_for_test(),
+        before,
+        "a priority yield changed the plan"
+    );
+    assert_eq!(
+        receiver.handoff.stage_for_test(),
+        Some("signing"),
+        "a priority turn reauthenticated the wrappers and abandoned the job, doing exactly the \
+         custody work it was supposed to be yielding out of"
+    );
+
+    // The next real signing visit must sign nothing and give the job up.
     let slice = receiver.handoff_sign(&mut server, &mut store, false);
     assert!(
         slice.is_none(),

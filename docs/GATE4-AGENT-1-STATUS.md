@@ -1145,7 +1145,50 @@ none of which the list named.
 | M39 (design **M4**): no per-visit reauthentication | "H3 signed against records that are no longer the ones it authenticated" |
 | M40: reserve after the rail scan | the selection cursor advances, proving the scan ran holding no admission and no permit |
 
-**The known `studio_exchange` contention flake recurred, and is recorded rather than glossed.**
+> ### Full-suite evidence at the current Flow H correction head: **FAILING / unresolved**
+>
+> `scheduling::studio_actor_owner_return_installs_both_classes_with_cancelled_preview_transport`
+> failed in **2 of 4** full runs after FLOWH-004. A single clean rerun previously attributed this
+> to known contention; **that attribution is withdrawn as under-evidenced.** No Flow H correction
+> PASS may rely on the full suite until the interaction is isolated or fixed.
+>
+> **Isolated by measurement: the cause is not Flow H.** The FLOWH-004 hypothesis was that a
+> watched target with no transferable overlay now transiently consumes a slot of the four-slot
+> process-wide pool while H1 determines there is nothing to do, and that store-wide
+> `intent_generation` rotation (`epoch_intents.rs:535`, `:566`) clears the quiet memo on any intent
+> write anywhere, making that frequent. Every link in that chain is true. The conclusion was still
+> wrong, and instrumenting the fixture said so:
+>
+> | Measured in the failing fixture | |
+> |---|---|
+> | probe reservations, whole run | **4** alone, **11** under full-suite load |
+> | handoff jobs created | **0** |
+> | elapsed, alone | 6498 ms |
+> | elapsed, under full-suite load | 6797 ms, against a **90 s** bound |
+>
+> `jobs = 0` means the machinery under review never executes here: no `can_sign`, `can_commit`,
+> `handoff_complete`, `handoff_sign`, no admission or permit ever held by a job. Flow H's entire
+> footprint is a handful of `try_acquire` reservations, which are non-blocking and so cannot
+> deadlock. And 6.5 s alone versus 6.8 s under load means the failure is **not** gradual slowdown
+> with 83 s of headroom to spare — it is a hang, in one of the fixture's unbounded convergence
+> loops (`while p.bob.epoch() != p.alice.epoch()`, and the `select!` whose other arm is
+> `loop { sync_once() }`).
+>
+> So this is a pre-existing intermittent hang in a two-actor networked fixture, which the status
+> note above had already seen once and misfiled. It needs its own investigation and must not be
+> closed by rerunning. What it is **not** is evidence against the Flow H corrections, and that
+> distinction is now measured rather than argued.
+>
+> Two fixes were ruled out in advance and remain ruled out. Giving H1 its own semaphore would
+> violate the accepted single four-slot capacity model. Lengthening the test timeout would hide the
+> question rather than answer it — and with 83 s of headroom it would not even help.
+>
+> **Method note, because it cost two wrong answers today.** Both the "documented contention flake"
+> disposition and the `intent_generation` mechanism were chains of individually true statements
+> that did not support their conclusion. Both were settled in minutes by counting something.
+> Neither would have been settled by another full-suite run.
+
+**The paragraph below is superseded by the ledger above and kept only to show what was claimed.**
 One full-suite run reported `scheduling::studio_actor_owner_return_installs_both_classes_with_cancelled_preview_transport`
 failing: the same test, in the same module, already recorded above as a deadline assertion that
 fails under concurrent Cargo load and passes serially. It passes in isolation in 6.6 s, the
@@ -1158,9 +1201,66 @@ the `studio_exchange` tests use the real four-slot pool rather than an injected 
 starvation there would look exactly like a flake. It is not one — but "it was flaky before" was
 not sufficient evidence on its own.
 
-**Still open.** The earlier list named three items; it should have named eight; the reviewer then
-showed it should have named twelve. What follows is what is known to be open, and is again not
-offered as a guarantee of completeness.
+### The fourth review: the same class again, at the boundary
+
+FLOWH-002 closed. FLOWH-004's body-read ordering closed. FLOWH-003 now genuinely authenticates
+before a non-priority slice. **FLOWH-TEST-001 was withdrawn in full** — the reviewer confirmed the
+`c676749` time-bound case and M5b do discriminate, which is the citation standing up.
+
+But FLOWH-001 did **not** close, and the two corrections each introduced a smaller defect of their
+own. That is the fourth consecutive round in which that has happened, and it is worth naming the
+shape rather than the instances: every one of these has been *two things that should agree about
+one fact, computed in two places*.
+
+**FLOWH-001-R1, P1: `pending` and `wake_in` sampled the clock separately.** The gates were made to
+agree with each other, and then the two answers derived from them were taken from different reads.
+Sample `pending` at `D - 1` — not runnable — let the clock cross `D`, then ask for a deadline:
+`wake_in` publishes only future deadlines, so it correctly answers "nothing", no timer is armed,
+`studio_pending` stays false, and the `Ready` job holds admission and a process-wide permit until
+unrelated work happens by. The original strand, squeezed into the expiry boundary. M37 could not
+see it: its mutant published nothing at all, where this needs a *correct* deadline expiring
+between two reads.
+
+Corrected structurally rather than by widening a window. `signal_and_wake` takes one sample and
+answers both questions from it, so the two are exhaustive by construction: at or past `D` the job
+is runnable and `pending` carries it; below `D` the delay is strictly positive. There is no third
+case, which is the property the previous shape lacked. `pending` and `wake_in` survive only as
+`#[cfg(test)]` conveniences, because a separately-sampled pair is exactly what must not exist in
+production.
+
+**FLOWH-003-R1, P2: the reauthentication ran before the priority yield.** §7.3 says a priority
+turn gives way immediately; the stamp check reads and hashes the whole authenticated intent record
+plus the bounded source record. So a priority turn did precisely the custody body work the
+priority gate exists to avoid, and a transient read error on such a turn could abandon a job that
+was never allowed to start a signing visit. The check is now behind `!priority`. A yield is not a
+visit, so it reauthenticates nothing.
+
+**FLOWH-004-R1, P2: a capacity refusal had no future retry.** Not charging the target was right —
+losing a race for capacity says nothing about the document. Recording *nothing* was not: the
+reservation is a `try_acquire`, so the actor is not queued behind the permit and nothing tells it
+capacity returned. No resource is stranded, but an automatic transfer that resumes only when
+unrelated Studio work arrives is not automatic. There is now one flat, non-escalating
+`probe_retry_at`, cleared the moment a reservation succeeds, and `wake_in` publishes it — together
+with the earliest future `next_at` among targets **still on the watch rail**, which also covers the
+abandoned-job case the reviewer raised and bounds what those maps can wake the actor for.
+
+My own test had hidden this by calling `run` again immediately after dropping the permits, which
+production does not get for free. That assertion is now on the published deadline instead.
+
+| Mutation | Effect |
+|---|---|
+| M41: off-by-one in the deadline filter | "at 30999 (deadline 31000) the job was neither runnable nor waited on": the exhaustiveness window opens by exactly one millisecond |
+| M42: reauthenticate before the priority gate | "a priority turn must report its yield, not vanish" |
+| M43: capacity refusal records no retry | "a capacity refusal left no future retry, so the transfer is dormant" |
+
+M41 is the one worth noting: the race itself cannot be reproduced with a `ManualClock`, because
+both reads return the same value. What is tested instead is the invariant that makes a single
+sample sufficient — never *neither* runnable nor waited on — asserted at each millisecond across
+the boundary. The single sample is structural; the invariant is what a mutation can reach.
+
+**Still open.** The list has been incomplete in every round: three when it should have been eight,
+eight when it should have been twelve, and twelve again missing all three findings above. What
+follows is what is known to be open, and is again not offered as a guarantee of completeness.
 
 1. **H1 and H5 each drain a full epoch-storage inventory under custody**, which design 6.1 does not
    put in H1 and which C-3's resumable cursor is meant to bound. The scheduled sequence is shipping
@@ -1174,12 +1274,11 @@ offered as a guarantee of completeness.
 5. **Design 7.3's `explicit_retry` relief is not wired to the handoff maps**, though the code
    comment cites 7.3's pacing as satisfied.
 6. **`next_at`, `hold_ms` and `quiet` are never pruned** against the current watch rail.
-7. **An abandoned target is not re-probed on a timer.** `wake_in` publishes a deadline only for a
-   live job, because a job is what holds a resource. After an `abandon` there is no job, so a
-   quiescent actor waits for ordinary Studio work before re-probing. That delays opportunistic
-   transfer; it strands nothing. Raised by the third review as analogous to FLOWH-001 and
-   deliberately not folded into it: a timer per remembered target is a different bargain from a
-   timer per held resource, and item 6 would have to be fixed first for it to be safe.
+7. ~~An abandoned target is not re-probed on a timer.~~ **Closed by FLOWH-004-R1.** `wake_in` now
+   publishes the earliest future `next_at` among rail targets when there is no job, so an
+   abandoned target's backoff expiry wakes the actor. Restricting it to the rail is also what
+   makes item 6 tolerable rather than a prerequisite: a deadline for an unwatched target can no
+   longer wake anything.
 8. **H1's "cheap by construction" claim does not hold for the interrupted-`Prepared` branch**,
    which still enters the synchronous `resolve_studio_handoff_with_io` backstop under custody.
    Flow R is what removes that, and Flow R is not started. Noted by the third review; it is

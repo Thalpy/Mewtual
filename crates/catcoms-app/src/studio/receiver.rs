@@ -313,8 +313,29 @@ impl StudioReceiver {
         server: &Server<T, R>,
         signal: &tokio::sync::watch::Sender<bool>,
     ) {
+        self.signal_and_wake(server, signal);
+    }
+
+    /// Publish "is there work now" and return "when is there work next", from **one** clock read.
+    ///
+    /// These two answers are about the same deadline, and taking them from separate reads is a
+    /// capacity strand waiting to happen: sample `pending` at `D - 1` and it says not runnable,
+    /// let the clock cross `D`, and a `wake_in` that only publishes future deadlines then says
+    /// there is nothing to wait for either. No timer is armed, `studio_pending` stays false, and a
+    /// `Ready` job holds admission and a process-wide permit until unrelated work happens by.
+    ///
+    /// With a single sample the two are exhaustive by construction: at `now >= D` the job is
+    /// runnable so `pending` is true, and below `D` the returned delay is strictly positive, so
+    /// the timer that fires is followed by a fresh sample that sees it runnable. There is no
+    /// third case, which is the property the previous shape lacked.
+    pub(crate) fn signal_and_wake<T: MeshTransport, R: CryptoRngCore>(
+        &self,
+        server: &Server<T, R>,
+        signal: &tokio::sync::watch::Sender<bool>,
+    ) -> Option<u64> {
+        let now = server.runtime_clock().monotonic_ms();
         signal.send_if_modified(|pending| {
-            let next = self.pending(server);
+            let next = self.pending_at(server, now);
             if *pending == next {
                 false
             } else {
@@ -322,18 +343,31 @@ impl StudioReceiver {
                 true
             }
         });
+        self.wake_in_at(now)
     }
+    /// Production reads this through `signal_and_wake`, which pairs it with `wake_in_at` under a
+    /// single clock sample. This convenience takes its own sample and so must not be used to
+    /// decide anything alongside a separately sampled deadline.
+    #[cfg(test)]
     pub(crate) fn pending<T: MeshTransport, R: CryptoRngCore>(
         &self,
         server: &Server<T, R>,
     ) -> bool {
+        self.pending_at(server, server.runtime_clock().monotonic_ms())
+    }
+
+    fn pending_at<T: MeshTransport, R: CryptoRngCore>(
+        &self,
+        server: &Server<T, R>,
+        now: u64,
+    ) -> bool {
         !self.paused
             && ((self.catchup.replay_ready()
-                && self.replay.pending(
-                    &self.watches,
-                    server.runtime_clock().monotonic_ms(),
-                    |w| server.sync.studio_watch_is_current(&w.inner),
-                ))
+                && self
+                    .replay
+                    .pending(&self.watches, now, |w| {
+                        server.sync.studio_watch_is_current(&w.inner)
+                    }))
                 || self.watches.iter().any(|(watch, _)| {
                     server.sync.studio_has_inbound(&watch.inner)
                         || server.sync.studio_has_page_request(&watch.inner)
@@ -344,9 +378,7 @@ impl StudioReceiver {
                 // progress this turn, and reporting it as pending would hold the driver at its
                 // active cadence for the whole life of the job. Every other term here is time- or
                 // state-gated for the same reason.
-                || self
-                    .handoff
-                    .runnable(server.runtime_clock().monotonic_ms())
+                || self.handoff.runnable(now)
                 || self.catchup.pending(server, &self.watches))
     }
     /// Milliseconds until this receiver has time-gated work to do, if any.
@@ -355,14 +387,21 @@ impl StudioReceiver {
     /// held handoff job needs both. Without it a paced refusal is indistinguishable from a stall:
     /// the job reports not-runnable, `pending` goes false, and a quiescent actor schedules no
     /// further Studio turn while the job still holds admission and a process-wide permit.
+    /// As `pending`: a separately sampled convenience for tests. Production pairs the two.
+    #[cfg(test)]
     pub(crate) fn wake_in<T: MeshTransport, R: CryptoRngCore>(
         &self,
         server: &Server<T, R>,
     ) -> Option<u64> {
+        self.wake_in_at(server.runtime_clock().monotonic_ms())
+    }
+
+    fn wake_in_at(&self, now: u64) -> Option<u64> {
         if self.paused {
             return None;
         }
-        self.handoff.wake_in(server.runtime_clock().monotonic_ms())
+        let rail: Vec<_> = self.watches.iter().map(|(w, _)| w.target).collect();
+        self.handoff.wake_in(now, &rail)
     }
     /// Put the receiver in the state a storage fault leaves it in.
     ///

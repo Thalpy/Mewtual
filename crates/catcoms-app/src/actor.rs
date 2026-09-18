@@ -3559,7 +3559,11 @@ where
         let mut file_transfers = file_transfers::FileTransfers::new();
         let mut studio_preview_resets_open = true;
         loop {
-            studio_receiver.signal(&server, &studio_signal);
+            // One call, because "is there work now" and "when is there work next" have to come
+            // from one clock read. Sampling them separately leaves a window where the deadline
+            // passes between the two and neither answer schedules anything, which strands the
+            // permit a handoff job is holding until unrelated work happens by.
+            let studio_wake = studio_receiver.signal_and_wake(&server, &studio_signal);
             #[cfg(test)]
             studio_preparation_signal.send_replace(studio_receiver.preparing_for_test());
             let delivery_clock = server.runtime_clock();
@@ -3569,7 +3573,7 @@ where
             // process-wide preparation permits for as long as that lasts.
             let delivery_delay = match (
                 next_delivery_delay(delivery_clock.monotonic_ms(), &delivery, &delivery_dirty),
-                studio_receiver.wake_in(&server),
+                studio_wake,
             ) {
                 (Some(a), Some(b)) => Some(a.min(b)),
                 (only, None) | (None, only) => only,

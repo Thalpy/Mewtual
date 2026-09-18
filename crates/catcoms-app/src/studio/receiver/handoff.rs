@@ -81,10 +81,22 @@ pub(super) struct HandoffRuntime {
     /// Source of `HandoffJob::token`. Monotonic per actor; a value is never reused, so a
     /// completion from an abandoned job can always be told from a live one.
     next_token: u64,
+    /// When to look again after the shared pool refused a reservation.
+    ///
+    /// Deliberately **not** a per-target hold. Losing a race for capacity says nothing about the
+    /// document, so charging it the doubling ineligibility backoff penalised an eligible target
+    /// for being unlucky. But recording nothing at all left no future retry either: the
+    /// reservation is a `try_acquire`, so this actor is not queued behind the permit and nothing
+    /// tells it when capacity returns. One flat, non-escalating deadline, cleared as soon as a
+    /// reservation succeeds.
+    probe_retry_at: Option<u64>,
 }
 
 const FIRST_HOLD_MS: u64 = 30_000;
 const MAX_HOLD_MS: u64 = 300_000;
+/// Flat retry after the shared pool is full. Short, because the condition is other actors' work
+/// finishing rather than anything about this document, and non-escalating for the same reason.
+const CAPACITY_RETRY_MS: u64 = 2_000;
 
 impl HandoffRuntime {
     pub(super) fn busy(&self) -> bool {
@@ -168,15 +180,36 @@ impl HandoffRuntime {
     /// Only a live job counts. An abandoned target holds no resource, so re-probing it can wait
     /// for ordinary Studio work; waking the actor for it would be a timer per remembered target
     /// rather than a timer per held resource.
-    pub(super) fn wake_in(&self, now: u64) -> Option<u64> {
-        let job = self.job.as_ref()?;
-        if matches!(job.stage, HandoffStage::Detached) {
-            return None;
+    pub(super) fn wake_in(&self, now: u64, rail: &[StudioTarget]) -> Option<u64> {
+        if let Some(job) = self.job.as_ref() {
+            if matches!(job.stage, HandoffStage::Detached) {
+                return None;
+            }
+            // Strictly future by construction: the caller samples `now` once for this and for
+            // `pending`, and at or past the deadline the job is runnable, so `pending` carries it.
+            return self
+                .next_at
+                .get(&job.target)
+                .filter(|at| now < **at)
+                .map(|at| at - now);
         }
-        self.next_at
-            .get(&job.target)
+        // No job, and still something to come back for. A capacity refusal selects no target and
+        // records no per-target hold, so without this the actor has no waiter on the shared pool
+        // (the reservation is a `try_acquire`) and nothing tells it capacity returned; an
+        // abandoned job leaves a deadline behind but takes the job with it. Neither strands a
+        // resource, which is why this is not the P1 above — but an automatic transfer that only
+        // resumes when unrelated Studio work happens by is not automatic.
+        //
+        // Only **future** deadlines, and only for targets still on the rail. An expired one would
+        // publish a zero delay every iteration while the probe memoises the target as quiet and
+        // declines to act on it, which is a spin rather than a wake. Restricting to the rail also
+        // keeps a deadline for a target that is no longer watched from waking the actor at all.
+        rail.iter()
+            .filter_map(|t| self.next_at.get(t))
+            .chain(self.probe_retry_at.iter())
             .filter(|at| now < **at)
-            .map(|at| at.saturating_sub(now))
+            .map(|at| at - now)
+            .min()
     }
 
     fn remaining(&self) -> Option<usize> {
@@ -388,8 +421,13 @@ impl StudioReceiver {
             return;
         }
         let Some(ownership) = self.catchup.reserve_overlay() else {
+            // No target is charged, but a flat retry is recorded so the actor comes back when
+            // capacity plausibly has. Without it a quiescent actor with an eligible draft waits
+            // for unrelated Studio work before trying again.
+            self.handoff.probe_retry_at = Some(now.saturating_add(CAPACITY_RETRY_MS));
             return;
         };
+        self.handoff.probe_retry_at = None;
         let group = server.group_id();
         let device = server
             .sync
@@ -528,7 +566,14 @@ impl StudioReceiver {
         // the bytes H2 reconstructed from are still the bytes on disk. A same-size authenticated
         // wrapper replacement between visits passes every authority check and is signed against.
         // A mismatch signs zero, abandons and backs off, exactly as a refused signature does.
-        if !self.handoff_plan_is_current(server, store, tenure) {
+        //
+        // **After** the priority test, not before it. 7.3 says a priority turn yields
+        // immediately, and this check reads and hashes the whole authenticated intent record plus
+        // the bounded source record: body work under custody, which is exactly what the priority
+        // gate exists to get out of the way of. Doing it first also gave a priority turn a way to
+        // abandon the job on a transient read error, when that turn was never allowed to start a
+        // signing visit at all. A yield is not a visit, so it reauthenticates nothing.
+        if !priority && !self.handoff_plan_is_current(server, store, tenure) {
             self.handoff.abandon(now);
             return None;
         }
