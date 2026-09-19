@@ -13,6 +13,8 @@ fn intent_retirement_shrink_still_needs_physical_replacement_headroom() {
         records: BTreeMap::from([([1; 32], 1024)]),
         record_slots: super::super::epoch_budget::MAX_ACCOUNTED_RECORDS,
         bytes: MAX_VAULT_INTENT_BYTES,
+        // This case is about the class total at its cap; no archive is involved.
+        archive_bytes: 0,
         ready: true,
     };
     assert!(budget
@@ -29,6 +31,72 @@ fn intent_retirement_shrink_still_needs_physical_replacement_headroom() {
             .is_ok(),
         "absent ledger creates no slot"
     );
+}
+
+/// The archive sub-cap, exercised against the arithmetic rather than against 16 MiB of real
+/// archives. Driving it with genuine maximal archives would cost minutes and gigabytes on a
+/// machine already carrying a 138 GB target directory, so this follows the same unit-level
+/// precedent as the class-cap case above. What it does establish is that the sub-cap binds
+/// independently of the class total, which is the whole reason it exists: an archive can be
+/// refused while the vault has ample intent room.
+#[test]
+fn draft_archive_sub_cap_binds_before_the_class_ceiling_and_refunds_the_replaced_record() {
+    let generation = Arc::new(());
+    let mut budget = EpochIntentBudget {
+        generation: generation.clone(),
+        records: BTreeMap::from([([1; 32], MAX_VAULT_DRAFT_ARCHIVE_BYTES - 1024)]),
+        record_slots: 1,
+        // Plenty of class headroom: only the archive tally is near its limit.
+        bytes: MAX_VAULT_DRAFT_ARCHIVE_BYTES - 1024,
+        archive_bytes: MAX_VAULT_DRAFT_ARCHIVE_BYTES - 1024,
+        ready: true,
+    };
+    assert!(
+        budget.bytes < MAX_VAULT_INTENT_BYTES,
+        "the class ceiling must not be what refuses this"
+    );
+    assert!(
+        budget
+            .preflight_draft_archive(&generation, [2; 32], None, 4096, false)
+            .is_err(),
+        "an archive over the sub-cap must refuse while the class total still has room"
+    );
+    assert!(
+        budget.ready,
+        "a known quota refusal needs no rescan, exactly as the class cap behaves"
+    );
+
+    // Replacing an existing archive releases its bytes first, so a same-size rewrite fits.
+    assert!(
+        budget
+            .preflight_draft_archive(
+                &generation,
+                [1; 32],
+                Some(MAX_VAULT_DRAFT_ARCHIVE_BYTES - 1024),
+                MAX_VAULT_DRAFT_ARCHIVE_BYTES - 1024,
+                false,
+            )
+            .is_ok(),
+        "replacing an archive with one of the same size must fit inside the sub-cap"
+    );
+    // A sync-only retry is never refused by the sub-cap: no new bytes are claimed.
+    assert!(budget
+        .preflight_draft_archive(
+            &generation,
+            [1; 32],
+            Some(MAX_VAULT_DRAFT_ARCHIVE_BYTES - 1024),
+            MAX_VAULT_DRAFT_ARCHIVE_BYTES - 1024,
+            true,
+        )
+        .is_ok());
+
+    // And the tally moves with a commit, so a second archive sees the first one's bytes.
+    budget.commit_draft_archive([2; 32], None, 4096);
+    assert_eq!(
+        budget.archive_bytes,
+        MAX_VAULT_DRAFT_ARCHIVE_BYTES - 1024 + 4096
+    );
+    assert_eq!(budget.bytes, MAX_VAULT_DRAFT_ARCHIVE_BYTES - 1024 + 4096);
 }
 
 impl ServerStore {

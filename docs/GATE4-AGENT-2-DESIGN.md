@@ -908,11 +908,17 @@ exercises. What retires is the **name and the message assertion**, not the cover
   into an installed, known, incomplete pin set. Both are fail-closed paths that the whole-arm
   mutation passes straight through.
 
-Also retiring with the collector: `write_draft_archive_for_test`, Agent 1's `cfg(test)`,
-`pub(in crate::store)` hand-sealer, which exists only because the family currently has no writer. It
-bypasses nothing the seam validates, since the production scope, sealing, framing and path are real
-and only the opaque body is synthetic, but it must be deleted when
-`write_studio_draft_archive_with_io` lands, and the seam's regressions repointed at the real writer.
+`write_draft_archive_for_test`, Agent 1's `cfg(test)`, `pub(in crate::store)` hand-sealer, was
+originally specified here as deleted when `write_studio_draft_archive_with_io` lands. **That was
+wrong, for the same reason the M19 retirement was wrong.** The fail-closed tests need to write
+payloads that are deliberately *not* valid archives: an undecodable body, a corrupted seed, a
+payload naming another document. A production writer will never produce any of those, so deleting
+the helper would delete the only way to reach the guards that exist for them.
+
+The helper therefore survives, narrowed to that purpose, and the tests that write a **valid**
+archive move to the real writer. It bypasses nothing the seam validates, since the production
+scope, sealing, framing and path are real and only the body is synthetic, which is exactly what
+makes it the right tool for a deliberately malformed body.
 
 **Sequencing against I-4.** Agent 1's `epoch_mutation_guard` does not exist yet; I-4 is last in its
 sequence. The seam commit that adds the `DraftArchive` family deliberately contains **no writer**,

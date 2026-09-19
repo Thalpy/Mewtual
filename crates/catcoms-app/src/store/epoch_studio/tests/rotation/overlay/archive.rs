@@ -357,6 +357,170 @@ fn a_draft_archive_whose_references_cannot_be_extracted_fails_the_scan_closed() 
     );
 }
 
+/// Build the archive for the current branch and persist it through the production writer.
+fn preserve(
+    f: &Fixture,
+    store: &mut ServerStore,
+) -> Result<catcoms_replication::studio::StudioDraftArchive, AppError> {
+    let state = store.load_epoch_intents(SERVER, &f.logical).unwrap();
+    let archive = StudioDraftArchive::from_branch(
+        state.overlay().unwrap(),
+        &state.ledger,
+        StudioOverlayProvenance::Closing,
+        true,
+        [3; 32],
+        [4; 32],
+        1,
+    )
+    .unwrap();
+    drop(state);
+    let mut b = budget(store, f);
+    store.write_studio_draft_archive_with_io(
+        SERVER,
+        &f.logical,
+        &archive,
+        &mut rng(),
+        &mut b.storage,
+        &mut b.intents,
+        atomic_write,
+        crate::store::epoch_intents::sync_intent,
+    )?;
+    Ok(archive)
+}
+
+#[test]
+fn the_archive_writer_is_accounted_idempotent_and_refuses_to_overwrite_evidence() {
+    let root = tempfile::tempdir().unwrap();
+    let f = Fixture::new(true);
+    let mut store = open(root.path());
+    let (close, basis) = closing(&f, &mut store);
+    frame_branch(&f, &mut store, &close, &basis);
+
+    let before = budget(&mut store, &f).intents.archive_bytes();
+    assert_eq!(before, 0, "no archive exists yet");
+
+    let archive = preserve(&f, &mut store).expect("the first preservation must succeed");
+    let charged = budget(&mut store, &f).intents.archive_bytes();
+    assert!(charged > 0, "a preserved archive must be charged");
+
+    // The record reads back as exactly the archive that was written.
+    let scope = crate::store::epoch_draft_archive::scope_bytes(SERVER, &f.logical).unwrap();
+    let stored = store
+        .read_scoped_draft_archive_plain(&scope)
+        .unwrap()
+        .unwrap();
+    assert!(
+        stored.plain.windows(4).count() > 0 && stored.physical_bytes > 0,
+        "the archive record must be present and non-empty"
+    );
+
+    // Exact retry: the same archive again is idempotent, not a second record, and takes the
+    // sync-only path so an uncertain write can be repeated at capacity.
+    preserve(&f, &mut store).expect("an exact retry must be idempotent");
+    assert_eq!(
+        budget(&mut store, &f).intents.archive_bytes(),
+        charged,
+        "an exact retry must not charge a second time"
+    );
+
+    // A DIFFERENT archive for the same document is refused rather than replacing the first.
+    // Overwriting preserved evidence to make room for other preserved evidence is the one thing
+    // this record must never do; releasing the existing archive is a separate explicit action.
+    let different = StudioDraftArchive::decode(&archive.encode().unwrap()).unwrap();
+    let _ = different;
+    let state = store.load_epoch_intents(SERVER, &f.logical).unwrap();
+    let other = StudioDraftArchive::from_branch(
+        state.overlay().unwrap(),
+        &state.ledger,
+        StudioOverlayProvenance::Closing,
+        // Only the label differs, so the payload differs while the branch does not.
+        false,
+        [3; 32],
+        [4; 32],
+        1,
+    )
+    .unwrap();
+    drop(state);
+    let mut b = budget(&mut store, &f);
+    let refused = store.write_studio_draft_archive_with_io(
+        SERVER,
+        &f.logical,
+        &other,
+        &mut rng(),
+        &mut b.storage,
+        &mut b.intents,
+        atomic_write,
+        crate::store::epoch_intents::sync_intent,
+    );
+    assert!(
+        refused.is_err(),
+        "a second, different archive must be refused, not written over the first"
+    );
+    drop(b);
+    assert_eq!(
+        budget(&mut store, &f).intents.archive_bytes(),
+        charged,
+        "a refused preservation must charge nothing"
+    );
+    // The original survives the refusal intact.
+    let after = store
+        .read_scoped_draft_archive_plain(&scope)
+        .unwrap()
+        .unwrap();
+    assert_eq!(after.plain.as_slice(), stored.plain.as_slice());
+}
+
+#[test]
+fn the_archive_writer_refuses_a_payload_naming_another_document() {
+    // The same binding the collector enforces on the way out, enforced on the way in, so a
+    // misplaced archive is never created rather than merely never trusted.
+    let root = tempfile::tempdir().unwrap();
+    let a = Fixture::new(true);
+    let b = Fixture::new(true);
+    let mut store = open(root.path());
+    let (close_b, basis_b) = closing(&b, &mut store);
+    frame_branch(&b, &mut store, &close_b, &basis_b);
+    let state = store.load_epoch_intents(SERVER, &b.logical).unwrap();
+    let archive_b = StudioDraftArchive::from_branch(
+        state.overlay().unwrap(),
+        &state.ledger,
+        StudioOverlayProvenance::Closing,
+        true,
+        [3; 32],
+        [4; 32],
+        1,
+    )
+    .unwrap();
+    drop(state);
+
+    let (close_a, basis_a) = closing(&a, &mut store);
+    frame_branch(&a, &mut store, &close_a, &basis_a);
+    let mut budgets = budget(&mut store, &a);
+    let refused = store.write_studio_draft_archive_with_io(
+        SERVER,
+        &a.logical,
+        &archive_b,
+        &mut rng(),
+        &mut budgets.storage,
+        &mut budgets.intents,
+        atomic_write,
+        crate::store::epoch_intents::sync_intent,
+    );
+    assert!(
+        refused.is_err(),
+        "an archive naming another document must be refused at the writer"
+    );
+    drop(budgets);
+    let scope = crate::store::epoch_draft_archive::scope_bytes(SERVER, &a.logical).unwrap();
+    assert!(
+        store
+            .read_scoped_draft_archive_plain(&scope)
+            .unwrap()
+            .is_none(),
+        "a refused write must leave no record behind"
+    );
+}
+
 #[test]
 fn draft_archive_of_a_frame_branch_round_trips_through_real_storage() {
     // The replication round trip uses header edits. Frame operations carry a CID and a declared

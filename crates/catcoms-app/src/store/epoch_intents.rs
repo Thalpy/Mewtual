@@ -24,6 +24,12 @@ pub(super) const MAX_SEALED_BYTES: usize = MAX_RECORD_BYTES + 40;
 /// Conservative vault-wide intent ceiling: sealed final files PLUS unpublished siblings and the
 /// full replacement copy at peak. Framing counts too; this is stricter than a payload-only cap.
 pub const MAX_VAULT_INTENT_BYTES: u64 = 64 * 1024 * 1024;
+/// A share of [`MAX_VAULT_INTENT_BYTES`], never an addition to it. One archive can approach
+/// 6 MiB, so this admits two at their derived maximum and about three at the shape a branch that
+/// fit a live record can actually reach. Refusing a further archive is safe: the branch stays
+/// retained, export stays available and no preservation claim is made. It is a storage policy to
+/// revisit after measurement, not a consequence of the format.
+pub(in crate::store) const MAX_VAULT_DRAFT_ARCHIVE_BYTES: u64 = 16 * 1024 * 1024;
 
 pub(super) mod inspection;
 pub(super) mod overlay;
@@ -159,6 +165,11 @@ pub struct EpochIntentBudget {
     // past the scanner's rail; the coordinator must also admit the other families' metadata.
     record_slots: usize,
     bytes: u64,
+    // Preserved draft archives are charged in `bytes` like everything else in this class, and
+    // additionally tallied here so they can have a sub-cap of their own. A single archive can
+    // approach 6 MiB, so without one a few of them would occupy most of the vault-wide intent
+    // ceiling and starve ordinary editing. This is a share of that ceiling, never an addition.
+    archive_bytes: u64,
     ready: bool,
 }
 
@@ -198,6 +209,7 @@ impl EpochIntentBudget {
         }
         let mut records = BTreeMap::new();
         let mut bytes = 0u64;
+        let mut archive_bytes = 0u64;
         // The Intents accounting class, not the Intents physical family: preserved draft archives
         // are their own record kind but charge records, record slots and bytes here, against the
         // same vault-wide ceiling. Their ids derive from a different scope domain, so an archive
@@ -207,15 +219,30 @@ impl EpochIntentBudget {
             bytes = bytes
                 .checked_add(size)
                 .ok_or_else(|| invalid("vault intent limit reached"))?;
+            if entry.kind == super::epoch_recovery::inventory::EpochRecordKind::DraftArchive {
+                archive_bytes = archive_bytes
+                    .checked_add(size)
+                    .ok_or_else(|| invalid("vault draft archive limit reached"))?;
+            }
             records.insert(entry.record.id, size);
         }
         for orphan in inventory.orphans().filter(|o| o.kind().intent_class()) {
             bytes = bytes
                 .checked_add(orphan.bytes())
                 .ok_or_else(|| invalid("vault intent limit reached"))?;
+            // An abandoned archive temporary occupies the sub-cap until cleanup reclaims it,
+            // exactly as it occupies the class total.
+            if orphan.kind() == super::epoch_recovery::inventory::EpochRecordKind::DraftArchive {
+                archive_bytes = archive_bytes
+                    .checked_add(orphan.bytes())
+                    .ok_or_else(|| invalid("vault draft archive limit reached"))?;
+            }
         }
         if bytes > MAX_VAULT_INTENT_BYTES {
             return Err(invalid("vault intent limit reached"));
+        }
+        if archive_bytes > MAX_VAULT_DRAFT_ARCHIVE_BYTES {
+            return Err(invalid("vault draft archive limit reached"));
         }
         Ok(Self {
             generation: inventory.intent_generation.clone(),
@@ -226,8 +253,33 @@ impl EpochIntentBudget {
                     .count(),
             records,
             bytes,
+            archive_bytes,
             ready: true,
         })
+    }
+
+    /// Observed physical occupancy of preserved draft archives, a share of [`Self::bytes`].
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "read by the archive writer's tests and by the disposition surface that \
+        lands next; the sub-cap it reports is enforced in preflight_draft_archive"
+        )
+    )]
+    pub(in crate::store) fn archive_bytes(&self) -> u64 {
+        self.archive_bytes
+    }
+
+    /// Poison this budget before a write's first possible I/O, and restore it only once the
+    /// write has actually committed. Writers in other modules of this class need the same
+    /// discipline `write_prepared_intents` applies inline, without reaching into these fields.
+    pub(in crate::store) fn begin_write(&mut self) {
+        self.ready = false;
+    }
+    pub(in crate::store) fn end_write(&mut self, generation: Arc<()>) {
+        self.generation = generation;
+        self.ready = true;
     }
 
     /// Failed reconciliation leaves the old budget unusable. Scan again after cleanup; never
@@ -248,6 +300,45 @@ impl EpochIntentBudget {
     #[cfg(test)]
     pub(in crate::store) fn record_slots_for_test(&self) -> usize {
         self.record_slots
+    }
+
+    /// The class preflight plus the archive sub-cap. Both are checked before any reservation,
+    /// so a refusal costs nothing and leaves the branch and its existing archive untouched.
+    pub(in crate::store) fn preflight_draft_archive(
+        &mut self,
+        generation: &Arc<()>,
+        id: [u8; 32],
+        old: Option<u64>,
+        next: u64,
+        sync_only: bool,
+    ) -> Result<(), AppError> {
+        self.preflight(generation, id, old, next, sync_only)?;
+        if !sync_only
+            && self
+                .archive_bytes
+                .checked_sub(old.unwrap_or(0))
+                .and_then(|n| n.checked_add(next))
+                .is_none_or(|peak| peak > MAX_VAULT_DRAFT_ARCHIVE_BYTES)
+        {
+            return Err(invalid("vault draft archive limit reached"));
+        }
+        Ok(())
+    }
+
+    /// Book a completed archive write into both the class total and the archive tally. The class
+    /// fields move exactly as `write_prepared_intents` moves them; only the sub-tally is extra.
+    pub(in crate::store) fn commit_draft_archive(
+        &mut self,
+        id: [u8; 32],
+        old: Option<u64>,
+        next: u64,
+    ) {
+        if old.is_none() {
+            self.record_slots += 1;
+        }
+        self.records.insert(id, next);
+        self.bytes = self.bytes - old.unwrap_or(0) + next;
+        self.archive_bytes = self.archive_bytes - old.unwrap_or(0) + next;
     }
 
     fn preflight(

@@ -305,6 +305,29 @@ files. Formatting is now scoped with `-p`.
 I-5's precondition is now half met: the operation-CID test passes. M28 still requires the
 collector, so Agent 1's fail-closed `DraftArchive` reference arm stays as it is.
 
+### Slice 2 (continued): the archive writer, and a real bug the assertion caught
+
+| Item | State |
+|---|---|
+| `ServerStore::write_studio_draft_archive_with_io` | Built. One archive per document; a second **different** one is refused rather than replacing the first; an exact retry takes the sync-only path so an uncertain write repeats at capacity without a second record. Payload-to-scope binding enforced at the writer as well as at the collector, so a misplaced archive is never created rather than merely never trusted. |
+| Accounting | `EpochIntentBudget` gains an `archive_bytes` tally and `MAX_VAULT_DRAFT_ARCHIVE_BYTES` (16 MiB), a **share** of the 64 MiB class ceiling and never an addition. Abandoned archive temporaries occupy the sub-cap as they occupy the class total. Preflight before any reservation, both budgets poisoned before the first possible I/O, exactly as `write_prepared_intents` does. |
+| I-4 | `epoch_mutation_guard` still does not exist; the two archive writers remain in Agent 1's I-4 participant list. |
+
+**The static assertion fired on its first compile, and it was a real bug.** The design said slice 2
+would tie my replication-owned bound to Agent 1's app-side copy with a static assertion. Written,
+it immediately failed: the encoder's per-entry cost had grown by the 32-byte accepted envelope,
+which an archive must carry because an operation id binds identity and not body, so the seam's copy
+was **8 KiB below the encoder's real maximum** and would have refused a maximal archive at the
+reader. Two derivations plus an assertion is strictly worse than one derivation, so the app copy is
+deleted and the schema's own bound is the only one. This is the second time a constant mirrored for
+convenience turned out to be wrong; the first was the mirrored test constants in slice 1.
+
+**A design over-promise, corrected.** Section 6.5 says `write_draft_archive_for_test` "must be
+deleted when `write_studio_draft_archive_with_io` lands". That is wrong for the same reason the M19
+retirement was wrong: the fail-closed tests need to write payloads that are *not* valid archives,
+which the production writer will never do. The helper survives, narrowed to that purpose; the valid
+paths move to the real writer. Recorded here rather than silently kept.
+
 ### Shared-checkout conditions during slice 2
 
 The `catcoms-app` test build broke and recovered twice inside a single verification pass, from

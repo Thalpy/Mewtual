@@ -17,34 +17,32 @@
 use std::collections::BTreeSet;
 use std::io::Read;
 
-use catcoms_replication::checkpoint::MAX_CHECKPOINT_BYTES;
-use catcoms_replication::epoch::{MAX_INTENT_BYTES_PER_DOCUMENT, MAX_RECEIPT_BYTES};
+use std::sync::Arc;
+
 use catcoms_replication::studio::ContentId;
-use catcoms_replication::studio::MAX_STUDIO_OVERLAY_OPS;
 use catcoms_replication::LogicalDocument;
 
-use super::epoch_budget::{Footprint, StorageRecord};
+use super::epoch_budget::{
+    EpochStorageBudget, Footprint, Replacement, StorageRecord, StorageScope, WritePurpose,
+};
+use super::epoch_intents::EpochIntentBudget;
 use super::epoch_recovery::inventory::{is_link, regular_file};
 use super::epoch_recovery::AuthenticatedEpochFileBytes;
 use super::*;
 
 pub(super) const RECORD_DOMAIN: &[u8] = b"catcoms/epoch-draft-archive-store/v1";
 
-/// Fixed per-entry fields plus framing. Agent 2 ties this to the actual encoder with a static
-/// assertion when the payload lands; until then it is the conservative scan rail.
-const ARCHIVE_ENTRY_OVERHEAD_BYTES: usize = 128;
-/// Deliberately generous; Agent 2 tightens it against the real header.
-const ARCHIVE_HEADER_BYTES: usize = 2048;
-
-/// Header, the covering receipt, the seed checkpoint, a document's worth of operations, and
-/// per-entry overhead for a full overlay branch. Kept crate-internal because nothing outside the
-/// store needs it yet; widen it and re-export it from `store.rs` when the payload encoder that
-/// must satisfy it lands.
-pub(super) const MAX_DRAFT_ARCHIVE_PAYLOAD_BYTES: usize = ARCHIVE_HEADER_BYTES
-    + MAX_RECEIPT_BYTES
-    + MAX_CHECKPOINT_BYTES
-    + MAX_INTENT_BYTES_PER_DOCUMENT
-    + MAX_STUDIO_OVERLAY_OPS * ARCHIVE_ENTRY_OVERHEAD_BYTES;
+/// Taken from the payload schema rather than re-derived here.
+///
+/// The seam carried its own copy of this derivation, with the note that Agent 2 would tie the two
+/// together with a static assertion once the encoder landed. The assertion was written and fired
+/// on its first compile: the encoder's per-entry cost had grown by the 32-byte accepted envelope,
+/// which an archive must carry because an operation id binds identity and not body, so the copy
+/// here was 8 KiB short of the real maximum and would have refused a maximal archive at the
+/// reader. Two derivations plus an assertion is strictly worse than one derivation, so the copy
+/// is gone and the schema's own bound is the only one.
+pub(super) const MAX_DRAFT_ARCHIVE_PAYLOAD_BYTES: usize =
+    catcoms_replication::studio::MAX_STUDIO_DRAFT_ARCHIVE_BYTES;
 const MAX_DRAFT_ARCHIVE_RECORD_BYTES: usize = MAX_DRAFT_ARCHIVE_PAYLOAD_BYTES + 1024;
 /// About 6 MiB + 35 KiB, deliberately larger than the intent record's 5 MiB + 1024: the archive is
 /// its own record kind and was never obliged to obey the intent cap. Recovery remains the largest
@@ -93,14 +91,6 @@ impl ServerStore {
 
     /// The same read through the canonical path, with the parent-directory check the addressed
     /// intent reader performs.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "Agent 2's writer and release path are \
-        the first production callers; the seam is exercised by its own tests today"
-        )
-    )]
     pub(in crate::store) fn read_scoped_draft_archive_plain(
         &self,
         scope: &[u8],
@@ -144,6 +134,121 @@ pub(super) fn storage_record(
             ..Footprint::default()
         },
     })
+}
+
+impl ServerStore {
+    /// Persist one preserved draft archive for a logical document.
+    ///
+    /// At most one archive exists per document: a second, different one is refused rather than
+    /// replacing the first, because overwriting preserved evidence to make room for other
+    /// preserved evidence is the one thing this record must never do. Releasing the existing
+    /// archive is a separate, explicitly confirmed action.
+    ///
+    /// An exact retry of the same archive takes the sync-only path, so an uncertain write can be
+    /// repeated without needing replacement headroom and without a second record.
+    ///
+    /// This writes the archive alone. The disposal transaction that removes the branch is a
+    /// separate accounted replacement of the intent record, and it runs only after this one has
+    /// returned durably: evidence first, removal second.
+    #[allow(clippy::too_many_arguments)]
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "the disposal transaction is this writer's first production caller and \
+        lands next; its own tests exercise it today"
+        )
+    )]
+    pub(in crate::store) fn write_studio_draft_archive_with_io(
+        &mut self,
+        server: u64,
+        document: &LogicalDocument,
+        archive: &catcoms_replication::studio::StudioDraftArchive,
+        rng: &mut impl CryptoRngCore,
+        budget: &mut EpochStorageBudget,
+        intents: &mut EpochIntentBudget,
+        writer: impl FnOnce(&Path, &[u8]) -> Result<(), AppError>,
+        sync: impl FnOnce(&Path, u64) -> Result<(), AppError>,
+    ) -> Result<(), AppError> {
+        // Bind the payload to the record it is about to occupy, at the writer as well as at the
+        // reader. The collector refuses a mismatch on the way out; refusing it here means one
+        // was never created.
+        if archive.document() != document {
+            return Err(invalid("draft archive names another logical document"));
+        }
+        let scope = scope_bytes(server, document)?;
+        let storage_scope = StorageScope::new(server, &document.server_id).map_err(invalid)?;
+        let id = *blake3::hash(&scope).as_bytes();
+        let payload = archive.encode().map_err(invalid)?;
+
+        let existing = self.read_scoped_draft_archive_plain(&scope)?;
+        let old = existing.as_ref().map(|r| r.physical_bytes);
+        let observed = old
+            .map(|n| storage_record(server, document, &scope, n))
+            .transpose()?;
+        budget
+            .verify_record(&storage_scope, id, observed)
+            .map_err(invalid)?;
+
+        let mut plain = Encoder::new();
+        plain.put_bytes(&scope).map_err(invalid)?;
+        plain.put_bytes(&payload).map_err(invalid)?;
+        let plain = Zeroizing::new(plain.finish());
+        if plain.len() > MAX_DRAFT_ARCHIVE_RECORD_BYTES {
+            return Err(invalid("record exceeds its bound"));
+        }
+
+        if let Some(record) = existing {
+            // Same archive, already durable: this is a retry, not a second preservation.
+            if record.plain.as_slice() == plain.as_slice() {
+                let bytes = old.expect("an observed record has a physical size");
+                intents.preflight_draft_archive(&self.intent_generation, id, old, bytes, true)?;
+                let reservation = budget
+                    .reserve_sync(&storage_scope, observed.expect("observed record"))
+                    .map_err(invalid)?;
+                intents.begin_write();
+                self.intent_generation = Arc::new(());
+                sync(&self.epoch_draft_archive_path(&scope), bytes)?;
+                reservation.commit();
+                intents.end_write(self.intent_generation.clone());
+                return Ok(());
+            }
+            return Err(invalid(
+                "a different draft archive is already preserved for this document; release it \
+                 explicitly before preserving another",
+            ));
+        }
+
+        let next = plain.len() as u64 + 40;
+        intents.preflight_draft_archive(&self.intent_generation, id, old, next, false)?;
+        let record = storage_record(server, document, &scope, next)?;
+        let reservation = budget
+            .reserve(
+                &storage_scope,
+                Replacement {
+                    record,
+                    scratch_bytes: 0,
+                    purpose: WritePurpose::Ordinary,
+                },
+            )
+            .map_err(invalid)?;
+        let sealed = match self.keys.db_key().and_then(|key| seal(&key, &plain, rng)) {
+            Ok(sealed) => sealed,
+            Err(error) => {
+                reservation.cancel_before_write();
+                return Err(error.into());
+            }
+        };
+        // Poison both budgets before any I/O, including a caught panic, exactly as the intent
+        // writer does: a failed or uncertain write must not leave either usable.
+        intents.begin_write();
+        self.intent_generation = Arc::new(());
+        writer(&self.epoch_draft_archive_path(&scope), &frame(&sealed))?;
+        reservation.commit();
+        intents.commit_draft_archive(id, old, next);
+        intents.end_write(self.intent_generation.clone());
+        Ok(())
+    }
 }
 
 /// One archive's accounting record and the conservative reference set it keeps alive.
