@@ -348,6 +348,13 @@ impl HandoffRuntime {
 
     /// Whether the rail scan ran. It advances the cursor, and nothing else does, so an unchanged
     /// cursor means the probe returned before reading any intent body.
+    /// The raw capacity retry. `wake_in` cannot witness it once a job exists, because that takes
+    /// the live-job branch and never looks here.
+    #[cfg(test)]
+    pub(super) fn probe_retry_for_test(&self) -> Option<u64> {
+        self.probe_retry_at
+    }
+
     #[cfg(test)]
     pub(super) fn selection_for_test(&self) -> usize {
         self.selection
@@ -424,7 +431,14 @@ impl StudioReceiver {
         store: &mut ServerStore,
         id: u64,
     ) {
+        // A capacity retry is owed only because an eligible target could not get a permit. Where
+        // there is no eligible target it has outlived its reason, and because it is global rather
+        // than per-target nothing else would ever consume it: `probe_due` would keep reporting
+        // work while this returns immediately, holding the receiver at its active cadence for
+        // ever. Every path out of this function that is not the retry's own gate therefore
+        // consumes it, which is what makes "due implies the next probe does something" true.
         if self.handoff.busy() || self.watches.is_empty() {
+            self.handoff.probe_retry_at = None;
             return;
         }
         let now = server.runtime_clock().monotonic_ms();
@@ -450,6 +464,9 @@ impl StudioReceiver {
             .iter()
             .any(|t| !self.handoff.is_quiet(&generation, *t) && !self.handoff.held(*t, now))
         {
+            // Same reason as the empty rail above: nothing here could use a permit, so a capacity
+            // retry has nothing left to be owed to.
+            self.handoff.probe_retry_at = None;
             return;
         }
         // The gate half of that retry. Recording a deadline the probe itself never reads is the

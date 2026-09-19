@@ -1304,10 +1304,42 @@ the timeout measured at the branch head, and its text is pool-related. It should
 a possible second, distinct defect rather than assumed to be the same hang, and it cannot speak to
 head-SHA causality because it is a different tree.
 
+### The sixth review: one termination defect, and a claim that overstated itself
+
+The pause-transition P1 closed, and both halves of FLOWH-004-R1 closed. One finding survived.
+
+**FLOWH-004-R2, P2: an expired capacity retry could outlive its own reason.** `probe_retry_at` is
+global, not per-target, so unlike `next_at` nothing filters it by the current rail. It is owed only
+because an eligible target could not get a permit — and if that target stops being watched before
+the deadline, `probe_due` keeps reporting work while `handoff_probe` returns immediately on the
+empty rail, holding the receiver at its active Studio cadence for ever with nothing a probe could
+do. No permit is stranded, which separates it from the earlier capacity strand, but permanent
+useless work is still a defect.
+
+My round-5 request asserted that every due state terminates through "a job, a future deadline, or
+the quiet memo". There is a fourth outcome — *the condition that justified the retry ceased to
+exist* — and nothing consumed it. Every exit from `handoff_probe` that is not the retry's own gate
+now clears it, which makes the real invariant true: **`probe_due` true implies the next probe
+either attempts capacity, arms another future gate, or consumes the state.**
+
+| Mutation | Effect |
+|---|---|
+| M47: empty rail does not consume the retry | "an expired capacity retry survived the disappearance of every eligible target" |
+| M48: success does not clear the retry | `left: Some(3000), right: None` |
+
+**M48 only works because the oracle moved.** The round-5 assertion routed this claim through
+`wake_in`, which takes its live-job branch once a job exists and never looks at `probe_retry_at` —
+so it would have stayed green with the clear deleted. It now asserts on the retry directly. That is
+the fourth assertion in this work that proved nothing until a mutant was run against it, and the
+reviewer found this one by reading rather than by running.
+
+**Item 6's wording was also wrong and is corrected below.** "Bounded rather than unbounded" was an
+overstatement: rail filtering bounds the *scheduling* impact, not the *retained state*.
+
 **Still open.** The list has been incomplete in every round: three when it should have been eight,
-eight when it should have been twelve, twelve again missing three findings, and then missing these
-two. What follows is what is known to be open, and is again not offered as a guarantee of
-completeness.
+eight when it should have been twelve, twelve again missing three findings, then missing two, and
+then missing this one plus the overstated bound. What follows is what is known to be open, and is
+again not offered as a guarantee of completeness.
 
 1. **H1 and H5 each drain a full epoch-storage inventory under custody**, which design 6.1 does not
    put in H1 and which C-3's resumable cursor is meant to bound. The scheduled sequence is shipping
@@ -1320,9 +1352,13 @@ completeness.
    signing progress. One type change away from NEW-5's shape.
 5. **Design 7.3's `explicit_retry` relief is not wired to the handoff maps**, though the code
    comment cites 7.3's pacing as satisfied.
-6. **`quiet` is still never pruned** against the current watch rail, though `next_at` and `hold_ms`
-   now shed their entry whenever a target is memoised quiet, and no deadline for an unwatched
-   target can wake the actor. Bounded rather than unbounded.
+6. **Stale pacing state no longer wakes for an unwatched `next_at`, but `quiet`, `next_at` and
+   `hold_ms` still require pruning for bounded retained state.** The previous wording — "bounded
+   rather than unbounded" — overstated it, and the reviewer was right to reject it. A target that
+   is backed off and then becomes unwatched *before* it is ever successfully re-read and memoised
+   quiet keeps its `next_at` and `hold_ms` entries for ever; rail filtering stops that entry waking
+   the actor, but it does not remove it. Scheduling impact is bounded to the current rail;
+   retained memory across unlimited target churn is not.
 7. ~~An abandoned target is not re-probed on a timer.~~ **Closed by FLOWH-004-R1.** `wake_in` now
    publishes the earliest future `next_at` among rail targets when there is no job, so an
    abandoned target's backoff expiry wakes the actor. Restricting it to the rail is also what

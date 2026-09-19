@@ -1033,10 +1033,90 @@ async fn an_exhausted_pool_stops_the_probe_before_it_reads_any_intent_body() {
         receiver.handoff.stage_for_test().is_some(),
         "the probe did not recover once capacity returned"
     );
-    assert!(
-        receiver.handoff.wake_in(due, &rail).is_none(),
+    // Asserted on the retry itself, not through `wake_in`: once a job exists `wake_in` takes its
+    // live-job branch and never looks at `probe_retry_at`, so routing the claim through it would
+    // stay green with the clear deleted.
+    assert_eq!(
+        receiver.handoff.probe_retry_for_test(),
+        None,
         "the capacity retry outlived the reservation that succeeded"
     );
+    assert!(receiver.handoff.wake_in(due, &rail).is_none());
+}
+
+/// A capacity retry must not outlive the eligibility that justified it.
+///
+/// `probe_retry_at` is global rather than per-target, so unlike `next_at` nothing filters it by
+/// the current rail. It is owed only because an eligible target could not get a permit; if that
+/// target stops being watched before the deadline, the retry has outlived its reason and no other
+/// path consumes it. `probe_due` would then report work for ever while `handoff_probe` returns
+/// immediately on the empty rail, holding the receiver at its active Studio cadence with nothing
+/// a probe could possibly do. No permit is stranded, which is what separates this from the
+/// capacity strand, but permanent useless work is still a defect.
+///
+/// The invariant is: `probe_due` true implies the next probe either attempts capacity, arms
+/// another future gate, or consumes the state. Every exit that is not the retry's own gate
+/// therefore clears it.
+#[tokio::test]
+async fn a_capacity_retry_does_not_outlive_the_watch_that_justified_it() {
+    let clock = ManualClock::new(1000);
+    let mut rng = ChaCha20Rng::seed_from_u64(2003);
+    let mut server = Server::found(
+        Hub::new().join(PeerId::from_u64(1)),
+        MlsDevice::generate().unwrap(),
+        rng.clone(),
+        Box::new(clock.clone()),
+        "owner",
+    )
+    .unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let mut store = ServerStore::open(root.path(), b"flow-h-stale-retry", &mut rng).unwrap();
+    let target = StudioTarget::Flipnote {
+        channel: crate::channel_id("general").to_be_bytes(),
+        object: [25; 16],
+    };
+    server.sync.with_registry_context(|g, d, _, _| {
+        crate::store::studio_handoff_ready_fixture(&mut store, 91, g, d, target, 1)
+    });
+    let mut receiver = StudioReceiver::default();
+    receiver
+        .run(
+            &mut server,
+            &mut store,
+            91,
+            Some(StudioRequest::Read { target }),
+        )
+        .unwrap();
+    let pool = receiver.catchup.inject_overlay_pool_for_test(4);
+
+    // An eligible target that cannot get a permit: the only state that owes a capacity retry.
+    let taken: Vec<_> = (0..4)
+        .map(|_| pool.clone().try_acquire_owned().expect("a free slot"))
+        .collect();
+    receiver.run(&mut server, &mut store, 91, None).unwrap();
+    assert!(
+        receiver.handoff.probe_retry_for_test().is_some(),
+        "no capacity retry was recorded, so this proves nothing"
+    );
+
+    // The watch goes away before the deadline, as ordinary subscription churn makes it.
+    receiver.watches.clear();
+    drop(taken);
+
+    // Past the deadline, one turn must settle it rather than leaving it due for ever.
+    clock.advance_ms(5_000);
+    receiver.run(&mut server, &mut store, 91, None).unwrap();
+    let now = server.runtime_clock().monotonic_ms();
+    assert!(
+        !receiver.handoff.probe_due(now, &[]),
+        "an expired capacity retry survived the disappearance of every eligible target, so the \
+         receiver reports work for ever while the probe returns immediately"
+    );
+    assert!(
+        !receiver.pending(&server),
+        "the receiver is permanently pending with no watch and nothing a probe could do"
+    );
+    assert_eq!(receiver.handoff.probe_retry_for_test(), None);
 }
 
 /// Design 6.1's M4: H3 reauthenticates the wrappers before the first `sign_next` of a visit.
