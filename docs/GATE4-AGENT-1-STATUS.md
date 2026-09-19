@@ -1336,6 +1336,19 @@ reviewer found this one by reading rather than by running.
 **Item 6's wording was also wrong and is corrected below.** "Bounded rather than unbounded" was an
 overstatement: rail filtering bounds the *scheduling* impact, not the *retained state*.
 
+### FLOWH-004-R3: PASS
+
+The seventh review returned **PASS / CLOSED** on `636cc58`, having derived the termination
+invariant from source rather than accepting it: with no live job the scheduler has two mutually
+exclusive modes, the capacity gate's and the rail's, and `handoff_probe` exhausts every reachable
+exit. It also confirmed the precedence cannot starve a target — a target hidden behind the gate
+could not have proceeded during those failed capacity attempts anyway — and that the residual
+`try_acquire` fairness question belongs to the existing shared-pool model rather than to this
+change.
+
+Two omissions from the open list were found and are restored as items 9 and 10 below. Neither is
+a new defect; both are things that had been disclosed and then lost.
+
 ### The seventh review: two deadline systems disagreeing
 
 FLOWH-004-R2 closed on both counts. One finding survived, and it is the same shape at one more
@@ -1410,6 +1423,19 @@ completeness.
    which still enters the synchronous `resolve_studio_handoff_with_io` backstop under custody.
    Flow R is what removes that, and Flow R is not started. Noted by the third review; it is
    excluded from this round's claim but must not disappear from the later custody review.
+9. **`next_token` uses `saturating_add(1)`**, so at `u64::MAX` every subsequent job takes the same
+   token and the routing added for NEW-10 stops distinguishing jobs. Unreachable at any real
+   scale. **This item was disclosed in an earlier round and then silently vanished when the list
+   was renumbered** — not fixed, not withdrawn, just lost, and the reviewer had to notice its
+   absence. It is restored here for that reason as much as for the defect.
+10. **`handoff_complete`'s mis-targeted `Prepared` and `Assembled` arms have no direct coverage.**
+    The superseded-completion regression exercises `Cancelled` only. Test debt rather than a
+    defect, previously disclosed and also absent from the renumbered list.
+
+**On the renumbering.** Items 9 and 10 were both lost the same way: the list was rewritten as
+prose each round rather than maintained, so an entry that was not part of that round's narrative
+simply did not get carried. That is a worse failure than an incomplete list, because it looks like
+progress. Entries are now only removed with an explicit "closed by" line, as items 3, 4 and 7 have.
 
 The two coverage debts that were items 3 and 4 in the previous revision are now closed, both by
 tests that were checked against a deliberately broken build before being trusted:
