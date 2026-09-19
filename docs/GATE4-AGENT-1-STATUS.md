@@ -1336,6 +1336,45 @@ reviewer found this one by reading rather than by running.
 **Item 6's wording was also wrong and is corrected below.** "Bounded rather than unbounded" was an
 overstatement: rail filtering bounds the *scheduling* impact, not the *retained state*.
 
+## Flow H checkpoint: accepted at `636cc58`
+
+> **The source-level PASS is bound to `636cc58dfcaca5d1e10d7b3400b9e8cafe237efe` and to nothing
+> later.** `ed4ba50` restores two lost open items and touches no Flow H code, but it was not
+> inspected by the reviewer and the PASS is not extended to it by assertion. Any later commit on
+> this branch — mine or Agent 2's — is outside it.
+
+| | |
+|---|---|
+| **Flow H H1–H6** | implemented; correction chain through FLOWH-004-R3 **closed** |
+| **Known Flow H residuals** | ten, all disclosed below, nonblocking for this checkpoint |
+| **Separate defects** | the owner-return branch-head hang, and the `db2798c` merge-checkout reserved-slot assertion — two independent investigations, not one |
+| **Not accepted or implemented** | Flow R, I-4, C-3, all eight §13 measurements, native exposure and Agent 2's P5 |
+
+### What seven rounds of review actually found
+
+Almost none of it was algorithmic. Every serious failure was **two representations of the same
+scheduling fact drifting apart**:
+
+| | |
+|---|---|
+| gate vs wake | a hold the commit arm never read; a deadline the driver never woke for |
+| owner vs waiter | a worker outliving the job that spawned it; a pause whose release needed the turn the pause prevented |
+| job vs completion | a completion routed by target rather than by the job that asked for it |
+| deadline class vs deadline class | a per-target hold and a global capacity gate each claiming to be authoritative |
+| one fact, two reads | `pending` and `wake_in` sampling the clock separately |
+
+For the remaining work the instruction to myself is to look for that shape *first*, before looking
+for conventional bugs. It is also why `pending` and `wake_in` no longer exist as a separately
+sampled pair in production, and why `hold` was deleted rather than fixed: the cheapest way to stop
+two representations drifting is to stop there being two.
+
+### Sequencing: I-4 and C-3 are one boundary, and they come before Flow R
+
+C-3's cross-visit inventory cursor depends on I-4 making its invalidation token trustworthy, so
+they are a coupled unit rather than two items. Flow R must not be built on the current unbounded
+inventory path and then split again afterwards — open items 1, 2 and 8 are all that same custody
+problem, and R1 would add a fourth instance of it.
+
 ### FLOWH-004-R3: PASS
 
 The seventh review returned **PASS / CLOSED** on `636cc58`, having derived the termination
