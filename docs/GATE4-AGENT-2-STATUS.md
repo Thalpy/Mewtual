@@ -344,6 +344,30 @@ Low items also done: the stale helper and module comments, which had already mis
 the status "Not yet built" list. The retirement rule the reviewer extracted is recorded as **R-1**
 in the design.
 
+### Verified: `intent_class()` for `DraftArchive` is safe for the preservation guarantee
+
+Agent 1 flagged this as the one decision it made on Agent 2's behalf that is not obviously
+reversible, and asked for it to be checked rather than assumed. Checked in source:
+
+- `intent_class()` governs exactly two things: budget accounting in `EpochIntentBudget::
+  from_inventory`, which is what Agent 2 wants, and coverage gating in `storage_name`. It reaches
+  **no deletion or retirement path**.
+- Nothing retires a final record *by family*. Retirement in this codebase removes **ledger
+  entries inside the intents record** (`remove_receipted`, `remove_to_manual_recovery`) through
+  `retire_included_with_io`, which addresses `epoch_intent_path` alone. An archive is a separate
+  record with no ledger entries, so intent retirement cannot reach it by construction.
+- Cleanup unlinks only `RecoveryName::Temporary`. Its own comment: "Finals (including corrupt
+  ones) and unrelated staging families are not ours to remove."
+
+So a final archive has exactly one deleter: the release path, which does not exist yet. That is
+the correctness dependency already recorded above, now with its full weight: grandfathering makes
+release the only route back under the sub-cap, and this check confirms nothing else will ever
+remove an archive on its own.
+
+The one behaviour that *is* wanted from `intent_class()` on the cleanup side is that an abandoned
+archive **temporary** is reclaimable, which it is, and which the sub-cap's orphan accounting
+already assumes.
+
 ### Shared-checkout conditions during slice 2
 
 The `catcoms-app` test build broke and recovered twice inside a single verification pass, from
