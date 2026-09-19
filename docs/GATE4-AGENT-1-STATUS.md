@@ -1336,10 +1336,52 @@ reviewer found this one by reading rather than by running.
 **Item 6's wording was also wrong and is corrected below.** "Bounded rather than unbounded" was an
 overstatement: rail filtering bounds the *scheduling* impact, not the *retained state*.
 
+### The seventh review: two deadline systems disagreeing
+
+FLOWH-004-R2 closed on both counts. One finding survived, and it is the same shape at one more
+remove: not two readings of one deadline, but two independent deadline classes.
+
+**FLOWH-004-R3, P2: a due target hold could bypass a future capacity gate.** `handoff_probe`'s
+capacity gate sits *after* its eligibility test, so a target whose own hold had expired passed the
+eligibility test and then returned at the gate — while `probe_due` reported it. The two-second
+pacing throttled the `try_acquire` correctly and paced the receiver not at all: for the whole
+capacity wait the actor stayed on its active Studio cadence taking turns that could only return.
+
+The invariant I offered to close R2 was therefore still false. The fix is the reviewer's
+precedence rule: while `probe_retry_at` exists it dominates every per-target deadline, in
+`probe_due` *and* in `wake_in`'s no-job branch, because that is exactly what the gate does.
+
+| Mutation | Effect |
+|---|---|
+| M49: `probe_due` loses the precedence | "an expired target hold reported due underneath a future capacity gate" |
+| M50: `wake_in` loses the precedence | `left: Some(1000), right: Some(2000)` — the unnecessary intermediate wake |
+| M51: the no-eligible-target exit does not clear | `left: Some(3000), right: None` |
+
+**M50 passed at first, and the reason is worth keeping.** One target cannot exercise it: the probe
+only arms a gate when something is eligible, and an eligible target's own deadline has by then
+expired, which `wake_in` filters out either way. It takes a *second* watched target held 30 s out
+with the gate armed at 29 s, so the target deadline falls inside the gate. The reviewer predicted
+this shape before the test existed.
+
+**M51 was the reviewer's, entirely.** `handoff_probe` has two pre-capacity exits and only the
+empty-rail one was guarded; a mutant deleting the other's clear passed both existing tests. The
+new test took two attempts: driving it through `run` never reached the probe, because
+`background_step` gates it behind `replay_ready` and the two-target fixture does not satisfy that.
+It now calls `handoff_probe` directly, since the claim is about what that function does at that
+exit rather than which scheduler turn reaches it.
+
+That is five assertions in this work that proved nothing until a mutant ran against them, two of
+them found by reading rather than running. The mutation step is not optional.
+
+**Evidence caveat.** Agent 2 now commits to this branch (`0287910`), so full-suite counts include
+their work. 668 passed / 0 failed is honest for my tests and is no longer a clean isolation of my
+changes.
+
 **Still open.** The list has been incomplete in every round: three when it should have been eight,
-eight when it should have been twelve, twelve again missing three findings, then missing two, and
-then missing this one plus the overstated bound. What follows is what is known to be open, and is
-again not offered as a guarantee of completeness.
+eight when it should have been twelve, twelve again missing three findings, then missing two, then
+missing one plus an overstated bound, and then missing the precedence defect and the unguarded
+clear site. What follows is what is known to be open, and is again not offered as a guarantee of
+completeness.
 
 1. **H1 and H5 each drain a full epoch-storage inventory under custody**, which design 6.1 does not
    put in H1 and which C-3's resumable cursor is meant to bound. The scheduled sequence is shipping

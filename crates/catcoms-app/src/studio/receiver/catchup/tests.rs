@@ -1044,6 +1044,206 @@ async fn an_exhausted_pool_stops_the_probe_before_it_reads_any_intent_body() {
     assert!(receiver.handoff.wake_in(due, &rail).is_none());
 }
 
+/// The other pre-capacity exit: a rail that is not empty but has nothing the probe may inspect.
+///
+/// `handoff_probe` has two exits before the capacity gate — an empty or busy rail, and a rail
+/// where every target is quiet or still held. Both must consume the capacity retry, for the same
+/// reason: it is owed only to an eligible target that could not get a permit. The empty-rail exit
+/// is covered; this one was not, and a mutant deleting only its clear passed the other two tests.
+#[tokio::test]
+async fn a_rail_with_nothing_eligible_also_consumes_the_capacity_retry() {
+    let clock = ManualClock::new(1000);
+    let mut rng = ChaCha20Rng::seed_from_u64(2213);
+    let mut server = Server::found(
+        Hub::new().join(PeerId::from_u64(1)),
+        MlsDevice::generate().unwrap(),
+        rng.clone(),
+        Box::new(clock.clone()),
+        "owner",
+    )
+    .unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let mut store = ServerStore::open(root.path(), b"flow-h-noneligible", &mut rng).unwrap();
+    let eligible = StudioTarget::Flipnote {
+        channel: crate::channel_id("general").to_be_bytes(),
+        object: [29; 16],
+    };
+    let paced = StudioTarget::Flipnote {
+        channel: crate::channel_id("general").to_be_bytes(),
+        object: [30; 16],
+    };
+    server.sync.with_registry_context(|g, d, _, _| {
+        crate::store::studio_handoff_ready_fixture(&mut store, 93, g, d, eligible, 1);
+        crate::store::save_studio_source_fixture(&mut store, 93, g, d, paced)
+    });
+    let mut receiver = StudioReceiver::default();
+    for t in [eligible, paced] {
+        receiver
+            .run(
+                &mut server,
+                &mut store,
+                93,
+                Some(StudioRequest::Read { target: t }),
+            )
+            .unwrap();
+    }
+    let pool = receiver.catchup.inject_overlay_pool_for_test(4);
+
+    // `paced` is held far out; `eligible` is what lets the probe reach the reservation.
+    let start = server.runtime_clock().monotonic_ms();
+    receiver.handoff.hold_target_for_test(paced, start);
+
+    let taken: Vec<_> = (0..4)
+        .map(|_| pool.clone().try_acquire_owned().expect("a free slot"))
+        .collect();
+    receiver.run(&mut server, &mut store, 93, None).unwrap();
+    assert!(
+        receiver.handoff.probe_retry_for_test().is_some(),
+        "no capacity retry was recorded, so this proves nothing"
+    );
+
+    // The eligible target stops being watched. The rail is still non-empty, but everything left
+    // on it is held, so the probe now exits at its eligibility test rather than the empty-rail
+    // check — a different line, with the same obligation.
+    receiver.watches.retain(|(w, _)| w.target != eligible);
+    assert!(
+        !receiver.watches.is_empty(),
+        "this must not be the empty-rail case"
+    );
+    drop(taken);
+
+    clock.advance_ms(5_000);
+    // The probe is called directly. `background_step` only reaches it behind `replay_ready`, and
+    // the claim under test is about what this function does at that exit, not about which
+    // scheduler turn happens to reach it.
+    receiver.handoff_probe(&mut server, &mut store, 93);
+    let now = server.runtime_clock().monotonic_ms();
+    assert_eq!(
+        receiver.handoff.probe_retry_for_test(),
+        None,
+        "a rail with nothing eligible left the capacity retry owed to a target it no longer has"
+    );
+    assert!(!receiver.handoff.probe_due(now, &[paced]));
+}
+
+/// Two deadline systems, one gate. The capacity retry has to dominate per-target pacing.
+///
+/// A target whose own hold has expired is due, and `handoff_probe` reaches its eligibility test
+/// and passes it — then returns at the capacity gate, which sits after that test and knows
+/// nothing about which target is due. So `probe_due` would report work the probe is not permitted
+/// to do, every turn, for the whole capacity wait: the two-second pacing throttles the
+/// `try_acquire` correctly and does not pace the receiver at all, which keeps the actor on its
+/// active Studio cadence taking turns that return immediately.
+///
+/// Not a strand, so not a P1. But it is the same gate/wake disagreement as everything before it,
+/// this time between two independent deadline classes rather than between two readings of one.
+#[tokio::test]
+async fn a_future_capacity_gate_suppresses_an_expired_target_hold() {
+    let clock = ManualClock::new(1000);
+    let mut rng = ChaCha20Rng::seed_from_u64(2111);
+    let mut server = Server::found(
+        Hub::new().join(PeerId::from_u64(1)),
+        MlsDevice::generate().unwrap(),
+        rng.clone(),
+        Box::new(clock.clone()),
+        "owner",
+    )
+    .unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let mut store = ServerStore::open(root.path(), b"flow-h-overlap", &mut rng).unwrap();
+    let target = StudioTarget::Flipnote {
+        channel: crate::channel_id("general").to_be_bytes(),
+        object: [27; 16],
+    };
+    server.sync.with_registry_context(|g, d, _, _| {
+        crate::store::studio_handoff_ready_fixture(&mut store, 92, g, d, target, 1)
+    });
+    let mut receiver = StudioReceiver::default();
+    receiver
+        .run(
+            &mut server,
+            &mut store,
+            92,
+            Some(StudioRequest::Read { target }),
+        )
+        .unwrap();
+    // A second watched target, so the rail can hold a target deadline that is still *future* while
+    // another target keeps the probe eligible. One target cannot do both: the probe only arms a
+    // capacity gate when something is eligible, and an eligible target's own deadline has by then
+    // expired, which `wake_in` filters out either way. That is why the first version of this test
+    // could not tell the two forms apart.
+    let held = StudioTarget::Flipnote {
+        channel: crate::channel_id("general").to_be_bytes(),
+        object: [28; 16],
+    };
+    server.sync.with_registry_context(|g, d, _, _| {
+        crate::store::save_studio_source_fixture(&mut store, 92, g, d, held)
+    });
+    receiver
+        .run(
+            &mut server,
+            &mut store,
+            92,
+            Some(StudioRequest::Read { target: held }),
+        )
+        .unwrap();
+    let pool = receiver.catchup.inject_overlay_pool_for_test(4);
+    let rail: Vec<_> = [target, held].to_vec();
+
+    // `held` is paced 30 s out; `target` stays eligible, which is what lets the probe reach the
+    // reservation at all.
+    let start = server.runtime_clock().monotonic_ms();
+    receiver.handoff.hold_target_for_test(held, start);
+    clock.advance_ms(29_000);
+
+    // Capacity is gone when the probe acts, so a two-second gate is armed *over* a target
+    // deadline that is only one second away.
+    let taken: Vec<_> = (0..4)
+        .map(|_| pool.clone().try_acquire_owned().expect("a free slot"))
+        .collect();
+    receiver.run(&mut server, &mut store, 92, None).unwrap();
+    let gate = receiver
+        .handoff
+        .probe_retry_for_test()
+        .expect("no capacity gate was armed, so this proves nothing");
+    let now = server.runtime_clock().monotonic_ms();
+    assert!(
+        now < start + 30_000 && start + 30_000 < gate,
+        "the target deadline is not inside the gate, so the overlap under test cannot arise"
+    );
+
+    // The actor must wait on the gate, not on the nearer target deadline it could not act on.
+    assert_eq!(
+        receiver.handoff.wake_in(now, &rail),
+        Some(gate - now),
+        "the actor is waiting on a target deadline that is earlier than the capacity gate, so it \
+         wakes for a turn that can only return at that gate"
+    );
+
+    // Past that target deadline but still under the gate: due must stay false.
+    clock.advance_ms(1_500);
+    let between = server.runtime_clock().monotonic_ms();
+    assert!(
+        between > start + 30_000 && between < gate,
+        "the clock is not between the two deadlines"
+    );
+    assert!(
+        !receiver.handoff.probe_due(between, &rail),
+        "an expired target hold reported due underneath a future capacity gate, so the receiver \
+         takes a turn that can only return at that gate"
+    );
+
+    // At the gate, and only then.
+    clock.advance_ms(gate - between);
+    let at = server.runtime_clock().monotonic_ms();
+    assert!(
+        receiver.handoff.probe_due(at, &rail),
+        "the capacity gate expired and nothing reported the work due"
+    );
+    assert!(receiver.handoff.wake_in(at, &rail).is_none());
+    drop(taken);
+}
+
 /// A capacity retry must not outlive the eligibility that justified it.
 ///
 /// `probe_retry_at` is global rather than per-target, so unlike `next_at` nothing filters it by

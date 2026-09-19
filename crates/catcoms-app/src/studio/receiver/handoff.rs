@@ -211,9 +211,14 @@ impl HandoffRuntime {
         // publish a zero delay every iteration while the probe memoises the target as quiet and
         // declines to act on it, which is a spin rather than a wake. Restricting to the rail also
         // keeps a deadline for a target that is no longer watched from waking the actor at all.
+        // Same precedence as `probe_due` and for the same reason. Without it a target deadline
+        // earlier than the capacity gate still wakes the actor for a turn that can only return at
+        // that gate, which is an unnecessary wake even once `probe_due` is right.
+        if let Some(at) = self.probe_retry_at {
+            return (now < at).then(|| at - now);
+        }
         rail.iter()
             .filter_map(|t| self.next_at.get(t))
-            .chain(self.probe_retry_at.iter())
             .filter(|at| now < **at)
             .map(|at| at - now)
             .min()
@@ -231,10 +236,17 @@ impl HandoffRuntime {
         if self.job.is_some() {
             return false;
         }
-        self.probe_retry_at.is_some_and(|at| now >= at)
-            || rail
-                .iter()
-                .any(|t| self.next_at.get(t).is_some_and(|at| now >= *at))
+        // The capacity gate **dominates** every per-target deadline while it stands, because
+        // `handoff_probe` returns at that gate regardless of which target is due. Reporting a
+        // target as due underneath it would be reporting work the probe is not permitted to do:
+        // the receiver would sit at its active cadence for the whole capacity wait, taking a turn
+        // that returns immediately, while the two-second pacing correctly throttled only the
+        // `try_acquire` and not the turns around it. Two deadline systems, disagreeing.
+        if let Some(at) = self.probe_retry_at {
+            return now >= at;
+        }
+        rail.iter()
+            .any(|t| self.next_at.get(t).is_some_and(|at| now >= *at))
     }
 
     fn remaining(&self) -> Option<usize> {
@@ -350,6 +362,12 @@ impl HandoffRuntime {
     /// cursor means the probe returned before reading any intent body.
     /// The raw capacity retry. `wake_in` cannot witness it once a job exists, because that takes
     /// the live-job branch and never looks here.
+    /// Record the per-target pacing a refused probe records, without contriving a refusal.
+    #[cfg(test)]
+    pub(super) fn hold_target_for_test(&mut self, target: StudioTarget, now: u64) {
+        self.hold_target(target, now);
+    }
+
     #[cfg(test)]
     pub(super) fn probe_retry_for_test(&self) -> Option<u64> {
         self.probe_retry_at
