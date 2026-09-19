@@ -908,6 +908,25 @@ exercises. What retires is the **name and the message assertion**, not the cover
   into an installed, known, incomplete pin set. Both are fail-closed paths that the whole-arm
   mutation passes straight through.
 
+> **R-1, the retirement rule.** Three times this design has said "X retires when Y lands" and
+> three times that was wrong: the A-1 accessor classification, M19, and the hand-sealer below.
+> The reviewer named the common root, and it is more specific than over-promising. The rule was
+> based on **implementation succession**, but the things being retired were not only
+> implementations: they also provided **unique state reachability or independent coverage**. A
+> successor that handles the valid case cannot, by construction, reach the malformed, legacy,
+> interrupted or hostile states its predecessor reached. A validating writer cannot produce
+> invalid input; that is what makes it a writer.
+>
+> So, before writing "X retires when Y lands", answer all five:
+>
+> 1. What states can X uniquely reach, including invalid and crash states?
+> 2. Can Y reach all of them? A validating production path usually cannot.
+> 3. Which mutation does X currently kill?
+> 4. Which successor test demonstrably kills that same mutation?
+> 5. Only then delete X.
+>
+> Applied to the case below, question 2 answers itself.
+
 `write_draft_archive_for_test`, Agent 1's `cfg(test)`, `pub(in crate::store)` hand-sealer, was
 originally specified here as deleted when `write_studio_draft_archive_with_io` lands. **That was
 wrong, for the same reason the M19 retirement was wrong.** The fail-closed tests need to write

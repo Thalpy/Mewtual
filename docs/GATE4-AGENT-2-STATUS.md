@@ -328,6 +328,22 @@ retirement was wrong: the fail-closed tests need to write payloads that are *not
 which the production writer will never do. The helper survives, narrowed to that purpose; the valid
 paths move to the real writer. Recorded here rather than silently kept.
 
+### Slice 2 review of `0287910`: three Medium corrections
+
+`f403a0a` **PASSED**: both collector fail-closed findings closed, the `seed()` accessor accepted,
+the M19 reclassification accepted. `0287910` returned CHANGES REQUIRED.
+
+| # | Finding | Correction |
+|---|---|---|
+| 1 | The archive sub-cap made `from_inventory` **fail**, which is self-locking: every accounted write needs a budget, so an over-cap vault would lose unrelated intent writes and the release that is the only way back under the cap | The check is removed from `from_inventory`. The class ceiling and the sub-cap differ in kind: one is a resource rail for a state this code cannot safely account for, the other an admission policy over a state that is perfectly accountable. Existing occupancy is grandfathered, growth refuses at admission. New regression proves an over-cap inventory still yields a usable budget, ordinary work continues, sync-only retry survives, growth refuses, and reduction restores admission. |
+| 2 | The sub-cap subtracted `old` before the physical write, contradicting the design's own claim that the peak and temporaries count | Corrected to the physical peak, `archive_bytes + next`, with the `old -> next` move left to commit. **The unit test that blessed the wrong model is rewritten**: a near-cap same-size non-sync replacement must now refuse, because the staged replacement and the record it replaces exist at once. |
+| 3a | The writer's *use* of the sub-cap was unanchored: the arithmetic test calls the helper directly and every writer test is far from 16 MiB | New test positions the tally near the cap with class headroom intact, so a refusal is attributable to the sub-cap alone. Note: the mutation the reviewer proposed, swapping in the ordinary class `preflight`, is **impossible** because that method is private to `epoch_intents`. The reachable mutation is passing `sync_only: true`, which skips the sub-cap; that fails the new test. |
+| 3b | N19 still installed its **valid** archive with the fault-injection helper, so writer to collector was compositional rather than end to end | N19 now retains the typed archive and persists it through the production writer. Proved by mutation: truncating the scope the writer emits breaks N19, which it could not have detected before. |
+
+Low items also done: the stale helper and module comments, which had already misled twice, and
+the status "Not yet built" list. The retirement rule the reviewer extracted is recorded as **R-1**
+in the design.
+
 ### Shared-checkout conditions during slice 2
 
 The `catcoms-app` test build broke and recovered twice inside a single verification pass, from
@@ -341,11 +357,21 @@ constraint the handoffs record about exhausted RAM and disk. The alternative of 
 1's file was also rejected: reverting a peer's work mid-edit could corrupt their session. The
 working answer is to retry and to report which signals could not be obtained.
 
+### Built so far
+
+The payload codec, the reference collector that narrows Agent 1's fail-closed arm under I-5, the
+archive record writer with its accounting and sub-cap, and the archive tally on
+`EpochIntentBudget`.
+
 ### Not yet built
 
-The app-side archive record writer and reader, the reference collector that narrows Agent 1's
-fail-closed arm (I-5), the release path, the disposal transaction, the v3 record arms, the
-composite copy capture, the lifecycle classifier, the tenure work and every native command.
+The archive release path, the disposal transaction (which is the writer's first production
+caller), the v3 record arms, the composite copy capture, the lifecycle classifier, the tenure
+work and every native command.
+
+**Sections above this point are an append-only ledger and are dated.** Where an earlier entry
+says something is not yet built, read it as the state at that entry's date, not as current
+state; this pair of lists is the current one.
 
 ## Test and CI evidence
 

@@ -9,10 +9,10 @@
 //!
 //! This module began as Agent 1's seam, landed ahead of Agent 2's implementation so that all
 //! three agents rebase onto one enum variant rather than each adding the same conceptual arm.
-//! The seam itself decoded nothing and failed every reference scan closed. The collector below
-//! narrows that refusal to an archive it cannot read. Still to come on top of this: the writer,
-//! the release path, the disposal transaction and the archive sub-cap. A vault with no archive
-//! file behaves exactly as it did before.
+//! The seam itself decoded nothing and failed every reference scan closed; the collector below
+//! narrows that refusal to an archive it cannot read, and the writer below persists one. Still
+//! to come on top of this: the release path and the disposal transaction, which is the writer's
+//! first production caller. A vault with no archive file behaves exactly as it did before.
 
 use std::collections::BTreeSet;
 use std::io::Read;
@@ -296,15 +296,23 @@ fn invalid(error: impl std::fmt::Display) -> AppError {
     AppError::Invalid(format!("epoch draft archive: {error}"))
 }
 
-/// Test-only fixture: seal and frame an archive file at its canonical path.
+/// Test-only fault injection: seal and frame an arbitrary body at an archive's canonical path.
 ///
-/// There is deliberately no production writer in this seam, so a fixture cannot call one. It
-/// bypasses nothing the seam validates: the scope comes from [`scope_bytes`], the sealing and
+/// **Not superseded by [`ServerStore::write_studio_draft_archive_with_io`], and not to be
+/// deleted in favour of it.** That writer validates what it persists, which is exactly why it
+/// cannot produce the states the reader's guards exist for: an undecodable payload, a canonical
+/// archive naming another document, a body whose seed no longer matches its receipt. A
+/// production writer's job is to never create those; this helper's job is to create them so the
+/// refusals can be proved. The two are complements, not successive versions of one thing.
+///
+/// Every VALID archive in the tests goes through the production writer. Use this only where the
+/// payload is deliberately malformed or misplaced.
+///
+/// It bypasses nothing the seam validates: the scope comes from [`scope_bytes`], the sealing and
 /// framing are the store's own, and the path is [`ServerStore::epoch_draft_archive_path`], so the
 /// filename grammar, filename-to-scope agreement, bound, framing, authentication, domain check and
 /// canonical scope re-derivation are all exercised for real. Only `body` is opaque, which is
-/// exactly what this family does not interpret. Delete this when Agent 2's writer lands and have
-/// the tests call that instead.
+/// exactly what this family does not interpret.
 #[cfg(test)]
 pub(in crate::store) fn write_draft_archive_for_test(
     store: &ServerStore,

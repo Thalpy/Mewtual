@@ -128,9 +128,12 @@ fn draft_archive_references_survive_a_complete_scan_as_the_sole_holder() {
     let (close, basis) = closing(&f, &mut store);
     let operation_cids = frame_branch(&f, &mut store, &close, &basis);
 
-    // The payload, taken while the live branch still exists.
+    // The archive itself, taken while the live branch still exists. Retained as the typed value
+    // rather than as bytes, so the production writer can persist it below: a valid archive must
+    // reach the collector through the real writer, or a framing, scope or layout regression in
+    // that writer would be invisible to this test.
     let state = store.load_epoch_intents(SERVER, &f.logical).unwrap();
-    let payload = StudioDraftArchive::from_branch(
+    let archive = StudioDraftArchive::from_branch(
         state.overlay().unwrap(),
         &state.ledger,
         StudioOverlayProvenance::Closing,
@@ -139,8 +142,6 @@ fn draft_archive_references_survive_a_complete_scan_as_the_sole_holder() {
         [4; 32],
         1,
     )
-    .unwrap()
-    .encode()
     .unwrap();
     let base_cids = state.overlay().unwrap().base_blob_cids().unwrap();
     drop(state);
@@ -169,15 +170,22 @@ fn draft_archive_references_survive_a_complete_scan_as_the_sole_holder() {
     }
     drop(pins);
 
-    // Now the archive is the sole holder.
-    crate::store::epoch_draft_archive::write_draft_archive_for_test(
-        &store,
-        SERVER,
-        &f.logical,
-        &payload,
-        &mut rng(),
-    )
-    .unwrap();
+    // Now the archive is the sole holder, persisted through the PRODUCTION writer so this test
+    // covers writer -> physical record -> collector -> pinning in one path.
+    let mut b = budget(&mut store, &f);
+    store
+        .write_studio_draft_archive_with_io(
+            SERVER,
+            &f.logical,
+            &archive,
+            &mut rng(),
+            &mut b.storage,
+            &mut b.intents,
+            atomic_write,
+            crate::store::epoch_intents::sync_intent,
+        )
+        .expect("the production writer must persist a valid archive");
+    drop(b);
     drop(store);
     let mut store = open(root.path());
     let pins = store.creative_pinned_cids().unwrap();
@@ -468,6 +476,68 @@ fn the_archive_writer_is_accounted_idempotent_and_refuses_to_overwrite_evidence(
         .unwrap()
         .unwrap();
     assert_eq!(after.plain.as_slice(), stored.plain.as_slice());
+}
+
+/// Finding 3a: the sub-cap's arithmetic is anchored in `epoch_intents::retirement`, but nothing
+/// proved the real writer consults it. Swapping the writer's `preflight_draft_archive` for the
+/// ordinary class `preflight` would leave that unit test passing, because it calls the sub-cap
+/// helper directly, and leave every other writer test passing, because none of them is anywhere
+/// near 16 MiB.
+///
+/// Position the tally near the cap instead of fabricating 16 MiB of genuine archives: the class
+/// total is untouched, so a refusal here is attributable to the sub-cap alone.
+#[test]
+fn the_archive_writer_refuses_at_the_sub_cap_not_the_class_ceiling() {
+    let root = tempfile::tempdir().unwrap();
+    let f = Fixture::new(true);
+    let mut store = open(root.path());
+    let (close, basis) = closing(&f, &mut store);
+    frame_branch(&f, &mut store, &close, &basis);
+
+    let state = store.load_epoch_intents(SERVER, &f.logical).unwrap();
+    let archive = StudioDraftArchive::from_branch(
+        state.overlay().unwrap(),
+        &state.ledger,
+        StudioOverlayProvenance::Closing,
+        true,
+        [3; 32],
+        [4; 32],
+        1,
+    )
+    .unwrap();
+    drop(state);
+
+    let mut b = budget(&mut store, &f);
+    assert!(
+        b.intents.bytes() < crate::store::epoch_intents::MAX_VAULT_INTENT_BYTES,
+        "the class ceiling must have room, or this proves nothing about the sub-cap"
+    );
+    b.intents.set_archive_bytes_for_test(
+        crate::store::epoch_intents::MAX_VAULT_DRAFT_ARCHIVE_BYTES - 16,
+    );
+    let refused = store.write_studio_draft_archive_with_io(
+        SERVER,
+        &f.logical,
+        &archive,
+        &mut rng(),
+        &mut b.storage,
+        &mut b.intents,
+        atomic_write,
+        crate::store::epoch_intents::sync_intent,
+    );
+    assert!(
+        refused.is_err(),
+        "the writer must consult the archive sub-cap, not only the class ceiling"
+    );
+    drop(b);
+    let scope = crate::store::epoch_draft_archive::scope_bytes(SERVER, &f.logical).unwrap();
+    assert!(
+        store
+            .read_scoped_draft_archive_plain(&scope)
+            .unwrap()
+            .is_none(),
+        "a write refused at the sub-cap must leave no record behind"
+    );
 }
 
 #[test]

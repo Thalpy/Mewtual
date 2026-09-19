@@ -241,9 +241,19 @@ impl EpochIntentBudget {
         if bytes > MAX_VAULT_INTENT_BYTES {
             return Err(invalid("vault intent limit reached"));
         }
-        if archive_bytes > MAX_VAULT_DRAFT_ARCHIVE_BYTES {
-            return Err(invalid("vault draft archive limit reached"));
-        }
+        // The archive sub-cap is deliberately NOT checked here, unlike the class ceiling above.
+        // The two differ in kind. The class ceiling is a resource rail for the whole accounting
+        // class, and a vault over it is in a state this code cannot safely account for. The
+        // sub-cap is an admission policy, and a vault holding more archive bytes than the policy
+        // currently admits is still perfectly accountable: its class total may be well under the
+        // ceiling, and nothing about the extra archives makes ordinary intents unsafe.
+        //
+        // Refusing construction here would be self-locking. Every accounted write needs a
+        // budget, so an over-cap vault would lose unrelated intent writes, and it would also
+        // lose the archive release that is the only way back under the cap. A policy number that
+        // can be revisited after measurement must never be able to strand a vault that was valid
+        // when its archives were written. Existing occupancy is grandfathered; growth is refused
+        // at admission, in `preflight_draft_archive`.
         Ok(Self {
             generation: inventory.intent_generation.clone(),
             record_slots: records.len()
@@ -302,6 +312,15 @@ impl EpochIntentBudget {
         self.record_slots
     }
 
+    /// Test-only: position the archive tally near its cap so a regression can prove the real
+    /// writer consults the archive sub-cap, without fabricating 16 MiB of genuine archives.
+    /// Only the sub-tally moves; the class total is left alone, so a refusal is attributable to
+    /// the sub-cap and not to the class ceiling.
+    #[cfg(test)]
+    pub(in crate::store) fn set_archive_bytes_for_test(&mut self, bytes: u64) {
+        self.archive_bytes = bytes;
+    }
+
     /// The class preflight plus the archive sub-cap. Both are checked before any reservation,
     /// so a refusal costs nothing and leaves the branch and its existing archive untouched.
     pub(in crate::store) fn preflight_draft_archive(
@@ -313,11 +332,17 @@ impl EpochIntentBudget {
         sync_only: bool,
     ) -> Result<(), AppError> {
         self.preflight(generation, id, old, next, sync_only)?;
+        // The PHYSICAL peak, not the resulting logical occupancy. A non-sync write stages its
+        // replacement beside the record it replaces, so both exist at once and `old` is not
+        // released until the rename commits. Subtracting `old` here would authorise a peak the
+        // sub-cap is supposed to cover, and a crash at that moment leaves the temporary as an
+        // orphan which the inventory then charges against the same cap. The class preflight
+        // above models the peak the same way; `commit_draft_archive` does the `old -> next`
+        // subtraction afterwards, once the write has actually landed.
         if !sync_only
             && self
                 .archive_bytes
-                .checked_sub(old.unwrap_or(0))
-                .and_then(|n| n.checked_add(next))
+                .checked_add(next)
                 .is_none_or(|peak| peak > MAX_VAULT_DRAFT_ARCHIVE_BYTES)
         {
             return Err(invalid("vault draft archive limit reached"));
