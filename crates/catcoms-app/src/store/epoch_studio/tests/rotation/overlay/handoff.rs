@@ -74,6 +74,291 @@ fn prepare(f: &Fixture, store: &mut ServerStore) -> (CloseRecord, [u8; 32], Stud
     (close, basis.fingerprint(), expected)
 }
 
+/// A clock that advances a fixed step on every read, so a slice deadline is crossed by
+/// construction rather than by hoping cheap and expensive operations fall either side of a
+/// wall-clock threshold. Design 7.3 requires the injected `Clock`, never `SystemClock`.
+#[derive(Debug)]
+struct SteppingClock {
+    ms: std::sync::atomic::AtomicU64,
+    step: u64,
+}
+
+impl catcoms_rt::Clock for SteppingClock {
+    fn now_ms(&self) -> u64 {
+        self.monotonic_ms()
+    }
+    fn monotonic_ms(&self) -> u64 {
+        self.ms
+            .fetch_add(self.step, std::sync::atomic::Ordering::SeqCst)
+            + self.step
+    }
+    fn sleep(
+        &self,
+        _: std::time::Duration,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + '_>> {
+        Box::pin(std::future::ready(()))
+    }
+}
+
+/// N31. Design 7.3's two distinct events, proven apart rather than inferred from "work remains".
+///
+/// A visit that returns with work left proves nothing on its own, because it may have deferred
+/// before signing anything. The discriminator is the remaining count at slice entry and exit: the
+/// core decrements it by exactly one per successful `sign_next`, so the difference is a count of
+/// signatures actually produced. Each of the four outcomes is asserted on that pair, and each
+/// limiter is exercised with the **other** one disabled so neither can stand in for it.
+#[test]
+fn studio_overlay_handoff_signing_slice_reports_yield_bound_and_completion_apart() {
+    use crate::store::epoch_studio::handoff_capture::{
+        MAX_SIGNING_TURNS_PER_VISIT, SIGNING_SLICE_BUDGET_MS,
+    };
+    let root = tempfile::tempdir().unwrap();
+    let f = Fixture::new(false);
+    let mut store = open(root.path());
+    let (basis, _) = performance::fixture(&f, &mut store, 40);
+    let records = canonical(&store);
+
+    let mut b = budget(&mut store, &f);
+    let capture = match store
+        .start_studio_handoff_with_io(
+            SERVER,
+            &f.group,
+            f.target,
+            &f.device,
+            basis,
+            Some(0),
+            &mut rng(),
+            &mut b,
+            &mut |_, p, bytes| atomic_write(p, bytes),
+            &mut flush,
+        )
+        .unwrap()
+    {
+        crate::store::epoch_studio::handoff::StudioHandoffStart::Captured(capture) => capture,
+        crate::store::epoch_studio::handoff::StudioHandoffStart::Settled(_) => {
+            panic!("the fixture branch was classified as already transferred")
+        }
+    };
+    let mut plan = capture.prepare().expect("H2 reconstructs the candidate");
+    assert_eq!(plan.remaining(), 40);
+
+    // 1. Priority yield. Signs ZERO and leaves the count untouched, and says so itself rather
+    //    than leaving the caller to infer a yield from the fact that work remains.
+    let ticking = SteppingClock {
+        ms: std::sync::atomic::AtomicU64::new(0),
+        step: 1,
+    };
+    let slice = plan
+        .sign_slice(
+            &f.device,
+            &f.group,
+            0,
+            true,
+            MAX_SIGNING_TURNS_PER_VISIT,
+            Some((&ticking, SIGNING_SLICE_BUDGET_MS)),
+        )
+        .unwrap();
+    assert!(slice.yielded(), "a priority yield was not reported as one");
+    assert_eq!(slice.signed(), 0, "a priority yield signed something");
+    assert_eq!(slice.remaining(), 40);
+    assert!(!slice.complete());
+
+    // 2. Count-bounded slice, with the time limiter DISABLED so only the turn cap can stop it.
+    let slice = plan
+        .sign_slice(
+            &f.device,
+            &f.group,
+            0,
+            false,
+            MAX_SIGNING_TURNS_PER_VISIT,
+            None,
+        )
+        .unwrap();
+    assert!(!slice.yielded());
+    assert_eq!(
+        slice.signed(),
+        MAX_SIGNING_TURNS_PER_VISIT,
+        "the turn cap did not bound the slice"
+    );
+    assert_eq!(slice.remaining(), 40 - MAX_SIGNING_TURNS_PER_VISIT);
+    assert!(!slice.complete());
+
+    // 3. Time-bounded slice, with the count limiter DISABLED so only the deadline can stop it.
+    //    The clock advances 200 ms per read against a 250 ms budget: the entry read sets the
+    //    deadline, the first signature's check is under it, the second crosses. A slice may
+    //    overrun by one whole operation, which is exactly the two signatures observed here.
+    let stepping = SteppingClock {
+        ms: std::sync::atomic::AtomicU64::new(0),
+        step: 200,
+    };
+    let slice = plan
+        .sign_slice(
+            &f.device,
+            &f.group,
+            0,
+            false,
+            usize::MAX,
+            Some((&stepping, SIGNING_SLICE_BUDGET_MS)),
+        )
+        .unwrap();
+    assert!(!slice.yielded());
+    assert_eq!(
+        slice.signed(),
+        2,
+        "the slice budget did not bound the slice"
+    );
+    assert_eq!(slice.remaining(), 40 - MAX_SIGNING_TURNS_PER_VISIT - 2);
+    assert!(!slice.complete());
+
+    // 4. Completion, with both limiters disabled.
+    let slice = plan
+        .sign_slice(&f.device, &f.group, 0, false, usize::MAX, None)
+        .unwrap();
+    assert_eq!(slice.signed(), 40 - MAX_SIGNING_TURNS_PER_VISIT - 2);
+    assert_eq!(slice.remaining(), 0);
+    assert!(slice.complete());
+
+    // No signature became durable at any point: H3 signs privately and H5 alone writes.
+    assert_eq!(
+        canonical(&store),
+        records,
+        "signing exposed a durable prefix"
+    );
+}
+
+/// H4 refuses a batch that is not finished signing. `finish` would fail anyway, but it would fail
+/// somewhere inside manifest construction; refusing here names the actual mistake, and a scheduled
+/// caller that assembles a plan it has only partly signed is exactly the mistake worth naming.
+#[test]
+fn studio_overlay_handoff_assembly_refuses_a_partly_signed_batch() {
+    let root = tempfile::tempdir().unwrap();
+    let f = Fixture::new(false);
+    let mut store = open(root.path());
+    let (basis, _) = performance::fixture(&f, &mut store, 4);
+    let mut b = budget(&mut store, &f);
+    let capture = match store
+        .start_studio_handoff_with_io(
+            SERVER,
+            &f.group,
+            f.target,
+            &f.device,
+            basis,
+            Some(0),
+            &mut rng(),
+            &mut b,
+            &mut |_, p, bytes| atomic_write(p, bytes),
+            &mut flush,
+        )
+        .unwrap()
+    {
+        crate::store::epoch_studio::handoff::StudioHandoffStart::Captured(capture) => capture,
+        crate::store::epoch_studio::handoff::StudioHandoffStart::Settled(_) => {
+            panic!("the fixture branch was classified as already transferred")
+        }
+    };
+    let mut plan = capture.prepare().unwrap();
+    // One bounded slice, deliberately short of the whole branch.
+    let slice = plan
+        .sign_slice(&f.device, &f.group, 0, false, 2, None)
+        .unwrap();
+    assert_eq!(slice.signed(), 2);
+    assert_eq!(slice.remaining(), 2);
+    match plan.assemble() {
+        Err(error) => assert!(
+            error.to_string().contains("signing did not complete"),
+            "a partly signed batch was refused for an unrelated reason: {error}"
+        ),
+        Ok(_) => panic!("a partly signed batch was assembled"),
+    }
+}
+
+/// H1/H2. A plan built from records that have since moved on is a stale proposal, however well
+/// formed it is, and the commit visit must refuse it before any signature becomes durable.
+///
+/// This is the handoff analogue of `studio_overlay_detached_plan_is_refused_when_the_record
+/// _changed`, and it is what makes the H5 stamp recheck load bearing: the synchronous adapter
+/// never leaves a gap, so nothing else in this suite can exercise it.
+#[test]
+fn studio_overlay_handoff_plan_is_refused_when_its_records_changed() {
+    let root = tempfile::tempdir().unwrap();
+    let f = Fixture::new(false);
+    let mut store = open(root.path());
+    let (close, basis, _) = prepare(&f, &mut store);
+    let records = canonical(&store);
+
+    // H1 under custody, then H2 detached. Nothing durable exists yet.
+    let mut b = budget(&mut store, &f);
+    let capture = match store
+        .start_studio_handoff_with_io(
+            SERVER,
+            &f.group,
+            f.target,
+            &f.device,
+            basis,
+            Some(0),
+            &mut rng(),
+            &mut b,
+            &mut |_, p, bytes| atomic_write(p, bytes),
+            &mut flush,
+        )
+        .unwrap()
+    {
+        crate::store::epoch_studio::handoff::StudioHandoffStart::Captured(capture) => capture,
+        crate::store::epoch_studio::handoff::StudioHandoffStart::Settled(_) => {
+            panic!("the fixture branch was classified as already transferred")
+        }
+    };
+    let mut plan = capture.prepare().expect("H2 reconstructs the candidate");
+    assert!(
+        plan.sign_slice(&f.device, &f.group, 0, false, usize::MAX, None)
+            .unwrap()
+            .complete(),
+        "H3 did not sign the whole branch"
+    );
+    let commit = plan.assemble().expect("H4 assembles the candidate");
+    assert_eq!(
+        canonical(&store),
+        records,
+        "H1 to H4 wrote something durable"
+    );
+
+    // The vault is closed and reopened while the plan is detached, which is what a crash between
+    // H2 and H5 looks like. The plan still holds the previous mount, so the context it was built
+    // against no longer exists even though every byte on disk is identical.
+    let _ = close;
+    drop(store);
+    let mut store = open(root.path());
+    assert_eq!(canonical(&store), records);
+
+    let mut b = budget(&mut store, &f);
+    let refused = store.commit_studio_handoff_with_io(
+        SERVER,
+        &f.group,
+        f.target,
+        &f.device,
+        commit,
+        Some(0),
+        &mut rng(),
+        &mut b,
+        &mut |_, p, bytes| atomic_write(p, bytes),
+        &mut flush,
+    );
+    match refused {
+        Err(error) => assert!(
+            error
+                .to_string()
+                .contains("overlay records or context changed"),
+            "a stale handoff plan was refused for an unrelated reason: {error}"
+        ),
+        Ok(_) => panic!("a handoff plan built from superseded records was committed"),
+    }
+    assert_eq!(
+        canonical(&store),
+        records,
+        "a refused handoff plan changed durable records"
+    );
+}
+
 #[test]
 fn studio_overlay_handoff_signs_the_whole_branch_once_and_keeps_pending_intents() {
     for art in [false, true] {

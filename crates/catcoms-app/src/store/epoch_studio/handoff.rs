@@ -18,6 +18,14 @@ pub(super) enum HandoffSync {
     Intents,
 }
 
+/// What H1 concluded. `Settled` is terminal and already durable: an acknowledgement of a branch
+/// this device already transferred. `Captured` is work whose expensive reconstruction has not
+/// happened yet.
+pub(crate) enum StudioHandoffStart {
+    Settled(StudioHandoffOutcome),
+    Captured(Box<StudioHandoffCapture>),
+}
+
 /// Minted only here, after the Prepared record crosses its first durability barrier.
 pub(super) struct CheckedHandoffWrite {
     metadata: [u8; 32],
@@ -54,6 +62,108 @@ impl ServerStore {
             },
         )
     }
+
+    /// Index creation still requires the actual independently saved object source.
+    ///
+    /// This runs at **both** H1 and H5, not only at H1. The single custody visit got that for
+    /// free; a scheduled H1 to H5 spans many background turns, and the stamp covers only the Index
+    /// document's own intent and source records, so the referenced Flipnote's source can be
+    /// evicted, retired or cleaned up in between without invalidating anything. Committing then
+    /// would leave a durable Index entry pointing at a source that no longer exists.
+    fn check_index_object_sources(
+        &mut self,
+        server: u64,
+        group: &ServerGroup,
+        target: StudioTarget,
+        device: &MlsDevice,
+        document: &LogicalDocument,
+        state: &EpochIntentState,
+    ) -> Result<(), AppError> {
+        let StudioTarget::Index { channel } = target else {
+            return Ok(());
+        };
+        for (_, intent) in state.pending().filter(|(id, _)| state.is_overlay(id)) {
+            if let IndexOp::PutObject { object, .. } =
+                IndexOp::decode_domain(document, &intent.operation, &intent.author)
+                    .map_err(invalid)?
+            {
+                let referenced = self.load_studio_epoch(
+                    server,
+                    group,
+                    StudioTarget::Flipnote { channel, object },
+                    device,
+                )?;
+                if referenced.is_none_or(|s| s.op_count() == 0 && s.epoch() == 0) {
+                    return Err(invalid("overlay references an unavailable Flipnote"));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Ordinary durable IO for the scheduled runtime's H1 visit.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn start_studio_handoff(
+        &mut self,
+        server: u64,
+        group: &ServerGroup,
+        target: StudioTarget,
+        device: &MlsDevice,
+        basis: [u8; 32],
+        tenure: Option<u64>,
+        rng: &mut impl CryptoRngCore,
+        budget: &mut EpochStudioBudget,
+    ) -> Result<StudioHandoffStart, AppError> {
+        self.start_studio_handoff_with_io(
+            server,
+            group,
+            target,
+            device,
+            basis,
+            tenure,
+            rng,
+            budget,
+            &mut |_, p, b| atomic_write(p, b),
+            &mut |step, p, b| match step {
+                HandoffSync::Source => sync_studio(p, b),
+                HandoffSync::Intents => epoch_intents::sync_intent(p, b),
+            },
+        )
+    }
+
+    /// Ordinary durable IO for the scheduled runtime's H5 visit.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn commit_studio_handoff(
+        &mut self,
+        server: u64,
+        group: &ServerGroup,
+        target: StudioTarget,
+        device: &MlsDevice,
+        commit: StudioHandoffCommit,
+        tenure: Option<u64>,
+        rng: &mut impl CryptoRngCore,
+        budget: &mut EpochStudioBudget,
+    ) -> Result<StudioHandoffOutcome, AppError> {
+        self.commit_studio_handoff_with_io(
+            server,
+            group,
+            target,
+            device,
+            commit,
+            tenure,
+            rng,
+            budget,
+            &mut |_, p, b| atomic_write(p, b),
+            &mut |step, p, b| match step {
+                HandoffSync::Source => sync_studio(p, b),
+                HandoffSync::Intents => epoch_intents::sync_intent(p, b),
+            },
+        )
+    }
+
+    /// The synchronous adapter: H1, H2, then H3 to H5, with no detach between them. Every caller
+    /// that cannot release custody, and every existing test, takes this path. The scheduled
+    /// runtime runs the same stages with custody released around H2.
     #[allow(clippy::too_many_arguments)]
     pub(super) fn handoff_studio_overlay_with_io(
         &mut self,
@@ -68,6 +178,60 @@ impl ServerStore {
         writer: &mut impl FnMut(HandoffWrite, &Path, &[u8]) -> Result<(), AppError>,
         sync: &mut impl FnMut(HandoffSync, &Path, u64) -> Result<(), AppError>,
     ) -> Result<StudioHandoffOutcome, AppError> {
+        let capture = match self.start_studio_handoff_with_io(
+            server, group, target, device, basis, tenure, rng, budget, writer, sync,
+        )? {
+            StudioHandoffStart::Settled(outcome) => return Ok(outcome),
+            StudioHandoffStart::Captured(capture) => capture,
+        };
+        // H1 already required a live tenure to mint the authority, so this cannot be absent here.
+        let tenure =
+            tenure.ok_or_else(|| invalid("overlay handoff needs observed owner tenure"))?;
+        // H2, then H3 with no turn cap, no deadline and nothing to yield to, then H4. The
+        // scheduled runtime runs these same four with custody released around H2 and H4 and the
+        // signing paged across visits.
+        let mut plan = capture.prepare()?;
+        let slice = plan.sign_slice(device, group, tenure, false, usize::MAX, None)?;
+        if !slice.complete() {
+            return Err(invalid("handoff signing did not complete"));
+        }
+        let commit = plan.assemble()?;
+        self.commit_studio_handoff_with_io(
+            server,
+            group,
+            target,
+            device,
+            commit,
+            Some(tenure),
+            rng,
+            budget,
+            writer,
+            sync,
+        )
+    }
+
+    /// H1: classify, resolve an interrupted Prepared record, authorize, and capture.
+    ///
+    /// Everything here is cheap by construction: bounded authenticated reads, a structural decode
+    /// for classification, and the short live-authority mint. The full branch reconstruction and
+    /// the private successor restore belong to H2, which runs detached.
+    ///
+    /// Both the synchronous adapter and the scheduled runtime enter through this, so there is one
+    /// classification and one authorization, not two that can drift.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn start_studio_handoff_with_io(
+        &mut self,
+        server: u64,
+        group: &ServerGroup,
+        target: StudioTarget,
+        device: &MlsDevice,
+        basis: [u8; 32],
+        tenure: Option<u64>,
+        rng: &mut impl CryptoRngCore,
+        budget: &mut EpochStudioBudget,
+        writer: &mut impl FnMut(HandoffWrite, &Path, &[u8]) -> Result<(), AppError>,
+        sync: &mut impl FnMut(HandoffSync, &Path, u64) -> Result<(), AppError>,
+    ) -> Result<StudioHandoffStart, AppError> {
         current_member(group, device)?;
         self.enter_studio_budget(server, group, budget)?;
         let document = target.document(&group.group_id()).map_err(invalid)?;
@@ -97,7 +261,7 @@ impl ServerStore {
                 writer,
                 sync,
             )?;
-            return Ok(outcome);
+            return Ok(StudioHandoffStart::Settled(outcome));
         }
         let overlay = metadata
             .overlay()
@@ -121,69 +285,93 @@ impl ServerStore {
                 .completed_branch(target, device.device_id(), basis)
                 .map_err(invalid)?
             {
-                return Ok(outcome);
+                return Ok(StudioHandoffStart::Settled(outcome));
             }
         }
         let tenure =
             tenure.ok_or_else(|| invalid("overlay handoff needs observed owner tenure"))?;
         // Index creation still requires the actual independently saved object source.
-        if let StudioTarget::Index { channel } = target {
-            for (id, intent) in state.pending().filter(|(id, _)| state.is_overlay(id)) {
-                let _ = id;
-                if let IndexOp::PutObject { object, .. } =
-                    IndexOp::decode_domain(&document, &intent.operation, &intent.author)
-                        .map_err(invalid)?
-                {
-                    let referenced = self.load_studio_epoch(
-                        server,
-                        group,
-                        StudioTarget::Flipnote { channel, object },
-                        device,
-                    )?;
-                    if referenced.is_none_or(|s| s.op_count() == 0 && s.epoch() == 0) {
-                        return Err(invalid("overlay references an unavailable Flipnote"));
-                    }
-                }
-            }
+        self.check_index_object_sources(server, group, target, device, &document, &state)?;
+        // The short live-authority mint. Structural metadata is enough: this reads the target,
+        // the active branch's author and its receipt, and checks them against live membership,
+        // MLS epoch and the observed tenure. It reconstructs nothing.
+        let authority = state
+            .handoff_metadata()
+            .ok_or_else(|| invalid("overlay metadata missing"))?
+            .handoff_authority(device, group, tenure)
+            .map_err(invalid)?;
+        self.capture_studio_handoff(
+            server, group, target, device, &document, basis, tenure, authority,
+        )
+        .map(Box::new)
+        .map(StudioHandoffStart::Captured)
+    }
+
+    /// H3, H4 and H5 composed under one custody visit: sign every remaining operation, assemble
+    /// the candidate, then run the accepted Prepared -> whole Source -> Completed transaction.
+    ///
+    /// The scheduled runtime will split H3 into bounded slices and move H4 to a worker; this is
+    /// the batch form the synchronous transaction keeps, and the durable half below is unchanged.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn commit_studio_handoff_with_io(
+        &mut self,
+        server: u64,
+        group: &ServerGroup,
+        target: StudioTarget,
+        device: &MlsDevice,
+        commit: StudioHandoffCommit,
+        tenure: Option<u64>,
+        rng: &mut impl CryptoRngCore,
+        budget: &mut EpochStudioBudget,
+        writer: &mut impl FnMut(HandoffWrite, &Path, &[u8]) -> Result<(), AppError>,
+        sync: &mut impl FnMut(HandoffSync, &Path, u64) -> Result<(), AppError>,
+    ) -> Result<StudioHandoffOutcome, AppError> {
+        current_member(group, device)?;
+        self.enter_studio_budget(server, group, budget)?;
+        // Tenure is part of the stamp, so a restart for the same owner at the same MLS epoch
+        // refuses here rather than letting a batch signed under one tenure become durable under
+        // the next.
+        if !self.studio_handoff_is_current(group, device, tenure, &commit.stamp)? {
+            return Err(invalid("overlay records or context changed; retry"));
         }
-        let (mut source, observed, before) =
+        if commit.stamp.server != server || commit.stamp.target != target {
+            return Err(invalid("overlay plan belongs to another target"));
+        }
+        let StudioHandoffCommit {
+            stamp,
+            basis,
+            candidate,
+            prepared,
+            mut state,
+            snapshot,
+            prepared_bytes,
+            completed_bytes,
+            source_bytes,
+        } = commit;
+        let document = stamp.document.clone();
+        let (source, observed, before) =
             self.checked_studio_source(server, group, target, device, false, &mut budget.storage)?;
         if observed.is_none() {
             return Err(invalid("overlay destination source missing"));
         }
+        drop(source);
         let original_source = self
             .read_studio_record(&scope_bytes(server, &document)?)?
             .ok_or_else(|| invalid("overlay destination source missing"))?;
         let original_source_hash = blake3::hash(&original_source.plain);
         drop(original_source);
-        let metadata = state
-            .handoff_metadata()
-            .ok_or_else(|| invalid("overlay metadata missing"))?;
-        let candidate = metadata
-            .prepare_handoff(&mut source, &state.ledger, device, group, tenure, rng)
-            .map_err(invalid)?;
-        drop(source);
-        let (mut candidate, prepared) = candidate.into_parts();
-        let completed = prepared
-            .complete(&candidate, &state.ledger)
-            .map_err(invalid)?;
+        // Against the state as H2 read it, before the prepared overlay is installed, exactly as
+        // when H4 and H5 were one function.
         self.check_handoff_references(&prepared, &candidate, &state)?;
+        self.check_index_object_sources(server, group, target, device, &document, &state)?;
         let scope = epoch_intents::scope_bytes(server, &document)?;
-        let (_, old) = self.read_epoch_intent_record(&scope, &document)?;
-        let original = state.encode(&scope)?;
-        let mut completed_state = state.clone();
-        completed_state.overlay = Some(completed);
-        state.overlay = Some(prepared);
-        let prepared_bytes = state.encode(&scope)?.len() as u64 + 40;
-        let completed_bytes = completed_state.encode(&scope)?.len() as u64 + 40;
         let source_scope = scope_bytes(server, &document)?;
-        let snapshot = Zeroizing::new(candidate.snapshot().map_err(invalid)?);
-        let mut e = Encoder::new();
-        e.put_bytes(&source_scope).map_err(invalid)?;
-        e.put_bytes(&target.channel()).map_err(invalid)?;
-        e.put_bytes(&snapshot).map_err(invalid)?;
-        e.put_u8(1); // Durable source-to-intent link, also charged by the common writer.
-        let source_bytes = e.finish().len() as u64 + 40;
+        // Physical size and the authenticated plaintext digest are all the unchanged fence needs;
+        // decoding again would reconstruct the whole branch a second time.
+        let original = self.read_scoped_intent_plain(&scope)?;
+        let old = original.as_ref().map(|record| record.physical_bytes);
+        let original = original.map(|record| blake3::hash(&record.plain));
+        state.overlay = Some(prepared);
         let intent_id = *blake3::hash(&scope).as_bytes();
         budget.intents.preflight_handoff(
             &self.intent_generation,
@@ -233,8 +421,12 @@ impl ServerStore {
             .map_err(invalid)?;
         // Recheck the actual intent contents before the first write. The source was checked
         // under the same exclusive borrow; the common writer also authenticates its old file.
-        let (actual, actual_old) = self.read_epoch_intent_record(&scope, &document)?;
-        if actual_old != old || actual.encode(&scope)?.as_slice() != original.as_slice() {
+        // Comparing the complete authenticated plaintext digest and physical size covers the same
+        // canonical bytes the previous decode-then-re-encode compared, without a second decode.
+        let actual = self.read_scoped_intent_plain(&scope)?;
+        if actual.as_ref().map(|record| record.physical_bytes) != old
+            || actual.map(|record| blake3::hash(&record.plain)) != original
+        {
             return Err(invalid("overlay intent source changed"));
         }
         let metadata_hash = *blake3::hash(&state.encode(&scope)?).as_bytes();
@@ -298,8 +490,10 @@ impl ServerStore {
         writer: &mut impl FnMut(HandoffWrite, &Path, &[u8]) -> Result<(), AppError>,
         sync: &mut impl FnMut(HandoffSync, &Path, u64) -> Result<(), AppError>,
     ) -> Result<(), AppError> {
-        let (_, old) = self
-            .read_epoch_intent_record(&epoch_intents::scope_bytes(server, document)?, document)?;
+        // `write_prepared_intents` consumes this size; it performs no old-record read of its own.
+        let old = self
+            .read_scoped_intent_plain(&epoch_intents::scope_bytes(server, document)?)?
+            .map(|record| record.physical_bytes);
         self.write_prepared_intents(
             server,
             document,
@@ -477,7 +671,7 @@ impl ServerStore {
         let document = unit.document().clone();
         let scope = epoch_intents::scope_bytes(server, &document)?;
         let (state, old) = self
-            .read_epoch_intent_record(&scope, &document)
+            .read_epoch_intent_record_structural(&scope, &document)
             .inspect_err(|_| budget.invalidate())?;
         let observed = old
             .map(|n| epoch_intents::storage_record(server, &document, &scope, n))
@@ -563,7 +757,7 @@ impl ServerStore {
     ) -> Result<(), AppError> {
         let (target, _, linked) = decode_record_link(plain, scope, document)?;
         if linked {
-            let state = self.load_epoch_intents(server, document)?;
+            let state = self.load_epoch_intents_structural(server, document)?;
             state
                 .handoff_metadata()
                 .ok_or_else(|| invalid("required handoff metadata missing"))?
@@ -583,7 +777,7 @@ impl ServerStore {
     ) -> Result<(), AppError> {
         let document = target.document(&group.group_id()).map_err(invalid)?;
         let scope = epoch_intents::scope_bytes(server, &document)?;
-        let (state, bytes) = self.read_epoch_intent_record(&scope, &document)?;
+        let (state, bytes) = self.read_epoch_intent_record_structural(&scope, &document)?;
         if let Some(metadata) = state.handoff_metadata() {
             metadata.check_target(target).map_err(invalid)?;
             if metadata.is_prepared() {

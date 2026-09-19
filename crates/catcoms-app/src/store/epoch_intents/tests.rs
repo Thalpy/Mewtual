@@ -685,6 +685,109 @@ fn old_scans_and_cleanup_ignore_intent_family_while_new_cleanup_preserves_finals
     assert_eq!(fs::read(final_path).unwrap(), before);
 }
 
+/// The `DraftArchive` seam, against a real intent ledger rather than a hand-built vault: one
+/// logical document can hold both an intent ledger and a preserved archive at once. They are
+/// separate physical families with separate inventory keys, and one accounting class.
+#[test]
+fn a_draft_archive_coexists_with_the_same_document_intent_ledger_in_one_accounting_class() {
+    let root = tempfile::tempdir().unwrap();
+    let (device, group, doc) = fixture();
+    let mut store = open(root.path());
+    let mut limits = budgets(&mut store, &doc);
+    prepare(&mut store, &doc, op(&doc, 1), &device, &group, &mut limits).unwrap();
+    let intent_path = store.epoch_intent_path(&scope_bytes(SERVER, &doc).unwrap());
+    let ledger_bytes = fs::read(&intent_path).unwrap();
+    let before = inventory(&mut store);
+    let ledger_record = before
+        .records()
+        .find(|e| e.kind == EpochRecordKind::Intents)
+        .unwrap()
+        .record;
+    let ledger_budget = EpochIntentBudget::from_inventory(&before).unwrap();
+
+    let archive_path = crate::store::epoch_draft_archive::write_draft_archive_for_test(
+        &store,
+        SERVER,
+        &doc,
+        b"opaque preserved draft",
+        &mut rng(),
+    )
+    .unwrap();
+    assert_ne!(archive_path, intent_path, "the two families shared a path");
+    let archive_bytes = fs::metadata(&archive_path).unwrap().len();
+
+    let view = inventory(&mut store);
+    let entries: Vec<_> = view
+        .records()
+        .filter(|e| e.kind.intent_class())
+        .map(|e| (e.kind, e.record))
+        .collect();
+    assert_eq!(entries.len(), 2, "one family displaced the other");
+    let archive = entries
+        .iter()
+        .find(|(kind, _)| *kind == EpochRecordKind::DraftArchive)
+        .unwrap()
+        .1;
+    // Same logical document, distinct records: the ids derive from different scope domains, so
+    // neither can silently overwrite or alias the other in the inventory map.
+    assert_eq!(archive.document, ledger_record.document);
+    assert_ne!(archive.id, ledger_record.id);
+    assert_eq!(archive.footprint.content, archive_bytes);
+    assert_eq!(
+        entries
+            .iter()
+            .find(|(kind, _)| *kind == EpochRecordKind::Intents)
+            .unwrap()
+            .1,
+        ledger_record,
+        "the archive changed the ledger's accounting"
+    );
+    assert_eq!(fs::read(&intent_path).unwrap(), ledger_bytes);
+
+    // Both charge the one vault-wide intent class.
+    let budget = EpochIntentBudget::from_inventory(&view).unwrap();
+    assert_eq!(
+        budget.bytes(),
+        ledger_budget.bytes() + archive_bytes,
+        "an archive's bytes were not charged to the intent accounting class"
+    );
+    assert_eq!(
+        budget.record_slots_for_test(),
+        ledger_budget.record_slots_for_test() + 1,
+        "an archive did not claim a record slot in the intent accounting class"
+    );
+
+    // A temporary sibling of each family is attributed to its own family, and a temporary named
+    // for one family's digest is not evidence about the other.
+    let archive_orphan = archive_path.with_file_name(format!(
+        ".{}.mewtual-stage-7-9.tmp",
+        archive_path.file_name().unwrap().to_str().unwrap()
+    ));
+    fs::write(&archive_orphan, b"unpublished archive").unwrap();
+    let with_orphan = inventory(&mut store);
+    assert_eq!(with_orphan.orphans().len(), 1);
+    assert_eq!(
+        with_orphan.orphans().next().unwrap().kind(),
+        EpochRecordKind::DraftArchive
+    );
+    assert_eq!(
+        EpochIntentBudget::from_inventory(&with_orphan)
+            .unwrap()
+            .bytes(),
+        budget.bytes() + fs::metadata(&archive_orphan).unwrap().len()
+    );
+
+    // Cleanup still runs at intent coverage and leaves both finals alone.
+    let cleaned = cleanup(&mut store);
+    assert_eq!(cleaned.orphans().len(), 0);
+    assert_eq!(
+        cleaned.records().filter(|e| e.kind.intent_class()).count(),
+        2
+    );
+    assert_eq!(fs::read(&intent_path).unwrap(), ledger_bytes);
+    assert_eq!(fs::metadata(&archive_path).unwrap().len(), archive_bytes);
+}
+
 #[test]
 fn per_document_count_and_byte_caps_survive_vault_decode_and_prepare() {
     for count_limited in [true, false] {

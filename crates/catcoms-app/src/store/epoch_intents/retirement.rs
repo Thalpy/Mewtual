@@ -13,6 +13,8 @@ fn intent_retirement_shrink_still_needs_physical_replacement_headroom() {
         records: BTreeMap::from([([1; 32], 1024)]),
         record_slots: super::super::epoch_budget::MAX_ACCOUNTED_RECORDS,
         bytes: MAX_VAULT_INTENT_BYTES,
+        // This case is about the class total at its cap; no archive is involved.
+        archive_bytes: 0,
         ready: true,
     };
     assert!(budget
@@ -28,6 +30,119 @@ fn intent_retirement_shrink_still_needs_physical_replacement_headroom() {
             .preflight(&generation, [2; 32], None, 0, true)
             .is_ok(),
         "absent ledger creates no slot"
+    );
+}
+
+/// The archive sub-cap's arithmetic. The wiring, that the real writer actually consults this
+/// rather than the ordinary class preflight, is anchored separately by
+/// `the_archive_writer_refuses_at_the_sub_cap_not_the_class_ceiling`; neither test substitutes
+/// for the other.
+///
+/// The sub-cap models the PHYSICAL peak, not the resulting logical occupancy. An earlier version
+/// of this test asserted that replacing an archive "releases its bytes first" so a near-cap
+/// same-size rewrite would fit. That was wrong: a non-sync write stages its replacement beside
+/// the record it replaces, so both exist at once, and a crash at that moment leaves the
+/// temporary charged against the same cap.
+#[test]
+fn draft_archive_sub_cap_covers_the_physical_replacement_peak() {
+    let generation = Arc::new(());
+    let near = MAX_VAULT_DRAFT_ARCHIVE_BYTES - 1024;
+    let mut budget = EpochIntentBudget {
+        generation: generation.clone(),
+        records: BTreeMap::from([([1; 32], near)]),
+        record_slots: 1,
+        // Plenty of class headroom: only the archive tally is near its limit, so every refusal
+        // below is attributable to the sub-cap.
+        bytes: near,
+        archive_bytes: near,
+        ready: true,
+    };
+    assert!(
+        budget.bytes < MAX_VAULT_INTENT_BYTES,
+        "the class ceiling must not be what refuses these"
+    );
+    assert!(
+        budget
+            .preflight_draft_archive(&generation, [2; 32], None, 4096, false)
+            .is_err(),
+        "a new archive over the sub-cap must refuse while the class total still has room"
+    );
+    assert!(
+        budget.ready,
+        "a known quota refusal needs no rescan, exactly as the class cap behaves"
+    );
+    assert!(
+        budget
+            .preflight_draft_archive(&generation, [1; 32], Some(near), near, false)
+            .is_err(),
+        "a non-sync replacement stages beside the record it replaces, so the peak is old + new \
+         and must refuse near the cap even at the same size"
+    );
+    // A sync-only retry claims no new bytes and stages nothing, so it is never refused here.
+    // This is what keeps an uncertain write repeatable when the vault is at its cap.
+    assert!(budget
+        .preflight_draft_archive(&generation, [1; 32], Some(near), near, true)
+        .is_ok());
+
+    // Commit does the logical `old -> next` move, after the write has actually landed.
+    budget.commit_draft_archive([2; 32], None, 4096);
+    assert_eq!(budget.archive_bytes, near + 4096);
+    assert_eq!(budget.bytes, near + 4096);
+}
+
+/// Existing archive occupancy above the policy sub-cap must be grandfathered, not fatal.
+///
+/// The class ceiling and the sub-cap differ in kind. A vault over the class ceiling is in a
+/// state this code cannot safely account for. A vault holding more archive bytes than the policy
+/// currently admits is still perfectly accountable, and refusing to construct its budget would
+/// be self-locking: every accounted write needs one, so the vault would lose unrelated intent
+/// writes and also lose the archive release that is the only way back under the cap.
+#[test]
+fn an_over_cap_archive_inventory_still_yields_a_usable_budget() {
+    let generation = Arc::new(());
+    let over = MAX_VAULT_DRAFT_ARCHIVE_BYTES + 4096;
+    let mut budget = EpochIntentBudget {
+        generation: generation.clone(),
+        records: BTreeMap::from([([1; 32], over), ([2; 32], 2048)]),
+        record_slots: 2,
+        bytes: over + 2048,
+        archive_bytes: over,
+        ready: true,
+    };
+    // The premise: over the archive policy, comfortably under the class rail.
+    assert!(budget.archive_bytes > MAX_VAULT_DRAFT_ARCHIVE_BYTES);
+    assert!(budget.bytes < MAX_VAULT_INTENT_BYTES);
+
+    // Unrelated ordinary intent work is unaffected.
+    assert!(
+        budget
+            .preflight(&generation, [2; 32], Some(2048), 4096, false)
+            .is_ok(),
+        "an over-cap archive tally must not block ordinary accounted intent writes"
+    );
+    // The exact archive retry stays available, so an uncertain write is still repeatable.
+    assert!(
+        budget
+            .preflight_draft_archive(&generation, [1; 32], Some(over), over, true)
+            .is_ok(),
+        "a sync-only archive retry must remain possible over the cap"
+    );
+    // Growth is what is refused.
+    assert!(
+        budget
+            .preflight_draft_archive(&generation, [3; 32], None, 1024, false)
+            .is_err(),
+        "a new archive must be refused while the tally is over the cap"
+    );
+    // Reduction remains possible, which is the route back under the policy: releasing an
+    // archive subtracts its bytes rather than claiming any.
+    budget.commit_draft_archive([1; 32], Some(over), 0);
+    assert_eq!(budget.archive_bytes, 0);
+    assert!(
+        budget
+            .preflight_draft_archive(&generation, [3; 32], None, 1024, false)
+            .is_ok(),
+        "once reduced under the cap, a new archive must be admitted again"
     );
 }
 
@@ -145,7 +260,8 @@ impl ServerStore {
     ) -> Result<(), AppError> {
         let scope = scope_bytes(server, document)?;
         let storage_scope = StorageScope::new(server, &document.server_id).map_err(invalid)?;
-        let (mut state, old) = match self.read_epoch_intent_record(&scope, document) {
+        // Retirement needs the ledger and overlay id membership, never a projection.
+        let (mut state, old) = match self.read_epoch_intent_record_structural(&scope, document) {
             Ok(value) => value,
             Err(error) => {
                 budget.invalidate();

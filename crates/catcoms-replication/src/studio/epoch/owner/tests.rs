@@ -3,6 +3,7 @@ use automerge::transaction::{CommitOptions, Transactable};
 use rand_chacha::ChaCha20Rng;
 use rand_core::SeedableRng;
 
+mod archive;
 mod frozen;
 mod handoff;
 

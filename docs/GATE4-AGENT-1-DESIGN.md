@@ -428,10 +428,10 @@ struct OverlayJob {
     ownership: OverlayOwnership,
     stage: OverlayStage,
 }
-/// Everything a worker, a result or a native handle must outlive its waiter to own. Dropping this
-/// releases the admission, the shared permit and any job-owned reference hold.
+/// The admission token and the shared permit a worker, a result or a native handle must outlive
+/// its waiter to own. Dropping this releases both together.
 pub(crate) struct OverlayOwnership {
-    admission: Arc<()>, permit: OwnedSemaphorePermit, pixels: Option<CreativeHold>,
+    admission: Arc<()>, permit: OwnedSemaphorePermit,
 }
 enum OverlayStage {
     Captured(Box<StudioOverlayCapture>),
@@ -458,6 +458,27 @@ pub(crate) enum StudioBackgroundResult {
 `StudioOverlaySavePreparation` and `StudioPreparedOverlaySave` own an `OverlayOwnership` exactly as
 `StudioInspectionPreparation` owns its permit, so native dropping either handle, cancelling between
 visits, or never issuing the second visit releases admission with no actor round trip.
+
+**Revised after A-001 (`35929a9`), reviewer-accepted.** `OverlayOwnership` originally carried a
+third member, `pixels: Option<CreativeHold>`. A-001 made `AdmittedOverlayMedia` the sole owner of
+the job's reference hold, minted together with the verified frame facts S3 rechecks and carried
+inside `StudioOverlayCapture` and then `StudioOverlayPlan`. A second `Option<CreativeHold>` here
+would be a competing owner, and a way to hold pixels apart from the facts that justify holding
+them, which is exactly what A-001 closed. The corrected invariant is:
+
+```text
+OverlayOwnership            = admission + shared permit
+StudioOverlayCapture/Plan   = media facts + the sole CreativeHold
+
+A live Flow S job owns both, until either
+  the plan becomes impossible (both released at once, in the worker), or
+  S3 transfers reference protection and the commit attempt returns.
+```
+
+The three resources therefore do **not** always release together, and no comment may claim they
+do. The failure path is the case that matters: a refused plan's media hold dies with its capture,
+so the admission and the shared permit must be released there and then rather than parked against
+a plan that can never commit (RT-001).
 
 ### 5.6 App: control requests and responses
 
@@ -790,6 +811,14 @@ writer reaches disk another way. Known participants that rotate nothing today an
 writer and sealing, rotation and adoption writers, receive, `epoch_recovery/cleanup.rs`'s unlink
 steps, the injected-failure writer seams used by tests, and any raw or tooling adapter. N17 and M20
 keep per-family evidence for exactly this reason.
+
+Agent 2's manual-lifecycle archive writers join this list on the same terms:
+`write_studio_draft_archive_with_io` and `release_studio_draft_archive_with_io`. They write and
+unlink `EpochRecordKind::DraftArchive` records, which live in the Studio family's directory and are
+therefore inventoried like every other five-family file. The enum discriminant lands ahead of I-4
+as an isolated seam commit with no guard and no writer, so the audit obligation attaches to the
+writers when Agent 2 builds them, not to the discriminant; recording them here rather than only in
+that commit's message is what keeps the audited list the single place coverage is proved.
 
 A sync-repair is included even though it changes no bytes: the existing code already treats an
 unchanged-file flush attempt as invalidating a captured inventory, and over-rotation is the safe

@@ -448,12 +448,28 @@ impl StudioOverlayState {
         }
         Ok(bytes)
     }
+    /// Full validation, including complete ordered reconstruction of any retained branch.
     pub fn decode_vault(bytes: &[u8], ledger: &IntentLedger) -> Result<Self, ReplError> {
+        Self::decode_vault_inner(bytes, ledger, true)
+    }
+
+    /// Identity, bounds, scope, entry and canonical-encoding validation without replaying the
+    /// branch. See `StudioOverlay::decode_vault_structural`: this mints no authority, and a
+    /// decoded Prepared or Completed flag remains evidence of a local record, never a capability.
+    pub fn decode_vault_structural(bytes: &[u8], ledger: &IntentLedger) -> Result<Self, ReplError> {
+        Self::decode_vault_inner(bytes, ledger, false)
+    }
+
+    fn decode_vault_inner(
+        bytes: &[u8],
+        ledger: &IntentLedger,
+        replay: bool,
+    ) -> Result<Self, ReplError> {
         if bytes.len() > MAX_EXTENSION {
             return Err(ReplError::EpochBound);
         }
         if bytes.first() == Some(&1) {
-            let active = StudioOverlay::decode_vault(bytes, ledger)?;
+            let active = StudioOverlay::decode_vault_inner(bytes, ledger, replay)?;
             return Ok(Self {
                 target: active.target(),
                 active: Some(active),
@@ -483,7 +499,7 @@ impl StudioOverlayState {
                 if bytes.len().saturating_sub(seed_bytes) > MAX_METADATA {
                     return Err(ReplError::EpochBound);
                 }
-                let a = StudioOverlay::decode_vault(raw, ledger)?;
+                let a = StudioOverlay::decode_vault_inner(raw, ledger, replay)?;
                 let p = if tag == 2 {
                     let epoch = number(&mut d)?;
                     let doc_id = u128::from_be_bytes(fixed(&mut d)?);

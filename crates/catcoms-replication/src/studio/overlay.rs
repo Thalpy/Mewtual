@@ -10,7 +10,9 @@ pub const MAX_STUDIO_OVERLAY_OPS: usize = 256;
 const MAX_METADATA: usize = 64 * 1024;
 const MAX_EXTENSION: usize = MAX_CHECKPOINT_BYTES + MAX_METADATA;
 
+pub(in crate::studio) mod archive;
 mod handoff;
+pub use archive::{StudioDraftArchive, StudioOverlayProvenance, MAX_STUDIO_DRAFT_ARCHIVE_BYTES};
 pub use handoff::{
     StudioHandoffAuthority, StudioHandoffCandidate, StudioHandoffEvidence, StudioHandoffOutcome,
     StudioHandoffSigning, StudioOverlaySave, StudioOverlayState,
@@ -353,7 +355,25 @@ impl StudioOverlay {
         Ok(bytes)
     }
     /// Authenticated local data only. This cannot return StudioClosingOverlayBasis.
+    /// Full validation: structural checks AND complete ordered typed reconstruction.
     pub fn decode_vault(bytes: &[u8], ledger: &IntentLedger) -> Result<Self, ReplError> {
+        Self::decode_vault_inner(bytes, ledger, true)
+    }
+
+    /// Same bounds, scope, entry, sequence, author, envelope and canonical-encoding checks as
+    /// `decode_vault`, without replaying the branch. For metadata readers that need identity and
+    /// accounting but no projection; it mints no authority and is never a display result. Full
+    /// reconstruction remains mandatory before display, append, handoff preparation or export.
+    /// Vault-sealed local bytes only: no network- or renderer-supplied bytes reach this.
+    pub fn decode_vault_structural(bytes: &[u8], ledger: &IntentLedger) -> Result<Self, ReplError> {
+        Self::decode_vault_inner(bytes, ledger, false)
+    }
+
+    pub(super) fn decode_vault_inner(
+        bytes: &[u8],
+        ledger: &IntentLedger,
+        replay: bool,
+    ) -> Result<Self, ReplError> {
         if bytes.len() > MAX_EXTENSION {
             return Err(ReplError::EpochBound);
         }
@@ -416,7 +436,12 @@ impl StudioOverlay {
             entries,
             next_sequence,
         };
-        out.read(ledger)?;
+        // Redundant with `encode_vault` below, which checks the same predicate. Kept so a
+        // structurally inconsistent branch is refused before any reconstruction or re-encoding.
+        out.checked_entries(ledger)?;
+        if replay {
+            out.read(ledger)?;
+        }
         if out.encode_vault(ledger)?.as_slice() != bytes {
             return Err(ReplError::Malformed);
         }

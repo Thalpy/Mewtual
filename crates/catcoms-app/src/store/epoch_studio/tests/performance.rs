@@ -306,6 +306,254 @@ fn measure(count: usize, clock: &dyn Clock) {
     assert_eq!(f.load(&store).unwrap().op_count(), initial + 3);
 }
 
+/// A real Flow S capture, produced entirely through the production path: source, owner decision,
+/// seal, basis, then `start_studio_closing_overlay` returning `Captured`. The runtime tests need a
+/// genuine `StudioOverlayCapture` and must not fabricate one.
+///
+/// `exhaust_intents` pre-fills the document's ordinary intent ledger to `MAX_INTENT_BYTES_PER_
+/// DOCUMENT`, which makes the capture's later `plan()` refuse at `IntentLedger::prepare`. That is
+/// a real refusal on a real capture: classification never calls `prepare`, so it is reachable only
+/// in the detached stage, which is exactly the RT-001 case. The pre-fill uses the production
+/// `prepare`, `encode`, `seal` and framing at the canonical path, as the existing per-document cap
+/// test does, so nothing it produces bypasses a check the reader performs.
+pub(crate) fn studio_closing_capture_fixture(
+    store: &mut ServerStore,
+    server: u64,
+    group: &ServerGroup,
+    device: &MlsDevice,
+    target: StudioTarget,
+    exhaust_intents: bool,
+) -> crate::store::StudioOverlayCapture {
+    // Creates the source and fills it to rotation eligibility, which an owner decision requires.
+    fill_studio_epoch_fixture(store, server, group, device, target);
+    let decision = studio_owner_decision_fixture(store, server, group, device, target, None);
+    let close = decision.close().clone();
+    let mut b = {
+        let inv = inventory(store);
+        store.studio_storage_budget(server, group, &inv).unwrap()
+    };
+    store
+        .seal_studio_epoch(
+            server,
+            group,
+            target,
+            device,
+            decision.receipt().clone(),
+            0,
+            &mut ChaCha20Rng::seed_from_u64(7),
+            &mut b,
+        )
+        .unwrap();
+    let basis = store
+        .prepare_studio_closing_overlay(server, group, target, device, &close, Some(0), &mut b)
+        .unwrap();
+
+    let logical = target.document(&group.group_id()).unwrap();
+    if exhaust_intents {
+        let mut ledger = catcoms_replication::IntentLedger::new(logical.clone());
+        let blank = title_op(target, 0);
+        let overhead = blank.encode().unwrap().len() - blank.body.len();
+        let mut left = catcoms_replication::epoch::MAX_INTENT_BYTES_PER_DOCUMENT;
+        let mut n = 0u128;
+        while left > 0 {
+            let len = left.min(catcoms_replication::epoch::MAX_DOMAIN_OP_BYTES);
+            let mut next = title_op(target, 0);
+            next.nonce = n.to_be_bytes();
+            next.body = vec![b'x'; len - overhead];
+            ledger.prepare(device.device_id(), next).unwrap();
+            left -= len;
+            n += 1;
+        }
+        let scope = crate::store::epoch_intents::scope_bytes(server, &logical).unwrap();
+        let state = crate::store::epoch_intents::EpochIntentState {
+            ledger,
+            overlay: None,
+        };
+        let sealed = seal(
+            &store.keys.db_key().unwrap(),
+            &state.encode(&scope).unwrap(),
+            &mut ChaCha20Rng::seed_from_u64(11),
+        )
+        .unwrap();
+        fs::write(store.epoch_intent_path(&scope), frame(&sealed)).unwrap();
+    }
+
+    let mut b = {
+        let inv = inventory(store);
+        store.studio_storage_budget(server, group, &inv).unwrap()
+    };
+    let mut op = title_op(target, 9_000);
+    op.nonce = [77; 16];
+    match store
+        .start_studio_closing_overlay(
+            server,
+            group,
+            target,
+            device,
+            &close,
+            Some(0),
+            basis.fingerprint(),
+            op,
+            300,
+            &mut ChaCha20Rng::seed_from_u64(13),
+            &mut b,
+        )
+        .unwrap()
+    {
+        crate::store::StudioOverlayStart::Captured(capture) => *capture,
+        crate::store::StudioOverlayStart::Settled(_) => {
+            panic!("the fixture request was classified as already accepted")
+        }
+    }
+}
+
+/// A vault left exactly where automatic handoff becomes possible: a local draft accepted on a
+/// Closing document, its successor settled and installed, and the installed head completed.
+/// Returns the branch's basis, which is what the H1 probe rediscovers for itself.
+///
+/// Every step is the production one. The runtime tests need this state and must not fabricate it.
+pub(crate) fn studio_handoff_ready_fixture(
+    store: &mut ServerStore,
+    server: u64,
+    group: &ServerGroup,
+    device: &MlsDevice,
+    target: StudioTarget,
+    operations: usize,
+) -> [u8; 32] {
+    fill_studio_epoch_fixture(store, server, group, device, target);
+    let decision = studio_owner_decision_fixture(store, server, group, device, target, None);
+    let close = decision.close().clone();
+    let mut b = {
+        let inv = inventory(store);
+        store.studio_storage_budget(server, group, &inv).unwrap()
+    };
+    store
+        .seal_studio_epoch(
+            server,
+            group,
+            target,
+            device,
+            decision.receipt().clone(),
+            0,
+            &mut ChaCha20Rng::seed_from_u64(21),
+            &mut b,
+        )
+        .unwrap();
+    let basis = store
+        .prepare_studio_closing_overlay(server, group, target, device, &close, Some(0), &mut b)
+        .unwrap();
+    // `operations` accepted entries, so a caller can build a branch long enough for H3 to page
+    // across background turns rather than finishing in one slice.
+    for n in 0..operations {
+        let mut op = title_op(target, 7_100 + n);
+        op.nonce = (n as u128 + 6_000).to_be_bytes();
+        store
+            .save_studio_closing_overlay(
+                server,
+                group,
+                target,
+                device,
+                &close,
+                Some(0),
+                basis.fingerprint(),
+                op,
+                300 + n as u64,
+                &mut ChaCha20Rng::seed_from_u64(22),
+                &mut b,
+            )
+            .unwrap();
+    }
+
+    // Persist the settlement decision to the owner journal, then rotate. Without the journal
+    // entry the installed head and the journal disagree, which is the check that caught an
+    // earlier version of this fixture taking a shortcut.
+    let mut source = store
+        .load_studio_epoch(server, group, target, device)
+        .unwrap()
+        .unwrap();
+    let receipt = source.unit.receipt_head().unwrap().cloned().unwrap();
+    let decision = source
+        .unit
+        .resume_owner_decision(group, device, 0, &receipt, &close)
+        .unwrap();
+    let mut b = {
+        let inv = inventory(store);
+        store.studio_storage_budget(server, group, &inv).unwrap()
+    };
+    store
+        .prepare_studio_owner_decision_with_writer(
+            server,
+            &decision,
+            group,
+            0,
+            &mut ChaCha20Rng::seed_from_u64(23),
+            &mut b.storage,
+            atomic_write,
+        )
+        .unwrap();
+
+    // Re-save unchanged so the retained source carries a real physical stamp, as the rotation
+    // path requires; never invent one from a normalized unit.
+    let (unit, observed, before) = store
+        .checked_studio_source(server, group, target, device, false, &mut b.storage)
+        .unwrap();
+    let logical = target.document(&group.group_id()).unwrap();
+    let source_scope = scope_bytes(server, &logical).unwrap();
+    let actual = store.read_studio_record(&source_scope).unwrap().unwrap();
+    let version = store
+        .studio_source_version(server, &unit, &actual.plain, actual.physical_bytes)
+        .unwrap();
+    let warmed = store
+        .save_studio_source_reusing(
+            server,
+            unit,
+            observed,
+            &before,
+            WritePurpose::Settlement,
+            &mut ChaCha20Rng::seed_from_u64(24),
+            &mut b.storage,
+            atomic_write,
+            sync_studio,
+            Some(version),
+        )
+        .unwrap();
+    store.retain_studio_source(group, device, warmed);
+
+    let mut b = {
+        let inv = inventory(store);
+        store.studio_storage_budget(server, group, &inv).unwrap()
+    };
+    let (_, installed) = store
+        .rotate_studio_owner(
+            server,
+            group,
+            target,
+            device,
+            0,
+            &ManualClock::new(1000),
+            &mut ChaCha20Rng::seed_from_u64(26),
+            &mut b,
+        )
+        .unwrap();
+    store.retain_studio_source(group, device, installed);
+    let mut b = {
+        let inv = inventory(store);
+        store.studio_storage_budget(server, group, &inv).unwrap()
+    };
+    store
+        .complete_studio_installed_head(
+            server,
+            group,
+            target,
+            device,
+            0,
+            &mut ChaCha20Rng::seed_from_u64(25),
+            &mut b,
+        )
+        .unwrap();
+    basis.fingerprint()
+}
+
 #[test]
 fn studio_source_profile_smoke() {
     measure(33, &ManualClock::new(0));
