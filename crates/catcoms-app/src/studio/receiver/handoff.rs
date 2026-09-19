@@ -193,7 +193,14 @@ impl HandoffRuntime {
                 .filter(|at| now < **at)
                 .map(|at| at - now);
         }
-        // No job, and still something to come back for. A capacity refusal selects no target and
+        // No job, and still something to come back for. With no job `runnable` is false by
+        // definition, so unlike the branch above there is nothing for `pending` to carry and the
+        // deadline cannot simply be dropped once it passes: `now == D` would leave the actor with
+        // neither pending work nor a wake, and the timer that just fired would be the last one.
+        // A due deadline is therefore reported through `probe_due` below, and this publishes only
+        // what is still ahead.
+        //
+        // A capacity refusal selects no target and
         // records no per-target hold, so without this the actor has no waiter on the shared pool
         // (the reservation is a `try_acquire`) and nothing tells it capacity returned; an
         // abandoned job leaves a deadline behind but takes the job with it. Neither strands a
@@ -210,6 +217,24 @@ impl HandoffRuntime {
             .filter(|at| now < **at)
             .map(|at| at - now)
             .min()
+    }
+
+    /// Whether a probe would do something now, with no job to carry it.
+    ///
+    /// This is `runnable`'s counterpart for the no-job case, and both halves of the pair it forms
+    /// with `wake_in` are needed for the same reason the job branch needed them: a deadline that
+    /// gates execution but never reaches the driver is a stall, and one that reaches the driver
+    /// but gates nothing is a hot loop. A due `probe_retry_at` or a rail target whose hold has
+    /// expired means the next turn has work; `is_quiet` excludes targets the probe would skip
+    /// anyway, which is what stops an expired deadline reporting "due" for ever.
+    pub(super) fn probe_due(&self, now: u64, rail: &[StudioTarget]) -> bool {
+        if self.job.is_some() {
+            return false;
+        }
+        self.probe_retry_at.is_some_and(|at| now >= at)
+            || rail
+                .iter()
+                .any(|t| self.next_at.get(t).is_some_and(|at| now >= *at))
     }
 
     fn remaining(&self) -> Option<usize> {
@@ -262,6 +287,13 @@ impl HandoffRuntime {
         if !self.quiet.contains(&target) {
             self.quiet.push(target);
         }
+        // A memoised target needs no deadline: the memo is its gate, and an intent write rotating
+        // the generation is what reopens it. Leaving an expired hold behind would make `probe_due`
+        // report work for ever on a target the probe then declines to act on, which is the spin
+        // the future-only filter in `wake_in` was reaching for and getting wrong. Clearing here
+        // also keeps the pacing maps from accumulating an entry per quiescent document.
+        self.next_at.remove(&target);
+        self.hold_ms.remove(&target);
     }
 
     fn is_quiet(&self, generation: &Arc<()>, target: StudioTarget) -> bool {
@@ -418,6 +450,13 @@ impl StudioReceiver {
             .iter()
             .any(|t| !self.handoff.is_quiet(&generation, *t) && !self.handoff.held(*t, now))
         {
+            return;
+        }
+        // The gate half of that retry. Recording a deadline the probe itself never reads is the
+        // same mistake as an H5 hold no commit arm consulted: under unrelated Studio traffic this
+        // would re-attempt the reservation on every single turn while claiming to pace at two
+        // seconds. Cheap as `try_acquire` is, the claim has to be true.
+        if self.handoff.probe_retry_at.is_some_and(|at| now < at) {
             return;
         }
         let Some(ownership) = self.catchup.reserve_overlay() else {

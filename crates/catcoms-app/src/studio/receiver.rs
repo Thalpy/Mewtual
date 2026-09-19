@@ -379,6 +379,12 @@ impl StudioReceiver {
                 // active cadence for the whole life of the job. Every other term here is time- or
                 // state-gated for the same reason.
                 || self.handoff.runnable(now)
+                // With no job there is nothing for `runnable` to report, so a due probe deadline
+                // has to reach the driver by its own term or the timer that fired for it is the
+                // last one this actor ever arms.
+                || self
+                    .handoff
+                    .probe_due(now, &self.rail())
                 || self.catchup.pending(server, &self.watches))
     }
     /// Milliseconds until this receiver has time-gated work to do, if any.
@@ -400,16 +406,46 @@ impl StudioReceiver {
         if self.paused {
             return None;
         }
-        let rail: Vec<_> = self.watches.iter().map(|(w, _)| w.target).collect();
-        self.handoff.wake_in(now, &rail)
+        self.handoff.wake_in(now, &self.rail())
+    }
+
+    /// The watched targets, which is the only set a handoff deadline may speak for. A deadline
+    /// remembered for a target that is no longer watched must not wake the actor.
+    fn rail(&self) -> Vec<StudioTarget> {
+        self.watches.iter().map(|(w, _)| w.target).collect()
     }
     /// Put the receiver in the state a storage fault leaves it in.
     ///
     /// Only the precondition is simulated. What a completion arriving in that state does, and
     /// whether the bundle it carries is released, are production paths.
+    /// Sets the flag only, for a test that needs the state without the transition.
     #[cfg(test)]
     pub(crate) fn pause_for_test(&mut self) {
         self.paused = true;
+    }
+
+    /// The whole production transition, which is what an errored step performs.
+    #[cfg(test)]
+    pub(crate) fn pause_at_for_test<T: MeshTransport, R: CryptoRngCore>(
+        &mut self,
+        server: &Server<T, R>,
+    ) {
+        self.pause(server);
+    }
+
+    /// Enter the paused state, releasing anything that can no longer make progress.
+    ///
+    /// The release has to happen **at the transition**, not on the next visit. A paused receiver
+    /// publishes neither pending work nor a wake, so "the next `run`" is precisely the event this
+    /// state prevents: a background pass that owns a non-detached bundle when an unrelated step
+    /// errors would hold this actor's admission and one of four process-wide permits until a user
+    /// happened to open a Studio document successfully. `release_if_stalled` at the top of `run`
+    /// is a backstop for a pause that arrived some other way, not the primary path.
+    fn pause<T: MeshTransport, R: CryptoRngCore>(&mut self, server: &Server<T, R>) {
+        self.paused = true;
+        self.pause_notice = true;
+        self.handoff
+            .release_if_stalled(server.runtime_clock().monotonic_ms());
     }
     pub(crate) fn take_pause_notice(&mut self) -> bool {
         std::mem::take(&mut self.pause_notice)
@@ -584,8 +620,7 @@ impl StudioReceiver {
             return match self.background_step(server, store, id) {
                 Ok(saved) => Ok(saved),
                 Err(error) => {
-                    self.paused = true;
-                    self.pause_notice = true;
+                    self.pause(server);
                     Err(error)
                 }
             };
@@ -599,8 +634,7 @@ impl StudioReceiver {
             return match result {
                 Ok(saved) => Ok(saved),
                 Err(error) => {
-                    self.paused = true;
-                    self.pause_notice = true;
+                    self.pause(server);
                     Err(error)
                 }
             };
@@ -668,8 +702,7 @@ impl StudioReceiver {
             Err(error) => {
                 // A pre-drain failure retains its packet; an admission failure may consume it.
                 // Neither is delivery. Hold BOTH cases instead of a peer-driven disk retry loop.
-                self.paused = true;
-                self.pause_notice = true;
+                self.pause(server);
                 return Err(error);
             }
         };

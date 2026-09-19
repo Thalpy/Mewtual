@@ -1258,9 +1258,56 @@ both reads return the same value. What is tested instead is the invariant that m
 sample sufficient — never *neither* runnable nor waited on — asserted at each millisecond across
 the boundary. The single sample is structural; the invariant is what a mutation can reach.
 
+### The fifth review: the last two blockers, both the same shape
+
+The reviewer accepted the scheduling-hang isolation and removed it from the Flow H causal argument
+entirely, leaving REQUEST CHANGES resting on two deterministic findings. Both were confirmed
+against source before being acted on, and both are the same shape as everything before them: a
+deadline or a hook that gates one thing while a second thing is needed to make it reachable.
+
+**P1: the pause stranded its own release.** All three sites that set `paused = true` returned
+immediately, and `release_if_stalled` lives at the top of `run` — which is exactly the event a
+paused receiver prevents, since `pending` begins with `!self.paused` and `wake_in` returns nothing.
+A background pass owning a non-detached bundle when an unrelated step errored would hold admission
+and a process-wide permit until a user happened to open a Studio document successfully. One
+`pause()` helper now sets the flag, the notice and the release together, at the transition.
+
+**P2, FLOWH-004-R1: the capacity retry had neither half.** The probe never read `probe_retry_at`,
+so under unrelated Studio traffic it re-attempted the reservation every turn while claiming two
+second pacing. And at `now == D` the no-job `wake_in` branch filtered the deadline away as no
+longer future, while `runnable` requires a live job — so the timer that fired was the last one the
+actor would ever arm. Gate and wake, the same pair as FLOWH-001, missed again in the branch where
+`runnable` cannot stand in.
+
+The spin that made the future-only filter look necessary is gone at its source: `quiet_for` now
+clears that target's `next_at` and `hold_ms`, because a memoised target's gate is the memo and a
+generation rotation is what reopens it. That also stops the pacing maps accumulating an entry per
+quiescent document.
+
+| Mutation | Effect |
+|---|---|
+| M44: pause without releasing | "the pause parked a bundle in a stage no turn will ever visit" |
+| M45: probe ignores its own retry deadline | the deadline is rewritten each turn: `left: Some(2000), right: Some(1500)` instead of counting down |
+| M46: a due retry is never reported | "at its deadline the retry was neither due nor published" |
+
+**M45 first passed against a build with the gate removed, and that is the finding worth keeping.**
+The original assertion was that the selection cursor does not move — but with the pool exhausted
+the reservation fails before the cursor advances either way, so it witnessed nothing. Three times
+in this work a plausible assertion has proved nothing until a mutation broke it. The green result
+is not the evidence; the failing mutant is.
+
+**CI, recorded as separate integration evidence.** Five specialised workflows green at
+`da73142`. General CI's Windows job checked out PR merge commit `db2798c`, not the branch head,
+and there the two owner-return fixtures failed on an **assertion** — "Studio must install through
+the reserved slot" — at 659 passed / 2 failed / 11 ignored. That is a *different failure mode* from
+the timeout measured at the branch head, and its text is pool-related. It should be investigated as
+a possible second, distinct defect rather than assumed to be the same hang, and it cannot speak to
+head-SHA causality because it is a different tree.
+
 **Still open.** The list has been incomplete in every round: three when it should have been eight,
-eight when it should have been twelve, and twelve again missing all three findings above. What
-follows is what is known to be open, and is again not offered as a guarantee of completeness.
+eight when it should have been twelve, twelve again missing three findings, and then missing these
+two. What follows is what is known to be open, and is again not offered as a guarantee of
+completeness.
 
 1. **H1 and H5 each drain a full epoch-storage inventory under custody**, which design 6.1 does not
    put in H1 and which C-3's resumable cursor is meant to bound. The scheduled sequence is shipping
@@ -1273,7 +1320,9 @@ follows is what is known to be open, and is again not offered as a guarantee of 
    signing progress. One type change away from NEW-5's shape.
 5. **Design 7.3's `explicit_retry` relief is not wired to the handoff maps**, though the code
    comment cites 7.3's pacing as satisfied.
-6. **`next_at`, `hold_ms` and `quiet` are never pruned** against the current watch rail.
+6. **`quiet` is still never pruned** against the current watch rail, though `next_at` and `hold_ms`
+   now shed their entry whenever a target is memoised quiet, and no deadline for an unwatched
+   target can wake the actor. Bounded rather than unbounded.
 7. ~~An abandoned target is not re-probed on a timer.~~ **Closed by FLOWH-004-R1.** `wake_in` now
    publishes the earliest future `next_at` among rail targets when there is no job, so an
    abandoned target's backoff expiry wakes the actor. Restricting it to the rail is also what

@@ -708,6 +708,95 @@ async fn authority_change_during_signing(moved: AuthorityMove) {
     receiver.run(&mut server, &mut store, 83, None).unwrap();
 }
 
+/// The pause that strands its own release.
+///
+/// A background pass can own a non-detached bundle when an unrelated step errors. That error sets
+/// `paused`, and from then on `pending` is false by its leading `!self.paused` and `wake_in`
+/// returns nothing, so no further turn is ever scheduled — and `release_if_stalled` lives at the
+/// top of `run`, which is exactly the event the paused state prevents. The bundle would hold this
+/// actor's admission and one of four process-wide permits until a user happened to open a Studio
+/// document successfully.
+///
+/// The release therefore has to happen at the transition. This test never calls `run` again after
+/// the failing one, because in production there would be nothing to call it.
+#[tokio::test]
+async fn a_pause_releases_the_bundle_it_strands_rather_than_waiting_for_a_turn_that_never_comes() {
+    let clock = ManualClock::new(1000);
+    let mut rng = ChaCha20Rng::seed_from_u64(1907);
+    let mut server = Server::found(
+        Hub::new().join(PeerId::from_u64(1)),
+        MlsDevice::generate().unwrap(),
+        rng.clone(),
+        Box::new(clock.clone()),
+        "owner",
+    )
+    .unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let mut store = ServerStore::open(root.path(), b"flow-h-pause-edge", &mut rng).unwrap();
+    let target = StudioTarget::Flipnote {
+        channel: crate::channel_id("general").to_be_bytes(),
+        object: [23; 16],
+    };
+    server.sync.with_registry_context(|g, d, _, _| {
+        crate::store::studio_handoff_ready_fixture(&mut store, 90, g, d, target, 1)
+    });
+    let mut receiver = StudioReceiver::default();
+    receiver
+        .run(
+            &mut server,
+            &mut store,
+            90,
+            Some(StudioRequest::Read { target }),
+        )
+        .unwrap();
+    let pool = receiver.catchup.inject_overlay_pool_for_test(4);
+    let free = pool.available_permits();
+
+    // A job holding a bundle, in a stage `release_if_stalled` would act on.
+    for _ in 0..40 {
+        receiver.run(&mut server, &mut store, 90, None).unwrap();
+        if let Some(work) = receiver.detach(&mut server) {
+            receiver.complete(&mut server, work.run(None).await);
+        }
+        if matches!(
+            receiver.handoff.stage_for_test(),
+            Some("signing") | Some("ready")
+        ) {
+            break;
+        }
+    }
+    assert!(
+        matches!(
+            receiver.handoff.stage_for_test(),
+            Some("signing") | Some("ready")
+        ),
+        "no job holds a bundle, so this proves nothing"
+    );
+    assert_eq!(pool.available_permits(), free - 1);
+
+    // The pause arrives. Nothing else happens afterwards, deliberately.
+    receiver.pause_at_for_test(&server);
+
+    assert!(
+        receiver.handoff.stage_for_test().is_none(),
+        "the pause parked a bundle in a stage no turn will ever visit"
+    );
+    assert_eq!(
+        pool.available_permits(),
+        free,
+        "the pause stranded the shared preparation slot"
+    );
+    assert!(
+        receiver.catchup.overlay_admission_available_for_test(),
+        "the pause stranded this actor's admission"
+    );
+    assert!(
+        !receiver.pending(&server) && receiver.wake_in(&server).is_none(),
+        "a paused receiver must publish neither work nor a deadline, which is exactly why the \
+         release cannot be deferred to a later turn"
+    );
+}
+
 /// "Is there work now" and "when is there work next" must come from one clock read.
 ///
 /// Sampling them separately leaves a window the size of whatever runs between the two calls. Take
@@ -889,14 +978,51 @@ async fn an_exhausted_pool_stops_the_probe_before_it_reads_any_intent_body() {
     // untransferred until unrelated Studio work happened to produce another custody turn. The
     // earlier version of this test hid that by calling `run` again itself, which production does
     // not get for free.
-    let rail: Vec<_> = [target].to_vec();
     let retry = receiver
         .handoff
-        .wake_in(now, &rail)
+        .wake_in(now, &[target])
         .expect("a capacity refusal left no future retry, so the transfer is dormant");
     assert!(
         retry > 0 && retry <= 2_000,
         "a capacity retry should be short and flat, not a doubling ineligibility backoff: {retry}"
+    );
+
+    // The gate half: while the retry is in the future, the probe must not re-attempt at all.
+    // Recording a deadline nothing reads is how an H5 hold became an unpaced retry, and the claim
+    // of two-second pacing has to hold under active Studio traffic too.
+    //
+    // The witness is that the deadline **counts down**. A probe that re-attempts rewrites it to
+    // `now + 2000` every turn, so the remaining time would stay pinned at the full interval
+    // instead of shrinking. The selection cursor is no witness here: with the pool still
+    // exhausted the reservation fails before the cursor moves either way, which is why the first
+    // version of this assertion passed against a build with the gate removed.
+    clock.advance_ms(500);
+    receiver.run(&mut server, &mut store, 88, None).unwrap();
+    let after = server.runtime_clock().monotonic_ms();
+    assert_eq!(
+        receiver.handoff.wake_in(after, &[target]),
+        Some(retry - 500),
+        "the retry deadline was rewritten, so the probe re-attempted inside its own pacing"
+    );
+
+    // The wake half, which the earlier version of this test never proved: expiry must itself
+    // schedule the run. With no job, `runnable` is false by definition, so if the deadline simply
+    // stops being published at `now == D` the timer that fired is the last one this actor arms.
+    let rail: Vec<_> = [target].to_vec();
+    assert!(
+        !receiver.handoff.probe_due(after, &rail),
+        "the retry reported due before its deadline"
+    );
+    clock.advance_ms(retry - 500);
+    let due = server.runtime_clock().monotonic_ms();
+    assert!(
+        receiver.handoff.probe_due(due, &rail),
+        "at its deadline the retry was neither due nor published, so the probe is never requested \
+         again and an eligible draft stays untransferred"
+    );
+    assert!(
+        receiver.pending(&server),
+        "a due probe did not reach the driver"
     );
 
     // With capacity back, the same target is picked up normally: the refusal left no trace.
@@ -908,7 +1034,7 @@ async fn an_exhausted_pool_stops_the_probe_before_it_reads_any_intent_body() {
         "the probe did not recover once capacity returned"
     );
     assert!(
-        receiver.handoff.wake_in(now, &rail).is_none(),
+        receiver.handoff.wake_in(due, &rail).is_none(),
         "the capacity retry outlived the reservation that succeeded"
     );
 }
