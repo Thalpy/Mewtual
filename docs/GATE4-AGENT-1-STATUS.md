@@ -1145,6 +1145,44 @@ none of which the list named.
 | M39 (design **M4**): no per-visit reauthentication | "H3 signed against records that are no longer the ones it authenticated" |
 | M40: reserve after the rail scan | the selection cursor advances, proving the scan ran holding no admission and no permit |
 
+> ### Three claims in the scheduling investigation were wrong, and are withdrawn
+>
+> All three were mine, all three are contradicted by source, and all three had been carried in
+> this ledger as established. Verified before withdrawing:
+>
+> **1. "The install has ~8 s of injected clock."** False. `start` is captured *after* the owner is
+> revealed (`scheduling.rs:513-514`), and the loop is `for pass in 0..160` at 250 ms per turn, so
+> the bound is **40,000 ms measured from owner return**. I computed `40000 - 32250` as if the
+> bound were absolute. There are three separate time concepts here and I conflated two: the outer
+> 90 s Tokio deadline is real time; the 40 s install bound is injected time *after owner return*;
+> preview and request expiries are independent protocol lifetimes on the injected clock.
+>
+> **2. "Three ready previews hold three of the four shared preparation permits."** False.
+> `PreviewJob::run` puts both permits in `let _permits = (permit, preview_permit);` **inside** the
+> `spawn_blocking` closure, so both drop when the blocking work ends; `PreviewCompletion::Prepared`
+> carries only the result. A *ready* preview holds **zero** preparation permits. Three
+> concurrently *running* parsers can hold three, which is bounded occupancy by design — the
+> three-permit preview pool is a **sublimit on** the four-permit shared pool, not seven units of
+> capacity. The variant named `three_retained_previews` retains checkpoint-memory slots, a
+> different allocator, not parser permits.
+>
+> **3. "The preview-readiness loop is unbounded."** False. It is `for _ in 0..160` with a
+> `"preview {i} never became ready"` assertion. The membership and channel convergence loops
+> earlier in the fixture are genuinely unbounded, but they are not the preview loop and should not
+> have been described as one.
+>
+> **What survives:** the preparation semaphores are process-wide while each `Pair` runs its own
+> `ManualClock`, so unrelated concurrent tests can consume the same capacity while advancing a
+> different simulated clock — which also means "my fixture advanced 30 s, so other retentions
+> expired" is invalid reasoning. And `unopened`'s `expect("cold paid preparation")` asserts a job
+> must exist immediately without establishing any capacity precondition, which is a source-derivable
+> test-isolation weakness independent of whether it caused the observed run.
+>
+> **What is needed is one failing trace**, not another aggregate pass count: which operation could
+> not progress, which resource or deadline prevented it, and who owned that resource. A zero
+> reading of `available_permits()` describes legitimate running work; the evidence is the refused
+> acquisition at its own site, with the owner identified.
+>
 > ### Full-suite evidence at the current Flow H correction head: **FAILING / unresolved**
 >
 > `scheduling::studio_actor_owner_return_installs_both_classes_with_cancelled_preview_transport`
@@ -1677,12 +1715,11 @@ in between. So it is not class-specific, which also disposes of a correlation wo
 first local sighting coincided with my widening a signature in `epoch_registry/page_source.rs`, and
 the next run failed on the *Studio* half instead.
 
-**The margin is ~8 s, not 40 s.** Every sighting shows identical progress — `preview 0 ready at
-9250`, `preview 1 ready at 17500`, `owner returning at ~32000` — against a 40 s bound. So the
-install has roughly eight seconds of injected clock, not forty, and fails in that last stretch. A
-tight margin that usually holds fits a ~20% intermittent failure far better than anything else
-proposed. Widening only that margin is a cheap way to test the hypothesis; it would be a
-diagnosis, not a fix, because the real question is why install sometimes needs more than eight.
+~~**The margin is ~8 s, not 40 s.**~~ **Withdrawn — see the correction at the top of this
+document.** The 40 s bound is measured from owner return, not absolutely, so the install has the
+full forty. The progress markers are identical across sightings (`preview 0 ready at 9250`,
+`preview 1 ready at 17500`, `owner returning at ~32000`), which remains a real observation; the
+margin arithmetic built on them was not.
 
 The assertion mode was believed confined to the merge checkout. It is not: it reproduced on this
 branch. Both are plausibly one root cause — registry install failing to complete in time —

@@ -634,6 +634,95 @@ mod persistence {
         atomic_write(path, bytes)
     }
 
+    /// What a test hook decides at one point in a mutation.
+    ///
+    /// The hook chooses *behaviour*; [`EpochMutation`] still performs the syscall. That is the
+    /// whole distinction: previously a caller supplied a closure that owned the physical write,
+    /// which meant the type permitted a closure that cloned the path and bytes, spawned, and
+    /// returned `Ok` — rotating the token, dropping the guard, and then mutating after a cursor
+    /// had captured the new generation. No production caller did that; the type allowed it.
+    #[derive(Debug)]
+    #[allow(dead_code)]
+    pub(in crate::store) enum Intercept {
+        /// Proceed with the operation as the coordinator intended.
+        Continue,
+        /// Proceed, but persist these bytes instead. Before-stage only.
+        Replace(Vec<u8>),
+        /// Refuse, without performing the operation.
+        Fail(AppError),
+    }
+
+    #[cfg(test)]
+    type BeforeHook<'h, T> = &'h mut dyn FnMut(T, &Path, &[u8]) -> Intercept;
+    #[cfg(test)]
+    type AfterHook<'h, T> = &'h mut dyn FnMut(T, &Path) -> Intercept;
+
+    /// Hooks around one mutation, generic over the transaction's own write tag.
+    ///
+    // The agreed shape for requirement 3, landed and compiling but **not yet applied**. Applying
+    // it means replacing the `writer`/`sync` closure parameters on roughly forty transaction
+    // functions and rewriting about as many injected-failure tests from "a closure that writes"
+    // to "a hook that decides". One family was converted to prove the shape; the cascade then
+    // spread through the tagged transaction layer rather than converging, so the partial
+    // conversion was reverted rather than left half-applied. Delete this marker with the commit
+    // that finishes it.
+    ///
+    /// **In a non-test build this has exactly one inhabitant, `None`.** There is no variant a
+    /// production caller could construct that carries an implementation, so "production supplies
+    /// no write implementation" is a property of the type rather than of the current call sites.
+    #[allow(dead_code)]
+    pub(in crate::store) enum WriteHooks<'h, T> {
+        None,
+        #[cfg(test)]
+        Hooked {
+            before: Option<BeforeHook<'h, T>>,
+            after: Option<AfterHook<'h, T>>,
+        },
+        #[allow(dead_code)]
+        Never(std::convert::Infallible, std::marker::PhantomData<&'h T>),
+    }
+
+    #[allow(dead_code)]
+    impl<T: Copy> WriteHooks<'_, T> {
+        /// Decide before the operation, yielding the bytes to persist.
+        pub(in crate::store) fn before<'b>(
+            &mut self,
+            #[cfg_attr(not(test), allow(unused_variables))] tag: T,
+            #[cfg_attr(not(test), allow(unused_variables))] path: &Path,
+            bytes: &'b [u8],
+        ) -> Result<std::borrow::Cow<'b, [u8]>, AppError> {
+            match self {
+                Self::None => Ok(std::borrow::Cow::Borrowed(bytes)),
+                #[cfg(test)]
+                Self::Hooked { before, .. } => match before.as_mut().map(|h| h(tag, path, bytes)) {
+                    None | Some(Intercept::Continue) => Ok(std::borrow::Cow::Borrowed(bytes)),
+                    Some(Intercept::Replace(replacement)) => {
+                        Ok(std::borrow::Cow::Owned(replacement))
+                    }
+                    Some(Intercept::Fail(error)) => Err(error),
+                },
+                Self::Never(never, _) => match *never {},
+            }
+        }
+
+        /// Decide after the operation has physically completed.
+        pub(in crate::store) fn after(
+            &mut self,
+            #[cfg_attr(not(test), allow(unused_variables))] tag: T,
+            #[cfg_attr(not(test), allow(unused_variables))] path: &Path,
+        ) -> Result<(), AppError> {
+            match self {
+                Self::None => Ok(()),
+                #[cfg(test)]
+                Self::Hooked { after, .. } => match after.as_mut().map(|h| h(tag, path)) {
+                    None | Some(Intercept::Continue) | Some(Intercept::Replace(_)) => Ok(()),
+                    Some(Intercept::Fail(error)) => Err(error),
+                },
+                Self::Never(never, _) => match *never {},
+            }
+        }
+    }
+
     /// Test-only wrappers. These are the **only** way anything outside this module reaches a
     /// path-generic physical operation, and they do not exist in a non-test build. The functions
     /// they wrap are private, so `pub(super)` on the wrapper cannot widen them: previously the
