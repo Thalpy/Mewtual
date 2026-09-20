@@ -513,7 +513,12 @@ async fn owner_return(pressure: Pressure) {
     *wire.hidden_peer.lock().unwrap() = None;
     let start = p.clock.monotonic_ms();
     let (mut studio_installed, mut registry_installed) = (false, false);
+    // Passes actually consumed. The budget is exactly 160 turns of 250 ms, so this and the
+    // injected elapsed time are the same quantity seen two ways; both are reported because the
+    // failure hypothesis is about *turns that accomplished nothing*, not about wall time.
+    let mut passes_used = 0;
     for pass in 0..160 {
+        passes_used = pass + 1;
         turn(&owner, &client, &p.clock, None, true).await;
         assert_eq!(
             client.actor.studio_scheduling_for_test(None).await.1,
@@ -543,15 +548,22 @@ async fn owner_return(pressure: Pressure) {
             break;
         }
     }
+    // One assertion reporting both classes, because two sequential ones stop at the first: the
+    // Studio failure hid Registry's state in every trace collected so far.
+    //
+    // The pass count is the discriminator. The loop's budget is 160 turns and a healthy run uses
+    // 132 (Parser, Transport) or 91 (Ready), so there are 28 spare passes in the tight variants.
+    // `turn` sleeps 5 ms of real time and then advances 250 ms of injected time, and 5 ms is not
+    // a completion barrier: under load a pass can return with its awaited work not yet landed,
+    // accomplishing nothing while still spending 250 ms of budget. If a failing run reports 160
+    // passes consumed, that is the mechanism, and no semaphore instrumentation is needed. If it
+    // reports far fewer, the loop broke early and the cause is elsewhere.
+    let injected = p.clock.monotonic_ms() - start;
     assert!(
-        studio_installed,
-        "Studio must install through the reserved slot"
+        studio_installed && registry_installed,
+        "{pressure:?}: install incomplete — studio={studio_installed} registry={registry_installed},          passes={passes_used}/160, injected={injected}/40000 ms since owner return"
     );
-    assert!(
-        registry_installed,
-        "Registry must install through the reserved slot"
-    );
-    assert!(p.clock.monotonic_ms() - start <= 40_000);
+    assert!(injected <= 40_000);
     eprintln!(
         "{pressure:?}: both classes installed after {} ms",
         p.clock.monotonic_ms() - start
