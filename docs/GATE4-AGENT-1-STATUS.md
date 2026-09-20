@@ -1336,6 +1336,58 @@ reviewer found this one by reading rather than by running.
 **Item 6's wording was also wrong and is corrected below.** "Bounded rather than unbounded" was an
 overstatement: rail filtering bounds the *scheduling* impact, not the *retained state*.
 
+## I-4, slice 1: the guard and its invariant
+
+`inventory_generation` and `EpochMutation` exist. The guard is obtainable only from
+`epoch_mutation_guard()`, which rotates **before** handing one out, so rotation precedes the
+caller's first possible I/O rather than following a successful write. It is not undone on drop and
+is not conditional on success.
+
+Landed deliberately **before** the audited writer conversion. The list is 66 `atomic_write` sites
+and 34 unlinks, and converting them on top of an unproven guard is the wrong order; the
+unconverted primitives carry explicit markers naming what is pending, rather than being quietly
+half-done.
+
+Two things the first conversion surfaced:
+
+- **The guard borrows the store, so paths must be resolved before rotation.** Gather, rotate, then
+  touch disk. That makes "rotate before first I/O" a borrow-checker property rather than a
+  remembered one.
+- **`flush_checked_epoch_intents` held only `&self` while mutating disk.** The store did not
+  require exclusive access to write. I-4 makes that a type error. The cascade was two levels deep.
+
+**M52**, handing out the guard without rotating, fails at "a captured inventory would survive a
+write it never saw". The negative half is asserted too: reads must not rotate, or a cross-visit
+cursor dies on ordinary activity — which is why `studio_generation` could not be reused.
+
+**Agent 2's answer closes the intent-write concern I raised.** Each appended operation is a full
+record rewrite plus a store-wide `intent_generation` rotation, and a bulk copy is N of each — but
+every item is a distinct user action and no path rotates in an automated loop. So the quiet memo's
+invalidation rate is bounded by human interaction, not by a loop. They checked source rather than
+answering from memory, and separately verified `intent_class` for DraftArchive against the
+preservation guarantee, which was the one decision I had made on their behalf.
+
+### The two scheduling tests have **two** failure modes, not one
+
+This corrects what was handed to the reviewer as two separate defects.
+
+| Mode | Shape | Where seen |
+|---|---|---|
+| 90 s timeout | never completes; 6.8 s normally, 83 s headroom | branch head, twice |
+| `registry_installed` false | progresses, then its own 40 s loop exhausts | CI at `db2798c`, and now locally |
+
+The assertion mode was believed confined to the merge checkout. It is not: it reproduced on this
+branch. Both are plausibly one root cause — registry install failing to complete in time —
+presenting differently depending on where it stalls, and chasing them as two bugs would waste the
+effort.
+
+**It is not the I-4 slice.** The mechanism rules it out: `inventory_generation` is written and
+never read in production, the converted site performs the identical flush on the identical path in
+the identical order, and the two widened signatures have no runtime effect. A stashed-baseline run
+was clean (670 passed) — but that is weak evidence on its own at the ~20% failure rate these runs
+show, and is recorded as corroboration rather than proof. The decisive part is that the same
+assertion was observed at `db2798c`, a tree that cannot contain work written after it.
+
 ## Flow H checkpoint: accepted at `636cc58`
 
 > **The source-level PASS is bound to `636cc58dfcaca5d1e10d7b3400b9e8cafe237efe` and to nothing

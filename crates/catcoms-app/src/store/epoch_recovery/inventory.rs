@@ -1064,6 +1064,48 @@ mod tests {
         LogicalDocument::new(group.to_vec(), DocType::StudioObject, key.to_vec()).unwrap()
     }
 
+    /// I-4's two directions, which are not symmetric.
+    ///
+    /// Rotation must happen before the first possible I/O of any operation that can touch an
+    /// inventoried record, and must **not** happen for anything else. Over-rotation costs a
+    /// rescan; under-rotation silently keeps a captured inventory valid across a mutation it
+    /// never saw, which is the only unsafe direction and the reason the guard is a type-level
+    /// prerequisite rather than a convention.
+    ///
+    /// The negative half is as load-bearing as the positive one: a token that rotated on reads
+    /// would make a cross-visit cursor die on ordinary activity, which is precisely why
+    /// `studio_generation` could not be reused for this.
+    #[test]
+    fn taking_the_mutation_guard_rotates_the_inventory_generation_and_reading_does_not() {
+        let root = tempfile::tempdir().unwrap();
+        let mut store = open(root.path());
+
+        let before = store.inventory_generation();
+        // A read of the same token is not an operation.
+        let again = store.inventory_generation();
+        assert!(
+            std::sync::Arc::ptr_eq(&before, &again),
+            "reading the token rotated it"
+        );
+
+        // The guard is the only way to reach an inventoried-family primitive, and taking it
+        // rotates before the caller can perform any I/O at all.
+        store.epoch_mutation_guard();
+        let after = store.inventory_generation();
+        assert!(
+            !std::sync::Arc::ptr_eq(&before, &after),
+            "taking the mutation guard did not rotate the inventory generation, so a captured \
+             inventory would survive a write it never saw"
+        );
+
+        // Rotation is monotonic: dropping the guard does not restore the previous token, and a
+        // second guard moves it again rather than returning to any earlier value.
+        store.epoch_mutation_guard();
+        let third = store.inventory_generation();
+        assert!(!std::sync::Arc::ptr_eq(&after, &third));
+        assert!(!std::sync::Arc::ptr_eq(&before, &third));
+    }
+
     fn stage(store: &mut ServerStore, server: u64, document: &LogicalDocument, epoch: u64) {
         let snapshot = RecoverySnapshot {
             doc_type: document.doc_type,

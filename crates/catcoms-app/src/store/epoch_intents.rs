@@ -489,7 +489,7 @@ impl ServerStore {
     /// The exclusive coordinator also flushes its matching saved source before claiming a
     /// maintenance no-op. This does not retire entries or infer that an operation is receipted.
     pub(super) fn flush_checked_epoch_intents(
-        &self,
+        &mut self,
         server: u64,
         document: &LogicalDocument,
         budget: &mut EpochStorageBudget,
@@ -510,7 +510,12 @@ impl ServerStore {
                     record,
                 )
                 .map_err(invalid)?;
-            sync_intent(&self.epoch_intent_path(&scope), bytes)?;
+            // I-4. The path is resolved before the guard is taken, because taking it borrows the
+            // store: gather, then rotate, then touch disk. That ordering is the invariant, and
+            // making the borrow checker enforce it is cheaper than remembering it.
+            let path = self.epoch_intent_path(&scope);
+            self.epoch_mutation_guard()
+                .with(|| sync_intent(&path, bytes))?;
             reservation.commit();
         }
         Ok(())

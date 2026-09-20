@@ -422,6 +422,18 @@ pub struct ServerStore {
     // Studio budget minting/write attempts and five-family cleanup invalidate captured scans.
     // Other raw P1 adapters still require the same sole coordinator/exclusive accounting owner.
     studio_generation: std::sync::Arc<()>,
+    // I-4. Rotated before the first possible I/O of ANY operation that can change, create,
+    // replace, rename, unlink or leave a temporary sibling of an inventoried record, and never
+    // restored. A resumable cross-visit scan is sound only because of this: the cursor captures
+    // the token and refuses if it has moved, so over-rotation costs a rescan and under-rotation
+    // is the only unsafe direction.
+    //
+    // Deliberately **not** `studio_generation`, for two independent reasons. That one rotates on
+    // every Studio budget entry, which would make a parked cursor die on unrelated Studio
+    // activity; and it is not rotated by the accounted recovery and owner writers, which would
+    // make it unsound. A budget mint or entry alone must not rotate this, which is what keeps
+    // I-4 separate from budget ownership.
+    inventory_generation: std::sync::Arc<()>,
     // Pure validation metadata; every reuse requires freshly authenticated identical bytes.
     // Never substitutes for an inventory, generation check, source load or write budget.
     inventory_cache: epoch_recovery::inventory::cache::RecordCache,
@@ -470,6 +482,7 @@ impl ServerStore {
             keys,
             intent_generation: std::sync::Arc::new(()),
             studio_generation: std::sync::Arc::new(()),
+            inventory_generation: std::sync::Arc::new(()),
             inventory_cache: Default::default(),
             studio_source: None,
             #[cfg(test)]
@@ -929,6 +942,92 @@ fn sync_directory(_path: &Path) -> std::io::Result<()> {
 /// bytes, and a pre-planted symlink is rejected rather than followed.
 fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), AppError> {
     atomic_write_with_hook(path, bytes, |_, _| {})
+}
+
+/// I-4's guard. Obtainable only from [`ServerStore::epoch_mutation_guard`], which rotates
+/// `inventory_generation` **before** handing one out.
+///
+/// The point is that this is a type-level prerequisite rather than a helper callers are
+/// encouraged to invoke. A convention that writers must remember to call is a convention writers
+/// will eventually forget, and the failure is silent: a captured inventory stays valid across a
+/// mutation it never saw. Routing the inventoried-family mutation primitives through a value that
+/// cannot be constructed without rotating first makes a bypass a compile error instead.
+///
+/// Rotation is **not** undone when this drops, and is not conditional on the operation
+/// succeeding. A failed or panicking write still leaves the token moved, because an operation
+/// that may have touched a file must invalidate a scan whether or not it finished.
+pub(in crate::store) struct EpochMutation<'a> {
+    // Borrows the store for the life of the guard, so a second guard cannot be taken while one is
+    // outstanding and the rotation cannot be interleaved with a read of the token it invalidated.
+    _store: std::marker::PhantomData<&'a ()>,
+}
+
+impl EpochMutation<'_> {
+    /// Atomically replace an inventoried record.
+    //
+    // Not yet reachable: the audited writer list is converted family by family, and until a
+    // writer routes through here it still calls the bare primitive. The guard, its rotation and
+    // the invariant are landed and tested first precisely because converting sixty-odd call
+    // sites on top of an unproven guard is the wrong order. Delete this marker with the commit
+    // that finishes the conversion.
+    #[allow(dead_code)]
+    pub(in crate::store) fn write(&self, path: &Path, bytes: &[u8]) -> Result<(), AppError> {
+        atomic_write(path, bytes)
+    }
+
+    /// Unlink an inventoried record, as the cleanup pass does.
+    //
+    // Also pending conversion. `EpochStorageCleanup` holds the store mutably for the whole pass,
+    // so routing its unlink through the guard is a restructure rather than a substitution.
+    #[allow(dead_code)]
+    pub(in crate::store) fn remove(&self, path: &Path) -> Result<(), AppError> {
+        match fs::remove_file(path) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(AppError::Io(error.to_string())),
+        }
+    }
+
+    /// Run I/O that the two narrow primitives above do not cover, under the same rotation.
+    ///
+    /// Two things need this. The per-family flushes (`sync_intent`, `sync_studio`) carry their own
+    /// checks and error messages and must not be collapsed into one generic primitive; and the
+    /// injected-failure writer seams reach disk through caller-supplied closures, which would
+    /// otherwise be exactly the bypass the guard exists to close.
+    ///
+    /// This is a capability rather than a narrow operation, so it is weaker than `write` and
+    /// `remove`. What it still guarantees is the property that matters: the token has already
+    /// rotated before any of it runs.
+    pub(in crate::store) fn with<T>(
+        &self,
+        io: impl FnOnce() -> Result<T, AppError>,
+    ) -> Result<T, AppError> {
+        io()
+    }
+}
+
+impl ServerStore {
+    /// Rotate `inventory_generation` and hand out the capability to mutate inventoried records.
+    ///
+    /// Rotation happens here, before the caller can perform any I/O, rather than after a
+    /// successful write. That ordering is I-4: a scan captured before this call must be refused
+    /// even if the write it was racing went on to fail.
+    pub(in crate::store) fn epoch_mutation_guard(&mut self) -> EpochMutation<'_> {
+        self.inventory_generation = std::sync::Arc::new(());
+        EpochMutation {
+            _store: std::marker::PhantomData,
+        }
+    }
+
+    /// The token a cursor captures. Cloning it is how a scan remembers what it began under.
+    //
+    // Read by the I-4 tests today; its production consumer is C-3's `EpochStorageCursor`, which
+    // captures it at `begin` and rechecks it before resuming work and before issuing an
+    // inventory. Delete this marker with that commit.
+    #[allow(dead_code)]
+    pub(in crate::store) fn inventory_generation(&self) -> std::sync::Arc<()> {
+        self.inventory_generation.clone()
+    }
 }
 
 /// The hook exists to place Linux subprocess-abort tests on the two sides of the rename. It has no

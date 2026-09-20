@@ -38,7 +38,7 @@ impl ServerStore {
     /// Reuse the verified prepared graph; unchanged history is never reconstructed here.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn registry_maintenance_hint(
-        &self,
+        &mut self,
         server: u64,
         group: &ServerGroup,
         bucket: u8,
