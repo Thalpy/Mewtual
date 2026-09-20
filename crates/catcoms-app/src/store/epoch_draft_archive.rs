@@ -246,10 +246,10 @@ impl ServerStore {
         // writer does: a failed or uncertain write must not leave either usable.
         intents.begin_write();
         self.intent_generation = Arc::new(());
-        // I-4, threaded here because the writer seam is now typed and this call site could not
-        // compile otherwise. Agent 1 made this change; the replacement branch is therefore
-        // covered, but **the exact-retry sync branch of this family is not**, and the design
-        // attaches that obligation to Agent 2 along with `release_studio_draft_archive_with_io`.
+        // I-4, threaded here because the writer seam is typed. Agent 1 made this change; both
+        // this replacement and the exact-retry flush above are now covered. What remains Agent
+        // 2's obligation is `release_studio_draft_archive_with_io`, which does not exist yet and
+        // will unlink an inventoried record when it does.
         let path = self.epoch_draft_archive_path(&scope);
         let framed = frame(&sealed);
         let mutation = self.epoch_mutation_guard();

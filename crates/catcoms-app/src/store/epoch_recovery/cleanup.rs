@@ -132,15 +132,20 @@ impl<'a> EpochStorageCleanup<'a> {
     /// A failed/cancelled pass may already have removed some unpublished siblings. It never
     /// changes a budget: only complete, current inventory reconciliation can release charges.
     pub fn step(&mut self) -> Result<EpochStorageCleanupProgress, AppError> {
-        self.step_with_io(|path| fs::remove_file(path), sync_directory)
+        // Production removal and flush go through the capability's own operations; the seam
+        // below exists so tests can fail either side without owning the physical I/O.
+        self.step_with_io(
+            |m, path| m.remove_io(path),
+            |m, parent| m.sync_parent_io(parent),
+        )
     }
 
     // Private seams inject failures on both sides of unlink and directory sync without changing
     // the production ordering. Poison before any I/O so catch_unwind cannot bypass a failure.
     fn step_with_io(
         &mut self,
-        mut unlink: impl FnMut(&Path) -> std::io::Result<()>,
-        mut sync: impl FnMut(&Path) -> std::io::Result<()>,
+        mut unlink: impl FnMut(&EpochMutation<'_>, &Path) -> std::io::Result<()>,
+        mut sync: impl FnMut(&EpochMutation<'_>, &Path) -> std::io::Result<()>,
     ) -> Result<EpochStorageCleanupProgress, AppError> {
         if self.failed {
             return Err(invalid("epoch storage cleanup failed; start a new pass"));
@@ -154,6 +159,13 @@ impl<'a> EpochStorageCleanup<'a> {
         if self.coverage.includes_intents() {
             self.store.intent_generation = std::sync::Arc::new(());
         }
+        // I-4. One capability spans the whole destructive batch, taken before the first possible
+        // unlink. That is sound for the same reason a batch of writes is: the guard holds the
+        // store exclusively, so no C-3 scan can be captured between the first removal and the
+        // parent sync, and a single rotation therefore invalidates every inventory that could
+        // have been taken before any of it. Unlinking a temporary sibling is exactly the
+        // "unlink or leave a temporary sibling" category I-4 names.
+        let mutation = self.store.epoch_mutation_guard();
         let mut next = self.progress;
         for _ in 0..ENTRIES_PER_STEP {
             let Some(entry) = self.directory.next() else {
@@ -185,7 +197,7 @@ impl<'a> EpochStorageCleanup<'a> {
                 .removed_ciphertext_bytes
                 .checked_add(metadata.len())
                 .ok_or_else(|| invalid("epoch storage cleanup byte counter overflow"))?;
-            unlink(&path).map_err(|e| {
+            unlink(&mutation, &path).map_err(|e| {
                 AppError::Io(format!(
                     "epoch staging cleanup: {e}; earlier siblings may already be removed"
                 ))
@@ -195,7 +207,8 @@ impl<'a> EpochStorageCleanup<'a> {
         }
         // Must also run at EOF with zero removals: a previous pass may have unlinked everything
         // then failed (or crashed) before its sync. There is no speculative counter refund.
-        sync(&self.parent).map_err(|e| AppError::CommittedButNotDurable(e.to_string()))?;
+        sync(&mutation, &self.parent)
+            .map_err(|e| AppError::CommittedButNotDurable(e.to_string()))?;
         self.progress = next;
         self.failed = false;
         Ok(next)
@@ -290,8 +303,8 @@ mod tests {
             EpochInventoryCoverage::RecoveryAndOwnerReceipts
         );
         let result = cleanup.step_with_io(
-            |path| fs::remove_file(path),
-            |_| Err(std::io::Error::other("flush failure")),
+            |m, path| m.remove_io(path),
+            |_, _| Err(std::io::Error::other("flush failure")),
         );
         assert!(matches!(result, Err(AppError::CommittedButNotDurable(_))));
         assert_eq!(cleanup.progress.removed_files, 0); // Failed batches report no success.
@@ -302,8 +315,8 @@ mod tests {
         let mut syncs = 0;
         let done = cleanup
             .step_with_io(
-                |path| fs::remove_file(path),
-                |_| {
+                |m, path| m.remove_io(path),
+                |_, _| {
                     syncs += 1;
                     Ok(())
                 },
@@ -323,6 +336,34 @@ mod tests {
             EpochInventoryCoverage::RecoveryAndOwnerReceipts
         );
         assert_eq!(result.orphans().len(), 0);
+    }
+
+    /// I4-003. Unlinking a temporary sibling is a five-family mutation, and the pass that does
+    /// it must rotate the inventory generation exactly as a write does.
+    ///
+    /// One capability spans the whole batch rather than one per removal: the guard holds the
+    /// store exclusively, so no cursor can be captured between the first unlink and the parent
+    /// sync, and a single rotation therefore invalidates every inventory that could have been
+    /// taken before any of it.
+    #[test]
+    fn a_cleanup_pass_that_removes_a_sibling_rotates_the_inventory_generation() {
+        let root = tempfile::tempdir().unwrap();
+        let mut store = open(root.path());
+        let orphan = staging_candidate(&final_path(&store), 800);
+        fs::write(&orphan, b"partial").unwrap();
+
+        let before = store.inventory_generation();
+        let mut job = store.cleanup_epoch_recovery_staging().unwrap();
+        while !job.step().unwrap().complete {}
+        drop(job);
+        assert!(
+            !orphan.exists(),
+            "the pass removed nothing, so this proves nothing"
+        );
+        assert!(
+            !std::sync::Arc::ptr_eq(&before, &store.inventory_generation()),
+            "cleanup unlinked an inventoried temporary sibling without rotating, so an inventory              captured before the pass would still be treated as current"
+        );
     }
 
     #[test]
@@ -521,8 +562,8 @@ mod tests {
         fs::write(&orphan, b"partial").unwrap();
         let mut job = store.cleanup_epoch_recovery_staging().unwrap();
         let failure = job.step_with_io(
-            |p| fs::remove_file(p),
-            |_| Err(std::io::Error::other("sync failed")),
+            |m, p| m.remove_io(p),
+            |_, _| Err(std::io::Error::other("sync failed")),
         );
         assert!(matches!(failure, Err(AppError::CommittedButNotDurable(_))));
         assert!(!orphan.exists());
@@ -535,8 +576,8 @@ mod tests {
         let mut syncs = 0;
         let progress = retry
             .step_with_io(
-                |_| panic!("no sibling remains"),
-                |_| {
+                |_, _| panic!("no sibling remains"),
+                |_, _| {
                     syncs += 1;
                     Ok(())
                 },
@@ -563,7 +604,7 @@ mod tests {
             let mut calls = 0;
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 job.step_with_io(
-                    |path| {
+                    |_, path| {
                         calls += 1;
                         if calls == 1 {
                             fs::remove_file(path)?;
@@ -575,7 +616,7 @@ mod tests {
                             Err(std::io::Error::other("unlink failed"))
                         }
                     },
-                    |_| panic!("failed traversal must not report a synced batch"),
+                    |_, _| panic!("failed traversal must not report a synced batch"),
                 )
             }));
             if panic_after_unlink {
@@ -608,8 +649,8 @@ mod tests {
         let mut syncs = 0;
         let first = job
             .step_with_io(
-                |_| panic!("legacy must not be unlinked"),
-                |_| {
+                |_, _| panic!("legacy must not be unlinked"),
+                |_, _| {
                     syncs += 1;
                     Ok(())
                 },
@@ -672,7 +713,7 @@ mod tests {
         assert!(!debug.contains(root.path().to_str().unwrap()));
         job.progress.removed_ciphertext_bytes = u64::MAX;
         assert!(job
-            .step_with_io(|_| panic!("overflow must precede unlink"), |_| Ok(()))
+            .step_with_io(|_, _| panic!("overflow must precede unlink"), |_, _| Ok(()),)
             .is_err());
         assert!(orphan.exists());
         assert!(job.into_inventory().is_err());

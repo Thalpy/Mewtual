@@ -976,28 +976,19 @@ pub(crate) struct EpochMutation<'a> {
 
 impl EpochMutation<'_> {
     /// Atomically replace an inventoried record.
-    //
-    // Not yet reachable: the audited writer list is converted family by family, and until a
-    // writer routes through here it still calls the bare primitive. The guard, its rotation and
-    // the invariant are landed and tested first precisely because converting sixty-odd call
-    // sites on top of an unproven guard is the wrong order. Delete this marker with the commit
-    // that finishes the conversion.
-    #[allow(dead_code)]
     pub(in crate::store) fn write(&self, path: &Path, bytes: &[u8]) -> Result<(), AppError> {
         atomic_write(path, bytes)
     }
 
-    /// Unlink an inventoried record, as the cleanup pass does.
-    //
-    // Also pending conversion. `EpochStorageCleanup` holds the store mutably for the whole pass,
-    // so routing its unlink through the guard is a restructure rather than a substitution.
-    #[allow(dead_code)]
-    pub(in crate::store) fn remove(&self, path: &Path) -> Result<(), AppError> {
-        match fs::remove_file(path) {
-            Ok(()) => Ok(()),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(error) => Err(AppError::Io(error.to_string())),
-        }
+    /// Unlink, in the `io::Result` shape cleanup's batch uses. The physical removal lives here
+    /// rather than in a caller-supplied closure, so a production path cannot own the syscall.
+    pub(in crate::store) fn remove_io(&self, path: &Path) -> std::io::Result<()> {
+        fs::remove_file(path)
+    }
+
+    /// Flush the inventoried directory after a removal batch, same reasoning.
+    pub(in crate::store) fn sync_parent_io(&self, parent: &Path) -> std::io::Result<()> {
+        sync_directory(parent)
     }
 
     /// Flush an inventoried record, per family.

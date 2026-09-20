@@ -1363,6 +1363,62 @@ overstatement: rail filtering bounds the *scheduling* impact, not the *retained 
 > nothing reads the token. The moment a cursor captures it across a custody release, one
 > unconverted mutation makes the whole consistency argument false.
 
+## I-4, slice 4: cleanup, and the one gate item that needs a decision
+
+**I4-003 closed.** `EpochStorageCleanup` unlinked temporary siblings and synced the inventoried
+directory without rotating anything — the exact "unlink or leave a temporary sibling" category
+§9.2 names, in production, not test code. One capability now spans each destructive batch, taken
+before the first possible unlink and held across the removals and the parent sync. That is the
+"one rotation covers N mutations" property: the guard holds the store exclusively, so no cursor
+can be captured between the first removal and the flush.
+
+The physical syscalls moved onto the capability as `remove_io` and `sync_parent_io`, so the seam
+decides *whether* to fail rather than owning the removal. `remove` is gone; `remove_io` is the
+single unlink operation.
+
+**M58**, swapping only that batch's guard for an unrotating stand-in, fails at "cleanup unlinked
+an inventoried temporary sibling without rotating".
+
+### Two claims I made that were wrong, corrected
+
+**"Deferred I/O is unrepresentable" was an overclaim.** Removing `with()` was necessary but not
+sufficient. The tagged writer seams still hand a callback the capability and let the callback
+perform the write, and nothing stops a callback cloning the path and bytes, spawning, and
+returning `Ok`. The stale-cursor race is reachable through that. It is closed for cleanup, where
+the syscalls now live on the capability, and open for the seven writer seams.
+
+**The path-class gap needs a relocation, not a newtype.** Worth recording why, because the
+mechanism is not obvious:
+
+- Rust module privacy cannot express "visible to `store` but not to `store::epoch_*`" — a
+  descendant always sees an ancestor's private items. So any `atomic_write` reachable from
+  `store.rs` is reachable from every epoch module.
+- A private marker type in `store.rs` fails identically: descendants can construct it.
+- The only mechanism that works is a module the epoch modules are **not** descendants of. But
+  then `store.rs`'s own six non-inventoried writers cannot reach the primitive either, so **they
+  must move into that module too**, which then exposes the capability plus *path-specific*
+  non-inventoried savers and no path-generic writer at all.
+
+That is a real relocation of where persistence lives. The reviewer declined to prescribe the
+module rearrangement and I am not improvising it; the gate stays closed on this one item with a
+concrete plan rather than a guess.
+
+### Gate status
+
+| C-3 gate condition | |
+|---|---|
+| replacement writes capability-only | **done** |
+| unchanged-file sync repairs capability-only | **done**, eight branches |
+| unlink / rename / temp-sibling capability-only | **done** |
+| bare primitives unreachable from participating paths | **open** — needs the relocation above |
+| no escaping writer callbacks in production | **partial** — cleanup done, seven writer seams open |
+| Agent 2's archive writer and release | write and retry done; `release_studio_draft_archive_with_io` does not exist yet |
+| audited leaf list reconciled | done for existing paths |
+| reads, budget mint and entry proved not to rotate | done |
+| cursor-level invalidation suite | belongs to C-3 |
+
+674 passed, 0 failed, 11 ignored; clippy `--all-targets -D warnings` clean.
+
 ## I-4, slice 3: the capability, and the eight retry branches
 
 **I4-001 closed, further than asked.** There is now **no `with()` at all**. Once every seam was
