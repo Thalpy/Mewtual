@@ -832,7 +832,7 @@ fn invalid(error: impl std::fmt::Display) -> AppError {
 // exclusion protects the authenticated file between read and flush; hostile concurrent local path
 // replacement is outside this guarantee. Keep regular-file checks at the actual open too.
 pub(super) fn sync_intent(
-    _: &EpochMutation<'_>,
+    m: &EpochMutation<'_>,
     path: &Path,
     expected_bytes: u64,
 ) -> Result<(), AppError> {
@@ -849,7 +849,7 @@ pub(super) fn sync_intent(
         return Err(invalid("opened retry file changed"));
     }
     file.sync_all().map_err(|e| AppError::Io(e.to_string()))?;
-    sync_directory(
+    m.sync_parent_io(
         path.parent()
             .ok_or_else(|| invalid("missing intent parent"))?,
     )

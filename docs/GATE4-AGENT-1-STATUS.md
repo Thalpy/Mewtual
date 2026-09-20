@@ -1363,6 +1363,82 @@ overstatement: rail filtering bounds the *scheduling* impact, not the *retained 
 > nothing reads the token. The moment a cursor captures it across a custody release, one
 > unconverted mutation makes the whole consistency argument false.
 
+## I-4, slice 7: the root-sync exception was path-generic
+
+The reviewer raised this as a conditional warning without having seen the source. It was a real
+bypass, and the comment above it made it worse by asserting the property the signature lacked:
+
+```rust
+/// Named rather than path-generic, like the savers below.
+pub(super) fn sync_vault_root(dir: &Path) -> std::io::Result<()> { sync_directory(dir) }
+```
+
+`sync_vault_root(&store.dir.join("servers"))` would have flushed the **inventoried** directory
+with no capability. A path-generic directory sync wearing a specific name is not a restriction.
+
+Fixed by the same rule the six savers already follow — **the implementation chooses the
+destination**:
+
+```rust
+impl ServerStore {
+    pub(super) fn sync_own_vault_root(&self) -> std::io::Result<()> { sync_directory(&self.dir) }
+}
+```
+
+`ServerStore::open` constructs the store and flushes through it. A fifth probe confirms the free
+function is gone: `E0425: cannot find function 'sync_vault_root' in module 'super::persistence'`.
+
+The method stays reachable from siblings, deliberately: `open` lives in the parent and a parent
+cannot see a child's private items. But it derives `self.dir`, so it can only ever flush the vault
+root — the inventoried records live one level down in `servers`, which it never touches. The
+exception cannot be redirected, which is the property that was asked for.
+
+**A process note.** The reviewer observed that `gate4-agent1-runtime` still resolved to `9beaa9b`,
+so the privacy fixes and this one were reported rather than inspected. That is the right thing to
+insist on: two of my claims about this boundary have now failed under their reading, so my
+description of it should not be load-bearing. Pushed before the next review.
+
+## I-4, slice 6: the relocation's own test visibility had reopened it
+
+The sibling module was the right architecture and the enforcement claim was still false, for a
+reason worth recording because it is the same shape as everything else in this work.
+
+**`pub(super)` from inside `persistence` means visible in `store`, and therefore visible to every
+sibling epoch module.** Those markers existed so *tests* could reach the primitives. So the
+relocation closed the door and its own test visibility propped it open:
+`create_staging_file`, `atomic_write_with_hook` and `atomic_write_with_hook_and_sync` were all
+reachable from an epoch module without a capability — and `create_staging_file` creates a
+temporary sibling from an arbitrary path, which is explicitly one of the mutations I-4 must
+invalidate. `sync_directory` and `StagingPath`, whose `Drop` unlinks, had not moved at all.
+
+**My probe passed only because it named the one function that happened to be private.** It proved
+"an epoch module cannot call `atomic_write`" and I reported it as "no path-generic physical
+persistence API is reachable". The reviewer's instruction — probe the boundary, not a function —
+is what found it. That is the ninth assertion in this work that proved less than it claimed, and
+the third the reviewer caught by reading.
+
+Now inside and private: the staging counter and constants, `StagingPath` and its `Drop`,
+`AtomicWritePhase`, `sync_directory`, `create_staging_file`, both atomic-hook variants. The three
+leaf flushes route their parent sync through `m.sync_parent_io(..)`, so even the directory flush
+goes through the capability. The one legitimate non-inventoried directory flush became a named
+`persistence::sync_vault_root(dir)`.
+
+Test access is genuine `#[cfg(test)] pub(super)` **wrappers** around private functions, not
+production-visible functions re-exported under `cfg(test)`.
+
+| Probe from an epoch module | Result |
+|---|---|
+| `persistence::atomic_write_with_hook` | `E0603: private function` |
+| `persistence::create_staging_file` | `E0603: private function` |
+| `persistence::sync_directory` | `E0603: private function` |
+| `persistence::write_for_test` | `E0425: not found` — absent in a non-test build |
+
+**The contract this actually establishes**, in the reviewer's terms: no project persistence
+primitive usable for five-family mutation exists without `EpochMutation`, backed by the audited
+writer list. Not the stronger "a write cannot be expressed" contract — an epoch module holding a
+`PathBuf` can still call `std::fs::write`, and §9.2's choke-point-plus-audit pairing reads as
+accepting that.
+
 ## I-4, slice 5: the relocation, and what is provably enforced now
 
 **The path-class gate condition is closed.** All physical persistence writing moved into
@@ -1464,7 +1540,7 @@ concrete plan rather than a guess.
 | replacement writes capability-only | **done** |
 | unchanged-file sync repairs capability-only | **done**, eight branches |
 | unlink / rename / temp-sibling capability-only | **done** |
-| bare primitives unreachable from participating paths | **done** — `store::persistence`, proved by a probe that fails to compile |
+| bare primitives unreachable from participating paths | **done** — `store::persistence`, with the primitives private rather than `pub(super)`; four probes fail to compile |
 | no escaping writer callbacks in production | **audited clean, not type-enforced** — no production path defers; the seam type still permits it |
 | Agent 2's archive writer and release | write and retry done; `release_studio_draft_archive_with_io` does not exist yet |
 | audited leaf list reconciled | done for existing paths |
@@ -1589,6 +1665,11 @@ This corrects what was handed to the reviewer as two separate defects.
 |---|---|---|
 | 90 s timeout | never completes; 6.8 s normally, 83 s headroom | branch head, twice |
 | install assertion | progresses, then its own loop exhausts | CI at `db2798c`; twice locally |
+
+**All three variants fail, and both halves of the assertion fire.** The `Ready` pressure variant
+(`..._with_three_retained_previews`) has now failed too, at the Registry assertion, so it is not
+confined to the two cancelled-preview cases. Across thirteen full runs since the registry-wake fix
+the rate is roughly a quarter, with both modes and both halves appearing.
 
 **Both halves of the assertion fire, in different runs.** CI saw "Studio must install", one local
 run saw "Registry must install", the next saw "Studio" again — with the registry writer converted

@@ -626,7 +626,7 @@ fn storage_record(
 }
 
 pub(super) fn sync_registry(
-    _: &EpochMutation<'_>,
+    m: &EpochMutation<'_>,
     path: &Path,
     expected_bytes: u64,
 ) -> Result<(), AppError> {
@@ -643,7 +643,7 @@ pub(super) fn sync_registry(
         return Err(invalid("opened retry file changed"));
     }
     file.sync_all().map_err(|e| AppError::Io(e.to_string()))?;
-    sync_directory(path.parent().ok_or_else(|| invalid("missing parent"))?)
+    m.sync_parent_io(path.parent().ok_or_else(|| invalid("missing parent"))?)
         .map_err(|e| AppError::Io(e.to_string()))
 }
 

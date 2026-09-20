@@ -93,10 +93,10 @@ fn staging_path(store: &ServerStore, doc: &LogicalDocument, sequence: u64) -> Pa
 // Simulate a process death that leaves its securely created staging sibling behind. Returning a
 // normal error would let the production RAII guard unlink it, unlike a killed process.
 fn leave_staging(_m: &EpochMutation<'_>, path: &Path, bytes: &[u8]) -> Result<(), AppError> {
-    let (mut file, mut staging) = create_staging_file(path)?;
+    let (mut file, mut staging) = create_staging_file_for_test(path)?;
     file.write_all(bytes).unwrap();
     file.sync_all().unwrap();
-    staging.remove_on_drop = false;
+    staging.keep_for_test();
     Err(AppError::Io("interrupted before rename".into()))
 }
 fn cleanup(store: &mut ServerStore) -> EpochStorageInventory {
@@ -448,10 +448,10 @@ fn committed_first_save_retries_at_both_caps_without_another_copy() {
             &mut rng(),
             &mut limits.0,
             &mut limits.1,
-            |_, path, bytes| atomic_write_with_hook_and_sync(
+            |_, path, bytes| atomic_write_with_hook_and_sync_for_test(
                 path,
                 bytes,
-                |_, _| {},
+                &mut |_, _| {},
                 |_| Err(std::io::Error::other("after rename"))
             ),
             sync_intent

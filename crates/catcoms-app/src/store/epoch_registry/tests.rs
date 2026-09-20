@@ -659,7 +659,7 @@ fn registry_store_cleanup_removes_only_unpublished_attempts_and_rescans_ownershi
             f.ingest(&mut store, &op, &mut budget).unwrap();
         }
         let path = f.path(&store);
-        let orphan = staging_candidate(&path, 901);
+        let orphan = staging_candidate_for_test(&path, 901);
         fs::write(&orphan, b"partial opaque bytes").unwrap();
         let saved = fs::read(&path).ok();
         let inv = inventory(&mut store);

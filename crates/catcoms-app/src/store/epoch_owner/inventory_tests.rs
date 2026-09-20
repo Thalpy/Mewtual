@@ -222,8 +222,9 @@ fn legacy_recovery_coverage_ignores_owner_finals_temporaries_and_owner_only_alia
     recovery(&mut store, 7, &doc, 0);
     let owner_path = store.epoch_owner_path(&scope_bytes(7, &doc).unwrap());
     let saved = fs::read(&owner_path).unwrap();
-    let owner_temp = staging_candidate(&owner_path, 900);
-    let recovery_temp = staging_candidate(&recovery_path(root.path(), &store, 7, &doc), 901);
+    let owner_temp = staging_candidate_for_test(&owner_path, 900);
+    let recovery_temp =
+        staging_candidate_for_test(&recovery_path(root.path(), &store, 7, &doc), 901);
     let alias = root
         .path()
         .join("servers")
@@ -275,7 +276,7 @@ fn identical_digest_text_in_the_other_namespace_cannot_assign_orphan_ownership()
             .path()
             .join("servers")
             .join(format!("{}.{suffix}", hex::encode(id)));
-        fs::write(staging_candidate(&fake_destination, 900), []).unwrap();
+        fs::write(staging_candidate_for_test(&fake_destination, 900), []).unwrap();
     }
     let inventory = collect(store.scan_epoch_storage().unwrap()).unwrap();
     assert_eq!(inventory.unresolved_orphans(), 2);
@@ -305,7 +306,7 @@ fn failed_journal_write_restarts_cleans_both_families_reconciles_and_retries() {
     let owner_before = fs::read(&owner_path).unwrap();
     let recovery_before = fs::read(&recovery_path).unwrap();
     let mut accounted = budget(&mut store, 7, &doc);
-    let orphan = staging_candidate(&owner_path, 900);
+    let orphan = staging_candidate_for_test(&owner_path, 900);
     assert!(store
         .update_epoch_owner_with_writer(
             7,
@@ -320,7 +321,11 @@ fn failed_journal_write_restarts_cleans_both_families_reconciles_and_retries() {
         )
         .is_err());
     assert!(accounted.requires_reconciliation());
-    fs::write(staging_candidate(&recovery_path, 901), b"partial recovery").unwrap();
+    fs::write(
+        staging_candidate_for_test(&recovery_path, 901),
+        b"partial recovery",
+    )
+    .unwrap();
     drop(store);
     let mut store = open(root.path());
     let inventory = collect(store.scan_epoch_storage().unwrap()).unwrap();
@@ -385,7 +390,7 @@ fn a_first_write_orphan_never_becomes_a_published_owner_decision() {
     .unwrap();
     let mut accounted = budget(&mut store, 7, &doc);
     let path = store.epoch_owner_path(&scope_bytes(7, &doc).unwrap());
-    let orphan = staging_candidate(&path, 900);
+    let orphan = staging_candidate_for_test(&path, 900);
     assert!(store
         .prepare_epoch_owner_with_writer(
             7,

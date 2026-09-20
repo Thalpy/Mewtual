@@ -295,7 +295,7 @@ mod tests {
                 .path()
                 .join("servers")
                 .join(format!("{}.{suffix}", "ab".repeat(32)));
-            fs::write(staging_candidate(&path, 900), b"unpublished").unwrap();
+            fs::write(staging_candidate_for_test(&path, 900), b"unpublished").unwrap();
         }
         let mut cleanup = store.cleanup_epoch_storage_staging().unwrap();
         assert_eq!(
@@ -349,7 +349,7 @@ mod tests {
     fn a_cleanup_pass_that_removes_a_sibling_rotates_the_inventory_generation() {
         let root = tempfile::tempdir().unwrap();
         let mut store = open(root.path());
-        let orphan = staging_candidate(&final_path(&store), 800);
+        let orphan = staging_candidate_for_test(&final_path(&store), 800);
         fs::write(&orphan, b"partial").unwrap();
 
         let before = store.inventory_generation();
@@ -383,11 +383,11 @@ mod tests {
         }
         let final_path = final_path(&store);
         let original = fs::read(&final_path).unwrap();
-        let empty = staging_candidate(&final_path, 800);
-        let partial = staging_candidate(&final_path, 801);
+        let empty = staging_candidate_for_test(&final_path, 800);
+        let partial = staging_candidate_for_test(&final_path, 801);
         fs::write(&empty, []).unwrap();
         fs::write(&partial, b"partial ciphertext").unwrap();
-        let legacy = staging_candidate(&root.path().join("servers/7.net"), 802);
+        let legacy = staging_candidate_for_test(&root.path().join("servers/7.net"), 802);
         fs::write(&legacy, b"do not remove legacy stages").unwrap();
         let (progress, inventory) = complete(&mut store);
         assert_eq!(progress.removed_files, 2);
@@ -415,7 +415,7 @@ mod tests {
         // legacy snapshot stands in for the still-unpruned epoch; cleanup cannot target it.
         let source = root.path().join("servers/7.bin");
         fs::write(&source, b"unpruned source history").unwrap();
-        let orphan = staging_candidate(&final_path(&store), 800);
+        let orphan = staging_candidate_for_test(&final_path(&store), 800);
         let result = store.update_epoch_recovery_with_writer(
             7,
             &document(),
@@ -481,7 +481,7 @@ mod tests {
             )
             .unwrap();
         let initial_usage = budget.usage();
-        let orphan = staging_candidate(&final_path(&store), 800);
+        let orphan = staging_candidate_for_test(&final_path(&store), 800);
         let failed = store.update_epoch_recovery_accounted_with_writer(
             7,
             &document(),
@@ -544,7 +544,7 @@ mod tests {
             .unwrap();
         let published = final_path(&store);
         let bytes = fs::read(&published).unwrap();
-        let orphan = staging_candidate(&published, 800);
+        let orphan = staging_candidate_for_test(&published, 800);
         fs::hard_link(&published, &orphan).unwrap();
         let (progress, fresh) = complete(&mut store);
         assert_eq!(progress.removed_files, 1);
@@ -558,7 +558,7 @@ mod tests {
     fn unlink_then_sync_failure_never_finishes_and_zero_deletion_retry_still_flushes() {
         let root = tempfile::tempdir().unwrap();
         let mut store = open(root.path());
-        let orphan = staging_candidate(&final_path(&store), 800);
+        let orphan = staging_candidate_for_test(&final_path(&store), 800);
         fs::write(&orphan, b"partial").unwrap();
         let mut job = store.cleanup_epoch_recovery_staging().unwrap();
         let failure = job.step_with_io(
@@ -598,7 +598,11 @@ mod tests {
             let root = tempfile::tempdir().unwrap();
             let mut store = open(root.path());
             for id in 800..802 {
-                fs::write(staging_candidate(&final_path(&store), id), b"partial").unwrap();
+                fs::write(
+                    staging_candidate_for_test(&final_path(&store), id),
+                    b"partial",
+                )
+                .unwrap();
             }
             let mut job = store.cleanup_epoch_recovery_staging().unwrap();
             let mut calls = 0;
@@ -669,7 +673,7 @@ mod tests {
         for kind in ["alias", "malformed", "directory", "final"] {
             let root = tempfile::tempdir().unwrap();
             let mut store = open(root.path());
-            let canonical = staging_candidate(&final_path(&store), 800);
+            let canonical = staging_candidate_for_test(&final_path(&store), 800);
             let path = match kind {
                 "alias" => canonical.with_file_name(
                     canonical
@@ -705,7 +709,7 @@ mod tests {
     fn byte_counter_overflow_refuses_before_unlink_and_debug_omits_paths() {
         let root = tempfile::tempdir().unwrap();
         let mut store = open(root.path());
-        let orphan = staging_candidate(&final_path(&store), 800);
+        let orphan = staging_candidate_for_test(&final_path(&store), 800);
         fs::write(&orphan, b"x").unwrap();
         let mut job = store.cleanup_epoch_recovery_staging().unwrap();
         let debug = format!("{job:?}");
@@ -727,7 +731,7 @@ mod tests {
         let mut store = open(root.path());
         let outside = root.path().join("outside");
         fs::write(&outside, b"must survive").unwrap();
-        let orphan = staging_candidate(&final_path(&store), 800);
+        let orphan = staging_candidate_for_test(&final_path(&store), 800);
         symlink(&outside, &orphan).unwrap();
         let mut job = store.cleanup_epoch_recovery_staging().unwrap();
         assert!(job.step().is_err());

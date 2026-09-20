@@ -1280,8 +1280,8 @@ mod tests {
             let mut store = open(root.path());
             let doc = document(b"group", b"cat");
             let final_path = store.epoch_recovery_path(&scope_bytes(7, &doc).unwrap());
-            let empty = staging_candidate(&final_path, 900);
-            let partial = staging_candidate(&final_path, 901);
+            let empty = staging_candidate_for_test(&final_path, 900);
+            let partial = staging_candidate_for_test(&final_path, 901);
             if !temp_first {
                 stage(&mut store, 7, &doc, 1);
             }
@@ -1324,7 +1324,7 @@ mod tests {
         let doc = document(b"group", b"cat");
         stage(&mut store, 7, &doc, 1);
         let source = store.epoch_recovery_path(&scope_bytes(7, &doc).unwrap());
-        let orphan = staging_candidate(&source, 999);
+        let orphan = staging_candidate_for_test(&source, 999);
         fs::rename(&source, &orphan).unwrap();
         let inventory = collect(&mut store).unwrap();
         assert_eq!(inventory.records().len(), 0);
@@ -1437,7 +1437,7 @@ mod tests {
         let destination =
             store.epoch_recovery_path(&scope_bytes(7, &document(b"g", b"k")).unwrap());
         for id in 0..3 {
-            fs::write(staging_candidate(&destination, id), []).unwrap();
+            fs::write(staging_candidate_for_test(&destination, id), []).unwrap();
         }
         let mut scan = store.scan_epoch_recovery().unwrap();
         scan.record_limit = 2;
@@ -1506,7 +1506,7 @@ mod tests {
                 .path()
                 .join("servers")
                 .join(format!("{}.{suffix}", "ab".repeat(32)));
-            fs::write(staging_candidate(&path, id), []).unwrap();
+            fs::write(staging_candidate_for_test(&path, id), []).unwrap();
         }
         let mut scan = store.scan_epoch_storage().unwrap();
         scan.record_limit = 2;

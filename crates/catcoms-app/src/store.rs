@@ -428,7 +428,7 @@ fn decode_server_net(bytes: &[u8]) -> Result<ServerNet, AppError> {
 mod persistence {
     use super::*;
 
-    pub(super) fn staging_candidate(path: &Path, id: u64) -> PathBuf {
+    fn staging_candidate(path: &Path, id: u64) -> PathBuf {
         let parent = path
             .parent()
             .filter(|parent| !parent.as_os_str().is_empty())
@@ -443,7 +443,7 @@ mod persistence {
         OpenOptions::new().write(true).create_new(true).open(path)
     }
 
-    pub(super) fn create_staging_file(path: &Path) -> Result<(File, StagingPath), AppError> {
+    fn create_staging_file(path: &Path) -> Result<(File, StagingPath), AppError> {
         for _ in 0..MAX_STAGING_ATTEMPTS {
             let id = NEXT_STAGING_ID.fetch_add(1, Ordering::Relaxed);
             let candidate = staging_candidate(path, id);
@@ -493,7 +493,7 @@ mod persistence {
     /// The hook exists to place Linux subprocess-abort tests on the two sides of the rename. It has no
     /// production side effects, and keeping it inside the primitive ensures the test exercises the
     /// same write/flush/rename sequence as every sealed persistence record.
-    pub(super) fn atomic_write_with_hook(
+    fn atomic_write_with_hook(
         path: &Path,
         bytes: &[u8],
         mut phase: impl FnMut(AtomicWritePhase, &Path),
@@ -501,7 +501,7 @@ mod persistence {
         atomic_write_with_hook_and_sync(path, bytes, &mut phase, sync_directory)
     }
 
-    pub(super) fn atomic_write_with_hook_and_sync(
+    fn atomic_write_with_hook_and_sync(
         path: &Path,
         bytes: &[u8],
         mut phase: impl FnMut(AtomicWritePhase, &Path),
@@ -634,6 +634,57 @@ mod persistence {
         atomic_write(path, bytes)
     }
 
+    /// Test-only wrappers. These are the **only** way anything outside this module reaches a
+    /// path-generic physical operation, and they do not exist in a non-test build. The functions
+    /// they wrap are private, so `pub(super)` on the wrapper cannot widen them: previously the
+    /// primitives themselves were `pub(super)`, which made them visible in `store` and therefore
+    /// to every sibling epoch module — the relocation's whole point, undone by its own test
+    /// visibility.
+    #[cfg(test)]
+    pub(super) fn staging_candidate_for_test(path: &Path, id: u64) -> PathBuf {
+        staging_candidate(path, id)
+    }
+
+    #[cfg(test)]
+    pub(super) fn create_staging_file_for_test(
+        path: &Path,
+    ) -> Result<(File, StagingPath), AppError> {
+        create_staging_file(path)
+    }
+
+    #[cfg(test)]
+    pub(super) fn atomic_write_with_hook_for_test(
+        path: &Path,
+        bytes: &[u8],
+        phase: impl FnMut(AtomicWritePhase, &Path),
+    ) -> Result<(), AppError> {
+        atomic_write_with_hook(path, bytes, phase)
+    }
+
+    #[cfg(test)]
+    pub(super) fn atomic_write_with_hook_and_sync_for_test(
+        path: &Path,
+        bytes: &[u8],
+        phase: &mut impl FnMut(AtomicWritePhase, &Path),
+        sync_parent: impl FnOnce(&Path) -> std::io::Result<()>,
+    ) -> Result<(), AppError> {
+        atomic_write_with_hook_and_sync(path, bytes, phase, sync_parent)
+    }
+
+    impl ServerStore {
+        /// Flush this store's own vault root, once, when it is first created.
+        ///
+        /// **Destination-bound, not merely named.** The first version took a `&Path`, so a
+        /// sibling could have passed `dir.join("servers")` and flushed the inventoried directory
+        /// with no capability — a path-generic directory sync wearing a specific name. The
+        /// implementation now derives the root from `self`, so the legitimate exception cannot be
+        /// redirected. `self.dir` is the vault root; the inventoried records live one level down
+        /// in `servers`, which this never touches.
+        pub(super) fn sync_own_vault_root(&self) -> std::io::Result<()> {
+            sync_directory(&self.dir)
+        }
+    }
+
     impl ServerStore {
         /// The non-inventoried records, each addressed by name rather than by a caller-supplied
         /// path. That is what keeps them from being a bypass: they can only ever write their own
@@ -669,16 +720,60 @@ mod persistence {
             atomic_write(&self.registry_path(), bytes)
         }
     }
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    #[cfg_attr(test, allow(dead_code))]
+    pub(super) enum AtomicWritePhase {
+        TempSynced,
+        Renamed,
+    }
+
+    /// Separates concurrent writers without ambient randomness. The process id separates live desktop
+    /// processes, while this counter separates threads and repeated writes inside one process. A stale
+    /// collision is harmless because the file is opened with `create_new`; we simply try the next id.
+    static NEXT_STAGING_ID: AtomicU64 = AtomicU64::new(0);
+    const MAX_STAGING_ATTEMPTS: usize = 1_024;
+
+    pub(super) struct StagingPath {
+        path: PathBuf,
+        remove_on_drop: bool,
+    }
+
+    #[cfg(test)]
+    impl StagingPath {
+        /// Tests plant an orphan and then keep it; production never needs this.
+        pub(super) fn keep_for_test(&mut self) {
+            self.remove_on_drop = false;
+        }
+    }
+
+    impl Drop for StagingPath {
+        fn drop(&mut self) {
+            if self.remove_on_drop {
+                // Cleanup is best effort: preserving the original write error matters more, and a
+                // crash can leave the same kind of harmless unreferenced sibling behind anyway.
+                let _ = fs::remove_file(&self.path);
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    fn sync_directory(path: &Path) -> std::io::Result<()> {
+        File::open(path).and_then(|directory| directory.sync_all())
+    }
+
+    #[cfg(not(unix))]
+    fn sync_directory(_path: &Path) -> std::io::Result<()> {
+        Ok(())
+    }
 }
 
 pub(crate) use persistence::EpochMutation;
-// Test-only re-exports. Planting an orphaned sibling or a corrupt record is something only a test
-// does; none of these is reachable in a non-test build, so the production property that no
-// path-generic writer exists outside `persistence` is unaffected.
+// Only the test wrappers leave the module. In a non-test build this import does not exist, so
+// nothing outside `persistence` can name a path-generic physical operation at all.
 #[cfg(test)]
 pub(in crate::store) use persistence::{
-    atomic_write_with_hook, atomic_write_with_hook_and_sync, create_staging_file,
-    staging_candidate, write_for_test,
+    atomic_write_with_hook_and_sync_for_test, atomic_write_with_hook_for_test,
+    create_staging_file_for_test, staging_candidate_for_test, write_for_test,
 };
 
 /// A passphrase-gated, on-disk store for a member's servers.
@@ -742,10 +837,7 @@ impl ServerStore {
         let session = acquire_vault_session(&dir)?;
         let keys = open_or_create_vault(&dir, passphrase, rng)?;
         fs::create_dir_all(dir.join("servers")).map_err(|e| AppError::Io(e.to_string()))?;
-        // Persist the `servers` directory entry as well as later contents. Without this flush, a
-        // first-launch power loss could retain a synced record but forget the newly created parent.
-        sync_directory(&dir).map_err(|error| AppError::Io(error.to_string()))?;
-        Ok(Self {
+        let store = Self {
             creative_protection: creative_references::Protection::new(&dir.join("servers")),
             dir,
             keys,
@@ -758,7 +850,14 @@ impl ServerStore {
             studio_rotation_interruption: None,
             replay_mount: std::sync::Arc::new(()),
             _session: session,
-        })
+        };
+        // Persist the `servers` directory entry as well as later contents. Without this flush, a
+        // first-launch power loss could retain a synced record but forget the newly created
+        // parent. It runs through the store so the destination cannot be supplied by a caller.
+        store
+            .sync_own_vault_root()
+            .map_err(|error| AppError::Io(error.to_string()))?;
+        Ok(store)
     }
 
     /// Authenticate a secret against the already-mounted vault without trying to acquire a
@@ -1124,43 +1223,6 @@ fn decode_registry(bytes: &[u8]) -> Result<Vec<ServerRecord>, AppError> {
     Ok(out)
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum AtomicWritePhase {
-    TempSynced,
-    Renamed,
-}
-
-/// Separates concurrent writers without ambient randomness. The process id separates live desktop
-/// processes, while this counter separates threads and repeated writes inside one process. A stale
-/// collision is harmless because the file is opened with `create_new`; we simply try the next id.
-static NEXT_STAGING_ID: AtomicU64 = AtomicU64::new(0);
-const MAX_STAGING_ATTEMPTS: usize = 1_024;
-
-struct StagingPath {
-    path: PathBuf,
-    remove_on_drop: bool,
-}
-
-impl Drop for StagingPath {
-    fn drop(&mut self) {
-        if self.remove_on_drop {
-            // Cleanup is best effort: preserving the original write error matters more, and a
-            // crash can leave the same kind of harmless unreferenced sibling behind anyway.
-            let _ = fs::remove_file(&self.path);
-        }
-    }
-}
-
-#[cfg(unix)]
-fn sync_directory(path: &Path) -> std::io::Result<()> {
-    File::open(path).and_then(|directory| directory.sync_all())
-}
-
-#[cfg(not(unix))]
-fn sync_directory(_path: &Path) -> std::io::Result<()> {
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1294,8 +1356,8 @@ mod tests {
             let path = snapshot.clone();
             let barrier = Arc::clone(&barrier);
             std::thread::spawn(move || {
-                atomic_write_with_hook(&path, b"sealed snapshot", |phase, _| {
-                    if phase == AtomicWritePhase::TempSynced {
+                atomic_write_with_hook_for_test(&path, b"sealed snapshot", |phase, _| {
+                    if phase == persistence::AtomicWritePhase::TempSynced {
                         barrier.wait();
                     }
                 })
@@ -1305,8 +1367,8 @@ mod tests {
             let path = network.clone();
             let barrier = Arc::clone(&barrier);
             std::thread::spawn(move || {
-                atomic_write_with_hook(&path, b"sealed network record", |phase, _| {
-                    if phase == AtomicWritePhase::TempSynced {
+                atomic_write_with_hook_for_test(&path, b"sealed network record", |phase, _| {
+                    if phase == persistence::AtomicWritePhase::TempSynced {
                         barrier.wait();
                     }
                 })
@@ -1330,8 +1392,8 @@ mod tests {
             let path = shared.clone();
             let barrier = Arc::clone(&barrier);
             std::thread::spawn(move || {
-                atomic_write_with_hook(&path, bytes, |phase, _| {
-                    if phase == AtomicWritePhase::TempSynced {
+                atomic_write_with_hook_for_test(&path, bytes, |phase, _| {
+                    if phase == persistence::AtomicWritePhase::TempSynced {
                         barrier.wait();
                     }
                 })
@@ -1354,10 +1416,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("state.bin");
         fs::write(&path, b"previous record").unwrap();
-        let result = atomic_write_with_hook_and_sync(
+        let result = atomic_write_with_hook_and_sync_for_test(
             &path,
             b"complete replacement",
-            |_, _| {},
+            &mut |_, _| {},
             |_| Err(std::io::Error::other("injected directory sync failure")),
         );
         assert!(matches!(
@@ -1446,10 +1508,10 @@ mod tests {
     fn atomic_write_abort_child() {
         let wanted = std::env::var(ATOMIC_CHILD_PHASE).expect("abort phase");
         let path = PathBuf::from(std::env::var_os(ATOMIC_CHILD_PATH).expect("abort path"));
-        atomic_write_with_hook(&path, b"new authenticated record", |phase, _| {
+        atomic_write_with_hook_for_test(&path, b"new authenticated record", |phase, _| {
             let reached = match phase {
-                AtomicWritePhase::TempSynced => "temp-synced",
-                AtomicWritePhase::Renamed => "renamed",
+                persistence::AtomicWritePhase::TempSynced => "temp-synced",
+                persistence::AtomicWritePhase::Renamed => "renamed",
             };
             if reached == wanted {
                 std::process::abort();

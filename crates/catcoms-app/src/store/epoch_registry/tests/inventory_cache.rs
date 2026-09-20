@@ -66,7 +66,7 @@ fn inventory_cache_reauthenticates_and_revalidates_gate_only_changes() {
     assert_eq!(scan(&mut store).1.reused_records, 1);
 
     // A cached final record never bypasses enumeration/accounting of a new staging copy.
-    let staged = crate::store::staging_candidate(&path, 917);
+    let staged = crate::store::staging_candidate_for_test(&path, 917);
     fs::write(&staged, [0; 123]).unwrap();
     let (with_orphan, p) = scan(&mut store);
     assert_eq!(p.reused_records, 1);

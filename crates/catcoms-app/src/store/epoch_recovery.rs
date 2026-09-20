@@ -816,12 +816,9 @@ mod tests {
                 _ => EpochRecoveryAction::AdvanceTime,
             };
             let writer = |_m: &EpochMutation<'_>, path: &Path, bytes: &[u8]| {
-                atomic_write_with_hook_and_sync(
-                    path,
-                    bytes,
-                    |_, _| {},
-                    |_| Err(std::io::Error::other("injected directory flush failure")),
-                )
+                atomic_write_with_hook_and_sync_for_test(path, bytes, &mut |_, _| {}, |_| {
+                    Err(std::io::Error::other("injected directory flush failure"))
+                })
             };
             assert!(matches!(
                 store.update_epoch_recovery_with_writer(
@@ -1246,10 +1243,10 @@ mod tests {
                 &mut budget,
                 |_, path, bytes| {
                     if after_rename {
-                        atomic_write_with_hook_and_sync(
+                        atomic_write_with_hook_and_sync_for_test(
                             path,
                             bytes,
-                            |_, _| {},
+                            &mut |_, _| {},
                             |_| Err(std::io::Error::other("injected flush failure")),
                         )
                     } else {

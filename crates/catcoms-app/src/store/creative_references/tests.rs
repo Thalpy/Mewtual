@@ -375,7 +375,11 @@ fn unknown_recovery_and_partial_temporary_never_enable_reclamation() {
         .path()
         .join("servers")
         .join(format!("{}.studio-epoch", "aa".repeat(32)));
-    fs::write(super::super::staging_candidate(&final_path, 1), b"partial").unwrap();
+    fs::write(
+        super::super::staging_candidate_for_test(&final_path, 1),
+        b"partial",
+    )
+    .unwrap();
     assert!(clean.creative_pinned_cids().is_err());
 }
 

@@ -359,7 +359,7 @@ fn studio_store_temporary_copies_are_charged_and_only_explicit_cleanup_removes_t
     let mut b = budget(&mut store, &f);
     f.edit(&mut store, &mut b, f.insert());
     let held = fs::read(f.path(&store)).unwrap();
-    let temp = staging_candidate(&f.path(&store), 100);
+    let temp = staging_candidate_for_test(&f.path(&store), 100);
     fs::write(&temp, b"partial copy").unwrap();
     let inv = inventory(&mut store);
     assert_eq!(inv.orphans().len(), 1);
@@ -388,7 +388,7 @@ fn studio_store_temporary_copies_are_charged_and_only_explicit_cleanup_removes_t
         .dir
         .join("servers")
         .join(format!("{}.studio-epoch", "ab".repeat(32)));
-    fs::write(staging_candidate(&unowned, 101), []).unwrap();
+    fs::write(staging_candidate_for_test(&unowned, 101), []).unwrap();
     let inv = inventory(&mut store);
     assert_eq!(inv.unresolved_orphans(), 1);
     assert!(store.studio_storage_budget(SERVER, &f.group, &inv).is_err());

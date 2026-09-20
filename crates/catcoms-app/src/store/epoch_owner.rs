@@ -286,12 +286,9 @@ impl ServerStore {
             |journal| journal.mark_published(receipt.hash()).map_err(invalid),
             |_m, path, bytes| {
                 if after_rename {
-                    atomic_write_with_hook_and_sync(
-                        path,
-                        bytes,
-                        |_m, _| {},
-                        |_| Err(std::io::Error::other("injected completion flush failure")),
-                    )
+                    atomic_write_with_hook_and_sync_for_test(path, bytes, &mut |_m, _| {}, |_| {
+                        Err(std::io::Error::other("injected completion flush failure"))
+                    })
                 } else {
                     Err(AppError::Io("injected completion before write".into()))
                 }
@@ -861,12 +858,9 @@ mod tests {
                 prepare(&mut store, signed.clone(), &group, &mut budget);
             }
             let writer = |_m: &EpochMutation<'_>, path: &Path, bytes: &[u8]| {
-                atomic_write_with_hook_and_sync(
-                    path,
-                    bytes,
-                    |_, _| {},
-                    |_| Err(std::io::Error::other("flush failure")),
-                )
+                atomic_write_with_hook_and_sync_for_test(path, bytes, &mut |_, _| {}, |_| {
+                    Err(std::io::Error::other("flush failure"))
+                })
             };
             let result = if completing {
                 store.update_epoch_owner_with_writer(
@@ -932,7 +926,7 @@ mod tests {
             prepare(&mut store, signed.clone(), &group, &mut budget);
             let path = store.epoch_owner_path(&scope_bytes(SERVER, &doc).unwrap());
             let before = fs::read(&path).unwrap();
-            let orphan = staging_candidate(&path, 901);
+            let orphan = staging_candidate_for_test(&path, 901);
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 store.update_epoch_owner_with_writer(
                     SERVER,
