@@ -42,11 +42,11 @@ fn studio_manual_recovery_disposition_is_recovery_first_crash_safe_and_not_seed_
                             if recovery == recovery_boundary {
                                 hit = true;
                                 if after_write {
-                                    atomic_write(path, bytes)?;
+                                    write_for_test(path, bytes)?;
                                 }
                                 return Err(AppError::Io("injected disposition barrier".into()));
                             }
-                            atomic_write(path, bytes)
+                            write_for_test(path, bytes)
                         },
                         &mut |m: &EpochMutation<'_>, p: &Path, b: u64| m.sync_intent(p, b),
                     )

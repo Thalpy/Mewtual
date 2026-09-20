@@ -1363,6 +1363,60 @@ overstatement: rail filtering bounds the *scheduling* impact, not the *retained 
 > nothing reads the token. The moment a cursor captures it across a custody release, one
 > unconverted mutation makes the whole consistency argument false.
 
+## I-4, slice 5: the relocation, and what is provably enforced now
+
+**The path-class gate condition is closed.** All physical persistence writing moved into
+`store::persistence`, a **sibling** of the epoch modules rather than an ancestor, so items private
+to it are genuinely beyond their reach — which is the only mechanism Rust offers, since a
+descendant always sees an ancestor's private items and can construct an ancestor's private marker
+types.
+
+What escapes the module is deliberate and small: the `EpochMutation` capability, and six
+**path-specific** savers for the non-inventoried records (`write_ui_state_record`,
+`write_server_net_record`, `write_address_cache_record`, `write_pairing_ledger_record`,
+`write_server_record`, `write_registry_record`). Each writes only its own record, so none can be
+aimed at an inventoried family, and **no path-generic writer exists outside the module at all**.
+Test-only re-exports carry `#[cfg(test)]`, so they cannot weaken the production property.
+
+**Proved by trying it, not by reading.** A probe planted in `epoch_intents.rs` —
+
+```rust
+fn i4_enforcement_probe(store: &ServerStore, scope: &[u8], bytes: &[u8]) -> Result<(), AppError> {
+    atomic_write(&store.epoch_intent_path(scope), bytes)
+}
+```
+
+— fails with `error[E0425]: cannot find function 'atomic_write' in this scope`. Adding a bare
+inventoried write is now impossible rather than forbidden by audit. The probe was removed after.
+
+**The relocation also found the live bypass the reviewer predicted.** `epoch_studio/rotation.rs`
+had a closure that received the capability and then called the bare primitive anyway. It had
+already obtained a guard so it was not a correctness bug, but it compiled, which was the whole
+point. It now calls `m.write(p, b)` and could not do otherwise.
+
+### Requirement 3 is audited, not yet type-enforced
+
+All 27 production writer closures are literally `|m, p, b| m.write(p, b)` or forwarders into one,
+and the three multi-line ones in `rotation.rs` call `m.write` / `sync(m, ..)` synchronously. **No
+production path defers I/O past the guard's lifetime.** That is an audit result.
+
+The **type** still permits it, because the seam is an arbitrary closure receiving the capability.
+Closing that needs the injection strategy inverted, which is a real change rather than a rename:
+
+```rust
+enum WriteIntercept<'h> {
+    None,
+    #[cfg(test)] Before(&'h mut dyn FnMut(&Path, &[u8]) -> Result<(), AppError>),
+}
+// transaction: intercept.check(path, bytes)?; mutation.write(path, bytes)?;
+```
+
+Production passes `None` and never supplies a writer at all, so deferral is unrepresentable rather
+than merely absent. The cost is every injected-failure test that currently fails *by writing*, plus
+the abort-phase tests that use `atomic_write_with_hook_and_sync` directly and would need capability
+methods. I have not done it: it is the third large refactor in this area and the design above
+should be ruled on before forty test sites are rewritten around it.
+
 ## I-4, slice 4: cleanup, and the one gate item that needs a decision
 
 **I4-003 closed.** `EpochStorageCleanup` unlinked temporary siblings and synced the inventoried
@@ -1410,8 +1464,8 @@ concrete plan rather than a guess.
 | replacement writes capability-only | **done** |
 | unchanged-file sync repairs capability-only | **done**, eight branches |
 | unlink / rename / temp-sibling capability-only | **done** |
-| bare primitives unreachable from participating paths | **open** — needs the relocation above |
-| no escaping writer callbacks in production | **partial** — cleanup done, seven writer seams open |
+| bare primitives unreachable from participating paths | **done** — `store::persistence`, proved by a probe that fails to compile |
+| no escaping writer callbacks in production | **audited clean, not type-enforced** — no production path defers; the seam type still permits it |
 | Agent 2's archive writer and release | write and retry done; `release_studio_draft_archive_with_io` does not exist yet |
 | audited leaf list reconciled | done for existing paths |
 | reads, budget mint and entry proved not to rotate | done |

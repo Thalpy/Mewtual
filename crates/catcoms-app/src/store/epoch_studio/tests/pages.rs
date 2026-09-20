@@ -433,7 +433,7 @@ fn studio_pages_write_and_flush_failure_require_exact_retry_after_reconciliation
             &mut b,
             |_, path, bytes| {
                 if failure == 1 {
-                    atomic_write(path, bytes)?;
+                    write_for_test(path, bytes)?;
                 }
                 Err(invalid("injected write failure"))
             },

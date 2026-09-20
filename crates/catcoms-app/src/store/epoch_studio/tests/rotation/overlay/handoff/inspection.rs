@@ -315,7 +315,7 @@ fn studio_inspection_prepared_and_completed_never_resolve_on_read() {
                 if step == HandoffWrite::Source {
                     return Err(AppError::Io("pause after Prepared".into()));
                 }
-                atomic_write(p, bytes)
+                write_for_test(p, bytes)
             },
             &mut flush,
         );

@@ -448,7 +448,7 @@ fn registry_pass_post_rename_failure_and_unwind_pause_without_skipping_or_early_
                     &mut budget,
                     &mut intents,
                     |_, path, bytes| {
-                        atomic_write(path, bytes)?;
+                        write_for_test(path, bytes)?;
                         if unwind {
                             panic!("injected post-rename replay-pass unwind");
                         }
@@ -676,7 +676,7 @@ fn registry_pass_maximal_ledger_keeps_only_bounded_ids_and_checks_inventory_at_b
         .join("servers")
         .join(format!("{}.intents", blake3::hash(&scope).to_hex()));
     let sealed = frame(&seal(&store.keys.db_key().unwrap(), &e.finish(), &mut rng()).unwrap());
-    atomic_write(&path, &sealed).unwrap();
+    write_for_test(&path, &sealed).unwrap();
     assert!(store
         .begin_registry_replay(
             SERVER,

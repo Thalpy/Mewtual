@@ -315,7 +315,7 @@ fn studio_overlay_store_uncertain_writes_and_changed_source_retry_at_physical_ca
                 &mut rng(),
                 &mut b,
                 |_m, p, bytes| {
-                    atomic_write(p, bytes)?;
+                    write_for_test(p, bytes)?;
                     Err(AppError::Io("after overlay rename".into()))
                 },
                 |m: &EpochMutation<'_>, p: &Path, b: u64| m.sync_intent(p, b),
@@ -1105,7 +1105,7 @@ fn studio_overlay_uncertain_acceptance_still_protects_its_pixels() {
             |_m, path, bytes| {
                 if after_rename {
                     // The record really lands; only the caller's result is lost.
-                    atomic_write(path, bytes)?;
+                    write_for_test(path, bytes)?;
                 } else {
                     // A failure that leaves a temporary sibling behind.
                     let mut staged = path.to_path_buf();

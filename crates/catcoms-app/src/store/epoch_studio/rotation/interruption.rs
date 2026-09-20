@@ -32,7 +32,7 @@ impl StudioRotationInterruption {
         );
         if target == self.target && matches && !self.hit.swap(true, Ordering::SeqCst) {
             if self.after_write {
-                atomic_write(path, bytes)?;
+                write_for_test(path, bytes)?;
             }
             return Err(AppError::Io("injected Studio rotation interruption".into()));
         }

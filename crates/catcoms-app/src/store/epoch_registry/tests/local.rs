@@ -127,7 +127,7 @@ fn registry_local_each_write_failure_retains_only_safe_state_and_retry_recovers(
             let required_intent = intent_path(&store, &f);
             let fail = |_m: &EpochMutation<'_>, path: &Path, bytes: &[u8]| {
                 if mode == 1 {
-                    atomic_write(path, bytes)?;
+                    write_for_test(path, bytes)?;
                 }
                 if mode == 2 {
                     panic!("injected writer panic");
@@ -149,7 +149,7 @@ fn registry_local_each_write_failure_retains_only_safe_state_and_retry_recovers(
                         if stage == 0 {
                             fail(m, path, bytes)
                         } else {
-                            atomic_write(path, bytes)
+                            write_for_test(path, bytes)
                         }
                     },
                     |m: &EpochMutation<'_>, p: &Path, b: u64| m.sync_intent(p, b),
@@ -158,7 +158,7 @@ fn registry_local_each_write_failure_retains_only_safe_state_and_retry_recovers(
                         if stage == 1 {
                             fail(m, path, bytes)
                         } else {
-                            atomic_write(path, bytes)
+                            write_for_test(path, bytes)
                         }
                     },
                     |m: &EpochMutation<'_>, p: &Path, b: u64| m.sync_registry(p, b),

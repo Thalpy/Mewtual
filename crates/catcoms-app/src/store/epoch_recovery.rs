@@ -850,7 +850,7 @@ mod tests {
                     &mut ChaCha20Rng::seed_from_u64(1),
                     |_, path, bytes| {
                         writes += 1;
-                        atomic_write(path, bytes)
+                        write_for_test(path, bytes)
                     },
                 )
                 .unwrap();

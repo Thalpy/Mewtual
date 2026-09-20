@@ -186,7 +186,7 @@ fn studio_overlay_handoff_capacity_preflight_and_full_cap_completed_sync_retry()
         &mut b,
         &mut |_, _, p, bytes| {
             wrote = true;
-            atomic_write(p, bytes)
+            write_for_test(p, bytes)
         },
         &mut flush,
     );
@@ -329,7 +329,7 @@ fn studio_overlay_handoff_preflights_later_source_peak_before_prepared_write() {
         &mut b,
         &mut |_, _, p, bytes| {
             wrote = true;
-            atomic_write(p, bytes)
+            write_for_test(p, bytes)
         },
         &mut flush,
     );

@@ -265,11 +265,11 @@ fn studio_rotation_store_every_write_crash_resumes_exact_decision_and_preserves_
                         if step == boundary {
                             hit = true;
                             if after {
-                                atomic_write(p, bytes)?;
+                                write_for_test(p, bytes)?;
                             }
                             return Err(AppError::Io("injected rotation write failure".into()));
                         }
-                        atomic_write(p, bytes)
+                        write_for_test(p, bytes)
                     },
                     &mut sync,
                 );
@@ -655,7 +655,7 @@ fn studio_rotation_store_unwind_after_successor_write_poisoned_budget_reopens_sa
             &mut rng(),
             &mut b,
             &mut |_, step, p, bytes| {
-                atomic_write(p, bytes)?;
+                write_for_test(p, bytes)?;
                 assert_ne!(step, RotationWrite::Successor, "injected post-write unwind");
                 Ok(())
             },

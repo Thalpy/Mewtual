@@ -174,11 +174,11 @@ fn studio_adoption_store_all_write_boundaries_preserve_recovery_and_exact_retry(
                             if phase == boundary {
                                 hit = true;
                                 if after_write {
-                                    atomic_write(path, bytes)?;
+                                    write_for_test(path, bytes)?;
                                 }
                                 return Err(AppError::Io("injected settlement boundary".into()));
                             }
-                            atomic_write(path, bytes)
+                            write_for_test(path, bytes)
                         },
                         &mut |m, _, path, bytes| m.sync_studio(path, bytes)
                     )

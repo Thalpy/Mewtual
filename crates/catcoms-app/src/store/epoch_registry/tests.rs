@@ -239,7 +239,7 @@ fn registry_store_failed_write_and_post_rename_failure_require_reconciliation_an
             |unit, _| unit.ingest(&op, &f.group, &f.device).map_err(invalid),
             |_, path, bytes| {
                 if committed {
-                    atomic_write(path, bytes)?;
+                    write_for_test(path, bytes)?;
                 }
                 Err(AppError::Io("injected write/durability failure".into()))
             },
@@ -266,7 +266,7 @@ fn registry_store_failed_write_and_post_rename_failure_require_reconciliation_an
                 |unit, _| unit.ingest(&op, &f.group, &f.device).map_err(invalid),
                 |_, path, bytes| {
                     assert!(!committed);
-                    atomic_write(path, bytes)
+                    write_for_test(path, bytes)
                 },
                 |m, path, size| {
                     synced = true;
@@ -736,7 +736,7 @@ fn registry_store_receipt_retry_after_failed_flush_and_removed_owner_inventory()
         &mut budget,
         |unit, _| unit.seal(receipt.clone(), &f.group, 0).map_err(invalid),
         |_m, path, bytes| {
-            atomic_write(path, bytes)?;
+            write_for_test(path, bytes)?;
             Err(AppError::Io("post-rename failure".into()))
         },
         |m: &EpochMutation<'_>, p: &Path, b: u64| m.sync_registry(p, b),

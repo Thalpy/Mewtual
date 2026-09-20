@@ -191,7 +191,7 @@ fn studio_discovery_store_changed_missing_or_corrupt_source_never_becomes_hint_o
             let mut b = budget(&mut store, &f);
             match damage {
                 "missing" => std::fs::remove_file(f.path(&store)).unwrap(),
-                "corrupt" => atomic_write(&f.path(&store), b"not a sealed source").unwrap(),
+                "corrupt" => write_for_test(&f.path(&store), b"not a sealed source").unwrap(),
                 _ => {
                     let _newer = budget(&mut store, &f);
                 }
@@ -232,7 +232,7 @@ fn studio_discovery_store_source_flush_and_journal_write_fail_before_proof_and_r
                         "journal must not run after failed source barrier"
                     );
                     if failure == "journal_after" {
-                        atomic_write(path, bytes)?;
+                        write_for_test(path, bytes)?;
                     }
                     Err(invalid("injected journal write"))
                 },

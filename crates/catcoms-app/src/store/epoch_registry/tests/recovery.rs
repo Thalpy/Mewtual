@@ -125,7 +125,7 @@ fn registry_recovery_stage_save_failures_preserve_source_and_retry_after_reconci
             &mut source.budget,
             |_, path, bytes| {
                 if after_rename {
-                    atomic_write(path, bytes)?;
+                    write_for_test(path, bytes)?;
                 }
                 Err(AppError::Io("injected recovery save failure".into()))
             },

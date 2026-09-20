@@ -85,12 +85,15 @@ impl ServerStore {
             clock,
             rng,
             budget,
-            &mut |_, _step, p, b| {
+            &mut |m, _step, p, b| {
+                // The hook decides whether to fail; the capability performs the write. Before the
+                // relocation this closure called the bare primitive directly, which compiled even
+                // though the write was inventoried — the exact bypass the audit was carrying.
                 #[cfg(test)]
                 if let Some(interruption) = &interruption {
                     interruption.before_write(target, _step, p, b)?;
                 }
-                atomic_write(p, b)
+                m.write(p, b)
             },
             &mut |m, step, p, b| match step {
                 RotationSync::Intents => super::super::epoch_intents::sync_intent(m, p, b),

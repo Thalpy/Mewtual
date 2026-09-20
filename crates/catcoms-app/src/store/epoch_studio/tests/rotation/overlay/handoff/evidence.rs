@@ -36,7 +36,7 @@ fn studio_overlay_handoff_candidate_requires_the_private_store_capability() {
         &mut b.storage,
         |_m, p, bytes| {
             wrote = true;
-            atomic_write(p, bytes)
+            write_for_test(p, bytes)
         },
         |m: &EpochMutation<'_>, p: &Path, b: u64| m.sync_studio(p, b),
     );
@@ -132,10 +132,10 @@ fn studio_overlay_handoff_full_signed_digest_prevents_false_completion() {
                 &mut |_, step, p, bytes| {
                     if step == HandoffWrite::Source {
                         hit = true;
-                        atomic_write(p, &substitute)?;
+                        write_for_test(p, &substitute)?;
                         return Err(invalid("substituted signed source"));
                     }
-                    atomic_write(p, bytes)
+                    write_for_test(p, bytes)
                 },
                 &mut flush,
             )
@@ -194,10 +194,10 @@ fn studio_overlay_handoff_partial_manifest_keeps_the_entire_branch() {
             &mut b,
             &mut |_, step, p, bytes| {
                 if step == HandoffWrite::Source {
-                    atomic_write(p, &substitute)?;
+                    write_for_test(p, &substitute)?;
                     return Err(invalid("partial signed source"));
                 }
-                atomic_write(p, bytes)
+                write_for_test(p, bytes)
             },
             &mut flush,
         )
@@ -257,10 +257,10 @@ fn studio_overlay_handoff_rechecks_source_after_prepared_before_candidate_write(
         &mut rng(),
         &mut b,
         &mut |_, step, p, bytes| {
-            atomic_write(p, bytes)?;
+            write_for_test(p, bytes)?;
             if step == HandoffWrite::Prepared {
                 hit = true;
-                atomic_write(&source_path, &changed)?;
+                write_for_test(&source_path, &changed)?;
             }
             Ok(())
         },

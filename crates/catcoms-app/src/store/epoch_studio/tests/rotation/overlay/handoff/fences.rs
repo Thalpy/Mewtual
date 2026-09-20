@@ -21,7 +21,7 @@ pub(super) fn interrupt(f: &Fixture, store: &mut ServerStore, basis: [u8; 32], s
                     hit = true;
                     return Err(invalid("interrupted transfer"));
                 }
-                atomic_write(p, bytes)
+                write_for_test(p, bytes)
             },
             &mut flush,
         )
@@ -98,7 +98,7 @@ fn studio_overlay_handoff_publication_and_shared_replacement_fences_survive_rest
         &mut b.storage,
         |_m, p, bytes| {
             wrote = true;
-            atomic_write(p, bytes)
+            write_for_test(p, bytes)
         },
         |m: &EpochMutation<'_>, p: &Path, b: u64| m.sync_studio(p, b),
     );

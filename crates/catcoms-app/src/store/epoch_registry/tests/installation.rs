@@ -246,14 +246,14 @@ fn registry_install_crash_boundaries_keep_source_or_successor_and_resume_without
                     &mut |_, at, path, bytes| {
                         if at == step {
                             if mode == 1 {
-                                atomic_write(path, bytes)?;
+                                write_for_test(path, bytes)?;
                             }
                             if mode == 2 {
                                 panic!("injected installation panic");
                             }
                             return Err(AppError::Io("injected installation write failure".into()));
                         }
-                        atomic_write(path, bytes)
+                        write_for_test(path, bytes)
                     },
                     &mut sync,
                 )

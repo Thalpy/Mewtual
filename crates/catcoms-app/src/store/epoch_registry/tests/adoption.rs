@@ -390,13 +390,13 @@ fn registry_adoption_store_crash_boundaries_keep_source_or_successor_and_retry()
                 if let Failure::Write(wanted, after) = failure {
                     if step == wanted {
                         if after {
-                            atomic_write(path, bytes)?;
+                            write_for_test(path, bytes)?;
                         }
                         fired.set(true);
                         return Err(invalid("injected adoption write failure"));
                     }
                 }
-                atomic_write(path, bytes)
+                write_for_test(path, bytes)
             },
             &mut |m, step, path, bytes| {
                 if matches!(failure, Failure::Flush(wanted) if wanted == step) {

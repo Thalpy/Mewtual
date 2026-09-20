@@ -191,7 +191,7 @@ fn registry_owner_rotation_combined_journal_write_is_atomic_and_uncertain_io_nee
                 &mut s.budget,
                 |_, path, bytes| {
                     if after_write {
-                        atomic_write(path, bytes)?;
+                        write_for_test(path, bytes)?;
                     }
                     Err(invalid("injected combined journal write/flush failure"))
                 }

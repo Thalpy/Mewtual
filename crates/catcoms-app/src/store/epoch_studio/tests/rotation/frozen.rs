@@ -83,11 +83,11 @@ fn studio_frozen_owner_store_crash_matrix_retains_full_source_then_recovery_then
                         if step == failure && !hit {
                             hit = true;
                             if after_write {
-                                atomic_write(path, bytes)?;
+                                write_for_test(path, bytes)?;
                             }
                             return Err(invalid("injected frozen takeover crash"));
                         }
-                        atomic_write(path, bytes)
+                        write_for_test(path, bytes)
                     },
                     &mut sync,
                 );
@@ -412,7 +412,7 @@ fn studio_frozen_owner_store_promotes_staged_recovery_at_its_deadline_without_ac
                         RotationWrite::Recovery,
                         "an idle pass inside the grace must not rewrite the warning"
                     );
-                    atomic_write(path, bytes)
+                    write_for_test(path, bytes)
                 },
                 &mut sync,
             )

@@ -602,7 +602,7 @@ fn studio_store_crash_matrix_has_intent_first_and_no_ciphertext_before_both_barr
             let mut b = budget(&mut store, &f);
             let fail = |_m: &EpochMutation<'_>, path: &Path, bytes: &[u8]| {
                 if mode == 1 {
-                    atomic_write(path, bytes)?;
+                    write_for_test(path, bytes)?;
                 }
                 if mode == 2 {
                     panic!("injected Studio writer panic");
@@ -630,7 +630,7 @@ fn studio_store_crash_matrix_has_intent_first_and_no_ciphertext_before_both_barr
                         if stage == 0 {
                             fail(m, p, bytes)
                         } else {
-                            atomic_write(p, bytes)
+                            write_for_test(p, bytes)
                         }
                     },
                     |m: &EpochMutation<'_>, p: &Path, b: u64| m.sync_intent(p, b),
@@ -639,7 +639,7 @@ fn studio_store_crash_matrix_has_intent_first_and_no_ciphertext_before_both_barr
                         if stage == 1 {
                             fail(m, p, bytes)
                         } else {
-                            atomic_write(p, bytes)
+                            write_for_test(p, bytes)
                         }
                     },
                     |m: &EpochMutation<'_>, p: &Path, b: u64| m.sync_studio(p, b),

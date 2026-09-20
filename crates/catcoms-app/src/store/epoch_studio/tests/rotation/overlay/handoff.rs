@@ -396,7 +396,7 @@ fn studio_overlay_handoff_signs_the_whole_branch_once_and_keeps_pending_intents(
                 &mut b,
                 &mut |_m, step, p, bytes| {
                     writes.push(step);
-                    atomic_write(p, bytes)
+                    write_for_test(p, bytes)
                 },
                 &mut flush,
             )
@@ -502,11 +502,11 @@ fn studio_overlay_handoff_crash_barriers_reopen_without_signed_prefixes_or_dupli
                             if at == step {
                                 hit = true;
                                 if after {
-                                    atomic_write(p, bytes)?;
+                                    write_for_test(p, bytes)?;
                                 }
                                 return Err(invalid("injected handoff write"));
                             }
-                            atomic_write(p, bytes)
+                            write_for_test(p, bytes)
                         },
                         &mut flush,
                     )

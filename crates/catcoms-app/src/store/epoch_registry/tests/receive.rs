@@ -107,7 +107,7 @@ fn registry_page_batch_uncertain_rename_and_duplicate_flush_do_not_grant_success
         &mut rng(),
         &mut budget,
         |_m, path, bytes| {
-            atomic_write(path, bytes)?;
+            write_for_test(path, bytes)?;
             Err(invalid("lost acknowledgement"))
         },
         |m: &EpochMutation<'_>, p: &Path, b: u64| m.sync_registry(p, b),

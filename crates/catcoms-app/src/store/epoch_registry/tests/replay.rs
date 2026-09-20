@@ -418,7 +418,7 @@ fn registry_replay_failed_tombstone_save_and_flush_retry_the_exact_signed_change
                 &mut intents,
                 |_, path, bytes| {
                     if mode == 1 {
-                        atomic_write(path, bytes)?;
+                        write_for_test(path, bytes)?;
                     }
                     if mode == 2 {
                         panic!("injected replay writer unwind");
