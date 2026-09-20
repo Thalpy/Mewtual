@@ -167,8 +167,8 @@ impl ServerStore {
         rng: &mut impl CryptoRngCore,
         budget: &mut EpochStorageBudget,
         intents: &mut EpochIntentBudget,
-        writer: impl FnOnce(&Path, &[u8]) -> Result<(), AppError>,
-        sync: impl FnOnce(&Path, u64) -> Result<(), AppError>,
+        writer: impl FnOnce(&EpochMutation<'_>, &Path, &[u8]) -> Result<(), AppError>,
+        sync: impl FnOnce(&EpochMutation<'_>, &Path, u64) -> Result<(), AppError>,
     ) -> Result<(), AppError> {
         // Bind the payload to the record it is about to occupy, at the writer as well as at the
         // reader. The collector refuses a mismatch on the way out; refusing it here means one
@@ -208,7 +208,10 @@ impl ServerStore {
                     .map_err(invalid)?;
                 intents.begin_write();
                 self.intent_generation = Arc::new(());
-                sync(&self.epoch_draft_archive_path(&scope), bytes)?;
+                // I-4, threaded by Agent 1 because the seam is typed; see the writer note.
+                let path = self.epoch_draft_archive_path(&scope);
+                let mutation = self.epoch_mutation_guard();
+                sync(&mutation, &path, bytes)?;
                 reservation.commit();
                 intents.end_write(self.intent_generation.clone());
                 return Ok(());
@@ -243,7 +246,14 @@ impl ServerStore {
         // writer does: a failed or uncertain write must not leave either usable.
         intents.begin_write();
         self.intent_generation = Arc::new(());
-        writer(&self.epoch_draft_archive_path(&scope), &frame(&sealed))?;
+        // I-4, threaded here because the writer seam is now typed and this call site could not
+        // compile otherwise. Agent 1 made this change; the replacement branch is therefore
+        // covered, but **the exact-retry sync branch of this family is not**, and the design
+        // attaches that obligation to Agent 2 along with `release_studio_draft_archive_with_io`.
+        let path = self.epoch_draft_archive_path(&scope);
+        let framed = frame(&sealed);
+        let mutation = self.epoch_mutation_guard();
+        writer(&mutation, &path, &framed)?;
         reservation.commit();
         intents.commit_draft_archive(id, old, next);
         intents.end_write(self.intent_generation.clone());

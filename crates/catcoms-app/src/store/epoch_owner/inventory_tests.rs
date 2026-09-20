@@ -313,7 +313,7 @@ fn failed_journal_write_restarts_cleans_both_families_reconciles_and_retries() {
             &mut rng(),
             &mut accounted,
             |journal| journal.mark_published(signed.hash()).map_err(invalid),
-            |_, bytes| {
+            |_, _, bytes| {
                 fs::write(&orphan, bytes).unwrap();
                 Err(AppError::Io("before rename".into()))
             }
@@ -394,7 +394,7 @@ fn a_first_write_orphan_never_becomes_a_published_owner_decision() {
             group.epoch(),
             &mut rng(),
             &mut accounted,
-            |_, bytes| {
+            |_, _, bytes| {
                 fs::write(&orphan, bytes).unwrap();
                 Err(AppError::Io("first write interrupted".into()))
             }

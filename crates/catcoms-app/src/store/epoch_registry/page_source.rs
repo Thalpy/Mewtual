@@ -65,10 +65,10 @@ impl ServerStore {
                     record,
                 )
                 .map_err(invalid)?;
-            sync_registry(
-                &self.registry_epoch_path(&scope_bytes(server, &logical)?),
-                record.footprint.total().map_err(invalid)?,
-            )?;
+            // I-4: an unchanged-file flush still invalidates a captured inventory.
+            let path = self.registry_epoch_path(&scope_bytes(server, &logical)?);
+            let bytes = record.footprint.total().map_err(invalid)?;
+            self.epoch_mutation_guard().sync_registry(&path, bytes)?;
             reservation.commit();
         }
         prepared

@@ -32,8 +32,8 @@ impl ServerStore {
             ts,
             rng,
             budget,
-            atomic_write,
-            super::super::epoch_intents::sync_intent,
+            |m: &EpochMutation<'_>, p: &Path, b: &[u8]| m.write(p, b),
+            |m: &EpochMutation<'_>, p: &Path, b: u64| m.sync_intent(p, b),
         )
     }
 
@@ -65,8 +65,8 @@ impl ServerStore {
             ts,
             rng,
             budget,
-            atomic_write,
-            super::super::epoch_intents::sync_intent,
+            |m: &EpochMutation<'_>, p: &Path, b: &[u8]| m.write(p, b),
+            |m: &EpochMutation<'_>, p: &Path, b: u64| m.sync_intent(p, b),
         )
     }
 
@@ -94,8 +94,8 @@ impl ServerStore {
             plan,
             rng,
             budget,
-            atomic_write,
-            super::super::epoch_intents::sync_intent,
+            |m: &EpochMutation<'_>, p: &Path, b: &[u8]| m.write(p, b),
+            |m: &EpochMutation<'_>, p: &Path, b: u64| m.sync_intent(p, b),
         )
     }
 
@@ -145,8 +145,8 @@ impl ServerStore {
         ts: u64,
         rng: &mut impl CryptoRngCore,
         budget: &mut EpochStudioBudget,
-        writer: impl FnOnce(&Path, &[u8]) -> Result<(), AppError>,
-        sync: impl FnOnce(&Path, u64) -> Result<(), AppError>,
+        writer: impl FnOnce(&EpochMutation<'_>, &Path, &[u8]) -> Result<(), AppError>,
+        sync: impl FnOnce(&EpochMutation<'_>, &Path, u64) -> Result<(), AppError>,
     ) -> Result<StudioOverlayStart, AppError> {
         current_member(group, device)?;
         let logical = target.document(&group.group_id()).map_err(invalid)?;
@@ -286,8 +286,8 @@ impl ServerStore {
         // `FnMut` so this can lend the same writer to the start visit and then to the commit.
         // A reborrow `&mut F` is itself `FnOnce`, so neither callee's bound changes and no caller
         // has to pass anything twice.
-        mut writer: impl FnMut(&Path, &[u8]) -> Result<(), AppError>,
-        mut sync: impl FnMut(&Path, u64) -> Result<(), AppError>,
+        mut writer: impl FnMut(&EpochMutation<'_>, &Path, &[u8]) -> Result<(), AppError>,
+        mut sync: impl FnMut(&EpochMutation<'_>, &Path, u64) -> Result<(), AppError>,
     ) -> Result<StudioOverlaySave, AppError> {
         let capture = match self.start_studio_closing_overlay_with_io(
             server,

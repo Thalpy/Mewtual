@@ -20,8 +20,8 @@ impl ServerStore {
         rng: &mut impl CryptoRngCore,
         budget: &mut EpochStorageBudget,
         intents: &mut EpochIntentBudget,
-        writer: impl FnOnce(&Path, &[u8]) -> Result<(), AppError>,
-        sync: impl FnOnce(&Path, u64) -> Result<(), AppError>,
+        writer: impl FnOnce(&EpochMutation<'_>, &Path, &[u8]) -> Result<(), AppError>,
+        sync: impl FnOnce(&EpochMutation<'_>, &Path, u64) -> Result<(), AppError>,
     ) -> Result<StudioLocalDraft, AppError> {
         if document.server_id != group.group_id()
             || group.member_signature_key(&device.device_id()).as_deref()

@@ -16,7 +16,7 @@ fn sealed_old_owner(f: &mut Fixture, store: &mut ServerStore) -> Receipt {
             0,
             &mut rng(),
             &mut b.storage,
-            atomic_write,
+            |m: &EpochMutation<'_>, p: &Path, b: &[u8]| m.write(p, b),
         )
         .unwrap();
     store
@@ -79,7 +79,7 @@ fn studio_frozen_owner_store_crash_matrix_retains_full_source_then_recovery_then
                     &ManualClock::new(1000),
                     &mut rng(),
                     &mut b,
-                    &mut |step, path, bytes| {
+                    &mut |_, step, path, bytes| {
                         if step == failure && !hit {
                             hit = true;
                             if after_write {
@@ -406,7 +406,7 @@ fn studio_frozen_owner_store_promotes_staged_recovery_at_its_deadline_without_ac
                 &clock,
                 &mut rng(),
                 &mut b,
-                &mut |step, path, bytes| {
+                &mut |_, step, path, bytes| {
                     assert_ne!(
                         step,
                         RotationWrite::Recovery,

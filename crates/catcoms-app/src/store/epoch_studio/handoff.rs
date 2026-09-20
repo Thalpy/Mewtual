@@ -55,10 +55,10 @@ impl ServerStore {
             tenure,
             rng,
             budget,
-            &mut |_, p, b| atomic_write(p, b),
-            &mut |step, p, b| match step {
-                HandoffSync::Source => sync_studio(p, b),
-                HandoffSync::Intents => epoch_intents::sync_intent(p, b),
+            &mut |m: &EpochMutation<'_>, _, p: &Path, b: &[u8]| m.write(p, b),
+            &mut |m, step, p, b| match step {
+                HandoffSync::Source => sync_studio(m, p, b),
+                HandoffSync::Intents => epoch_intents::sync_intent(m, p, b),
             },
         )
     }
@@ -123,10 +123,10 @@ impl ServerStore {
             tenure,
             rng,
             budget,
-            &mut |_, p, b| atomic_write(p, b),
-            &mut |step, p, b| match step {
-                HandoffSync::Source => sync_studio(p, b),
-                HandoffSync::Intents => epoch_intents::sync_intent(p, b),
+            &mut |m: &EpochMutation<'_>, _, p: &Path, b: &[u8]| m.write(p, b),
+            &mut |m, step, p, b| match step {
+                HandoffSync::Source => sync_studio(m, p, b),
+                HandoffSync::Intents => epoch_intents::sync_intent(m, p, b),
             },
         )
     }
@@ -153,10 +153,10 @@ impl ServerStore {
             tenure,
             rng,
             budget,
-            &mut |_, p, b| atomic_write(p, b),
-            &mut |step, p, b| match step {
-                HandoffSync::Source => sync_studio(p, b),
-                HandoffSync::Intents => epoch_intents::sync_intent(p, b),
+            &mut |m: &EpochMutation<'_>, _, p: &Path, b: &[u8]| m.write(p, b),
+            &mut |m, step, p, b| match step {
+                HandoffSync::Source => sync_studio(m, p, b),
+                HandoffSync::Intents => epoch_intents::sync_intent(m, p, b),
             },
         )
     }
@@ -175,8 +175,8 @@ impl ServerStore {
         tenure: Option<u64>,
         rng: &mut impl CryptoRngCore,
         budget: &mut EpochStudioBudget,
-        writer: &mut impl FnMut(HandoffWrite, &Path, &[u8]) -> Result<(), AppError>,
-        sync: &mut impl FnMut(HandoffSync, &Path, u64) -> Result<(), AppError>,
+        writer: &mut impl FnMut(&EpochMutation<'_>, HandoffWrite, &Path, &[u8]) -> Result<(), AppError>,
+        sync: &mut impl FnMut(&EpochMutation<'_>, HandoffSync, &Path, u64) -> Result<(), AppError>,
     ) -> Result<StudioHandoffOutcome, AppError> {
         let capture = match self.start_studio_handoff_with_io(
             server, group, target, device, basis, tenure, rng, budget, writer, sync,
@@ -229,8 +229,8 @@ impl ServerStore {
         tenure: Option<u64>,
         rng: &mut impl CryptoRngCore,
         budget: &mut EpochStudioBudget,
-        writer: &mut impl FnMut(HandoffWrite, &Path, &[u8]) -> Result<(), AppError>,
-        sync: &mut impl FnMut(HandoffSync, &Path, u64) -> Result<(), AppError>,
+        writer: &mut impl FnMut(&EpochMutation<'_>, HandoffWrite, &Path, &[u8]) -> Result<(), AppError>,
+        sync: &mut impl FnMut(&EpochMutation<'_>, HandoffSync, &Path, u64) -> Result<(), AppError>,
     ) -> Result<StudioHandoffStart, AppError> {
         current_member(group, device)?;
         self.enter_studio_budget(server, group, budget)?;
@@ -323,8 +323,8 @@ impl ServerStore {
         tenure: Option<u64>,
         rng: &mut impl CryptoRngCore,
         budget: &mut EpochStudioBudget,
-        writer: &mut impl FnMut(HandoffWrite, &Path, &[u8]) -> Result<(), AppError>,
-        sync: &mut impl FnMut(HandoffSync, &Path, u64) -> Result<(), AppError>,
+        writer: &mut impl FnMut(&EpochMutation<'_>, HandoffWrite, &Path, &[u8]) -> Result<(), AppError>,
+        sync: &mut impl FnMut(&EpochMutation<'_>, HandoffSync, &Path, u64) -> Result<(), AppError>,
     ) -> Result<StudioHandoffOutcome, AppError> {
         current_member(group, device)?;
         self.enter_studio_budget(server, group, budget)?;
@@ -455,8 +455,8 @@ impl ServerStore {
             WritePurpose::Ordinary,
             rng,
             &mut budget.storage,
-            |p, b| writer(HandoffWrite::Source, p, b),
-            |p, b| sync(HandoffSync::Source, p, b),
+            |m, p, b| writer(m, HandoffWrite::Source, p, b),
+            |m, p, b| sync(m, HandoffSync::Source, p, b),
             None,
             Some(&capability),
         )?;
@@ -487,8 +487,8 @@ impl ServerStore {
         step: HandoffWrite,
         rng: &mut impl CryptoRngCore,
         budget: &mut EpochStudioBudget,
-        writer: &mut impl FnMut(HandoffWrite, &Path, &[u8]) -> Result<(), AppError>,
-        sync: &mut impl FnMut(HandoffSync, &Path, u64) -> Result<(), AppError>,
+        writer: &mut impl FnMut(&EpochMutation<'_>, HandoffWrite, &Path, &[u8]) -> Result<(), AppError>,
+        sync: &mut impl FnMut(&EpochMutation<'_>, HandoffSync, &Path, u64) -> Result<(), AppError>,
     ) -> Result<(), AppError> {
         // `write_prepared_intents` consumes this size; it performs no old-record read of its own.
         let old = self
@@ -503,8 +503,8 @@ impl ServerStore {
             rng,
             &mut budget.storage,
             &mut budget.intents,
-            |p, b| writer(step, p, b),
-            |p, b| sync(HandoffSync::Intents, p, b),
+            |m, p, b| writer(m, step, p, b),
+            |m, p, b| sync(m, HandoffSync::Intents, p, b),
         )?;
         Ok(())
     }
@@ -527,10 +527,10 @@ impl ServerStore {
             device,
             rng,
             budget,
-            &mut |_, p, b| atomic_write(p, b),
-            &mut |step, p, b| match step {
-                HandoffSync::Source => sync_studio(p, b),
-                HandoffSync::Intents => epoch_intents::sync_intent(p, b),
+            &mut |m: &EpochMutation<'_>, _, p: &Path, b: &[u8]| m.write(p, b),
+            &mut |m, step, p, b| match step {
+                HandoffSync::Source => sync_studio(m, p, b),
+                HandoffSync::Intents => epoch_intents::sync_intent(m, p, b),
             },
         )
     }
@@ -543,8 +543,8 @@ impl ServerStore {
         device: &MlsDevice,
         rng: &mut impl CryptoRngCore,
         budget: &mut EpochStudioBudget,
-        writer: &mut impl FnMut(HandoffWrite, &Path, &[u8]) -> Result<(), AppError>,
-        sync: &mut impl FnMut(HandoffSync, &Path, u64) -> Result<(), AppError>,
+        writer: &mut impl FnMut(&EpochMutation<'_>, HandoffWrite, &Path, &[u8]) -> Result<(), AppError>,
+        sync: &mut impl FnMut(&EpochMutation<'_>, HandoffSync, &Path, u64) -> Result<(), AppError>,
     ) -> Result<(), AppError> {
         current_member(group, device)?;
         self.enter_studio_budget(server, group, budget)?;
@@ -609,8 +609,8 @@ impl ServerStore {
                     WritePurpose::Ordinary,
                     rng,
                     &mut budget.storage,
-                    |_, _| Err(invalid("handoff resolution requires unchanged source")),
-                    |p, b| sync(HandoffSync::Source, p, b),
+                    |_, _, _| Err(invalid("handoff resolution requires unchanged source")),
+                    |m, p, b| sync(m, HandoffSync::Source, p, b),
                 )?;
                 self.check_handoff_references(metadata, &source.unit, &state)?;
                 state.overlay = Some(
@@ -662,7 +662,7 @@ impl ServerStore {
 
     /// Shared final write boundary. An ordinary caller cannot prune Prepared evidence.
     pub(super) fn check_studio_handoff_write(
-        &self,
+        &mut self,
         server: u64,
         unit: &mut StudioEpoch,
         budget: &mut EpochStorageBudget,
@@ -737,10 +737,10 @@ impl ServerStore {
             let reservation = budget
                 .reserve_sync(&storage_scope, record)
                 .map_err(invalid)?;
-            epoch_intents::sync_intent(
-                &self.epoch_intent_path(&scope),
-                old.ok_or_else(|| invalid("completed handoff record missing"))?,
-            )?;
+            // I-4: the completed-handoff exact retry is a mutation for inventory purposes.
+            let path = self.epoch_intent_path(&scope);
+            let bytes = old.ok_or_else(|| invalid("completed handoff record missing"))?;
+            self.epoch_mutation_guard().sync_intent(&path, bytes)?;
             reservation.commit();
         }
         Ok(true)
@@ -770,7 +770,7 @@ impl ServerStore {
     /// Generic providers refuse a Prepared destination; they never expose a batch between the
     /// source and final intent barriers. After uncertain completion, sync the actual record.
     pub(super) fn check_studio_handoff_publication(
-        &self,
+        &mut self,
         server: u64,
         group: &ServerGroup,
         target: StudioTarget,
@@ -784,10 +784,10 @@ impl ServerStore {
                 return Err(invalid("prepared overlay handoff is not publishable"));
             }
             if metadata.has_completed() {
-                epoch_intents::sync_intent(
-                    &self.epoch_intent_path(&scope),
-                    bytes.ok_or_else(|| invalid("completed handoff record missing"))?,
-                )?;
+                // I-4: same exact-retry flush, on the publish check's path.
+                let path = self.epoch_intent_path(&scope);
+                let bytes = bytes.ok_or_else(|| invalid("completed handoff record missing"))?;
+                self.epoch_mutation_guard().sync_intent(&path, bytes)?;
             }
         }
         Ok(())

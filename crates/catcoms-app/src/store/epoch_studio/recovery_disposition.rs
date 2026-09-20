@@ -31,8 +31,8 @@ impl ServerStore {
             clock,
             rng,
             budget,
-            &mut |_, path, bytes| atomic_write(path, bytes),
-            &mut super::super::epoch_intents::sync_intent,
+            &mut |m: &EpochMutation<'_>, _, path: &Path, bytes: &[u8]| m.write(path, bytes),
+            &mut |m: &EpochMutation<'_>, p: &Path, b: u64| m.sync_intent(p, b),
         )
     }
 
@@ -48,8 +48,8 @@ impl ServerStore {
         clock: &dyn catcoms_rt::Clock,
         rng: &mut impl CryptoRngCore,
         budget: &mut EpochStudioBudget,
-        write: &mut impl FnMut(bool, &Path, &[u8]) -> Result<(), AppError>,
-        sync: &mut impl FnMut(&Path, u64) -> Result<(), AppError>,
+        write: &mut impl FnMut(&EpochMutation<'_>, bool, &Path, &[u8]) -> Result<(), AppError>,
+        sync: &mut impl FnMut(&EpochMutation<'_>, &Path, u64) -> Result<(), AppError>,
     ) -> Result<usize, AppError> {
         current_member(group, device)?;
         self.enter_studio_budget(server, group, budget)?;
@@ -113,7 +113,7 @@ impl ServerStore {
                 rng,
                 &mut budget.storage,
                 &mut budget.intents,
-                |p, b| write(false, p, b),
+                |m, p, b| write(m, false, p, b),
                 sync,
             )?;
             return Ok(0);
@@ -134,7 +134,7 @@ impl ServerStore {
             clock,
             rng,
             &mut budget.storage,
-            |p, b| write(true, p, b),
+            |m, p, b| write(m, true, p, b),
         )?;
         self.write_studio_manual_recovery_disposition_with_io(
             server,
@@ -143,7 +143,7 @@ impl ServerStore {
             rng,
             &mut budget.storage,
             &mut budget.intents,
-            |p, b| write(false, p, b),
+            |m, p, b| write(m, false, p, b),
             sync,
         )?;
         Ok(selected.len())

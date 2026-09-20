@@ -16,7 +16,7 @@ pub(super) fn interrupt(f: &Fixture, store: &mut ServerStore, basis: [u8; 32], s
             Some(0),
             &mut rng(),
             &mut b,
-            &mut |at, p, bytes| {
+            &mut |_m, at, p, bytes| {
                 if at == step {
                     hit = true;
                     return Err(invalid("interrupted transfer"));
@@ -96,11 +96,11 @@ fn studio_overlay_handoff_publication_and_shared_replacement_fences_survive_rest
         WritePurpose::Ordinary,
         &mut rng(),
         &mut b.storage,
-        |p, bytes| {
+        |_m, p, bytes| {
             wrote = true;
             atomic_write(p, bytes)
         },
-        sync_studio,
+        |m: &EpochMutation<'_>, p: &Path, b: u64| m.sync_studio(p, b),
     );
     assert!(
         matches!(result,Err(AppError::Invalid(ref s)) if s.contains("prepared handoff blocks source replacement")),
@@ -351,7 +351,7 @@ fn studio_overlay_handoff_frozen_owner_takeover_preserves_completed_local_work()
             0,
             &mut rng(),
             &mut b.storage,
-            atomic_write,
+            |m: &EpochMutation<'_>, p: &Path, b: &[u8]| m.write(p, b),
         )
         .unwrap();
     let (_, sealed) = store

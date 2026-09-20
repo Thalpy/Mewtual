@@ -69,10 +69,10 @@ impl ServerStore {
             rng,
             budget,
             intents,
-            &mut |_, path, bytes| atomic_write(path, bytes),
-            &mut |step, path, bytes| match step {
-                InstallSync::Intents => super::super::epoch_intents::sync_intent(path, bytes),
-                _ => sync_registry(path, bytes),
+            &mut |m: &EpochMutation<'_>, _, path: &Path, bytes: &[u8]| m.write(path, bytes),
+            &mut |m, step, path, bytes| match step {
+                InstallSync::Intents => super::super::epoch_intents::sync_intent(m, path, bytes),
+                _ => sync_registry(m, path, bytes),
             },
         )
     }
@@ -91,8 +91,8 @@ impl ServerStore {
         rng: &mut impl CryptoRngCore,
         budget: &mut EpochStorageBudget,
         intents: &mut EpochIntentBudget,
-        writer: &mut impl FnMut(InstallWrite, &Path, &[u8]) -> Result<(), AppError>,
-        sync: &mut impl FnMut(InstallSync, &Path, u64) -> Result<(), AppError>,
+        writer: &mut impl FnMut(&EpochMutation<'_>, InstallWrite, &Path, &[u8]) -> Result<(), AppError>,
+        sync: &mut impl FnMut(&EpochMutation<'_>, InstallSync, &Path, u64) -> Result<(), AppError>,
     ) -> Result<(RegistryInstallOutcome, EpochRegistryState), AppError> {
         // Bounded canonical decoders precede vault work, and authority comes from current MLS
         // state plus independently observed tenure, never a field trusted from the receipt.
@@ -134,8 +134,8 @@ impl ServerStore {
                 }
                 Ok(Some(plan))
             },
-            |_, _| Err(invalid("source preparation must not rewrite the epoch")),
-            |path, bytes| sync(InstallSync::Source, path, bytes),
+            |_, _, _| Err(invalid("source preparation must not rewrite the epoch")),
+            |m, path, bytes| sync(m, InstallSync::Source, path, bytes),
         )?;
         let Some(plan) = plan else {
             // A post-rename retry must never reinstall a seed over newer edits or retire intents
@@ -178,7 +178,7 @@ impl ServerStore {
                 clock,
                 rng,
                 budget,
-                |path, bytes| writer(InstallWrite::Recovery, path, bytes),
+                |m, path, bytes| writer(m, InstallWrite::Recovery, path, bytes),
             )?
             .is_some()
         {
@@ -194,7 +194,7 @@ impl ServerStore {
             clock,
             rng,
             budget,
-            |path, bytes| writer(InstallWrite::Recovery, path, bytes),
+            |m, path, bytes| writer(m, InstallWrite::Recovery, path, bytes),
         )? {
             if saved.state.eviction_pending()?.is_some() {
                 return Ok((RegistryInstallOutcome::RecoveryPending, state));
@@ -206,8 +206,8 @@ impl ServerStore {
             rng,
             budget,
             intents,
-            |path, bytes| writer(InstallWrite::Intents, path, bytes),
-            |path, bytes| sync(InstallSync::Intents, path, bytes),
+            |m, path, bytes| writer(m, InstallWrite::Intents, path, bytes),
+            |m, path, bytes| sync(m, InstallSync::Intents, path, bytes),
         )?;
         self.update_registry_with_io(
             server,
@@ -225,8 +225,8 @@ impl ServerStore {
                 *unit = successor;
                 Ok(RegistryInstallOutcome::Installed)
             },
-            |path, bytes| writer(InstallWrite::Successor, path, bytes),
-            |path, bytes| sync(InstallSync::Successor, path, bytes),
+            |m, path, bytes| writer(m, InstallWrite::Successor, path, bytes),
+            |m, path, bytes| sync(m, InstallSync::Successor, path, bytes),
         )
     }
 }

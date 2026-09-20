@@ -166,10 +166,10 @@ impl ServerStore {
             rng,
             budget,
             intents,
-            atomic_write,
-            super::epoch_intents::sync_intent,
-            atomic_write,
-            sync_registry,
+            |m: &EpochMutation<'_>, p: &Path, b: &[u8]| m.write(p, b),
+            |m: &EpochMutation<'_>, p: &Path, b: u64| m.sync_intent(p, b),
+            |m: &EpochMutation<'_>, p: &Path, b: &[u8]| m.write(p, b),
+            |m: &EpochMutation<'_>, p: &Path, b: u64| m.sync_registry(p, b),
         )
     }
 
@@ -185,10 +185,10 @@ impl ServerStore {
         rng: &mut impl CryptoRngCore,
         budget: &mut EpochStorageBudget,
         intents: &mut EpochIntentBudget,
-        intent_writer: impl FnOnce(&Path, &[u8]) -> Result<(), AppError>,
-        intent_sync: impl FnOnce(&Path, u64) -> Result<(), AppError>,
-        epoch_writer: impl FnOnce(&Path, &[u8]) -> Result<(), AppError>,
-        epoch_sync: impl FnOnce(&Path, u64) -> Result<(), AppError>,
+        intent_writer: impl FnOnce(&EpochMutation<'_>, &Path, &[u8]) -> Result<(), AppError>,
+        intent_sync: impl FnOnce(&EpochMutation<'_>, &Path, u64) -> Result<(), AppError>,
+        epoch_writer: impl FnOnce(&EpochMutation<'_>, &Path, &[u8]) -> Result<(), AppError>,
+        epoch_sync: impl FnOnce(&EpochMutation<'_>, &Path, u64) -> Result<(), AppError>,
     ) -> Result<(SealedOp, EpochRegistryState), AppError> {
         let document = registry_document(&group.group_id(), bucket).map_err(invalid)?;
         // Bound and authenticate the caller before rebuilding any saved graph or copying its
@@ -315,8 +315,8 @@ impl ServerStore {
             rng,
             budget,
             |unit, _| unit.ingest(sealed, group, device).map_err(invalid),
-            atomic_write,
-            sync_registry,
+            |m: &EpochMutation<'_>, p: &Path, b: &[u8]| m.write(p, b),
+            |m: &EpochMutation<'_>, p: &Path, b: u64| m.sync_registry(p, b),
         )
     }
 
@@ -359,8 +359,8 @@ impl ServerStore {
             rng,
             budget,
             |unit, _| unit.seal(receipt, group, tenure_start).map_err(invalid),
-            atomic_write,
-            sync_registry,
+            |m: &EpochMutation<'_>, p: &Path, b: &[u8]| m.write(p, b),
+            |m: &EpochMutation<'_>, p: &Path, b: u64| m.sync_registry(p, b),
         )
     }
 
@@ -379,8 +379,8 @@ impl ServerStore {
         rng: &mut R,
         budget: &mut EpochStorageBudget,
         apply: impl FnOnce(&mut RegistryEpoch, &mut R) -> Result<T, AppError>,
-        writer: impl FnOnce(&Path, &[u8]) -> Result<(), AppError>,
-        sync: impl FnOnce(&Path, u64) -> Result<(), AppError>,
+        writer: impl FnOnce(&EpochMutation<'_>, &Path, &[u8]) -> Result<(), AppError>,
+        sync: impl FnOnce(&EpochMutation<'_>, &Path, u64) -> Result<(), AppError>,
     ) -> Result<(T, EpochRegistryState), AppError> {
         let document = registry_document(&group.group_id(), bucket).map_err(invalid)?;
         let scope = scope_bytes(server, &document)?;
@@ -445,7 +445,10 @@ impl ServerStore {
             let reservation = budget
                 .reserve_sync(&storage_scope, record)
                 .map_err(invalid)?;
-            sync(&path, record.footprint.total().map_err(invalid)?)?;
+            // I-4: unchanged Registry still flushes, so it still rotates.
+            let bytes = record.footprint.total().map_err(invalid)?;
+            let mutation = self.epoch_mutation_guard();
+            sync(&mutation, &path, bytes)?;
             reservation.commit();
         } else {
             let record = storage_record(
@@ -474,8 +477,8 @@ impl ServerStore {
             };
             // I-4: rotate before the write, never after it succeeds.
             let framed = frame(&sealed);
-            self.epoch_mutation_guard()
-                .with(|| writer(&path, &framed))?;
+            let mutation = self.epoch_mutation_guard();
+            writer(&mutation, &path, &framed)?;
             reservation.commit();
         }
         Ok((outcome, EpochRegistryState { unit }))
@@ -622,7 +625,11 @@ fn storage_record(
     })
 }
 
-fn sync_registry(path: &Path, expected_bytes: u64) -> Result<(), AppError> {
+pub(super) fn sync_registry(
+    _: &EpochMutation<'_>,
+    path: &Path,
+    expected_bytes: u64,
+) -> Result<(), AppError> {
     let metadata = fs::symlink_metadata(path).map_err(|e| AppError::Io(e.to_string()))?;
     if !regular_file(&metadata) || metadata.len() != expected_bytes {
         return Err(invalid("retry file changed"));

@@ -77,8 +77,8 @@ impl ServerStore {
             operations,
             rng,
             budget,
-            atomic_write,
-            sync_studio,
+            |m: &EpochMutation<'_>, p: &Path, b: &[u8]| m.write(p, b),
+            |m: &EpochMutation<'_>, p: &Path, b: u64| m.sync_studio(p, b),
         )
     }
 
@@ -93,8 +93,8 @@ impl ServerStore {
         operations: &[SealedOp],
         rng: &mut impl CryptoRngCore,
         budget: &mut EpochStudioBudget,
-        writer: impl FnOnce(&Path, &[u8]) -> Result<(), AppError>,
-        sync: impl FnOnce(&Path, u64) -> Result<(), AppError>,
+        writer: impl FnOnce(&EpochMutation<'_>, &Path, &[u8]) -> Result<(), AppError>,
+        sync: impl FnOnce(&EpochMutation<'_>, &Path, u64) -> Result<(), AppError>,
     ) -> Result<StudioPageAdmission, AppError> {
         if operations.len() > MAX_STUDIO_PAGE_OPS {
             return Err(invalid("Studio page exceeds operation cap"));

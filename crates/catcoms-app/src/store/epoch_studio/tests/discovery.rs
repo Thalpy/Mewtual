@@ -219,14 +219,14 @@ fn studio_discovery_store_source_flush_and_journal_write_fail_before_proof_and_r
                 Some(0),
                 &mut rng(),
                 &mut b,
-                |path, bytes| {
+                |m, path, bytes| {
                     if failure == "source" {
                         Err(invalid("injected source flush"))
                     } else {
-                        sync_studio(path, bytes)
+                        sync_studio(m, path, bytes)
                     }
                 },
-                |path, bytes| {
+                |_, path, bytes| {
                     assert_ne!(
                         failure, "source",
                         "journal must not run after failed source barrier"

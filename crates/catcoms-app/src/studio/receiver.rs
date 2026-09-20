@@ -385,6 +385,11 @@ impl StudioReceiver {
                 || self
                     .handoff
                     .probe_due(now, &self.rail())
+                // A retained Registry source owns a process-wide preparation permit, and only a
+                // custody visit can drop it. Without this term a quiet actor with no watches
+                // never schedules that visit, so the thirty-second bound the code claims is not
+                // a bound at all: four such actors strand the whole pool indefinitely.
+                || self.catchup.registry_expiry_due(now)
                 || self.catchup.pending(server, &self.watches))
     }
     /// Milliseconds until this receiver has time-gated work to do, if any.
@@ -406,7 +411,16 @@ impl StudioReceiver {
         if self.paused {
             return None;
         }
-        self.handoff.wake_in(now, &self.rail())
+        // Both deadlines, from the one sample the caller took. They are independent resources,
+        // so the earliest wins; nothing here dominates anything else the way the capacity gate
+        // dominates per-target pacing.
+        match (
+            self.handoff.wake_in(now, &self.rail()),
+            self.catchup.registry_wake_in(now),
+        ) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (only, None) | (None, only) => only,
+        }
     }
 
     /// The watched targets, which is the only set a handoff deadline may speak for. A deadline

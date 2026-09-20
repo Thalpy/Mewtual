@@ -298,7 +298,7 @@ impl ServerStore {
             clock,
             rng,
             budget,
-            atomic_write,
+            |m: &EpochMutation<'_>, p: &Path, b: &[u8]| m.write(p, b),
         )
     }
 
@@ -313,7 +313,7 @@ impl ServerStore {
         clock: &dyn Clock,
         rng: &mut impl CryptoRngCore,
         budget: &mut EpochStorageBudget,
-        writer: impl FnOnce(&Path, &[u8]) -> Result<(), AppError>,
+        writer: impl FnOnce(&EpochMutation<'_>, &Path, &[u8]) -> Result<(), AppError>,
     ) -> Result<EpochRecoveryUpdate, AppError> {
         let scope = scope_bytes(server, document)?;
         let storage_scope = StorageScope::new(server, &document.server_id).map_err(invalid)?;
@@ -365,8 +365,8 @@ impl ServerStore {
         // the ordering this invariant needs is the one the borrow checker already enforces.
         let path = self.epoch_recovery_path(&scope);
         let framed = frame(&sealed);
-        self.epoch_mutation_guard()
-            .with(|| writer(&path, &framed))?;
+        let mutation = self.epoch_mutation_guard();
+        writer(&mutation, &path, &framed)?;
         reservation.commit();
         Ok(EpochRecoveryUpdate { transition, state })
     }
@@ -389,7 +389,7 @@ impl ServerStore {
         clock: &dyn Clock,
         rng: &mut impl CryptoRngCore,
         budget: &mut EpochStorageBudget,
-        writer: impl FnOnce(&Path, &[u8]) -> Result<(), AppError>,
+        writer: impl FnOnce(&EpochMutation<'_>, &Path, &[u8]) -> Result<(), AppError>,
     ) -> Result<Option<RecoveryTransition>, AppError> {
         let Some(warning) = pending else {
             return Ok(None);
@@ -440,7 +440,14 @@ impl ServerStore {
         clock: &dyn Clock,
         rng: &mut impl CryptoRngCore,
     ) -> Result<EpochRecoveryUpdate, AppError> {
-        self.update_epoch_recovery_with_writer(server, document, action, clock, rng, atomic_write)
+        self.update_epoch_recovery_with_writer(
+            server,
+            document,
+            action,
+            clock,
+            rng,
+            |m: &EpochMutation<'_>, p: &Path, b: &[u8]| m.write(p, b),
+        )
     }
 
     // The extra argument is the deterministic disk-failure seam; the production API has no
@@ -453,7 +460,7 @@ impl ServerStore {
         action: EpochRecoveryAction,
         clock: &dyn Clock,
         rng: &mut impl CryptoRngCore,
-        writer: impl FnOnce(&Path, &[u8]) -> Result<(), AppError>,
+        writer: impl FnOnce(&EpochMutation<'_>, &Path, &[u8]) -> Result<(), AppError>,
     ) -> Result<EpochRecoveryUpdate, AppError> {
         let scope = scope_bytes(server, document)?;
         let mut state = self.read_epoch_recovery(&scope, document)?;
@@ -466,8 +473,8 @@ impl ServerStore {
         let sealed = seal(&self.keys.db_key()?, &plain, rng)?;
         let path = self.epoch_recovery_path(&scope);
         let framed = frame(&sealed);
-        self.epoch_mutation_guard()
-            .with(|| writer(&path, &framed))?;
+        let mutation = self.epoch_mutation_guard();
+        writer(&mutation, &path, &framed)?;
         Ok(EpochRecoveryUpdate { transition, state })
     }
 
@@ -742,7 +749,9 @@ mod tests {
         let mut store = open(root.path());
         stage(&mut store, 1, 10);
         stage(&mut store, 2, 20);
-        let fail = |_: &Path, _: &[u8]| Err(AppError::Io("injected full disk".into()));
+        let fail = |_m: &EpochMutation<'_>, _: &Path, _: &[u8]| {
+            Err(AppError::Io("injected full disk".into()))
+        };
         assert!(store
             .update_epoch_recovery_with_writer(
                 SERVER,
@@ -806,7 +815,7 @@ mod tests {
                 1 => acknowledgement(warning),
                 _ => EpochRecoveryAction::AdvanceTime,
             };
-            let writer = |path: &Path, bytes: &[u8]| {
+            let writer = |_m: &EpochMutation<'_>, path: &Path, bytes: &[u8]| {
                 atomic_write_with_hook_and_sync(
                     path,
                     bytes,
@@ -839,7 +848,7 @@ mod tests {
                     action(),
                     &ManualClock::new(30 + RECOVERY_GRACE_MS),
                     &mut ChaCha20Rng::seed_from_u64(1),
-                    |path, bytes| {
+                    |_, path, bytes| {
                         writes += 1;
                         atomic_write(path, bytes)
                     },
@@ -1207,7 +1216,7 @@ mod tests {
             &ManualClock::new(10),
             &mut ChaCha20Rng::seed_from_u64(10),
             &mut budget,
-            |_, _| {
+            |_, _, _| {
                 writes += 1;
                 Ok(())
             },
@@ -1235,7 +1244,7 @@ mod tests {
                 &ManualClock::new(10),
                 &mut ChaCha20Rng::seed_from_u64(10),
                 &mut budget,
-                |path, bytes| {
+                |_, path, bytes| {
                     if after_rename {
                         atomic_write_with_hook_and_sync(
                             path,
@@ -1259,7 +1268,7 @@ mod tests {
                     &ManualClock::new(10),
                     &mut ChaCha20Rng::seed_from_u64(10),
                     &mut budget,
-                    |_, _| {
+                    |_, _, _| {
                         retried_writes += 1;
                         Ok(())
                     }
@@ -1318,7 +1327,7 @@ mod tests {
                 &ManualClock::new(40),
                 &mut ChaCha20Rng::seed_from_u64(10),
                 &mut budget,
-                |_, _| {
+                |_, _, _| {
                     writes += 1;
                     Ok(())
                 }

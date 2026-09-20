@@ -940,6 +940,16 @@ fn sync_directory(_path: &Path) -> std::io::Result<()> {
 /// Each invocation uses a destination-specific, securely-created sibling. Concurrent writers and
 /// the `.bin`/`.net`/`.cache` records for one server therefore cannot overwrite each other's staged
 /// bytes, and a pre-planted symlink is rejected rather than followed.
+/// It deliberately does **not** take the capability. The same primitive writes `ui_state`,
+/// `server_net`, `address_cache`, the pairing ledger and the server record, none of which
+/// belong to an inventoried family, and forcing rotation for those would invalidate a captured
+/// inventory every time the UI saved a preference. Inventoried writes reach it only through
+/// `EpochMutation::write`.
+///
+/// **This is the remaining gap against the design's stated property.** Section 9.2 asks that
+/// the bare helpers stop being reachable *for five-family paths*, and one guard parameter
+/// cannot express that when the primitive serves both path classes. Closing it needs the path
+/// class in the type: separate primitives, or a newtype for an inventoried path.
 fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), AppError> {
     atomic_write_with_hook(path, bytes, |_, _| {})
 }
@@ -956,10 +966,12 @@ fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), AppError> {
 /// Rotation is **not** undone when this drops, and is not conditional on the operation
 /// succeeding. A failed or panicking write still leaves the token moved, because an operation
 /// that may have touched a file must invalidate a scan whether or not it finished.
-pub(in crate::store) struct EpochMutation<'a> {
-    // Borrows the store for the life of the guard, so a second guard cannot be taken while one is
-    // outstanding and the rotation cannot be interleaved with a read of the token it invalidated.
-    _store: std::marker::PhantomData<&'a ()>,
+pub(crate) struct EpochMutation<'a> {
+    // Borrows the store exclusively for the life of the guard. That is what makes a batch under
+    // one guard sound: no scan of this store can be captured between the first and last write,
+    // because starting one would need the store back. The phantom names the real relationship
+    // rather than an anonymous lifetime, so the exclusion cannot be weakened by accident later.
+    _store: std::marker::PhantomData<&'a mut ServerStore>,
 }
 
 impl EpochMutation<'_> {
@@ -988,21 +1000,26 @@ impl EpochMutation<'_> {
         }
     }
 
-    /// Run I/O that the two narrow primitives above do not cover, under the same rotation.
+    /// Flush an inventoried record, per family.
     ///
-    /// Two things need this. The per-family flushes (`sync_intent`, `sync_studio`) carry their own
-    /// checks and error messages and must not be collapsed into one generic primitive; and the
-    /// injected-failure writer seams reach disk through caller-supplied closures, which would
-    /// otherwise be exactly the bypass the guard exists to close.
+    /// Separate methods rather than one generic `sync`, because `sync_intent`, `sync_registry` and
+    /// `sync_studio` carry different checks and different error messages. Collapsing them would
+    /// smuggle a behavioural change inside a refactor; keeping them separate costs three methods
+    /// and preserves every existing refusal exactly.
     ///
-    /// This is a capability rather than a narrow operation, so it is weaker than `write` and
-    /// `remove`. What it still guarantees is the property that matters: the token has already
-    /// rotated before any of it runs.
-    pub(in crate::store) fn with<T>(
-        &self,
-        io: impl FnOnce() -> Result<T, AppError>,
-    ) -> Result<T, AppError> {
-        io()
+    /// A sync repair is a mutation for I-4's purposes even though it changes no bytes: the
+    /// existing code already treats an unchanged-file flush attempt as invalidating a captured
+    /// inventory, and over-rotation is the safe direction.
+    pub(in crate::store) fn sync_intent(&self, path: &Path, bytes: u64) -> Result<(), AppError> {
+        epoch_intents::sync_intent(self, path, bytes)
+    }
+
+    pub(in crate::store) fn sync_registry(&self, path: &Path, bytes: u64) -> Result<(), AppError> {
+        epoch_registry::sync_registry(self, path, bytes)
+    }
+
+    pub(in crate::store) fn sync_studio(&self, path: &Path, bytes: u64) -> Result<(), AppError> {
+        epoch_studio::sync_studio(self, path, bytes)
     }
 }
 

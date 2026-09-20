@@ -56,8 +56,8 @@ fn eligible(f: &Fixture, store: &mut ServerStore) {
             WritePurpose::Ordinary,
             &mut rng(),
             &mut b.storage,
-            atomic_write,
-            sync_studio,
+            |m: &EpochMutation<'_>, p: &Path, b: &[u8]| m.write(p, b),
+            |m: &EpochMutation<'_>, p: &Path, b: u64| m.sync_studio(p, b),
         )
         .unwrap();
     store.retain_studio_source(&f.group, &f.device, state);
@@ -83,8 +83,8 @@ fn warm(f: &Fixture, store: &mut ServerStore) {
             WritePurpose::Settlement,
             &mut rng(),
             &mut b.storage,
-            atomic_write,
-            sync_studio,
+            |m: &EpochMutation<'_>, p: &Path, b: &[u8]| m.write(p, b),
+            |m: &EpochMutation<'_>, p: &Path, b: u64| m.sync_studio(p, b),
             Some(version),
         )
         .unwrap();
@@ -112,10 +112,10 @@ fn rotate_at(
         )
         .unwrap()
 }
-fn sync(step: RotationSync, p: &Path, bytes: u64) -> Result<(), AppError> {
+fn sync(m: &EpochMutation<'_>, step: RotationSync, p: &Path, bytes: u64) -> Result<(), AppError> {
     match step {
-        RotationSync::Intents => crate::store::epoch_intents::sync_intent(p, bytes),
-        _ => sync_studio(p, bytes),
+        RotationSync::Intents => crate::store::epoch_intents::sync_intent(m, p, bytes),
+        _ => sync_studio(m, p, bytes),
     }
 }
 
@@ -226,8 +226,8 @@ fn studio_rotation_store_every_write_crash_resumes_exact_decision_and_preserves_
                         WritePurpose::Ordinary,
                         &mut rng(),
                         &mut initial.storage,
-                        atomic_write,
-                        sync_studio,
+                        |m: &EpochMutation<'_>, p: &Path, b: &[u8]| m.write(p, b),
+                        |m: &EpochMutation<'_>, p: &Path, b: u64| m.sync_studio(p, b),
                     )
                     .unwrap();
                 store.retain_studio_source(&f.group, &f.device, state);
@@ -245,7 +245,7 @@ fn studio_rotation_store_every_write_crash_resumes_exact_decision_and_preserves_
                         0,
                         &mut rng(),
                         &mut b.storage,
-                        atomic_write,
+                        |m: &EpochMutation<'_>, p: &Path, b: &[u8]| m.write(p, b),
                     )
                     .unwrap();
                 f.edit(&mut store, &mut b, f.title());
@@ -261,7 +261,7 @@ fn studio_rotation_store_every_write_crash_resumes_exact_decision_and_preserves_
                     &ManualClock::new(1000),
                     &mut rng(),
                     &mut b,
-                    &mut |step, p, bytes| {
+                    &mut |_, step, p, bytes| {
                         if step == boundary {
                             hit = true;
                             if after {
@@ -370,8 +370,8 @@ fn studio_rotation_store_source_flush_failure_precedes_any_journal_or_retirement
             &ManualClock::new(1000),
             &mut rng(),
             &mut b,
-            &mut |_, _, _| panic!("no write before source flush"),
-            &mut |step, _, _| {
+            &mut |_, _, _, _| panic!("no write before source flush"),
+            &mut |_, step, _, _| {
                 assert_eq!(step, RotationSync::Source);
                 Err(AppError::Io("flush".into()))
             }
@@ -654,7 +654,7 @@ fn studio_rotation_store_unwind_after_successor_write_poisoned_budget_reopens_sa
             &ManualClock::new(1000),
             &mut rng(),
             &mut b,
-            &mut |step, p, bytes| {
+            &mut |_, step, p, bytes| {
                 atomic_write(p, bytes)?;
                 assert_ne!(step, RotationWrite::Successor, "injected post-write unwind");
                 Ok(())

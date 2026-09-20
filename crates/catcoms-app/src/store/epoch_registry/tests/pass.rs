@@ -447,7 +447,7 @@ fn registry_pass_post_rename_failure_and_unwind_pause_without_skipping_or_early_
                     &mut rng(),
                     &mut budget,
                     &mut intents,
-                    |path, bytes| {
+                    |_, path, bytes| {
                         atomic_write(path, bytes)?;
                         if unwind {
                             panic!("injected post-rename replay-pass unwind");

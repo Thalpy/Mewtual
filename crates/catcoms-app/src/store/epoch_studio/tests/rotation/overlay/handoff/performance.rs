@@ -133,8 +133,8 @@ pub(super) fn fixture(
             &mut rng(),
             &mut b.storage,
             &mut b.intents,
-            atomic_write,
-            sync_intent,
+            |m: &EpochMutation<'_>, p: &Path, b: &[u8]| m.write(p, b),
+            |m: &EpochMutation<'_>, p: &Path, b: u64| m.sync_intent(p, b),
         )
         .unwrap();
     let next = install(f, store, &close);

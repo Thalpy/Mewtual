@@ -106,11 +106,11 @@ fn registry_page_batch_uncertain_rename_and_duplicate_flush_do_not_grant_success
         &page,
         &mut rng(),
         &mut budget,
-        |path, bytes| {
+        |_m, path, bytes| {
             atomic_write(path, bytes)?;
             Err(invalid("lost acknowledgement"))
         },
-        sync_registry,
+        |m: &EpochMutation<'_>, p: &Path, b: u64| m.sync_registry(p, b),
     );
     assert!(result.is_err());
     assert_eq!(
@@ -144,8 +144,8 @@ fn registry_page_batch_uncertain_rename_and_duplicate_flush_do_not_grant_success
             &page,
             &mut rng(),
             &mut budget,
-            |_, _| panic!("duplicate must not replace"),
-            |_, _| Err(invalid("flush failed"))
+            |_, _, _| panic!("duplicate must not replace"),
+            |_, _, _| Err(invalid("flush failed"))
         )
         .is_err());
     budget = super::budget(&mut store, &f);
@@ -194,8 +194,8 @@ fn registry_page_batch_empty_completion_requires_open_scope_inventory_and_flush(
             &[],
             &mut rng(),
             &mut budget,
-            |_, _| panic!("empty must not replace"),
-            |_, _| Err(invalid("empty flush failed"))
+            |_, _, _| panic!("empty must not replace"),
+            |_, _, _| Err(invalid("empty flush failed"))
         )
         .is_err());
     budget = super::budget(&mut store, &f);

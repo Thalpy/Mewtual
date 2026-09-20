@@ -181,7 +181,7 @@ fn draft_archive_references_survive_a_complete_scan_as_the_sole_holder() {
             &mut rng(),
             &mut b.storage,
             &mut b.intents,
-            atomic_write,
+            |m: &EpochMutation<'_>, p: &Path, b: &[u8]| m.write(p, b),
             crate::store::epoch_intents::sync_intent,
         )
         .expect("the production writer must persist a valid archive");
@@ -390,7 +390,7 @@ fn preserve(
         &mut rng(),
         &mut b.storage,
         &mut b.intents,
-        atomic_write,
+        |m: &EpochMutation<'_>, p: &Path, b: &[u8]| m.write(p, b),
         crate::store::epoch_intents::sync_intent,
     )?;
     Ok(archive)
@@ -457,7 +457,7 @@ fn the_archive_writer_is_accounted_idempotent_and_refuses_to_overwrite_evidence(
         &mut rng(),
         &mut b.storage,
         &mut b.intents,
-        atomic_write,
+        |m: &EpochMutation<'_>, p: &Path, b: &[u8]| m.write(p, b),
         crate::store::epoch_intents::sync_intent,
     );
     assert!(
@@ -522,7 +522,7 @@ fn the_archive_writer_refuses_at_the_sub_cap_not_the_class_ceiling() {
         &mut rng(),
         &mut b.storage,
         &mut b.intents,
-        atomic_write,
+        |m: &EpochMutation<'_>, p: &Path, b: &[u8]| m.write(p, b),
         crate::store::epoch_intents::sync_intent,
     );
     assert!(
@@ -573,7 +573,7 @@ fn the_archive_writer_refuses_a_payload_naming_another_document() {
         &mut rng(),
         &mut budgets.storage,
         &mut budgets.intents,
-        atomic_write,
+        |m: &EpochMutation<'_>, p: &Path, b: &[u8]| m.write(p, b),
         crate::store::epoch_intents::sync_intent,
     );
     assert!(

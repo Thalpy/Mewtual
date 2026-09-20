@@ -125,7 +125,7 @@ fn registry_local_each_write_failure_retains_only_safe_state_and_retry_recovers(
             let mut store = open(root.path());
             let (mut budget, mut intents) = budgets(&mut store, &f);
             let required_intent = intent_path(&store, &f);
-            let fail = |path: &Path, bytes: &[u8]| {
+            let fail = |_m: &EpochMutation<'_>, path: &Path, bytes: &[u8]| {
                 if mode == 1 {
                     atomic_write(path, bytes)?;
                 }
@@ -145,23 +145,23 @@ fn registry_local_each_write_failure_retains_only_safe_state_and_retry_recovers(
                     &mut rng(),
                     &mut budget,
                     &mut intents,
-                    |path, bytes| {
+                    |m, path, bytes| {
                         if stage == 0 {
-                            fail(path, bytes)
+                            fail(m, path, bytes)
                         } else {
                             atomic_write(path, bytes)
                         }
                     },
-                    sync_intent,
-                    |path, bytes| {
+                    |m: &EpochMutation<'_>, p: &Path, b: u64| m.sync_intent(p, b),
+                    |m, path, bytes| {
                         assert!(required_intent.exists(), "intent first");
                         if stage == 1 {
-                            fail(path, bytes)
+                            fail(m, path, bytes)
                         } else {
                             atomic_write(path, bytes)
                         }
                     },
-                    sync_registry,
+                    |m: &EpochMutation<'_>, p: &Path, b: u64| m.sync_registry(p, b),
                 )
             }));
             assert!(result.is_err() || result.unwrap().is_err());
@@ -212,20 +212,20 @@ fn registry_local_duplicate_flush_failure_cannot_release_ciphertext() {
                     &mut rng(),
                     &mut budget,
                     &mut intents,
-                    |_, _| panic!("duplicate intent must not rewrite"),
-                    |path, n| {
+                    |_, _, _| panic!("duplicate intent must not rewrite"),
+                    |m, path, n| {
                         if stage == 0 {
                             fail()
                         } else {
-                            sync_intent(path, n)
+                            sync_intent(m, path, n)
                         }
                     },
-                    |_, _| panic!("duplicate registry must not rewrite"),
-                    |path, n| {
+                    |_, _, _| panic!("duplicate registry must not rewrite"),
+                    |m, path, n| {
                         if stage == 1 {
                             fail()
                         } else {
-                            sync_registry(path, n)
+                            sync_registry(m, path, n)
                         }
                     },
                 )

@@ -1336,6 +1336,86 @@ reviewer found this one by reading rather than by running.
 **Item 6's wording was also wrong and is corrected below.** "Bounded rather than unbounded" was an
 overstatement: rail filtering bounds the *scheduling* impact, not the *retained state*.
 
+> ## C-3 is hard-blocked until I-4 enforcement is complete
+>
+> The reviewer's ruling at `0a9c586`, recorded verbatim in substance because it is the condition
+> the rest of this work hangs off:
+>
+> **I-4 may land incrementally only while `inventory_generation` has no production consumer.
+> Partial conversion grants no I-4 acceptance.** C-3, or any other code that releases inventory
+> custody and relies on the generation token for consistency, is hard-blocked until:
+>
+> - all replacement writes are capability-only;
+> - **all unchanged-file sync repairs are capability-only**;
+> - all unlink, rename and temporary-sibling paths are capability-only;
+> - bare five-family mutation primitives are no longer callable from participating production
+>   paths;
+> - Agent 2's DraftArchive writer and release satisfy the same discipline;
+> - the audited **leaf** list is reconciled against source;
+> - reads, budget mint and budget entry are proved not to rotate;
+> - a final cursor-level invalidation suite passes.
+>
+> And: **do not propagate `EpochMutation::with()` into further production writers.** Replace it
+> with synchronous narrow operations before the remaining conversion.
+>
+> The reason the gate sits at *activation* rather than at source landing is worth keeping: with no
+> production consumer, an under-rotating writer cannot make anything accept stale state, because
+> nothing reads the token. The moment a cursor captures it across a custody release, one
+> unconverted mutation makes the whole consistency argument false.
+
+## I-4, slice 3: the capability, and the eight retry branches
+
+**I4-001 closed, further than asked.** There is now **no `with()` at all**. Once every seam was
+typed to take `&EpochMutation<'_>`, the escape hatch had no callers: injected-failure closures
+receive the capability and do their own I/O. So the deferred-I/O hole — rotate, spawn, drop the
+guard, let a cursor capture the new token, then mutate under it — is not merely unreachable, it is
+inexpressible. The three leaf sync primitives take the capability themselves, so `sync_intent`,
+`sync_registry` and `sync_studio` cannot be called without one.
+
+**I4-002 was eight branches, not four.** Beyond the reviewer's intents, intent retirement,
+registry and Studio source: `epoch_registry/head.rs`, `epoch_registry/receive.rs`,
+`epoch_registry/page_source.rs`, `epoch_studio/discovery.rs`, and two in `epoch_studio/handoff.rs`
+(the completed-handoff retry and the publish check). Agent 2's archive retry too, which the typed
+seam forced me to touch; their file carries a comment saying so and naming what remains theirs.
+
+### The gap that needs a ruling rather than a guess
+
+§9.2 says the bare helpers "stop being reachable **for five-family paths**". That is not
+expressible with a capability parameter on `atomic_write`, because the same primitive writes
+`ui_state`, `server_net`, `address_cache`, the pairing ledger and the server record. I tried it
+universally and saw the consequence immediately: saving a UI preference would rotate the token and
+invalidate a captured inventory. So `atomic_write` stays bare and is reached for inventoried
+records only through `EpochMutation::write`. **Closing this properly needs the path class in the
+type** — separate primitives, or a newtype for an inventoried path. It is documented at the
+primitive and is the one outstanding item on the C-3 gate list that I will not pick unilaterally.
+
+### The eighth masked assertion, caught before it shipped
+
+My first I4-002 test asserted "an exact retry flushed the record without rotating" — and passed
+for the wrong reason. `epoch_recovery.rs` has no `reserve_sync` **at all**, so that writer has no
+exact-retry branch; repeating the transition simply performed a second *replacement*, which
+rotates anyway. The reviewer had already said as much about the recovery leaves, and I wrote the
+test regardless.
+
+The assertion now lives on a call that is *guaranteed* to take the sync branch, because its writer
+panics if anything rewrites. **M57**, swapping only that branch's guard for an unrotating stand-in,
+fails it at the named assertion.
+
+That is eight assertions in this work that proved nothing until a mutation ran against them. Three
+were caught by the reviewer reading rather than running.
+
+### Evidence
+
+673 passed, 1 failed, 11 ignored; clippy `--all-targets -D warnings` clean at zero.
+
+The failure is the known scheduling install assertion. **A correction to my own earlier note:** I
+described the clean 674/0 run after the registry-wake fix as what the investigation predicted. That
+was over-read. The wake fix now has two samples — one clean, one failing with the same "Registry
+must install through the reserved slot" — which is the unchanged ~20% rate. **The wake fix has not
+demonstrably fixed the scheduling failure.** It remains a real production bug worth having fixed on
+its own merits, and it is not the cure. The mode-B margin is also tighter than stated: owner returns
+at 32250 against a 40 s bound, so the install had **7.75 s**.
+
 ## I-4, slice 1: the guard and its invariant
 
 `inventory_generation` and `EpochMutation` exist. The guard is obtainable only from

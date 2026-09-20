@@ -381,7 +381,7 @@ mod tests {
             action(1),
             &ManualClock::new(1),
             &mut ChaCha20Rng::seed_from_u64(1),
-            |_, bytes| {
+            |_, _, bytes| {
                 fs::write(&orphan, bytes).unwrap();
                 Err(AppError::Io(
                     "simulated interruption before first rename".into(),
@@ -448,7 +448,7 @@ mod tests {
             &ManualClock::new(2),
             &mut ChaCha20Rng::seed_from_u64(2),
             &mut budget,
-            |_, bytes| {
+            |_, _, bytes| {
                 fs::write(&orphan, bytes).unwrap();
                 Err(AppError::Io("interrupted replacement".into()))
             },

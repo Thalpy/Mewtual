@@ -246,8 +246,8 @@ pub(super) fn save_inventory_fixture_ops(store: &mut ServerStore, count: usize) 
                 *unit = source.f.source;
                 Ok(())
             },
-            atomic_write,
-            sync_registry,
+            |m: &EpochMutation<'_>, p: &Path, b: &[u8]| m.write(p, b),
+            |m: &EpochMutation<'_>, p: &Path, b: u64| m.sync_registry(p, b),
         )
         .unwrap();
     assert!(fs::metadata(&path).unwrap().len() > 256 * 1024);
@@ -300,8 +300,8 @@ fn measure(case: &str, build: impl FnOnce(&mut Source), clock: &dyn Clock, max_p
                     *unit = source.f.source;
                     Ok(())
                 },
-                atomic_write,
-                sync_registry,
+                |m: &EpochMutation<'_>, p: &Path, b: &[u8]| m.write(p, b),
+                |m: &EpochMutation<'_>, p: &Path, b: u64| m.sync_registry(p, b),
             )
             .unwrap()
     });

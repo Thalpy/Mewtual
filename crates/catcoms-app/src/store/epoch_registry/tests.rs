@@ -237,13 +237,13 @@ fn registry_store_failed_write_and_post_rename_failure_require_reconciliation_an
             &mut rng(),
             &mut budget,
             |unit, _| unit.ingest(&op, &f.group, &f.device).map_err(invalid),
-            |path, bytes| {
+            |_, path, bytes| {
                 if committed {
                     atomic_write(path, bytes)?;
                 }
                 Err(AppError::Io("injected write/durability failure".into()))
             },
-            |_, _| panic!("first write cannot sync-only"),
+            |_, _, _| panic!("first write cannot sync-only"),
         );
         assert!(result.is_err());
         assert!(budget.requires_reconciliation());
@@ -264,13 +264,13 @@ fn registry_store_failed_write_and_post_rename_failure_require_reconciliation_an
                 &mut rng(),
                 &mut budget,
                 |unit, _| unit.ingest(&op, &f.group, &f.device).map_err(invalid),
-                |path, bytes| {
+                |_, path, bytes| {
                     assert!(!committed);
                     atomic_write(path, bytes)
                 },
-                |path, size| {
+                |m, path, size| {
                     synced = true;
-                    sync_registry(path, size)
+                    sync_registry(m, path, size)
                 },
             )
             .unwrap();
@@ -307,8 +307,8 @@ fn registry_store_failed_duplicate_sync_or_writer_panic_cannot_acknowledge() {
             &mut rng(),
             &mut budget,
             |unit, _| unit.ingest(&op, &f.group, &f.device).map_err(invalid),
-            |_, _| panic!("duplicate must not replace"),
-            |_, _| Err(AppError::Io("injected sync failure".into()))
+            |_, _, _| panic!("duplicate must not replace"),
+            |_, _, _| Err(AppError::Io("injected sync failure".into()))
         )
         .is_err());
     assert!(budget.requires_reconciliation());
@@ -326,8 +326,8 @@ fn registry_store_failed_duplicate_sync_or_writer_panic_cannot_acknowledge() {
             &mut rng(),
             &mut budget,
             |unit, _| unit.ingest(&next, &f.group, &f.device).map_err(invalid),
-            |_, _| panic!("injected writer panic"),
-            sync_registry,
+            |_m, _, _| panic!("injected writer panic"),
+            |m: &EpochMutation<'_>, p: &Path, b: u64| m.sync_registry(p, b),
         )
     }));
     assert!(caught.is_err());
@@ -735,11 +735,11 @@ fn registry_store_receipt_retry_after_failed_flush_and_removed_owner_inventory()
         &mut rng(),
         &mut budget,
         |unit, _| unit.seal(receipt.clone(), &f.group, 0).map_err(invalid),
-        |path, bytes| {
+        |_m, path, bytes| {
             atomic_write(path, bytes)?;
             Err(AppError::Io("post-rename failure".into()))
         },
-        sync_registry,
+        |m: &EpochMutation<'_>, p: &Path, b: u64| m.sync_registry(p, b),
     );
     assert!(result.is_err());
     assert!(budget.requires_reconciliation());

@@ -169,8 +169,8 @@ impl ServerStore {
             rng,
             budget,
             intents,
-            atomic_write,
-            sync_intent,
+            |m: &EpochMutation<'_>, p: &Path, b: &[u8]| m.write(p, b),
+            |m: &EpochMutation<'_>, p: &Path, b: u64| m.sync_intent(p, b),
         )
     }
     /// Store-internal ordering seam, not an arbitrary-id removal API. The caller must keep the
@@ -184,8 +184,8 @@ impl ServerStore {
         rng: &mut impl CryptoRngCore,
         budget: &mut EpochStorageBudget,
         intents: &mut EpochIntentBudget,
-        writer: impl FnOnce(&Path, &[u8]) -> Result<(), AppError>,
-        sync: impl FnOnce(&Path, u64) -> Result<(), AppError>,
+        writer: impl FnOnce(&EpochMutation<'_>, &Path, &[u8]) -> Result<(), AppError>,
+        sync: impl FnOnce(&EpochMutation<'_>, &Path, u64) -> Result<(), AppError>,
     ) -> Result<(), AppError> {
         self.retire_included_with_io(
             server,
@@ -210,8 +210,8 @@ impl ServerStore {
         rng: &mut impl CryptoRngCore,
         budget: &mut EpochStorageBudget,
         intents: &mut EpochIntentBudget,
-        writer: impl FnOnce(&Path, &[u8]) -> Result<(), AppError>,
-        sync: impl FnOnce(&Path, u64) -> Result<(), AppError>,
+        writer: impl FnOnce(&EpochMutation<'_>, &Path, &[u8]) -> Result<(), AppError>,
+        sync: impl FnOnce(&EpochMutation<'_>, &Path, u64) -> Result<(), AppError>,
     ) -> Result<(), AppError> {
         self.retire_included_with_io(
             server,
@@ -237,8 +237,8 @@ impl ServerStore {
         rng: &mut impl CryptoRngCore,
         budget: &mut EpochStorageBudget,
         intents: &mut EpochIntentBudget,
-        writer: impl FnOnce(&Path, &[u8]) -> Result<(), AppError>,
-        sync: impl FnOnce(&Path, u64) -> Result<(), AppError>,
+        writer: impl FnOnce(&EpochMutation<'_>, &Path, &[u8]) -> Result<(), AppError>,
+        sync: impl FnOnce(&EpochMutation<'_>, &Path, u64) -> Result<(), AppError>,
     ) -> Result<(), AppError> {
         self.retire_included_with_io(
             server, document, recovered, true, rng, budget, intents, writer, sync,
@@ -255,8 +255,8 @@ impl ServerStore {
         rng: &mut impl CryptoRngCore,
         budget: &mut EpochStorageBudget,
         intents: &mut EpochIntentBudget,
-        writer: impl FnOnce(&Path, &[u8]) -> Result<(), AppError>,
-        sync: impl FnOnce(&Path, u64) -> Result<(), AppError>,
+        writer: impl FnOnce(&EpochMutation<'_>, &Path, &[u8]) -> Result<(), AppError>,
+        sync: impl FnOnce(&EpochMutation<'_>, &Path, u64) -> Result<(), AppError>,
     ) -> Result<(), AppError> {
         let scope = scope_bytes(server, document)?;
         let storage_scope = StorageScope::new(server, &document.server_id).map_err(invalid)?;
@@ -313,7 +313,11 @@ impl ServerStore {
                     .map_err(invalid)?;
                 intents.ready = false;
                 self.intent_generation = Arc::new(());
-                sync(&self.epoch_intent_path(&scope), old.expect("observed file"))?;
+                // I-4: the zero-removal exact retry is a mutation for inventory purposes.
+                let path = self.epoch_intent_path(&scope);
+                let bytes = old.expect("observed file");
+                let mutation = self.epoch_mutation_guard();
+                sync(&mutation, &path, bytes)?;
                 reservation.commit();
                 intents.generation = self.intent_generation.clone();
                 intents.ready = true;
@@ -350,8 +354,8 @@ impl ServerStore {
         // I-4: path first, then rotate, then touch disk.
         let path = self.epoch_intent_path(&scope);
         let framed = frame(&sealed);
-        self.epoch_mutation_guard()
-            .with(|| writer(&path, &framed))?;
+        let mutation = self.epoch_mutation_guard();
+        writer(&mutation, &path, &framed)?;
         reservation.commit();
         intents.records.insert(id, next);
         intents.bytes = final_bytes;

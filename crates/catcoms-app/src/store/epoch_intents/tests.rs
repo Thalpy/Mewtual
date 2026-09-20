@@ -92,7 +92,7 @@ fn staging_path(store: &ServerStore, doc: &LogicalDocument, sequence: u64) -> Pa
 }
 // Simulate a process death that leaves its securely created staging sibling behind. Returning a
 // normal error would let the production RAII guard unlink it, unlike a killed process.
-fn leave_staging(path: &Path, bytes: &[u8]) -> Result<(), AppError> {
+fn leave_staging(_m: &EpochMutation<'_>, path: &Path, bytes: &[u8]) -> Result<(), AppError> {
     let (mut file, mut staging) = create_staging_file(path)?;
     file.write_all(bytes).unwrap();
     file.sync_all().unwrap();
@@ -306,7 +306,7 @@ fn interrupted_first_save_is_not_an_accepted_edit_and_cleanup_does_not_promote_i
         &mut limits.0,
         &mut limits.1,
         leave_staging,
-        sync_intent,
+        |m: &EpochMutation<'_>, p: &Path, b: u64| m.sync_intent(p, b),
     );
     assert!(result.is_err());
     assert!(limits.0.requires_reconciliation());
@@ -448,7 +448,7 @@ fn committed_first_save_retries_at_both_caps_without_another_copy() {
             &mut rng(),
             &mut limits.0,
             &mut limits.1,
-            |path, bytes| atomic_write_with_hook_and_sync(
+            |_, path, bytes| atomic_write_with_hook_and_sync(
                 path,
                 bytes,
                 |_, _| {},
@@ -473,6 +473,12 @@ fn committed_first_save_retries_at_both_caps_without_another_copy() {
         budget.usage().content,
         super::super::epoch_budget::CONTENT_ALLOWANCE_BYTES
     );
+    // I4-002. This call is guaranteed to take the exact-retry *sync* branch, because its writer
+    // panics if anything rewrites. So it is the right place to assert that a flush which changes
+    // no bytes still rotates the inventory generation: the replacement branches were converted
+    // first and every retry branch was missed, which a test driving a second replacement would
+    // not have noticed.
+    let before_retry = store.inventory_generation();
     let state = store
         .prepare_epoch_intent_with_io(
             SERVER,
@@ -483,10 +489,14 @@ fn committed_first_save_retries_at_both_caps_without_another_copy() {
             &mut rng(),
             &mut budget,
             &mut intents,
-            |_, _| panic!("an exact retry must not rewrite ciphertext"),
-            sync_intent,
+            |_m, _, _| panic!("an exact retry must not rewrite ciphertext"),
+            |m: &EpochMutation<'_>, p: &Path, b: u64| m.sync_intent(p, b),
         )
         .unwrap();
+    assert!(
+        !std::sync::Arc::ptr_eq(&before_retry, &store.inventory_generation()),
+        "an exact retry flushed the record without rotating, so an inventory captured before it          would survive a durability-changing operation it never saw"
+    );
     assert_eq!(state.pending().len(), 1);
     assert_eq!(intents.bytes(), MAX_VAULT_INTENT_BYTES);
     assert!(!budget.requires_reconciliation());
@@ -520,8 +530,8 @@ fn writer_and_retry_flush_panics_or_errors_poison_both_budgets() {
             &mut rng(),
             &mut limits.0,
             &mut limits.1,
-            |_, _| panic!("writer panic"),
-            sync_intent,
+            |_m, _, _| panic!("writer panic"),
+            |m: &EpochMutation<'_>, p: &Path, b: u64| m.sync_intent(p, b),
         )
     }));
     assert!(panic.is_err());
@@ -539,8 +549,8 @@ fn writer_and_retry_flush_panics_or_errors_poison_both_budgets() {
             &mut rng(),
             &mut limits.0,
             &mut limits.1,
-            |_, _| panic!("no rewrite"),
-            |_, _| Err(AppError::Io("flush failed".into()))
+            |_, _, _| panic!("no rewrite"),
+            |_, _, _| Err(AppError::Io("flush failed".into()))
         )
         .is_err());
     assert!(limits.0.requires_reconciliation());

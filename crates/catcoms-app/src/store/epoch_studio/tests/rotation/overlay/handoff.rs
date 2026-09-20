@@ -26,10 +26,15 @@ fn transfer(f: &Fixture, store: &mut ServerStore, basis: [u8; 32]) -> StudioHand
         )
         .unwrap()
 }
-fn flush(step: HandoffSync, path: &Path, bytes: u64) -> Result<(), AppError> {
+fn flush(
+    m: &EpochMutation<'_>,
+    step: HandoffSync,
+    path: &Path,
+    bytes: u64,
+) -> Result<(), AppError> {
     match step {
-        HandoffSync::Source => sync_studio(path, bytes),
-        HandoffSync::Intents => sync_intent(path, bytes),
+        HandoffSync::Source => sync_studio(m, path, bytes),
+        HandoffSync::Intents => sync_intent(m, path, bytes),
     }
 }
 fn prepare(f: &Fixture, store: &mut ServerStore) -> (CloseRecord, [u8; 32], StudioProjection) {
@@ -52,7 +57,7 @@ fn prepare(f: &Fixture, store: &mut ServerStore) -> (CloseRecord, [u8; 32], Stud
             0,
             &mut rng(),
             &mut b.storage,
-            atomic_write,
+            |m: &EpochMutation<'_>, p: &Path, b: &[u8]| m.write(p, b),
         )
         .unwrap();
     warm(f, store);
@@ -129,7 +134,7 @@ fn studio_overlay_handoff_signing_slice_reports_yield_bound_and_completion_apart
             Some(0),
             &mut rng(),
             &mut b,
-            &mut |_, p, bytes| atomic_write(p, bytes),
+            &mut |m: &EpochMutation<'_>, _, p: &Path, bytes: &[u8]| m.write(p, bytes),
             &mut flush,
         )
         .unwrap()
@@ -246,7 +251,7 @@ fn studio_overlay_handoff_assembly_refuses_a_partly_signed_batch() {
             Some(0),
             &mut rng(),
             &mut b,
-            &mut |_, p, bytes| atomic_write(p, bytes),
+            &mut |m: &EpochMutation<'_>, _, p: &Path, bytes: &[u8]| m.write(p, bytes),
             &mut flush,
         )
         .unwrap()
@@ -298,7 +303,7 @@ fn studio_overlay_handoff_plan_is_refused_when_its_records_changed() {
             Some(0),
             &mut rng(),
             &mut b,
-            &mut |_, p, bytes| atomic_write(p, bytes),
+            &mut |m: &EpochMutation<'_>, _, p: &Path, bytes: &[u8]| m.write(p, bytes),
             &mut flush,
         )
         .unwrap()
@@ -340,7 +345,7 @@ fn studio_overlay_handoff_plan_is_refused_when_its_records_changed() {
         Some(0),
         &mut rng(),
         &mut b,
-        &mut |_, p, bytes| atomic_write(p, bytes),
+        &mut |m: &EpochMutation<'_>, _, p: &Path, bytes: &[u8]| m.write(p, bytes),
         &mut flush,
     );
     match refused {
@@ -389,7 +394,7 @@ fn studio_overlay_handoff_signs_the_whole_branch_once_and_keeps_pending_intents(
                 Some(0),
                 &mut rng(),
                 &mut b,
-                &mut |step, p, bytes| {
+                &mut |_m, step, p, bytes| {
                     writes.push(step);
                     atomic_write(p, bytes)
                 },
@@ -493,7 +498,7 @@ fn studio_overlay_handoff_crash_barriers_reopen_without_signed_prefixes_or_dupli
                         Some(0),
                         &mut rng(),
                         &mut b,
-                        &mut |at, p, bytes| {
+                        &mut |_m, at, p, bytes| {
                             if at == step {
                                 hit = true;
                                 if after {
@@ -543,12 +548,12 @@ fn studio_overlay_handoff_crash_barriers_reopen_without_signed_prefixes_or_dupli
                     Some(0),
                     &mut rng(),
                     &mut b,
-                    &mut |_, p, bytes| atomic_write(p, bytes),
-                    &mut |step, p, bytes| {
+                    &mut |m: &EpochMutation<'_>, _, p: &Path, bytes: &[u8]| m.write(p, bytes),
+                    &mut |m, step, p, bytes| {
                         assert_eq!(step, HandoffSync::Source);
                         hit = true;
                         if after {
-                            flush(step, p, bytes)?;
+                            flush(m, step, p, bytes)?;
                         }
                         Err(invalid("injected handoff sync"))
                     },
@@ -615,8 +620,8 @@ fn grow(f: &Fixture, store: &mut ServerStore) {
             WritePurpose::Ordinary,
             &mut rng(),
             &mut b.storage,
-            atomic_write,
-            sync_studio,
+            |m: &EpochMutation<'_>, p: &Path, b: &[u8]| m.write(p, b),
+            |m: &EpochMutation<'_>, p: &Path, b: u64| m.sync_studio(p, b),
         )
         .unwrap();
     store.retain_studio_source(&f.group, &f.device, state);
@@ -664,10 +669,10 @@ fn studio_overlay_handoff_completed_retry_keeps_channel_after_real_receipt_retir
             999,
             &mut rng(),
             &mut b,
-            |_, _| panic!("completed retry rewrote its record"),
-            |p, bytes| {
+            |_, _, _| panic!("completed retry rewrote its record"),
+            |m, p, bytes| {
                 syncs += 1;
-                sync_intent(p, bytes)
+                sync_intent(m, p, bytes)
             },
         )
         .unwrap();
@@ -695,10 +700,10 @@ fn studio_overlay_handoff_completed_retry_keeps_channel_after_real_receipt_retir
         999,
         &mut rng(),
         &mut b,
-        |_, _| panic!("wrong-channel retry wrote"),
-        |p, bytes| {
+        |_, _, _| panic!("wrong-channel retry wrote"),
+        |m, p, bytes| {
             syncs += 1;
-            sync_intent(p, bytes)
+            sync_intent(m, p, bytes)
         },
     );
     assert!(

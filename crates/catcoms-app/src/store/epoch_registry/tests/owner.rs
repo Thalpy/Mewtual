@@ -189,7 +189,7 @@ fn registry_owner_rotation_combined_journal_write_is_atomic_and_uncertain_io_nee
                 0,
                 &mut rng(),
                 &mut s.budget,
-                |path, bytes| {
+                |_, path, bytes| {
                     if after_write {
                         atomic_write(path, bytes)?;
                     }

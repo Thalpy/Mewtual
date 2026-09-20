@@ -38,7 +38,7 @@ fn studio_manual_recovery_disposition_is_recovery_first_crash_safe_and_not_seed_
                         &ManualClock::new(1000),
                         &mut rng(),
                         &mut b,
-                        &mut |recovery, path, bytes| {
+                        &mut |_m, recovery, path, bytes| {
                             if recovery == recovery_boundary {
                                 hit = true;
                                 if after_write {
@@ -48,7 +48,7 @@ fn studio_manual_recovery_disposition_is_recovery_first_crash_safe_and_not_seed_
                             }
                             atomic_write(path, bytes)
                         },
-                        &mut super::super::super::epoch_intents::sync_intent,
+                        &mut |m: &EpochMutation<'_>, p: &Path, b: u64| m.sync_intent(p, b),
                     )
                     .is_err());
                 assert!(hit);
@@ -86,10 +86,10 @@ fn studio_manual_recovery_disposition_is_recovery_first_crash_safe_and_not_seed_
                         &ManualClock::new(1000),
                         &mut rng(),
                         &mut b,
-                        &mut |_, p, b| atomic_write(p, b),
-                        &mut |p, b| {
+                        &mut |m: &EpochMutation<'_>, _, p: &Path, b: &[u8]| m.write(p, b),
+                        &mut |m, p, b| {
                             synced = true;
-                            super::super::super::epoch_intents::sync_intent(p, b)
+                            super::super::super::epoch_intents::sync_intent(m, p, b)
                         },
                     )
                     .unwrap();

@@ -170,7 +170,7 @@ fn studio_adoption_store_all_write_boundaries_preserve_recovery_and_exact_retry(
                         &ManualClock::new(1000),
                         &mut rng(),
                         &mut b,
-                        &mut |phase, path, bytes| {
+                        &mut |_, phase, path, bytes| {
                             if phase == boundary {
                                 hit = true;
                                 if after_write {
@@ -180,7 +180,7 @@ fn studio_adoption_store_all_write_boundaries_preserve_recovery_and_exact_retry(
                             }
                             atomic_write(path, bytes)
                         },
-                        &mut |_, path, bytes| sync_studio(path, bytes)
+                        &mut |m, _, path, bytes| m.sync_studio(path, bytes)
                     )
                     .is_err());
                 assert!(hit);
@@ -253,8 +253,8 @@ fn studio_adoption_store_failed_closing_flush_stops_before_recovery_or_seed() {
             &ManualClock::new(1000),
             &mut rng(),
             &mut b,
-            &mut |_, _, _| panic!("unchanged source must flush before any further write"),
-            &mut |phase, _, _| {
+            &mut |_, _, _, _| panic!("unchanged source must flush before any further write"),
+            &mut |_, phase, _, _| {
                 assert_eq!(phase, AdoptionSync::Source);
                 flushed = true;
                 Err(AppError::Io("flush failed".into()))

@@ -499,8 +499,8 @@ fn reference_scan_keeps_an_overwritten_checkpoint_register_after_reopen() {
             WritePurpose::Ordinary,
             &mut rng(),
             &mut budget.storage,
-            atomic_write,
-            sync_studio,
+            |m: &EpochMutation<'_>, p: &Path, b: &[u8]| m.write(p, b),
+            |m: &EpochMutation<'_>, p: &Path, b: u64| m.sync_studio(p, b),
         )
         .unwrap();
     store.creative_pinned_cids().unwrap();
@@ -600,7 +600,7 @@ fn studio_store_crash_matrix_has_intent_first_and_no_ciphertext_before_both_barr
             let f = Fixture::new(true);
             let mut store = open(root.path());
             let mut b = budget(&mut store, &f);
-            let fail = |path: &Path, bytes: &[u8]| {
+            let fail = |_m: &EpochMutation<'_>, path: &Path, bytes: &[u8]| {
                 if mode == 1 {
                     atomic_write(path, bytes)?;
                 }
@@ -626,23 +626,23 @@ fn studio_store_crash_matrix_has_intent_first_and_no_ciphertext_before_both_barr
                     100,
                     &mut rng(),
                     &mut b,
-                    |p, bytes| {
+                    |m, p, bytes| {
                         if stage == 0 {
-                            fail(p, bytes)
+                            fail(m, p, bytes)
                         } else {
                             atomic_write(p, bytes)
                         }
                     },
-                    super::super::epoch_intents::sync_intent,
-                    |p, bytes| {
+                    |m: &EpochMutation<'_>, p: &Path, b: u64| m.sync_intent(p, b),
+                    |m, p, bytes| {
                         assert!(intent_path.exists());
                         if stage == 1 {
-                            fail(p, bytes)
+                            fail(m, p, bytes)
                         } else {
                             atomic_write(p, bytes)
                         }
                     },
-                    sync_studio,
+                    |m: &EpochMutation<'_>, p: &Path, b: u64| m.sync_studio(p, b),
                 )
             }));
             assert!(result.is_err() || result.unwrap().is_err());
@@ -697,20 +697,20 @@ fn studio_store_duplicate_flush_failure_preserves_bytes_and_requires_rescan() {
             100,
             &mut rng(),
             &mut b,
-            |_, _| panic!("duplicate intent rewrote"),
-            |p, n| {
+            |_, _, _| panic!("duplicate intent rewrote"),
+            |m, p, n| {
                 if stage == 0 {
                     Err(AppError::Io("flush failed".into()))
                 } else {
-                    super::super::epoch_intents::sync_intent(p, n)
+                    super::super::epoch_intents::sync_intent(m, p, n)
                 }
             },
-            |_, _| panic!("duplicate epoch rewrote"),
-            |p, n| {
+            |_, _, _| panic!("duplicate epoch rewrote"),
+            |m, p, n| {
                 if stage == 1 {
                     Err(AppError::Io("flush failed".into()))
                 } else {
-                    sync_studio(p, n)
+                    sync_studio(m, p, n)
                 }
             },
         );
@@ -969,7 +969,7 @@ fn studio_store_fault_persists_before_reporting_and_failed_fault_save_can_retry(
             0,
             &mut rng(),
             &mut b,
-            |_, _| Err(AppError::Io("fault write failed".into()))
+            |_, _, _| Err(AppError::Io("fault write failed".into()))
         )
         .is_err());
     assert!(b.requires_reconciliation());

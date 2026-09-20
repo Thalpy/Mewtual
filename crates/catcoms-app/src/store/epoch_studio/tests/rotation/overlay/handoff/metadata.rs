@@ -110,8 +110,8 @@ fn studio_overlay_handoff_rollover_floor_rejects_forgotten_retry_after_rewind() 
             WritePurpose::Ordinary,
             &mut rng(),
             &mut b.storage,
-            atomic_write,
-            sync_studio,
+            |m: &EpochMutation<'_>, p: &Path, b: &[u8]| m.write(p, b),
+            |m: &EpochMutation<'_>, p: &Path, b: u64| m.sync_studio(p, b),
         )
         .unwrap();
     drop(store);
@@ -184,7 +184,7 @@ fn studio_overlay_handoff_capacity_preflight_and_full_cap_completed_sync_retry()
         Some(0),
         &mut rng(),
         &mut b,
-        &mut |_, p, bytes| {
+        &mut |_, _, p, bytes| {
             wrote = true;
             atomic_write(p, bytes)
         },
@@ -225,8 +225,8 @@ fn studio_overlay_handoff_capacity_preflight_and_full_cap_completed_sync_retry()
         999,
         &mut rng(),
         &mut b,
-        |_, _| panic!("completed retry allocated replacement"),
-        |_, _| Err(invalid("injected completed retry sync")),
+        |_, _, _| panic!("completed retry allocated replacement"),
+        |_, _, _| Err(invalid("injected completed retry sync")),
     );
     assert!(
         matches!(result,Err(AppError::Invalid(ref s)) if s.contains("injected completed retry sync"))
@@ -247,10 +247,10 @@ fn studio_overlay_handoff_capacity_preflight_and_full_cap_completed_sync_retry()
             999,
             &mut rng(),
             &mut b,
-            |_, _| panic!("completed retry allocated replacement"),
-            |p, bytes| {
+            |_, _, _| panic!("completed retry allocated replacement"),
+            |m, p, bytes| {
                 synced = true;
-                sync_intent(p, bytes)
+                sync_intent(m, p, bytes)
             },
         )
         .unwrap();
@@ -327,7 +327,7 @@ fn studio_overlay_handoff_preflights_later_source_peak_before_prepared_write() {
         Some(0),
         &mut rng(),
         &mut b,
-        &mut |_, p, bytes| {
+        &mut |_, _, p, bytes| {
             wrote = true;
             atomic_write(p, bytes)
         },

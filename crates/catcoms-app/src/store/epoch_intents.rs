@@ -514,8 +514,7 @@ impl ServerStore {
             // store: gather, then rotate, then touch disk. That ordering is the invariant, and
             // making the borrow checker enforce it is cheaper than remembering it.
             let path = self.epoch_intent_path(&scope);
-            self.epoch_mutation_guard()
-                .with(|| sync_intent(&path, bytes))?;
+            self.epoch_mutation_guard().sync_intent(&path, bytes)?;
             reservation.commit();
         }
         Ok(())
@@ -549,8 +548,8 @@ impl ServerStore {
             rng,
             budget,
             intents,
-            atomic_write,
-            sync_intent,
+            |m: &EpochMutation<'_>, p: &Path, b: &[u8]| m.write(p, b),
+            |m: &EpochMutation<'_>, p: &Path, b: u64| m.sync_intent(p, b),
         )
     }
 
@@ -565,8 +564,8 @@ impl ServerStore {
         rng: &mut impl CryptoRngCore,
         budget: &mut EpochStorageBudget,
         intents: &mut EpochIntentBudget,
-        writer: impl FnOnce(&Path, &[u8]) -> Result<(), AppError>,
-        sync: impl FnOnce(&Path, u64) -> Result<(), AppError>,
+        writer: impl FnOnce(&EpochMutation<'_>, &Path, &[u8]) -> Result<(), AppError>,
+        sync: impl FnOnce(&EpochMutation<'_>, &Path, u64) -> Result<(), AppError>,
     ) -> Result<EpochIntentState, AppError> {
         let scope = scope_bytes(server, document)?;
         // Bound public Vec fields before encode can copy an arbitrarily large caller input.
@@ -631,8 +630,8 @@ impl ServerStore {
         rng: &mut impl CryptoRngCore,
         budget: &mut EpochStorageBudget,
         intents: &mut EpochIntentBudget,
-        writer: impl FnOnce(&Path, &[u8]) -> Result<(), AppError>,
-        sync: impl FnOnce(&Path, u64) -> Result<(), AppError>,
+        writer: impl FnOnce(&EpochMutation<'_>, &Path, &[u8]) -> Result<(), AppError>,
+        sync: impl FnOnce(&EpochMutation<'_>, &Path, u64) -> Result<(), AppError>,
     ) -> Result<EpochIntentState, AppError> {
         let scope = scope_bytes(server, document)?;
         let storage_scope = StorageScope::new(server, &document.server_id).map_err(invalid)?;
@@ -654,7 +653,10 @@ impl ServerStore {
                 .map_err(invalid)?;
             intents.ready = false;
             self.intent_generation = Arc::new(());
-            sync(&self.epoch_intent_path(&scope), bytes)?;
+            // I-4: a sync repair changes no bytes and still invalidates a captured inventory.
+            let path = self.epoch_intent_path(&scope);
+            let mutation = self.epoch_mutation_guard();
+            sync(&mutation, &path, bytes)?;
             reservation.commit();
             intents.generation = self.intent_generation.clone();
             intents.ready = true;
@@ -688,8 +690,8 @@ impl ServerStore {
         // I-4: path first, then rotate, then touch disk.
         let path = self.epoch_intent_path(&scope);
         let framed = frame(&sealed);
-        self.epoch_mutation_guard()
-            .with(|| writer(&path, &framed))?;
+        let mutation = self.epoch_mutation_guard();
+        writer(&mutation, &path, &framed)?;
         reservation.commit();
         if old.is_none() {
             intents.record_slots += 1;
@@ -829,7 +831,11 @@ fn invalid(error: impl std::fmt::Display) -> AppError {
 // Re-sync only: no new ciphertext, nonce, staging file, or free-space requirement. Mounted-store
 // exclusion protects the authenticated file between read and flush; hostile concurrent local path
 // replacement is outside this guarantee. Keep regular-file checks at the actual open too.
-pub(super) fn sync_intent(path: &Path, expected_bytes: u64) -> Result<(), AppError> {
+pub(super) fn sync_intent(
+    _: &EpochMutation<'_>,
+    path: &Path,
+    expected_bytes: u64,
+) -> Result<(), AppError> {
     let metadata = fs::symlink_metadata(path).map_err(|e| AppError::Io(e.to_string()))?;
     if !regular_file(&metadata) || metadata.len() != expected_bytes {
         return Err(invalid("retry file changed"));

@@ -245,8 +245,8 @@ impl ServerStore {
             rng,
             &mut budget.storage,
             &mut budget.intents,
-            atomic_write,
-            super::epoch_intents::sync_intent,
+            |m: &EpochMutation<'_>, p: &Path, b: &[u8]| m.write(p, b),
+            |m: &EpochMutation<'_>, p: &Path, b: u64| m.sync_intent(p, b),
         )?;
         let observed = state.source.as_ref().map(source::SourceVersion::record);
         let before = state.unit.snapshot().map_err(invalid)?;
@@ -262,8 +262,8 @@ impl ServerStore {
             WritePurpose::Settlement,
             rng,
             &mut budget.storage,
-            atomic_write,
-            sync_studio,
+            |m: &EpochMutation<'_>, p: &Path, b: &[u8]| m.write(p, b),
+            |m: &EpochMutation<'_>, p: &Path, b: u64| m.sync_studio(p, b),
         )
     }
 
@@ -319,10 +319,10 @@ impl ServerStore {
             ts,
             rng,
             budget,
-            atomic_write,
-            super::epoch_intents::sync_intent,
-            atomic_write,
-            sync_studio,
+            |m: &EpochMutation<'_>, p: &Path, b: &[u8]| m.write(p, b),
+            |m: &EpochMutation<'_>, p: &Path, b: u64| m.sync_intent(p, b),
+            |m: &EpochMutation<'_>, p: &Path, b: &[u8]| m.write(p, b),
+            |m: &EpochMutation<'_>, p: &Path, b: u64| m.sync_studio(p, b),
         )
     }
     #[allow(clippy::too_many_arguments)]
@@ -337,10 +337,10 @@ impl ServerStore {
         ts: u64,
         rng: &mut impl CryptoRngCore,
         budget: &mut EpochStudioBudget,
-        intent_writer: impl FnOnce(&Path, &[u8]) -> Result<(), AppError>,
-        intent_sync: impl FnOnce(&Path, u64) -> Result<(), AppError>,
-        epoch_writer: impl FnOnce(&Path, &[u8]) -> Result<(), AppError>,
-        epoch_sync: impl FnOnce(&Path, u64) -> Result<(), AppError>,
+        intent_writer: impl FnOnce(&EpochMutation<'_>, &Path, &[u8]) -> Result<(), AppError>,
+        intent_sync: impl FnOnce(&EpochMutation<'_>, &Path, u64) -> Result<(), AppError>,
+        epoch_writer: impl FnOnce(&EpochMutation<'_>, &Path, &[u8]) -> Result<(), AppError>,
+        epoch_sync: impl FnOnce(&EpochMutation<'_>, &Path, u64) -> Result<(), AppError>,
     ) -> Result<(SealedOp, EpochStudioState), AppError> {
         let logical = target.document(&group.group_id()).map_err(invalid)?;
         match target {
@@ -421,8 +421,8 @@ impl ServerStore {
             WritePurpose::Ordinary,
             rng,
             &mut budget.storage,
-            atomic_write,
-            sync_studio,
+            |m: &EpochMutation<'_>, p: &Path, b: &[u8]| m.write(p, b),
+            |m: &EpochMutation<'_>, p: &Path, b: u64| m.sync_studio(p, b),
         )?;
         Ok((outcome, state))
     }
@@ -449,7 +449,7 @@ impl ServerStore {
             tenure_start,
             rng,
             budget,
-            atomic_write,
+            |m: &EpochMutation<'_>, p: &Path, b: &[u8]| m.write(p, b),
         )
     }
     #[allow(clippy::too_many_arguments)]
@@ -463,7 +463,7 @@ impl ServerStore {
         tenure_start: u64,
         rng: &mut impl CryptoRngCore,
         budget: &mut EpochStudioBudget,
-        writer: impl FnOnce(&Path, &[u8]) -> Result<(), AppError>,
+        writer: impl FnOnce(&EpochMutation<'_>, &Path, &[u8]) -> Result<(), AppError>,
     ) -> Result<(ReceiptIngest, EpochStudioState), AppError> {
         let logical = target.document(&group.group_id()).map_err(invalid)?;
         scope_bytes(server, &receipt.document)?;
@@ -492,7 +492,7 @@ impl ServerStore {
             rng,
             &mut budget.storage,
             writer,
-            sync_studio,
+            |m: &EpochMutation<'_>, p: &Path, b: u64| m.sync_studio(p, b),
         )?;
         Ok((outcome, state))
     }
@@ -561,8 +561,8 @@ impl ServerStore {
         purpose: WritePurpose,
         rng: &mut impl CryptoRngCore,
         budget: &mut EpochStorageBudget,
-        writer: impl FnOnce(&Path, &[u8]) -> Result<(), AppError>,
-        sync: impl FnOnce(&Path, u64) -> Result<(), AppError>,
+        writer: impl FnOnce(&EpochMutation<'_>, &Path, &[u8]) -> Result<(), AppError>,
+        sync: impl FnOnce(&EpochMutation<'_>, &Path, u64) -> Result<(), AppError>,
     ) -> Result<EpochStudioState, AppError> {
         self.save_studio_source_reusing(
             server, unit, observed, before, purpose, rng, budget, writer, sync, None,
@@ -578,8 +578,8 @@ impl ServerStore {
         purpose: WritePurpose,
         rng: &mut impl CryptoRngCore,
         budget: &mut EpochStorageBudget,
-        writer: impl FnOnce(&Path, &[u8]) -> Result<(), AppError>,
-        sync: impl FnOnce(&Path, u64) -> Result<(), AppError>,
+        writer: impl FnOnce(&EpochMutation<'_>, &Path, &[u8]) -> Result<(), AppError>,
+        sync: impl FnOnce(&EpochMutation<'_>, &Path, u64) -> Result<(), AppError>,
         prior: Option<source::SourceVersion>,
     ) -> Result<EpochStudioState, AppError> {
         self.save_studio_source_checked(
@@ -596,8 +596,8 @@ impl ServerStore {
         purpose: WritePurpose,
         rng: &mut impl CryptoRngCore,
         budget: &mut EpochStorageBudget,
-        writer: impl FnOnce(&Path, &[u8]) -> Result<(), AppError>,
-        sync: impl FnOnce(&Path, u64) -> Result<(), AppError>,
+        writer: impl FnOnce(&EpochMutation<'_>, &Path, &[u8]) -> Result<(), AppError>,
+        sync: impl FnOnce(&EpochMutation<'_>, &Path, u64) -> Result<(), AppError>,
         prior: Option<source::SourceVersion>,
         handoff: Option<&handoff::CheckedHandoffWrite>,
     ) -> Result<EpochStudioState, AppError> {
@@ -616,7 +616,10 @@ impl ServerStore {
             let reservation = budget
                 .reserve_sync(&storage_scope, record)
                 .map_err(invalid)?;
-            sync(&path, record.footprint.total().map_err(invalid)?)?;
+            // I-4: unchanged Studio source still flushes, so it still rotates.
+            let bytes = record.footprint.total().map_err(invalid)?;
+            let mutation = self.epoch_mutation_guard();
+            sync(&mutation, &path, bytes)?;
             reservation.commit();
             // Restore can normalize owner state without rewriting the file. Preserve its actual
             // prior physical stamp, not a hash of the normalized in-memory snapshot.
@@ -656,8 +659,8 @@ impl ServerStore {
             };
             // I-4: rotate before the write, never after it succeeds.
             let framed = frame(&sealed);
-            self.epoch_mutation_guard()
-                .with(|| writer(&path, &framed))?;
+            let mutation = self.epoch_mutation_guard();
+            writer(&mutation, &path, &framed)?;
             reservation.commit();
             Some(self.studio_source_version(server, &unit, &plain, plain.len() as u64 + 40)?)
         };
@@ -897,7 +900,11 @@ fn storage_record(
         },
     })
 }
-fn sync_studio(path: &Path, expected: u64) -> Result<(), AppError> {
+pub(super) fn sync_studio(
+    _: &EpochMutation<'_>,
+    path: &Path,
+    expected: u64,
+) -> Result<(), AppError> {
     let metadata = fs::symlink_metadata(path).map_err(|e| AppError::Io(e.to_string()))?;
     if !regular_file(&metadata) || metadata.len() != expected {
         return Err(invalid("retry file changed"));

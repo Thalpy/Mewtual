@@ -181,8 +181,8 @@ impl ServerStore {
             rng,
             budget,
             |_, _| Ok(()),
-            |_, _| Err(invalid("rotation source preparation cannot rewrite")),
-            sync_registry,
+            |_, _, _| Err(invalid("rotation source preparation cannot rewrite")),
+            |m: &EpochMutation<'_>, p: &Path, b: u64| m.sync_registry(p, b),
         )?;
         let checked = (|| {
             let journal = self.load_epoch_owner_receipts(server, &document)?;

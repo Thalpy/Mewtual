@@ -395,8 +395,8 @@ impl ServerStore {
         plan: StudioOverlayPlan,
         rng: &mut impl CryptoRngCore,
         budget: &mut EpochStudioBudget,
-        writer: impl FnOnce(&Path, &[u8]) -> Result<(), AppError>,
-        sync: impl FnOnce(&Path, u64) -> Result<(), AppError>,
+        writer: impl FnOnce(&EpochMutation<'_>, &Path, &[u8]) -> Result<(), AppError>,
+        sync: impl FnOnce(&EpochMutation<'_>, &Path, u64) -> Result<(), AppError>,
     ) -> Result<StudioLocalDraft, AppError> {
         current_member(group, device)?;
         self.enter_studio_budget(server, group, budget)?;

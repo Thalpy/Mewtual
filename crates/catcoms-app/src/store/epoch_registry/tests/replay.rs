@@ -294,10 +294,15 @@ fn signed(f: &Fixture, result: (RegistryReplayOutcome, EpochRegistryState)) -> S
     )
     .unwrap()
 }
-pub(super) fn sync(step: ReplaySync, path: &Path, bytes: u64) -> Result<(), AppError> {
+pub(super) fn sync(
+    m: &EpochMutation<'_>,
+    step: ReplaySync,
+    path: &Path,
+    bytes: u64,
+) -> Result<(), AppError> {
     match step {
-        ReplaySync::Intent => crate::store::epoch_intents::sync_intent(path, bytes),
-        _ => sync_registry(path, bytes),
+        ReplaySync::Intent => crate::store::epoch_intents::sync_intent(m, path, bytes),
+        _ => sync_registry(m, path, bytes),
     }
 }
 pub(super) fn intent_bytes(store: &ServerStore, f: &Fixture) -> Vec<u8> {
@@ -411,7 +416,7 @@ fn registry_replay_failed_tombstone_save_and_flush_retry_the_exact_signed_change
                 &mut rng(),
                 &mut budget,
                 &mut intents,
-                |path, bytes| {
+                |_, path, bytes| {
                     if mode == 1 {
                         atomic_write(path, bytes)?;
                     }
@@ -473,12 +478,12 @@ fn registry_replay_failed_tombstone_save_and_flush_retry_the_exact_signed_change
             &mut rng(),
             &mut budget,
             &mut intents,
-            |_, _| panic!("retry must not rewrite"),
-            &mut |step, path, bytes| {
+            |_, _, _| panic!("retry must not rewrite"),
+            &mut |m, step, path, bytes| {
                 if step == ReplaySync::Intent {
                     Err(AppError::Io("intent sync failed".into()))
                 } else {
-                    sync(step, path, bytes)
+                    sync(m, step, path, bytes)
                 }
             },
         );
@@ -519,15 +524,15 @@ fn registry_replay_every_flush_failure_and_unwind_withholds_ciphertext() {
                     &mut rng(),
                     &mut budget,
                     &mut intents,
-                    |_, _| panic!("exact replay must not rewrite the epoch"),
-                    &mut |step, path, bytes| {
+                    |_, _, _| panic!("exact replay must not rewrite the epoch"),
+                    &mut |m, step, path, bytes| {
                         if step == target {
                             if unwind {
                                 panic!("injected {target:?} sync unwind");
                             }
                             Err(AppError::Io(format!("injected {target:?} sync failure")))
                         } else {
-                            sync(step, path, bytes)
+                            sync(m, step, path, bytes)
                         }
                     },
                 )

@@ -77,10 +77,10 @@ fn pending(s: &TestSource) -> Vec<u8> {
         .map(|(_, intent)| intent.operation.nonce[0])
         .collect()
 }
-fn sync(step: InstallSync, path: &Path, bytes: u64) -> Result<(), AppError> {
+fn sync(m: &EpochMutation<'_>, step: InstallSync, path: &Path, bytes: u64) -> Result<(), AppError> {
     match step {
-        InstallSync::Intents => crate::store::epoch_intents::sync_intent(path, bytes),
-        _ => sync_registry(path, bytes),
+        InstallSync::Intents => crate::store::epoch_intents::sync_intent(m, path, bytes),
+        _ => sync_registry(m, path, bytes),
     }
 }
 
@@ -243,7 +243,7 @@ fn registry_install_crash_boundaries_keep_source_or_successor_and_resume_without
                     &mut rng(),
                     &mut s.budget,
                     &mut intents,
-                    &mut |at, path, bytes| {
+                    &mut |_, at, path, bytes| {
                         if at == step {
                             if mode == 1 {
                                 atomic_write(path, bytes)?;
@@ -318,8 +318,8 @@ fn registry_install_sync_failure_never_retires_before_source_flush() {
         &mut rng(),
         &mut s.budget,
         &mut intents,
-        &mut |_, _, _| panic!("source durability must precede every write"),
-        &mut |step, _, _| {
+        &mut |_, _, _, _| panic!("source durability must precede every write"),
+        &mut |_, step, _, _| {
             assert_eq!(step, InstallSync::Source);
             Err(AppError::Io("source flush failed".into()))
         },

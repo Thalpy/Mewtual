@@ -213,7 +213,7 @@ impl ServerStore {
             expected_tenure_start_group_epoch,
             rng,
             budget,
-            atomic_write,
+            |m: &EpochMutation<'_>, p: &Path, b: &[u8]| m.write(p, b),
         )
     }
 
@@ -226,7 +226,7 @@ impl ServerStore {
         tenure: u64,
         rng: &mut impl CryptoRngCore,
         budget: &mut EpochStorageBudget,
-        writer: impl FnOnce(&Path, &[u8]) -> Result<(), AppError>,
+        writer: impl FnOnce(&EpochMutation<'_>, &Path, &[u8]) -> Result<(), AppError>,
     ) -> Result<EpochOwnerReceiptState, AppError> {
         // Public Receipt fields are not a validation boundary. Bound variable fields before
         // canonical encoding/signature work, then use the wire decoder's exact schema too.
@@ -263,7 +263,7 @@ impl ServerStore {
             rng,
             budget,
             |journal| journal.mark_published(receipt_hash).map_err(invalid),
-            atomic_write,
+            |m: &EpochMutation<'_>, p: &Path, b: &[u8]| m.write(p, b),
         )
     }
 
@@ -284,12 +284,12 @@ impl ServerStore {
             rng,
             budget,
             |journal| journal.mark_published(receipt.hash()).map_err(invalid),
-            |path, bytes| {
+            |_m, path, bytes| {
                 if after_rename {
                     atomic_write_with_hook_and_sync(
                         path,
                         bytes,
-                        |_, _| {},
+                        |_m, _| {},
                         |_| Err(std::io::Error::other("injected completion flush failure")),
                     )
                 } else {
@@ -308,7 +308,7 @@ impl ServerStore {
         rng: &mut impl CryptoRngCore,
         budget: &mut EpochStorageBudget,
         apply: impl FnOnce(&mut OwnerReceiptJournal) -> Result<(), AppError>,
-        writer: impl FnOnce(&Path, &[u8]) -> Result<(), AppError>,
+        writer: impl FnOnce(&EpochMutation<'_>, &Path, &[u8]) -> Result<(), AppError>,
     ) -> Result<EpochOwnerReceiptState, AppError> {
         self.update_epoch_owner_state_with_writer(
             server,
@@ -352,7 +352,7 @@ impl ServerStore {
             tenure,
             rng,
             budget,
-            atomic_write,
+            |m: &EpochMutation<'_>, p: &Path, b: &[u8]| m.write(p, b),
         )
     }
 
@@ -365,7 +365,7 @@ impl ServerStore {
         tenure: u64,
         rng: &mut impl CryptoRngCore,
         budget: &mut EpochStorageBudget,
-        writer: impl FnOnce(&Path, &[u8]) -> Result<(), AppError>,
+        writer: impl FnOnce(&EpochMutation<'_>, &Path, &[u8]) -> Result<(), AppError>,
     ) -> Result<EpochOwnerReceiptState, AppError> {
         self.prepare_owner_pair_with_writer(
             server,
@@ -390,7 +390,7 @@ impl ServerStore {
         tenure: u64,
         rng: &mut impl CryptoRngCore,
         budget: &mut EpochStorageBudget,
-        writer: impl FnOnce(&Path, &[u8]) -> Result<(), AppError>,
+        writer: impl FnOnce(&EpochMutation<'_>, &Path, &[u8]) -> Result<(), AppError>,
     ) -> Result<EpochOwnerReceiptState, AppError> {
         self.prepare_owner_pair_with_writer(
             server,
@@ -414,7 +414,7 @@ impl ServerStore {
         tenure: u64,
         rng: &mut impl CryptoRngCore,
         budget: &mut EpochStorageBudget,
-        writer: impl FnOnce(&Path, &[u8]) -> Result<(), AppError>,
+        writer: impl FnOnce(&EpochMutation<'_>, &Path, &[u8]) -> Result<(), AppError>,
     ) -> Result<EpochOwnerReceiptState, AppError> {
         self.update_epoch_owner_state_with_writer(
             server,
@@ -440,7 +440,7 @@ impl ServerStore {
         rng: &mut impl CryptoRngCore,
         budget: &mut EpochStorageBudget,
         apply: impl FnOnce(&mut EpochOwnerReceiptState) -> Result<(), AppError>,
-        writer: impl FnOnce(&Path, &[u8]) -> Result<(), AppError>,
+        writer: impl FnOnce(&EpochMutation<'_>, &Path, &[u8]) -> Result<(), AppError>,
     ) -> Result<EpochOwnerReceiptState, AppError> {
         let scope = scope_bytes(server, document)?;
         let storage_scope = StorageScope::new(server, &document.server_id).map_err(invalid)?;
@@ -480,8 +480,8 @@ impl ServerStore {
         // I-4: path first, then rotate, then touch disk.
         let path = self.epoch_owner_path(&scope);
         let framed = frame(&sealed);
-        self.epoch_mutation_guard()
-            .with(|| writer(&path, &framed))?;
+        let mutation = self.epoch_mutation_guard();
+        writer(&mutation, &path, &framed)?;
         reservation.commit();
         Ok(state)
     }
@@ -711,7 +711,7 @@ mod tests {
                         state.decision_close = Some((receipt.hash(), close.clone()));
                         Ok(())
                     },
-                    atomic_write,
+                    |m: &EpochMutation<'_>, p: &Path, b: &[u8]| m.write(p, b),
                 )
                 .unwrap();
             // Repeating completion of epoch zero while epoch one is pending must preserve the
@@ -829,7 +829,7 @@ mod tests {
                 group.epoch(),
                 &mut rng(),
                 &mut budget,
-                |_, _| panic!("stale prepare wrote")
+                |_m, _, _| panic!("stale prepare wrote")
             )
             .is_err());
         let retry = store
@@ -860,7 +860,7 @@ mod tests {
             if completing {
                 prepare(&mut store, signed.clone(), &group, &mut budget);
             }
-            let writer = |path: &Path, bytes: &[u8]| {
+            let writer = |_m: &EpochMutation<'_>, path: &Path, bytes: &[u8]| {
                 atomic_write_with_hook_and_sync(
                     path,
                     bytes,
@@ -940,7 +940,7 @@ mod tests {
                     &mut rng(),
                     &mut budget,
                     |j| j.mark_published(signed.hash()).map_err(invalid),
-                    |_, bytes| {
+                    |_, _, bytes| {
                         fs::write(&orphan, bytes).unwrap();
                         if panic {
                             panic!("injected after temporary write");
@@ -1053,7 +1053,7 @@ mod tests {
             group.epoch(),
             &mut rng(),
             &mut budget,
-            |_, _| panic!("over-cap write"),
+            |_, _, _| panic!("over-cap write"),
         );
         assert!(result.is_err());
         assert!(!budget.requires_reconciliation());
@@ -1073,7 +1073,7 @@ mod tests {
                 group.epoch(),
                 &mut rng(),
                 &mut budget,
-                |_, _| panic!("unauthorized write")
+                |_, _, _| panic!("unauthorized write")
             )
             .is_err());
         let mut malformed = receipt(&owner, &group, &doc, 0);
@@ -1165,7 +1165,7 @@ mod tests {
                 alice_group.epoch(),
                 &mut rng(),
                 &mut budget,
-                |_, _| panic!("invalid adoption wrote")
+                |_, _, _| panic!("invalid adoption wrote")
             )
             .is_err());
         assert_eq!(fs::read(&path).unwrap(), before);
@@ -1193,7 +1193,7 @@ mod tests {
             alice_group.epoch(),
             &mut rng(),
             &mut budget,
-            |_, _| Err(AppError::Io("before write".into())),
+            |_, _, _| Err(AppError::Io("before write".into())),
         );
         assert!(failure.is_err());
         assert_eq!(
@@ -1272,7 +1272,7 @@ mod tests {
                 group.epoch(),
                 &mut rng(),
                 &mut budget,
-                |_, _| panic!("noncanonical write")
+                |_, _, _| panic!("noncanonical write")
             )
             .is_err());
         assert_eq!(

@@ -386,7 +386,7 @@ fn registry_adoption_store_crash_boundaries_keep_source_or_successor_and_retry()
             &ManualClock::new(100),
             &mut rng(),
             &mut budget,
-            &mut |step, path, bytes| {
+            &mut |_, step, path, bytes| {
                 if let Failure::Write(wanted, after) = failure {
                     if step == wanted {
                         if after {
@@ -398,12 +398,12 @@ fn registry_adoption_store_crash_boundaries_keep_source_or_successor_and_retry()
                 }
                 atomic_write(path, bytes)
             },
-            &mut |step, path, bytes| {
+            &mut |m, step, path, bytes| {
                 if matches!(failure, Failure::Flush(wanted) if wanted == step) {
                     fired.set(true);
                     return Err(invalid("injected adoption flush failure"));
                 }
-                sync_registry(path, bytes)
+                sync_registry(m, path, bytes)
             },
         );
         assert!(fired.get(), "{failure:?}");

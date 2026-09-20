@@ -233,8 +233,8 @@ fn studio_source_reuse_failed_write_or_flush_discards_owned_graph() {
             &op,
             &mut rng(),
             &mut b,
-            |_, _| Err(invalid("injected write failure")),
-            |_, _| Err(invalid("injected flush failure")),
+            |_, _, _| Err(invalid("injected write failure")),
+            |_, _, _| Err(invalid("injected flush failure")),
         );
         assert!(result.unwrap_err().to_string().contains(if flush {
             "flush failure"

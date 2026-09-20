@@ -123,7 +123,7 @@ fn registry_recovery_stage_save_failures_preserve_source_and_retry_after_reconci
             &ManualClock::new(10),
             &mut rng(),
             &mut source.budget,
-            |path, bytes| {
+            |_, path, bytes| {
                 if after_rename {
                     atomic_write(path, bytes)?;
                 }
@@ -205,7 +205,7 @@ fn registry_recovery_stage_refuses_stale_inventory_invalid_old_slots_and_storage
         &ManualClock::new(0),
         &mut rng(),
         &mut full,
-        |_, _| panic!("storage refusal must precede I/O"),
+        |_, _, _| panic!("storage refusal must precede I/O"),
     );
     assert!(refused.unwrap_err().to_string().contains("storage limit"));
     assert!(!full.requires_reconciliation());

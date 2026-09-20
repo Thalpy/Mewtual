@@ -39,8 +39,8 @@ impl ServerStore {
             operations,
             rng,
             budget,
-            atomic_write,
-            sync_registry,
+            |m: &EpochMutation<'_>, p: &Path, b: &[u8]| m.write(p, b),
+            |m: &EpochMutation<'_>, p: &Path, b: u64| m.sync_registry(p, b),
         )
     }
 
@@ -55,8 +55,8 @@ impl ServerStore {
         operations: &[SealedOp],
         rng: &mut impl CryptoRngCore,
         budget: &mut EpochStorageBudget,
-        writer: impl FnOnce(&Path, &[u8]) -> Result<(), AppError>,
-        sync: impl FnOnce(&Path, u64) -> Result<(), AppError>,
+        writer: impl FnOnce(&EpochMutation<'_>, &Path, &[u8]) -> Result<(), AppError>,
+        sync: impl FnOnce(&EpochMutation<'_>, &Path, u64) -> Result<(), AppError>,
     ) -> Result<(RegistryPageAdmission, Option<EpochRegistryState>), AppError> {
         if operations.len() > MAX_REGISTRY_PAGE_OPS {
             return Err(invalid("registry page operation count is invalid"));
@@ -137,7 +137,7 @@ impl ServerStore {
         expected_doc_id: u128,
         device: &MlsDevice,
         budget: &mut EpochStorageBudget,
-        sync: impl FnOnce(&Path, u64) -> Result<(), AppError>,
+        sync: impl FnOnce(&EpochMutation<'_>, &Path, u64) -> Result<(), AppError>,
     ) -> Result<Option<EpochRegistryState>, AppError> {
         let document = registry_document(&group.group_id(), bucket).map_err(invalid)?;
         let scope = scope_bytes(server, &document)?;
@@ -197,10 +197,11 @@ impl ServerStore {
             let reservation = budget
                 .reserve_sync(&storage_scope, record)
                 .map_err(invalid)?;
-            sync(
-                &self.registry_epoch_path(&scope),
-                record.footprint.total().map_err(invalid)?,
-            )?;
+            // I-4: an unchanged-file flush is a mutation for inventory purposes.
+            let path = self.registry_epoch_path(&scope);
+            let bytes = record.footprint.total().map_err(invalid)?;
+            let mutation = self.epoch_mutation_guard();
+            sync(&mutation, &path, bytes)?;
             reservation.commit();
         }
         Ok(state)

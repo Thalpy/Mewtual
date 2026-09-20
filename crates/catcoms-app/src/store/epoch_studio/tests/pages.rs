@@ -431,13 +431,13 @@ fn studio_pages_write_and_flush_failure_require_exact_retry_after_reconciliation
             &page,
             &mut rng(),
             &mut b,
-            |path, bytes| {
+            |_, path, bytes| {
                 if failure == 1 {
                     atomic_write(path, bytes)?;
                 }
                 Err(invalid("injected write failure"))
             },
-            |_, _| Err(invalid("injected flush failure")),
+            |_, _, _| Err(invalid("injected flush failure")),
         );
         assert!(result.is_err());
         assert!(b.requires_reconciliation());
