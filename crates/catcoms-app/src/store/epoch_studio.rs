@@ -553,7 +553,7 @@ impl ServerStore {
     }
     #[allow(clippy::too_many_arguments)]
     fn save_studio_source(
-        &self,
+        &mut self,
         server: u64,
         unit: StudioEpoch,
         observed: Option<StorageRecord>,
@@ -570,7 +570,7 @@ impl ServerStore {
     }
     #[allow(clippy::too_many_arguments)]
     fn save_studio_source_reusing(
-        &self,
+        &mut self,
         server: u64,
         unit: StudioEpoch,
         observed: Option<StorageRecord>,
@@ -588,7 +588,7 @@ impl ServerStore {
     }
     #[allow(clippy::too_many_arguments)]
     fn save_studio_source_checked(
-        &self,
+        &mut self,
         server: u64,
         mut unit: StudioEpoch,
         observed: Option<StorageRecord>,
@@ -654,7 +654,10 @@ impl ServerStore {
                     return Err(error.into());
                 }
             };
-            writer(&path, &frame(&sealed))?;
+            // I-4: rotate before the write, never after it succeeds.
+            let framed = frame(&sealed);
+            self.epoch_mutation_guard()
+                .with(|| writer(&path, &framed))?;
             reservation.commit();
             Some(self.studio_source_version(server, &unit, &plain, plain.len() as u64 + 40)?)
         };

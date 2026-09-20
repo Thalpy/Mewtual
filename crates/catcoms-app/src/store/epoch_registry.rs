@@ -472,7 +472,10 @@ impl ServerStore {
                     return Err(error.into());
                 }
             };
-            writer(&path, &frame(&sealed))?;
+            // I-4: rotate before the write, never after it succeeds.
+            let framed = frame(&sealed);
+            self.epoch_mutation_guard()
+                .with(|| writer(&path, &framed))?;
             reservation.commit();
         }
         Ok((outcome, EpochRegistryState { unit }))

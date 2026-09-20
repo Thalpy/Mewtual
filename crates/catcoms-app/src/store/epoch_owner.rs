@@ -477,7 +477,11 @@ impl ServerStore {
                 return Err(error.into());
             }
         };
-        writer(&self.epoch_owner_path(&scope), &frame(&sealed))?;
+        // I-4: path first, then rotate, then touch disk.
+        let path = self.epoch_owner_path(&scope);
+        let framed = frame(&sealed);
+        self.epoch_mutation_guard()
+            .with(|| writer(&path, &framed))?;
         reservation.commit();
         Ok(state)
     }

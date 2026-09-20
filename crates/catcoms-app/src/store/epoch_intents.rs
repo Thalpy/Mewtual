@@ -685,7 +685,11 @@ impl ServerStore {
         // on failure so a second budget or an older completed scan cannot bypass reconciliation.
         intents.ready = false;
         self.intent_generation = Arc::new(());
-        writer(&self.epoch_intent_path(&scope), &frame(&sealed))?;
+        // I-4: path first, then rotate, then touch disk.
+        let path = self.epoch_intent_path(&scope);
+        let framed = frame(&sealed);
+        self.epoch_mutation_guard()
+            .with(|| writer(&path, &framed))?;
         reservation.commit();
         if old.is_none() {
             intents.record_slots += 1;

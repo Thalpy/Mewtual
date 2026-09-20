@@ -347,7 +347,11 @@ impl ServerStore {
         // actual old/new file and every temporary sibling rather than trusting early credit.
         intents.ready = false;
         self.intent_generation = Arc::new(());
-        writer(&self.epoch_intent_path(&scope), &frame(&sealed))?;
+        // I-4: path first, then rotate, then touch disk.
+        let path = self.epoch_intent_path(&scope);
+        let framed = frame(&sealed);
+        self.epoch_mutation_guard()
+            .with(|| writer(&path, &framed))?;
         reservation.commit();
         intents.records.insert(id, next);
         intents.bytes = final_bytes;

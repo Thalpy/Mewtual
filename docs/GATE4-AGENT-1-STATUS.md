@@ -1367,6 +1367,30 @@ invalidation rate is bounded by human interaction, not by a loop. They checked s
 answering from memory, and separately verified `intent_class` for DraftArchive against the
 preservation guarantee, which was the one decision I had made on their behalf.
 
+### I-4, slice 2: six writers converted
+
+Recovery, accounted recovery, intents, intent retirement, owner state, registry and Studio source
+now rotate through the guard. Three more `&self`-mutating functions surfaced in `epoch_studio.rs`
+and were widened; the cascade settled in three iterations.
+
+**A masked assertion I would have shipped, and the reason the design pairs a choke point with an
+audited list.** The first per-family test asserted "an accounted recovery write did not rotate" —
+and **M53 passed against a build with the accounted writer's guard removed.** It drives
+`update_epoch_recovery`, a *different* write path, and never touched the accounted writer at all.
+The message named a writer the test did not exercise, which is worse than no coverage because it
+reads as coverage. Two writers reach the same family and only one was tested: covering each
+**writer** is the point, not each family. The accounted path now has its own test beside its own
+helper, and **M54** fails it at the named assertion.
+
+`epoch_draft_archive.rs`'s writer is Agent 2's and is deliberately not converted here. The design
+attaches that audit obligation to them when they build the writers; they are actively editing that
+file and converting it underneath them would be worse than handing it over.
+
+Still open for I-4: the cleanup unlinks, which need `EpochStorageCleanup` restructured because it
+holds the store mutably across its whole pass; the injected-failure writer seams; and per-family
+rotation evidence for the four families that still lack it. `EpochMutation::write` and `remove`
+keep their markers until then.
+
 ### The two scheduling tests have **two** failure modes, not one
 
 This corrects what was handed to the reviewer as two separate defects.
@@ -1374,7 +1398,20 @@ This corrects what was handed to the reviewer as two separate defects.
 | Mode | Shape | Where seen |
 |---|---|---|
 | 90 s timeout | never completes; 6.8 s normally, 83 s headroom | branch head, twice |
-| `registry_installed` false | progresses, then its own 40 s loop exhausts | CI at `db2798c`, and now locally |
+| install assertion | progresses, then its own loop exhausts | CI at `db2798c`; twice locally |
+
+**Both halves of the assertion fire, in different runs.** CI saw "Studio must install", one local
+run saw "Registry must install", the next saw "Studio" again — with the registry writer converted
+in between. So it is not class-specific, which also disposes of a correlation worth naming: the
+first local sighting coincided with my widening a signature in `epoch_registry/page_source.rs`, and
+the next run failed on the *Studio* half instead.
+
+**The margin is ~8 s, not 40 s.** Every sighting shows identical progress — `preview 0 ready at
+9250`, `preview 1 ready at 17500`, `owner returning at ~32000` — against a 40 s bound. So the
+install has roughly eight seconds of injected clock, not forty, and fails in that last stretch. A
+tight margin that usually holds fits a ~20% intermittent failure far better than anything else
+proposed. Widening only that margin is a cheap way to test the hypothesis; it would be a
+diagnosis, not a fix, because the real question is why install sometimes needs more than eight.
 
 The assertion mode was believed confined to the merge checkout. It is not: it reproduced on this
 branch. Both are plausibly one root cause — registry install failing to complete in time —

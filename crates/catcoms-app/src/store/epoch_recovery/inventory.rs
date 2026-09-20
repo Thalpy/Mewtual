@@ -1106,6 +1106,49 @@ mod tests {
         assert!(!std::sync::Arc::ptr_eq(&before, &third));
     }
 
+    /// N17's per-family obligation, for the families converted so far.
+    ///
+    /// The guard test above proves the mechanism; this proves the mechanism is actually *on* the
+    /// path a real writer takes. Those are different claims, and only the second one is what a
+    /// cross-visit cursor depends on. A writer that reaches disk some other way is exactly the
+    /// case a correct central guard does not cover, which is why the design pairs the choke point
+    /// with an audited list rather than treating either as sufficient alone.
+    ///
+    /// Reads are asserted not to rotate in the same test, because a token that moved on reads
+    /// would make a parked cursor die on ordinary activity rather than on a mutation.
+    #[test]
+    fn a_real_recovery_write_rotates_the_inventory_generation_and_a_scan_does_not() {
+        let root = tempfile::tempdir().unwrap();
+        let mut store = open(root.path());
+        let document = document(b"group", b"doc");
+
+        let before = store.inventory_generation();
+        stage(&mut store, 7, &document, 1);
+        let after = store.inventory_generation();
+        assert!(
+            !std::sync::Arc::ptr_eq(&before, &after),
+            "a recovery write did not rotate the inventory generation, so an inventory captured \
+             before it would still be treated as current. This exercises `update_epoch_recovery`; \
+             the accounted writer is a separate path, covered by its own test"
+        );
+
+        // A full scan is a read. It must leave the token alone, or nothing could ever be
+        // scanned across visits.
+        let quiet = store.inventory_generation();
+        let _ = collect_with(&mut store, EpochInventoryCoverage::RecoveryOnly);
+        assert!(
+            std::sync::Arc::ptr_eq(&quiet, &store.inventory_generation()),
+            "scanning rotated the token, which would make every cross-visit scan self-invalidating"
+        );
+
+        // A second write moves it again, so the token tracks writes rather than latching once.
+        stage(&mut store, 7, &document, 2);
+        assert!(!std::sync::Arc::ptr_eq(
+            &after,
+            &store.inventory_generation()
+        ));
+    }
+
     fn stage(store: &mut ServerStore, server: u64, document: &LogicalDocument, epoch: u64) {
         let snapshot = RecoverySnapshot {
             doc_type: document.doc_type,

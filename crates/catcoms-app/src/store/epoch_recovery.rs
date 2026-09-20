@@ -361,7 +361,12 @@ impl ServerStore {
                 return Err(error.into());
             }
         };
-        writer(&self.epoch_recovery_path(&scope), &frame(&sealed))?;
+        // I-4. Path first, then rotate, then touch disk: taking the guard borrows the store, so
+        // the ordering this invariant needs is the one the borrow checker already enforces.
+        let path = self.epoch_recovery_path(&scope);
+        let framed = frame(&sealed);
+        self.epoch_mutation_guard()
+            .with(|| writer(&path, &framed))?;
         reservation.commit();
         Ok(EpochRecoveryUpdate { transition, state })
     }
@@ -459,7 +464,10 @@ impl ServerStore {
             super::creative_references::recovery_cids(document, &state),
         );
         let sealed = seal(&self.keys.db_key()?, &plain, rng)?;
-        writer(&self.epoch_recovery_path(&scope), &frame(&sealed))?;
+        let path = self.epoch_recovery_path(&scope);
+        let framed = frame(&sealed);
+        self.epoch_mutation_guard()
+            .with(|| writer(&path, &framed))?;
         Ok(EpochRecoveryUpdate { transition, state })
     }
 
@@ -1069,6 +1077,39 @@ mod tests {
                 .unwrap(),
         )
         .unwrap()
+    }
+
+    /// N17, for the accounted recovery writer specifically.
+    ///
+    /// The unaccounted path has its own rotation test next to the inventory. These are two
+    /// distinct writers reaching the same family, and the first version of that other test
+    /// claimed to cover this one while never calling it — a mutation of this writer passed it.
+    /// Covering each writer rather than each family is the whole point of an audited list.
+    #[test]
+    fn the_accounted_recovery_writer_rotates_the_inventory_generation() {
+        let root = tempfile::tempdir().unwrap();
+        let mut store = open(root.path());
+        let mut budget = inventory_budget(&store);
+        accounted(
+            &mut store,
+            &mut budget,
+            EpochRecoveryAction::Stage(snapshot(1)),
+            10,
+        );
+
+        let before = store.inventory_generation();
+        let mut budget = inventory_budget(&store);
+        accounted(
+            &mut store,
+            &mut budget,
+            EpochRecoveryAction::Stage(snapshot(2)),
+            20,
+        );
+        assert!(
+            !std::sync::Arc::ptr_eq(&before, &store.inventory_generation()),
+            "the accounted recovery writer did not rotate the inventory generation, so a captured \
+             inventory would survive a write it never saw"
+        );
     }
 
     fn accounted(
