@@ -314,9 +314,14 @@ fn failed_journal_write_restarts_cleans_both_families_reconciles_and_retries() {
             &mut rng(),
             &mut accounted,
             |journal| journal.mark_published(signed.hash()).map_err(invalid),
-            |_, _, bytes| {
-                fs::write(&orphan, bytes).unwrap();
-                Err(AppError::Io("before rename".into()))
+            &mut WriteHooks::Hooked {
+                before: Some(&mut |_: WriteTag, _: &Path, bytes: &[u8]| {
+                    fs::write(&orphan, bytes).unwrap();
+                    Intercept::Fail(AppError::Io("before rename".into()))
+                }),
+                before_sync: None,
+                before_unlink: None,
+                after: None,
             }
         )
         .is_err());
@@ -399,9 +404,14 @@ fn a_first_write_orphan_never_becomes_a_published_owner_decision() {
             group.epoch(),
             &mut rng(),
             &mut accounted,
-            |_, _, bytes| {
-                fs::write(&orphan, bytes).unwrap();
-                Err(AppError::Io("first write interrupted".into()))
+            &mut WriteHooks::Hooked {
+                before: Some(&mut |_: WriteTag, _: &Path, bytes: &[u8]| {
+                    fs::write(&orphan, bytes).unwrap();
+                    Intercept::Fail(AppError::Io("first write interrupted".into()))
+                }),
+                before_sync: None,
+                before_unlink: None,
+                after: None,
             }
         )
         .is_err());

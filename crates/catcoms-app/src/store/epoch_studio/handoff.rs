@@ -42,12 +42,7 @@ impl ServerStore {
             tenure,
             rng,
             budget,
-            &mut |m: &EpochMutation<'_>, _, p: &Path, b: &[u8]| m.write(p, b),
-            &mut |m, step, p, b| match step {
-                WriteTag::Source => sync_studio(m, p, b),
-                WriteTag::Intents => epoch_intents::sync_intent(m, p, b),
-                _ => unreachable!("tag not produced by this transaction"),
-            },
+            &mut WriteHooks::None,
         )
     }
 
@@ -111,12 +106,7 @@ impl ServerStore {
             tenure,
             rng,
             budget,
-            &mut |m: &EpochMutation<'_>, _, p: &Path, b: &[u8]| m.write(p, b),
-            &mut |m, step, p, b| match step {
-                WriteTag::Source => sync_studio(m, p, b),
-                WriteTag::Intents => epoch_intents::sync_intent(m, p, b),
-                _ => unreachable!("tag not produced by this transaction"),
-            },
+            &mut WriteHooks::None,
         )
     }
 
@@ -142,12 +132,7 @@ impl ServerStore {
             tenure,
             rng,
             budget,
-            &mut |m: &EpochMutation<'_>, _, p: &Path, b: &[u8]| m.write(p, b),
-            &mut |m, step, p, b| match step {
-                WriteTag::Source => sync_studio(m, p, b),
-                WriteTag::Intents => epoch_intents::sync_intent(m, p, b),
-                _ => unreachable!("tag not produced by this transaction"),
-            },
+            &mut WriteHooks::None,
         )
     }
 
@@ -165,11 +150,10 @@ impl ServerStore {
         tenure: Option<u64>,
         rng: &mut impl CryptoRngCore,
         budget: &mut EpochStudioBudget,
-        writer: &mut impl FnMut(&EpochMutation<'_>, WriteTag, &Path, &[u8]) -> Result<(), AppError>,
-        sync: &mut impl FnMut(&EpochMutation<'_>, WriteTag, &Path, u64) -> Result<(), AppError>,
+        hooks: &mut WriteHooks<'_>,
     ) -> Result<StudioHandoffOutcome, AppError> {
         let capture = match self.start_studio_handoff_with_io(
-            server, group, target, device, basis, tenure, rng, budget, writer, sync,
+            server, group, target, device, basis, tenure, rng, budget, hooks,
         )? {
             StudioHandoffStart::Settled(outcome) => return Ok(outcome),
             StudioHandoffStart::Captured(capture) => capture,
@@ -195,8 +179,7 @@ impl ServerStore {
             Some(tenure),
             rng,
             budget,
-            writer,
-            sync,
+            hooks,
         )
     }
 
@@ -219,8 +202,7 @@ impl ServerStore {
         tenure: Option<u64>,
         rng: &mut impl CryptoRngCore,
         budget: &mut EpochStudioBudget,
-        writer: &mut impl FnMut(&EpochMutation<'_>, WriteTag, &Path, &[u8]) -> Result<(), AppError>,
-        sync: &mut impl FnMut(&EpochMutation<'_>, WriteTag, &Path, u64) -> Result<(), AppError>,
+        hooks: &mut WriteHooks<'_>,
     ) -> Result<StudioHandoffStart, AppError> {
         current_member(group, device)?;
         self.enter_studio_budget(server, group, budget)?;
@@ -248,8 +230,7 @@ impl ServerStore {
                 WriteTag::Completed,
                 rng,
                 budget,
-                writer,
-                sync,
+                hooks,
             )?;
             return Ok(StudioHandoffStart::Settled(outcome));
         }
@@ -260,9 +241,7 @@ impl ServerStore {
             return Err(invalid("overlay author or basis mismatch"));
         }
         if state.handoff_prepared() {
-            self.resolve_studio_handoff_with_io(
-                server, group, target, device, rng, budget, writer, sync,
-            )?;
+            self.resolve_studio_handoff_with_io(server, group, target, device, rng, budget, hooks)?;
             state = self.checked_epoch_replay_state(
                 server,
                 &document,
@@ -313,8 +292,7 @@ impl ServerStore {
         tenure: Option<u64>,
         rng: &mut impl CryptoRngCore,
         budget: &mut EpochStudioBudget,
-        writer: &mut impl FnMut(&EpochMutation<'_>, WriteTag, &Path, &[u8]) -> Result<(), AppError>,
-        sync: &mut impl FnMut(&EpochMutation<'_>, WriteTag, &Path, u64) -> Result<(), AppError>,
+        hooks: &mut WriteHooks<'_>,
     ) -> Result<StudioHandoffOutcome, AppError> {
         current_member(group, device)?;
         self.enter_studio_budget(server, group, budget)?;
@@ -428,8 +406,7 @@ impl ServerStore {
             WriteTag::Prepared,
             rng,
             budget,
-            writer,
-            sync,
+            hooks,
         )?;
         let capability = CheckedHandoffWrite {
             metadata: metadata_hash,
@@ -445,14 +422,12 @@ impl ServerStore {
             WritePurpose::Ordinary,
             rng,
             &mut budget.storage,
-            |m, p, b| writer(m, WriteTag::Source, p, b),
-            |m, p, b| sync(m, WriteTag::Source, p, b),
+            WriteStep::new(WriteTag::Source),
+            hooks,
             None,
             Some(&capability),
         )?;
-        self.resolve_studio_handoff_with_io(
-            server, group, target, device, rng, budget, writer, sync,
-        )?;
+        self.resolve_studio_handoff_with_io(server, group, target, device, rng, budget, hooks)?;
         let final_state = self.checked_epoch_replay_state(
             server,
             &document,
@@ -477,8 +452,7 @@ impl ServerStore {
         step: WriteTag,
         rng: &mut impl CryptoRngCore,
         budget: &mut EpochStudioBudget,
-        writer: &mut impl FnMut(&EpochMutation<'_>, WriteTag, &Path, &[u8]) -> Result<(), AppError>,
-        sync: &mut impl FnMut(&EpochMutation<'_>, WriteTag, &Path, u64) -> Result<(), AppError>,
+        hooks: &mut WriteHooks<'_>,
     ) -> Result<(), AppError> {
         // `write_prepared_intents` consumes this size; it performs no old-record read of its own.
         let old = self
@@ -493,8 +467,8 @@ impl ServerStore {
             rng,
             &mut budget.storage,
             &mut budget.intents,
-            |m, p, b| writer(m, step, p, b),
-            |m, p, b| sync(m, WriteTag::Intents, p, b),
+            WriteStep::new(step),
+            hooks,
         )?;
         Ok(())
     }
@@ -517,12 +491,7 @@ impl ServerStore {
             device,
             rng,
             budget,
-            &mut |m: &EpochMutation<'_>, _, p: &Path, b: &[u8]| m.write(p, b),
-            &mut |m, step, p, b| match step {
-                WriteTag::Source => sync_studio(m, p, b),
-                WriteTag::Intents => epoch_intents::sync_intent(m, p, b),
-                _ => unreachable!("tag not produced by this transaction"),
-            },
+            &mut WriteHooks::None,
         )
     }
     #[allow(clippy::too_many_arguments)]
@@ -534,8 +503,7 @@ impl ServerStore {
         device: &MlsDevice,
         rng: &mut impl CryptoRngCore,
         budget: &mut EpochStudioBudget,
-        writer: &mut impl FnMut(&EpochMutation<'_>, WriteTag, &Path, &[u8]) -> Result<(), AppError>,
-        sync: &mut impl FnMut(&EpochMutation<'_>, WriteTag, &Path, u64) -> Result<(), AppError>,
+        hooks: &mut WriteHooks<'_>,
     ) -> Result<(), AppError> {
         current_member(group, device)?;
         self.enter_studio_budget(server, group, budget)?;
@@ -560,8 +528,7 @@ impl ServerStore {
                     WriteTag::Completed,
                     rng,
                     budget,
-                    writer,
-                    sync,
+                    hooks,
                 )?;
             }
             return Ok(());
@@ -586,8 +553,7 @@ impl ServerStore {
                     WriteTag::Active,
                     rng,
                     budget,
-                    writer,
-                    sync,
+                    hooks,
                 )
             }
             StudioHandoffEvidence::Complete => {
@@ -600,8 +566,11 @@ impl ServerStore {
                     WritePurpose::Ordinary,
                     rng,
                     &mut budget.storage,
-                    |_, _, _| Err(invalid("handoff resolution requires unchanged source")),
-                    |m, p, b| sync(m, WriteTag::Source, p, b),
+                    WriteStep::flush_only(
+                        WriteTag::Source,
+                        "handoff resolution requires unchanged source",
+                    ),
+                    hooks,
                 )?;
                 self.check_handoff_references(metadata, &source.unit, &state)?;
                 state.overlay = Some(
@@ -617,8 +586,7 @@ impl ServerStore {
                     WriteTag::Completed,
                     rng,
                     budget,
-                    writer,
-                    sync,
+                    hooks,
                 )
             }
             StudioHandoffEvidence::Hold => Err(invalid(

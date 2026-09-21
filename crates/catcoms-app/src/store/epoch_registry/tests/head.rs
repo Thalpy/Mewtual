@@ -136,7 +136,7 @@ fn registry_head_uncertain_source_flush_returns_no_proof_and_blocks_budget_until
             Some(0),
             &mut rng(),
             &mut budget,
-            |_, _, _| Err(AppError::CommittedButNotDurable("injected sync".into()))
+            &mut WriteHooks::fail_before_sync(FailError::NotDurable("injected sync"))
         )
         .is_err());
     assert!(select(&mut store, &f, &mut budget, Some(0)).is_err());

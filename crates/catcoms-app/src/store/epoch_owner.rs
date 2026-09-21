@@ -213,7 +213,7 @@ impl ServerStore {
             expected_tenure_start_group_epoch,
             rng,
             budget,
-            |m: &EpochMutation<'_>, p: &Path, b: &[u8]| m.write(p, b),
+            &mut WriteHooks::None,
         )
     }
 
@@ -226,7 +226,7 @@ impl ServerStore {
         tenure: u64,
         rng: &mut impl CryptoRngCore,
         budget: &mut EpochStorageBudget,
-        writer: impl FnOnce(&EpochMutation<'_>, &Path, &[u8]) -> Result<(), AppError>,
+        hooks: &mut WriteHooks<'_>,
     ) -> Result<EpochOwnerReceiptState, AppError> {
         // Public Receipt fields are not a validation boundary. Bound variable fields before
         // canonical encoding/signature work, then use the wire decoder's exact schema too.
@@ -242,7 +242,7 @@ impl ServerStore {
             rng,
             budget,
             |journal| journal.prepare(receipt, group, tenure).map_err(invalid),
-            writer,
+            hooks,
         )
     }
 
@@ -263,7 +263,7 @@ impl ServerStore {
             rng,
             budget,
             |journal| journal.mark_published(receipt_hash).map_err(invalid),
-            |m: &EpochMutation<'_>, p: &Path, b: &[u8]| m.write(p, b),
+            &mut WriteHooks::None,
         )
     }
 
@@ -278,21 +278,38 @@ impl ServerStore {
         budget: &mut EpochStorageBudget,
         after_rename: bool,
     ) -> Result<EpochOwnerReceiptState, AppError> {
+        // Either side of the completion replacement. After the rename the record is visible but
+        // its durability is unproven, which is a different repair from never having written.
+        let mut fail_before = |_: WriteTag, _: &Path, _: &[u8]| {
+            Intercept::Fail(AppError::Io("injected completion before write".into()))
+        };
+        let mut fail_after = |_: WriteTag, _: &Path| {
+            AfterIntercept::Fail(AppError::CommittedButNotDurable(
+                "injected completion flush failure".into(),
+            ))
+        };
+        let mut hooks = if after_rename {
+            WriteHooks::Hooked {
+                before: None,
+                before_sync: None,
+                before_unlink: None,
+                after: Some(&mut fail_after),
+            }
+        } else {
+            WriteHooks::Hooked {
+                before: Some(&mut fail_before),
+                before_sync: None,
+                before_unlink: None,
+                after: None,
+            }
+        };
         self.update_epoch_owner_with_writer(
             server,
             &receipt.document,
             rng,
             budget,
             |journal| journal.mark_published(receipt.hash()).map_err(invalid),
-            |_m, path, bytes| {
-                if after_rename {
-                    atomic_write_with_hook_and_sync_for_test(path, bytes, &mut |_m, _| {}, |_| {
-                        Err(std::io::Error::other("injected completion flush failure"))
-                    })
-                } else {
-                    Err(AppError::Io("injected completion before write".into()))
-                }
-            },
+            &mut hooks,
         )
     }
 
@@ -305,7 +322,7 @@ impl ServerStore {
         rng: &mut impl CryptoRngCore,
         budget: &mut EpochStorageBudget,
         apply: impl FnOnce(&mut OwnerReceiptJournal) -> Result<(), AppError>,
-        writer: impl FnOnce(&EpochMutation<'_>, &Path, &[u8]) -> Result<(), AppError>,
+        hooks: &mut WriteHooks<'_>,
     ) -> Result<EpochOwnerReceiptState, AppError> {
         self.update_epoch_owner_state_with_writer(
             server,
@@ -326,7 +343,7 @@ impl ServerStore {
                 }
                 Ok(())
             },
-            writer,
+            hooks,
         )
     }
 
@@ -349,7 +366,7 @@ impl ServerStore {
             tenure,
             rng,
             budget,
-            |m: &EpochMutation<'_>, p: &Path, b: &[u8]| m.write(p, b),
+            &mut WriteHooks::None,
         )
     }
 
@@ -362,7 +379,7 @@ impl ServerStore {
         tenure: u64,
         rng: &mut impl CryptoRngCore,
         budget: &mut EpochStorageBudget,
-        writer: impl FnOnce(&EpochMutation<'_>, &Path, &[u8]) -> Result<(), AppError>,
+        hooks: &mut WriteHooks<'_>,
     ) -> Result<EpochOwnerReceiptState, AppError> {
         self.prepare_owner_pair_with_writer(
             server,
@@ -372,7 +389,7 @@ impl ServerStore {
             tenure,
             rng,
             budget,
-            writer,
+            hooks,
         )
     }
 
@@ -387,7 +404,7 @@ impl ServerStore {
         tenure: u64,
         rng: &mut impl CryptoRngCore,
         budget: &mut EpochStorageBudget,
-        writer: impl FnOnce(&EpochMutation<'_>, &Path, &[u8]) -> Result<(), AppError>,
+        hooks: &mut WriteHooks<'_>,
     ) -> Result<EpochOwnerReceiptState, AppError> {
         self.prepare_owner_pair_with_writer(
             server,
@@ -397,7 +414,7 @@ impl ServerStore {
             tenure,
             rng,
             budget,
-            writer,
+            hooks,
         )
     }
 
@@ -411,7 +428,7 @@ impl ServerStore {
         tenure: u64,
         rng: &mut impl CryptoRngCore,
         budget: &mut EpochStorageBudget,
-        writer: impl FnOnce(&EpochMutation<'_>, &Path, &[u8]) -> Result<(), AppError>,
+        hooks: &mut WriteHooks<'_>,
     ) -> Result<EpochOwnerReceiptState, AppError> {
         self.update_epoch_owner_state_with_writer(
             server,
@@ -426,7 +443,7 @@ impl ServerStore {
                 state.decision_close = Some((receipt.hash(), close.clone()));
                 Ok(())
             },
-            writer,
+            hooks,
         )
     }
 
@@ -437,7 +454,7 @@ impl ServerStore {
         rng: &mut impl CryptoRngCore,
         budget: &mut EpochStorageBudget,
         apply: impl FnOnce(&mut EpochOwnerReceiptState) -> Result<(), AppError>,
-        writer: impl FnOnce(&EpochMutation<'_>, &Path, &[u8]) -> Result<(), AppError>,
+        hooks: &mut WriteHooks<'_>,
     ) -> Result<EpochOwnerReceiptState, AppError> {
         let scope = scope_bytes(server, document)?;
         let storage_scope = StorageScope::new(server, &document.server_id).map_err(invalid)?;
@@ -478,7 +495,9 @@ impl ServerStore {
         let path = self.epoch_owner_path(&scope);
         let framed = frame(&sealed);
         let mutation = self.epoch_mutation_guard();
-        writer(&mutation, &path, &framed)?;
+        let framed = hooks.before(WriteTag::Journal, &path, &framed)?;
+        mutation.write(&path, &framed)?;
+        hooks.after_write(WriteTag::Journal, &path)?;
         reservation.commit();
         Ok(state)
     }
@@ -708,7 +727,7 @@ mod tests {
                         state.decision_close = Some((receipt.hash(), close.clone()));
                         Ok(())
                     },
-                    |m: &EpochMutation<'_>, p: &Path, b: &[u8]| m.write(p, b),
+                    &mut WriteHooks::None,
                 )
                 .unwrap();
             // Repeating completion of epoch zero while epoch one is pending must preserve the
@@ -826,7 +845,7 @@ mod tests {
                 group.epoch(),
                 &mut rng(),
                 &mut budget,
-                |_m, _, _| panic!("stale prepare wrote")
+                &mut WriteHooks::MustNotWrite("stale prepare wrote")
             )
             .is_err());
         let retry = store
@@ -857,10 +876,17 @@ mod tests {
             if completing {
                 prepare(&mut store, signed.clone(), &group, &mut budget);
             }
-            let writer = |_m: &EpochMutation<'_>, path: &Path, bytes: &[u8]| {
-                atomic_write_with_hook_and_sync_for_test(path, bytes, &mut |_, _| {}, |_| {
-                    Err(std::io::Error::other("flush failure"))
-                })
+            // The replacement itself completes; only its durability barrier fails. That is what
+            // the old seam modelled by handing in a writer whose flush returned an error, and
+            // the after decision is where the same failure now lands: the bytes are in place.
+            let mut flush_failure = |_: WriteTag, _: &Path| {
+                AfterIntercept::Fail(AppError::CommittedButNotDurable("flush failure".into()))
+            };
+            let mut hooks = WriteHooks::Hooked {
+                before: None,
+                before_sync: None,
+                before_unlink: None,
+                after: Some(&mut flush_failure),
             };
             let result = if completing {
                 store.update_epoch_owner_with_writer(
@@ -869,7 +895,7 @@ mod tests {
                     &mut rng(),
                     &mut budget,
                     |j| j.mark_published(signed.hash()).map_err(invalid),
-                    writer,
+                    &mut hooks,
                 )
             } else {
                 store.prepare_epoch_owner_with_writer(
@@ -879,7 +905,7 @@ mod tests {
                     group.epoch(),
                     &mut rng(),
                     &mut budget,
-                    writer,
+                    &mut hooks,
                 )
             };
             assert!(matches!(result, Err(AppError::CommittedButNotDurable(_))));
@@ -934,12 +960,20 @@ mod tests {
                     &mut rng(),
                     &mut budget,
                     |j| j.mark_published(signed.hash()).map_err(invalid),
-                    |_, _, bytes| {
-                        fs::write(&orphan, bytes).unwrap();
-                        if panic {
-                            panic!("injected after temporary write");
-                        }
-                        Err(AppError::Io("injected before rename".into()))
+                    // Plant the temporary sibling an interrupted write would have left, then
+                    // stop before the rename. Planting it is fixture work: the record itself
+                    // is never created on this path.
+                    &mut WriteHooks::Hooked {
+                        before: Some(&mut |_: WriteTag, _: &Path, bytes: &[u8]| {
+                            fs::write(&orphan, bytes).unwrap();
+                            if panic {
+                                panic!("injected after temporary write");
+                            }
+                            Intercept::Fail(AppError::Io("injected before rename".into()))
+                        }),
+                        before_sync: None,
+                        before_unlink: None,
+                        after: None,
                     },
                 )
             }));
@@ -1047,7 +1081,7 @@ mod tests {
             group.epoch(),
             &mut rng(),
             &mut budget,
-            |_, _, _| panic!("over-cap write"),
+            &mut WriteHooks::MustNotWrite("over-cap write"),
         );
         assert!(result.is_err());
         assert!(!budget.requires_reconciliation());
@@ -1067,7 +1101,7 @@ mod tests {
                 group.epoch(),
                 &mut rng(),
                 &mut budget,
-                |_, _, _| panic!("unauthorized write")
+                &mut WriteHooks::MustNotWrite("unauthorized write")
             )
             .is_err());
         let mut malformed = receipt(&owner, &group, &doc, 0);
@@ -1159,7 +1193,7 @@ mod tests {
                 alice_group.epoch(),
                 &mut rng(),
                 &mut budget,
-                |_, _, _| panic!("invalid adoption wrote")
+                &mut WriteHooks::MustNotWrite("invalid adoption wrote")
             )
             .is_err());
         assert_eq!(fs::read(&path).unwrap(), before);
@@ -1187,7 +1221,7 @@ mod tests {
             alice_group.epoch(),
             &mut rng(),
             &mut budget,
-            |_, _, _| Err(AppError::Io("before write".into())),
+            &mut WriteHooks::fail_before_write(FailError::Io("before write")),
         );
         assert!(failure.is_err());
         assert_eq!(
@@ -1266,7 +1300,7 @@ mod tests {
                 group.epoch(),
                 &mut rng(),
                 &mut budget,
-                |_, _, _| panic!("noncanonical write")
+                &mut WriteHooks::MustNotWrite("noncanonical write")
             )
             .is_err());
         assert_eq!(

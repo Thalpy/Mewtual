@@ -53,8 +53,7 @@ impl ServerStore {
             clock,
             rng,
             budget,
-            &mut |m: &EpochMutation<'_>, _, path: &Path, bytes: &[u8]| m.write(path, bytes),
-            &mut |m, _, path, bytes| m.sync_registry(path, bytes),
+            &mut WriteHooks::None,
         )
     }
 
@@ -71,8 +70,7 @@ impl ServerStore {
         clock: &dyn Clock,
         rng: &mut impl CryptoRngCore,
         budget: &mut EpochStorageBudget,
-        writer: &mut impl FnMut(&EpochMutation<'_>, WriteTag, &Path, &[u8]) -> Result<(), AppError>,
-        sync: &mut impl FnMut(&EpochMutation<'_>, WriteTag, &Path, u64) -> Result<(), AppError>,
+        hooks: &mut WriteHooks<'_>,
     ) -> Result<(RegistryAdoptionOutcome, EpochRegistryState), AppError> {
         if group.member_signature_key(&device.device_id()).as_deref()
             != Some(device.public_key_bytes().as_slice())
@@ -114,8 +112,8 @@ impl ServerStore {
                     }
                 }
             },
-            |m, path, bytes| writer(m, WriteTag::Source, path, bytes),
-            |m, path, bytes| sync(m, WriteTag::Source, path, bytes),
+            WriteStep::new(WriteTag::Source),
+            hooks,
         )?;
         if outcome != RegistryAdoptionOutcome::AwaitingSeed {
             return Ok((outcome, state));
@@ -158,13 +156,7 @@ impl ServerStore {
         // acknowledgement that may never come.
         if self
             .advance_due_epoch_recovery_with_writer(
-                server,
-                &document,
-                pending,
-                clock,
-                rng,
-                budget,
-                |m, path, bytes| writer(m, WriteTag::Recovery, path, bytes),
+                server, &document, pending, clock, rng, budget, hooks,
             )?
             .is_some()
         {
@@ -178,7 +170,7 @@ impl ServerStore {
                 clock,
                 rng,
                 budget,
-                |m, path, bytes| writer(m, WriteTag::Recovery, path, bytes),
+                hooks,
             )?;
             if saved.state.eviction_pending()?.is_some() {
                 return Ok((RegistryAdoptionOutcome::RecoveryPending, state));
@@ -201,8 +193,8 @@ impl ServerStore {
                     .map_err(invalid)?;
                 Ok(RegistryAdoptionOutcome::Installed)
             },
-            |m, path, bytes| writer(m, WriteTag::Successor, path, bytes),
-            |m, path, bytes| sync(m, WriteTag::Successor, path, bytes),
+            WriteStep::new(WriteTag::Successor),
+            hooks,
         )
     }
 }

@@ -298,7 +298,7 @@ impl ServerStore {
             clock,
             rng,
             budget,
-            |m: &EpochMutation<'_>, p: &Path, b: &[u8]| m.write(p, b),
+            &mut WriteHooks::None,
         )
     }
 
@@ -313,7 +313,7 @@ impl ServerStore {
         clock: &dyn Clock,
         rng: &mut impl CryptoRngCore,
         budget: &mut EpochStorageBudget,
-        writer: impl FnOnce(&EpochMutation<'_>, &Path, &[u8]) -> Result<(), AppError>,
+        hooks: &mut WriteHooks<'_>,
     ) -> Result<EpochRecoveryUpdate, AppError> {
         let scope = scope_bytes(server, document)?;
         let storage_scope = StorageScope::new(server, &document.server_id).map_err(invalid)?;
@@ -366,7 +366,9 @@ impl ServerStore {
         let path = self.epoch_recovery_path(&scope);
         let framed = frame(&sealed);
         let mutation = self.epoch_mutation_guard();
-        writer(&mutation, &path, &framed)?;
+        let framed = hooks.before(WriteTag::Recovery, &path, &framed)?;
+        mutation.write(&path, &framed)?;
+        hooks.after_write(WriteTag::Recovery, &path)?;
         reservation.commit();
         Ok(EpochRecoveryUpdate { transition, state })
     }
@@ -389,7 +391,7 @@ impl ServerStore {
         clock: &dyn Clock,
         rng: &mut impl CryptoRngCore,
         budget: &mut EpochStorageBudget,
-        writer: impl FnOnce(&EpochMutation<'_>, &Path, &[u8]) -> Result<(), AppError>,
+        hooks: &mut WriteHooks<'_>,
     ) -> Result<Option<RecoveryTransition>, AppError> {
         let Some(warning) = pending else {
             return Ok(None);
@@ -407,7 +409,7 @@ impl ServerStore {
             clock,
             rng,
             budget,
-            writer,
+            hooks,
         )?;
         saved.state.eviction_pending()
     }
@@ -446,7 +448,7 @@ impl ServerStore {
             action,
             clock,
             rng,
-            |m: &EpochMutation<'_>, p: &Path, b: &[u8]| m.write(p, b),
+            &mut WriteHooks::None,
         )
     }
 
@@ -460,7 +462,7 @@ impl ServerStore {
         action: EpochRecoveryAction,
         clock: &dyn Clock,
         rng: &mut impl CryptoRngCore,
-        writer: impl FnOnce(&EpochMutation<'_>, &Path, &[u8]) -> Result<(), AppError>,
+        hooks: &mut WriteHooks<'_>,
     ) -> Result<EpochRecoveryUpdate, AppError> {
         let scope = scope_bytes(server, document)?;
         let mut state = self.read_epoch_recovery(&scope, document)?;
@@ -474,7 +476,9 @@ impl ServerStore {
         let path = self.epoch_recovery_path(&scope);
         let framed = frame(&sealed);
         let mutation = self.epoch_mutation_guard();
-        writer(&mutation, &path, &framed)?;
+        let framed = hooks.before(WriteTag::Recovery, &path, &framed)?;
+        mutation.write(&path, &framed)?;
+        hooks.after_write(WriteTag::Recovery, &path)?;
         Ok(EpochRecoveryUpdate { transition, state })
     }
 
@@ -749,9 +753,6 @@ mod tests {
         let mut store = open(root.path());
         stage(&mut store, 1, 10);
         stage(&mut store, 2, 20);
-        let fail = |_m: &EpochMutation<'_>, _: &Path, _: &[u8]| {
-            Err(AppError::Io("injected full disk".into()))
-        };
         assert!(store
             .update_epoch_recovery_with_writer(
                 SERVER,
@@ -759,7 +760,7 @@ mod tests {
                 EpochRecoveryAction::Stage(snapshot(3)),
                 &ManualClock::new(30),
                 &mut ChaCha20Rng::seed_from_u64(0),
-                fail
+                &mut WriteHooks::fail_before_write(FailError::Io("injected full disk"))
             )
             .is_err());
         drop(store);
@@ -778,7 +779,7 @@ mod tests {
                     action,
                     &ManualClock::new(30 + RECOVERY_GRACE_MS),
                     &mut ChaCha20Rng::seed_from_u64(0),
-                    fail
+                    &mut WriteHooks::fail_before_write(FailError::Io("injected full disk"))
                 )
                 .is_err());
             drop(store);
@@ -815,11 +816,6 @@ mod tests {
                 1 => acknowledgement(warning),
                 _ => EpochRecoveryAction::AdvanceTime,
             };
-            let writer = |_m: &EpochMutation<'_>, path: &Path, bytes: &[u8]| {
-                atomic_write_with_hook_and_sync_for_test(path, bytes, &mut |_, _| {}, |_| {
-                    Err(std::io::Error::other("injected directory flush failure"))
-                })
-            };
             assert!(matches!(
                 store.update_epoch_recovery_with_writer(
                     SERVER,
@@ -831,7 +827,10 @@ mod tests {
                         30 + RECOVERY_GRACE_MS
                     }),
                     &mut ChaCha20Rng::seed_from_u64(0),
-                    writer
+                    // Renamed into place, then the directory flush fails: visible, not durable.
+                    &mut WriteHooks::fail_after_write(FailError::NotDurable(
+                        "injected directory flush failure"
+                    ))
                 ),
                 Err(AppError::CommittedButNotDurable(_))
             ));
@@ -845,9 +844,14 @@ mod tests {
                     action(),
                     &ManualClock::new(30 + RECOVERY_GRACE_MS),
                     &mut ChaCha20Rng::seed_from_u64(1),
-                    |_, path, bytes| {
-                        writes += 1;
-                        write_for_test(path, bytes)
+                    &mut WriteHooks::Hooked {
+                        before: Some(&mut |_: WriteTag, _: &Path, _: &[u8]| {
+                            writes += 1;
+                            Intercept::Continue
+                        }),
+                        before_sync: None,
+                        before_unlink: None,
+                        after: None,
                     },
                 )
                 .unwrap();
@@ -1205,7 +1209,6 @@ mod tests {
             [filler],
         )
         .unwrap();
-        let mut writes = 0;
         let result = store.update_epoch_recovery_accounted_with_writer(
             SERVER,
             &document(),
@@ -1213,13 +1216,9 @@ mod tests {
             &ManualClock::new(10),
             &mut ChaCha20Rng::seed_from_u64(10),
             &mut budget,
-            |_, _, _| {
-                writes += 1;
-                Ok(())
-            },
+            &mut WriteHooks::MustNotWrite("a refusal at the storage limit reached the writer"),
         );
         assert!(result.unwrap_err().to_string().contains("storage limit"));
-        assert_eq!(writes, 0);
         assert!(!budget.requires_reconciliation());
         assert!(store
             .epoch_recovery_inventory_record(SERVER, &document())
@@ -1241,22 +1240,14 @@ mod tests {
                 &ManualClock::new(10),
                 &mut ChaCha20Rng::seed_from_u64(10),
                 &mut budget,
-                |_, path, bytes| {
-                    if after_rename {
-                        atomic_write_with_hook_and_sync_for_test(
-                            path,
-                            bytes,
-                            &mut |_, _| {},
-                            |_| Err(std::io::Error::other("injected flush failure")),
-                        )
-                    } else {
-                        Err(AppError::Io("injected write failure".into()))
-                    }
+                &mut if after_rename {
+                    WriteHooks::fail_after_write(FailError::NotDurable("injected flush failure"))
+                } else {
+                    WriteHooks::fail_before_write(FailError::Io("injected write failure"))
                 },
             );
             assert!(result.is_err());
             assert!(budget.requires_reconciliation());
-            let mut retried_writes = 0;
             assert!(store
                 .update_epoch_recovery_accounted_with_writer(
                     SERVER,
@@ -1265,13 +1256,11 @@ mod tests {
                     &ManualClock::new(10),
                     &mut ChaCha20Rng::seed_from_u64(10),
                     &mut budget,
-                    |_, _, _| {
-                        retried_writes += 1;
-                        Ok(())
-                    }
+                    &mut WriteHooks::MustNotWrite(
+                        "a retry on an unreconciled budget reached the writer"
+                    )
                 )
                 .is_err());
-            assert_eq!(retried_writes, 0);
             let record = store
                 .epoch_recovery_inventory_record(SERVER, &document())
                 .unwrap();
@@ -1315,7 +1304,6 @@ mod tests {
             [wrong],
         )
         .unwrap();
-        let mut writes = 0;
         assert!(store
             .update_epoch_recovery_accounted_with_writer(
                 SERVER,
@@ -1324,13 +1312,9 @@ mod tests {
                 &ManualClock::new(40),
                 &mut ChaCha20Rng::seed_from_u64(10),
                 &mut budget,
-                |_, _, _| {
-                    writes += 1;
-                    Ok(())
-                }
+                &mut WriteHooks::MustNotWrite("a wrong-pool inventory reached the writer")
             )
             .is_err());
-        assert_eq!(writes, 0);
         assert!(budget.requires_reconciliation());
         let mut budget = inventory_budget(&store);
         let path = store.epoch_recovery_path(&scope_bytes(SERVER, &document()).unwrap());

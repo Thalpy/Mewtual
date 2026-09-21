@@ -233,8 +233,16 @@ fn studio_source_reuse_failed_write_or_flush_discards_owned_graph() {
             &op,
             &mut rng(),
             &mut b,
-            |_, _, _| Err(invalid("injected write failure")),
-            |_, _, _| Err(invalid("injected flush failure")),
+            &mut WriteHooks::Hooked {
+                before: Some(&mut |_: WriteTag, _: &Path, _: &[u8]| {
+                    Intercept::Fail(invalid("injected write failure"))
+                }),
+                before_sync: Some(&mut |_: WriteTag, _: &Path, _: u64| {
+                    AfterIntercept::Fail(invalid("injected flush failure"))
+                }),
+                before_unlink: None,
+                after: None,
+            },
         );
         assert!(result.unwrap_err().to_string().contains(if flush {
             "flush failure"

@@ -55,8 +55,8 @@ fn eligible(f: &Fixture, store: &mut ServerStore) {
             WritePurpose::Ordinary,
             &mut rng(),
             &mut b.storage,
-            |m: &EpochMutation<'_>, p: &Path, b: &[u8]| m.write(p, b),
-            |m: &EpochMutation<'_>, p: &Path, b: u64| m.sync_studio(p, b),
+            WriteStep::new(WriteTag::Source),
+            &mut WriteHooks::None,
         )
         .unwrap();
     store.retain_studio_source(&f.group, &f.device, state);
@@ -82,8 +82,8 @@ fn warm(f: &Fixture, store: &mut ServerStore) {
             WritePurpose::Settlement,
             &mut rng(),
             &mut b.storage,
-            |m: &EpochMutation<'_>, p: &Path, b: &[u8]| m.write(p, b),
-            |m: &EpochMutation<'_>, p: &Path, b: u64| m.sync_studio(p, b),
+            WriteStep::new(WriteTag::Source),
+            &mut WriteHooks::None,
             Some(version),
         )
         .unwrap();
@@ -110,12 +110,6 @@ fn rotate_at(
             &mut b,
         )
         .unwrap()
-}
-fn sync(m: &EpochMutation<'_>, step: WriteTag, p: &Path, bytes: u64) -> Result<(), AppError> {
-    match step {
-        WriteTag::Intents => crate::store::epoch_intents::sync_intent(m, p, bytes),
-        _ => sync_studio(m, p, bytes),
-    }
 }
 
 #[test]
@@ -225,8 +219,8 @@ fn studio_rotation_store_every_write_crash_resumes_exact_decision_and_preserves_
                         WritePurpose::Ordinary,
                         &mut rng(),
                         &mut initial.storage,
-                        |m: &EpochMutation<'_>, p: &Path, b: &[u8]| m.write(p, b),
-                        |m: &EpochMutation<'_>, p: &Path, b: u64| m.sync_studio(p, b),
+                        WriteStep::new(WriteTag::Source),
+                        &mut WriteHooks::None,
                     )
                     .unwrap();
                 store.retain_studio_source(&f.group, &f.device, state);
@@ -244,13 +238,13 @@ fn studio_rotation_store_every_write_crash_resumes_exact_decision_and_preserves_
                         0,
                         &mut rng(),
                         &mut b.storage,
-                        |m: &EpochMutation<'_>, p: &Path, b: &[u8]| m.write(p, b),
+                        &mut WriteHooks::None,
                     )
                     .unwrap();
                 f.edit(&mut store, &mut b, f.title());
                 warm(&f, &mut store);
                 let mut b = budget(&mut store, &f);
-                let mut hit = false;
+                let hit = std::cell::Cell::new(false);
                 let result = store.rotate_studio_owner_with_io(
                     SERVER,
                     &f.group,
@@ -260,20 +254,31 @@ fn studio_rotation_store_every_write_crash_resumes_exact_decision_and_preserves_
                     &ManualClock::new(1000),
                     &mut rng(),
                     &mut b,
-                    &mut |_, step, p, bytes| {
-                        if step == boundary {
-                            hit = true;
-                            if after {
-                                write_for_test(p, bytes)?;
+                    &mut WriteHooks::Hooked {
+                        before: Some(&mut |step: WriteTag, _: &Path, _: &[u8]| {
+                            if step == boundary && !after {
+                                hit.set(true);
+                                return Intercept::Fail(AppError::Io(
+                                    "injected rotation write failure".into(),
+                                ));
                             }
-                            return Err(AppError::Io("injected rotation write failure".into()));
-                        }
-                        write_for_test(p, bytes)
+                            Intercept::Continue
+                        }),
+                        before_sync: None,
+                        before_unlink: None,
+                        after: Some(&mut |step: WriteTag, _: &Path| {
+                            if step == boundary && after {
+                                hit.set(true);
+                                return AfterIntercept::Fail(AppError::Io(
+                                    "injected rotation write failure".into(),
+                                ));
+                            }
+                            AfterIntercept::Continue
+                        }),
                     },
-                    &mut sync,
                 );
                 assert!(result.is_err());
-                assert!(hit, "boundary {boundary:?}");
+                assert!(hit.get(), "boundary {boundary:?}");
                 assert!(b.requires_reconciliation());
                 drop(store);
                 let mut store = open(root.path());
@@ -369,10 +374,16 @@ fn studio_rotation_store_source_flush_failure_precedes_any_journal_or_retirement
             &ManualClock::new(1000),
             &mut rng(),
             &mut b,
-            &mut |_, _, _, _| panic!("no write before source flush"),
-            &mut |_, step, _, _| {
-                assert_eq!(step, WriteTag::Source);
-                Err(AppError::Io("flush".into()))
+            &mut WriteHooks::Hooked {
+                before: Some(&mut |_: WriteTag, _: &Path, _: &[u8]| {
+                    panic!("no write before source flush")
+                }),
+                before_sync: Some(&mut |step: WriteTag, _: &Path, _: u64| {
+                    assert_eq!(step, WriteTag::Source);
+                    AfterIntercept::Fail(AppError::Io("flush".into()))
+                }),
+                before_unlink: None,
+                after: None,
             }
         )
         .is_err());
@@ -653,12 +664,15 @@ fn studio_rotation_store_unwind_after_successor_write_poisoned_budget_reopens_sa
             &ManualClock::new(1000),
             &mut rng(),
             &mut b,
-            &mut |_, step, p, bytes| {
-                write_for_test(p, bytes)?;
-                assert_ne!(step, WriteTag::Successor, "injected post-write unwind");
-                Ok(())
+            &mut WriteHooks::Hooked {
+                before: None,
+                before_sync: None,
+                before_unlink: None,
+                after: Some(&mut |step: WriteTag, _: &Path| {
+                    assert_ne!(step, WriteTag::Successor, "injected post-write unwind");
+                    AfterIntercept::Continue
+                }),
             },
-            &mut sync,
         )
     }));
     assert!(result.is_err());

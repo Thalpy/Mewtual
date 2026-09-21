@@ -16,14 +16,18 @@ pub(super) fn interrupt(f: &Fixture, store: &mut ServerStore, basis: [u8; 32], s
             Some(0),
             &mut rng(),
             &mut b,
-            &mut |_m, at, p, bytes| {
-                if at == step {
-                    hit = true;
-                    return Err(invalid("interrupted transfer"));
-                }
-                write_for_test(p, bytes)
+            &mut WriteHooks::Hooked {
+                before: Some(&mut |at: WriteTag, _: &Path, _: &[u8]| {
+                    if at == step {
+                        hit = true;
+                        return Intercept::Fail(invalid("interrupted transfer"));
+                    }
+                    Intercept::Continue
+                }),
+                before_sync: None,
+                before_unlink: None,
+                after: None,
             },
-            &mut flush,
         )
         .unwrap_err();
     assert!(hit && error.to_string().contains("interrupted transfer"));
@@ -96,11 +100,18 @@ fn studio_overlay_handoff_publication_and_shared_replacement_fences_survive_rest
         WritePurpose::Ordinary,
         &mut rng(),
         &mut b.storage,
-        |_m, p, bytes| {
-            wrote = true;
-            write_for_test(p, bytes)
+        WriteStep::new(WriteTag::Source),
+        // Records whether a replacement was even attempted; the refusal under test happens
+        // before this point, so it must not fire.
+        &mut WriteHooks::Hooked {
+            before: Some(&mut |_: WriteTag, _: &Path, _: &[u8]| {
+                wrote = true;
+                Intercept::Continue
+            }),
+            before_sync: None,
+            before_unlink: None,
+            after: None,
         },
-        |m: &EpochMutation<'_>, p: &Path, b: u64| m.sync_studio(p, b),
     );
     assert!(
         matches!(result,Err(AppError::Invalid(ref s)) if s.contains("prepared handoff blocks source replacement")),
@@ -351,7 +362,7 @@ fn studio_overlay_handoff_frozen_owner_takeover_preserves_completed_local_work()
             0,
             &mut rng(),
             &mut b.storage,
-            |m: &EpochMutation<'_>, p: &Path, b: &[u8]| m.write(p, b),
+            &mut WriteHooks::None,
         )
         .unwrap();
     let (_, sealed) = store

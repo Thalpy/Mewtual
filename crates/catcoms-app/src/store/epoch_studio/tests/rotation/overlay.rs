@@ -1,5 +1,4 @@
 use super::*;
-use crate::store::epoch_intents::sync_intent;
 use catcoms_replication::studio::{StudioClosingOverlayBasis, StudioLocalDraft};
 use catcoms_replication::CloseRecord;
 use std::collections::{BTreeMap, BTreeSet};
@@ -125,8 +124,7 @@ fn install(f: &Fixture, store: &mut ServerStore, close: &CloseRecord) -> EpochSt
             &mut rng(),
             &mut b.storage,
             &mut b.intents,
-            |m: &EpochMutation<'_>, p: &Path, b: &[u8]| m.write(p, b),
-            |m: &EpochMutation<'_>, p: &Path, b: u64| m.sync_intent(p, b),
+            &mut WriteHooks::None,
         )
         .unwrap();
     let observed = state.source.as_ref().map(SourceVersion::record);
@@ -141,8 +139,8 @@ fn install(f: &Fixture, store: &mut ServerStore, close: &CloseRecord) -> EpochSt
             WritePurpose::Settlement,
             &mut rng(),
             &mut b.storage,
-            |m: &EpochMutation<'_>, p: &Path, b: &[u8]| m.write(p, b),
-            |m: &EpochMutation<'_>, p: &Path, b: u64| m.sync_studio(p, b),
+            WriteStep::new(WriteTag::Source),
+            &mut WriteHooks::None,
         )
         .unwrap()
 }
@@ -287,8 +285,7 @@ fn studio_overlay_store_uncertain_writes_and_changed_source_retry_at_physical_ca
                 123,
                 &mut rng(),
                 &mut b,
-                |_m, _, _| Err(AppError::Io("before overlay write".into())),
-                |m: &EpochMutation<'_>, p: &Path, b: u64| m.sync_intent(p, b),
+                &mut WriteHooks::fail_before_write(FailError::Io("before overlay write")),
             )
             .unwrap_err();
         assert!(error.to_string().contains("before overlay write"));
@@ -314,11 +311,7 @@ fn studio_overlay_store_uncertain_writes_and_changed_source_retry_at_physical_ca
                 123,
                 &mut rng(),
                 &mut b,
-                |_m, p, bytes| {
-                    write_for_test(p, bytes)?;
-                    Err(AppError::Io("after overlay rename".into()))
-                },
-                |m: &EpochMutation<'_>, p: &Path, b: u64| m.sync_intent(p, b),
+                &mut WriteHooks::fail_after_write(FailError::Io("after overlay rename")),
             )
             .unwrap_err();
         assert!(error.to_string().contains("after overlay rename"));
@@ -364,8 +357,16 @@ fn studio_overlay_store_uncertain_writes_and_changed_source_retry_at_physical_ca
                 999,
                 &mut rng(),
                 &mut b,
-                |_m, _, _| panic!("exact retry allocated replacement"),
-                |_m, _, _| Err(AppError::Io("retry sync failed".into())),
+                &mut WriteHooks::Hooked {
+                    before: Some(&mut |_: WriteTag, _: &Path, _: &[u8]| {
+                        panic!("exact retry allocated replacement")
+                    }),
+                    before_sync: Some(&mut |_: WriteTag, _: &Path, _: u64| {
+                        AfterIntercept::Fail(AppError::Io("retry sync failed".into()))
+                    }),
+                    before_unlink: None,
+                    after: None,
+                },
             )
             .unwrap_err();
         assert!(error.to_string().contains("retry sync failed"));
@@ -384,8 +385,7 @@ fn studio_overlay_store_uncertain_writes_and_changed_source_retry_at_physical_ca
                 999,
                 &mut rng(),
                 &mut b,
-                |_m, _, _| panic!("exact retry allocated replacement"),
-                |m: &EpochMutation<'_>, p: &Path, b: u64| m.sync_intent(p, b),
+                &mut WriteHooks::MustNotWrite("exact retry allocated replacement"),
             )
             .unwrap();
         assert_eq!(local(retry).projection(), expected.projection());
@@ -435,10 +435,10 @@ fn studio_overlay_store_failed_ordinary_intent_is_not_acceptance_and_ordinary_ap
                 100,
                 &mut rng(),
                 &mut b,
-                |m: &EpochMutation<'_>, p: &Path, b: &[u8]| m.write(p, b),
-                |m: &EpochMutation<'_>, p: &Path, b: u64| m.sync_intent(p, b),
-                |_m, _, _| Err(AppError::Io("ordinary source save failed".into())),
-                |m: &EpochMutation<'_>, p: &Path, b: u64| m.sync_studio(p, b),
+                WriteStep::new(WriteTag::Intents),
+                // Only the source half fails; the intent half must still be written first.
+                &mut WriteHooks::fail_before_write(FailError::Io("ordinary source save failed"))
+                    .at(WriteTag::Epoch),
             )
             .unwrap_err();
         assert!(error.to_string().contains("ordinary source save failed"));
@@ -1090,6 +1090,26 @@ fn studio_overlay_uncertain_acceptance_still_protects_its_pixels() {
             7,
         );
         let mut b = budget(&mut store, &f);
+        // Before the rename, leaving behind the temporary sibling a real interrupted write
+        // would have left. Planting it is fixture work, not the write: the record itself is
+        // never created on this path.
+        let mut plant_sibling = |_: WriteTag, path: &Path, bytes: &[u8]| {
+            let mut staged = path.to_path_buf();
+            staged.set_extension("intents.mewtual-stage-1-1.tmp");
+            std::fs::write(&staged, bytes).unwrap();
+            Intercept::Fail(AppError::Io("interrupted".into()))
+        };
+        let mut hooks = if after_rename {
+            // The record really lands; only the caller's result is lost.
+            WriteHooks::fail_after_write(FailError::Io("interrupted"))
+        } else {
+            WriteHooks::Hooked {
+                before: Some(&mut plant_sibling),
+                before_sync: None,
+                before_unlink: None,
+                after: None,
+            }
+        };
         let failed = store.save_studio_closing_overlay_with_io(
             SERVER,
             &f.group,
@@ -1102,19 +1122,7 @@ fn studio_overlay_uncertain_acceptance_still_protects_its_pixels() {
             300,
             &mut rng(),
             &mut b,
-            |_m, path, bytes| {
-                if after_rename {
-                    // The record really lands; only the caller's result is lost.
-                    write_for_test(path, bytes)?;
-                } else {
-                    // A failure that leaves a temporary sibling behind.
-                    let mut staged = path.to_path_buf();
-                    staged.set_extension("intents.mewtual-stage-1-1.tmp");
-                    std::fs::write(&staged, bytes).unwrap();
-                }
-                Err(crate::AppError::Io("interrupted".into()))
-            },
-            |m: &EpochMutation<'_>, p: &Path, b: u64| m.sync_intent(p, b),
+            &mut hooks,
         );
         assert!(failed.is_err(), "the injected writer must fail the save");
 
@@ -1280,8 +1288,7 @@ fn studio_overlay_detached_acceptance_survives_a_complete_scan_between_capture_a
             plan,
             &mut rng(),
             &mut b,
-            |m: &EpochMutation<'_>, p: &Path, b: &[u8]| m.write(p, b),
-            |m: &EpochMutation<'_>, p: &Path, b: u64| m.sync_intent(p, b),
+            &mut WriteHooks::None,
         )
         .unwrap();
     assert_eq!(draft.accepted(), 1);
@@ -1339,8 +1346,7 @@ fn studio_overlay_detached_plan_is_refused_when_the_record_changed() {
         plan,
         &mut rng(),
         &mut b,
-        |m: &EpochMutation<'_>, p: &Path, b: &[u8]| m.write(p, b),
-        |m: &EpochMutation<'_>, p: &Path, b: u64| m.sync_intent(p, b),
+        &mut WriteHooks::None,
     );
     assert!(
         refused.is_err(),
@@ -1465,8 +1471,7 @@ fn studio_overlay_new_acceptance_requires_pixels_at_admission_and_again_before_t
         plan,
         &mut rng(),
         &mut b,
-        |m: &EpochMutation<'_>, p: &Path, b: &[u8]| m.write(p, b),
-        |m: &EpochMutation<'_>, p: &Path, b: u64| m.sync_intent(p, b),
+        &mut WriteHooks::None,
     );
     match refused {
         Err(error) => assert!(
@@ -1598,8 +1603,7 @@ fn admitted_media_cannot_be_paired_with_another_operation() {
             plan,
             &mut rng(),
             &mut budget,
-            |m: &EpochMutation<'_>, p: &Path, b: &[u8]| m.write(p, b),
-            |m: &EpochMutation<'_>, p: &Path, b: u64| m.sync_intent(p, b),
+            &mut WriteHooks::None,
         )
         .unwrap();
     assert_eq!(draft.accepted(), 1);

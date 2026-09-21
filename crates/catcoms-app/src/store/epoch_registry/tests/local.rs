@@ -1,6 +1,5 @@
 //! The local publication boundary is two durable records, not just a marker in memory.
 use super::*;
-use crate::store::epoch_intents::sync_intent;
 use catcoms_replication::SignedOp;
 
 fn domain(f: &Fixture, n: u8) -> DomainOp {
@@ -125,14 +124,33 @@ fn registry_local_each_write_failure_retains_only_safe_state_and_retry_recovers(
             let mut store = open(root.path());
             let (mut budget, mut intents) = budgets(&mut store, &f);
             let required_intent = intent_path(&store, &f);
-            let fail = |_m: &EpochMutation<'_>, path: &Path, bytes: &[u8]| {
-                if mode == 1 {
-                    write_for_test(path, bytes)?;
+            // Which half of the transaction fails, and on which side of its write. Mode 1 used
+            // to write the record itself and then return an error; the transaction now performs
+            // that write and the failure moves to the after decision.
+            let wanted = if stage == 0 {
+                WriteTag::Intents
+            } else {
+                WriteTag::Epoch
+            };
+            let mut before = |tag: WriteTag, _: &Path, _: &[u8]| {
+                if tag == WriteTag::Epoch {
+                    assert!(required_intent.exists(), "intent first");
+                }
+                if tag != wanted || mode == 1 {
+                    return Intercept::Continue;
                 }
                 if mode == 2 {
                     panic!("injected writer panic");
                 }
-                Err(AppError::Io("injected failed persistence".into()))
+                Intercept::Fail(AppError::Io("injected failed persistence".into()))
+            };
+            let mut after = |tag: WriteTag, _: &Path| {
+                if tag == wanted && mode == 1 {
+                    return AfterIntercept::Fail(AppError::Io(
+                        "injected failed persistence".into(),
+                    ));
+                }
+                AfterIntercept::Continue
             };
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 store.edit_registry_epoch_with_io(
@@ -145,23 +163,13 @@ fn registry_local_each_write_failure_retains_only_safe_state_and_retry_recovers(
                     &mut rng(),
                     &mut budget,
                     &mut intents,
-                    |m, path, bytes| {
-                        if stage == 0 {
-                            fail(m, path, bytes)
-                        } else {
-                            write_for_test(path, bytes)
-                        }
+                    WriteStep::new(WriteTag::Intents),
+                    &mut WriteHooks::Hooked {
+                        before: Some(&mut before),
+                        before_sync: None,
+                        before_unlink: None,
+                        after: Some(&mut after),
                     },
-                    |m: &EpochMutation<'_>, p: &Path, b: u64| m.sync_intent(p, b),
-                    |m, path, bytes| {
-                        assert!(required_intent.exists(), "intent first");
-                        if stage == 1 {
-                            fail(m, path, bytes)
-                        } else {
-                            write_for_test(path, bytes)
-                        }
-                    },
-                    |m: &EpochMutation<'_>, p: &Path, b: u64| m.sync_registry(p, b),
                 )
             }));
             assert!(result.is_err() || result.unwrap().is_err());
@@ -195,11 +203,19 @@ fn registry_local_duplicate_flush_failure_cannot_release_ciphertext() {
             let (first, _) = edit(&mut store, &f, 1, &mut budget, &mut intents);
             let saved = fs::read(f.path(&store)).unwrap();
             let ledger = fs::read(intent_path(&store, &f)).unwrap();
-            let fail = || {
+            let wanted = if stage == 0 {
+                WriteTag::Intents
+            } else {
+                WriteTag::Epoch
+            };
+            let mut fail_flush = |tag: WriteTag, _: &Path, _: u64| {
+                if tag != wanted {
+                    return AfterIntercept::Continue;
+                }
                 if panic {
                     panic!("injected sync panic");
                 }
-                Err(AppError::Io("injected failed flush".into()))
+                AfterIntercept::Fail(AppError::Io("injected failed flush".into()))
             };
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 store.edit_registry_epoch_with_io(
@@ -212,21 +228,15 @@ fn registry_local_duplicate_flush_failure_cannot_release_ciphertext() {
                     &mut rng(),
                     &mut budget,
                     &mut intents,
-                    |_, _, _| panic!("duplicate intent must not rewrite"),
-                    |m, path, n| {
-                        if stage == 0 {
-                            fail()
-                        } else {
-                            sync_intent(m, path, n)
-                        }
-                    },
-                    |_, _, _| panic!("duplicate registry must not rewrite"),
-                    |m, path, n| {
-                        if stage == 1 {
-                            fail()
-                        } else {
-                            sync_registry(m, path, n)
-                        }
+                    WriteStep::new(WriteTag::Intents),
+                    // A duplicate rewrites neither record; only the selected flush fails.
+                    &mut WriteHooks::Hooked {
+                        before: Some(&mut |tag: WriteTag, _: &Path, _: &[u8]| {
+                            panic!("duplicate {tag:?} must not rewrite")
+                        }),
+                        before_sync: Some(&mut fail_flush),
+                        before_unlink: None,
+                        after: None,
                     },
                 )
             }));

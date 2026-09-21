@@ -499,8 +499,8 @@ fn reference_scan_keeps_an_overwritten_checkpoint_register_after_reopen() {
             WritePurpose::Ordinary,
             &mut rng(),
             &mut budget.storage,
-            |m: &EpochMutation<'_>, p: &Path, b: &[u8]| m.write(p, b),
-            |m: &EpochMutation<'_>, p: &Path, b: u64| m.sync_studio(p, b),
+            WriteStep::new(WriteTag::Source),
+            &mut WriteHooks::None,
         )
         .unwrap();
     store.creative_pinned_cids().unwrap();
@@ -600,14 +600,11 @@ fn studio_store_crash_matrix_has_intent_first_and_no_ciphertext_before_both_barr
             let f = Fixture::new(true);
             let mut store = open(root.path());
             let mut b = budget(&mut store, &f);
-            let fail = |_m: &EpochMutation<'_>, path: &Path, bytes: &[u8]| {
-                if mode == 1 {
-                    write_for_test(path, bytes)?;
-                }
-                if mode == 2 {
-                    panic!("injected Studio writer panic");
-                }
-                Err(AppError::Io("injected persistence failure".into()))
+            // Which half of the transaction fails, and on which side of its own write.
+            let wanted = if stage == 0 {
+                WriteTag::Intents
+            } else {
+                WriteTag::Epoch
             };
             let intent_scope =
                 super::super::epoch_intents::scope_bytes(SERVER, &f.logical).unwrap();
@@ -626,23 +623,31 @@ fn studio_store_crash_matrix_has_intent_first_and_no_ciphertext_before_both_barr
                     100,
                     &mut rng(),
                     &mut b,
-                    |m, p, bytes| {
-                        if stage == 0 {
-                            fail(m, p, bytes)
-                        } else {
-                            write_for_test(p, bytes)
-                        }
+                    WriteStep::new(WriteTag::Intents),
+                    &mut WriteHooks::Hooked {
+                        before: Some(&mut |tag: WriteTag, _: &Path, _: &[u8]| {
+                            if tag == WriteTag::Epoch {
+                                assert!(intent_path.exists());
+                            }
+                            if tag != wanted || mode == 1 {
+                                return Intercept::Continue;
+                            }
+                            if mode == 2 {
+                                panic!("injected Studio writer panic");
+                            }
+                            Intercept::Fail(AppError::Io("injected persistence failure".into()))
+                        }),
+                        before_sync: None,
+                        before_unlink: None,
+                        after: Some(&mut |tag: WriteTag, _: &Path| {
+                            if tag == wanted && mode == 1 {
+                                return AfterIntercept::Fail(AppError::Io(
+                                    "injected persistence failure".into(),
+                                ));
+                            }
+                            AfterIntercept::Continue
+                        }),
                     },
-                    |m: &EpochMutation<'_>, p: &Path, b: u64| m.sync_intent(p, b),
-                    |m, p, bytes| {
-                        assert!(intent_path.exists());
-                        if stage == 1 {
-                            fail(m, p, bytes)
-                        } else {
-                            write_for_test(p, bytes)
-                        }
-                    },
-                    |m: &EpochMutation<'_>, p: &Path, b: u64| m.sync_studio(p, b),
                 )
             }));
             assert!(result.is_err() || result.unwrap().is_err());
@@ -697,21 +702,25 @@ fn studio_store_duplicate_flush_failure_preserves_bytes_and_requires_rescan() {
             100,
             &mut rng(),
             &mut b,
-            |_, _, _| panic!("duplicate intent rewrote"),
-            |m, p, n| {
-                if stage == 0 {
-                    Err(AppError::Io("flush failed".into()))
-                } else {
-                    super::super::epoch_intents::sync_intent(m, p, n)
-                }
-            },
-            |_, _, _| panic!("duplicate epoch rewrote"),
-            |m, p, n| {
-                if stage == 1 {
-                    Err(AppError::Io("flush failed".into()))
-                } else {
-                    sync_studio(m, p, n)
-                }
+            WriteStep::new(WriteTag::Intents),
+            // A duplicate rewrites neither record; the selected half's flush fails.
+            &mut WriteHooks::Hooked {
+                before: Some(&mut |tag: WriteTag, _: &Path, _: &[u8]| {
+                    panic!("duplicate {tag:?} rewrote")
+                }),
+                before_sync: Some(&mut |tag: WriteTag, _: &Path, _: u64| {
+                    let wanted = if stage == 0 {
+                        WriteTag::Intents
+                    } else {
+                        WriteTag::Epoch
+                    };
+                    if tag == wanted {
+                        return AfterIntercept::Fail(AppError::Io("flush failed".into()));
+                    }
+                    AfterIntercept::Continue
+                }),
+                before_unlink: None,
+                after: None,
             },
         );
         assert!(result.is_err());
@@ -969,7 +978,8 @@ fn studio_store_fault_persists_before_reporting_and_failed_fault_save_can_retry(
             0,
             &mut rng(),
             &mut b,
-            |_, _, _| Err(AppError::Io("fault write failed".into()))
+            WriteStep::new(WriteTag::Source),
+            &mut WriteHooks::fail_before_write(FailError::Io("fault write failed"))
         )
         .is_err());
     assert!(b.requires_reconciliation());

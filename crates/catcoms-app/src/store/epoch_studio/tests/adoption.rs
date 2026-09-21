@@ -152,7 +152,7 @@ fn studio_adoption_store_all_write_boundaries_preserve_recovery_and_exact_retry(
                 f.edit(&mut store, &mut b, f.insert());
                 let (receipt, seed) = checkpoint(&f, &store, 4, 4);
                 let mut b = budget(&mut store, &f);
-                let mut hit = false;
+                let hit = std::cell::Cell::new(false);
                 assert!(store
                     .adopt_studio_checkpoint_with_io(
                         SERVER,
@@ -165,20 +165,31 @@ fn studio_adoption_store_all_write_boundaries_preserve_recovery_and_exact_retry(
                         &ManualClock::new(1000),
                         &mut rng(),
                         &mut b,
-                        &mut |_, phase, path, bytes| {
-                            if phase == boundary {
-                                hit = true;
-                                if after_write {
-                                    write_for_test(path, bytes)?;
+                        &mut WriteHooks::Hooked {
+                            before: Some(&mut |phase: WriteTag, _: &Path, _: &[u8]| {
+                                if phase == boundary && !after_write {
+                                    hit.set(true);
+                                    return Intercept::Fail(AppError::Io(
+                                        "injected settlement boundary".into(),
+                                    ));
                                 }
-                                return Err(AppError::Io("injected settlement boundary".into()));
-                            }
-                            write_for_test(path, bytes)
-                        },
-                        &mut |m, _, path, bytes| m.sync_studio(path, bytes)
+                                Intercept::Continue
+                            }),
+                            before_sync: None,
+                            before_unlink: None,
+                            after: Some(&mut |phase: WriteTag, _: &Path| {
+                                if phase == boundary && after_write {
+                                    hit.set(true);
+                                    return AfterIntercept::Fail(AppError::Io(
+                                        "injected settlement boundary".into(),
+                                    ));
+                                }
+                                AfterIntercept::Continue
+                            }),
+                        }
                     )
                     .is_err());
-                assert!(hit);
+                assert!(hit.get());
                 assert!(b.requires_reconciliation());
                 drop(store);
                 store = open(root.path());
@@ -248,11 +259,17 @@ fn studio_adoption_store_failed_closing_flush_stops_before_recovery_or_seed() {
             &ManualClock::new(1000),
             &mut rng(),
             &mut b,
-            &mut |_, _, _, _| panic!("unchanged source must flush before any further write"),
-            &mut |_, phase, _, _| {
-                assert_eq!(phase, WriteTag::Source);
-                flushed = true;
-                Err(AppError::Io("flush failed".into()))
+            &mut WriteHooks::Hooked {
+                before: Some(&mut |_: WriteTag, _: &Path, _: &[u8]| {
+                    panic!("unchanged source must flush before any further write")
+                }),
+                before_sync: Some(&mut |phase: WriteTag, _: &Path, _: u64| {
+                    assert_eq!(phase, WriteTag::Source);
+                    flushed = true;
+                    AfterIntercept::Fail(AppError::Io("flush failed".into()))
+                }),
+                before_unlink: None,
+                after: None,
             }
         )
         .is_err());

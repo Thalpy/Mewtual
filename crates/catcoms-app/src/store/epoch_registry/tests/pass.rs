@@ -1,6 +1,6 @@
 //! Pass orchestration tests use the real checked replay adapter and vault. Only the failure
 //! seam injects IO errors/unwinds; authority, intent selection and publication gating stay real.
-use super::replay::{budgets, intent_bytes, journal, put, sync, tombstone};
+use super::replay::{budgets, intent_bytes, journal, put, tombstone};
 use super::*;
 use crate::store::epoch_registry::pass::REPLAY_INTERVAL_MS;
 use catcoms_replication::SignedOp;
@@ -447,16 +447,24 @@ fn registry_pass_post_rename_failure_and_unwind_pause_without_skipping_or_early_
                     &mut rng(),
                     &mut budget,
                     &mut intents,
-                    |_, path, bytes| {
-                        write_for_test(path, bytes)?;
-                        if unwind {
-                            panic!("injected post-rename replay-pass unwind");
-                        }
-                        Err(AppError::Io(
-                            "injected post-rename replay-pass failure".into(),
-                        ))
+                    &mut WriteHooks::Hooked {
+                        before: None,
+                        before_sync: None,
+                        before_unlink: None,
+                        // Only the epoch replacement. The transaction flushes the source and
+                        // the intent ledger first, and this must not fire on either.
+                        after: Some(&mut |tag: WriteTag, _: &Path| {
+                            if tag != WriteTag::Epoch {
+                                return AfterIntercept::Continue;
+                            }
+                            if unwind {
+                                panic!("injected post-rename replay-pass unwind");
+                            }
+                            AfterIntercept::Fail(AppError::Io(
+                                "injected post-rename replay-pass failure".into(),
+                            ))
+                        }),
                     },
-                    &mut sync,
                 )
             })
         }));

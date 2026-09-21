@@ -106,11 +106,8 @@ fn registry_page_batch_uncertain_rename_and_duplicate_flush_do_not_grant_success
         &page,
         &mut rng(),
         &mut budget,
-        |_m, path, bytes| {
-            write_for_test(path, bytes)?;
-            Err(invalid("lost acknowledgement"))
-        },
-        |m: &EpochMutation<'_>, p: &Path, b: u64| m.sync_registry(p, b),
+        // The page lands; only the caller's acknowledgement is lost.
+        &mut WriteHooks::fail_after_write(FailError::Invalid("lost acknowledgement")),
     );
     assert!(result.is_err());
     assert_eq!(
@@ -144,8 +141,16 @@ fn registry_page_batch_uncertain_rename_and_duplicate_flush_do_not_grant_success
             &page,
             &mut rng(),
             &mut budget,
-            |_, _, _| panic!("duplicate must not replace"),
-            |_, _, _| Err(invalid("flush failed"))
+            &mut WriteHooks::Hooked {
+                before: Some(&mut |_: WriteTag, _: &Path, _: &[u8]| {
+                    panic!("duplicate must not replace")
+                }),
+                before_sync: Some(&mut |_: WriteTag, _: &Path, _: u64| {
+                    AfterIntercept::Fail(invalid("flush failed"))
+                }),
+                before_unlink: None,
+                after: None,
+            }
         )
         .is_err());
     budget = super::budget(&mut store, &f);
@@ -194,8 +199,16 @@ fn registry_page_batch_empty_completion_requires_open_scope_inventory_and_flush(
             &[],
             &mut rng(),
             &mut budget,
-            |_, _, _| panic!("empty must not replace"),
-            |_, _, _| Err(invalid("empty flush failed"))
+            &mut WriteHooks::Hooked {
+                before: Some(&mut |_: WriteTag, _: &Path, _: &[u8]| {
+                    panic!("empty must not replace")
+                }),
+                before_sync: Some(&mut |_: WriteTag, _: &Path, _: u64| {
+                    AfterIntercept::Fail(invalid("empty flush failed"))
+                }),
+                before_unlink: None,
+                after: None,
+            }
         )
         .is_err());
     budget = super::budget(&mut store, &f);

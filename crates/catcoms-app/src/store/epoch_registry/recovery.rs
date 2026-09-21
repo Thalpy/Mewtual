@@ -38,7 +38,7 @@ impl ServerStore {
             clock,
             rng,
             budget,
-            |m: &EpochMutation<'_>, p: &Path, b: &[u8]| m.write(p, b),
+            &mut WriteHooks::None,
         )
     }
 
@@ -54,7 +54,7 @@ impl ServerStore {
         clock: &dyn Clock,
         rng: &mut impl CryptoRngCore,
         budget: &mut EpochStorageBudget,
-        writer: impl FnOnce(&EpochMutation<'_>, &Path, &[u8]) -> Result<(), AppError>,
+        hooks: &mut WriteHooks<'_>,
     ) -> Result<Option<EpochRecoveryUpdate>, AppError> {
         let close = CloseRecord::decode(close_bytes).map_err(invalid)?;
         let document = registry_document(&group.group_id(), bucket).map_err(invalid)?;
@@ -124,7 +124,7 @@ impl ServerStore {
             clock,
             rng,
             budget,
-            writer,
+            hooks,
         )
         .map(Some)
     }

@@ -20,8 +20,7 @@ impl ServerStore {
         rng: &mut impl CryptoRngCore,
         budget: &mut EpochStorageBudget,
         intents: &mut EpochIntentBudget,
-        writer: impl FnOnce(&EpochMutation<'_>, &Path, &[u8]) -> Result<(), AppError>,
-        sync: impl FnOnce(&EpochMutation<'_>, &Path, u64) -> Result<(), AppError>,
+        hooks: &mut WriteHooks<'_>,
     ) -> Result<StudioLocalDraft, AppError> {
         if document.server_id != group.group_id()
             || group.member_signature_key(&device.device_id()).as_deref()
@@ -49,7 +48,16 @@ impl ServerStore {
             if overlay.exact_retry(expected, &intent).map_err(invalid)? {
                 let view = overlay.read(&state.ledger).map_err(invalid)?;
                 self.write_prepared_intents(
-                    server, document, state, old, true, rng, budget, intents, writer, sync,
+                    server,
+                    document,
+                    state,
+                    old,
+                    true,
+                    rng,
+                    budget,
+                    intents,
+                    WriteStep::new(WriteTag::Intents),
+                    hooks,
                 )?;
                 return Ok(view);
             }
@@ -91,7 +99,16 @@ impl ServerStore {
         self.hold_creative_operation(document, &intent.operation);
         state.overlay = Some(overlay);
         self.write_prepared_intents(
-            server, document, state, old, false, rng, budget, intents, writer, sync,
+            server,
+            document,
+            state,
+            old,
+            false,
+            rng,
+            budget,
+            intents,
+            WriteStep::new(WriteTag::Intents),
+            hooks,
         )?;
         Ok(view)
     }

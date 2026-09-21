@@ -548,8 +548,8 @@ impl ServerStore {
             rng,
             budget,
             intents,
-            |m: &EpochMutation<'_>, p: &Path, b: &[u8]| m.write(p, b),
-            |m: &EpochMutation<'_>, p: &Path, b: u64| m.sync_intent(p, b),
+            WriteStep::new(WriteTag::Intents),
+            &mut WriteHooks::None,
         )
     }
 
@@ -564,8 +564,8 @@ impl ServerStore {
         rng: &mut impl CryptoRngCore,
         budget: &mut EpochStorageBudget,
         intents: &mut EpochIntentBudget,
-        writer: impl FnOnce(&EpochMutation<'_>, &Path, &[u8]) -> Result<(), AppError>,
-        sync: impl FnOnce(&EpochMutation<'_>, &Path, u64) -> Result<(), AppError>,
+        step: WriteStep,
+        hooks: &mut WriteHooks<'_>,
     ) -> Result<EpochIntentState, AppError> {
         let scope = scope_bytes(server, document)?;
         // Bound public Vec fields before encode can copy an arbitrarily large caller input.
@@ -613,13 +613,16 @@ impl ServerStore {
             .map_err(invalid)?;
         let unchanged = state.ledger.len() == count;
         self.write_prepared_intents(
-            server, document, state, old, unchanged, rng, budget, intents, writer, sync,
+            server, document, state, old, unchanged, rng, budget, intents, step, hooks,
         )
     }
 
     // Sole persistence path for ordinary intents and explicit overlay acceptance. Caller has
     // authenticated the actual record and checked its inventory under this exclusive borrow.
     #[allow(clippy::too_many_arguments)]
+    /// `tag` names the replacement's step in the caller's transaction, which for a handoff is
+    /// the stage being persisted rather than the record's family. The exact-retry flush is
+    /// always `Intents`: it repairs this record, whatever step first wrote it.
     pub(in crate::store) fn write_prepared_intents(
         &mut self,
         server: u64,
@@ -630,8 +633,8 @@ impl ServerStore {
         rng: &mut impl CryptoRngCore,
         budget: &mut EpochStorageBudget,
         intents: &mut EpochIntentBudget,
-        writer: impl FnOnce(&EpochMutation<'_>, &Path, &[u8]) -> Result<(), AppError>,
-        sync: impl FnOnce(&EpochMutation<'_>, &Path, u64) -> Result<(), AppError>,
+        step: WriteStep,
+        hooks: &mut WriteHooks<'_>,
     ) -> Result<EpochIntentState, AppError> {
         let scope = scope_bytes(server, document)?;
         let storage_scope = StorageScope::new(server, &document.server_id).map_err(invalid)?;
@@ -656,7 +659,9 @@ impl ServerStore {
             // I-4: a sync repair changes no bytes and still invalidates a captured inventory.
             let path = self.epoch_intent_path(&scope);
             let mutation = self.epoch_mutation_guard();
-            sync(&mutation, &path, bytes)?;
+            hooks.before_sync(WriteTag::Intents, &path, bytes)?;
+            sync_intent(&mutation, &path, bytes)?;
+            hooks.after_sync(WriteTag::Intents, &path)?;
             reservation.commit();
             intents.generation = self.intent_generation.clone();
             intents.ready = true;
@@ -664,6 +669,9 @@ impl ServerStore {
         }
         let plain = state.encode(&scope)?;
         let next = plain.len() as u64 + 40;
+        // A step that was only ever allowed to flush must not reach a replacement. Refused
+        // before the preflight, so it charges nothing and disturbs no held record.
+        step.permit_replacement()?;
         let final_bytes = intents.preflight(&self.intent_generation, id, old, next, false)?;
         let record = storage_record(server, document, &scope, next)?;
         let reservation = budget
@@ -691,7 +699,9 @@ impl ServerStore {
         let path = self.epoch_intent_path(&scope);
         let framed = frame(&sealed);
         let mutation = self.epoch_mutation_guard();
-        writer(&mutation, &path, &framed)?;
+        let framed = hooks.before(step.tag(), &path, &framed)?;
+        mutation.write(&path, &framed)?;
+        hooks.after_write(step.tag(), &path)?;
         reservation.commit();
         if old.is_none() {
             intents.record_slots += 1;

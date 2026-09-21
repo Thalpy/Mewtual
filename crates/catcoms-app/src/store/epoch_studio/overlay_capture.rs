@@ -384,7 +384,7 @@ impl ServerStore {
     /// The plan's media hold is released only when this call returns, on success, error and
     /// unwinding alike.
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn commit_studio_overlay_save(
+    pub(in crate::store) fn commit_studio_overlay_save(
         &mut self,
         server: u64,
         group: &ServerGroup,
@@ -395,8 +395,7 @@ impl ServerStore {
         plan: StudioOverlayPlan,
         rng: &mut impl CryptoRngCore,
         budget: &mut EpochStudioBudget,
-        writer: impl FnOnce(&EpochMutation<'_>, &Path, &[u8]) -> Result<(), AppError>,
-        sync: impl FnOnce(&EpochMutation<'_>, &Path, u64) -> Result<(), AppError>,
+        hooks: &mut WriteHooks<'_>,
     ) -> Result<StudioLocalDraft, AppError> {
         current_member(group, device)?;
         self.enter_studio_budget(server, group, budget)?;
@@ -476,8 +475,8 @@ impl ServerStore {
             rng,
             &mut budget.storage,
             &mut budget.intents,
-            writer,
-            sync,
+            WriteStep::new(WriteTag::Intents),
+            hooks,
         );
         // Explicit: the hold outlives the write attempt, including its error path.
         drop(hold);

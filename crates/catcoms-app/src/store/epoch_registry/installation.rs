@@ -56,11 +56,7 @@ impl ServerStore {
             rng,
             budget,
             intents,
-            &mut |m: &EpochMutation<'_>, _, path: &Path, bytes: &[u8]| m.write(path, bytes),
-            &mut |m, step, path, bytes| match step {
-                WriteTag::Intents => super::super::epoch_intents::sync_intent(m, path, bytes),
-                _ => sync_registry(m, path, bytes),
-            },
+            &mut WriteHooks::None,
         )
     }
 
@@ -78,8 +74,7 @@ impl ServerStore {
         rng: &mut impl CryptoRngCore,
         budget: &mut EpochStorageBudget,
         intents: &mut EpochIntentBudget,
-        writer: &mut impl FnMut(&EpochMutation<'_>, WriteTag, &Path, &[u8]) -> Result<(), AppError>,
-        sync: &mut impl FnMut(&EpochMutation<'_>, WriteTag, &Path, u64) -> Result<(), AppError>,
+        hooks: &mut WriteHooks<'_>,
     ) -> Result<(RegistryInstallOutcome, EpochRegistryState), AppError> {
         // Bounded canonical decoders precede vault work, and authority comes from current MLS
         // state plus independently observed tenure, never a field trusted from the receipt.
@@ -121,8 +116,11 @@ impl ServerStore {
                 }
                 Ok(Some(plan))
             },
-            |_, _, _| Err(invalid("source preparation must not rewrite the epoch")),
-            |m, path, bytes| sync(m, WriteTag::Source, path, bytes),
+            WriteStep::flush_only(
+                WriteTag::Source,
+                "source preparation must not rewrite the epoch",
+            ),
+            hooks,
         )?;
         let Some(plan) = plan else {
             // A post-rename retry must never reinstall a seed over newer edits or retire intents
@@ -159,13 +157,7 @@ impl ServerStore {
         // acknowledgement that may never come.
         if self
             .advance_due_epoch_recovery_with_writer(
-                server,
-                &document,
-                pending,
-                clock,
-                rng,
-                budget,
-                |m, path, bytes| writer(m, WriteTag::Recovery, path, bytes),
+                server, &document, pending, clock, rng, budget, hooks,
             )?
             .is_some()
         {
@@ -181,21 +173,13 @@ impl ServerStore {
             clock,
             rng,
             budget,
-            |m, path, bytes| writer(m, WriteTag::Recovery, path, bytes),
+            hooks,
         )? {
             if saved.state.eviction_pending()?.is_some() {
                 return Ok((RegistryInstallOutcome::RecoveryPending, state));
             }
         }
-        self.retire_registry_intents_with_io(
-            server,
-            &plan,
-            rng,
-            budget,
-            intents,
-            |m, path, bytes| writer(m, WriteTag::Intents, path, bytes),
-            |m, path, bytes| sync(m, WriteTag::Intents, path, bytes),
-        )?;
+        self.retire_registry_intents_with_io(server, &plan, rng, budget, intents, hooks)?;
         self.update_registry_with_io(
             server,
             group,
@@ -212,8 +196,8 @@ impl ServerStore {
                 *unit = successor;
                 Ok(RegistryInstallOutcome::Installed)
             },
-            |m, path, bytes| writer(m, WriteTag::Successor, path, bytes),
-            |m, path, bytes| sync(m, WriteTag::Successor, path, bytes),
+            WriteStep::new(WriteTag::Successor),
+            hooks,
         )
     }
 }

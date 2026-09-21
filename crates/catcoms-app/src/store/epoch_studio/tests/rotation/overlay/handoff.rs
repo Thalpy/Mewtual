@@ -25,13 +25,6 @@ fn transfer(f: &Fixture, store: &mut ServerStore, basis: [u8; 32]) -> StudioHand
         )
         .unwrap()
 }
-fn flush(m: &EpochMutation<'_>, step: WriteTag, path: &Path, bytes: u64) -> Result<(), AppError> {
-    match step {
-        WriteTag::Source => sync_studio(m, path, bytes),
-        WriteTag::Intents => sync_intent(m, path, bytes),
-        _ => unreachable!("tag not produced by this transaction"),
-    }
-}
 fn prepare(f: &Fixture, store: &mut ServerStore) -> (CloseRecord, [u8; 32], StudioProjection) {
     let (close, basis) = closing(f, store);
     let expected = save(f, store, &close, basis.fingerprint(), f.title(), 123)
@@ -52,7 +45,7 @@ fn prepare(f: &Fixture, store: &mut ServerStore) -> (CloseRecord, [u8; 32], Stud
             0,
             &mut rng(),
             &mut b.storage,
-            |m: &EpochMutation<'_>, p: &Path, b: &[u8]| m.write(p, b),
+            &mut WriteHooks::None,
         )
         .unwrap();
     warm(f, store);
@@ -129,8 +122,7 @@ fn studio_overlay_handoff_signing_slice_reports_yield_bound_and_completion_apart
             Some(0),
             &mut rng(),
             &mut b,
-            &mut |m: &EpochMutation<'_>, _, p: &Path, bytes: &[u8]| m.write(p, bytes),
-            &mut flush,
+            &mut WriteHooks::None,
         )
         .unwrap()
     {
@@ -246,8 +238,7 @@ fn studio_overlay_handoff_assembly_refuses_a_partly_signed_batch() {
             Some(0),
             &mut rng(),
             &mut b,
-            &mut |m: &EpochMutation<'_>, _, p: &Path, bytes: &[u8]| m.write(p, bytes),
-            &mut flush,
+            &mut WriteHooks::None,
         )
         .unwrap()
     {
@@ -298,8 +289,7 @@ fn studio_overlay_handoff_plan_is_refused_when_its_records_changed() {
             Some(0),
             &mut rng(),
             &mut b,
-            &mut |m: &EpochMutation<'_>, _, p: &Path, bytes: &[u8]| m.write(p, bytes),
-            &mut flush,
+            &mut WriteHooks::None,
         )
         .unwrap()
     {
@@ -340,8 +330,7 @@ fn studio_overlay_handoff_plan_is_refused_when_its_records_changed() {
         Some(0),
         &mut rng(),
         &mut b,
-        &mut |m: &EpochMutation<'_>, _, p: &Path, bytes: &[u8]| m.write(p, bytes),
-        &mut flush,
+        &mut WriteHooks::None,
     );
     match refused {
         Err(error) => assert!(
@@ -389,11 +378,16 @@ fn studio_overlay_handoff_signs_the_whole_branch_once_and_keeps_pending_intents(
                 Some(0),
                 &mut rng(),
                 &mut b,
-                &mut |_m, step, p, bytes| {
-                    writes.push(step);
-                    write_for_test(p, bytes)
+                // Record which steps the transaction writes, without performing any of them.
+                &mut WriteHooks::Hooked {
+                    before: Some(&mut |step: WriteTag, _: &Path, _: &[u8]| {
+                        writes.push(step);
+                        Intercept::Continue
+                    }),
+                    before_sync: None,
+                    before_unlink: None,
+                    after: None,
                 },
-                &mut flush,
             )
             .unwrap();
         assert_eq!(
@@ -474,7 +468,9 @@ fn studio_overlay_handoff_crash_barriers_reopen_without_signed_prefixes_or_dupli
                 copy_vault(root.path(), attempt.path());
                 let mut store = open(attempt.path());
                 let mut b = budget(&mut store, &f);
-                let mut hit = false;
+                // A Cell because both decisions below record into it, and only one of them
+                // fires: two closures cannot each hold it mutably.
+                let hit = std::cell::Cell::new(false);
                 let error = store
                     .handoff_studio_overlay_with_io(
                         SERVER,
@@ -485,20 +481,29 @@ fn studio_overlay_handoff_crash_barriers_reopen_without_signed_prefixes_or_dupli
                         Some(0),
                         &mut rng(),
                         &mut b,
-                        &mut |_m, at, p, bytes| {
-                            if at == step {
-                                hit = true;
-                                if after {
-                                    write_for_test(p, bytes)?;
+                        // Fail one named step, on whichever side of it the case wants. Other
+                        // steps proceed normally through the transaction's own writes.
+                        &mut WriteHooks::Hooked {
+                            before: Some(&mut |at: WriteTag, _: &Path, _: &[u8]| {
+                                if at == step && !after {
+                                    hit.set(true);
+                                    return Intercept::Fail(invalid("injected handoff write"));
                                 }
-                                return Err(invalid("injected handoff write"));
-                            }
-                            write_for_test(p, bytes)
+                                Intercept::Continue
+                            }),
+                            before_sync: None,
+                            before_unlink: None,
+                            after: Some(&mut |at: WriteTag, _: &Path| {
+                                if at == step && after {
+                                    hit.set(true);
+                                    return AfterIntercept::Fail(invalid("injected handoff write"));
+                                }
+                                AfterIntercept::Continue
+                            }),
                         },
-                        &mut flush,
                     )
                     .unwrap_err();
-                assert!(hit && error.to_string().contains("injected handoff write"));
+                assert!(hit.get() && error.to_string().contains("injected handoff write"));
                 assert!(b.requires_reconciliation());
                 drop(store);
                 let mut store = open(attempt.path());
@@ -524,7 +529,7 @@ fn studio_overlay_handoff_crash_barriers_reopen_without_signed_prefixes_or_dupli
             copy_vault(root.path(), attempt.path());
             let mut store = open(attempt.path());
             let mut b = budget(&mut store, &f);
-            let mut hit = false;
+            let hit = std::cell::Cell::new(false);
             let error = store
                 .handoff_studio_overlay_with_io(
                     SERVER,
@@ -535,18 +540,31 @@ fn studio_overlay_handoff_crash_barriers_reopen_without_signed_prefixes_or_dupli
                     Some(0),
                     &mut rng(),
                     &mut b,
-                    &mut |m: &EpochMutation<'_>, _, p: &Path, bytes: &[u8]| m.write(p, bytes),
-                    &mut |m, step, p, bytes| {
-                        assert_eq!(step, WriteTag::Source);
-                        hit = true;
-                        if after {
-                            flush(m, step, p, bytes)?;
-                        }
-                        Err(invalid("injected handoff sync"))
+                    // The source flush, refused on one side or the other. `after` used to mean
+                    // "do the real flush, then fail"; it now means "let the transaction flush,
+                    // then fail", which is the same observable without a second sync path.
+                    &mut WriteHooks::Hooked {
+                        before: None,
+                        before_sync: Some(&mut |step: WriteTag, _: &Path, _: u64| {
+                            assert_eq!(step, WriteTag::Source);
+                            if after {
+                                return AfterIntercept::Continue;
+                            }
+                            hit.set(true);
+                            AfterIntercept::Fail(invalid("injected handoff sync"))
+                        }),
+                        before_unlink: None,
+                        after: Some(&mut |step: WriteTag, _: &Path| {
+                            if !after || step != WriteTag::Source {
+                                return AfterIntercept::Continue;
+                            }
+                            hit.set(true);
+                            AfterIntercept::Fail(invalid("injected handoff sync"))
+                        }),
                     },
                 )
                 .unwrap_err();
-            assert!(hit && error.to_string().contains("injected handoff sync"));
+            assert!(hit.get() && error.to_string().contains("injected handoff sync"));
             drop(store);
             let mut store = open(attempt.path());
             assert!(store
@@ -607,8 +625,8 @@ fn grow(f: &Fixture, store: &mut ServerStore) {
             WritePurpose::Ordinary,
             &mut rng(),
             &mut b.storage,
-            |m: &EpochMutation<'_>, p: &Path, b: &[u8]| m.write(p, b),
-            |m: &EpochMutation<'_>, p: &Path, b: u64| m.sync_studio(p, b),
+            WriteStep::new(WriteTag::Source),
+            &mut WriteHooks::None,
         )
         .unwrap();
     store.retain_studio_source(&f.group, &f.device, state);
@@ -656,10 +674,16 @@ fn studio_overlay_handoff_completed_retry_keeps_channel_after_real_receipt_retir
             999,
             &mut rng(),
             &mut b,
-            |_, _, _| panic!("completed retry rewrote its record"),
-            |m, p, bytes| {
-                syncs += 1;
-                sync_intent(m, p, bytes)
+            &mut WriteHooks::Hooked {
+                before: Some(&mut |_: WriteTag, _: &Path, _: &[u8]| {
+                    panic!("completed retry rewrote its record")
+                }),
+                before_sync: Some(&mut |_: WriteTag, _: &Path, _: u64| {
+                    syncs += 1;
+                    AfterIntercept::Continue
+                }),
+                before_unlink: None,
+                after: None,
             },
         )
         .unwrap();
@@ -687,10 +711,16 @@ fn studio_overlay_handoff_completed_retry_keeps_channel_after_real_receipt_retir
         999,
         &mut rng(),
         &mut b,
-        |_, _, _| panic!("wrong-channel retry wrote"),
-        |m, p, bytes| {
-            syncs += 1;
-            sync_intent(m, p, bytes)
+        &mut WriteHooks::Hooked {
+            before: Some(&mut |_: WriteTag, _: &Path, _: &[u8]| {
+                panic!("wrong-channel retry wrote")
+            }),
+            before_sync: Some(&mut |_: WriteTag, _: &Path, _: u64| {
+                syncs += 1;
+                AfterIntercept::Continue
+            }),
+            before_unlink: None,
+            after: None,
         },
     );
     assert!(

@@ -169,8 +169,7 @@ impl ServerStore {
             rng,
             budget,
             intents,
-            |m: &EpochMutation<'_>, p: &Path, b: &[u8]| m.write(p, b),
-            |m: &EpochMutation<'_>, p: &Path, b: u64| m.sync_intent(p, b),
+            &mut WriteHooks::None,
         )
     }
     /// Store-internal ordering seam, not an arbitrary-id removal API. The caller must keep the
@@ -184,8 +183,7 @@ impl ServerStore {
         rng: &mut impl CryptoRngCore,
         budget: &mut EpochStorageBudget,
         intents: &mut EpochIntentBudget,
-        writer: impl FnOnce(&EpochMutation<'_>, &Path, &[u8]) -> Result<(), AppError>,
-        sync: impl FnOnce(&EpochMutation<'_>, &Path, u64) -> Result<(), AppError>,
+        hooks: &mut WriteHooks<'_>,
     ) -> Result<(), AppError> {
         self.retire_included_with_io(
             server,
@@ -195,8 +193,7 @@ impl ServerStore {
             rng,
             budget,
             intents,
-            writer,
-            sync,
+            hooks,
         )
     }
 
@@ -210,8 +207,7 @@ impl ServerStore {
         rng: &mut impl CryptoRngCore,
         budget: &mut EpochStorageBudget,
         intents: &mut EpochIntentBudget,
-        writer: impl FnOnce(&EpochMutation<'_>, &Path, &[u8]) -> Result<(), AppError>,
-        sync: impl FnOnce(&EpochMutation<'_>, &Path, u64) -> Result<(), AppError>,
+        hooks: &mut WriteHooks<'_>,
     ) -> Result<(), AppError> {
         self.retire_included_with_io(
             server,
@@ -221,8 +217,7 @@ impl ServerStore {
             rng,
             budget,
             intents,
-            writer,
-            sync,
+            hooks,
         )
     }
 
@@ -237,11 +232,10 @@ impl ServerStore {
         rng: &mut impl CryptoRngCore,
         budget: &mut EpochStorageBudget,
         intents: &mut EpochIntentBudget,
-        writer: impl FnOnce(&EpochMutation<'_>, &Path, &[u8]) -> Result<(), AppError>,
-        sync: impl FnOnce(&EpochMutation<'_>, &Path, u64) -> Result<(), AppError>,
+        hooks: &mut WriteHooks<'_>,
     ) -> Result<(), AppError> {
         self.retire_included_with_io(
-            server, document, recovered, true, rng, budget, intents, writer, sync,
+            server, document, recovered, true, rng, budget, intents, hooks,
         )
     }
 
@@ -255,8 +249,7 @@ impl ServerStore {
         rng: &mut impl CryptoRngCore,
         budget: &mut EpochStorageBudget,
         intents: &mut EpochIntentBudget,
-        writer: impl FnOnce(&EpochMutation<'_>, &Path, &[u8]) -> Result<(), AppError>,
-        sync: impl FnOnce(&EpochMutation<'_>, &Path, u64) -> Result<(), AppError>,
+        hooks: &mut WriteHooks<'_>,
     ) -> Result<(), AppError> {
         let scope = scope_bytes(server, document)?;
         let storage_scope = StorageScope::new(server, &document.server_id).map_err(invalid)?;
@@ -317,7 +310,9 @@ impl ServerStore {
                 let path = self.epoch_intent_path(&scope);
                 let bytes = old.expect("observed file");
                 let mutation = self.epoch_mutation_guard();
-                sync(&mutation, &path, bytes)?;
+                hooks.before_sync(WriteTag::Intents, &path, bytes)?;
+                super::sync_intent(&mutation, &path, bytes)?;
+                hooks.after_sync(WriteTag::Intents, &path)?;
                 reservation.commit();
                 intents.generation = self.intent_generation.clone();
                 intents.ready = true;
@@ -355,7 +350,9 @@ impl ServerStore {
         let path = self.epoch_intent_path(&scope);
         let framed = frame(&sealed);
         let mutation = self.epoch_mutation_guard();
-        writer(&mutation, &path, &framed)?;
+        let framed = hooks.before(WriteTag::Intents, &path, &framed)?;
+        mutation.write(&path, &framed)?;
+        hooks.after_write(WriteTag::Intents, &path)?;
         reservation.commit();
         intents.records.insert(id, next);
         intents.bytes = final_bytes;

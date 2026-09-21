@@ -176,8 +176,7 @@ fn studio_overlay_handoff_refuses_a_batch_signed_under_a_superseded_tenure() {
             Some(0),
             &mut rng(),
             &mut b,
-            &mut |m: &EpochMutation<'_>, _, p: &Path, b: &[u8]| m.write(p, b),
-            &mut flush,
+            &mut WriteHooks::None,
         )
         .expect("H1 refused under a live tenure");
     let capture = match start {
@@ -206,8 +205,7 @@ fn studio_overlay_handoff_refuses_a_batch_signed_under_a_superseded_tenure() {
             Some(1),
             &mut rng(),
             &mut b,
-            &mut |m: &EpochMutation<'_>, _, p: &Path, b: &[u8]| m.write(p, b),
-            &mut flush,
+            &mut WriteHooks::None,
         )
         .expect_err("H5 committed a batch signed under a tenure that has since been superseded");
     assert!(
@@ -291,8 +289,7 @@ fn studio_overlay_handoff_rechecks_index_object_sources_at_commit_not_only_at_ca
             Some(0),
             &mut rng(),
             &mut b,
-            &mut |m: &EpochMutation<'_>, _, p: &Path, b: &[u8]| m.write(p, b),
-            &mut flush,
+            &mut WriteHooks::None,
         )
         .expect("H1 refused while the reference was still good");
     let capture = match start {
@@ -327,8 +324,7 @@ fn studio_overlay_handoff_rechecks_index_object_sources_at_commit_not_only_at_ca
             Some(0),
             &mut rng(),
             &mut b,
-            &mut |m: &EpochMutation<'_>, _, p: &Path, b: &[u8]| m.write(p, b),
-            &mut flush,
+            &mut WriteHooks::None,
         )
         .expect_err("H5 committed an Index entry pointing at a source that is no longer there");
     assert!(

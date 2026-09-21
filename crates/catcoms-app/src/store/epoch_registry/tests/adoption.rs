@@ -385,24 +385,35 @@ fn registry_adoption_store_crash_boundaries_keep_source_or_successor_and_retry()
             &ManualClock::new(100),
             &mut rng(),
             &mut budget,
-            &mut |_, step, path, bytes| {
-                if let Failure::Write(wanted, after) = failure {
-                    if step == wanted {
-                        if after {
-                            write_for_test(path, bytes)?;
+            &mut WriteHooks::Hooked {
+                before: Some(&mut |step: WriteTag, _: &Path, _: &[u8]| {
+                    if let Failure::Write(wanted, false) = failure {
+                        if step == wanted {
+                            fired.set(true);
+                            return Intercept::Fail(invalid("injected adoption write failure"));
                         }
-                        fired.set(true);
-                        return Err(invalid("injected adoption write failure"));
                     }
-                }
-                write_for_test(path, bytes)
-            },
-            &mut |m, step, path, bytes| {
-                if matches!(failure, Failure::Flush(wanted) if wanted == step) {
-                    fired.set(true);
-                    return Err(invalid("injected adoption flush failure"));
-                }
-                sync_registry(m, path, bytes)
+                    Intercept::Continue
+                }),
+                before_sync: Some(&mut |step: WriteTag, _: &Path, _: u64| {
+                    if matches!(failure, Failure::Flush(wanted) if wanted == step) {
+                        fired.set(true);
+                        return AfterIntercept::Fail(invalid("injected adoption flush failure"));
+                    }
+                    AfterIntercept::Continue
+                }),
+                before_unlink: None,
+                after: Some(&mut |step: WriteTag, _: &Path| {
+                    if let Failure::Write(wanted, true) = failure {
+                        if step == wanted {
+                            fired.set(true);
+                            return AfterIntercept::Fail(invalid(
+                                "injected adoption write failure",
+                            ));
+                        }
+                    }
+                    AfterIntercept::Continue
+                }),
             },
         );
         assert!(fired.get(), "{failure:?}");

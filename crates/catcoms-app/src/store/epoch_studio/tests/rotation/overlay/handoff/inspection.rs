@@ -133,8 +133,8 @@ fn studio_inspection_same_size_authenticated_replacement_is_stale() {
                 &mut rng(),
                 &mut b.storage,
                 &mut b.intents,
-                |m: &EpochMutation<'_>, p: &Path, b: &[u8]| m.write(p, b),
-                |m: &EpochMutation<'_>, p: &Path, b: u64| m.sync_intent(p, b),
+                WriteStep::new(WriteTag::Intents),
+                &mut WriteHooks::None,
             )
             .unwrap();
         let after_bytes = fs::read(&path).unwrap();
@@ -311,13 +311,8 @@ fn studio_inspection_prepared_and_completed_never_resolve_on_read() {
             Some(0),
             &mut rng(),
             &mut b,
-            &mut |_m, step, p, bytes| {
-                if step == WriteTag::Source {
-                    return Err(AppError::Io("pause after Prepared".into()));
-                }
-                write_for_test(p, bytes)
-            },
-            &mut flush,
+            &mut WriteHooks::fail_before_write(FailError::Io("pause after Prepared"))
+                .at(WriteTag::Source),
         );
         assert!(result.is_err());
         let path = store.epoch_intent_path(
@@ -446,8 +441,8 @@ fn studio_inspection_maximal_canonical_seed_and_bounded_record_input() {
                 &mut rng(),
                 &mut b.storage,
                 &mut b.intents,
-                |m: &EpochMutation<'_>, p: &Path, b: &[u8]| m.write(p, b),
-                |m: &EpochMutation<'_>, p: &Path, b: u64| m.sync_intent(p, b),
+                WriteStep::new(WriteTag::Intents),
+                &mut WriteHooks::None,
             )
             .unwrap();
         let path = store.epoch_intent_path(&scope);

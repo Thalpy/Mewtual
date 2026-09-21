@@ -16,7 +16,7 @@ fn sealed_old_owner(f: &mut Fixture, store: &mut ServerStore) -> Receipt {
             0,
             &mut rng(),
             &mut b.storage,
-            |m: &EpochMutation<'_>, p: &Path, b: &[u8]| m.write(p, b),
+            &mut WriteHooks::None,
         )
         .unwrap();
     store
@@ -69,7 +69,7 @@ fn studio_frozen_owner_store_crash_matrix_retains_full_source_then_recovery_then
                 let mut store = open(root.path());
                 warm(&f, &mut store);
                 let mut b = budget(&mut store, &f);
-                let mut hit = false;
+                let hit = std::cell::Cell::new(false);
                 let result = store.rotate_studio_owner_with_io(
                     SERVER,
                     &f.group,
@@ -79,19 +79,31 @@ fn studio_frozen_owner_store_crash_matrix_retains_full_source_then_recovery_then
                     &ManualClock::new(1000),
                     &mut rng(),
                     &mut b,
-                    &mut |_, step, path, bytes| {
-                        if step == failure && !hit {
-                            hit = true;
-                            if after_write {
-                                write_for_test(path, bytes)?;
+                    &mut WriteHooks::Hooked {
+                        before: Some(&mut |step: WriteTag, _: &Path, _: &[u8]| {
+                            if step == failure && !hit.get() && !after_write {
+                                hit.set(true);
+                                return Intercept::Fail(invalid("injected frozen takeover crash"));
                             }
-                            return Err(invalid("injected frozen takeover crash"));
-                        }
-                        write_for_test(path, bytes)
+                            Intercept::Continue
+                        }),
+                        before_sync: None,
+                        before_unlink: None,
+                        after: Some(&mut |step: WriteTag, _: &Path| {
+                            if step == failure && !hit.get() && after_write {
+                                hit.set(true);
+                                return AfterIntercept::Fail(invalid(
+                                    "injected frozen takeover crash",
+                                ));
+                            }
+                            AfterIntercept::Continue
+                        }),
                     },
-                    &mut sync,
                 );
-                assert!(hit && result.is_err(), "{art}/{failure:?}/{after_write}");
+                assert!(
+                    hit.get() && result.is_err(),
+                    "{art}/{failure:?}/{after_write}"
+                );
                 let held = f.load(&store).unwrap();
                 let installed = held.epoch() == 1;
                 if !installed {
@@ -406,15 +418,19 @@ fn studio_frozen_owner_store_promotes_staged_recovery_at_its_deadline_without_ac
                 &clock,
                 &mut rng(),
                 &mut b,
-                &mut |_, step, path, bytes| {
-                    assert_ne!(
-                        step,
-                        WriteTag::Recovery,
-                        "an idle pass inside the grace must not rewrite the warning"
-                    );
-                    write_for_test(path, bytes)
+                &mut WriteHooks::Hooked {
+                    before: Some(&mut |step: WriteTag, _: &Path, _: &[u8]| {
+                        assert_ne!(
+                            step,
+                            WriteTag::Recovery,
+                            "an idle pass inside the grace must not rewrite the warning"
+                        );
+                        Intercept::Continue
+                    }),
+                    before_sync: None,
+                    before_unlink: None,
+                    after: None,
                 },
-                &mut sync,
             )
             .unwrap();
         assert_eq!(outcome, StudioRotationOutcome::RecoveryPending);

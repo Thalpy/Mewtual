@@ -92,12 +92,18 @@ fn staging_path(store: &ServerStore, doc: &LogicalDocument, sequence: u64) -> Pa
 }
 // Simulate a process death that leaves its securely created staging sibling behind. Returning a
 // normal error would let the production RAII guard unlink it, unlike a killed process.
-fn leave_staging(_m: &EpochMutation<'_>, path: &Path, bytes: &[u8]) -> Result<(), AppError> {
-    let (mut file, mut staging) = create_staging_file_for_test(path)?;
+/// Leave behind the staging sibling an interrupted write would have left, then refuse before
+/// the rename. Creating the sibling is fixture work: the record itself is never created here,
+/// and the transaction's own write never runs.
+fn leave_staging(_: WriteTag, path: &Path, bytes: &[u8]) -> Intercept {
+    let (mut file, mut staging) = match create_staging_file_for_test(path) {
+        Ok(pair) => pair,
+        Err(error) => return Intercept::Fail(error),
+    };
     file.write_all(bytes).unwrap();
     file.sync_all().unwrap();
     staging.keep_for_test();
-    Err(AppError::Io("interrupted before rename".into()))
+    Intercept::Fail(AppError::Io("interrupted before rename".into()))
 }
 fn cleanup(store: &mut ServerStore) -> EpochStorageInventory {
     let mut cleanup = store.cleanup_epoch_storage_staging_with_intents().unwrap();
@@ -305,8 +311,13 @@ fn interrupted_first_save_is_not_an_accepted_edit_and_cleanup_does_not_promote_i
         &mut rng(),
         &mut limits.0,
         &mut limits.1,
-        leave_staging,
-        |m: &EpochMutation<'_>, p: &Path, b: u64| m.sync_intent(p, b),
+        WriteStep::new(WriteTag::Intents),
+        &mut WriteHooks::Hooked {
+            before: Some(&mut leave_staging),
+            before_sync: None,
+            before_unlink: None,
+            after: None,
+        },
     );
     assert!(result.is_err());
     assert!(limits.0.requires_reconciliation());
@@ -352,8 +363,13 @@ fn failed_replacement_counts_orphans_as_content_and_global_bytes_until_reconcili
             &mut rng(),
             &mut limits.0,
             &mut limits.1,
-            leave_staging,
-            sync_intent
+            WriteStep::new(WriteTag::Intents),
+            &mut WriteHooks::Hooked {
+                before: Some(&mut leave_staging),
+                before_sync: None,
+                before_unlink: None,
+                after: None,
+            }
         )
         .is_err());
     let view = inventory(&mut store);
@@ -448,13 +464,8 @@ fn committed_first_save_retries_at_both_caps_without_another_copy() {
             &mut rng(),
             &mut limits.0,
             &mut limits.1,
-            |_, path, bytes| atomic_write_with_hook_and_sync_for_test(
-                path,
-                bytes,
-                &mut |_, _| {},
-                |_| Err(std::io::Error::other("after rename"))
-            ),
-            sync_intent
+            WriteStep::new(WriteTag::Intents),
+            &mut WriteHooks::fail_after_write(FailError::NotDurable("after rename"))
         )
         .is_err());
     drop(store);
@@ -489,8 +500,8 @@ fn committed_first_save_retries_at_both_caps_without_another_copy() {
             &mut rng(),
             &mut budget,
             &mut intents,
-            |_m, _, _| panic!("an exact retry must not rewrite ciphertext"),
-            |m: &EpochMutation<'_>, p: &Path, b: u64| m.sync_intent(p, b),
+            WriteStep::new(WriteTag::Intents),
+            &mut WriteHooks::MustNotWrite("an exact retry must not rewrite ciphertext"),
         )
         .unwrap();
     assert!(
@@ -530,8 +541,8 @@ fn writer_and_retry_flush_panics_or_errors_poison_both_budgets() {
             &mut rng(),
             &mut limits.0,
             &mut limits.1,
-            |_m, _, _| panic!("writer panic"),
-            |m: &EpochMutation<'_>, p: &Path, b: u64| m.sync_intent(p, b),
+            WriteStep::new(WriteTag::Intents),
+            &mut WriteHooks::MustNotWrite("writer panic"),
         )
     }));
     assert!(panic.is_err());
@@ -549,8 +560,16 @@ fn writer_and_retry_flush_panics_or_errors_poison_both_budgets() {
             &mut rng(),
             &mut limits.0,
             &mut limits.1,
-            |_, _, _| panic!("no rewrite"),
-            |_, _, _| Err(AppError::Io("flush failed".into()))
+            WriteStep::new(WriteTag::Intents),
+            // The exact retry must reach the flush and not a replacement, and the flush fails.
+            &mut WriteHooks::Hooked {
+                before: Some(&mut |_: WriteTag, _: &Path, _: &[u8]| panic!("no rewrite")),
+                before_sync: Some(&mut |_: WriteTag, _: &Path, _: u64| {
+                    AfterIntercept::Fail(AppError::Io("flush failed".into()))
+                }),
+                before_unlink: None,
+                after: None,
+            }
         )
         .is_err());
     assert!(limits.0.requires_reconciliation());

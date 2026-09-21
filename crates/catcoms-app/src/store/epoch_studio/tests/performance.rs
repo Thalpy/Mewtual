@@ -126,8 +126,8 @@ pub(crate) fn save_studio_source_fixture(
             WritePurpose::Ordinary,
             &mut rng(),
             &mut b.storage,
-            |m: &EpochMutation<'_>, p: &Path, b: &[u8]| m.write(p, b),
-            |m: &EpochMutation<'_>, p: &Path, b: u64| m.sync_studio(p, b),
+            WriteStep::new(WriteTag::Source),
+            &mut WriteHooks::None,
         )
         .unwrap();
     operations
@@ -208,8 +208,8 @@ pub(crate) fn fill_studio_epoch_fixture(
             WritePurpose::Ordinary,
             &mut rng(),
             &mut budget.storage,
-            |m: &EpochMutation<'_>, p: &Path, b: &[u8]| m.write(p, b),
-            |m: &EpochMutation<'_>, p: &Path, b: u64| m.sync_studio(p, b),
+            WriteStep::new(WriteTag::Source),
+            &mut WriteHooks::None,
         )
         .unwrap();
     store.retain_studio_source(group, device, state);
@@ -254,8 +254,8 @@ fn measure(count: usize, clock: &dyn Clock) {
             WritePurpose::Ordinary,
             &mut rng(),
             &mut b.storage,
-            |m: &EpochMutation<'_>, p: &Path, b: &[u8]| m.write(p, b),
-            |m: &EpochMutation<'_>, p: &Path, b: u64| m.sync_studio(p, b),
+            WriteStep::new(WriteTag::Source),
+            &mut WriteHooks::None,
         )
         .unwrap();
     let bytes = fs::metadata(f.path(&store)).unwrap().len();
@@ -488,7 +488,7 @@ pub(crate) fn studio_handoff_ready_fixture(
             0,
             &mut ChaCha20Rng::seed_from_u64(23),
             &mut b.storage,
-            |m: &EpochMutation<'_>, p: &Path, b: &[u8]| m.write(p, b),
+            &mut WriteHooks::None,
         )
         .unwrap();
 
@@ -512,8 +512,8 @@ pub(crate) fn studio_handoff_ready_fixture(
             WritePurpose::Settlement,
             &mut ChaCha20Rng::seed_from_u64(24),
             &mut b.storage,
-            |m: &EpochMutation<'_>, p: &Path, b: &[u8]| m.write(p, b),
-            |m: &EpochMutation<'_>, p: &Path, b: u64| m.sync_studio(p, b),
+            WriteStep::new(WriteTag::Source),
+            &mut WriteHooks::None,
             Some(version),
         )
         .unwrap();

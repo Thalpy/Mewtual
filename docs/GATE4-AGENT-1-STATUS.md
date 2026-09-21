@@ -1475,32 +1475,73 @@ overstatement: rail filtering bounds the *scheduling* impact, not the *retained 
 > those executions**, not that the variants cannot interfere under another interleaving. 132 of
 > 160 passes is a measurement, not a worst-case guarantee.
 
-## Requirement 3: in progress, two paths converted
+## Requirement 3: COMPLETE
 
-**Status.** Two complete mutation paths now take `&mut WriteHooks<'_>` instead of `writer`/`sync`
-closures, and perform their own operations. **83 seam parameters across 22 files remain**, down
-from 86 across 24.
+**Zero `writer`/`sync`/`unlink` seam parameters remain anywhere in the crate**, down from 86
+across 24 files. Every transaction performs its own physical operations; callers decide around
+them and cannot substitute one.
 
-| Path | Commit | Shape it established |
-| --- | --- | --- |
-| Draft archive writer | `9c846f4` | replacement + record sync; `before`/`before_sync`/`after` |
-| Staging cleanup batch | `5f52ef6` | unlink in a loop; `before_unlink`, `after` per operation |
+**In a non-test build `WriteHooks` has exactly one inhabitant, `None`.** `Fail`, `MustNotWrite`
+and `Hooked` are all `#[cfg(test)]`, and `Never` is uninhabited. So "production supplies no write
+implementation" is a property of the type, not an audit of the current call sites. That is what
+requirement 3 asked for.
 
-Both were chosen for the same reason: a **closed forwarding tree**. The draft archive writer has
-one function, no production callers and five test callers in one file; cleanup's `step_with_io`
-had one production caller and seven test callers, all in cleanup.rs. Neither reaches the tagged
-transaction layer, so neither could cascade.
+### What made it converge this time
 
-**What is left is the hard part.** Every remaining seam forwards through that tagged layer. The
-owner-receipt family alone is nine functions funnelling into one physical write, and two of its
-callers (`epoch_studio/rotation.rs`, `epoch_studio/discovery.rs`) forward from tagged seams that
-have their own callers and their own barrier tests. `update_epoch_recovery_accounted_with_writer`
-has twelve call sites spanning registry and studio. These are the trees the sweeps died in.
+The decisive measurement came before any edit: **only 14 sites in the whole crate actually
+invoke a seam parameter.** Everything else forwards. So the semantic work - write versus sync,
+which primitive, tag routing, before/after ordering - was confined to 14 places, and the
+remaining ~250 sites were parameter substitution the compiler could enumerate.
 
-**Method that works, from two converted paths.** Pick a physical write site; convert it together
-with everything that transitively forwards into it, by hand; keep every assertion the old closure
-carried; mutate one decision away and confirm a named assertion fails. Both conversions compiled
-on the first attempt under this method, against 170 → 181 → 207 for the sweeps.
+The sweeps failed because they tried to rewrite bodies by pattern. Changing signatures by hand
+and letting the compiler list the call sites gave a strictly decreasing error count:
+**102 → 47 → 26 → 16 → 2 → 0** in the library, then **121 → 90 → 76 → 61 → 45 → 26 → 16 → 2 → 0**
+across the tests. Compare 170 → 181 → 207 for the second sweep.
+
+### Two things the conversion had to invent
+
+**`WriteStep`**, carrying a step's tag *and* whether it may replace at all. Five production sites
+passed a writer that always returned an error - "replay assessment must not rewrite the epoch",
+"handoff resolution requires unchanged source". Those are **assertions, not implementations**,
+and `WriteHooks::None` would have silently permitted every one of them. A permissive default
+there would have deleted five production guards while looking like a mechanical conversion.
+
+The tag had to be a passed value rather than a constant because the same callee is a different
+step in different transactions: `save_studio_source` is tagged `Source` at rotation.rs:228 and
+`Successor` at rotation.rs:405.
+
+**`WriteHooks::Fail` and `MustNotWrite`**, closure-free injections. `WriteHooks` borrows its
+decisions, so a helper cannot build one and return it with a closure inside; without these, every
+one of ~60 injected-failure tests would have needed a `let`-bound closure. `Fail` spells its error
+out as a `FailError` rather than holding an `AppError`, because `AppError` is not `Clone` and a
+one-shot injection that silently stopped firing would be a different test from the one its author
+wrote.
+
+### What the tests gained
+
+Several were **strengthened by the conversion**, because the closures they used to pass were
+doing the write themselves and so bypassing the capability:
+
+- cleanup's interrupted-unlink test called `fs::remove_file` directly; the real `remove_io`, with
+  its symlink and regular-file checks, now runs and the test only decides whether it should.
+- every `after`-style injection used to perform its own `write_for_test` and then return an
+  error. The transaction now performs that write, so "fails after the bytes are in place" is
+  tested against the real replacement rather than a second path to disk.
+- `epoch_studio/rotation.rs` held two closures that were **identity maps between per-transaction
+  tag enums**, complete with an `unreachable!` arm for tags the other enum lacked. One store-wide
+  tag deleted the translation and the unreachable arm with it.
+- `epoch_registry/replay.rs` needed a `RefCell` because two adapter closures each wanted
+  `&mut sync` and only one could hold it. One set of decisions removed the aliasing rather than
+  working around it.
+
+### The conversion hazard, found the hard way
+
+A closure seam often carries assertions invisible at the call site. Cleanup's sync closure was
+`panic!("failed traversal must not report a synced batch")` - an assertion that no sync happens,
+not an injection. A helper without a sync slot silently dropped it, and that assertion turned out
+to be the *only* thing in the module that catches deleting `before_unlink` from the production
+loop: the other panicking unlink hooks sit on paths where no unlink was reachable anyway.
+**Enumerate what each closure asserts before replacing it, not just what it does.**
 
 **One conversion hazard, found the hard way.** A closure seam often carries assertions that are
 invisible at the call site — cleanup's sync closure was `panic!("failed traversal must not report

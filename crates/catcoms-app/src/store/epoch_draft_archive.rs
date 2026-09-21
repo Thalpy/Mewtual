@@ -214,7 +214,7 @@ impl ServerStore {
                 let mutation = self.epoch_mutation_guard();
                 hooks.before_sync(WriteTag::Archive, &path, bytes)?;
                 super::epoch_intents::sync_intent(&mutation, &path, bytes)?;
-                hooks.after(WriteTag::Archive, &path)?;
+                hooks.after_sync(WriteTag::Archive, &path)?;
                 reservation.commit();
                 intents.end_write(self.intent_generation.clone());
                 return Ok(());
@@ -259,7 +259,7 @@ impl ServerStore {
         let mutation = self.epoch_mutation_guard();
         let framed = hooks.before(WriteTag::Archive, &path, &framed)?;
         mutation.write(&path, &framed)?;
-        hooks.after(WriteTag::Archive, &path)?;
+        hooks.after_write(WriteTag::Archive, &path)?;
         reservation.commit();
         intents.commit_draft_archive(id, old, next);
         intents.end_write(self.intent_generation.clone());

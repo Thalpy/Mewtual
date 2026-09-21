@@ -198,7 +198,7 @@ impl<'a> EpochStorageCleanup<'a> {
                     "epoch staging cleanup: {e}; earlier siblings may already be removed"
                 ))
             })?;
-            hooks.after(WriteTag::Staging, &path)?;
+            hooks.after_unlink(WriteTag::Staging, &path)?;
             next.removed_files += 1;
             next.removed_ciphertext_bytes = removed_bytes;
         }
@@ -213,7 +213,7 @@ impl<'a> EpochStorageCleanup<'a> {
         mutation
             .sync_parent_io(&self.parent)
             .map_err(|e| AppError::CommittedButNotDurable(e.to_string()))?;
-        hooks.after(WriteTag::Staging, &self.parent)?;
+        hooks.after_sync(WriteTag::Staging, &self.parent)?;
         self.progress = next;
         self.failed = false;
         Ok(next)
@@ -448,11 +448,16 @@ mod tests {
             action(1),
             &ManualClock::new(1),
             &mut ChaCha20Rng::seed_from_u64(1),
-            |_, _, bytes| {
-                fs::write(&orphan, bytes).unwrap();
-                Err(AppError::Io(
-                    "simulated interruption before first rename".into(),
-                ))
+            &mut WriteHooks::Hooked {
+                before: Some(&mut |_: WriteTag, _: &Path, bytes: &[u8]| {
+                    fs::write(&orphan, bytes).unwrap();
+                    Intercept::Fail(AppError::Io(
+                        "simulated interruption before first rename".into(),
+                    ))
+                }),
+                before_sync: None,
+                before_unlink: None,
+                after: None,
             },
         );
         assert!(result.is_err());
@@ -515,9 +520,14 @@ mod tests {
             &ManualClock::new(2),
             &mut ChaCha20Rng::seed_from_u64(2),
             &mut budget,
-            |_, _, bytes| {
-                fs::write(&orphan, bytes).unwrap();
-                Err(AppError::Io("interrupted replacement".into()))
+            &mut WriteHooks::Hooked {
+                before: Some(&mut |_: WriteTag, _: &Path, bytes: &[u8]| {
+                    fs::write(&orphan, bytes).unwrap();
+                    Intercept::Fail(AppError::Io("interrupted replacement".into()))
+                }),
+                before_sync: None,
+                before_unlink: None,
+                after: None,
             },
         );
         assert!(failed.is_err());

@@ -23,7 +23,7 @@ impl ServerStore {
             durable_tenure,
             rng,
             budget,
-            |m: &EpochMutation<'_>, p: &Path, b: u64| m.sync_registry(p, b),
+            &mut WriteHooks::None,
         )
     }
 
@@ -37,7 +37,7 @@ impl ServerStore {
         durable_tenure: Option<u64>,
         rng: &mut impl CryptoRngCore,
         budget: &mut EpochStorageBudget,
-        sync: impl FnOnce(&EpochMutation<'_>, &Path, u64) -> Result<(), AppError>,
+        hooks: &mut WriteHooks<'_>,
     ) -> Result<ReceiptHeadSelection, AppError> {
         if group.member_signature_key(&device.device_id()).as_deref()
             != Some(device.public_key_bytes().as_slice())
@@ -101,7 +101,7 @@ impl ServerStore {
             budget,
             held,
             record,
-            sync,
+            hooks,
         )
     }
 
@@ -117,7 +117,7 @@ impl ServerStore {
         budget: &mut EpochStorageBudget,
         held: Option<Receipt>,
         record: Option<StorageRecord>,
-        sync: impl FnOnce(&EpochMutation<'_>, &Path, u64) -> Result<(), AppError>,
+        hooks: &mut WriteHooks<'_>,
     ) -> Result<ReceiptHeadSelection, AppError> {
         let document = registry_document(&group.group_id(), bucket).map_err(invalid)?;
         let scope = scope_bytes(server, &document)?;
@@ -166,7 +166,9 @@ impl ServerStore {
             let path = self.registry_epoch_path(&scope);
             let bytes = record.footprint.total().map_err(invalid)?;
             let mutation = self.epoch_mutation_guard();
-            sync(&mutation, &path, bytes)?;
+            hooks.before_sync(WriteTag::Source, &path, bytes)?;
+            sync_registry(&mutation, &path, bytes)?;
+            hooks.after_sync(WriteTag::Source, &path)?;
             reservation.commit();
             // Re-save even an exact published retry: a previously visible rename is not itself
             // evidence of a successful parent flush. No mark-published or receipt issuance here.
@@ -211,7 +213,7 @@ impl ServerStore {
             budget,
             head,
             record,
-            |m: &EpochMutation<'_>, p: &Path, b: u64| m.sync_registry(p, b),
+            &mut WriteHooks::None,
         )
     }
 }

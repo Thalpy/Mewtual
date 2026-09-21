@@ -32,8 +32,7 @@ impl ServerStore {
             ts,
             rng,
             budget,
-            |m: &EpochMutation<'_>, p: &Path, b: &[u8]| m.write(p, b),
-            |m: &EpochMutation<'_>, p: &Path, b: u64| m.sync_intent(p, b),
+            &mut WriteHooks::None,
         )
     }
 
@@ -65,8 +64,7 @@ impl ServerStore {
             ts,
             rng,
             budget,
-            |m: &EpochMutation<'_>, p: &Path, b: &[u8]| m.write(p, b),
-            |m: &EpochMutation<'_>, p: &Path, b: u64| m.sync_intent(p, b),
+            &mut WriteHooks::None,
         )
     }
 
@@ -94,8 +92,7 @@ impl ServerStore {
             plan,
             rng,
             budget,
-            |m: &EpochMutation<'_>, p: &Path, b: &[u8]| m.write(p, b),
-            |m: &EpochMutation<'_>, p: &Path, b: u64| m.sync_intent(p, b),
+            &mut WriteHooks::None,
         )
     }
 
@@ -132,7 +129,7 @@ impl ServerStore {
     /// inline; the scheduled runtime runs the same three stages with custody released around
     /// `plan`. There is deliberately no second algorithm for a scheduler to drift from.
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn start_studio_closing_overlay_with_io(
+    pub(in crate::store) fn start_studio_closing_overlay_with_io(
         &mut self,
         server: u64,
         group: &ServerGroup,
@@ -145,8 +142,7 @@ impl ServerStore {
         ts: u64,
         rng: &mut impl CryptoRngCore,
         budget: &mut EpochStudioBudget,
-        writer: impl FnOnce(&EpochMutation<'_>, &Path, &[u8]) -> Result<(), AppError>,
-        sync: impl FnOnce(&EpochMutation<'_>, &Path, u64) -> Result<(), AppError>,
+        hooks: &mut WriteHooks<'_>,
     ) -> Result<StudioOverlayStart, AppError> {
         current_member(group, device)?;
         let logical = target.document(&group.group_id()).map_err(invalid)?;
@@ -187,8 +183,8 @@ impl ServerStore {
                     rng,
                     &mut budget.storage,
                     &mut budget.intents,
-                    writer,
-                    sync,
+                    WriteStep::new(WriteTag::Intents),
+                    hooks,
                 )?;
                 return Ok(StudioOverlayStart::Settled(Box::new(
                     StudioOverlaySave::HandedOff(outcome),
@@ -229,8 +225,7 @@ impl ServerStore {
                     rng,
                     &mut budget.storage,
                     &mut budget.intents,
-                    writer,
-                    sync,
+                    hooks,
                 )
                 .map(|draft| {
                     StudioOverlayStart::Settled(Box::new(StudioOverlaySave::Local(draft)))
@@ -270,7 +265,7 @@ impl ServerStore {
     /// The synchronous adapter: the same three stages with no detach between them. Every caller
     /// that cannot release custody, and every existing test, takes this path.
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn save_studio_closing_overlay_with_io(
+    pub(in crate::store) fn save_studio_closing_overlay_with_io(
         &mut self,
         server: u64,
         group: &ServerGroup,
@@ -286,30 +281,17 @@ impl ServerStore {
         // `FnMut` so this can lend the same writer to the start visit and then to the commit.
         // A reborrow `&mut F` is itself `FnOnce`, so neither callee's bound changes and no caller
         // has to pass anything twice.
-        mut writer: impl FnMut(&EpochMutation<'_>, &Path, &[u8]) -> Result<(), AppError>,
-        mut sync: impl FnMut(&EpochMutation<'_>, &Path, u64) -> Result<(), AppError>,
+        hooks: &mut WriteHooks<'_>,
     ) -> Result<StudioOverlaySave, AppError> {
         let capture = match self.start_studio_closing_overlay_with_io(
-            server,
-            group,
-            target,
-            device,
-            close,
-            tenure,
-            basis,
-            operation,
-            ts,
-            rng,
-            budget,
-            &mut writer,
-            &mut sync,
+            server, group, target, device, close, tenure, basis, operation, ts, rng, budget, hooks,
         )? {
             StudioOverlayStart::Settled(saved) => return Ok(*saved),
             StudioOverlayStart::Captured(capture) => *capture,
         };
         let plan = capture.plan()?;
         self.commit_studio_overlay_save(
-            server, group, target, device, close, tenure, plan, rng, budget, writer, sync,
+            server, group, target, device, close, tenure, plan, rng, budget, hooks,
         )
         .map(StudioOverlaySave::Local)
     }

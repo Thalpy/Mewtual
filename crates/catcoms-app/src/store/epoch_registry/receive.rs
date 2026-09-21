@@ -39,8 +39,7 @@ impl ServerStore {
             operations,
             rng,
             budget,
-            |m: &EpochMutation<'_>, p: &Path, b: &[u8]| m.write(p, b),
-            |m: &EpochMutation<'_>, p: &Path, b: u64| m.sync_registry(p, b),
+            &mut WriteHooks::None,
         )
     }
 
@@ -55,8 +54,7 @@ impl ServerStore {
         operations: &[SealedOp],
         rng: &mut impl CryptoRngCore,
         budget: &mut EpochStorageBudget,
-        writer: impl FnOnce(&EpochMutation<'_>, &Path, &[u8]) -> Result<(), AppError>,
-        sync: impl FnOnce(&EpochMutation<'_>, &Path, u64) -> Result<(), AppError>,
+        hooks: &mut WriteHooks<'_>,
     ) -> Result<(RegistryPageAdmission, Option<EpochRegistryState>), AppError> {
         if operations.len() > MAX_REGISTRY_PAGE_OPS {
             return Err(invalid("registry page operation count is invalid"));
@@ -75,7 +73,7 @@ impl ServerStore {
                     expected_doc_id,
                     device,
                     budget,
-                    sync,
+                    hooks,
                 )
                 .map(|state| (RegistryPageAdmission::default(), state));
         }
@@ -119,8 +117,8 @@ impl ServerStore {
                 }
                 Ok(result)
             },
-            writer,
-            sync,
+            WriteStep::new(WriteTag::Epoch),
+            hooks,
         )
         .map(|(counts, state)| (counts, Some(state)))
     }
@@ -137,7 +135,7 @@ impl ServerStore {
         expected_doc_id: u128,
         device: &MlsDevice,
         budget: &mut EpochStorageBudget,
-        sync: impl FnOnce(&EpochMutation<'_>, &Path, u64) -> Result<(), AppError>,
+        hooks: &mut WriteHooks<'_>,
     ) -> Result<Option<EpochRegistryState>, AppError> {
         let document = registry_document(&group.group_id(), bucket).map_err(invalid)?;
         let scope = scope_bytes(server, &document)?;
@@ -201,7 +199,9 @@ impl ServerStore {
             let path = self.registry_epoch_path(&scope);
             let bytes = record.footprint.total().map_err(invalid)?;
             let mutation = self.epoch_mutation_guard();
-            sync(&mutation, &path, bytes)?;
+            hooks.before_sync(WriteTag::Epoch, &path, bytes)?;
+            sync_registry(&mutation, &path, bytes)?;
+            hooks.after_sync(WriteTag::Epoch, &path)?;
             reservation.commit();
         }
         Ok(state)

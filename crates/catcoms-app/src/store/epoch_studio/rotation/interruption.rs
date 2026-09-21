@@ -18,25 +18,42 @@ pub(crate) struct StudioRotationInterruption {
 }
 
 impl StudioRotationInterruption {
-    pub(super) fn before_write(
-        &self,
-        target: StudioTarget,
-        step: WriteTag,
-        path: &Path,
-        bytes: &[u8],
-    ) -> Result<(), AppError> {
-        let matches = matches!(
-            (self.boundary, step),
-            (StudioRotationBoundary::Recovery, WriteTag::Recovery)
-                | (StudioRotationBoundary::Successor, WriteTag::Successor)
-        );
-        if target == self.target && matches && !self.hit.swap(true, Ordering::SeqCst) {
-            if self.after_write {
-                write_for_test(path, bytes)?;
-            }
-            return Err(AppError::Io("injected Studio rotation interruption".into()));
+    /// Whether this interruption is aimed at the write about to happen. The one-shot flag is
+    /// deliberately not consulted here: it is claimed by whichever side actually fires.
+    fn aimed_at(&self, target: StudioTarget, step: WriteTag) -> bool {
+        target == self.target
+            && matches!(
+                (self.boundary, step),
+                (StudioRotationBoundary::Recovery, WriteTag::Recovery)
+                    | (StudioRotationBoundary::Successor, WriteTag::Successor)
+            )
+    }
+
+    /// Fail before the replacement, so no record is left behind.
+    pub(super) fn before(&self, target: StudioTarget, step: WriteTag) -> Intercept {
+        if !self.after_write && self.claim(target, step) {
+            return Intercept::Fail(AppError::Io("injected Studio rotation interruption".into()));
         }
-        Ok(())
+        Intercept::Continue
+    }
+
+    /// Fail once the bytes are in place, so a restart finds a durable but unaccounted record.
+    ///
+    /// This half used to be expressed by the injected writer performing the write itself and
+    /// then returning an error. It no longer writes: the capability does, and this only decides
+    /// afterwards, which is the same observable without a second path to disk.
+    pub(super) fn after(&self, target: StudioTarget, step: WriteTag) -> AfterIntercept {
+        if self.after_write && self.claim(target, step) {
+            return AfterIntercept::Fail(AppError::Io(
+                "injected Studio rotation interruption".into(),
+            ));
+        }
+        AfterIntercept::Continue
+    }
+
+    /// Aimed here, and the one shot is still unspent.
+    fn claim(&self, target: StudioTarget, step: WriteTag) -> bool {
+        self.aimed_at(target, step) && !self.hit.swap(true, Ordering::SeqCst)
     }
 }
 

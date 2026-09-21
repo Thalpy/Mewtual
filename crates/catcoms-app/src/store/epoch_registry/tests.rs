@@ -237,13 +237,22 @@ fn registry_store_failed_write_and_post_rename_failure_require_reconciliation_an
             &mut rng(),
             &mut budget,
             |unit, _| unit.ingest(&op, &f.group, &f.device).map_err(invalid),
-            |_, path, bytes| {
-                if committed {
-                    write_for_test(path, bytes)?;
-                }
-                Err(AppError::Io("injected write/durability failure".into()))
+            WriteStep::new(WriteTag::Epoch),
+            &mut WriteHooks::Hooked {
+                before: Some(&mut |_: WriteTag, _: &Path, _: &[u8]| {
+                    if committed {
+                        return Intercept::Continue;
+                    }
+                    Intercept::Fail(AppError::Io("injected write/durability failure".into()))
+                }),
+                before_sync: Some(&mut |_: WriteTag, _: &Path, _: u64| {
+                    panic!("first write cannot sync-only")
+                }),
+                before_unlink: None,
+                after: Some(&mut |_: WriteTag, _: &Path| {
+                    AfterIntercept::Fail(AppError::Io("injected write/durability failure".into()))
+                }),
             },
-            |_, _, _| panic!("first write cannot sync-only"),
         );
         assert!(result.is_err());
         assert!(budget.requires_reconciliation());
@@ -264,13 +273,18 @@ fn registry_store_failed_write_and_post_rename_failure_require_reconciliation_an
                 &mut rng(),
                 &mut budget,
                 |unit, _| unit.ingest(&op, &f.group, &f.device).map_err(invalid),
-                |_, path, bytes| {
-                    assert!(!committed);
-                    write_for_test(path, bytes)
-                },
-                |m, path, size| {
-                    synced = true;
-                    sync_registry(m, path, size)
+                WriteStep::new(WriteTag::Epoch),
+                &mut WriteHooks::Hooked {
+                    before: Some(&mut |_: WriteTag, _: &Path, _: &[u8]| {
+                        assert!(!committed);
+                        Intercept::Continue
+                    }),
+                    before_sync: Some(&mut |_: WriteTag, _: &Path, _: u64| {
+                        synced = true;
+                        AfterIntercept::Continue
+                    }),
+                    before_unlink: None,
+                    after: None,
                 },
             )
             .unwrap();
@@ -307,8 +321,17 @@ fn registry_store_failed_duplicate_sync_or_writer_panic_cannot_acknowledge() {
             &mut rng(),
             &mut budget,
             |unit, _| unit.ingest(&op, &f.group, &f.device).map_err(invalid),
-            |_, _, _| panic!("duplicate must not replace"),
-            |_, _, _| Err(AppError::Io("injected sync failure".into()))
+            WriteStep::new(WriteTag::Epoch),
+            &mut WriteHooks::Hooked {
+                before: Some(&mut |_: WriteTag, _: &Path, _: &[u8]| {
+                    panic!("duplicate must not replace")
+                }),
+                before_sync: Some(&mut |_: WriteTag, _: &Path, _: u64| {
+                    AfterIntercept::Fail(AppError::Io("injected sync failure".into()))
+                }),
+                before_unlink: None,
+                after: None,
+            }
         )
         .is_err());
     assert!(budget.requires_reconciliation());
@@ -326,8 +349,8 @@ fn registry_store_failed_duplicate_sync_or_writer_panic_cannot_acknowledge() {
             &mut rng(),
             &mut budget,
             |unit, _| unit.ingest(&next, &f.group, &f.device).map_err(invalid),
-            |_m, _, _| panic!("injected writer panic"),
-            |m: &EpochMutation<'_>, p: &Path, b: u64| m.sync_registry(p, b),
+            WriteStep::new(WriteTag::Epoch),
+            &mut WriteHooks::MustNotWrite("injected writer panic"),
         )
     }));
     assert!(caught.is_err());
@@ -735,11 +758,8 @@ fn registry_store_receipt_retry_after_failed_flush_and_removed_owner_inventory()
         &mut rng(),
         &mut budget,
         |unit, _| unit.seal(receipt.clone(), &f.group, 0).map_err(invalid),
-        |_m, path, bytes| {
-            write_for_test(path, bytes)?;
-            Err(AppError::Io("post-rename failure".into()))
-        },
-        |m: &EpochMutation<'_>, p: &Path, b: u64| m.sync_registry(p, b),
+        WriteStep::new(WriteTag::Epoch),
+        &mut WriteHooks::fail_after_write(FailError::Io("post-rename failure")),
     );
     assert!(result.is_err());
     assert!(budget.requires_reconciliation());

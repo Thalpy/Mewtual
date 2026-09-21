@@ -591,14 +591,6 @@ mod persistence {
         ) -> Result<(), AppError> {
             epoch_registry::sync_registry(self, path, bytes)
         }
-
-        pub(in crate::store) fn sync_studio(
-            &self,
-            path: &Path,
-            bytes: u64,
-        ) -> Result<(), AppError> {
-            epoch_studio::sync_studio(self, path, bytes)
-        }
     }
 
     impl ServerStore {
@@ -694,6 +686,87 @@ mod persistence {
         Staging,
     }
 
+    /// One write's identity within the caller's transaction: which step it is, and whether it
+    /// may replace the record at all.
+    ///
+    /// The second half exists because several transactions are read-and-flush by construction -
+    /// a replay assessment, a source preparation, a handoff resolution - and reaching a
+    /// replacement there means a caller mis-routed rather than that a write failed. The old
+    /// seam said this by handing in a writer that always returned an error. That is an
+    /// assertion, not an implementation, and replacing such a seam with a permissive default
+    /// would delete a production guard while looking like a mechanical conversion.
+    ///
+    /// Both halves are plain values. Naming a write, or forbidding one, is not the authority to
+    /// perform one.
+    #[derive(Clone, Copy)]
+    pub(in crate::store) struct WriteStep {
+        tag: WriteTag,
+        refusal: Option<&'static str>,
+    }
+
+    impl WriteStep {
+        /// An ordinary step, free to replace or to flush.
+        pub(in crate::store) fn new(tag: WriteTag) -> Self {
+            Self { tag, refusal: None }
+        }
+
+        /// A step that may only flush a record already in place. `why` is reported if a
+        /// replacement is ever reached, and should say what the caller got wrong.
+        pub(in crate::store) fn flush_only(tag: WriteTag, why: &'static str) -> Self {
+            Self {
+                tag,
+                refusal: Some(why),
+            }
+        }
+
+        pub(in crate::store) fn tag(self) -> WriteTag {
+            self.tag
+        }
+
+        /// Refuse here if this step was never allowed to replace anything. Called at the
+        /// physical site, before the guard and before any decision.
+        pub(in crate::store) fn permit_replacement(self) -> Result<(), AppError> {
+            match self.refusal {
+                None => Ok(()),
+                Some(why) => Err(AppError::Invalid(format!("epoch storage: {why}"))),
+            }
+        }
+    }
+
+    /// Where a [`WriteHooks::Fail`] fires.
+    #[cfg(test)]
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub(in crate::store) enum FailPoint {
+        /// Nothing is written.
+        BeforeWrite,
+        /// The bytes are in place and the transaction still fails: visible, not accounted.
+        AfterWrite,
+        /// The record stays exactly as it was; its durability is simply not confirmed.
+        BeforeSync,
+    }
+
+    /// The error a [`WriteHooks::Fail`] produces. Spelled out rather than held as an `AppError`
+    /// because `AppError` is not `Clone`, and an injection that fires once and then silently
+    /// stops would be a different test from the one its author wrote.
+    #[cfg(test)]
+    #[derive(Clone, Copy, Debug)]
+    pub(in crate::store) enum FailError {
+        Io(&'static str),
+        Invalid(&'static str),
+        NotDurable(&'static str),
+    }
+
+    #[cfg(test)]
+    impl FailError {
+        fn build(self) -> AppError {
+            match self {
+                Self::Io(message) => AppError::Io(message.into()),
+                Self::Invalid(message) => AppError::Invalid(format!("epoch storage: {message}")),
+                Self::NotDurable(message) => AppError::CommittedButNotDurable(message.into()),
+            }
+        }
+    }
+
     #[cfg(test)]
     type BeforeHook<'h> = &'h mut dyn FnMut(WriteTag, &Path, &[u8]) -> Intercept;
     #[cfg(test)]
@@ -722,10 +795,26 @@ mod persistence {
     ///
     /// **In a non-test build this has exactly one inhabitant, `None`.** There is no variant a
     /// production caller could construct that carries an implementation, so "production supplies
-    /// no write implementation" is a property of the type rather than of the current call sites.
+    /// no write implementation" is a property of the type rather than of the current call sites,
+    /// which is what requirement 3 asks for. Whether a transaction may replace its record at all
+    /// is a separate question, carried by [`WriteStep`] rather than by a decision.
     #[allow(dead_code)]
     pub(in crate::store) enum WriteHooks<'h> {
         None,
+        /// Refuse at one fixed point, which is what most injected-failure tests want. The
+        /// closure form below is for the rest: counting, capturing, or deciding per call.
+        #[cfg(test)]
+        Fail {
+            at: FailPoint,
+            /// Restrict to one step of a multi-write transaction; `None` fires at the first.
+            only: Option<WriteTag>,
+            error: FailError,
+        },
+        /// Assert that no replacement is attempted, panicking if one is. Distinct from `Fail`:
+        /// the test wants to report the unexpected write itself, not whatever the transaction
+        /// decides to do with an error.
+        #[cfg(test)]
+        MustNotWrite(&'static str),
         #[cfg(test)]
         Hooked {
             before: Option<BeforeHook<'h>>,
@@ -735,6 +824,53 @@ mod persistence {
         },
         #[allow(dead_code)]
         Never(std::convert::Infallible, std::marker::PhantomData<&'h ()>),
+    }
+
+    #[cfg(test)]
+    impl WriteHooks<'_> {
+        /// Refuse before the replacement: nothing reaches disk.
+        pub(in crate::store) fn fail_before_write(error: FailError) -> Self {
+            Self::Fail {
+                at: FailPoint::BeforeWrite,
+                only: None,
+                error,
+            }
+        }
+
+        /// Fail once the bytes are in place, leaving a durable but unaccounted record.
+        pub(in crate::store) fn fail_after_write(error: FailError) -> Self {
+            Self::Fail {
+                at: FailPoint::AfterWrite,
+                only: None,
+                error,
+            }
+        }
+
+        /// Refuse the durability flush of a record that is already in place.
+        pub(in crate::store) fn fail_before_sync(error: FailError) -> Self {
+            Self::Fail {
+                at: FailPoint::BeforeSync,
+                only: None,
+                error,
+            }
+        }
+
+        /// Restrict an injection to one step of a multi-write transaction.
+        pub(in crate::store) fn at(self, tag: WriteTag) -> Self {
+            match self {
+                Self::Fail { at, error, .. } => Self::Fail {
+                    at,
+                    only: Some(tag),
+                    error,
+                },
+                other => other,
+            }
+        }
+
+        /// Whether a `Fail` aimed at `point` should fire for this write.
+        fn fires(at: FailPoint, only: Option<WriteTag>, point: FailPoint, tag: WriteTag) -> bool {
+            at == point && only.is_none_or(|wanted| wanted == tag)
+        }
     }
 
     #[allow(dead_code)]
@@ -748,6 +884,16 @@ mod persistence {
         ) -> Result<std::borrow::Cow<'b, [u8]>, AppError> {
             match self {
                 Self::None => Ok(std::borrow::Cow::Borrowed(bytes)),
+                #[cfg(test)]
+                Self::Fail { at, only, error }
+                    if Self::fires(*at, *only, FailPoint::BeforeWrite, tag) =>
+                {
+                    Err(error.build())
+                }
+                #[cfg(test)]
+                Self::Fail { .. } => Ok(std::borrow::Cow::Borrowed(bytes)),
+                #[cfg(test)]
+                Self::MustNotWrite(why) => panic!("{why}"),
                 #[cfg(test)]
                 Self::Hooked { before, .. } => match before.as_mut().map(|h| h(tag, path, bytes)) {
                     None | Some(Intercept::Continue) => Ok(std::borrow::Cow::Borrowed(bytes)),
@@ -771,6 +917,18 @@ mod persistence {
             match self {
                 Self::None => Ok(()),
                 #[cfg(test)]
+                Self::Fail { at, only, error }
+                    if Self::fires(*at, *only, FailPoint::BeforeSync, tag) =>
+                {
+                    Err(error.build())
+                }
+                #[cfg(test)]
+                Self::Fail { .. } => Ok(()),
+                // A sync, an unlink and an after decision are all allowed: the assertion is
+                // about replacement only.
+                #[cfg(test)]
+                Self::MustNotWrite(_) => Ok(()),
+                #[cfg(test)]
                 Self::Hooked { before_sync, .. } => {
                     match before_sync.as_mut().map(|h| h(tag, path, len)) {
                         None | Some(AfterIntercept::Continue) => Ok(()),
@@ -789,6 +947,14 @@ mod persistence {
         ) -> Result<(), AppError> {
             match self {
                 Self::None => Ok(()),
+                // No `Fail` point names an unlink: the batch that removes records builds its
+                // decisions explicitly, because what it needs is per-entry, not fixed.
+                #[cfg(test)]
+                Self::Fail { .. } => Ok(()),
+                // A sync, an unlink and an after decision are all allowed: the assertion is
+                // about replacement only.
+                #[cfg(test)]
+                Self::MustNotWrite(_) => Ok(()),
                 #[cfg(test)]
                 Self::Hooked { before_unlink, .. } => {
                     match before_unlink.as_mut().map(|h| h(tag, path)) {
@@ -800,16 +966,63 @@ mod persistence {
             }
         }
 
-        /// Decide after a physical operation has completed, whichever it was: a replacement, a
-        /// sync, or one removal out of a batch. The tag and path say which, and a batch consults
-        /// this once per completed operation rather than once for the batch.
-        pub(in crate::store) fn after(
+        /// Decide after a replacement has physically completed: the bytes are in place and the
+        /// transaction has not yet published its accounting.
+        pub(in crate::store) fn after_write(
+            &mut self,
+            tag: WriteTag,
+            path: &Path,
+        ) -> Result<(), AppError> {
+            match self {
+                #[cfg(test)]
+                Self::Fail { at, only, error }
+                    if Self::fires(*at, *only, FailPoint::AfterWrite, tag) =>
+                {
+                    Err(error.build())
+                }
+                other => other.after_any(tag, path),
+            }
+        }
+
+        /// Decide after a durability sync has completed.
+        ///
+        /// Separate from [`Self::after_write`] because a `Fail` aimed at "after the write" must
+        /// not fire here. A multi-write transaction commonly flushes one record before replacing
+        /// another, and an injection that fired on the first flush would test a different
+        /// failure from the one it names - which is exactly how the first conversion of the
+        /// replay-pass tests went wrong.
+        pub(in crate::store) fn after_sync(
+            &mut self,
+            tag: WriteTag,
+            path: &Path,
+        ) -> Result<(), AppError> {
+            self.after_any(tag, path)
+        }
+
+        /// Decide after one removal out of a batch. A batch consults this once per completed
+        /// removal rather than once for the batch.
+        pub(in crate::store) fn after_unlink(
+            &mut self,
+            tag: WriteTag,
+            path: &Path,
+        ) -> Result<(), AppError> {
+            self.after_any(tag, path)
+        }
+
+        /// The closure-hook half, shared by all three: a `Hooked` test decides for itself which
+        /// operation it cares about, using the tag and path.
+        fn after_any(
             &mut self,
             #[cfg_attr(not(test), allow(unused_variables))] tag: WriteTag,
             #[cfg_attr(not(test), allow(unused_variables))] path: &Path,
         ) -> Result<(), AppError> {
             match self {
                 Self::None => Ok(()),
+                #[cfg(test)]
+                Self::Fail { .. } => Ok(()),
+                // The assertion is about replacement only, and one already happened or did not.
+                #[cfg(test)]
+                Self::MustNotWrite(_) => Ok(()),
                 #[cfg(test)]
                 Self::Hooked { after, .. } => match after.as_mut().map(|h| h(tag, path)) {
                     None | Some(AfterIntercept::Continue) => Ok(()),
@@ -990,8 +1203,8 @@ mod persistence {
 
 pub(crate) use persistence::EpochMutation;
 #[cfg(test)]
-pub(in crate::store) use persistence::{AfterIntercept, Intercept};
-pub(in crate::store) use persistence::{WriteHooks, WriteTag};
+pub(in crate::store) use persistence::{AfterIntercept, FailError, Intercept};
+pub(in crate::store) use persistence::{WriteHooks, WriteStep, WriteTag};
 // Only the test wrappers leave the module. In a non-test build this import does not exist, so
 // nothing outside `persistence` can name a path-generic physical operation at all.
 #[cfg(test)]

@@ -76,12 +76,6 @@ fn pending(s: &TestSource) -> Vec<u8> {
         .map(|(_, intent)| intent.operation.nonce[0])
         .collect()
 }
-fn sync(m: &EpochMutation<'_>, step: WriteTag, path: &Path, bytes: u64) -> Result<(), AppError> {
-    match step {
-        WriteTag::Intents => crate::store::epoch_intents::sync_intent(m, path, bytes),
-        _ => sync_registry(m, path, bytes),
-    }
-}
 
 #[test]
 fn registry_install_retires_only_exact_covered_intents_and_retry_preserves_new_edits() {
@@ -238,19 +232,29 @@ fn registry_install_crash_boundaries_keep_source_or_successor_and_resume_without
                     &mut rng(),
                     &mut s.budget,
                     &mut intents,
-                    &mut |_, at, path, bytes| {
-                        if at == step {
-                            if mode == 1 {
-                                write_for_test(path, bytes)?;
+                    &mut WriteHooks::Hooked {
+                        before: Some(&mut |at: WriteTag, _: &Path, _: &[u8]| {
+                            if at != step || mode == 1 {
+                                return Intercept::Continue;
                             }
                             if mode == 2 {
                                 panic!("injected installation panic");
                             }
-                            return Err(AppError::Io("injected installation write failure".into()));
-                        }
-                        write_for_test(path, bytes)
+                            Intercept::Fail(AppError::Io(
+                                "injected installation write failure".into(),
+                            ))
+                        }),
+                        before_sync: None,
+                        before_unlink: None,
+                        after: Some(&mut |at: WriteTag, _: &Path| {
+                            if at == step && mode == 1 {
+                                return AfterIntercept::Fail(AppError::Io(
+                                    "injected installation write failure".into(),
+                                ));
+                            }
+                            AfterIntercept::Continue
+                        }),
                     },
-                    &mut sync,
                 )
             }));
             assert!(result.is_err() || result.unwrap().is_err());
@@ -313,10 +317,16 @@ fn registry_install_sync_failure_never_retires_before_source_flush() {
         &mut rng(),
         &mut s.budget,
         &mut intents,
-        &mut |_, _, _, _| panic!("source durability must precede every write"),
-        &mut |_, step, _, _| {
-            assert_eq!(step, WriteTag::Source);
-            Err(AppError::Io("source flush failed".into()))
+        &mut WriteHooks::Hooked {
+            before: Some(&mut |_: WriteTag, _: &Path, _: &[u8]| {
+                panic!("source durability must precede every write")
+            }),
+            before_sync: Some(&mut |step: WriteTag, _: &Path, _: u64| {
+                assert_eq!(step, WriteTag::Source);
+                AfterIntercept::Fail(AppError::Io("source flush failed".into()))
+            }),
+            before_unlink: None,
+            after: None,
         },
     );
     assert!(result.is_err());

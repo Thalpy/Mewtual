@@ -219,22 +219,30 @@ fn studio_discovery_store_source_flush_and_journal_write_fail_before_proof_and_r
                 Some(0),
                 &mut rng(),
                 &mut b,
-                |m, path, bytes| {
-                    if failure == "source" {
-                        Err(invalid("injected source flush"))
-                    } else {
-                        sync_studio(m, path, bytes)
-                    }
-                },
-                |_, path, bytes| {
-                    assert_ne!(
-                        failure, "source",
-                        "journal must not run after failed source barrier"
-                    );
-                    if failure == "journal_after" {
-                        write_for_test(path, bytes)?;
-                    }
-                    Err(invalid("injected journal write"))
+                &mut WriteHooks::Hooked {
+                    before_sync: Some(&mut |_: WriteTag, _: &Path, _: u64| {
+                        if failure == "source" {
+                            return AfterIntercept::Fail(invalid("injected source flush"));
+                        }
+                        AfterIntercept::Continue
+                    }),
+                    before: Some(&mut |_: WriteTag, _: &Path, _: &[u8]| {
+                        assert_ne!(
+                            failure, "source",
+                            "journal must not run after failed source barrier"
+                        );
+                        if failure == "journal_after" {
+                            return Intercept::Continue;
+                        }
+                        Intercept::Fail(invalid("injected journal write"))
+                    }),
+                    before_unlink: None,
+                    after: Some(&mut |_: WriteTag, _: &Path| {
+                        if failure == "journal_after" {
+                            return AfterIntercept::Fail(invalid("injected journal write"));
+                        }
+                        AfterIntercept::Continue
+                    }),
                 },
             );
             assert!(result.is_err());

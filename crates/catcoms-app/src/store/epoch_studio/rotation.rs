@@ -61,29 +61,29 @@ impl ServerStore {
     ) -> Result<(StudioRotationOutcome, EpochStudioState), AppError> {
         #[cfg(test)]
         let interruption = self.studio_rotation_interruption.clone();
+        #[cfg(test)]
+        let mut interrupt_before = |step: WriteTag, _: &Path, _: &[u8]| {
+            interruption
+                .as_ref()
+                .map_or(Intercept::Continue, |i| i.before(target, step))
+        };
+        #[cfg(test)]
+        let mut interrupt_after = |step: WriteTag, _: &Path| {
+            interruption
+                .as_ref()
+                .map_or(AfterIntercept::Continue, |i| i.after(target, step))
+        };
+        #[cfg(test)]
+        let mut hooks = WriteHooks::Hooked {
+            before: Some(&mut interrupt_before),
+            before_sync: None,
+            before_unlink: None,
+            after: Some(&mut interrupt_after),
+        };
+        #[cfg(not(test))]
+        let mut hooks = WriteHooks::None;
         self.rotate_studio_owner_with_io(
-            server,
-            group,
-            target,
-            device,
-            tenure,
-            clock,
-            rng,
-            budget,
-            &mut |m, _step, p, b| {
-                // The hook decides whether to fail; the capability performs the write. Before the
-                // relocation this closure called the bare primitive directly, which compiled even
-                // though the write was inventoried — the exact bypass the audit was carrying.
-                #[cfg(test)]
-                if let Some(interruption) = &interruption {
-                    interruption.before_write(target, _step, p, b)?;
-                }
-                m.write(p, b)
-            },
-            &mut |m, step, p, b| match step {
-                WriteTag::Intents => super::super::epoch_intents::sync_intent(m, p, b),
-                _ => sync_studio(m, p, b),
-            },
+            server, group, target, device, tenure, clock, rng, budget, &mut hooks,
         )
     }
 
@@ -98,8 +98,7 @@ impl ServerStore {
         clock: &dyn Clock,
         rng: &mut impl CryptoRngCore,
         budget: &mut EpochStudioBudget,
-        writer: &mut impl FnMut(&EpochMutation<'_>, WriteTag, &Path, &[u8]) -> Result<(), AppError>,
-        sync: &mut impl FnMut(&EpochMutation<'_>, WriteTag, &Path, u64) -> Result<(), AppError>,
+        hooks: &mut WriteHooks<'_>,
     ) -> Result<(StudioRotationOutcome, EpochStudioState), AppError> {
         if group.designated_committer() != Some(device.device_id()) || tenure > group.epoch() {
             return Err(invalid(
@@ -126,8 +125,8 @@ impl ServerStore {
             WritePurpose::Settlement,
             rng,
             &mut budget.storage,
-            |m, p, b| writer(m, WriteTag::Source, p, b),
-            |m, p, b| sync(m, WriteTag::Source, p, b),
+            WriteStep::new(WriteTag::Source),
+            hooks,
             version,
         )?;
         let document = target.document(&group.group_id()).map_err(invalid)?;
@@ -196,7 +195,7 @@ impl ServerStore {
             tenure,
             rng,
             &mut budget.storage,
-            |m, p, b| writer(m, WriteTag::Journal, p, b),
+            hooks,
         )?;
         let pending = saved.pending().is_some();
         // The exact decision is durable before sealing. Installed retries must preserve newer
@@ -231,8 +230,8 @@ impl ServerStore {
             WritePurpose::Settlement,
             rng,
             &mut budget.storage,
-            |m, p, b| writer(m, WriteTag::Source, p, b),
-            |m, p, b| sync(m, WriteTag::Source, p, b),
+            WriteStep::new(WriteTag::Source),
+            hooks,
         )?;
         if outcome == ReceiptIngest::Fault {
             return Ok((StudioRotationOutcome::Fault, state));
@@ -250,31 +249,10 @@ impl ServerStore {
                 budget,
                 state,
                 record,
-                &mut |m, step, p, b| {
-                    writer(
-                        m,
-                        match step {
-                            WriteTag::Source => WriteTag::Source,
-                            WriteTag::Recovery => WriteTag::Recovery,
-                            WriteTag::Successor => WriteTag::Successor,
-                            _ => unreachable!("tag not produced by this transaction"),
-                        },
-                        p,
-                        b,
-                    )
-                },
-                &mut |m, step, p, b| {
-                    sync(
-                        m,
-                        match step {
-                            WriteTag::Source => WriteTag::Source,
-                            WriteTag::Successor => WriteTag::Successor,
-                            _ => unreachable!("tag not produced by this transaction"),
-                        },
-                        p,
-                        b,
-                    )
-                },
+                // These were two identity maps between per-transaction tag enums, complete with
+                // an `unreachable!` for tags the other enum lacked. One store-wide tag removes
+                // the translation and the unreachable arm with it.
+                hooks,
             )?;
             // This shared install half can only install or hold a recovery warning. An
             // unexpected future outcome must not be reported as successful rotation.
@@ -303,8 +281,7 @@ impl ServerStore {
             clock,
             rng,
             budget,
-            writer,
-            sync,
+            hooks,
         )
     }
 
@@ -324,8 +301,7 @@ impl ServerStore {
         clock: &dyn Clock,
         rng: &mut impl CryptoRngCore,
         budget: &mut EpochStudioBudget,
-        writer: &mut impl FnMut(&EpochMutation<'_>, WriteTag, &Path, &[u8]) -> Result<(), AppError>,
-        sync: &mut impl FnMut(&EpochMutation<'_>, WriteTag, &Path, u64) -> Result<(), AppError>,
+        hooks: &mut WriteHooks<'_>,
     ) -> Result<(StudioRotationOutcome, EpochStudioState), AppError> {
         let plan = state
             .unit
@@ -361,7 +337,7 @@ impl ServerStore {
                 clock,
                 rng,
                 &mut budget.storage,
-                |m, p, b| writer(m, WriteTag::Recovery, p, b),
+                hooks,
             )?
             .is_some()
         {
@@ -375,7 +351,7 @@ impl ServerStore {
                 clock,
                 rng,
                 &mut budget.storage,
-                |m, p, b| writer(m, WriteTag::Recovery, p, b),
+                hooks,
             )?;
             if saved.state.eviction_pending()?.is_some() {
                 return Ok((StudioRotationOutcome::RecoveryPending, state));
@@ -387,8 +363,7 @@ impl ServerStore {
             rng,
             &mut budget.storage,
             &mut budget.intents,
-            |m, p, b| writer(m, WriteTag::Intents, p, b),
-            |m, p, b| sync(m, WriteTag::Intents, p, b),
+            hooks,
         )?;
         let record = state
             .source
@@ -408,8 +383,8 @@ impl ServerStore {
             WritePurpose::Settlement,
             rng,
             &mut budget.storage,
-            |m, p, b| writer(m, WriteTag::Successor, p, b),
-            |m, p, b| sync(m, WriteTag::Successor, p, b),
+            WriteStep::new(WriteTag::Successor),
+            hooks,
         )?;
         Ok((
             StudioRotationOutcome::Installed {
