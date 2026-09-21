@@ -1475,10 +1475,52 @@ overstatement: rail filtering bounds the *scheduling* impact, not the *retained 
 > those executions**, not that the variants cannot interfere under another interleaving. 132 of
 > 160 passes is a measurement, not a worst-case guarantee.
 
-## Requirement 3: prepared, attempted twice, not applied
+## Requirement 3: in progress, two paths converted
 
-**What is landed:** the `WriteHooks` interceptor type, and one store-wide `WriteTag` replacing the
-eight per-transaction enums. 315 store tests pass on that.
+**Status.** Two complete mutation paths now take `&mut WriteHooks<'_>` instead of `writer`/`sync`
+closures, and perform their own operations. **83 seam parameters across 22 files remain**, down
+from 86 across 24.
+
+| Path | Commit | Shape it established |
+| --- | --- | --- |
+| Draft archive writer | `9c846f4` | replacement + record sync; `before`/`before_sync`/`after` |
+| Staging cleanup batch | `5f52ef6` | unlink in a loop; `before_unlink`, `after` per operation |
+
+Both were chosen for the same reason: a **closed forwarding tree**. The draft archive writer has
+one function, no production callers and five test callers in one file; cleanup's `step_with_io`
+had one production caller and seven test callers, all in cleanup.rs. Neither reaches the tagged
+transaction layer, so neither could cascade.
+
+**What is left is the hard part.** Every remaining seam forwards through that tagged layer. The
+owner-receipt family alone is nine functions funnelling into one physical write, and two of its
+callers (`epoch_studio/rotation.rs`, `epoch_studio/discovery.rs`) forward from tagged seams that
+have their own callers and their own barrier tests. `update_epoch_recovery_accounted_with_writer`
+has twelve call sites spanning registry and studio. These are the trees the sweeps died in.
+
+**Method that works, from two converted paths.** Pick a physical write site; convert it together
+with everything that transitively forwards into it, by hand; keep every assertion the old closure
+carried; mutate one decision away and confirm a named assertion fails. Both conversions compiled
+on the first attempt under this method, against 170 → 181 → 207 for the sweeps.
+
+**One conversion hazard, found the hard way.** A closure seam often carries assertions that are
+invisible at the call site — cleanup's sync closure was `panic!("failed traversal must not report
+a synced batch")`, an assertion that no sync happens, not an injection. A helper without a sync
+slot silently dropped it, and that assertion is the *only* thing in the module that catches
+deleting `before_unlink` from the production loop. Enumerate what each closure asserts before
+replacing it, not just what it does.
+
+**Ordering, fixed across all conversions** (the reviewed shape):
+
+```text
+guard acquired and budgets invalidated
+  → before decision        (may refuse, may replace bytes; runs after the I-4 rotation)
+  → fixed capability operation  (the store's own; a caller cannot substitute one)
+  → after decision         (may refuse; the bytes are already in place)
+  → success/accounting publication
+```
+
+**What is landed besides the two paths:** the `WriteHooks` interceptor type, and one store-wide
+`WriteTag` replacing the eight per-transaction enums. 315 store tests pass on that.
 
 **Why the tag unification matters more than it looks.** The first conversion attempt made the
 hooks generic over each transaction's own tag, so every forwarding site had to reconcile two tag
