@@ -1,5 +1,4 @@
 //! Saved-intent authority, retry identity and conservative recovery screening share real vault IO.
-use super::super::replay::ReplaySync;
 use super::*;
 use catcoms_replication::SignedOp;
 use catcoms_rt::ManualClock;
@@ -296,12 +295,12 @@ fn signed(f: &Fixture, result: (RegistryReplayOutcome, EpochRegistryState)) -> S
 }
 pub(super) fn sync(
     m: &EpochMutation<'_>,
-    step: ReplaySync,
+    step: WriteTag,
     path: &Path,
     bytes: u64,
 ) -> Result<(), AppError> {
     match step {
-        ReplaySync::Intent => crate::store::epoch_intents::sync_intent(m, path, bytes),
+        WriteTag::Intents => crate::store::epoch_intents::sync_intent(m, path, bytes),
         _ => sync_registry(m, path, bytes),
     }
 }
@@ -480,7 +479,7 @@ fn registry_replay_failed_tombstone_save_and_flush_retry_the_exact_signed_change
             &mut intents,
             |_, _, _| panic!("retry must not rewrite"),
             &mut |m, step, path, bytes| {
-                if step == ReplaySync::Intent {
+                if step == WriteTag::Intents {
                     Err(AppError::Io("intent sync failed".into()))
                 } else {
                     sync(m, step, path, bytes)
@@ -510,7 +509,7 @@ fn registry_replay_every_flush_failure_and_unwind_withholds_ciphertext() {
     let ledger = intent_bytes(&store, &f);
     // Even a byte-identical retry must cross all three barriers. A sync error or unwind must
     // never expose Prepared, trust stale accounting, rewrite the change, or retire the intent.
-    for target in [ReplaySync::Source, ReplaySync::Intent, ReplaySync::Epoch] {
+    for target in [WriteTag::Source, WriteTag::Intents, WriteTag::Epoch] {
         for unwind in [false, true] {
             let (mut budget, mut intents) = budgets(&mut store, &f);
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {

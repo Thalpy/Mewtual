@@ -35,7 +35,7 @@ fn studio_overlay_handoff_reference_scan_keeps_overlay_only_pixels_when_metadata
     let accepted = save(&f, &mut store, &close, basis.fingerprint(), op.clone(), 123);
     assert_eq!(accepted.accepted(), 1);
     install(&f, &mut store, &close);
-    fences::interrupt(&f, &mut store, basis.fingerprint(), HandoffWrite::Source);
+    fences::interrupt(&f, &mut store, basis.fingerprint(), WriteTag::Source);
 
     // The operation is accepted locally but has not entered any canonical signed source.
     let source = f.load(&store).unwrap();
@@ -140,7 +140,7 @@ fn studio_overlay_handoff_reference_scan_requires_metadata_with_the_complete_sco
     let f = Fixture::new(true);
     let mut store = open(root.path());
     let (_, basis, _) = prepare(&f, &mut store);
-    fences::interrupt(&f, &mut store, basis, HandoffWrite::Source);
+    fences::interrupt(&f, &mut store, basis, WriteTag::Source);
     let original = store.load_epoch_intents(SERVER, &f.logical).unwrap();
     let path = store.epoch_intent_path(&epoch_intents::scope_bytes(SERVER, &f.logical).unwrap());
     let saved = fs::read(&path).unwrap();

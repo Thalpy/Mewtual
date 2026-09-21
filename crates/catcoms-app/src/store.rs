@@ -652,10 +652,33 @@ mod persistence {
         Fail(AppError),
     }
 
+    /// Which write within a multi-write transaction this is.
+    ///
+    /// One store-wide tag rather than a type parameter. The eight per-transaction enums it
+    /// replaces were a union of these variants, and making the hooks generic over them meant
+    /// every forwarding site had to reconcile two tag types — which is what made the first
+    /// attempt at this conversion cascade instead of converge.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub(in crate::store) enum WriteTag {
+        Source,
+        Recovery,
+        Successor,
+        Intents,
+        Epoch,
+        Journal,
+        Prepared,
+        Completed,
+        Active,
+        /// Agent 2's draft archive. Not yet produced by any transaction: their writer
+        /// currently takes the untagged seam, and will use this when it joins the tagged ones.
+        #[allow(dead_code)]
+        Archive,
+    }
+
     #[cfg(test)]
-    type BeforeHook<'h, T> = &'h mut dyn FnMut(T, &Path, &[u8]) -> Intercept;
+    type BeforeHook<'h> = &'h mut dyn FnMut(WriteTag, &Path, &[u8]) -> Intercept;
     #[cfg(test)]
-    type AfterHook<'h, T> = &'h mut dyn FnMut(T, &Path) -> Intercept;
+    type AfterHook<'h> = &'h mut dyn FnMut(WriteTag, &Path) -> Intercept;
 
     /// Hooks around one mutation, generic over the transaction's own write tag.
     ///
@@ -671,23 +694,23 @@ mod persistence {
     /// production caller could construct that carries an implementation, so "production supplies
     /// no write implementation" is a property of the type rather than of the current call sites.
     #[allow(dead_code)]
-    pub(in crate::store) enum WriteHooks<'h, T> {
+    pub(in crate::store) enum WriteHooks<'h> {
         None,
         #[cfg(test)]
         Hooked {
-            before: Option<BeforeHook<'h, T>>,
-            after: Option<AfterHook<'h, T>>,
+            before: Option<BeforeHook<'h>>,
+            after: Option<AfterHook<'h>>,
         },
         #[allow(dead_code)]
-        Never(std::convert::Infallible, std::marker::PhantomData<&'h T>),
+        Never(std::convert::Infallible, std::marker::PhantomData<&'h ()>),
     }
 
     #[allow(dead_code)]
-    impl<T: Copy> WriteHooks<'_, T> {
+    impl WriteHooks<'_> {
         /// Decide before the operation, yielding the bytes to persist.
         pub(in crate::store) fn before<'b>(
             &mut self,
-            #[cfg_attr(not(test), allow(unused_variables))] tag: T,
+            #[cfg_attr(not(test), allow(unused_variables))] tag: WriteTag,
             #[cfg_attr(not(test), allow(unused_variables))] path: &Path,
             bytes: &'b [u8],
         ) -> Result<std::borrow::Cow<'b, [u8]>, AppError> {
@@ -708,7 +731,7 @@ mod persistence {
         /// Decide after the operation has physically completed.
         pub(in crate::store) fn after(
             &mut self,
-            #[cfg_attr(not(test), allow(unused_variables))] tag: T,
+            #[cfg_attr(not(test), allow(unused_variables))] tag: WriteTag,
             #[cfg_attr(not(test), allow(unused_variables))] path: &Path,
         ) -> Result<(), AppError> {
             match self {
@@ -857,6 +880,7 @@ mod persistence {
 }
 
 pub(crate) use persistence::EpochMutation;
+pub(in crate::store) use persistence::WriteTag;
 // Only the test wrappers leave the module. In a non-test build this import does not exist, so
 // nothing outside `persistence` can name a path-generic physical operation at all.
 #[cfg(test)]

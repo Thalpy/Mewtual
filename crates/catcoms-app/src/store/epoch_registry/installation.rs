@@ -18,19 +18,6 @@ pub enum RegistryInstallOutcome {
 }
 
 // Private deterministic failure seams. Production always uses the same vault write/sync paths.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum InstallWrite {
-    Recovery,
-    Intents,
-    Successor,
-}
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum InstallSync {
-    Source,
-    Intents,
-    Successor,
-}
-
 impl ServerStore {
     /// Install the exact held current-owner registry receipt. All steps share one store borrow,
     /// and every reload checks the saved source/accounting. No caller-provided seed is trusted.
@@ -71,7 +58,7 @@ impl ServerStore {
             intents,
             &mut |m: &EpochMutation<'_>, _, path: &Path, bytes: &[u8]| m.write(path, bytes),
             &mut |m, step, path, bytes| match step {
-                InstallSync::Intents => super::super::epoch_intents::sync_intent(m, path, bytes),
+                WriteTag::Intents => super::super::epoch_intents::sync_intent(m, path, bytes),
                 _ => sync_registry(m, path, bytes),
             },
         )
@@ -91,8 +78,8 @@ impl ServerStore {
         rng: &mut impl CryptoRngCore,
         budget: &mut EpochStorageBudget,
         intents: &mut EpochIntentBudget,
-        writer: &mut impl FnMut(&EpochMutation<'_>, InstallWrite, &Path, &[u8]) -> Result<(), AppError>,
-        sync: &mut impl FnMut(&EpochMutation<'_>, InstallSync, &Path, u64) -> Result<(), AppError>,
+        writer: &mut impl FnMut(&EpochMutation<'_>, WriteTag, &Path, &[u8]) -> Result<(), AppError>,
+        sync: &mut impl FnMut(&EpochMutation<'_>, WriteTag, &Path, u64) -> Result<(), AppError>,
     ) -> Result<(RegistryInstallOutcome, EpochRegistryState), AppError> {
         // Bounded canonical decoders precede vault work, and authority comes from current MLS
         // state plus independently observed tenure, never a field trusted from the receipt.
@@ -135,7 +122,7 @@ impl ServerStore {
                 Ok(Some(plan))
             },
             |_, _, _| Err(invalid("source preparation must not rewrite the epoch")),
-            |m, path, bytes| sync(m, InstallSync::Source, path, bytes),
+            |m, path, bytes| sync(m, WriteTag::Source, path, bytes),
         )?;
         let Some(plan) = plan else {
             // A post-rename retry must never reinstall a seed over newer edits or retire intents
@@ -178,7 +165,7 @@ impl ServerStore {
                 clock,
                 rng,
                 budget,
-                |m, path, bytes| writer(m, InstallWrite::Recovery, path, bytes),
+                |m, path, bytes| writer(m, WriteTag::Recovery, path, bytes),
             )?
             .is_some()
         {
@@ -194,7 +181,7 @@ impl ServerStore {
             clock,
             rng,
             budget,
-            |m, path, bytes| writer(m, InstallWrite::Recovery, path, bytes),
+            |m, path, bytes| writer(m, WriteTag::Recovery, path, bytes),
         )? {
             if saved.state.eviction_pending()?.is_some() {
                 return Ok((RegistryInstallOutcome::RecoveryPending, state));
@@ -206,8 +193,8 @@ impl ServerStore {
             rng,
             budget,
             intents,
-            |m, path, bytes| writer(m, InstallWrite::Intents, path, bytes),
-            |m, path, bytes| sync(m, InstallSync::Intents, path, bytes),
+            |m, path, bytes| writer(m, WriteTag::Intents, path, bytes),
+            |m, path, bytes| sync(m, WriteTag::Intents, path, bytes),
         )?;
         self.update_registry_with_io(
             server,
@@ -225,8 +212,8 @@ impl ServerStore {
                 *unit = successor;
                 Ok(RegistryInstallOutcome::Installed)
             },
-            |m, path, bytes| writer(m, InstallWrite::Successor, path, bytes),
-            |m, path, bytes| sync(m, InstallSync::Successor, path, bytes),
+            |m, path, bytes| writer(m, WriteTag::Successor, path, bytes),
+            |m, path, bytes| sync(m, WriteTag::Successor, path, bytes),
         )
     }
 }

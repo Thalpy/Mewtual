@@ -1,4 +1,3 @@
-use super::super::adoption::{AdoptionSync, AdoptionWrite};
 use super::*;
 use catcoms_replication::{registry::RegistryRecovery, CheckpointSeed, RecoveryReason};
 use catcoms_rt::ManualClock;
@@ -351,17 +350,17 @@ fn registry_adoption_store_empty_newcomer_installs_without_a_recovery_file() {
 fn registry_adoption_store_crash_boundaries_keep_source_or_successor_and_retry() {
     #[derive(Clone, Copy, Debug)]
     enum Failure {
-        Write(AdoptionWrite, bool),
-        Flush(AdoptionSync),
+        Write(WriteTag, bool),
+        Flush(WriteTag),
     }
     let failures = [
-        Failure::Write(AdoptionWrite::Source, false),
-        Failure::Write(AdoptionWrite::Source, true),
-        Failure::Write(AdoptionWrite::Recovery, false),
-        Failure::Write(AdoptionWrite::Recovery, true),
-        Failure::Write(AdoptionWrite::Successor, false),
-        Failure::Write(AdoptionWrite::Successor, true),
-        Failure::Flush(AdoptionSync::Source),
+        Failure::Write(WriteTag::Source, false),
+        Failure::Write(WriteTag::Source, true),
+        Failure::Write(WriteTag::Recovery, false),
+        Failure::Write(WriteTag::Recovery, true),
+        Failure::Write(WriteTag::Successor, false),
+        Failure::Write(WriteTag::Successor, true),
+        Failure::Flush(WriteTag::Source),
     ];
     for failure in failures {
         let root = tempfile::tempdir().unwrap();
@@ -371,7 +370,7 @@ fn registry_adoption_store_crash_boundaries_keep_source_or_successor_and_retry()
         let op = f.op(1);
         f.ingest(&mut store, &op, &mut budget).unwrap();
         let (receipt, seed) = target(&f, 10, 10);
-        if matches!(failure, Failure::Flush(AdoptionSync::Source)) {
+        if matches!(failure, Failure::Flush(WriteTag::Source)) {
             adopt(&mut store, &f, &receipt, None, &mut budget).unwrap();
         }
         let fired = std::cell::Cell::new(false);
@@ -427,7 +426,7 @@ fn registry_adoption_store_crash_boundaries_keep_source_or_successor_and_retry()
         let mut budget = self::budget(&mut store, &f);
         // A rename may have succeeded even though its flush/report failed. After restart and
         // inventory reconciliation, accepted successor edits must survive retrying that receipt.
-        let post_rename_edit = matches!(failure, Failure::Write(AdoptionWrite::Successor, true));
+        let post_rename_edit = matches!(failure, Failure::Write(WriteTag::Successor, true));
         if post_rename_edit {
             f.source = f.load(&store).unwrap().unit;
             let newer = f.op(20);

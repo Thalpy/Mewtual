@@ -1,5 +1,4 @@
 //! Real bounded closures exercise the production settlement ordering and restart file paths.
-use super::super::installation::{InstallSync, InstallWrite};
 use super::settlement::{source_fixture, TestSource};
 use super::*;
 use catcoms_replication::registry::RegistryRecovery;
@@ -77,9 +76,9 @@ fn pending(s: &TestSource) -> Vec<u8> {
         .map(|(_, intent)| intent.operation.nonce[0])
         .collect()
 }
-fn sync(m: &EpochMutation<'_>, step: InstallSync, path: &Path, bytes: u64) -> Result<(), AppError> {
+fn sync(m: &EpochMutation<'_>, step: WriteTag, path: &Path, bytes: u64) -> Result<(), AppError> {
     match step {
-        InstallSync::Intents => crate::store::epoch_intents::sync_intent(m, path, bytes),
+        WriteTag::Intents => crate::store::epoch_intents::sync_intent(m, path, bytes),
         _ => sync_registry(m, path, bytes),
     }
 }
@@ -217,11 +216,7 @@ fn registry_install_empty_recovery_and_missing_ledger_create_only_successor() {
 
 #[test]
 fn registry_install_crash_boundaries_keep_source_or_successor_and_resume_without_loss() {
-    for step in [
-        InstallWrite::Recovery,
-        InstallWrite::Intents,
-        InstallWrite::Successor,
-    ] {
+    for step in [WriteTag::Recovery, WriteTag::Intents, WriteTag::Successor] {
         for mode in 0..3 {
             // before write, after rename, writer unwind
             let root = tempfile::tempdir().unwrap();
@@ -263,7 +258,7 @@ fn registry_install_crash_boundaries_keep_source_or_successor_and_resume_without
             let after = s.f.load(&s.store).unwrap();
             assert_eq!(
                 after.epoch(),
-                u64::from(step == InstallWrite::Successor && mode == 1)
+                u64::from(step == WriteTag::Successor && mode == 1)
             );
             if after.epoch() == 0 {
                 assert_eq!((after.phase(), after.op_count()), (EpochPhase::Closing, 11));
@@ -272,7 +267,7 @@ fn registry_install_crash_boundaries_keep_source_or_successor_and_resume_without
                 pending(&s).contains(&10),
                 "never retire excluded author work"
             );
-            if step == InstallWrite::Successor {
+            if step == WriteTag::Successor {
                 assert!(
                     !pending(&s).contains(&1),
                     "retirement durable before selection"
@@ -320,7 +315,7 @@ fn registry_install_sync_failure_never_retires_before_source_flush() {
         &mut intents,
         &mut |_, _, _, _| panic!("source durability must precede every write"),
         &mut |_, step, _, _| {
-            assert_eq!(step, InstallSync::Source);
+            assert_eq!(step, WriteTag::Source);
             Err(AppError::Io("source flush failed".into()))
         },
     );

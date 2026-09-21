@@ -52,10 +52,10 @@ fn handoff(f: &mut Fixture) -> u64 {
 fn studio_frozen_owner_store_crash_matrix_retains_full_source_then_recovery_then_successor() {
     for art in [false, true] {
         for failure in [
-            RotationWrite::Journal,
-            RotationWrite::Source,
-            RotationWrite::Recovery,
-            RotationWrite::Successor,
+            WriteTag::Journal,
+            WriteTag::Source,
+            WriteTag::Recovery,
+            WriteTag::Successor,
         ] {
             for after_write in [false, true] {
                 let root = tempfile::tempdir().unwrap();
@@ -409,7 +409,7 @@ fn studio_frozen_owner_store_promotes_staged_recovery_at_its_deadline_without_ac
                 &mut |_, step, path, bytes| {
                     assert_ne!(
                         step,
-                        RotationWrite::Recovery,
+                        WriteTag::Recovery,
                         "an idle pass inside the grace must not rewrite the warning"
                     );
                     write_for_test(path, bytes)

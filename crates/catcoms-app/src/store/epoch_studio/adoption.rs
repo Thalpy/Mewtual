@@ -7,18 +7,6 @@ use catcoms_rt::Clock;
 /// The same persistence outcomes as Registry adoption; not a second state machine.
 pub use crate::store::RegistryAdoptionOutcome as StudioAdoptionOutcome;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum AdoptionWrite {
-    Source,
-    Recovery,
-    Successor,
-}
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum AdoptionSync {
-    Source,
-    Successor,
-}
-
 impl ServerStore {
     /// Trusted-local only: the app must hold a fresh, privately minted discovery selection as
     /// well as current native/vault custody. A raw receipt passed by the UI is not provenance.
@@ -66,8 +54,8 @@ impl ServerStore {
         clock: &dyn Clock,
         rng: &mut impl CryptoRngCore,
         budget: &mut EpochStudioBudget,
-        writer: &mut impl FnMut(&EpochMutation<'_>, AdoptionWrite, &Path, &[u8]) -> Result<(), AppError>,
-        sync: &mut impl FnMut(&EpochMutation<'_>, AdoptionSync, &Path, u64) -> Result<(), AppError>,
+        writer: &mut impl FnMut(&EpochMutation<'_>, WriteTag, &Path, &[u8]) -> Result<(), AppError>,
+        sync: &mut impl FnMut(&EpochMutation<'_>, WriteTag, &Path, u64) -> Result<(), AppError>,
     ) -> Result<(StudioAdoptionOutcome, EpochStudioState), AppError> {
         current_member(group, device)?;
         let document = target.document(&group.group_id()).map_err(invalid)?;
@@ -110,8 +98,8 @@ impl ServerStore {
             WritePurpose::Settlement,
             rng,
             &mut budget.storage,
-            |m, path, bytes| writer(m, AdoptionWrite::Source, path, bytes),
-            |m, path, bytes| sync(m, AdoptionSync::Source, path, bytes),
+            |m, path, bytes| writer(m, WriteTag::Source, path, bytes),
+            |m, path, bytes| sync(m, WriteTag::Source, path, bytes),
             version,
         )?;
         if outcome != StudioAdoptionOutcome::AwaitingSeed {
@@ -143,8 +131,8 @@ impl ServerStore {
         budget: &mut EpochStudioBudget,
         mut state: EpochStudioState,
         observed: Option<StorageRecord>,
-        writer: &mut impl FnMut(&EpochMutation<'_>, AdoptionWrite, &Path, &[u8]) -> Result<(), AppError>,
-        sync: &mut impl FnMut(&EpochMutation<'_>, AdoptionSync, &Path, u64) -> Result<(), AppError>,
+        writer: &mut impl FnMut(&EpochMutation<'_>, WriteTag, &Path, &[u8]) -> Result<(), AppError>,
+        sync: &mut impl FnMut(&EpochMutation<'_>, WriteTag, &Path, u64) -> Result<(), AppError>,
     ) -> Result<(StudioAdoptionOutcome, EpochStudioState), AppError> {
         let document = target.document(&group.group_id()).map_err(invalid)?;
         let plan = state
@@ -182,7 +170,7 @@ impl ServerStore {
                 clock,
                 rng,
                 &mut budget.storage,
-                |m, path, bytes| writer(m, AdoptionWrite::Recovery, path, bytes),
+                |m, path, bytes| writer(m, WriteTag::Recovery, path, bytes),
             )?
             .is_some()
         {
@@ -196,7 +184,7 @@ impl ServerStore {
                 clock,
                 rng,
                 &mut budget.storage,
-                |m, path, bytes| writer(m, AdoptionWrite::Recovery, path, bytes),
+                |m, path, bytes| writer(m, WriteTag::Recovery, path, bytes),
             )?;
             if saved.state.eviction_pending()?.is_some() {
                 return Ok((StudioAdoptionOutcome::RecoveryPending, state));
@@ -223,8 +211,8 @@ impl ServerStore {
             WritePurpose::Settlement,
             rng,
             &mut budget.storage,
-            |m, path, bytes| writer(m, AdoptionWrite::Successor, path, bytes),
-            |m, path, bytes| sync(m, AdoptionSync::Successor, path, bytes),
+            |m, path, bytes| writer(m, WriteTag::Successor, path, bytes),
+            |m, path, bytes| sync(m, WriteTag::Successor, path, bytes),
         )?;
         Ok((StudioAdoptionOutcome::Installed, saved))
     }

@@ -24,18 +24,6 @@ pub enum RegistryAdoptionOutcome {
 }
 
 // Deterministic failure seams cover both failure-before-write and uncertain post-rename errors.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum AdoptionWrite {
-    Source,
-    Recovery,
-    Successor,
-}
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum AdoptionSync {
-    Source,
-    Successor,
-}
-
 impl ServerStore {
     /// Trusted local adapter, called only under the Server's fresh scoped discovery borrow.
     /// Receipt bytes alone do not confer currency. On any interrupted attempt the next caller
@@ -83,8 +71,8 @@ impl ServerStore {
         clock: &dyn Clock,
         rng: &mut impl CryptoRngCore,
         budget: &mut EpochStorageBudget,
-        writer: &mut impl FnMut(&EpochMutation<'_>, AdoptionWrite, &Path, &[u8]) -> Result<(), AppError>,
-        sync: &mut impl FnMut(&EpochMutation<'_>, AdoptionSync, &Path, u64) -> Result<(), AppError>,
+        writer: &mut impl FnMut(&EpochMutation<'_>, WriteTag, &Path, &[u8]) -> Result<(), AppError>,
+        sync: &mut impl FnMut(&EpochMutation<'_>, WriteTag, &Path, u64) -> Result<(), AppError>,
     ) -> Result<(RegistryAdoptionOutcome, EpochRegistryState), AppError> {
         if group.member_signature_key(&device.device_id()).as_deref()
             != Some(device.public_key_bytes().as_slice())
@@ -126,8 +114,8 @@ impl ServerStore {
                     }
                 }
             },
-            |m, path, bytes| writer(m, AdoptionWrite::Source, path, bytes),
-            |m, path, bytes| sync(m, AdoptionSync::Source, path, bytes),
+            |m, path, bytes| writer(m, WriteTag::Source, path, bytes),
+            |m, path, bytes| sync(m, WriteTag::Source, path, bytes),
         )?;
         if outcome != RegistryAdoptionOutcome::AwaitingSeed {
             return Ok((outcome, state));
@@ -176,7 +164,7 @@ impl ServerStore {
                 clock,
                 rng,
                 budget,
-                |m, path, bytes| writer(m, AdoptionWrite::Recovery, path, bytes),
+                |m, path, bytes| writer(m, WriteTag::Recovery, path, bytes),
             )?
             .is_some()
         {
@@ -190,7 +178,7 @@ impl ServerStore {
                 clock,
                 rng,
                 budget,
-                |m, path, bytes| writer(m, AdoptionWrite::Recovery, path, bytes),
+                |m, path, bytes| writer(m, WriteTag::Recovery, path, bytes),
             )?;
             if saved.state.eviction_pending()?.is_some() {
                 return Ok((RegistryAdoptionOutcome::RecoveryPending, state));
@@ -213,8 +201,8 @@ impl ServerStore {
                     .map_err(invalid)?;
                 Ok(RegistryAdoptionOutcome::Installed)
             },
-            |m, path, bytes| writer(m, AdoptionWrite::Successor, path, bytes),
-            |m, path, bytes| sync(m, AdoptionSync::Successor, path, bytes),
+            |m, path, bytes| writer(m, WriteTag::Successor, path, bytes),
+            |m, path, bytes| sync(m, WriteTag::Successor, path, bytes),
         )
     }
 }

@@ -1,5 +1,4 @@
 use super::*;
-use crate::store::epoch_studio::handoff::{HandoffSync, HandoffWrite};
 use catcoms_replication::studio::{StudioHandoffOutcome, StudioOverlaySave};
 use catcoms_replication::ReplError;
 
@@ -26,15 +25,11 @@ fn transfer(f: &Fixture, store: &mut ServerStore, basis: [u8; 32]) -> StudioHand
         )
         .unwrap()
 }
-fn flush(
-    m: &EpochMutation<'_>,
-    step: HandoffSync,
-    path: &Path,
-    bytes: u64,
-) -> Result<(), AppError> {
+fn flush(m: &EpochMutation<'_>, step: WriteTag, path: &Path, bytes: u64) -> Result<(), AppError> {
     match step {
-        HandoffSync::Source => sync_studio(m, path, bytes),
-        HandoffSync::Intents => sync_intent(m, path, bytes),
+        WriteTag::Source => sync_studio(m, path, bytes),
+        WriteTag::Intents => sync_intent(m, path, bytes),
+        _ => unreachable!("tag not produced by this transaction"),
     }
 }
 fn prepare(f: &Fixture, store: &mut ServerStore) -> (CloseRecord, [u8; 32], StudioProjection) {
@@ -403,11 +398,7 @@ fn studio_overlay_handoff_signs_the_whole_branch_once_and_keeps_pending_intents(
             .unwrap();
         assert_eq!(
             writes,
-            [
-                HandoffWrite::Prepared,
-                HandoffWrite::Source,
-                HandoffWrite::Completed
-            ]
+            [WriteTag::Prepared, WriteTag::Source, WriteTag::Completed]
         );
         let saved = store.load_epoch_intents(SERVER, &f.logical).unwrap();
         assert!(
@@ -477,11 +468,7 @@ fn studio_overlay_handoff_crash_barriers_reopen_without_signed_prefixes_or_dupli
         let mut template = open(root.path());
         let (_, basis, expected) = prepare(&f, &mut template);
         drop(template);
-        for step in [
-            HandoffWrite::Prepared,
-            HandoffWrite::Source,
-            HandoffWrite::Completed,
-        ] {
+        for step in [WriteTag::Prepared, WriteTag::Source, WriteTag::Completed] {
             for after in [false, true] {
                 let attempt = tempfile::tempdir().unwrap();
                 copy_vault(root.path(), attempt.path());
@@ -518,7 +505,7 @@ fn studio_overlay_handoff_crash_barriers_reopen_without_signed_prefixes_or_dupli
                 let state = store.load_epoch_intents(SERVER, &f.logical).unwrap();
                 let source = f.load(&store).unwrap();
                 assert!(source.op_count() <= 1);
-                if step == HandoffWrite::Completed && after {
+                if step == WriteTag::Completed && after {
                     assert!(state.overlay().is_none());
                 } else {
                     assert_eq!(
@@ -550,7 +537,7 @@ fn studio_overlay_handoff_crash_barriers_reopen_without_signed_prefixes_or_dupli
                     &mut b,
                     &mut |m: &EpochMutation<'_>, _, p: &Path, bytes: &[u8]| m.write(p, bytes),
                     &mut |m, step, p, bytes| {
-                        assert_eq!(step, HandoffSync::Source);
+                        assert_eq!(step, WriteTag::Source);
                         hit = true;
                         if after {
                             flush(m, step, p, bytes)?;

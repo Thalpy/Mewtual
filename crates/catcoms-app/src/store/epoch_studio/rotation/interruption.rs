@@ -21,14 +21,14 @@ impl StudioRotationInterruption {
     pub(super) fn before_write(
         &self,
         target: StudioTarget,
-        step: RotationWrite,
+        step: WriteTag,
         path: &Path,
         bytes: &[u8],
     ) -> Result<(), AppError> {
         let matches = matches!(
             (self.boundary, step),
-            (StudioRotationBoundary::Recovery, RotationWrite::Recovery)
-                | (StudioRotationBoundary::Successor, RotationWrite::Successor)
+            (StudioRotationBoundary::Recovery, WriteTag::Recovery)
+                | (StudioRotationBoundary::Successor, WriteTag::Successor)
         );
         if target == self.target && matches && !self.hit.swap(true, Ordering::SeqCst) {
             if self.after_write {

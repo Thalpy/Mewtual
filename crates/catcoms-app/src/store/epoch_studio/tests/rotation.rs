@@ -1,6 +1,5 @@
 //! Real typed signed closures, with a large (but accepted) Automerge message to reach the
 //! production lower bound cheaply. Failure seams wrap the actual vault writer, never the gate.
-use super::super::rotation::{RotationSync, RotationWrite};
 use super::super::source::SourceVersion;
 use super::*;
 use catcoms_replication::studio::StudioRecovery;
@@ -112,9 +111,9 @@ fn rotate_at(
         )
         .unwrap()
 }
-fn sync(m: &EpochMutation<'_>, step: RotationSync, p: &Path, bytes: u64) -> Result<(), AppError> {
+fn sync(m: &EpochMutation<'_>, step: WriteTag, p: &Path, bytes: u64) -> Result<(), AppError> {
     match step {
-        RotationSync::Intents => crate::store::epoch_intents::sync_intent(m, p, bytes),
+        WriteTag::Intents => crate::store::epoch_intents::sync_intent(m, p, bytes),
         _ => sync_studio(m, p, bytes),
     }
 }
@@ -190,11 +189,11 @@ fn studio_rotation_store_every_write_crash_resumes_exact_decision_and_preserves_
         eligible(&f, &mut fixture_store);
         let snapshot = f.load(&fixture_store).unwrap().unit.snapshot().unwrap();
         for boundary in [
-            RotationWrite::Journal,
-            RotationWrite::Source,
-            RotationWrite::Recovery,
-            RotationWrite::Intents,
-            RotationWrite::Successor,
+            WriteTag::Journal,
+            WriteTag::Source,
+            WriteTag::Recovery,
+            WriteTag::Intents,
+            WriteTag::Successor,
         ] {
             // Index with no excluded/deleted state needs no recovery. Introduce an excluded
             // edit by persisting the decision first below, so every boundary is actually hit.
@@ -372,7 +371,7 @@ fn studio_rotation_store_source_flush_failure_precedes_any_journal_or_retirement
             &mut b,
             &mut |_, _, _, _| panic!("no write before source flush"),
             &mut |_, step, _, _| {
-                assert_eq!(step, RotationSync::Source);
+                assert_eq!(step, WriteTag::Source);
                 Err(AppError::Io("flush".into()))
             }
         )
@@ -656,7 +655,7 @@ fn studio_rotation_store_unwind_after_successor_write_poisoned_budget_reopens_sa
             &mut b,
             &mut |_, step, p, bytes| {
                 write_for_test(p, bytes)?;
-                assert_ne!(step, RotationWrite::Successor, "injected post-write unwind");
+                assert_ne!(step, WriteTag::Successor, "injected post-write unwind");
                 Ok(())
             },
             &mut sync,

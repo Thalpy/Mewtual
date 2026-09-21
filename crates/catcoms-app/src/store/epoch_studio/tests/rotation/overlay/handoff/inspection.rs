@@ -312,7 +312,7 @@ fn studio_inspection_prepared_and_completed_never_resolve_on_read() {
             &mut rng(),
             &mut b,
             &mut |_m, step, p, bytes| {
-                if step == HandoffWrite::Source {
+                if step == WriteTag::Source {
                     return Err(AppError::Io("pause after Prepared".into()));
                 }
                 write_for_test(p, bytes)

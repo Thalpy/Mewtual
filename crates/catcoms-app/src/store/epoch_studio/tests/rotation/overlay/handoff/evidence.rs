@@ -6,7 +6,7 @@ fn studio_overlay_handoff_candidate_requires_the_private_store_capability() {
     let f = Fixture::new(true);
     let mut store = open(root.path());
     let (_, basis, _) = prepare(&f, &mut store);
-    super::fences::interrupt(&f, &mut store, basis, HandoffWrite::Source);
+    super::fences::interrupt(&f, &mut store, basis, WriteTag::Source);
     let state = store.load_epoch_intents(SERVER, &f.logical).unwrap();
     let mut source = f.load(&store).unwrap();
     let before = source.unit.snapshot().unwrap();
@@ -130,7 +130,7 @@ fn studio_overlay_handoff_full_signed_digest_prevents_false_completion() {
                 &mut rng(),
                 &mut b,
                 &mut |_, step, p, bytes| {
-                    if step == HandoffWrite::Source {
+                    if step == WriteTag::Source {
                         hit = true;
                         write_for_test(p, &substitute)?;
                         return Err(invalid("substituted signed source"));
@@ -193,7 +193,7 @@ fn studio_overlay_handoff_partial_manifest_keeps_the_entire_branch() {
             &mut rng(),
             &mut b,
             &mut |_, step, p, bytes| {
-                if step == HandoffWrite::Source {
+                if step == WriteTag::Source {
                     write_for_test(p, &substitute)?;
                     return Err(invalid("partial signed source"));
                 }
@@ -258,7 +258,7 @@ fn studio_overlay_handoff_rechecks_source_after_prepared_before_candidate_write(
         &mut b,
         &mut |_, step, p, bytes| {
             write_for_test(p, bytes)?;
-            if step == HandoffWrite::Prepared {
+            if step == WriteTag::Prepared {
                 hit = true;
                 write_for_test(&source_path, &changed)?;
             }

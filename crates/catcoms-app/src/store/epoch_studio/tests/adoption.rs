@@ -1,4 +1,3 @@
-use super::super::adoption::{AdoptionSync, AdoptionWrite};
 use super::*;
 use catcoms_replication::studio::StudioRecovery;
 use catcoms_replication::{CheckpointSeed, RecoveryTransition};
@@ -144,11 +143,7 @@ fn studio_adoption_store_recovery_is_durable_before_replacement_and_intents_surv
 #[test]
 fn studio_adoption_store_all_write_boundaries_preserve_recovery_and_exact_retry() {
     for art in [false, true] {
-        for boundary in [
-            AdoptionWrite::Source,
-            AdoptionWrite::Recovery,
-            AdoptionWrite::Successor,
-        ] {
+        for boundary in [WriteTag::Source, WriteTag::Recovery, WriteTag::Successor] {
             for after_write in [false, true] {
                 let root = tempfile::tempdir().unwrap();
                 let mut store = open(root.path());
@@ -188,7 +183,7 @@ fn studio_adoption_store_all_write_boundaries_preserve_recovery_and_exact_retry(
                 drop(store);
                 store = open(root.path());
                 let state = f.load(&store).unwrap();
-                let installed = boundary == AdoptionWrite::Successor && after_write;
+                let installed = boundary == WriteTag::Successor && after_write;
                 if installed {
                     assert_eq!(state.epoch(), 5);
                     assert_eq!(
@@ -255,7 +250,7 @@ fn studio_adoption_store_failed_closing_flush_stops_before_recovery_or_seed() {
             &mut b,
             &mut |_, _, _, _| panic!("unchanged source must flush before any further write"),
             &mut |_, phase, _, _| {
-                assert_eq!(phase, AdoptionSync::Source);
+                assert_eq!(phase, WriteTag::Source);
                 flushed = true;
                 Err(AppError::Io("flush failed".into()))
             }

@@ -31,13 +31,6 @@ impl std::fmt::Debug for RegistryReplayOutcome {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum ReplaySync {
-    Source,
-    Intent,
-    Epoch,
-}
-
 /// Pure screening for NEW authoring only; current-log retries never reapply their effect.
 fn new_authoring_hold(
     operation: &RegistryOp,
@@ -142,7 +135,7 @@ impl ServerStore {
             intents,
             |m: &EpochMutation<'_>, p: &Path, b: &[u8]| m.write(p, b),
             &mut |m, step, path, bytes| match step {
-                ReplaySync::Intent => super::super::epoch_intents::sync_intent(m, path, bytes),
+                WriteTag::Intents => super::super::epoch_intents::sync_intent(m, path, bytes),
                 _ => sync_registry(m, path, bytes),
             },
         )
@@ -161,7 +154,7 @@ impl ServerStore {
         budget: &mut EpochStorageBudget,
         intents: &mut EpochIntentBudget,
         writer: impl FnOnce(&EpochMutation<'_>, &Path, &[u8]) -> Result<(), AppError>,
-        sync: &mut impl FnMut(&EpochMutation<'_>, ReplaySync, &Path, u64) -> Result<(), AppError>,
+        sync: &mut impl FnMut(&EpochMutation<'_>, WriteTag, &Path, u64) -> Result<(), AppError>,
     ) -> Result<(RegistryReplayOutcome, EpochRegistryState), AppError> {
         if group.member_signature_key(&device.device_id()).as_deref()
             != Some(device.public_key_bytes().as_slice())
@@ -195,7 +188,7 @@ impl ServerStore {
                     .map_err(invalid)
             },
             |_, _, _| Err(invalid("replay assessment must not rewrite the epoch")),
-            |m, path, bytes| sync(m, ReplaySync::Source, path, bytes),
+            |m, path, bytes| sync(m, WriteTag::Source, path, bytes),
         )?;
 
         // Validate every slot, even for an exact retry. Corrupt/opaque recovery must not become
@@ -246,9 +239,9 @@ impl ServerStore {
             budget,
             intents,
             |_, _, _| Err(invalid("replay must not create an intent")),
-            |m, path, bytes| sync.borrow_mut()(m, ReplaySync::Intent, path, bytes),
+            |m, path, bytes| sync.borrow_mut()(m, WriteTag::Intents, path, bytes),
             writer,
-            |m, path, bytes| sync.borrow_mut()(m, ReplaySync::Epoch, path, bytes),
+            |m, path, bytes| sync.borrow_mut()(m, WriteTag::Epoch, path, bytes),
         )
         .map(|(sealed, state)| (RegistryReplayOutcome::Prepared(sealed), state))
     }

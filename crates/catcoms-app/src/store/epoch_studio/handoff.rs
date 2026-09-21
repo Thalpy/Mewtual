@@ -5,19 +5,6 @@ use catcoms_replication::studio::{
     StudioHandoffEvidence, StudioHandoffOutcome, StudioOverlayState,
 };
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum HandoffWrite {
-    Prepared,
-    Source,
-    Completed,
-    Active,
-}
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum HandoffSync {
-    Source,
-    Intents,
-}
-
 /// What H1 concluded. `Settled` is terminal and already durable: an acknowledgement of a branch
 /// this device already transferred. `Captured` is work whose expensive reconstruction has not
 /// happened yet.
@@ -57,8 +44,9 @@ impl ServerStore {
             budget,
             &mut |m: &EpochMutation<'_>, _, p: &Path, b: &[u8]| m.write(p, b),
             &mut |m, step, p, b| match step {
-                HandoffSync::Source => sync_studio(m, p, b),
-                HandoffSync::Intents => epoch_intents::sync_intent(m, p, b),
+                WriteTag::Source => sync_studio(m, p, b),
+                WriteTag::Intents => epoch_intents::sync_intent(m, p, b),
+                _ => unreachable!("tag not produced by this transaction"),
             },
         )
     }
@@ -125,8 +113,9 @@ impl ServerStore {
             budget,
             &mut |m: &EpochMutation<'_>, _, p: &Path, b: &[u8]| m.write(p, b),
             &mut |m, step, p, b| match step {
-                HandoffSync::Source => sync_studio(m, p, b),
-                HandoffSync::Intents => epoch_intents::sync_intent(m, p, b),
+                WriteTag::Source => sync_studio(m, p, b),
+                WriteTag::Intents => epoch_intents::sync_intent(m, p, b),
+                _ => unreachable!("tag not produced by this transaction"),
             },
         )
     }
@@ -155,8 +144,9 @@ impl ServerStore {
             budget,
             &mut |m: &EpochMutation<'_>, _, p: &Path, b: &[u8]| m.write(p, b),
             &mut |m, step, p, b| match step {
-                HandoffSync::Source => sync_studio(m, p, b),
-                HandoffSync::Intents => epoch_intents::sync_intent(m, p, b),
+                WriteTag::Source => sync_studio(m, p, b),
+                WriteTag::Intents => epoch_intents::sync_intent(m, p, b),
+                _ => unreachable!("tag not produced by this transaction"),
             },
         )
     }
@@ -175,8 +165,8 @@ impl ServerStore {
         tenure: Option<u64>,
         rng: &mut impl CryptoRngCore,
         budget: &mut EpochStudioBudget,
-        writer: &mut impl FnMut(&EpochMutation<'_>, HandoffWrite, &Path, &[u8]) -> Result<(), AppError>,
-        sync: &mut impl FnMut(&EpochMutation<'_>, HandoffSync, &Path, u64) -> Result<(), AppError>,
+        writer: &mut impl FnMut(&EpochMutation<'_>, WriteTag, &Path, &[u8]) -> Result<(), AppError>,
+        sync: &mut impl FnMut(&EpochMutation<'_>, WriteTag, &Path, u64) -> Result<(), AppError>,
     ) -> Result<StudioHandoffOutcome, AppError> {
         let capture = match self.start_studio_handoff_with_io(
             server, group, target, device, basis, tenure, rng, budget, writer, sync,
@@ -229,8 +219,8 @@ impl ServerStore {
         tenure: Option<u64>,
         rng: &mut impl CryptoRngCore,
         budget: &mut EpochStudioBudget,
-        writer: &mut impl FnMut(&EpochMutation<'_>, HandoffWrite, &Path, &[u8]) -> Result<(), AppError>,
-        sync: &mut impl FnMut(&EpochMutation<'_>, HandoffSync, &Path, u64) -> Result<(), AppError>,
+        writer: &mut impl FnMut(&EpochMutation<'_>, WriteTag, &Path, &[u8]) -> Result<(), AppError>,
+        sync: &mut impl FnMut(&EpochMutation<'_>, WriteTag, &Path, u64) -> Result<(), AppError>,
     ) -> Result<StudioHandoffStart, AppError> {
         current_member(group, device)?;
         self.enter_studio_budget(server, group, budget)?;
@@ -255,7 +245,7 @@ impl ServerStore {
                 &document,
                 state,
                 true,
-                HandoffWrite::Completed,
+                WriteTag::Completed,
                 rng,
                 budget,
                 writer,
@@ -323,8 +313,8 @@ impl ServerStore {
         tenure: Option<u64>,
         rng: &mut impl CryptoRngCore,
         budget: &mut EpochStudioBudget,
-        writer: &mut impl FnMut(&EpochMutation<'_>, HandoffWrite, &Path, &[u8]) -> Result<(), AppError>,
-        sync: &mut impl FnMut(&EpochMutation<'_>, HandoffSync, &Path, u64) -> Result<(), AppError>,
+        writer: &mut impl FnMut(&EpochMutation<'_>, WriteTag, &Path, &[u8]) -> Result<(), AppError>,
+        sync: &mut impl FnMut(&EpochMutation<'_>, WriteTag, &Path, u64) -> Result<(), AppError>,
     ) -> Result<StudioHandoffOutcome, AppError> {
         current_member(group, device)?;
         self.enter_studio_budget(server, group, budget)?;
@@ -435,7 +425,7 @@ impl ServerStore {
             &document,
             state,
             false,
-            HandoffWrite::Prepared,
+            WriteTag::Prepared,
             rng,
             budget,
             writer,
@@ -455,8 +445,8 @@ impl ServerStore {
             WritePurpose::Ordinary,
             rng,
             &mut budget.storage,
-            |m, p, b| writer(m, HandoffWrite::Source, p, b),
-            |m, p, b| sync(m, HandoffSync::Source, p, b),
+            |m, p, b| writer(m, WriteTag::Source, p, b),
+            |m, p, b| sync(m, WriteTag::Source, p, b),
             None,
             Some(&capability),
         )?;
@@ -484,11 +474,11 @@ impl ServerStore {
         document: &LogicalDocument,
         state: EpochIntentState,
         unchanged: bool,
-        step: HandoffWrite,
+        step: WriteTag,
         rng: &mut impl CryptoRngCore,
         budget: &mut EpochStudioBudget,
-        writer: &mut impl FnMut(&EpochMutation<'_>, HandoffWrite, &Path, &[u8]) -> Result<(), AppError>,
-        sync: &mut impl FnMut(&EpochMutation<'_>, HandoffSync, &Path, u64) -> Result<(), AppError>,
+        writer: &mut impl FnMut(&EpochMutation<'_>, WriteTag, &Path, &[u8]) -> Result<(), AppError>,
+        sync: &mut impl FnMut(&EpochMutation<'_>, WriteTag, &Path, u64) -> Result<(), AppError>,
     ) -> Result<(), AppError> {
         // `write_prepared_intents` consumes this size; it performs no old-record read of its own.
         let old = self
@@ -504,7 +494,7 @@ impl ServerStore {
             &mut budget.storage,
             &mut budget.intents,
             |m, p, b| writer(m, step, p, b),
-            |m, p, b| sync(m, HandoffSync::Intents, p, b),
+            |m, p, b| sync(m, WriteTag::Intents, p, b),
         )?;
         Ok(())
     }
@@ -529,8 +519,9 @@ impl ServerStore {
             budget,
             &mut |m: &EpochMutation<'_>, _, p: &Path, b: &[u8]| m.write(p, b),
             &mut |m, step, p, b| match step {
-                HandoffSync::Source => sync_studio(m, p, b),
-                HandoffSync::Intents => epoch_intents::sync_intent(m, p, b),
+                WriteTag::Source => sync_studio(m, p, b),
+                WriteTag::Intents => epoch_intents::sync_intent(m, p, b),
+                _ => unreachable!("tag not produced by this transaction"),
             },
         )
     }
@@ -543,8 +534,8 @@ impl ServerStore {
         device: &MlsDevice,
         rng: &mut impl CryptoRngCore,
         budget: &mut EpochStudioBudget,
-        writer: &mut impl FnMut(&EpochMutation<'_>, HandoffWrite, &Path, &[u8]) -> Result<(), AppError>,
-        sync: &mut impl FnMut(&EpochMutation<'_>, HandoffSync, &Path, u64) -> Result<(), AppError>,
+        writer: &mut impl FnMut(&EpochMutation<'_>, WriteTag, &Path, &[u8]) -> Result<(), AppError>,
+        sync: &mut impl FnMut(&EpochMutation<'_>, WriteTag, &Path, u64) -> Result<(), AppError>,
     ) -> Result<(), AppError> {
         current_member(group, device)?;
         self.enter_studio_budget(server, group, budget)?;
@@ -566,7 +557,7 @@ impl ServerStore {
                     &document,
                     state,
                     true,
-                    HandoffWrite::Completed,
+                    WriteTag::Completed,
                     rng,
                     budget,
                     writer,
@@ -592,7 +583,7 @@ impl ServerStore {
                     &document,
                     state,
                     false,
-                    HandoffWrite::Active,
+                    WriteTag::Active,
                     rng,
                     budget,
                     writer,
@@ -610,7 +601,7 @@ impl ServerStore {
                     rng,
                     &mut budget.storage,
                     |_, _, _| Err(invalid("handoff resolution requires unchanged source")),
-                    |m, p, b| sync(m, HandoffSync::Source, p, b),
+                    |m, p, b| sync(m, WriteTag::Source, p, b),
                 )?;
                 self.check_handoff_references(metadata, &source.unit, &state)?;
                 state.overlay = Some(
@@ -623,7 +614,7 @@ impl ServerStore {
                     &document,
                     state,
                     false,
-                    HandoffWrite::Completed,
+                    WriteTag::Completed,
                     rng,
                     budget,
                     writer,

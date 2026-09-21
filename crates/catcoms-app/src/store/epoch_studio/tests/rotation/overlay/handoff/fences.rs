@@ -3,7 +3,7 @@ use catcoms_replication::studio::catchup::{
     StudioPageOutcome, StudioPageProvider, StudioPageRequest,
 };
 
-pub(super) fn interrupt(f: &Fixture, store: &mut ServerStore, basis: [u8; 32], step: HandoffWrite) {
+pub(super) fn interrupt(f: &Fixture, store: &mut ServerStore, basis: [u8; 32], step: WriteTag) {
     let mut b = budget(store, f);
     let mut hit = false;
     let error = store
@@ -39,7 +39,7 @@ fn studio_overlay_handoff_publication_and_shared_replacement_fences_survive_rest
         .add_member(&f.device, requester.key_package().unwrap())
         .unwrap();
     let (_, basis, _) = prepare(&f, &mut store);
-    interrupt(&f, &mut store, basis, HandoffWrite::Completed);
+    interrupt(&f, &mut store, basis, WriteTag::Completed);
     drop(store);
     let mut store = open(root.path());
     warm(&f, &mut store);
@@ -147,7 +147,7 @@ fn studio_overlay_handoff_missing_metadata_cannot_become_publishable_after_resta
     let f = Fixture::new(true);
     let mut store = open(root.path());
     let (_, basis, _) = prepare(&f, &mut store);
-    interrupt(&f, &mut store, basis, HandoffWrite::Completed);
+    interrupt(&f, &mut store, basis, WriteTag::Completed);
     let scope = crate::store::epoch_intents::scope_bytes(SERVER, &f.logical).unwrap();
     let path = store.epoch_intent_path(&scope);
     let saved = fs::read(&path).unwrap();
@@ -183,7 +183,7 @@ fn studio_overlay_handoff_owner_rotation_resolves_committed_batch_before_retirem
         let f = Fixture::new(art);
         let mut store = open(root.path());
         let (_, basis, _) = prepare(&f, &mut store);
-        interrupt(&f, &mut store, basis, HandoffWrite::Completed);
+        interrupt(&f, &mut store, basis, WriteTag::Completed);
         grow(&f, &mut store);
         drop(store);
         let mut store = open(root.path());
@@ -211,7 +211,7 @@ fn studio_overlay_handoff_absent_manifest_returns_to_active_after_unrelated_inge
     let f = Fixture::new(true);
     let mut store = open(root.path());
     let (_, basis, expected) = prepare(&f, &mut store);
-    interrupt(&f, &mut store, basis, HandoffWrite::Source);
+    interrupt(&f, &mut store, basis, WriteTag::Source);
     let mut source = f.load(&store).unwrap().unit;
     let mut unrelated = f.title();
     unrelated.nonce = [77; 16];
@@ -270,7 +270,7 @@ fn studio_overlay_handoff_adoption_resolves_before_pruning_signed_history() {
     let f = Fixture::new(true);
     let mut store = open(root.path());
     let (_, basis, _) = prepare(&f, &mut store);
-    interrupt(&f, &mut store, basis, HandoffWrite::Completed);
+    interrupt(&f, &mut store, basis, WriteTag::Completed);
     drop(store);
     let mut store = open(root.path());
     warm(&f, &mut store);
@@ -334,7 +334,7 @@ fn studio_overlay_handoff_frozen_owner_takeover_preserves_completed_local_work()
     let mut f = Fixture::new(true);
     let mut store = open(root.path());
     let (_, basis, _) = prepare(&f, &mut store);
-    interrupt(&f, &mut store, basis, HandoffWrite::Completed);
+    interrupt(&f, &mut store, basis, WriteTag::Completed);
     grow(&f, &mut store);
     let mut old_source = f.load(&store).unwrap();
     let previous = old_source.unit.receipt_head().unwrap().cloned().unwrap();
@@ -415,7 +415,7 @@ fn studio_overlay_handoff_all_exact_resolution_in_fault_does_not_clear_fault() {
     let f = Fixture::new(true);
     let mut store = open(root.path());
     let (_, basis, _) = prepare(&f, &mut store);
-    interrupt(&f, &mut store, basis, HandoffWrite::Completed);
+    interrupt(&f, &mut store, basis, WriteTag::Completed);
     let conflict = Receipt::sign(
         f.logical.clone(),
         0,
