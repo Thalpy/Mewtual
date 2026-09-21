@@ -1401,6 +1401,34 @@ overstatement: rail filtering bounds the *scheduling* impact, not the *retained 
 > nothing reads the token. The moment a cursor captures it across a custody release, one
 > unconverted mutation makes the whole consistency argument false.
 
+## Requirement 3: prepared, attempted twice, not applied
+
+**What is landed:** the `WriteHooks` interceptor type, and one store-wide `WriteTag` replacing the
+eight per-transaction enums. 315 store tests pass on that.
+
+**Why the tag unification matters more than it looks.** The first conversion attempt made the
+hooks generic over each transaction's own tag, so every forwarding site had to reconcile two tag
+types — which is why its errors cascaded rather than converged, and why it was reverted. With one
+store-wide tag, forwarding is a value rather than a type to reconcile. The error count on the tag
+change itself went 87 → 13 → 7 → 1 → 0, which is the convergence the generic version never showed.
+
+**The second attempt also failed, and the measurement is the reason.** Converting the leaf
+bodies and sweeping the callers moved the error count **170 → 181 → 207**. Rising under each
+sweep is divergence: the seam shapes vary more than a regex sweep can assume, so each pass was
+creating more mismatches than it fixed. I reverted rather than push on, because a half-converted
+seam layer has neither property and looks like it has one — the same conclusion as the first
+attempt, reached by a different route.
+
+**What the conversion actually requires**, now that two mechanical attempts have failed: the
+remaining ~40 transaction functions need converting **by hand, one transaction at a time**, each
+with its own callers and injected-failure tests, rather than by pattern. The shapes differ enough
+— some functions take a writer and a sync, some only one, some forward into others, some dispatch
+on a tag — that sweeping them together is what diverges.
+
+That is real work rather than a rename, and it should be done deliberately rather than at the end
+of a long session. The type and the tag are in place so it is no longer blocked on a design
+question; it is blocked only on the effort.
+
 ## I-4, slice 7: the root-sync exception was path-generic
 
 The reviewer raised this as a conditional warning without having seen the source. It was a real
