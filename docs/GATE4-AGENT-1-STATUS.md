@@ -1401,6 +1401,29 @@ overstatement: rail filtering bounds the *scheduling* impact, not the *retained 
 > nothing reads the token. The moment a cursor captures it across a custody release, one
 > unconverted mutation makes the whole consistency argument false.
 
+> ## I-4: everything except requirement 3 is accepted
+>
+> At `cad2689` the reviewer closed I4-BUILD-001, I4-HOOK-001 and SCHED-DIAG-001, and confirmed
+> requirement 2 stays PASS. Established for the currently implemented mutation paths:
+>
+> - replacement writes capability-bound
+> - retry and sync repairs capability-bound
+> - cleanup unlink and directory sync capability-bound
+> - project persistence primitives hidden behind the sibling boundary
+> - root-sync exception destination-bound
+> - production writer callbacks audited synchronous
+> - reads and budget-only operations proved not to rotate
+>
+> **Requirement 3's conversion is the sole remaining source-enforcement step before C-3.** The
+> hooks and unified tag are preparation, not enforcement: the transaction signatures still accept
+> arbitrary writer and sync closures.
+>
+> And once it is converted, no further architectural invention is required before C-3 starts. The
+> next substantive proof is the cursor-level property in C-3 itself — capture the generation,
+> release custody, mutate any inventoried family, reacquire, and the cursor must refuse before
+> continuing or issuing an inventory — plus the negative case that reads and budget operations do
+> not invalidate it.
+
 > ## Requirement 2: PASS, both halves
 >
 > Closed at `bc957be` by source review: the generic persistence operations are hidden, and the
