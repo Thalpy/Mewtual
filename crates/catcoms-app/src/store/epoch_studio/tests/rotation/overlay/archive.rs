@@ -181,8 +181,7 @@ fn draft_archive_references_survive_a_complete_scan_as_the_sole_holder() {
             &mut rng(),
             &mut b.storage,
             &mut b.intents,
-            |m: &EpochMutation<'_>, p: &Path, b: &[u8]| m.write(p, b),
-            crate::store::epoch_intents::sync_intent,
+            &mut WriteHooks::None,
         )
         .expect("the production writer must persist a valid archive");
     drop(b);
@@ -365,11 +364,12 @@ fn a_draft_archive_whose_references_cannot_be_extracted_fails_the_scan_closed() 
     );
 }
 
-/// Build the archive for the current branch and persist it through the production writer.
-fn preserve(
+/// The archive for the current branch. Deterministic in the branch state and these constants,
+/// so building it twice yields the same plaintext record and the second write is an exact retry.
+fn archive_for(
     f: &Fixture,
     store: &mut ServerStore,
-) -> Result<catcoms_replication::studio::StudioDraftArchive, AppError> {
+) -> catcoms_replication::studio::StudioDraftArchive {
     let state = store.load_epoch_intents(SERVER, &f.logical).unwrap();
     let archive = StudioDraftArchive::from_branch(
         state.overlay().unwrap(),
@@ -382,6 +382,15 @@ fn preserve(
     )
     .unwrap();
     drop(state);
+    archive
+}
+
+/// Build the archive for the current branch and persist it through the production writer.
+fn preserve(
+    f: &Fixture,
+    store: &mut ServerStore,
+) -> Result<catcoms_replication::studio::StudioDraftArchive, AppError> {
+    let archive = archive_for(f, store);
     let mut b = budget(store, f);
     store.write_studio_draft_archive_with_io(
         SERVER,
@@ -390,8 +399,7 @@ fn preserve(
         &mut rng(),
         &mut b.storage,
         &mut b.intents,
-        |m: &EpochMutation<'_>, p: &Path, b: &[u8]| m.write(p, b),
-        crate::store::epoch_intents::sync_intent,
+        &mut WriteHooks::None,
     )?;
     Ok(archive)
 }
@@ -457,8 +465,7 @@ fn the_archive_writer_is_accounted_idempotent_and_refuses_to_overwrite_evidence(
         &mut rng(),
         &mut b.storage,
         &mut b.intents,
-        |m: &EpochMutation<'_>, p: &Path, b: &[u8]| m.write(p, b),
-        crate::store::epoch_intents::sync_intent,
+        &mut WriteHooks::None,
     );
     assert!(
         refused.is_err(),
@@ -522,8 +529,7 @@ fn the_archive_writer_refuses_at_the_sub_cap_not_the_class_ceiling() {
         &mut rng(),
         &mut b.storage,
         &mut b.intents,
-        |m: &EpochMutation<'_>, p: &Path, b: &[u8]| m.write(p, b),
-        crate::store::epoch_intents::sync_intent,
+        &mut WriteHooks::None,
     );
     assert!(
         refused.is_err(),
@@ -573,8 +579,7 @@ fn the_archive_writer_refuses_a_payload_naming_another_document() {
         &mut rng(),
         &mut budgets.storage,
         &mut budgets.intents,
-        |m: &EpochMutation<'_>, p: &Path, b: &[u8]| m.write(p, b),
-        crate::store::epoch_intents::sync_intent,
+        &mut WriteHooks::None,
     );
     assert!(
         refused.is_err(),
@@ -624,4 +629,167 @@ fn draft_archive_of_a_frame_branch_round_trips_through_real_storage() {
     assert_eq!(read.basis(), overlay.basis());
     assert_eq!(read.document(), &f.logical);
     assert_eq!(read.encode().unwrap(), bytes);
+}
+
+/// Requirement 3 for this path: the caller decides *around* the physical operation, it does not
+/// supply one. Both the replacement and the exact-retry sync are the store's own, and a hook can
+/// only refuse on either side of them.
+///
+/// The ordering this pins down is the one a caller-supplied writer could not be trusted to keep:
+/// the after decision runs once the bytes are already in place, so a failure there is a durable
+/// record that was never charged, repairable by exact retry rather than by overwriting evidence.
+#[test]
+fn the_archive_writer_consults_hooks_on_both_sides_of_its_own_operations() {
+    let root = tempfile::tempdir().unwrap();
+    let f = Fixture::new(true);
+    let mut store = open(root.path());
+    let (close, basis) = closing(&f, &mut store);
+    frame_branch(&f, &mut store, &close, &basis);
+    let scope = crate::store::epoch_draft_archive::scope_bytes(SERVER, &f.logical).unwrap();
+
+    // Refusing before the replacement leaves no record and charges nothing.
+    let archive = archive_for(&f, &mut store);
+    let mut tags = Vec::new();
+    {
+        let mut before = |tag: WriteTag, _p: &std::path::Path, bytes: &[u8]| {
+            tags.push(tag);
+            assert!(
+                !bytes.is_empty(),
+                "the hook must see the record being written"
+            );
+            Intercept::Fail(AppError::Io(
+                "injected refusal before the archive write".into(),
+            ))
+        };
+        let mut hooks = WriteHooks::Hooked {
+            before: Some(&mut before),
+            before_sync: None,
+            after: None,
+        };
+        let mut b = budget(&mut store, &f);
+        let refused = store.write_studio_draft_archive_with_io(
+            SERVER,
+            &f.logical,
+            &archive,
+            &mut rng(),
+            &mut b.storage,
+            &mut b.intents,
+            &mut hooks,
+        );
+        assert!(
+            refused.is_err(),
+            "a refusal before the write must fail the call"
+        );
+    }
+    assert_eq!(
+        tags,
+        vec![WriteTag::Archive],
+        "the archive write must carry its own tag"
+    );
+    assert!(
+        store
+            .read_scoped_draft_archive_plain(&scope)
+            .unwrap()
+            .is_none(),
+        "a write refused before the replacement must leave no record behind"
+    );
+
+    // Refusing after it leaves the record durable but uncharged, and poisons the budget that
+    // was mid-write: an uncertain write must not leave either accounting usable.
+    let mut b = budget(&mut store, &f);
+    {
+        let mut after = |tag: WriteTag, _p: &std::path::Path| {
+            assert_eq!(tag, WriteTag::Archive);
+            AfterIntercept::Fail(AppError::Io(
+                "injected failure after the archive write".into(),
+            ))
+        };
+        let mut hooks = WriteHooks::Hooked {
+            before: None,
+            before_sync: None,
+            after: Some(&mut after),
+        };
+        let refused = store.write_studio_draft_archive_with_io(
+            SERVER,
+            &f.logical,
+            &archive,
+            &mut rng(),
+            &mut b.storage,
+            &mut b.intents,
+            &mut hooks,
+        );
+        assert!(
+            refused.is_err(),
+            "a failure after the write must fail the call"
+        );
+    }
+    // The same budget was poisoned before the first possible I/O and never restored.
+    let poisoned = store.write_studio_draft_archive_with_io(
+        SERVER,
+        &f.logical,
+        &archive,
+        &mut rng(),
+        &mut b.storage,
+        &mut b.intents,
+        &mut WriteHooks::None,
+    );
+    assert!(
+        poisoned.is_err(),
+        "an uncertain write must leave the intent budget unusable until it is rebuilt"
+    );
+    drop(b);
+    let stored = store
+        .read_scoped_draft_archive_plain(&scope)
+        .unwrap()
+        .expect("the bytes were in place before the after decision ran");
+    let physical = stored.physical_bytes;
+
+    // The exact retry takes the sync branch, and that operation is hooked too: the size it is
+    // asked to flush is the record's, and refusing leaves the record itself untouched.
+    let mut saw_len = None;
+    {
+        let mut before_sync = |tag: WriteTag, _p: &std::path::Path, len: u64| {
+            assert_eq!(tag, WriteTag::Archive);
+            saw_len = Some(len);
+            AfterIntercept::Fail(AppError::Io(
+                "injected refusal before the archive sync".into(),
+            ))
+        };
+        let mut hooks = WriteHooks::Hooked {
+            before: None,
+            before_sync: Some(&mut before_sync),
+            after: None,
+        };
+        let mut b = budget(&mut store, &f);
+        let refused = store.write_studio_draft_archive_with_io(
+            SERVER,
+            &f.logical,
+            &archive,
+            &mut rng(),
+            &mut b.storage,
+            &mut b.intents,
+            &mut hooks,
+        );
+        assert!(
+            refused.is_err(),
+            "a refusal before the sync must fail the call"
+        );
+    }
+    assert_eq!(
+        saw_len,
+        Some(physical),
+        "the sync decision must be given the record's own physical size"
+    );
+    assert_eq!(
+        store
+            .read_scoped_draft_archive_plain(&scope)
+            .unwrap()
+            .expect("the record survives a refused sync")
+            .physical_bytes,
+        physical,
+        "a refused sync must not disturb the record it was going to flush"
+    );
+
+    // And the whole sequence is repairable: an exact retry through the unhooked writer succeeds.
+    preserve(&f, &mut store).expect("an exact retry must repair an uncharged durable archive");
 }

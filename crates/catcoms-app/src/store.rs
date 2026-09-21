@@ -684,9 +684,8 @@ mod persistence {
         Prepared,
         Completed,
         Active,
-        /// Agent 2's draft archive. Not yet produced by any transaction: their writer
-        /// currently takes the untagged seam, and will use this when it joins the tagged ones.
-        #[allow(dead_code)]
+        /// The draft archive record, both its first preservation and the exact-retry sync.
+        /// Agent 2's release transaction, which unlinks one, will carry this tag too.
         Archive,
     }
 
@@ -694,16 +693,23 @@ mod persistence {
     type BeforeHook<'h> = &'h mut dyn FnMut(WriteTag, &Path, &[u8]) -> Intercept;
     #[cfg(test)]
     type AfterHook<'h> = &'h mut dyn FnMut(WriteTag, &Path) -> AfterIntercept;
+    /// Decides before a durability sync of a record that is already in place. It is given the
+    /// size the record is expected to have rather than its bytes, and has no replacement arm:
+    /// there is nothing to substitute when the content is already on disk.
+    #[cfg(test)]
+    type SyncHook<'h> = &'h mut dyn FnMut(WriteTag, &Path, u64) -> AfterIntercept;
 
-    /// Hooks around one mutation, generic over the transaction's own write tag.
+    /// Hooks around one mutation, tagged by which write within the transaction it is.
     ///
-    // The agreed shape for requirement 3, landed and compiling but **not yet applied**. Applying
-    // it means replacing the `writer`/`sync` closure parameters on roughly forty transaction
-    // functions and rewriting about as many injected-failure tests from "a closure that writes"
-    // to "a hook that decides". One family was converted to prove the shape; the cascade then
-    // spread through the tagged transaction layer rather than converging, so the partial
-    // conversion was reverted rather than left half-applied. Delete this marker with the commit
-    // that finishes it.
+    // Requirement 3, **applied to one path so far**: the draft archive writer, whose forwarding
+    // tree is closed (one function, no production callers, five tests in one file), which is why
+    // it went first. The remaining transaction functions still take `writer`/`sync` closure
+    // parameters; until each is converted, requirement 3 holds for the converted paths only.
+    //
+    // Conversion is per complete mutation path, not by sweep: two sweeps diverged, the second
+    // going 170 -> 181 -> 207 unresolved sites, because a leaf's callers forward through the
+    // tagged transaction layer and each layer's tests assert that path's own barriers. The unit
+    // that converges is a physical write site together with everything that forwards into it.
     ///
     /// **In a non-test build this has exactly one inhabitant, `None`.** There is no variant a
     /// production caller could construct that carries an implementation, so "production supplies
@@ -714,6 +720,7 @@ mod persistence {
         #[cfg(test)]
         Hooked {
             before: Option<BeforeHook<'h>>,
+            before_sync: Option<SyncHook<'h>>,
             after: Option<AfterHook<'h>>,
         },
         #[allow(dead_code)]
@@ -743,7 +750,30 @@ mod persistence {
             }
         }
 
-        /// Decide after the operation has physically completed.
+        /// Decide before a durability sync of a record already in place, yielding nothing: the
+        /// operation the transaction then performs is fixed, and so are its bytes.
+        pub(in crate::store) fn before_sync(
+            &mut self,
+            #[cfg_attr(not(test), allow(unused_variables))] tag: WriteTag,
+            #[cfg_attr(not(test), allow(unused_variables))] path: &Path,
+            #[cfg_attr(not(test), allow(unused_variables))] len: u64,
+        ) -> Result<(), AppError> {
+            match self {
+                Self::None => Ok(()),
+                #[cfg(test)]
+                Self::Hooked { before_sync, .. } => {
+                    match before_sync.as_mut().map(|h| h(tag, path, len)) {
+                        None | Some(AfterIntercept::Continue) => Ok(()),
+                        Some(AfterIntercept::Fail(error)) => Err(error),
+                    }
+                }
+                Self::Never(never, _) => match *never {},
+            }
+        }
+
+        /// Decide after the operation has physically completed, whichever it was: a replacement
+        /// or a sync. Within one transaction branch only one of the two runs, and the tag and
+        /// path say which.
         pub(in crate::store) fn after(
             &mut self,
             #[cfg_attr(not(test), allow(unused_variables))] tag: WriteTag,
@@ -930,7 +960,9 @@ mod persistence {
 }
 
 pub(crate) use persistence::EpochMutation;
-pub(in crate::store) use persistence::WriteTag;
+#[cfg(test)]
+pub(in crate::store) use persistence::{AfterIntercept, Intercept};
+pub(in crate::store) use persistence::{WriteHooks, WriteTag};
 // Only the test wrappers leave the module. In a non-test build this import does not exist, so
 // nothing outside `persistence` can name a path-generic physical operation at all.
 #[cfg(test)]

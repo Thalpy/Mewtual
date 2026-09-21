@@ -167,8 +167,7 @@ impl ServerStore {
         rng: &mut impl CryptoRngCore,
         budget: &mut EpochStorageBudget,
         intents: &mut EpochIntentBudget,
-        writer: impl FnOnce(&EpochMutation<'_>, &Path, &[u8]) -> Result<(), AppError>,
-        sync: impl FnOnce(&EpochMutation<'_>, &Path, u64) -> Result<(), AppError>,
+        hooks: &mut WriteHooks<'_>,
     ) -> Result<(), AppError> {
         // Bind the payload to the record it is about to occupy, at the writer as well as at the
         // reader. The collector refuses a mismatch on the way out; refusing it here means one
@@ -208,10 +207,14 @@ impl ServerStore {
                     .map_err(invalid)?;
                 intents.begin_write();
                 self.intent_generation = Arc::new(());
-                // I-4, threaded by Agent 1 because the seam is typed; see the writer note.
+                // I-4, then requirement 3: rotate first, and the operation performed under the
+                // guard is this transaction's own, not one a caller handed in. A hook may refuse
+                // on either side of it; it cannot substitute a different one.
                 let path = self.epoch_draft_archive_path(&scope);
                 let mutation = self.epoch_mutation_guard();
-                sync(&mutation, &path, bytes)?;
+                hooks.before_sync(WriteTag::Archive, &path, bytes)?;
+                super::epoch_intents::sync_intent(&mutation, &path, bytes)?;
+                hooks.after(WriteTag::Archive, &path)?;
                 reservation.commit();
                 intents.end_write(self.intent_generation.clone());
                 return Ok(());
@@ -246,14 +249,17 @@ impl ServerStore {
         // writer does: a failed or uncertain write must not leave either usable.
         intents.begin_write();
         self.intent_generation = Arc::new(());
-        // I-4, threaded here because the writer seam is typed. Agent 1 made this change; both
-        // this replacement and the exact-retry flush above are now covered. What remains Agent
-        // 2's obligation is `release_studio_draft_archive_with_io`, which does not exist yet and
-        // will unlink an inventoried record when it does.
+        // I-4 and requirement 3 together: rotate before touching disk, and perform the store's
+        // own replacement rather than a caller's. Both this replacement and the exact-retry
+        // flush above are covered. What remains Agent 2's obligation is
+        // `release_studio_draft_archive_with_io`, which does not exist yet and will unlink an
+        // inventoried record when it does.
         let path = self.epoch_draft_archive_path(&scope);
         let framed = frame(&sealed);
         let mutation = self.epoch_mutation_guard();
-        writer(&mutation, &path, &framed)?;
+        let framed = hooks.before(WriteTag::Archive, &path, &framed)?;
+        mutation.write(&path, &framed)?;
+        hooks.after(WriteTag::Archive, &path)?;
         reservation.commit();
         intents.commit_draft_archive(id, old, next);
         intents.end_write(self.intent_generation.clone());
