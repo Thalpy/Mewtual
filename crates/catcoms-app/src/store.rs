@@ -641,12 +641,27 @@ mod persistence {
     /// which meant the type permitted a closure that cloned the path and bytes, spawned, and
     /// returned `Ok` — rotating the token, dropping the guard, and then mutating after a cursor
     /// had captured the new generation. No production caller did that; the type allowed it.
+    /// What an after hook may decide. Deliberately **no replacement variant**.
+    ///
+    /// The first version reused `Intercept` here and treated `Replace` as success, silently
+    /// discarding the bytes. A fault-injection test moved from a writer callback to an after hook
+    /// would then have run, substituted nothing, and reported nothing: the injection doing no work
+    /// while looking as though it had. Given how many assertions in this work have proved less
+    /// than they claimed, that is the wrong foundation for a fault-injection suite. Making the
+    /// mistake unrepresentable beats rejecting it at runtime.
+    #[derive(Debug)]
+    #[allow(dead_code)]
+    pub(in crate::store) enum AfterIntercept {
+        Continue,
+        Fail(AppError),
+    }
+
     #[derive(Debug)]
     #[allow(dead_code)]
     pub(in crate::store) enum Intercept {
         /// Proceed with the operation as the coordinator intended.
         Continue,
-        /// Proceed, but persist these bytes instead. Before-stage only.
+        /// Proceed, but persist these bytes instead.
         Replace(Vec<u8>),
         /// Refuse, without performing the operation.
         Fail(AppError),
@@ -678,7 +693,7 @@ mod persistence {
     #[cfg(test)]
     type BeforeHook<'h> = &'h mut dyn FnMut(WriteTag, &Path, &[u8]) -> Intercept;
     #[cfg(test)]
-    type AfterHook<'h> = &'h mut dyn FnMut(WriteTag, &Path) -> Intercept;
+    type AfterHook<'h> = &'h mut dyn FnMut(WriteTag, &Path) -> AfterIntercept;
 
     /// Hooks around one mutation, generic over the transaction's own write tag.
     ///
@@ -738,11 +753,46 @@ mod persistence {
                 Self::None => Ok(()),
                 #[cfg(test)]
                 Self::Hooked { after, .. } => match after.as_mut().map(|h| h(tag, path)) {
-                    None | Some(Intercept::Continue) | Some(Intercept::Replace(_)) => Ok(()),
-                    Some(Intercept::Fail(error)) => Err(error),
+                    None | Some(AfterIntercept::Continue) => Ok(()),
+                    Some(AfterIntercept::Fail(error)) => Err(error),
                 },
                 Self::Never(never, _) => match *never {},
             }
+        }
+    }
+
+    // Unix-gated with the module, not just the test: its only contents are the symlink
+    // regression, so on Windows the import would be unused and `-D warnings` would fail. That
+    // asymmetry is exactly what hid the original break.
+    #[cfg(all(test, unix))]
+    mod tests {
+        use super::*;
+
+        /// Lives inside `persistence` because it exercises the private primitives directly.
+        ///
+        /// It used to sit in the parent test module and call `staging_candidate` and
+        /// `open_staging_candidate` by name. Hiding those broke this test on Unix only, and the
+        /// break was invisible to a Windows run: `#[cfg(unix)]` meant the local suite never
+        /// compiled it. Rehoming it here keeps the regression exercising the real primitives
+        /// rather than making either of them `pub(super)` again.
+        #[test]
+        fn a_preplanted_staging_symlink_is_never_followed() {
+            use std::os::unix::fs::symlink;
+
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("state.bin");
+            let victim = dir.path().join("victim");
+            fs::write(&victim, b"must stay intact").unwrap();
+            let planted = staging_candidate(&path, u64::MAX);
+            symlink(&victim, &planted).unwrap();
+
+            // The planted symlink must be refused, not followed. Replacing this with a write to
+            // some other generated name would test nothing.
+            let error = open_staging_candidate(&planted).unwrap_err();
+            assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
+            atomic_write(&path, b"authenticated state").unwrap();
+            assert_eq!(fs::read(&victim).unwrap(), b"must stay intact");
+            assert_eq!(fs::read(&path).unwrap(), b"authenticated state");
         }
     }
 
@@ -1553,25 +1603,6 @@ mod tests {
             Err(AppError::CommittedButNotDurable(message))
                 if message == "injected vault directory sync failure"
         ));
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn a_preplanted_staging_symlink_is_never_followed() {
-        use std::os::unix::fs::symlink;
-
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("state.bin");
-        let victim = dir.path().join("victim");
-        fs::write(&victim, b"must stay intact").unwrap();
-        let planted = staging_candidate(&path, u64::MAX);
-        symlink(&victim, &planted).unwrap();
-
-        let error = open_staging_candidate(&planted).unwrap_err();
-        assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
-        write_for_test(&path, b"authenticated state").unwrap();
-        assert_eq!(fs::read(&victim).unwrap(), b"must stay intact");
-        assert_eq!(fs::read(&path).unwrap(), b"authenticated state");
     }
 
     #[cfg(target_os = "linux")]

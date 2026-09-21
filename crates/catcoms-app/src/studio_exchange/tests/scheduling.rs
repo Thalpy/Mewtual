@@ -551,13 +551,18 @@ async fn owner_return(pressure: Pressure) {
     // One assertion reporting both classes, because two sequential ones stop at the first: the
     // Studio failure hid Registry's state in every trace collected so far.
     //
-    // The pass count is the discriminator. The loop's budget is 160 turns and a healthy run uses
-    // 132 (Parser, Transport) or 91 (Ready), so there are 28 spare passes in the tight variants.
-    // `turn` sleeps 5 ms of real time and then advances 250 ms of injected time, and 5 ms is not
-    // a completion barrier: under load a pass can return with its awaited work not yet landed,
-    // accomplishing nothing while still spending 250 ms of budget. If a failing run reports 160
-    // passes consumed, that is the mechanism, and no semaphore instrumentation is needed. If it
-    // reports far fewer, the loop broke early and the cause is elsewhere.
+    // The pass count is descriptive, not diagnostic, and the earlier comment here claimed
+    // otherwise. The loop's only early exit is the same conjunction this assertion tests, so
+    // reaching a failure here *always* means all 160 passes ran: `passes=160` is entailed by the
+    // failure rather than evidence about its cause, and "far fewer passes" is not a reachable
+    // outcome. Capacity refusals, expired requests, other work being selected, and a record that
+    // installed with a mismatched projection all produce the identical line.
+    //
+    // For context, a healthy run uses 132 passes (Parser, Transport) or 91 (Ready). Establishing
+    // *why* a failing run exhausted the budget needs progress and refusal observations —
+    // selected work, acquisition outcome, request deadlines, source-state transitions — which
+    // this does not collect. The booleans below are also conjunctions of presence, id, phase or
+    // epoch, and projection equality, so a `false` does not say which conjunct failed.
     let injected = p.clock.monotonic_ms() - start;
     assert!(
         studio_installed && registry_installed,

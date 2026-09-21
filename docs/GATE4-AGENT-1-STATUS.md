@@ -1401,6 +1401,57 @@ overstatement: rail filtering bounds the *scheduling* impact, not the *retained 
 > nothing reads the token. The moment a cursor captures it across a custody release, one
 > unconverted mutation makes the whole consistency argument false.
 
+> ## Requirement 2: PASS, both halves
+>
+> Closed at `bc957be` by source review: the generic persistence operations are hidden, and the
+> vault-root exception is destination-bound. The reviewer also established something I had stated
+> imprecisely — `StagingPath` and `AtomicWritePhase` remain nameable `pub(super)` types, but their
+> fields and production constructor are private, so a sibling cannot build one aimed at an
+> arbitrary file and trigger its unlinking `Drop`. The accurate claim is "the mutating
+> implementation and construction paths are private", not "every associated type name is private".
+>
+> ### I broke the Unix build and could not have seen it
+>
+> `a_preplanted_staging_symlink_is_never_followed` still called `staging_candidate` and
+> `open_staging_candidate` by name after those became private. It is `#[cfg(unix)]`, so a Windows
+> run never compiles it: every local suite passed while CI's Linux job failed at
+> `error[E0425]` before running a single test. Attribution is partly older —
+> `open_staging_candidate` was already inaccessible at the review base — but this range hid
+> `staging_candidate` after replacing its export and did not migrate the consumer.
+>
+> Fixed by rehoming the test **inside `persistence`**, where it exercises the private primitives
+> directly, rather than by making either `pub(super)` again. The planted-symlink open attempt is
+> preserved; replacing it with a write to another generated name would test nothing. The module is
+> `#[cfg(all(test, unix))]` because its only content is that test.
+>
+> **Verified rather than assumed.** A temporary probe in the same module referencing
+> `staging_candidate`, `open_staging_candidate`, `atomic_write` and `fs` compiles on Windows, so
+> every name the Unix test needs resolves there; only `symlink` is Unix-specific and is imported
+> in the test body. (`cargo check --target x86_64-linux-android` fails in `ring`'s build script
+> before reaching this crate, so it proves nothing.)
+>
+> ### The after hook could silently accept a no-op injection
+>
+> `WriteHooks::after` treated `Intercept::Replace` as success and discarded the bytes. A
+> fault-injection test moved from a writer callback to an after hook would have run, substituted
+> nothing, and reported nothing. That is a masked assertion built into the API, before a single
+> test used it. Fixed with a separate `AfterIntercept` carrying only `Continue` and `Fail`, so the
+> mistake is unrepresentable rather than rejected at runtime.
+>
+> ### The pass-count diagnostic claimed something trivially true
+>
+> I wrote that a failing run reporting 160 passes "is the mechanism, and no semaphore
+> instrumentation is needed". False by the loop's own control flow: its only early exit is the
+> same conjunction the assertion tests, so **any** failure there entails 160 passes, and "far
+> fewer passes" is unreachable. Capacity refusals, expired requests, other work being selected,
+> and a mismatched projection all produce the identical line. The count says the bounded loop
+> exhausted, not why. Claim withdrawn in the source comment; the combined booleans and the count
+> stay as description.
+>
+> Also narrowed: identical serial and concurrent-3 completion times show no interference **in
+> those executions**, not that the variants cannot interfere under another interleaving. 132 of
+> 160 passes is a measurement, not a worst-case guarantee.
+
 ## Requirement 3: prepared, attempted twice, not applied
 
 **What is landed:** the `WriteHooks` interceptor type, and one store-wide `WriteTag` replacing the
