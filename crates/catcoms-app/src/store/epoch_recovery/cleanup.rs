@@ -132,20 +132,15 @@ impl<'a> EpochStorageCleanup<'a> {
     /// A failed/cancelled pass may already have removed some unpublished siblings. It never
     /// changes a budget: only complete, current inventory reconciliation can release charges.
     pub fn step(&mut self) -> Result<EpochStorageCleanupProgress, AppError> {
-        // Production removal and flush go through the capability's own operations; the seam
-        // below exists so tests can fail either side without owning the physical I/O.
-        self.step_with_io(
-            |m, path| m.remove_io(path),
-            |m, parent| m.sync_parent_io(parent),
-        )
+        self.step_with_hooks(&mut WriteHooks::None)
     }
 
-    // Private seams inject failures on both sides of unlink and directory sync without changing
-    // the production ordering. Poison before any I/O so catch_unwind cannot bypass a failure.
-    fn step_with_io(
+    // Tests decide on either side of each unlink and of the directory sync without changing the
+    // production ordering and without owning the physical I/O: removal and flush are always the
+    // capability's own operations. Poison before any I/O so catch_unwind cannot bypass a failure.
+    fn step_with_hooks(
         &mut self,
-        mut unlink: impl FnMut(&EpochMutation<'_>, &Path) -> std::io::Result<()>,
-        mut sync: impl FnMut(&EpochMutation<'_>, &Path) -> std::io::Result<()>,
+        hooks: &mut WriteHooks<'_>,
     ) -> Result<EpochStorageCleanupProgress, AppError> {
         if self.failed {
             return Err(invalid("epoch storage cleanup failed; start a new pass"));
@@ -197,18 +192,28 @@ impl<'a> EpochStorageCleanup<'a> {
                 .removed_ciphertext_bytes
                 .checked_add(metadata.len())
                 .ok_or_else(|| invalid("epoch storage cleanup byte counter overflow"))?;
-            unlink(&mutation, &path).map_err(|e| {
+            hooks.before_unlink(WriteTag::Staging, &path)?;
+            mutation.remove_io(&path).map_err(|e| {
                 AppError::Io(format!(
                     "epoch staging cleanup: {e}; earlier siblings may already be removed"
                 ))
             })?;
+            hooks.after(WriteTag::Staging, &path)?;
             next.removed_files += 1;
             next.removed_ciphertext_bytes = removed_bytes;
         }
         // Must also run at EOF with zero removals: a previous pass may have unlinked everything
         // then failed (or crashed) before its sync. There is no speculative counter refund.
-        sync(&mutation, &self.parent)
+        // A directory sync has no record whose size could be checked, so it reports zero. A
+        // refusal here is committed-but-not-durable by construction: siblings are already gone
+        // and nothing has made their absence durable.
+        hooks
+            .before_sync(WriteTag::Staging, &self.parent, 0)
             .map_err(|e| AppError::CommittedButNotDurable(e.to_string()))?;
+        mutation
+            .sync_parent_io(&self.parent)
+            .map_err(|e| AppError::CommittedButNotDurable(e.to_string()))?;
+        hooks.after(WriteTag::Staging, &self.parent)?;
         self.progress = next;
         self.failed = false;
         Ok(next)
@@ -229,6 +234,31 @@ impl<'a> EpochStorageCleanup<'a> {
 mod tests {
     use super::*;
     use crate::store::EpochRecoveryInventory;
+
+    // `WriteHooks` borrows its decisions rather than owning them, so a helper cannot build one
+    // and return it with the closure inside. These take the caller's closure by reference and
+    // assemble the rest, which keeps each call site to the decision it is actually making.
+
+    /// Decide before the directory sync only.
+    fn on_sync<'h>(f: &'h mut dyn FnMut(WriteTag, &Path, u64) -> AfterIntercept) -> WriteHooks<'h> {
+        WriteHooks::Hooked {
+            before: None,
+            before_sync: Some(f),
+            before_unlink: None,
+            after: None,
+        }
+    }
+
+    /// Decide before each unlink only. Used with `panic!` to assert an unlink never happens.
+    fn on_unlink<'h>(f: &'h mut dyn FnMut(WriteTag, &Path) -> AfterIntercept) -> WriteHooks<'h> {
+        WriteHooks::Hooked {
+            before: None,
+            before_sync: None,
+            before_unlink: Some(f),
+            after: None,
+        }
+    }
+
     use catcoms_replication::RecoveryReason;
     use catcoms_rt::ManualClock;
     use catcoms_wire::DocType;
@@ -302,10 +332,10 @@ mod tests {
             cleanup.coverage(),
             EpochInventoryCoverage::RecoveryAndOwnerReceipts
         );
-        let result = cleanup.step_with_io(
-            |m, path| m.remove_io(path),
-            |_, _| Err(std::io::Error::other("flush failure")),
-        );
+        let mut refuse = |_: WriteTag, _: &Path, _: u64| {
+            AfterIntercept::Fail(AppError::Io("flush failure".into()))
+        };
+        let result = cleanup.step_with_hooks(&mut on_sync(&mut refuse));
         assert!(matches!(result, Err(AppError::CommittedButNotDurable(_))));
         assert_eq!(cleanup.progress.removed_files, 0); // Failed batches report no success.
         assert!(cleanup.into_inventory().is_err());
@@ -313,15 +343,11 @@ mod tests {
         let mut store = open(root.path());
         let mut cleanup = store.cleanup_epoch_storage_staging().unwrap();
         let mut syncs = 0;
-        let done = cleanup
-            .step_with_io(
-                |m, path| m.remove_io(path),
-                |_, _| {
-                    syncs += 1;
-                    Ok(())
-                },
-            )
-            .unwrap();
+        let mut count = |_: WriteTag, _: &Path, _: u64| {
+            syncs += 1;
+            AfterIntercept::Continue
+        };
+        let done = cleanup.step_with_hooks(&mut on_sync(&mut count)).unwrap();
         assert!(done.complete);
         assert_eq!(done.removed_files, 0);
         assert_eq!(syncs, 1); // An empty retry must still make earlier unlinks durable.
@@ -561,10 +587,10 @@ mod tests {
         let orphan = staging_candidate_for_test(&final_path(&store), 800);
         fs::write(&orphan, b"partial").unwrap();
         let mut job = store.cleanup_epoch_recovery_staging().unwrap();
-        let failure = job.step_with_io(
-            |m, p| m.remove_io(p),
-            |_, _| Err(std::io::Error::other("sync failed")),
-        );
+        let mut refuse = |_: WriteTag, _: &Path, _: u64| {
+            AfterIntercept::Fail(AppError::Io("sync failed".into()))
+        };
+        let failure = job.step_with_hooks(&mut on_sync(&mut refuse));
         assert!(matches!(failure, Err(AppError::CommittedButNotDurable(_))));
         assert!(!orphan.exists());
         assert_eq!(job.progress.removed_files, 0); // No successful progress published.
@@ -574,14 +600,18 @@ mod tests {
         let mut store = open(root.path());
         let mut retry = store.cleanup_epoch_recovery_staging().unwrap();
         let mut syncs = 0;
+        let mut never = |_: WriteTag, _: &Path| panic!("no sibling remains");
+        let mut count = |_: WriteTag, _: &Path, _: u64| {
+            syncs += 1;
+            AfterIntercept::Continue
+        };
         let progress = retry
-            .step_with_io(
-                |_, _| panic!("no sibling remains"),
-                |_, _| {
-                    syncs += 1;
-                    Ok(())
-                },
-            )
+            .step_with_hooks(&mut WriteHooks::Hooked {
+                before: None,
+                before_sync: Some(&mut count),
+                before_unlink: Some(&mut never),
+                after: None,
+            })
             .unwrap();
         assert!(progress.complete);
         assert_eq!(progress.removed_files, 0);
@@ -606,22 +636,32 @@ mod tests {
             }
             let mut job = store.cleanup_epoch_recovery_staging().unwrap();
             let mut calls = 0;
+            // The first sibling is removed by the capability's own unlink; the decision only
+            // says whether to proceed. The second is refused before it happens, so exactly one
+            // removal is real and the retry below must find exactly one left to do.
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                job.step_with_io(
-                    |_, path| {
-                        calls += 1;
-                        if calls == 1 {
-                            fs::remove_file(path)?;
-                            if panic_after_unlink {
-                                panic!("interrupted after unlink");
-                            }
-                            Ok(())
-                        } else {
-                            Err(std::io::Error::other("unlink failed"))
-                        }
-                    },
-                    |_, _| panic!("failed traversal must not report a synced batch"),
-                )
+                let mut proceed_once = |_: WriteTag, _: &Path| {
+                    calls += 1;
+                    if calls == 1 {
+                        AfterIntercept::Continue
+                    } else {
+                        AfterIntercept::Fail(AppError::Io("unlink failed".into()))
+                    }
+                };
+                let mut interrupt = |_: WriteTag, _: &Path| {
+                    if panic_after_unlink {
+                        panic!("interrupted after unlink");
+                    }
+                    AfterIntercept::Continue
+                };
+                let mut unreached =
+                    |_: WriteTag, _: &Path, _: u64| panic!("failed traversal must not sync");
+                job.step_with_hooks(&mut WriteHooks::Hooked {
+                    before: None,
+                    before_sync: Some(&mut unreached),
+                    before_unlink: Some(&mut proceed_once),
+                    after: Some(&mut interrupt),
+                })
             }));
             if panic_after_unlink {
                 assert!(result.is_err());
@@ -651,14 +691,18 @@ mod tests {
         let mut job = store.cleanup_epoch_recovery_staging().unwrap();
         job.entry_limit = ENTRIES_PER_STEP;
         let mut syncs = 0;
+        let mut never = |_: WriteTag, _: &Path| panic!("legacy must not be unlinked");
+        let mut count = |_: WriteTag, _: &Path, _: u64| {
+            syncs += 1;
+            AfterIntercept::Continue
+        };
         let first = job
-            .step_with_io(
-                |_, _| panic!("legacy must not be unlinked"),
-                |_, _| {
-                    syncs += 1;
-                    Ok(())
-                },
-            )
+            .step_with_hooks(&mut WriteHooks::Hooked {
+                before: None,
+                before_sync: Some(&mut count),
+                before_unlink: Some(&mut never),
+                after: None,
+            })
             .unwrap();
         assert_eq!(first.visited_entries, ENTRIES_PER_STEP);
         assert!(!first.complete);
@@ -716,9 +760,8 @@ mod tests {
         assert!(!debug.contains("private-cat") && !debug.contains("mewtual-stage"));
         assert!(!debug.contains(root.path().to_str().unwrap()));
         job.progress.removed_ciphertext_bytes = u64::MAX;
-        assert!(job
-            .step_with_io(|_, _| panic!("overflow must precede unlink"), |_, _| Ok(()),)
-            .is_err());
+        let mut never = |_: WriteTag, _: &Path| panic!("overflow must precede unlink");
+        assert!(job.step_with_hooks(&mut on_unlink(&mut never)).is_err());
         assert!(orphan.exists());
         assert!(job.into_inventory().is_err());
     }

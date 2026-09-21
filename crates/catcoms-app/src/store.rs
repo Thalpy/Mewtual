@@ -687,12 +687,21 @@ mod persistence {
         /// The draft archive record, both its first preservation and the exact-retry sync.
         /// Agent 2's release transaction, which unlinks one, will carry this tag too.
         Archive,
+        /// A temporary staging sibling, which is removed rather than replaced. Cleanup reports
+        /// its whole destructive batch under this tag: the siblings it removes may belong to
+        /// several families, and what they have in common is being staging, not being any one
+        /// family's record.
+        Staging,
     }
 
     #[cfg(test)]
     type BeforeHook<'h> = &'h mut dyn FnMut(WriteTag, &Path, &[u8]) -> Intercept;
     #[cfg(test)]
     type AfterHook<'h> = &'h mut dyn FnMut(WriteTag, &Path) -> AfterIntercept;
+    /// Decides before an unlink. Like the after decision it carries only the record it concerns:
+    /// a removal has no payload that could be substituted for another.
+    #[cfg(test)]
+    type UnlinkHook<'h> = &'h mut dyn FnMut(WriteTag, &Path) -> AfterIntercept;
     /// Decides before a durability sync of a record that is already in place. It is given the
     /// size the record is expected to have rather than its bytes, and has no replacement arm:
     /// there is nothing to substitute when the content is already on disk.
@@ -721,6 +730,7 @@ mod persistence {
         Hooked {
             before: Option<BeforeHook<'h>>,
             before_sync: Option<SyncHook<'h>>,
+            before_unlink: Option<UnlinkHook<'h>>,
             after: Option<AfterHook<'h>>,
         },
         #[allow(dead_code)]
@@ -771,9 +781,28 @@ mod persistence {
             }
         }
 
-        /// Decide after the operation has physically completed, whichever it was: a replacement
-        /// or a sync. Within one transaction branch only one of the two runs, and the tag and
-        /// path say which.
+        /// Decide before removing a record, yielding nothing for the same reason as a sync.
+        pub(in crate::store) fn before_unlink(
+            &mut self,
+            #[cfg_attr(not(test), allow(unused_variables))] tag: WriteTag,
+            #[cfg_attr(not(test), allow(unused_variables))] path: &Path,
+        ) -> Result<(), AppError> {
+            match self {
+                Self::None => Ok(()),
+                #[cfg(test)]
+                Self::Hooked { before_unlink, .. } => {
+                    match before_unlink.as_mut().map(|h| h(tag, path)) {
+                        None | Some(AfterIntercept::Continue) => Ok(()),
+                        Some(AfterIntercept::Fail(error)) => Err(error),
+                    }
+                }
+                Self::Never(never, _) => match *never {},
+            }
+        }
+
+        /// Decide after a physical operation has completed, whichever it was: a replacement, a
+        /// sync, or one removal out of a batch. The tag and path say which, and a batch consults
+        /// this once per completed operation rather than once for the batch.
         pub(in crate::store) fn after(
             &mut self,
             #[cfg_attr(not(test), allow(unused_variables))] tag: WriteTag,

@@ -664,6 +664,7 @@ fn the_archive_writer_consults_hooks_on_both_sides_of_its_own_operations() {
         let mut hooks = WriteHooks::Hooked {
             before: Some(&mut before),
             before_sync: None,
+            before_unlink: None,
             after: None,
         };
         let mut b = budget(&mut store, &f);
@@ -707,6 +708,7 @@ fn the_archive_writer_consults_hooks_on_both_sides_of_its_own_operations() {
         let mut hooks = WriteHooks::Hooked {
             before: None,
             before_sync: None,
+            before_unlink: None,
             after: Some(&mut after),
         };
         let refused = store.write_studio_draft_archive_with_io(
@@ -758,6 +760,7 @@ fn the_archive_writer_consults_hooks_on_both_sides_of_its_own_operations() {
         let mut hooks = WriteHooks::Hooked {
             before: None,
             before_sync: Some(&mut before_sync),
+            before_unlink: None,
             after: None,
         };
         let mut b = budget(&mut store, &f);
