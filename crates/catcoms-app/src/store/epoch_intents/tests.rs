@@ -1191,14 +1191,14 @@ fn a_cursor_parked_across_an_intent_write_or_its_exact_retry_flush_refuses() {
 
     let mut limits = budgets(&mut store, &doc);
     let mut cursor = store.begin_epoch_storage_scan(coverage).unwrap();
-    let progress = store.step_epoch_storage_scan(&mut cursor, 1).unwrap();
+    let progress = store.step_epoch_storage_scan(&mut cursor, 1, None).unwrap();
     assert!(
         !progress.complete,
         "the fixture must span more than one step"
     );
     prepare(&mut store, &doc, op(&doc, 2), &device, &group, &mut limits).unwrap();
     assert!(
-        store.step_epoch_storage_scan(&mut cursor, 1).is_err(),
+        store.step_epoch_storage_scan(&mut cursor, 1, None).is_err(),
         "a cursor parked across an intent write resumed anyway"
     );
     assert!(
@@ -1211,7 +1211,7 @@ fn a_cursor_parked_across_an_intent_write_or_its_exact_retry_flush_refuses() {
     let held = fs::read(&path).unwrap();
     let mut limits = budgets(&mut store, &doc);
     let mut cursor = store.begin_epoch_storage_scan(coverage).unwrap();
-    store.step_epoch_storage_scan(&mut cursor, 1).unwrap();
+    store.step_epoch_storage_scan(&mut cursor, 1, None).unwrap();
     prepare(&mut store, &doc, op(&doc, 2), &device, &group, &mut limits).unwrap();
     assert_eq!(
         fs::read(&path).unwrap(),
@@ -1219,7 +1219,7 @@ fn a_cursor_parked_across_an_intent_write_or_its_exact_retry_flush_refuses() {
         "the control is broken: this retry rewrote the ledger, so it is not the flush case"
     );
     assert!(
-        store.step_epoch_storage_scan(&mut cursor, 1).is_err(),
+        store.step_epoch_storage_scan(&mut cursor, 1, None).is_err(),
         "a cursor survived an exact-retry intent flush, which is still a durability-changing \
          operation on an inventoried record"
     );

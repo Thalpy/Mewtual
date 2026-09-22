@@ -389,6 +389,108 @@ pub struct EpochStorageCursor {
     cold_byte_limit: Option<u64>,
     references: Option<CreativeReferenceScan>,
     generation: std::sync::Arc<()>,
+    /// This cursor's own identity, so a detached validation cannot be installed into a
+    /// different cursor that happens to be scanning the same record.
+    identity: std::sync::Arc<()>,
+    /// The physical mount. A result produced before a reopen must not be installed after one.
+    mount: std::sync::Arc<()>,
+    /// At most one, which is the existing one-body-per-step rail rather than a new bound.
+    parked: Option<ParkedEpochRecord>,
+    /// The record whose detached validation is outstanding: parked and not yet installed,
+    /// whether or not the caller has taken the body yet.
+    ///
+    /// Stepping is refused while this is set. Without it, a caller could take a parked body,
+    /// drop it, and keep scanning - and the record would be missing from the resulting inventory
+    /// with nothing having failed. An inventory that silently omits a record is worse than one
+    /// that refuses, because a budget built from it looks usable.
+    awaiting: Option<(EpochRecordKind, [u8; 32])>,
+}
+
+/// A record whose authenticated plaintext has been read, but whose typed validation the cursor
+/// would not run inside the visit's remaining budget.
+///
+/// Parking is a scheduling decision, not a weakening of any rail: the body was already read
+/// under the byte and cold-byte limits, the family cap was already applied, and a genuine
+/// size-limit violation still refuses rather than parks.
+///
+/// The four bindings are what make installing the result safe. Cursor identity stops a
+/// validation being installed into a different scan; the mount stops one surviving a reopen;
+/// the record id stops it being installed against a different entry; and the generation stops
+/// it being installed after a write it never saw. All four are rechecked at install.
+pub struct ParkedEpochRecord {
+    identity: std::sync::Arc<()>,
+    mount: std::sync::Arc<()>,
+    generation: std::sync::Arc<()>,
+    key: (EpochRecordKind, [u8; 32]),
+    plain: Zeroizing<Vec<u8>>,
+    server: u64,
+    document: LogicalDocument,
+    size: u64,
+    digest: blake3::Hash,
+    references: bool,
+}
+
+/// A detached validation's result, still carrying the bindings of the cursor that parked it.
+pub struct ValidatedEpochRecord {
+    identity: std::sync::Arc<()>,
+    mount: std::sync::Arc<()>,
+    generation: std::sync::Arc<()>,
+    key: (EpochRecordKind, [u8; 32]),
+    server: u64,
+    document: LogicalDocument,
+    size: u64,
+    digest: blake3::Hash,
+    body: ValidatedRecordBody,
+}
+
+impl ParkedEpochRecord {
+    /// The detached stage. Runs the same pure validation the inline path runs, with no store, no
+    /// device key and no MLS secret, so it needs no custody and can happen in another visit.
+    pub fn validate(self) -> Result<ValidatedEpochRecord, AppError> {
+        // The scope is the first field of the authenticated plaintext; re-deriving it is a slice
+        // read, not a second validation, and keeps the parked body a single owned buffer.
+        let mut decoder = Decoder::new(&self.plain);
+        let scope = decoder.get_bytes().map_err(invalid)?;
+        let body = validate_record_body(
+            self.key.0,
+            &self.plain,
+            scope,
+            self.server,
+            &self.document,
+            self.size,
+            self.references,
+        )?;
+        Ok(ValidatedEpochRecord {
+            identity: self.identity,
+            mount: self.mount,
+            generation: self.generation,
+            key: self.key,
+            server: self.server,
+            document: self.document,
+            size: self.size,
+            digest: self.digest,
+            body,
+        })
+    }
+}
+
+impl std::fmt::Debug for ParkedEpochRecord {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // No plaintext, no record identifier, no document.
+        f.debug_struct("ParkedEpochRecord")
+            .field("family", &self.key.0)
+            .field("bytes", &self.size)
+            .finish_non_exhaustive()
+    }
+}
+
+impl std::fmt::Debug for ValidatedEpochRecord {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ValidatedEpochRecord")
+            .field("family", &self.key.0)
+            .field("bytes", &self.size)
+            .finish_non_exhaustive()
+    }
 }
 
 /// A cursor plus custody of the store, for callers that complete a scan in one visit and so do
@@ -516,6 +618,10 @@ impl ServerStore {
                 // Captured before the first entry is read, so any mutation concurrent with even
                 // the earliest part of this scan invalidates it.
                 generation: self.inventory_generation.clone(),
+                identity: std::sync::Arc::new(()),
+                mount: self.registry_mount(),
+                parked: None,
+                awaiting: None,
             },
             store: self,
         })
@@ -532,12 +638,36 @@ impl ServerStore {
 
     /// Resume a parked cursor. Invalidation is checked **before** any traversal or record work,
     /// so an overtaken cursor costs nothing to reject.
+    ///
+    /// `budget` bounds continuous custody. With `None` the cursor never parks, which is right
+    /// for a caller that holds the store for the whole scan anyway and could not use a parked
+    /// body if it got one. With `Some`, a record whose validation cannot be conservatively
+    /// bounded within what remains is parked instead of run: take it with
+    /// [`Self::take_parked_record`], validate it detached, and install it before stepping again.
     pub fn step_epoch_storage_scan(
         &mut self,
         cursor: &mut EpochStorageCursor,
         steps: usize,
+        budget: Option<(&dyn catcoms_rt::Clock, u64)>,
     ) -> Result<EpochStorageScanProgress, AppError> {
-        cursor.step_with(self, steps)
+        cursor.step_with(self, steps, budget)
+    }
+
+    /// Take the record this cursor parked, if any. The cursor refuses to step again until the
+    /// result is installed, so this is the only way forward rather than an optional check.
+    pub fn take_parked_record(&self, cursor: &mut EpochStorageCursor) -> Option<ParkedEpochRecord> {
+        cursor.parked.take()
+    }
+
+    /// Install a detached validation. Rechecks the cursor identity, the mount, the record id and
+    /// the inventory generation; a failure here is ordinary, not exceptional, because a write
+    /// may well have landed while the validation ran outside custody.
+    pub fn install_validated_record(
+        &mut self,
+        cursor: &mut EpochStorageCursor,
+        validated: ValidatedEpochRecord,
+    ) -> Result<(), AppError> {
+        cursor.install_validated(self, validated)
     }
 
     /// Consume a cursor and issue its inventory. Rechecks invalidation: a scan that completed
@@ -621,25 +751,144 @@ impl EpochStorageCursor {
     /// Visit at most 64 directory entries and authenticate at most one bounded record. Schedule
     /// another step when `complete` is false. An error permanently poisons this scan, including
     /// errors caused by local corruption, disappearance, aliases or resource exhaustion.
+    /// Merge one validated record into the inventory.
+    ///
+    /// Shared by the inline path and by the install of a detached validation, so a parked record
+    /// cannot accumulate different accounting from an unparked one. That is the whole reason it
+    /// is a method rather than two copies.
+    #[allow(clippy::too_many_arguments)]
+    fn install_body(
+        &mut self,
+        store: &mut ServerStore,
+        key: (EpochRecordKind, [u8; 32]),
+        server: u64,
+        document: LogicalDocument,
+        size: u64,
+        digest: blake3::Hash,
+        body: ValidatedRecordBody,
+    ) -> Result<(), AppError> {
+        let (family, hash) = key;
+        if let Some(collected) = self.references.as_mut() {
+            collected.refs.add(&document.server_id, body.cids)?;
+            if let Some(target) = body.metadata {
+                collected
+                    .metadata
+                    .insert((server, document.clone()), target);
+            }
+            if let Some(target) = body.required {
+                collected
+                    .required
+                    .insert((server, document.clone()), target);
+            }
+        }
+        if matches!(family, EpochRecordKind::Registry | EpochRecordKind::Studio) {
+            // Even an explicit reference scan may warm pure validation metadata, but a later
+            // reference scan must still enumerate the actual CIDs.
+            store
+                .inventory_cache
+                .put((family, hash), size, digest, body.record);
+        }
+        if self
+            .inventory
+            .records
+            .insert(
+                (family, hash),
+                EpochStorageInventoryEntry {
+                    kind: family,
+                    server,
+                    document,
+                    record: body.record,
+                },
+            )
+            .is_some()
+        {
+            return Err(invalid("duplicate epoch storage inventory entry"));
+        }
+        match family {
+            EpochRecordKind::Recovery => self.progress.recovery_records += 1,
+            EpochRecordKind::OwnerReceipts => self.progress.owner_receipt_records += 1,
+            EpochRecordKind::Intents => self.progress.intent_records += 1,
+            EpochRecordKind::DraftArchive => self.progress.draft_archive_records += 1,
+            EpochRecordKind::Registry => self.progress.registry_records += 1,
+            EpochRecordKind::Studio => self.progress.studio_records += 1,
+        }
+        Ok(())
+    }
+
+    /// Install a detached validation, rechecking every binding it was parked with.
+    fn install_validated(
+        &mut self,
+        store: &mut ServerStore,
+        validated: ValidatedEpochRecord,
+    ) -> Result<(), AppError> {
+        // All four, and the generation last so its message is the one a caller sees when a write
+        // landed while the validation was detached - which is the expected outcome, not a bug.
+        if !std::sync::Arc::ptr_eq(&self.identity, &validated.identity) {
+            return Err(invalid("validated record belongs to a different scan"));
+        }
+        if !std::sync::Arc::ptr_eq(&self.mount, &validated.mount) {
+            return Err(invalid(
+                "validated record was produced under a different mount",
+            ));
+        }
+        match self.awaiting {
+            Some(key) if key == validated.key => {}
+            // Left set, so the caller can still install the right one.
+            Some(_) => return Err(invalid("validated record is not the one this scan parked")),
+            None => return Err(invalid("this scan has no parked record to install")),
+        }
+        self.check_not_invalidated(store)?;
+        if !std::sync::Arc::ptr_eq(&self.generation, &validated.generation) {
+            return Err(invalid(
+                "validated record was produced before a concurrent record mutation",
+            ));
+        }
+        self.install_body(
+            store,
+            validated.key,
+            validated.server,
+            validated.document,
+            validated.size,
+            validated.digest,
+            validated.body,
+        )?;
+        // Only now: a failed merge leaves the record outstanding rather than quietly dropped.
+        self.awaiting = None;
+        self.parked = None;
+        Ok(())
+    }
+
     fn step_with(
         &mut self,
         store: &mut ServerStore,
         steps: usize,
+        budget: Option<(&dyn catcoms_rt::Clock, u64)>,
     ) -> Result<EpochStorageScanProgress, AppError> {
         // Before resuming any expensive work, not after. A cursor that has been overtaken must
         // not pay for traversal or record authentication it is going to throw away.
         self.check_not_invalidated(store)?;
-        self.guarded_step(store, steps, Self::step_inner)
+        if self.awaiting.is_some() {
+            return Err(invalid(
+                "this scan has a parked record; validate and install it before stepping",
+            ));
+        }
+        // One clock read per visit, at entry. The deadline is then a fixed target rather than a
+        // moving one, and the classifier below compares against what is left of it.
+        let deadline = budget.map(|(clock, ms)| (clock, clock.monotonic_ms().saturating_add(ms)));
+        self.guarded_step(store, steps, deadline, Self::step_inner)
     }
 
+    #[allow(clippy::type_complexity)]
     fn guarded_step(
         &mut self,
         store: &mut ServerStore,
         steps: usize,
+        deadline: Option<(&dyn catcoms_rt::Clock, u64)>,
         work: impl FnOnce(
             &mut Self,
             &mut ServerStore,
             usize,
+            Option<(&dyn catcoms_rt::Clock, u64)>,
         ) -> Result<EpochStorageScanProgress, AppError>,
     ) -> Result<EpochStorageScanProgress, AppError> {
         if self.failed {
@@ -650,7 +899,7 @@ impl EpochStorageCursor {
         // Poison BEFORE traversing/parsing: even a caught parser panic must not let a caller
         // resume beyond the offending entry and declare an incomplete inventory complete.
         self.failed = true;
-        let result = work(self, store, steps);
+        let result = work(self, store, steps, deadline);
         if result.is_ok() {
             self.failed = false;
         }
@@ -661,7 +910,11 @@ impl EpochStorageCursor {
         &mut self,
         store: &mut ServerStore,
         steps: usize,
+        deadline: Option<(&dyn catcoms_rt::Clock, u64)>,
     ) -> Result<EpochStorageScanProgress, AppError> {
+        // Read once per record that might be parked, not per entry: a traversal step that skips
+        // uncovered filenames does no validation and needs no clock.
+        let remaining_ms = deadline.map(|(clock, at)| at.saturating_sub(clock.monotonic_ms()));
         if self.progress.complete {
             return Ok(self.progress);
         }
@@ -752,73 +1005,54 @@ impl EpochStorageCursor {
                     let cached = cacheable
                         .then(|| store.inventory_cache.get((family, hash), size, digest))
                         .flatten();
-                    let record =
-                        if let Some(record) = cached {
-                            self.progress.reused_records += 1;
-                            record
-                        } else {
-                            self.check_cold_bytes(size)?;
-                            self.progress.uncached_bytes =
-                                self.progress.uncached_bytes.checked_add(size).ok_or_else(
-                                    || invalid("epoch storage inventory cold byte limit reached"),
-                                )?;
-                            let validated = validate_record_body(
-                                family,
-                                &plain,
-                                scope,
-                                server,
-                                &document,
-                                size,
-                                self.references.is_some(),
-                            )?;
-                            let record = validated.record;
-                            if let Some(collected) = self.references.as_mut() {
-                                collected.refs.add(&document.server_id, validated.cids)?;
-                                if let Some(target) = validated.metadata {
-                                    collected
-                                        .metadata
-                                        .insert((server, document.clone()), target);
-                                }
-                                if let Some(target) = validated.required {
-                                    collected
-                                        .required
-                                        .insert((server, document.clone()), target);
-                                }
-                            }
-                            if matches!(family, EpochRecordKind::Registry | EpochRecordKind::Studio)
+                    let body = if let Some(record) = cached {
+                        // A cache hit is cheap by construction, so it is never a parking
+                        // candidate: the expensive thing is exactly what the cache avoided.
+                        self.progress.reused_records += 1;
+                        ValidatedRecordBody::accounting_only(record)
+                    } else {
+                        self.check_cold_bytes(size)?;
+                        self.progress.uncached_bytes = self
+                            .progress
+                            .uncached_bytes
+                            .checked_add(size)
+                            .ok_or_else(|| {
+                                invalid("epoch storage inventory cold byte limit reached")
+                            })?;
+                        // Classify BEFORE invoking. Measuring after a long synchronous validator
+                        // has returned would not have bounded anything, so the decision is made
+                        // on facts known now: family, authenticated size, and whether this scan
+                        // is collecting references.
+                        if let Some(remaining) = remaining_ms.as_ref() {
+                            if !validation_fits(family, size, self.references.is_some(), *remaining)
                             {
-                                // Even an explicit reference scan may warm pure validation metadata,
-                                // but a later reference scan must still enumerate the actual CIDs.
-                                store
-                                    .inventory_cache
-                                    .put((family, hash), size, digest, record);
+                                self.awaiting = Some((family, hash));
+                                self.parked = Some(ParkedEpochRecord {
+                                    identity: self.identity.clone(),
+                                    mount: self.mount.clone(),
+                                    generation: self.generation.clone(),
+                                    key: (family, hash),
+                                    plain,
+                                    server,
+                                    document,
+                                    size,
+                                    digest,
+                                    references: self.references.is_some(),
+                                });
+                                return Ok(self.progress);
                             }
-                            record
-                        };
-                    if self
-                        .inventory
-                        .records
-                        .insert(
-                            (family, hash),
-                            EpochStorageInventoryEntry {
-                                kind: family,
-                                server,
-                                document,
-                                record,
-                            },
-                        )
-                        .is_some()
-                    {
-                        return Err(invalid("duplicate epoch storage inventory entry"));
-                    }
-                    match family {
-                        EpochRecordKind::Recovery => self.progress.recovery_records += 1,
-                        EpochRecordKind::OwnerReceipts => self.progress.owner_receipt_records += 1,
-                        EpochRecordKind::Intents => self.progress.intent_records += 1,
-                        EpochRecordKind::DraftArchive => self.progress.draft_archive_records += 1,
-                        EpochRecordKind::Registry => self.progress.registry_records += 1,
-                        EpochRecordKind::Studio => self.progress.studio_records += 1,
-                    }
+                        }
+                        validate_record_body(
+                            family,
+                            &plain,
+                            scope,
+                            server,
+                            &document,
+                            size,
+                            self.references.is_some(),
+                        )?
+                    };
+                    self.install_body(store, (family, hash), server, document, size, digest, body)?;
                     break;
                 }
                 RecoveryName::Temporary(destination) => {
@@ -894,7 +1128,9 @@ impl EpochStorageScan<'_> {
     /// another step when `complete` is false. An error permanently poisons this scan, including
     /// errors caused by local corruption, disappearance, aliases or resource exhaustion.
     pub fn step(&mut self) -> Result<EpochStorageScanProgress, AppError> {
-        self.cursor.step_with(self.store, ENTRIES_PER_STEP)
+        // No budget: this form holds the store across every step, so parking a body would
+        // strand the scan rather than shorten any custody hold.
+        self.cursor.step_with(self.store, ENTRIES_PER_STEP, None)
     }
     pub fn finish(self) -> Result<EpochStorageInventory, AppError> {
         self.cursor.finish_with(self.store)
@@ -1089,6 +1325,43 @@ pub(in crate::store) struct ValidatedRecordBody {
     metadata: Option<catcoms_replication::studio::StudioTarget>,
     /// A Studio handoff metadata target this record *depends on*.
     required: Option<catcoms_replication::studio::StudioTarget>,
+}
+
+impl ValidatedRecordBody {
+    /// A cache hit: the record's typed validation already happened, and its reference facts were
+    /// deliberately not cached, which is why a reference scan never consults the cache.
+    fn accounting_only(record: StorageRecord) -> Self {
+        Self {
+            record,
+            cids: std::collections::BTreeSet::new(),
+            metadata: None,
+            required: None,
+        }
+    }
+}
+
+/// Whether one record's typed validation can be **conservatively** bounded within `remaining_ms`.
+///
+/// Design 9.2 is explicit that `budget_ms` is not a preemption mechanism: checking elapsed time
+/// after a long synchronous validator has returned does not enforce a boundary. So the decision
+/// is made from what is known before the call - family, authenticated physical size, and whether
+/// references are being collected - and **where cost cannot be conservatively classified, the
+/// default is to detach**.
+///
+/// Measurement 13.7 is what will make classification possible: the largest single-record step for
+/// each family at its accepted ceiling, with and without reference collection. Until those
+/// figures exist, nothing can be conservatively classified and this returns false for every
+/// fresh validation. That is deliberately pessimistic - it detaches records that would have been
+/// cheap - and it is the direction the design names, because the failure mode of detaching a
+/// cheap record is an extra visit, while the failure mode of inlining an expensive one is an
+/// unbounded custody hold.
+fn validation_fits(
+    _family: EpochRecordKind,
+    _size: u64,
+    _references: bool,
+    _remaining_ms: u64,
+) -> bool {
+    false
 }
 
 /// The typed validation of one authenticated record body, for every family.
@@ -1582,7 +1855,7 @@ mod tests {
         let mut scan = store.scan_epoch_recovery().unwrap();
         assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             scan.cursor
-                .guarded_step(scan.store, ENTRIES_PER_STEP, |_, _, _| {
+                .guarded_step(scan.store, ENTRIES_PER_STEP, None, |_, _, _, _| {
                     panic!("injected parser panic")
                 })
         }))
@@ -1679,7 +1952,7 @@ mod tests {
         let mut scan = store.scan_epoch_storage().unwrap();
         assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             scan.cursor
-                .guarded_step(scan.store, ENTRIES_PER_STEP, |_, _, _| {
+                .guarded_step(scan.store, ENTRIES_PER_STEP, None, |_, _, _, _| {
                     panic!("combined parser panic")
                 })
         }))
@@ -2109,13 +2382,15 @@ mod tests {
             .unwrap();
         // One step, then custody is released: the cursor outlives the borrow, which is the
         // whole point of the change.
-        let progress = store.step_epoch_storage_scan(&mut cursor, 1).unwrap();
+        let progress = store.step_epoch_storage_scan(&mut cursor, 1, None).unwrap();
         assert!(
             !progress.complete,
             "the fixture must need more than one step"
         );
         stage(&mut store, 7, &doc, 2);
-        let refused = store.step_epoch_storage_scan(&mut cursor, 1).unwrap_err();
+        let refused = store
+            .step_epoch_storage_scan(&mut cursor, 1, None)
+            .unwrap_err();
         assert!(
             refused.to_string().contains("invalidated"),
             "a cursor resumed across a record mutation continued instead of refusing: {refused}"
@@ -2133,7 +2408,7 @@ mod tests {
             .begin_epoch_storage_scan(EpochInventoryCoverage::RecoveryOnly)
             .unwrap();
         while !store
-            .step_epoch_storage_scan(&mut cursor, ENTRIES_PER_STEP)
+            .step_epoch_storage_scan(&mut cursor, ENTRIES_PER_STEP, None)
             .unwrap()
             .complete
         {}
@@ -2161,7 +2436,7 @@ mod tests {
         let mut cursor = store
             .begin_epoch_storage_scan(EpochInventoryCoverage::RecoveryOnly)
             .unwrap();
-        store.step_epoch_storage_scan(&mut cursor, 1).unwrap();
+        store.step_epoch_storage_scan(&mut cursor, 1, None).unwrap();
 
         // Ordinary non-mutating traffic between visits.
         store.load_epoch_recovery(7, &doc).unwrap();
@@ -2169,7 +2444,7 @@ mod tests {
         let _ = store.inventory_generation();
 
         while !store
-            .step_epoch_storage_scan(&mut cursor, ENTRIES_PER_STEP)
+            .step_epoch_storage_scan(&mut cursor, ENTRIES_PER_STEP, None)
             .unwrap()
             .complete
         {}
@@ -2177,5 +2452,149 @@ mod tests {
             .finish_epoch_storage_scan(cursor)
             .expect("a quiescent vault must let a parked cursor complete");
         assert_eq!(inventory.coverage(), EpochInventoryCoverage::RecoveryOnly);
+    }
+
+    /// C-3's custody bound: with a time budget, a record whose validation cannot be
+    /// conservatively bounded is parked rather than run, and the scan still completes through
+    /// the detached stage.
+    ///
+    /// The classifier currently detaches every fresh validation, because measurement 13.7 does
+    /// not exist yet and 9.2's rule for that case is to default to detaching. So this also
+    /// documents the pessimistic default: one record per visit until those figures land.
+    #[test]
+    fn a_budgeted_cursor_parks_each_record_and_completes_through_the_detached_stage() {
+        let root = tempfile::tempdir().unwrap();
+        let mut store = open(root.path());
+        let doc = document(b"group", b"parked");
+        stage(&mut store, 7, &doc, 1);
+        let clock = ManualClock::new(0);
+
+        let mut cursor = store
+            .begin_epoch_storage_scan(EpochInventoryCoverage::RecoveryOnly)
+            .unwrap();
+        let mut parked_bodies = 0;
+        loop {
+            let progress = store
+                .step_epoch_storage_scan(&mut cursor, ENTRIES_PER_STEP, Some((&clock, 250)))
+                .unwrap();
+            let Some(parked) = store.take_parked_record(&mut cursor) else {
+                if progress.complete {
+                    break;
+                }
+                continue;
+            };
+            parked_bodies += 1;
+            // A cursor holding a parked body refuses to advance: the caller cannot skip the
+            // detached stage and silently drop the record from its inventory.
+            assert!(
+                store
+                    .step_epoch_storage_scan(&mut cursor, 1, Some((&clock, 250)))
+                    .is_err(),
+                "a cursor stepped past its own parked record"
+            );
+            // The detached stage: no store, no key, no custody.
+            let validated = parked.validate().unwrap();
+            store
+                .install_validated_record(&mut cursor, validated)
+                .unwrap();
+        }
+        assert_eq!(
+            parked_bodies, 1,
+            "the fixture's one record must have been parked exactly once"
+        );
+
+        let inventory = store.finish_epoch_storage_scan(cursor).unwrap();
+        assert_eq!(
+            inventory.records().count(),
+            1,
+            "the parked record never reached the inventory, so detaching lost it"
+        );
+
+        // An unbudgeted scan of the same vault must agree, or parking changed the answer.
+        let direct = collect(&mut store).unwrap();
+        assert_eq!(direct.records().count(), 1);
+    }
+
+    /// The four bindings a detached validation is rechecked against.
+    ///
+    /// Each is a different way for a result to arrive at the wrong place: another scan, another
+    /// mount, another record, or after a write the validation never saw. The last is the
+    /// expected one - a validation runs outside custody precisely so that writes can happen
+    /// while it does - which is why it refuses rather than poisons.
+    #[test]
+    fn a_detached_validation_is_refused_by_the_wrong_scan_record_or_generation() {
+        let doc = document(b"group", b"binding");
+        let clock = ManualClock::new(0);
+        let park = |store: &mut ServerStore| {
+            let mut cursor = store
+                .begin_epoch_storage_scan(EpochInventoryCoverage::RecoveryOnly)
+                .unwrap();
+            store
+                .step_epoch_storage_scan(&mut cursor, ENTRIES_PER_STEP, Some((&clock, 250)))
+                .unwrap();
+            let parked = store
+                .take_parked_record(&mut cursor)
+                .expect("the classifier must park this record");
+            (cursor, parked)
+        };
+
+        // Wrong scan: a second cursor over the same vault and the same record.
+        let root = tempfile::tempdir().unwrap();
+        let mut store = open(root.path());
+        stage(&mut store, 7, &doc, 1);
+        let (_first, parked) = park(&mut store);
+        let (mut second, _also) = park(&mut store);
+        let error = store
+            .install_validated_record(&mut second, parked.validate().unwrap())
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("different scan"),
+            "a validation was installed into a scan that did not park it: {error}"
+        );
+
+        // Wrong record: park one, then offer it to a cursor waiting for another.
+        let root = tempfile::tempdir().unwrap();
+        let mut store = open(root.path());
+        stage(&mut store, 7, &doc, 1);
+        stage(&mut store, 7, &document(b"group", b"other"), 1);
+        let (mut cursor, parked) = park(&mut store);
+        let mut forged = parked.validate().unwrap();
+        forged.identity = cursor_identity(&cursor);
+        forged.key.1 = [0xAB; 32];
+        let error = store
+            .install_validated_record(&mut cursor, forged)
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("not the one this scan parked"),
+            "a validation was installed against the wrong record: {error}"
+        );
+        assert!(
+            store
+                .step_epoch_storage_scan(&mut cursor, 1, Some((&clock, 250)))
+                .is_err(),
+            "a refused install let the scan continue with its record still outstanding"
+        );
+
+        // Overtaken while detached: the case the design expects to happen in normal running.
+        let root = tempfile::tempdir().unwrap();
+        let mut store = open(root.path());
+        stage(&mut store, 7, &doc, 1);
+        let (mut cursor, parked) = park(&mut store);
+        let validated = parked.validate().unwrap();
+        stage(&mut store, 7, &doc, 2);
+        let error = store
+            .install_validated_record(&mut cursor, validated)
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("invalidated"),
+            "a validation produced before a write was installed after it: {error}"
+        );
+    }
+
+    /// Reaches into the cursor so the wrong-record case can vary exactly one binding. Varying
+    /// the record id alone is the point: if the test also changed the identity, the identity
+    /// check would fire first and the record check would never be exercised.
+    fn cursor_identity(cursor: &EpochStorageCursor) -> std::sync::Arc<()> {
+        cursor.identity.clone()
     }
 }

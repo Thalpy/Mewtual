@@ -383,7 +383,7 @@ mod tests {
         let mut cursor = store
             .begin_epoch_storage_scan(EpochInventoryCoverage::RecoveryOnly)
             .unwrap();
-        store.step_epoch_storage_scan(&mut cursor, 1).unwrap();
+        store.step_epoch_storage_scan(&mut cursor, 1, None).unwrap();
 
         let mut job = store.cleanup_epoch_recovery_staging().unwrap();
         while !job.step().unwrap().complete {}
@@ -397,7 +397,7 @@ mod tests {
             "cleanup unlinked an inventoried temporary sibling without rotating, so an inventory              captured before the pass would still be treated as current"
         );
         assert!(
-            store.step_epoch_storage_scan(&mut cursor, 1).is_err(),
+            store.step_epoch_storage_scan(&mut cursor, 1, None).is_err(),
             "a cursor parked across a cleanup unlink resumed anyway"
         );
         assert!(

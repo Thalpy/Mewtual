@@ -533,7 +533,7 @@ fn a_cursor_parked_across_an_owner_journal_write_refuses_to_resume_or_finish() {
     let mut cursor = store
         .begin_epoch_storage_scan(EpochInventoryCoverage::RecoveryAndOwnerReceipts)
         .unwrap();
-    let progress = store.step_epoch_storage_scan(&mut cursor, 1).unwrap();
+    let progress = store.step_epoch_storage_scan(&mut cursor, 1, None).unwrap();
     assert!(
         !progress.complete,
         "the fixture must leave the cursor mid-traversal for this to be a spanning scan"
@@ -551,7 +551,7 @@ fn a_cursor_parked_across_an_owner_journal_write_refuses_to_resume_or_finish() {
     );
 
     assert!(
-        store.step_epoch_storage_scan(&mut cursor, 1).is_err(),
+        store.step_epoch_storage_scan(&mut cursor, 1, None).is_err(),
         "a cursor parked across an owner-journal write resumed anyway"
     );
     assert!(

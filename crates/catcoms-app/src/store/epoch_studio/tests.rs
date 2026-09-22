@@ -1168,7 +1168,7 @@ fn a_cursor_parked_across_a_studio_source_write_refuses_but_survives_a_budget_mi
             EpochInventoryCoverage::RecoveryOwnerReceiptsIntentsRegistryAndStudio,
         )
         .unwrap();
-    let progress = store.step_epoch_storage_scan(&mut cursor, 1).unwrap();
+    let progress = store.step_epoch_storage_scan(&mut cursor, 1, None).unwrap();
     assert!(
         !progress.complete,
         "the fixture must span more than one step"
@@ -1178,7 +1178,7 @@ fn a_cursor_parked_across_a_studio_source_write_refuses_but_survives_a_budget_mi
     // `studio_generation`. It must survive both.
     let minted = budget(&mut store, &f);
     drop(minted);
-    store.step_epoch_storage_scan(&mut cursor, 1).expect(
+    store.step_epoch_storage_scan(&mut cursor, 1, None).expect(
         "a Studio budget mint invalidated a parked cursor, which is the self-invalidation \
                  hazard that ruled out reusing studio_generation",
     );
@@ -1192,7 +1192,7 @@ fn a_cursor_parked_across_a_studio_source_write_refuses_but_survives_a_budget_mi
         "the Studio source writer did not rotate the inventory generation"
     );
     assert!(
-        store.step_epoch_storage_scan(&mut cursor, 1).is_err(),
+        store.step_epoch_storage_scan(&mut cursor, 1, None).is_err(),
         "a cursor parked across a Studio source write resumed anyway"
     );
     assert!(

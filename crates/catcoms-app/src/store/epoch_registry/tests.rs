@@ -936,7 +936,7 @@ fn a_cursor_parked_across_registry_writes_refuses_including_same_size_and_failed
                 EpochInventoryCoverage::RecoveryOwnerReceiptsIntentsAndRegistry,
             )
             .unwrap();
-        store.step_epoch_storage_scan(&mut cursor, 1).unwrap();
+        store.step_epoch_storage_scan(&mut cursor, 1, None).unwrap();
         cursor
     };
     let refused = |store: &ServerStore, mut cursor: EpochStorageCursor, what: &str| {
@@ -961,7 +961,7 @@ fn a_cursor_parked_across_registry_writes_refuses_including_same_size_and_failed
     let mut cursor = park(&mut store);
     f.ingest(&mut store, &next, &mut budget).unwrap();
     assert!(
-        store.step_epoch_storage_scan(&mut cursor, 1).is_err(),
+        store.step_epoch_storage_scan(&mut cursor, 1, None).is_err(),
         "a cursor parked across a Registry write resumed anyway"
     );
     refused(&store, cursor, "a Registry write");
@@ -981,7 +981,7 @@ fn a_cursor_parked_across_registry_writes_refuses_including_same_size_and_failed
         "the control is broken: this retry rewrote the record, so it is not the unchanged case"
     );
     assert!(
-        store.step_epoch_storage_scan(&mut cursor, 1).is_err(),
+        store.step_epoch_storage_scan(&mut cursor, 1, None).is_err(),
         "a cursor survived an unchanged-record flush, which is still a durability-changing \
          operation on an inventoried file"
     );
@@ -1008,7 +1008,7 @@ fn a_cursor_parked_across_registry_writes_refuses_including_same_size_and_failed
         )
         .is_err());
     assert!(
-        store.step_epoch_storage_scan(&mut cursor, 1).is_err(),
+        store.step_epoch_storage_scan(&mut cursor, 1, None).is_err(),
         "a cursor survived a failed write attempt, so it would miss whatever that attempt left"
     );
     refused(&store, cursor, "a failed write attempt");

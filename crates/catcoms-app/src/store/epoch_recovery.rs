@@ -1113,7 +1113,7 @@ mod tests {
         let mut cursor = store
             .begin_epoch_storage_scan(EpochInventoryCoverage::RecoveryOnly)
             .unwrap();
-        store.step_epoch_storage_scan(&mut cursor, 1).unwrap();
+        store.step_epoch_storage_scan(&mut cursor, 1, None).unwrap();
 
         let mut budget = inventory_budget(&store);
         accounted(
@@ -1128,7 +1128,7 @@ mod tests {
              inventory would survive a write it never saw"
         );
         assert!(
-            store.step_epoch_storage_scan(&mut cursor, 1).is_err(),
+            store.step_epoch_storage_scan(&mut cursor, 1, None).is_err(),
             "a cursor parked across an accounted recovery write resumed anyway"
         );
         assert!(
