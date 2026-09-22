@@ -2284,12 +2284,23 @@ Accompanying prose:
 
 ## Next actions
 
-1. **Flow H**, the largest remaining piece: H1 capture, H2 detached plan, the H3 signing slice with
-   `MAX_SIGNING_TURNS_PER_VISIT`/`SIGNING_SLICE_BUDGET_MS` on the injected clock, H4 detached
-   assembly, H5 commit, H6 notify. N31 and M5a/M5b live here, and 7.3's two-distinct-events rule
-   (priority yield signs zero; slice bound signs at least one and fewer than all) is the part most
-   likely to be got wrong. Then **Flow R**, which needs no media and is independent.
-2. Then I-4 with C-3. See the revised sequencing table above.
+1. **C-3**, now the largest remaining piece and unblocked: `EpochStorageCursor` as an owned type
+   replacing the exclusive-borrow scanner, invalidation checked both before resuming expensive
+   work and before issuing the inventory, the time budget with classify-before-invoking
+   detachment, the single parked body carrying its job's original `OverlayOwnership` and
+   rechecked against cursor identity, mount, record id and `inventory_generation`, and
+   `MAX_INVENTORY_RESTARTS` with backoff rather than a fallback to an unbounded scan. N17 and
+   N18 are its evidence.
+
+   **Not blocked on measurement 13.7.** The largest-step figures calibrate the classifier, and
+   9.2 already states the rule for their absence: default to detaching. So C-3 starts in its
+   conservative mode and 13.7 tunes it later.
+
+   Section 15 asks for a **coordinated verdict** on the borrow-to-cursor change, because it is a
+   semantic consistency change shared with Agent 3 and every Studio write path, not a mechanical
+   signature change. Get that before converting call sites, not after.
+2. Then **Flow R**, which needs no media and is independent. It was deliberately sequenced after
+   this boundary so it is not built on the unbounded inventory path and then split again.
 3. Produce design 13's eight measurements as each item lands; C-1's before-and-after is the first
    and is cheap, since the opt-in profile already exists. **No measurement exists yet.**
 4. R4-TEST-001 stays open until the reviewer can inspect `079e59a` on GitHub. C-1's call-site table
@@ -2307,3 +2318,11 @@ Accompanying prose:
 9. When Agent 2's archive writer lands, delete `write_draft_archive_for_test`, replace the
    fail-closed reference arm with their collector, and add their two archive writers to the I-4
    audit as design 9.2 now records.
+10. **Tell Agent 2 what requirement 3 changed under them**, which has not been sent. The eight
+    per-transaction tag enums are gone, replaced by one store-wide `WriteTag`; `WriteTag::Archive`
+    covers the draft archive record and is what their `release_studio_draft_archive_with_io`
+    should carry. Transactions no longer accept `writer`/`sync`/`unlink` closures at all: a new
+    writer takes `WriteStep` and `&mut WriteHooks<'_>` and performs its own operations through
+    `EpochMutation`. A caller that needs "flush only, never replace" says so with
+    `WriteStep::flush_only`, and the leaf must call `permit_replacement()` before its
+    replacement branch for that to mean anything.
