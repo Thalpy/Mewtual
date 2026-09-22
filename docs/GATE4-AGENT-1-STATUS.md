@@ -1508,9 +1508,14 @@ matrices were testing the earlier flush while claiming the replacement, and pass
 error plus a hit flag plus a successful exact restart are consistent with either. The frozen
 fixture masked it further: its predecessor is already Closing, so the phase and projection checks
 hold for both failures. `CompletedOperation::{Write, Sync, Unlink}` is now passed to the hook,
-both matrices assert the firing event is the last one observed and that the Source case declined
-the preceding sync, and both check the record's own bytes - the only evidence that separates the
-two failures there.
+and both matrices assert the firing event is the last one observed and check the record's own
+bytes - the only evidence that separates the two failures in the frozen case.
+
+The first version of this claimed both matrices also asserted the *preceding* Source sync. Only
+the ordinary one did; the review caught the overstatement. The frozen matrix now carries the
+same assertion, which matters for a different mutation than the one that motivated the finding:
+asserting only the final event rejects an injection that fires on the preceding flush, but not a
+change that deletes that flush altogether.
 
 **The flush-only refusal now has consumer-level tests.** One per enforcing leaf (Intents,
 Registry, Studio), each submitting an otherwise-valid replacement under a flush-only step and

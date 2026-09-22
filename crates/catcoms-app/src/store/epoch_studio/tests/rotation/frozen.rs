@@ -124,6 +124,17 @@ fn studio_frozen_owner_store_crash_matrix_retains_full_source_then_recovery_then
                         "the injection fired at an earlier operation, not after the {failure:?} \
                          replacement it names: {seen:?}"
                     );
+                    if failure == WriteTag::Source {
+                        // As in the ordinary matrix. Asserting only the final event rejects an
+                        // injection that fires on the preceding flush, but not a change that
+                        // removes that flush altogether, which would silently drop the
+                        // durability barrier this takeover depends on.
+                        assert!(
+                            seen.contains(&(CompletedOperation::Sync, WriteTag::Source)),
+                            "the held source was never flushed before the takeover sealed it: \
+                             {seen:?}"
+                        );
+                    }
                 }
                 // The predecessor is already Closing, so phase and projection cannot tell a
                 // failure after the takeover's Source replacement from one before it. The
