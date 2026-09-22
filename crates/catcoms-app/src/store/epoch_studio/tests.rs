@@ -1148,3 +1148,55 @@ fn a_flush_only_step_refuses_a_studio_source_replacement_but_still_reaches_the_f
         "the flush-only step returned success without reaching a sync"
     );
 }
+
+/// N17, Studio source family.
+///
+/// The Studio negative case is the one that decided the design: `studio_generation` rotates on
+/// every budget entry, so reusing it would have made a parked cursor die whenever anything
+/// touched Studio at all. `inventory_generation` must move for a source *write* and stay put for
+/// a budget mint or entry, and both halves are asserted here against the real paths.
+#[test]
+fn a_cursor_parked_across_a_studio_source_write_refuses_but_survives_a_budget_mint() {
+    let root = tempfile::tempdir().unwrap();
+    let f = Fixture::new(false);
+    let mut store = open(root.path());
+    let mut b = budget(&mut store, &f);
+    f.edit(&mut store, &mut b, f.insert());
+
+    let mut cursor = store
+        .begin_epoch_storage_scan(
+            EpochInventoryCoverage::RecoveryOwnerReceiptsIntentsRegistryAndStudio,
+        )
+        .unwrap();
+    let progress = store.step_epoch_storage_scan(&mut cursor, 1).unwrap();
+    assert!(
+        !progress.complete,
+        "the fixture must span more than one step"
+    );
+
+    // A budget mint and entry: the exact activity that would kill this cursor if the token were
+    // `studio_generation`. It must survive both.
+    let minted = budget(&mut store, &f);
+    drop(minted);
+    store.step_epoch_storage_scan(&mut cursor, 1).expect(
+        "a Studio budget mint invalidated a parked cursor, which is the self-invalidation \
+                 hazard that ruled out reusing studio_generation",
+    );
+
+    // Now a real Studio source write.
+    let before = store.inventory_generation();
+    let mut b = budget(&mut store, &f);
+    f.edit(&mut store, &mut b, f.title());
+    assert!(
+        !std::sync::Arc::ptr_eq(&before, &store.inventory_generation()),
+        "the Studio source writer did not rotate the inventory generation"
+    );
+    assert!(
+        store.step_epoch_storage_scan(&mut cursor, 1).is_err(),
+        "a cursor parked across a Studio source write resumed anyway"
+    );
+    assert!(
+        store.finish_epoch_storage_scan(cursor).is_err(),
+        "a cursor parked across a Studio source write still issued an inventory"
+    );
+}

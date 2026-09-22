@@ -379,6 +379,12 @@ mod tests {
         fs::write(&orphan, b"partial").unwrap();
 
         let before = store.inventory_generation();
+        // N17's unlink case, with a real cursor parked across the removal.
+        let mut cursor = store
+            .begin_epoch_storage_scan(EpochInventoryCoverage::RecoveryOnly)
+            .unwrap();
+        store.step_epoch_storage_scan(&mut cursor, 1).unwrap();
+
         let mut job = store.cleanup_epoch_recovery_staging().unwrap();
         while !job.step().unwrap().complete {}
         drop(job);
@@ -389,6 +395,14 @@ mod tests {
         assert!(
             !std::sync::Arc::ptr_eq(&before, &store.inventory_generation()),
             "cleanup unlinked an inventoried temporary sibling without rotating, so an inventory              captured before the pass would still be treated as current"
+        );
+        assert!(
+            store.step_epoch_storage_scan(&mut cursor, 1).is_err(),
+            "a cursor parked across a cleanup unlink resumed anyway"
+        );
+        assert!(
+            store.finish_epoch_storage_scan(cursor).is_err(),
+            "a cursor parked across a cleanup unlink still issued an inventory"
         );
     }
 

@@ -51,7 +51,7 @@ pub use epoch_recovery::cleanup::{
     EpochStorageCleanupProgress as RecoveryCleanupProgress,
 };
 pub use epoch_recovery::inventory::{
-    EpochInventoryCoverage, EpochRecordKind, EpochStorageInventory,
+    EpochInventoryCoverage, EpochRecordKind, EpochStorageCursor, EpochStorageInventory,
     EpochStorageInventory as EpochRecoveryInventory, EpochStorageInventoryEntry,
     EpochStorageInventoryEntry as RecoveryInventoryEntry, EpochStorageOrphan,
     EpochStorageOrphan as RecoveryOrphan, EpochStorageScan, EpochStorageScan as EpochRecoveryScan,

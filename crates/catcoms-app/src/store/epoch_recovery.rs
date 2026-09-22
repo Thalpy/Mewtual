@@ -1108,6 +1108,13 @@ mod tests {
         );
 
         let before = store.inventory_generation();
+        // N17: park a real cursor across the real writer, not just observe the token. A rotating
+        // token that no cursor consults would satisfy the assertion below and protect nothing.
+        let mut cursor = store
+            .begin_epoch_storage_scan(EpochInventoryCoverage::RecoveryOnly)
+            .unwrap();
+        store.step_epoch_storage_scan(&mut cursor, 1).unwrap();
+
         let mut budget = inventory_budget(&store);
         accounted(
             &mut store,
@@ -1119,6 +1126,14 @@ mod tests {
             !std::sync::Arc::ptr_eq(&before, &store.inventory_generation()),
             "the accounted recovery writer did not rotate the inventory generation, so a captured \
              inventory would survive a write it never saw"
+        );
+        assert!(
+            store.step_epoch_storage_scan(&mut cursor, 1).is_err(),
+            "a cursor parked across an accounted recovery write resumed anyway"
+        );
+        assert!(
+            store.finish_epoch_storage_scan(cursor).is_err(),
+            "a cursor parked across an accounted recovery write still issued an inventory"
         );
     }
 

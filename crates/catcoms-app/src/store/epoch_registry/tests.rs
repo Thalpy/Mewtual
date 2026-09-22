@@ -920,3 +920,96 @@ fn a_flush_only_step_refuses_a_registry_replacement_but_still_reaches_the_flush(
         "the flush-only step returned success without reaching a sync"
     );
 }
+
+/// N17, Registry family, plus the two shapes the matrix calls out separately.
+///
+/// A same-size authenticated replacement matters because size is the cheap thing a cursor could
+/// have keyed on; an inventory that survived a same-size rewrite would be wrong about content
+/// while looking right about bytes. A failed write that leaves a temporary sibling matters
+/// because rotation is required before the *first possible* I/O, not on success: a cursor that
+/// survived a failed attempt would miss the orphan that attempt left behind.
+#[test]
+fn a_cursor_parked_across_registry_writes_refuses_including_same_size_and_failed_attempts() {
+    let park = |store: &mut ServerStore| {
+        let mut cursor = store
+            .begin_epoch_storage_scan(
+                EpochInventoryCoverage::RecoveryOwnerReceiptsIntentsAndRegistry,
+            )
+            .unwrap();
+        store.step_epoch_storage_scan(&mut cursor, 1).unwrap();
+        cursor
+    };
+    let refused = |store: &ServerStore, mut cursor: EpochStorageCursor, what: &str| {
+        // `step` needs &mut; take it separately so the closure stays shared over the store.
+        let _ = &mut cursor;
+        assert!(
+            store.finish_epoch_storage_scan(cursor).is_err(),
+            "a cursor parked across {what} still issued an inventory"
+        );
+    };
+
+    // 1. An ordinary accounted Registry replacement.
+    let root = tempfile::tempdir().unwrap();
+    let mut f = Fixture::new();
+    let op = f.op(1);
+    let mut store = open(root.path());
+    let mut budget = budget(&mut store, &f);
+    f.ingest(&mut store, &op, &mut budget).unwrap();
+
+    let next = f.op(2);
+    let mut budget = self::budget(&mut store, &f);
+    let mut cursor = park(&mut store);
+    f.ingest(&mut store, &next, &mut budget).unwrap();
+    assert!(
+        store.step_epoch_storage_scan(&mut cursor, 1).is_err(),
+        "a cursor parked across a Registry write resumed anyway"
+    );
+    refused(&store, cursor, "a Registry write");
+
+    // 2. A same-size authenticated replacement: the exact-retry flush of an unchanged record,
+    //    which changes no bytes at all and must still invalidate.
+    let held = fs::read(f.path(&store)).unwrap();
+    let mut budget = self::budget(&mut store, &f);
+    let mut cursor = park(&mut store);
+    assert_eq!(
+        f.ingest(&mut store, &next, &mut budget).unwrap().0,
+        Admission::Duplicate
+    );
+    assert_eq!(
+        fs::read(f.path(&store)).unwrap(),
+        held,
+        "the control is broken: this retry rewrote the record, so it is not the unchanged case"
+    );
+    assert!(
+        store.step_epoch_storage_scan(&mut cursor, 1).is_err(),
+        "a cursor survived an unchanged-record flush, which is still a durability-changing \
+         operation on an inventoried file"
+    );
+    refused(&store, cursor, "an unchanged-record flush");
+
+    // 3. A failed write. Rotation happens before the first possible I/O, so a cursor must not
+    //    survive an attempt merely because the attempt returned an error.
+    let mut budget = self::budget(&mut store, &f);
+    let mut cursor = park(&mut store);
+    let third = f.op(3);
+    assert!(store
+        .update_registry_with_io(
+            SERVER,
+            &f.group,
+            f.key.bucket(),
+            &f.device,
+            true,
+            WritePurpose::Ordinary,
+            &mut rng(),
+            &mut budget,
+            |unit, _| unit.ingest(&third, &f.group, &f.device).map_err(invalid),
+            WriteStep::new(WriteTag::Epoch),
+            &mut WriteHooks::fail_after_write(FailError::Io("injected, leaving an attempt behind")),
+        )
+        .is_err());
+    assert!(
+        store.step_epoch_storage_scan(&mut cursor, 1).is_err(),
+        "a cursor survived a failed write attempt, so it would miss whatever that attempt left"
+    );
+    refused(&store, cursor, "a failed write attempt");
+}

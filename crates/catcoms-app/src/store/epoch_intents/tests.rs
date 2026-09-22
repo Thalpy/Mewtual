@@ -1172,3 +1172,56 @@ fn a_flush_only_step_refuses_an_intent_replacement_but_still_reaches_the_flush()
         "the flush-only step returned success without reaching a sync"
     );
 }
+
+/// N17, intents family, both the replacement and the exact-retry flush.
+///
+/// The flush case is the one worth stating: it changes no bytes, and an inventory captured
+/// before it would still describe the right content. It must invalidate anyway, because the
+/// operation changes the record's durability and I-4's safe direction is to over-rotate.
+#[test]
+fn a_cursor_parked_across_an_intent_write_or_its_exact_retry_flush_refuses() {
+    let coverage = EpochInventoryCoverage::RecoveryOwnerReceiptsAndIntents;
+
+    // The replacement.
+    let root = tempfile::tempdir().unwrap();
+    let (device, group, doc) = fixture();
+    let mut store = open(root.path());
+    let mut limits = budgets(&mut store, &doc);
+    prepare(&mut store, &doc, op(&doc, 1), &device, &group, &mut limits).unwrap();
+
+    let mut limits = budgets(&mut store, &doc);
+    let mut cursor = store.begin_epoch_storage_scan(coverage).unwrap();
+    let progress = store.step_epoch_storage_scan(&mut cursor, 1).unwrap();
+    assert!(
+        !progress.complete,
+        "the fixture must span more than one step"
+    );
+    prepare(&mut store, &doc, op(&doc, 2), &device, &group, &mut limits).unwrap();
+    assert!(
+        store.step_epoch_storage_scan(&mut cursor, 1).is_err(),
+        "a cursor parked across an intent write resumed anyway"
+    );
+    assert!(
+        store.finish_epoch_storage_scan(cursor).is_err(),
+        "a cursor parked across an intent write still issued an inventory"
+    );
+
+    // The exact retry, which flushes without rewriting.
+    let path = store.epoch_intent_path(&scope_bytes(SERVER, &doc).unwrap());
+    let held = fs::read(&path).unwrap();
+    let mut limits = budgets(&mut store, &doc);
+    let mut cursor = store.begin_epoch_storage_scan(coverage).unwrap();
+    store.step_epoch_storage_scan(&mut cursor, 1).unwrap();
+    prepare(&mut store, &doc, op(&doc, 2), &device, &group, &mut limits).unwrap();
+    assert_eq!(
+        fs::read(&path).unwrap(),
+        held,
+        "the control is broken: this retry rewrote the ledger, so it is not the flush case"
+    );
+    assert!(
+        store.step_epoch_storage_scan(&mut cursor, 1).is_err(),
+        "a cursor survived an exact-retry intent flush, which is still a durability-changing \
+         operation on an inventoried record"
+    );
+    assert!(store.finish_epoch_storage_scan(cursor).is_err());
+}

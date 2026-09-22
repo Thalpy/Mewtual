@@ -512,3 +512,50 @@ fn owner_family_caps_scope_domains_and_canonical_names_are_not_weakened_by_union
         );
     }
 }
+
+/// N17, owner-journal family: a cursor parked across a real owner-decision write refuses.
+///
+/// The guard test in `inventory.rs` proves the mechanism and the writer-conversion tests prove
+/// this path takes the guard. Neither proves a cursor actually consults the token, and a
+/// rotating token nobody reads would satisfy both while protecting nothing. This closes that
+/// gap for the family whose record the journal is.
+#[test]
+fn a_cursor_parked_across_an_owner_journal_write_refuses_to_resume_or_finish() {
+    let root = tempfile::tempdir().unwrap();
+    let (owner, group, doc) = fixture();
+    let mut store = open(root.path());
+    // An existing journal, so the write under test replaces a record the cursor has already
+    // begun accounting rather than creating one it never saw.
+    let signed = prepare(&mut store, 7, &owner, &group, &doc);
+    // Taken before parking, as a real caller's would be.
+    let mut budget = budget(&mut store, 7, &doc);
+
+    let mut cursor = store
+        .begin_epoch_storage_scan(EpochInventoryCoverage::RecoveryAndOwnerReceipts)
+        .unwrap();
+    let progress = store.step_epoch_storage_scan(&mut cursor, 1).unwrap();
+    assert!(
+        !progress.complete,
+        "the fixture must leave the cursor mid-traversal for this to be a spanning scan"
+    );
+
+    let before = store.inventory_generation();
+    // Completing the held decision is an ordinary owner-journal replacement; a second prepare
+    // would be refused as a conflicting decision and would test the refusal, not the write.
+    store
+        .mark_epoch_owner_receipt_published(7, &doc, signed.hash(), &mut rng(), &mut budget)
+        .unwrap();
+    assert!(
+        !std::sync::Arc::ptr_eq(&before, &store.inventory_generation()),
+        "the owner-journal writer did not rotate the inventory generation"
+    );
+
+    assert!(
+        store.step_epoch_storage_scan(&mut cursor, 1).is_err(),
+        "a cursor parked across an owner-journal write resumed anyway"
+    );
+    assert!(
+        store.finish_epoch_storage_scan(cursor).is_err(),
+        "a cursor parked across an owner-journal write still issued an inventory"
+    );
+}
