@@ -653,6 +653,109 @@ impl ServerStore {
         cursor.step_with(self, steps, budget)
     }
 
+    /// Begin a commit attempt's inventory work, with its own restart budget.
+    ///
+    /// Prefer this over driving a bare cursor: it is what keeps an overtaken scan from either
+    /// failing the commit outright or restarting forever.
+    pub fn begin_epoch_inventory_job(
+        &mut self,
+        coverage: EpochInventoryCoverage,
+        references: bool,
+    ) -> Result<EpochInventoryJob, AppError> {
+        let mut cursor = self.begin_epoch_storage_scan(coverage)?;
+        if references {
+            cursor.collect_creative_references(self)?;
+        }
+        Ok(EpochInventoryJob {
+            cursor,
+            coverage,
+            references,
+            restarts: 0,
+        })
+    }
+
+    /// Step an inventory job, absorbing an invalidation into a restart while the budget allows.
+    pub fn step_epoch_inventory_job(
+        &mut self,
+        job: &mut EpochInventoryJob,
+        steps: usize,
+        budget: Option<(&dyn catcoms_rt::Clock, u64)>,
+    ) -> Result<EpochInventoryStep, AppError> {
+        match self.step_epoch_storage_scan(&mut job.cursor, steps, budget) {
+            Ok(progress) => Ok(if job.cursor.parked.is_some() {
+                EpochInventoryStep::Parked
+            } else {
+                EpochInventoryStep::Stepped(progress)
+            }),
+            Err(error) if is_invalidation(&error) => self.restart_job(job),
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Take the record this job's cursor parked.
+    pub fn take_parked_job_record(&self, job: &mut EpochInventoryJob) -> Option<ParkedEpochRecord> {
+        job.cursor.parked.take()
+    }
+
+    /// Install a detached validation into this job's cursor. An invalidation here is absorbed
+    /// as a restart like any other: a write landing while a validation ran detached is the
+    /// expected case, not an error the caller should have to classify.
+    pub fn install_validated_job_record(
+        &mut self,
+        job: &mut EpochInventoryJob,
+        validated: ValidatedEpochRecord,
+    ) -> Result<EpochInventoryStep, AppError> {
+        match job.cursor.install_validated(self, validated) {
+            Ok(()) => Ok(EpochInventoryStep::Stepped(job.cursor.progress)),
+            Err(error) if is_invalidation(&error) => self.restart_job(job),
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Finish, or restart once more, or report that the vault will not hold still.
+    pub fn finish_epoch_inventory_job(
+        &mut self,
+        mut job: EpochInventoryJob,
+    ) -> Result<EpochInventoryOutcome, AppError> {
+        let references = job.references;
+        let cursor = std::mem::replace(
+            &mut job.cursor,
+            self.begin_epoch_storage_scan(job.coverage)?,
+        );
+        let finished = if references {
+            cursor.finish_creative_references(self).map(|_| None)
+        } else {
+            cursor.finish_with(self).map(Some)
+        };
+        match finished {
+            Ok(Some(inventory)) => Ok(EpochInventoryOutcome::Complete(Box::new(inventory))),
+            // A reference scan installs protection rather than returning an inventory; its
+            // caller wants the protection, and an empty completion says the install happened.
+            Ok(None) => Ok(EpochInventoryOutcome::Complete(Box::new(
+                EpochStorageInventory::empty(job.coverage, self.intent_generation.clone()),
+            ))),
+            Err(error) if is_invalidation(&error) => match self.restart_job(&mut job)? {
+                EpochInventoryStep::Unstable => Ok(EpochInventoryOutcome::Unstable),
+                _ => Ok(EpochInventoryOutcome::Restarted(Box::new(job))),
+            },
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Replace an overtaken cursor, or report the budget spent.
+    fn restart_job(&mut self, job: &mut EpochInventoryJob) -> Result<EpochInventoryStep, AppError> {
+        if job.restarts >= MAX_INVENTORY_RESTARTS {
+            return Ok(EpochInventoryStep::Unstable);
+        }
+        job.restarts += 1;
+        let mut cursor = self.begin_epoch_storage_scan(job.coverage)?;
+        if job.references {
+            cursor.collect_creative_references(self)?;
+        }
+        job.cursor = cursor;
+        Ok(EpochInventoryStep::Restarted)
+    }
+
     /// Take the record this cursor parked, if any. The cursor refuses to step again until the
     /// result is installed, so this is the only way forward rather than an optional check.
     pub fn take_parked_record(&self, cursor: &mut EpochStorageCursor) -> Option<ParkedEpochRecord> {
@@ -1311,6 +1414,76 @@ pub(in crate::store) fn regular_file(metadata: &fs::Metadata) -> bool {
 
 pub(super) fn invalid(error: impl std::fmt::Display) -> AppError {
     AppError::Invalid(format!("epoch storage: {error}"))
+}
+
+/// How many times one commit attempt may start an invalidated scan again before giving up.
+///
+/// The bound exists because restarting is only progress if writes eventually stop. A vault under
+/// continuous write pressure would otherwise restart forever, holding the commit open and doing
+/// no useful work. Exhausting it is a signal to back off, **not** permission to fall back to a
+/// single-visit unbounded scan: that would trade the custody bound for the liveness problem.
+pub const MAX_INVENTORY_RESTARTS: usize = 3;
+
+/// One commit attempt's inventory work: a cursor plus the restart budget that bounds it.
+///
+/// The restart count belongs here rather than in the cursor because a restart *replaces* the
+/// cursor. Keeping it in the thing that outlives the cursor is what makes the budget a property
+/// of the attempt, as the design specifies, instead of resetting every time a scan is retried.
+pub struct EpochInventoryJob {
+    cursor: EpochStorageCursor,
+    coverage: EpochInventoryCoverage,
+    references: bool,
+    restarts: usize,
+}
+
+/// What one step of an inventory job did.
+#[derive(Debug)]
+pub enum EpochInventoryStep {
+    /// Ordinary progress.
+    Stepped(EpochStorageScanProgress),
+    /// A record is parked. Take it, validate it detached, install it, then step again.
+    Parked,
+    /// A write overtook the scan and it has been started again. Nothing is lost except the work
+    /// already done; the restart budget is one smaller.
+    Restarted,
+    /// The restart budget is spent. Back off and try the whole attempt later.
+    Unstable,
+}
+
+/// What finishing an inventory job produced.
+pub enum EpochInventoryOutcome {
+    Complete(Box<EpochStorageInventory>),
+    /// Overtaken between the last step and the inventory being issued. The job comes back with
+    /// a fresh cursor and one less restart.
+    Restarted(Box<EpochInventoryJob>),
+    /// The restart budget is spent.
+    Unstable,
+}
+
+impl std::fmt::Debug for EpochInventoryJob {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("EpochInventoryJob")
+            .field("coverage", &self.coverage)
+            .field("restarts", &self.restarts)
+            .finish_non_exhaustive()
+    }
+}
+
+impl std::fmt::Debug for EpochInventoryOutcome {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Complete(_) => f.write_str("Complete(..)"),
+            Self::Restarted(_) => f.write_str("Restarted(..)"),
+            Self::Unstable => f.write_str("Unstable"),
+        }
+    }
+}
+
+/// Only an invalidation may be absorbed by a restart. Every other failure is the scan's own and
+/// must surface: retrying a corrupt record or an exhausted rail would spend the budget hiding a
+/// fault that is not going to fix itself.
+fn is_invalidation(error: &AppError) -> bool {
+    matches!(error, AppError::Invalid(message) if message.contains("invalidated"))
 }
 
 /// Everything one record's typed validation produces.
@@ -2596,5 +2769,123 @@ mod tests {
     /// check would fire first and the record check would never be exercised.
     fn cursor_identity(cursor: &EpochStorageCursor) -> std::sync::Arc<()> {
         cursor.identity.clone()
+    }
+
+    /// The restart budget, and the thing it must not become.
+    ///
+    /// A vault under continuous write pressure restarts forever without a bound, holding the
+    /// commit open and doing no useful work. With one, the attempt gives up and backs off. The
+    /// part worth testing is the *shape* of giving up: `Unstable` is a signal to retry the whole
+    /// attempt later, never a licence to fall back to a single-visit unbounded scan, because
+    /// that would trade the custody bound away for the liveness problem.
+    #[test]
+    fn an_inventory_job_restarts_a_bounded_number_of_times_then_reports_the_vault_unstable() {
+        let root = tempfile::tempdir().unwrap();
+        let mut store = open(root.path());
+        let doc = document(b"group", b"restart");
+        stage(&mut store, 7, &doc, 1);
+
+        let mut job = store
+            .begin_epoch_inventory_job(EpochInventoryCoverage::RecoveryOnly, false)
+            .unwrap();
+        let mut restarts = 0;
+        let unstable = loop {
+            // Rotate before every step, so the scan is overtaken every single time. The guard
+            // is the right unit here: this test is about the restart budget's arithmetic, and
+            // N17 separately proves each real writer takes the guard. Driving it with real
+            // writes would also exhaust their own slots before the budget ran out.
+            store.epoch_mutation_guard();
+            match store
+                .step_epoch_inventory_job(&mut job, ENTRIES_PER_STEP, None)
+                .unwrap()
+            {
+                EpochInventoryStep::Restarted => restarts += 1,
+                EpochInventoryStep::Unstable => break true,
+                EpochInventoryStep::Stepped(_) | EpochInventoryStep::Parked => {}
+            }
+            assert!(
+                restarts <= MAX_INVENTORY_RESTARTS,
+                "the job restarted more times than its budget allows"
+            );
+        };
+        assert!(unstable);
+        assert_eq!(
+            restarts, MAX_INVENTORY_RESTARTS,
+            "the job gave up before spending its budget"
+        );
+
+        // Spent, and it stays spent: a further step reports the same thing rather than quietly
+        // resuming, so a caller cannot loop its way back to an unbounded scan.
+        assert!(matches!(
+            store
+                .step_epoch_inventory_job(&mut job, ENTRIES_PER_STEP, None)
+                .unwrap(),
+            EpochInventoryStep::Unstable
+        ));
+        assert!(matches!(
+            store.finish_epoch_inventory_job(job).unwrap(),
+            EpochInventoryOutcome::Unstable
+        ));
+
+        // And the vault is fine: once writes stop, a fresh attempt completes. `Unstable`
+        // described the vault's behaviour, not damage to it.
+        let mut job = store
+            .begin_epoch_inventory_job(EpochInventoryCoverage::RecoveryOnly, false)
+            .unwrap();
+        loop {
+            match store
+                .step_epoch_inventory_job(&mut job, ENTRIES_PER_STEP, None)
+                .unwrap()
+            {
+                EpochInventoryStep::Stepped(progress) if progress.complete => break,
+                EpochInventoryStep::Unstable => panic!("a quiescent vault reported unstable"),
+                _ => {}
+            }
+        }
+        let EpochInventoryOutcome::Complete(inventory) =
+            store.finish_epoch_inventory_job(job).unwrap()
+        else {
+            panic!("a quiescent vault did not complete");
+        };
+        assert_eq!(inventory.records().count(), 1);
+    }
+
+    /// A restart absorbs an invalidation and nothing else.
+    ///
+    /// Spending the budget on a corrupt record or an exhausted rail would hide a fault that is
+    /// not going to fix itself, and would report `Unstable` - "try again later" - for something
+    /// no amount of waiting repairs.
+    #[test]
+    fn an_inventory_job_does_not_spend_restarts_on_faults_that_are_not_invalidation() {
+        let root = tempfile::tempdir().unwrap();
+        let mut store = open(root.path());
+        let doc = document(b"group", b"corrupt");
+        stage(&mut store, 7, &doc, 1);
+        // Corrupt the record in place: authentication fails, which is not an invalidation.
+        let path = store.epoch_recovery_path(&scope_bytes(7, &doc).unwrap());
+        let mut bytes = fs::read(&path).unwrap();
+        let last = bytes.len() - 1;
+        bytes[last] ^= 0xFF;
+        fs::write(&path, bytes).unwrap();
+
+        let mut job = store
+            .begin_epoch_inventory_job(EpochInventoryCoverage::RecoveryOnly, false)
+            .unwrap();
+        let error = loop {
+            match store.step_epoch_inventory_job(&mut job, ENTRIES_PER_STEP, None) {
+                Ok(EpochInventoryStep::Unstable) => {
+                    panic!("a corrupt record was reported as an unstable vault")
+                }
+                Ok(EpochInventoryStep::Restarted) => {
+                    panic!("a corrupt record spent a restart from the budget")
+                }
+                Ok(_) => {}
+                Err(error) => break error,
+            }
+        };
+        assert!(
+            !error.to_string().contains("invalidated"),
+            "a corruption fault was misclassified as an invalidation: {error}"
+        );
     }
 }
