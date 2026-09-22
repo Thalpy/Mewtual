@@ -752,142 +752,49 @@ impl EpochStorageCursor {
                     let cached = cacheable
                         .then(|| store.inventory_cache.get((family, hash), size, digest))
                         .flatten();
-                    let record = if let Some(record) = cached {
-                        self.progress.reused_records += 1;
-                        record
-                    } else {
-                        self.check_cold_bytes(size)?;
-                        self.progress.uncached_bytes = self
-                            .progress
-                            .uncached_bytes
-                            .checked_add(size)
-                            .ok_or_else(|| {
-                                invalid("epoch storage inventory cold byte limit reached")
-                            })?;
-                        let record = match family {
-                            EpochRecordKind::Recovery => {
-                                let state = EpochRecoveryState::decode(&plain, scope, &document)?;
-                                if let Some(collected) = self.references.as_mut() {
-                                    collected.refs.add(
-                                        &document.server_id,
-                                        super::super::creative_references::recovery_cids(
-                                            &document, &state,
-                                        )?,
-                                    )?;
-                                }
-                                recovery_record(scope, state.footprint(size)?)
-                            }
-                            EpochRecordKind::OwnerReceipts => {
-                                epoch_owner::EpochOwnerReceiptState::decode(
-                                    &plain, scope, &document,
+                    let record =
+                        if let Some(record) = cached {
+                            self.progress.reused_records += 1;
+                            record
+                        } else {
+                            self.check_cold_bytes(size)?;
+                            self.progress.uncached_bytes =
+                                self.progress.uncached_bytes.checked_add(size).ok_or_else(
+                                    || invalid("epoch storage inventory cold byte limit reached"),
                                 )?;
-                                epoch_owner::storage_record(server, &document, scope, size)?
-                            }
-                            EpochRecordKind::Intents => {
-                                // Accounting and reference collection need the ledger, the
-                                // handoff metadata target and the overlay's seed-derived base
-                                // CIDs, never its replayed projection. A retained branch would
-                                // otherwise be fully reconstructed on every five-family scan in
-                                // the vault, including scans for unrelated documents.
-                                let state = epoch_intents::EpochIntentState::decode_structural(
-                                    &plain, scope, &document,
-                                )?;
-                                if let Some(collected) = self.references.as_mut() {
-                                    if let Some(metadata) = state.handoff_metadata() {
-                                        collected
-                                            .metadata
-                                            .insert((server, document.clone()), metadata.target());
-                                    }
-                                    if let Some(overlay) = state.overlay() {
-                                        collected.refs.add(
-                                            &document.server_id,
-                                            overlay.base_blob_cids().map_err(invalid)?,
-                                        )?;
-                                    }
-                                    if matches!(
-                                        document.doc_type,
-                                        DocType::StudioIndex | DocType::StudioObject
-                                    ) {
-                                        for (_, intent) in state.pending() {
-                                            collected.refs.add(
-                                                &document.server_id,
-                                                catcoms_replication::studio::operation_blob_cid(
-                                                    &intent.operation,
-                                                )
-                                                .map_err(invalid)?,
-                                            )?;
-                                        }
-                                    } else if document.doc_type != DocType::DocRegistry {
-                                        return Err(invalid(
-                                            "unsupported creative reference family",
-                                        ));
-                                    }
+                            let validated = validate_record_body(
+                                family,
+                                &plain,
+                                scope,
+                                server,
+                                &document,
+                                size,
+                                self.references.is_some(),
+                            )?;
+                            let record = validated.record;
+                            if let Some(collected) = self.references.as_mut() {
+                                collected.refs.add(&document.server_id, validated.cids)?;
+                                if let Some(target) = validated.metadata {
+                                    collected
+                                        .metadata
+                                        .insert((server, document.clone()), target);
                                 }
-                                epoch_intents::storage_record(server, &document, scope, size)?
-                            }
-                            EpochRecordKind::DraftArchive => {
-                                // The seam authenticates, names and accounts an archive without
-                                // knowing what is inside it. A reference scan is the one case that
-                                // cannot proceed on that basis: its deletion-protection set would
-                                // omit the archive's CIDs and archived pixels would be reclaimed,
-                                // destroying the preservation guarantee. The seam therefore failed
-                                // closed for EVERY archive until the collector existed.
-                                //
-                                // That refusal is NARROWED here, not removed. `inventory_references`
-                                // still refuses an archive whose bounded canonical payload will not
-                                // decode, which is the rule every other family applies to a corrupt
-                                // record; what it no longer refuses is an archive it can read.
-                                //
-                                // An accounting-only scan still reads and authenticates the file,
-                                // as it does for every family; what it does not do is decode or
-                                // interpret the archive payload. That distinction matters at an
-                                // I/O boundary and is not the same as touching nothing.
-                                if let Some(collected) = self.references.as_mut() {
-                                    let inspected = epoch_draft_archive::inventory_references(
-                                        &plain, server, &document, scope, size,
-                                    )?;
-                                    collected.refs.add(&document.server_id, inspected.cids)?;
-                                    inspected.record
-                                } else {
-                                    epoch_draft_archive::storage_record(
-                                        server, &document, scope, size,
-                                    )?
+                                if let Some(target) = validated.required {
+                                    collected
+                                        .required
+                                        .insert((server, document.clone()), target);
                                 }
                             }
-                            EpochRecordKind::Registry => {
-                                super::super::epoch_registry::inventory_record(
-                                    &plain, server, &document, scope, size,
-                                )?
+                            if matches!(family, EpochRecordKind::Registry | EpochRecordKind::Studio)
+                            {
+                                // Even an explicit reference scan may warm pure validation metadata,
+                                // but a later reference scan must still enumerate the actual CIDs.
+                                store
+                                    .inventory_cache
+                                    .put((family, hash), size, digest, record);
                             }
-                            EpochRecordKind::Studio => {
-                                if let Some(collected) = self.references.as_mut() {
-                                    let inspected =
-                                        super::super::epoch_studio::inventory_references(
-                                            &plain, server, &document, scope, size,
-                                        )?;
-                                    collected.refs.add(&document.server_id, inspected.cids)?;
-                                    if let Some(target) = inspected.required_metadata {
-                                        collected
-                                            .required
-                                            .insert((server, document.clone()), target);
-                                    }
-                                    inspected.record
-                                } else {
-                                    super::super::epoch_studio::inventory_record(
-                                        &plain, server, &document, scope, size,
-                                    )?
-                                }
-                            }
+                            record
                         };
-                        if matches!(family, EpochRecordKind::Registry | EpochRecordKind::Studio) {
-                            // Even an explicit reference scan may warm pure validation metadata,
-                            // but a later reference scan must still enumerate the actual CIDs.
-                            store
-                                .inventory_cache
-                                .put((family, hash), size, digest, record);
-                        }
-                        record
-                    };
                     if self
                         .inventory
                         .records
@@ -1168,6 +1075,135 @@ pub(in crate::store) fn regular_file(metadata: &fs::Metadata) -> bool {
 
 pub(super) fn invalid(error: impl std::fmt::Display) -> AppError {
     AppError::Invalid(format!("epoch storage: {error}"))
+}
+
+/// Everything one record's typed validation produces.
+///
+/// Returned rather than applied, so the validation can run somewhere other than where its
+/// results are merged. The reference facts are keyed by the caller, which already holds the
+/// record's authenticated `(server, document)`.
+pub(in crate::store) struct ValidatedRecordBody {
+    record: StorageRecord,
+    cids: std::collections::BTreeSet<[u8; 32]>,
+    /// A Studio handoff metadata target this record *supplies*.
+    metadata: Option<catcoms_replication::studio::StudioTarget>,
+    /// A Studio handoff metadata target this record *depends on*.
+    required: Option<catcoms_replication::studio::StudioTarget>,
+}
+
+/// The typed validation of one authenticated record body, for every family.
+///
+/// **Pure by construction**: authenticated plaintext and its already-checked identity in,
+/// accounting and reference facts out. No `ServerStore`, no device key, no MLS secret, no I/O.
+/// That is not an incidental property - it is what lets C-3 run this stage detached, in a visit
+/// other than the one that read the bytes, which is the whole basis for bounding custody when a
+/// single cold Registry or Studio record's validation would otherwise dominate a step.
+///
+/// Extracting it also makes the claim checkable rather than asserted: if this signature ever
+/// needs the store back, detachment has stopped being sound and the compiler says so.
+#[allow(clippy::too_many_arguments)]
+pub(in crate::store) fn validate_record_body(
+    family: EpochRecordKind,
+    plain: &[u8],
+    scope: &[u8],
+    server: u64,
+    document: &LogicalDocument,
+    size: u64,
+    references: bool,
+) -> Result<ValidatedRecordBody, AppError> {
+    let mut cids = std::collections::BTreeSet::new();
+    let mut metadata = None;
+    let mut required = None;
+    let record = match family {
+        EpochRecordKind::Recovery => {
+            let state = EpochRecoveryState::decode(plain, scope, document)?;
+            if references {
+                cids.extend(super::super::creative_references::recovery_cids(
+                    document, &state,
+                )?);
+            }
+            recovery_record(scope, state.footprint(size)?)
+        }
+        EpochRecordKind::OwnerReceipts => {
+            epoch_owner::EpochOwnerReceiptState::decode(plain, scope, document)?;
+            epoch_owner::storage_record(server, document, scope, size)?
+        }
+        EpochRecordKind::Intents => {
+            // Accounting and reference collection need the ledger, the handoff metadata target
+            // and the overlay's seed-derived base CIDs, never its replayed projection. A
+            // retained branch would otherwise be fully reconstructed on every five-family scan
+            // in the vault, including scans for unrelated documents.
+            let state = epoch_intents::EpochIntentState::decode_structural(plain, scope, document)?;
+            if references {
+                if let Some(held) = state.handoff_metadata() {
+                    metadata = Some(held.target());
+                }
+                if let Some(overlay) = state.overlay() {
+                    cids.extend(overlay.base_blob_cids().map_err(invalid)?);
+                }
+                if matches!(
+                    document.doc_type,
+                    DocType::StudioIndex | DocType::StudioObject
+                ) {
+                    for (_, intent) in state.pending() {
+                        cids.extend(
+                            catcoms_replication::studio::operation_blob_cid(&intent.operation)
+                                .map_err(invalid)?,
+                        );
+                    }
+                } else if document.doc_type != DocType::DocRegistry {
+                    return Err(invalid("unsupported creative reference family"));
+                }
+            }
+            epoch_intents::storage_record(server, document, scope, size)?
+        }
+        EpochRecordKind::DraftArchive => {
+            // The seam authenticates, names and accounts an archive without knowing what is
+            // inside it. A reference scan is the one case that cannot proceed on that basis: its
+            // deletion-protection set would omit the archive's CIDs and archived pixels would be
+            // reclaimed, destroying the preservation guarantee. The seam therefore failed closed
+            // for EVERY archive until the collector existed.
+            //
+            // That refusal is NARROWED here, not removed. `inventory_references` still refuses an
+            // archive whose bounded canonical payload will not decode, which is the rule every
+            // other family applies to a corrupt record; what it no longer refuses is an archive
+            // it can read.
+            //
+            // An accounting-only scan still reads and authenticates the file, as it does for
+            // every family; what it does not do is decode or interpret the archive payload. That
+            // distinction matters at an I/O boundary and is not the same as touching nothing.
+            if references {
+                let inspected = epoch_draft_archive::inventory_references(
+                    plain, server, document, scope, size,
+                )?;
+                cids.extend(inspected.cids);
+                inspected.record
+            } else {
+                epoch_draft_archive::storage_record(server, document, scope, size)?
+            }
+        }
+        EpochRecordKind::Registry => {
+            super::super::epoch_registry::inventory_record(plain, server, document, scope, size)?
+        }
+        EpochRecordKind::Studio => {
+            if references {
+                let inspected = super::super::epoch_studio::inventory_references(
+                    plain, server, document, scope, size,
+                )?;
+                cids.extend(inspected.cids);
+                required = inspected.required_metadata;
+                inspected.record
+            } else {
+                super::super::epoch_studio::inventory_record(plain, server, document, scope, size)?
+            }
+        }
+    };
+    Ok(ValidatedRecordBody {
+        record,
+        cids,
+        metadata,
+        required,
+    })
 }
 
 #[cfg(test)]
