@@ -1475,6 +1475,54 @@ overstatement: rail filtering bounds the *scheduling* impact, not the *retained 
 > those executions**, not that the variants cannot interfere under another interleaving. 132 of
 > 160 passes is a measurement, not a worst-case guarantee.
 
+## C-3: the storage half is complete; the runtime half is the next checkpoint
+
+**Landed** (`5d20cb5`, `5fe2d79`, `6026240`, `5d266bd`, `176e4a1`):
+
+| Piece | Evidence |
+| --- | --- |
+| Scan is an owned `EpochStorageCursor`, store borrowed per call | The property was previously inexpressible: the old scanner held `&mut ServerStore` for its whole life, so no write could land between its steps |
+| Invalidation refused before resuming **and** before issuing | Two mutations, each caught at its own assertion |
+| N17 per family, with the real writers | All six, plus same-size replacement and failed write; Studio carries the negative half (a budget mint must not invalidate) |
+| Validation extracted as a pure function | Purity is now a signature, not a claim: if it ever needs the store back, the compiler says so |
+| Parked body, detached validation, four rebinding checks | Cursor identity, mount, record id, generation |
+| `MAX_INVENTORY_RESTARTS` with `Unstable` | Mutation: removing the bound fails at "restarted more times than its budget allows" |
+
+**Two deviations from 9.2's literal text, both forced:**
+
+1. `budget_ms` is `Option<(&dyn Clock, u64)>`, not a bare `u64`. `check-no-ambient.sh` forbids
+   reading the clock ambiently and elapsed time cannot be measured without one. Same shape the
+   H3 signing slice already uses.
+2. `None` means *no bound and never park*. The 75 single-visit callers hold the store across the
+   whole scan; a parked body would strand them rather than shorten any custody hold.
+
+**The classifier detaches everything.** `validation_fits` returns false for every fresh
+validation, because 13.7 does not exist and 9.2's rule for that case is to default to detaching.
+So a budgeted scan currently does one record per visit. That is the safe direction - detaching a
+cheap record costs a visit, inlining an expensive one costs an unbounded custody hold - but it
+means **13.7 is now load-bearing for throughput, not just a reporting obligation**.
+
+### What remains, and why it is a separate checkpoint
+
+The runtime still drives scans the old way at six sites: `studio/control.rs` (x2),
+`receiver.rs`, `receiver/catchup.rs`, `receiver/handoff.rs`, `receiver/replay.rs`. Each runs a
+scan to completion inside one synchronous closure and uses the inventory immediately.
+
+Converting them is not a signature change. Each becomes a multi-visit state machine, because the
+budget cannot be built until the scan completes and the work needing it has to wait; the parked
+body needs a `StudioBackgroundJob` variant; and the scheduler needs to handle its result. This is
+precisely the semantic consistency change section 15 asks for a coordinated verdict on.
+
+**Correction to an earlier note in this ledger:** I recorded `OverlayOwnership` as a gap in the
+parked body. It is not. Ownership is created at admission in the runtime and the parked body
+travels *alongside* it in the job enum, exactly as `OverlayPlan` and `OverlayAssemble` already
+do - no second pool, no capacity released when only the waiter is cancelled. The storage layer
+neither creates nor holds it. The requirement attaches to the runtime variant when it is added.
+
+Until that conversion lands, **the custody bound exists but does not yet apply in production**:
+every shipping caller passes no budget and therefore never parks. The machinery is proved; its
+adoption is not.
+
 ## Requirement 3: COMPLETE
 
 ### Exact-head execution evidence
@@ -2299,6 +2347,8 @@ Accompanying prose:
    Section 15 asks for a **coordinated verdict** on the borrow-to-cursor change, because it is a
    semantic consistency change shared with Agent 3 and every Studio write path, not a mechanical
    signature change. Get that before converting call sites, not after.
+   **Status: the storage half is done.** See the C-3 section above. What remains is the runtime
+   adoption of the cursor at six call sites, which is its own checkpoint.
 2. Then **Flow R**, which needs no media and is independent. It was deliberately sequenced after
    this boundary so it is not built on the unbounded inventory path and then split again.
 3. Produce design 13's eight measurements as each item lands; C-1's before-and-after is the first
