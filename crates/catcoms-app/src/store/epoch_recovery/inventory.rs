@@ -366,8 +366,19 @@ impl EpochStorageInventory {
 /// Exclusive, incrementally scheduled inventory job. Dropping it cancels discovery; neither
 /// cancellation nor error exposes a partial inventory. Only mount-local validation metadata
 /// may be memoized; no durable store mutation is performed.
-pub struct EpochStorageScan<'a> {
-    store: &'a mut ServerStore,
+/// C-3's resumable inventory cursor: everything a scan needs except custody of the store.
+///
+/// The store is supplied per call rather than borrowed for the cursor's life, which is what
+/// lets a scan be parked between visits. Holding `&mut ServerStore` across every step is what
+/// made the previous scanner single-visit by construction.
+///
+/// `generation` is the `inventory_generation` observed when the scan began. Under I-4 that token
+/// rotates before any five-family mutation's first possible I/O, so a cursor whose captured
+/// value no longer matches the store's has been overtaken by a write it did not see, and must
+/// refuse rather than continue or issue an inventory. Over-rotation costs a rescan;
+/// under-rotation is the only unsafe direction, which is why the check is equality on the
+/// allocation identity rather than a counter comparison.
+pub struct EpochStorageCursor {
     directory: fs::ReadDir,
     inventory: EpochStorageInventory,
     progress: EpochStorageScanProgress,
@@ -377,6 +388,14 @@ pub struct EpochStorageScan<'a> {
     byte_limit: u64,
     cold_byte_limit: Option<u64>,
     references: Option<CreativeReferenceScan>,
+    generation: std::sync::Arc<()>,
+}
+
+/// A cursor plus custody of the store, for callers that complete a scan in one visit and so do
+/// not need to park it. Every method delegates to the cursor; there is one implementation.
+pub struct EpochStorageScan<'a> {
+    store: &'a mut ServerStore,
+    cursor: EpochStorageCursor,
 }
 
 /// At most one requirement or match per already-counted authenticated record. Full scopes
@@ -405,6 +424,18 @@ impl CreativeReferenceScan {
 impl std::fmt::Debug for EpochStorageScan<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("EpochStorageScan")
+            .field("progress", &self.cursor.progress)
+            .field("failed", &self.cursor.failed)
+            .finish_non_exhaustive()
+    }
+}
+
+/// Same omissions as the scan's: no vault paths, no record identifiers, and not the captured
+/// generation, which is an allocation identity and means nothing outside this process.
+impl std::fmt::Debug for EpochStorageCursor {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("EpochStorageCursor")
+            .field("coverage", &self.inventory.coverage)
             .field("progress", &self.progress)
             .field("failed", &self.failed)
             .finish_non_exhaustive()
@@ -450,10 +481,10 @@ impl ServerStore {
         &mut self,
     ) -> Result<EpochStorageScan<'_>, AppError> {
         let mut scan = self.scan_epoch_storage_with_studio()?;
-        scan.entry_limit = 1024;
-        scan.record_limit = 64;
-        scan.byte_limit = STUDIO_RECEIVE_READ_BYTES;
-        scan.cold_byte_limit = Some(STUDIO_RECEIVE_COLD_BYTES);
+        scan.cursor.entry_limit = 1024;
+        scan.cursor.record_limit = 64;
+        scan.cursor.byte_limit = STUDIO_RECEIVE_READ_BYTES;
+        scan.cursor.cold_byte_limit = Some(STUDIO_RECEIVE_COLD_BYTES);
         Ok(scan)
     }
 
@@ -472,31 +503,81 @@ impl ServerStore {
         let mut inventory = EpochStorageInventory::empty(coverage, self.intent_generation.clone());
         inventory.studio_generation = self.studio_generation.clone();
         Ok(EpochStorageScan {
+            cursor: EpochStorageCursor {
+                directory,
+                inventory,
+                progress: EpochStorageScanProgress::default(),
+                failed: false,
+                entry_limit: MAX_DIRECTORY_ENTRIES,
+                record_limit: MAX_ACCOUNTED_RECORDS,
+                byte_limit: MAX_AUTHENTICATED_BYTES,
+                cold_byte_limit: None,
+                references: None,
+                // Captured before the first entry is read, so any mutation concurrent with even
+                // the earliest part of this scan invalidates it.
+                generation: self.inventory_generation.clone(),
+            },
             store: self,
-            directory,
-            inventory,
-            progress: EpochStorageScanProgress::default(),
-            failed: false,
-            entry_limit: MAX_DIRECTORY_ENTRIES,
-            record_limit: MAX_ACCOUNTED_RECORDS,
-            byte_limit: MAX_AUTHENTICATED_BYTES,
-            cold_byte_limit: None,
-            references: None,
         })
+    }
+
+    /// Begin a scan that can be parked between visits. The cursor owns its progress; custody of
+    /// the store is taken again by each `step_epoch_storage_scan` call and released on return.
+    pub fn begin_epoch_storage_scan(
+        &mut self,
+        coverage: EpochInventoryCoverage,
+    ) -> Result<EpochStorageCursor, AppError> {
+        Ok(self.scan_epoch_files(coverage)?.cursor)
+    }
+
+    /// Resume a parked cursor. Invalidation is checked **before** any traversal or record work,
+    /// so an overtaken cursor costs nothing to reject.
+    pub fn step_epoch_storage_scan(
+        &mut self,
+        cursor: &mut EpochStorageCursor,
+        steps: usize,
+    ) -> Result<EpochStorageScanProgress, AppError> {
+        cursor.step_with(self, steps)
+    }
+
+    /// Consume a cursor and issue its inventory. Rechecks invalidation: a scan that completed
+    /// its traversal before a write landed must not hand out a stale inventory.
+    pub fn finish_epoch_storage_scan(
+        &self,
+        cursor: EpochStorageCursor,
+    ) -> Result<EpochStorageInventory, AppError> {
+        cursor.finish_with(self)
     }
 }
 
-impl EpochStorageScan<'_> {
+impl EpochStorageCursor {
+    /// Refuse if a five-family mutation has landed since this cursor captured its token.
+    ///
+    /// Called before resuming work and again before issuing an inventory. Both matter: the
+    /// first keeps an overtaken cursor from spending custody on results it must discard, and
+    /// the second catches a write that lands after the traversal reached EOF but before the
+    /// caller consumed the inventory.
+    fn check_not_invalidated(&self, store: &ServerStore) -> Result<(), AppError> {
+        if !std::sync::Arc::ptr_eq(&self.generation, &store.inventory_generation) {
+            return Err(invalid(
+                "epoch storage inventory was invalidated by a concurrent record mutation",
+            ));
+        }
+        Ok(())
+    }
+
     /// Opt-in only: ordinary budget scans must NOT replace a transient pre-publication hold.
-    pub(in crate::store) fn collect_creative_references(&mut self) -> Result<(), AppError> {
+    pub(in crate::store) fn collect_creative_references(
+        &mut self,
+        store: &ServerStore,
+    ) -> Result<(), AppError> {
         if self.progress.visited_entries != 0
             || self.coverage()
                 != EpochInventoryCoverage::RecoveryOwnerReceiptsIntentsRegistryAndStudio
         {
             return Err(invalid("reference scan requires fresh full inventory"));
         }
-        let generation = self
-            .store
+        let generation = store
             .creative_protection
             .lock()
             .map_err(|_| invalid("reference protection poisoned"))?
@@ -512,7 +593,10 @@ impl EpochStorageScan<'_> {
     }
     pub(in crate::store) fn finish_creative_references(
         self,
+        store: &ServerStore,
     ) -> Result<super::super::creative_references::CreativeReferences, AppError> {
+        // A reference scan installs protection, so a stale one is worse than a stale budget.
+        self.check_not_invalidated(store)?;
         if self.failed || !self.progress.complete || !self.inventory.orphans.is_empty() {
             // Partial temporary files may contain a not-yet-published reference. Never guess.
             return Err(invalid(
@@ -523,7 +607,7 @@ impl EpochStorageScan<'_> {
             .references
             .ok_or_else(|| invalid("not a reference scan"))?;
         collected.check_dependencies()?;
-        self.store
+        store
             .creative_protection
             .lock()
             .map_err(|_| invalid("reference protection poisoned"))?
@@ -537,13 +621,26 @@ impl EpochStorageScan<'_> {
     /// Visit at most 64 directory entries and authenticate at most one bounded record. Schedule
     /// another step when `complete` is false. An error permanently poisons this scan, including
     /// errors caused by local corruption, disappearance, aliases or resource exhaustion.
-    pub fn step(&mut self) -> Result<EpochStorageScanProgress, AppError> {
-        self.guarded_step(Self::step_inner)
+    fn step_with(
+        &mut self,
+        store: &mut ServerStore,
+        steps: usize,
+    ) -> Result<EpochStorageScanProgress, AppError> {
+        // Before resuming any expensive work, not after. A cursor that has been overtaken must
+        // not pay for traversal or record authentication it is going to throw away.
+        self.check_not_invalidated(store)?;
+        self.guarded_step(store, steps, Self::step_inner)
     }
 
     fn guarded_step(
         &mut self,
-        work: impl FnOnce(&mut Self) -> Result<EpochStorageScanProgress, AppError>,
+        store: &mut ServerStore,
+        steps: usize,
+        work: impl FnOnce(
+            &mut Self,
+            &mut ServerStore,
+            usize,
+        ) -> Result<EpochStorageScanProgress, AppError>,
     ) -> Result<EpochStorageScanProgress, AppError> {
         if self.failed {
             return Err(invalid(
@@ -553,18 +650,22 @@ impl EpochStorageScan<'_> {
         // Poison BEFORE traversing/parsing: even a caught parser panic must not let a caller
         // resume beyond the offending entry and declare an incomplete inventory complete.
         self.failed = true;
-        let result = work(self);
+        let result = work(self, store, steps);
         if result.is_ok() {
             self.failed = false;
         }
         result
     }
 
-    fn step_inner(&mut self) -> Result<EpochStorageScanProgress, AppError> {
+    fn step_inner(
+        &mut self,
+        store: &mut ServerStore,
+        steps: usize,
+    ) -> Result<EpochStorageScanProgress, AppError> {
         if self.progress.complete {
             return Ok(self.progress);
         }
-        for _ in 0..ENTRIES_PER_STEP {
+        for _ in 0..steps {
             let Some(entry) = self.directory.next() else {
                 self.progress.complete = true;
                 break;
@@ -609,8 +710,7 @@ impl EpochStorageScan<'_> {
                         matches!(family, EpochRecordKind::Registry | EpochRecordKind::Studio)
                             && self.references.is_none();
                     let candidate = cacheable
-                        && self
-                            .store
+                        && store
                             .inventory_cache
                             .candidate((family, hash), metadata.len());
                     if !candidate {
@@ -620,24 +720,16 @@ impl EpochStorageScan<'_> {
                         plain,
                         physical_bytes: size,
                     } = match family {
-                        EpochRecordKind::Recovery => {
-                            self.store.read_epoch_recovery_plain(&entry.path())
-                        }
+                        EpochRecordKind::Recovery => store.read_epoch_recovery_plain(&entry.path()),
                         EpochRecordKind::OwnerReceipts => {
-                            self.store.read_epoch_owner_plain(&entry.path())
+                            store.read_epoch_owner_plain(&entry.path())
                         }
-                        EpochRecordKind::Intents => {
-                            self.store.read_epoch_intent_plain(&entry.path())
-                        }
+                        EpochRecordKind::Intents => store.read_epoch_intent_plain(&entry.path()),
                         EpochRecordKind::DraftArchive => {
-                            self.store.read_epoch_draft_archive_plain(&entry.path())
+                            store.read_epoch_draft_archive_plain(&entry.path())
                         }
-                        EpochRecordKind::Registry => {
-                            self.store.read_epoch_registry_plain(&entry.path())
-                        }
-                        EpochRecordKind::Studio => {
-                            self.store.read_epoch_studio_plain(&entry.path())
-                        }
+                        EpochRecordKind::Registry => store.read_epoch_registry_plain(&entry.path()),
+                        EpochRecordKind::Studio => store.read_epoch_studio_plain(&entry.path()),
                     }?
                     .ok_or_else(|| invalid("epoch record disappeared during inventory"))?;
                     self.progress.authenticated_bytes = self
@@ -658,7 +750,7 @@ impl EpochStorageScan<'_> {
                     // signed history. Stat/filename/snapshot-head equality alone is insufficient.
                     let digest = blake3::hash(&plain);
                     let cached = cacheable
-                        .then(|| self.store.inventory_cache.get((family, hash), size, digest))
+                        .then(|| store.inventory_cache.get((family, hash), size, digest))
                         .flatten();
                     let record = if let Some(record) = cached {
                         self.progress.reused_records += 1;
@@ -790,7 +882,7 @@ impl EpochStorageScan<'_> {
                         if matches!(family, EpochRecordKind::Registry | EpochRecordKind::Studio) {
                             // Even an explicit reference scan may warm pure validation metadata,
                             // but a later reference scan must still enumerate the actual CIDs.
-                            self.store
+                            store
                                 .inventory_cache
                                 .put((family, hash), size, digest, record);
                         }
@@ -864,11 +956,41 @@ impl EpochStorageScan<'_> {
 
     /// Consume only a successful EOF result. A completed result is metadata, not a storage lease;
     /// future callers must keep the coordinator exclusive until the complete budget is installed.
-    pub fn finish(self) -> Result<EpochStorageInventory, AppError> {
+    fn finish_with(self, store: &ServerStore) -> Result<EpochStorageInventory, AppError> {
+        // Again before issuing, not only before resuming: a write can land after the traversal
+        // reaches EOF and before the caller consumes the result.
+        self.check_not_invalidated(store)?;
         if self.failed || !self.progress.complete {
             return Err(invalid("epoch storage inventory is incomplete"));
         }
         Ok(self.inventory)
+    }
+}
+
+/// The single-visit form. Each method holds custody only for the call it delegates, which is
+/// the same discipline the parked form uses; the difference is that this one keeps the borrow
+/// alive between calls so the caller cannot release custody even if it wanted to.
+impl EpochStorageScan<'_> {
+    pub(in crate::store) fn collect_creative_references(&mut self) -> Result<(), AppError> {
+        self.cursor.collect_creative_references(self.store)
+    }
+    pub(in crate::store) fn finish_creative_references(
+        self,
+    ) -> Result<super::super::creative_references::CreativeReferences, AppError> {
+        self.cursor.finish_creative_references(self.store)
+    }
+    /// Fixed coverage for this job, including before it completes.
+    pub fn coverage(&self) -> EpochInventoryCoverage {
+        self.cursor.coverage()
+    }
+    /// Visit at most 64 directory entries and authenticate at most one bounded record. Schedule
+    /// another step when `complete` is false. An error permanently poisons this scan, including
+    /// errors caused by local corruption, disappearance, aliases or resource exhaustion.
+    pub fn step(&mut self) -> Result<EpochStorageScanProgress, AppError> {
+        self.cursor.step_with(self.store, ENTRIES_PER_STEP)
+    }
+    pub fn finish(self) -> Result<EpochStorageInventory, AppError> {
+        self.cursor.finish_with(self.store)
     }
 }
 
@@ -1186,7 +1308,7 @@ mod tests {
     fn collect(store: &mut ServerStore) -> Result<EpochStorageInventory, AppError> {
         let mut scan = store.scan_epoch_recovery()?;
         loop {
-            let before = scan.progress;
+            let before = scan.cursor.progress;
             let after = scan.step()?;
             assert!(after.visited_entries - before.visited_entries <= ENTRIES_PER_STEP);
             assert!(after.recovery_records - before.recovery_records <= 1);
@@ -1352,9 +1474,9 @@ mod tests {
         drop(scan);
         assert_eq!(collect(&mut store).unwrap().records().len(), 1);
         let mut scan = store.scan_epoch_recovery().unwrap();
-        scan.record_limit = 0;
+        scan.cursor.record_limit = 0;
         assert!(scan.step().is_err());
-        scan.record_limit = MAX_ACCOUNTED_RECORDS;
+        scan.cursor.record_limit = MAX_ACCOUNTED_RECORDS;
         assert!(scan.step().is_err()); // Increasing a test rail cannot unpoison the job.
         assert!(scan.finish().is_err());
     }
@@ -1367,7 +1489,7 @@ mod tests {
             fs::write(root.path().join("servers").join(format!("{id}.bin")), []).unwrap();
         }
         let mut scan = store.scan_epoch_recovery().unwrap();
-        scan.entry_limit = ENTRIES_PER_STEP;
+        scan.cursor.entry_limit = ENTRIES_PER_STEP;
         let step = scan.step().unwrap();
         assert_eq!(step.visited_entries, ENTRIES_PER_STEP);
         assert!(!step.complete);
@@ -1383,9 +1505,9 @@ mod tests {
             .total()
             .unwrap();
         let mut scan = store.scan_epoch_recovery().unwrap();
-        scan.byte_limit = bytes - 1;
+        scan.cursor.byte_limit = bytes - 1;
         while scan.step().is_ok() {}
-        assert_eq!(scan.progress.authenticated_bytes, 0);
+        assert_eq!(scan.cursor.progress.authenticated_bytes, 0);
         assert!(scan.finish().is_err());
     }
 
@@ -1402,10 +1524,10 @@ mod tests {
         )
         .unwrap();
         let mut scan = store.scan_studio_receive_inventory().unwrap();
-        assert_eq!(scan.entry_limit, 1024);
-        assert_eq!(scan.record_limit, 64);
-        assert_eq!(scan.byte_limit, STUDIO_RECEIVE_READ_BYTES);
-        assert_eq!(scan.cold_byte_limit, Some(STUDIO_RECEIVE_COLD_BYTES));
+        assert_eq!(scan.cursor.entry_limit, 1024);
+        assert_eq!(scan.cursor.record_limit, 64);
+        assert_eq!(scan.cursor.byte_limit, STUDIO_RECEIVE_READ_BYTES);
+        assert_eq!(scan.cursor.cold_byte_limit, Some(STUDIO_RECEIVE_COLD_BYTES));
         let error = loop {
             match scan.step() {
                 Err(error) => break error.to_string(),
@@ -1413,7 +1535,7 @@ mod tests {
             }
         };
         assert!(error.contains("byte limit"), "{error}");
-        assert_eq!(scan.progress.authenticated_bytes, 0);
+        assert_eq!(scan.cursor.progress.authenticated_bytes, 0);
         assert!(scan.finish().is_err());
     }
 
@@ -1423,7 +1545,10 @@ mod tests {
         let mut store = open(root.path());
         let mut scan = store.scan_epoch_recovery().unwrap();
         assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            scan.guarded_step(|_| panic!("injected parser panic"))
+            scan.cursor
+                .guarded_step(scan.store, ENTRIES_PER_STEP, |_, _, _| {
+                    panic!("injected parser panic")
+                })
         }))
         .is_err());
         assert!(scan.step().is_err());
@@ -1440,9 +1565,9 @@ mod tests {
             fs::write(staging_candidate_for_test(&destination, id), []).unwrap();
         }
         let mut scan = store.scan_epoch_recovery().unwrap();
-        scan.record_limit = 2;
+        scan.cursor.record_limit = 2;
         assert!(scan.step().is_err());
-        assert_eq!(scan.progress.orphan_files, 2);
+        assert_eq!(scan.cursor.progress.orphan_files, 2);
         assert!(scan.finish().is_err());
     }
 
@@ -1509,15 +1634,18 @@ mod tests {
             fs::write(staging_candidate_for_test(&path, id), []).unwrap();
         }
         let mut scan = store.scan_epoch_storage().unwrap();
-        scan.record_limit = 2;
+        scan.cursor.record_limit = 2;
         assert!(scan.step().is_err());
-        assert_eq!(scan.progress.orphan_files, 2);
-        scan.record_limit = 3;
+        assert_eq!(scan.cursor.progress.orphan_files, 2);
+        scan.cursor.record_limit = 3;
         assert!(scan.step().is_err());
         assert!(scan.finish().is_err());
         let mut scan = store.scan_epoch_storage().unwrap();
         assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            scan.guarded_step(|_| panic!("combined parser panic"))
+            scan.cursor
+                .guarded_step(scan.store, ENTRIES_PER_STEP, |_, _, _| {
+                    panic!("combined parser panic")
+                })
         }))
         .is_err());
         assert!(scan.finish().is_err());
@@ -1918,5 +2046,100 @@ mod tests {
         fs::rename(&parent, &moved).unwrap();
         symlink(&moved, &parent).unwrap();
         assert!(store.scan_epoch_recovery().is_err());
+    }
+
+    /// C-3's central property: a cursor that released custody, was overtaken by an inventoried
+    /// mutation, and then resumed must refuse.
+    ///
+    /// This is the claim the whole of I-4 exists to support, and it is only expressible now that
+    /// the scan is an owned cursor: the previous scanner held `&mut ServerStore` for its whole
+    /// life, so no write could land between its steps and the question could not be asked.
+    ///
+    /// Both refusal points are exercised separately, because they fail differently. A cursor
+    /// overtaken mid-traversal must refuse at its next step, before paying for work it would
+    /// discard. A cursor overtaken after reaching EOF has no step left to refuse at, and must
+    /// refuse when it issues the inventory instead - otherwise a scan that finished traversing
+    /// a moment before a write would hand out a budget that is already wrong.
+    #[test]
+    fn a_cursor_overtaken_by_a_write_refuses_at_its_next_step_and_at_finish() {
+        let doc = document(b"group", b"cursor");
+
+        // Overtaken mid-traversal.
+        let root = tempfile::tempdir().unwrap();
+        let mut store = open(root.path());
+        stage(&mut store, 7, &doc, 1);
+        let mut cursor = store
+            .begin_epoch_storage_scan(EpochInventoryCoverage::RecoveryOnly)
+            .unwrap();
+        // One step, then custody is released: the cursor outlives the borrow, which is the
+        // whole point of the change.
+        let progress = store.step_epoch_storage_scan(&mut cursor, 1).unwrap();
+        assert!(
+            !progress.complete,
+            "the fixture must need more than one step"
+        );
+        stage(&mut store, 7, &doc, 2);
+        let refused = store.step_epoch_storage_scan(&mut cursor, 1).unwrap_err();
+        assert!(
+            refused.to_string().contains("invalidated"),
+            "a cursor resumed across a record mutation continued instead of refusing: {refused}"
+        );
+        assert!(
+            store.finish_epoch_storage_scan(cursor).is_err(),
+            "an invalidated cursor still issued an inventory"
+        );
+
+        // Overtaken after EOF, with nothing left to refuse at except the inventory itself.
+        let root = tempfile::tempdir().unwrap();
+        let mut store = open(root.path());
+        stage(&mut store, 7, &doc, 1);
+        let mut cursor = store
+            .begin_epoch_storage_scan(EpochInventoryCoverage::RecoveryOnly)
+            .unwrap();
+        while !store
+            .step_epoch_storage_scan(&mut cursor, ENTRIES_PER_STEP)
+            .unwrap()
+            .complete
+        {}
+        stage(&mut store, 7, &doc, 2);
+        let refused = store.finish_epoch_storage_scan(cursor).unwrap_err();
+        assert!(
+            refused.to_string().contains("invalidated"),
+            "a completed-but-stale cursor issued its inventory: {refused}"
+        );
+    }
+
+    /// The negative half, which is as load-bearing as the positive one.
+    ///
+    /// If reads or budget-only activity rotated the token, a parked cursor would die on ordinary
+    /// traffic and the runtime would never finish a scan on a busy vault. That failure mode is
+    /// exactly why `studio_generation` could not be reused here, and a cursor that survives a
+    /// quiescent vault is the design's stated completion condition.
+    #[test]
+    fn reads_and_budget_only_activity_do_not_invalidate_a_parked_cursor() {
+        let root = tempfile::tempdir().unwrap();
+        let mut store = open(root.path());
+        let doc = document(b"group", b"quiet");
+        stage(&mut store, 7, &doc, 1);
+
+        let mut cursor = store
+            .begin_epoch_storage_scan(EpochInventoryCoverage::RecoveryOnly)
+            .unwrap();
+        store.step_epoch_storage_scan(&mut cursor, 1).unwrap();
+
+        // Ordinary non-mutating traffic between visits.
+        store.load_epoch_recovery(7, &doc).unwrap();
+        store.epoch_recovery_inventory_record(7, &doc).unwrap();
+        let _ = store.inventory_generation();
+
+        while !store
+            .step_epoch_storage_scan(&mut cursor, ENTRIES_PER_STEP)
+            .unwrap()
+            .complete
+        {}
+        let inventory = store
+            .finish_epoch_storage_scan(cursor)
+            .expect("a quiescent vault must let a parked cursor complete");
+        assert_eq!(inventory.coverage(), EpochInventoryCoverage::RecoveryOnly);
     }
 }
