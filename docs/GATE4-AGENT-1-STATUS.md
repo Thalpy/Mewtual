@@ -1477,6 +1477,48 @@ overstatement: rail filtering bounds the *scheduling* impact, not the *retained 
 
 ## Requirement 3: COMPLETE
 
+### Exact-head execution evidence
+
+Run on the branch head itself, not a PR merge checkout.
+
+| Target | Result |
+| --- | --- |
+| `catcoms-app --lib` (whole suite, not the `store::` filter) | **679 passed, 0 failed, 11 ignored** |
+| `--test product_e2e` | 13 passed |
+| `--test tcp_product_e2e` | 1 passed |
+| `--test process_recovery_e2e` | 2 passed, 1 ignored |
+| `--test studio_inspection_fixture` | 2 passed |
+| `--test studio_preview_fixture` | 1 passed |
+| `clippy --all-targets` | clean |
+
+Each integration binary was run separately, so a library failure could not prevent the
+recovery-sweep check in `product_e2e` from executing. The `studio_actor_owner_return` case that
+failed in CI's Linux job passed here; it remains separately tracked and is not attributed to this
+work either way.
+
+`scripts/check-no-ambient.sh` still exits 1, unchanged by this work and red since 2026-09-13.
+
+### Two review findings, both closed
+
+**The after decision now carries an operation identity.** Splitting `after` into
+`after_write`/`after_sync`/`after_unlink` fixed the fixed `Fail` variant but left the custom
+`Hooked.after` callback routing through one shared path with only a tag and a path to go on -
+which cannot distinguish a flush from a later replacement of the same record. Two rotation crash
+matrices were testing the earlier flush while claiming the replacement, and passing, because an
+error plus a hit flag plus a successful exact restart are consistent with either. The frozen
+fixture masked it further: its predecessor is already Closing, so the phase and projection checks
+hold for both failures. `CompletedOperation::{Write, Sync, Unlink}` is now passed to the hook,
+both matrices assert the firing event is the last one observed and that the Source case declined
+the preceding sync, and both check the record's own bytes - the only evidence that separates the
+two failures there.
+
+**The flush-only refusal now has consumer-level tests.** One per enforcing leaf (Intents,
+Registry, Studio), each submitting an otherwise-valid replacement under a flush-only step and
+requiring refusal, an unchanged record, and that the replacement hook was never consulted. Both
+controls are present: the same replacement succeeds under `WriteStep::new`, and an unchanged
+record under the flush-only step is *observed* reaching its sync. Deleting each leaf's
+`permit_replacement()` fails its test.
+
 **Zero `writer`/`sync`/`unlink` seam parameters remain anywhere in the crate**, down from 86
 across 24 files. Every transaction performs its own physical operations; callers decide around
 them and cannot substitute one.
