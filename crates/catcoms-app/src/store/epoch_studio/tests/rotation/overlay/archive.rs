@@ -699,8 +699,13 @@ fn the_archive_writer_consults_hooks_on_both_sides_of_its_own_operations() {
     // was mid-write: an uncertain write must not leave either accounting usable.
     let mut b = budget(&mut store, &f);
     {
-        let mut after = |tag: WriteTag, _p: &std::path::Path| {
+        let mut after = |op: CompletedOperation, tag: WriteTag, _p: &std::path::Path| {
             assert_eq!(tag, WriteTag::Archive);
+            assert_eq!(
+                op,
+                CompletedOperation::Write,
+                "the first preservation replaces"
+            );
             AfterIntercept::Fail(AppError::Io(
                 "injected failure after the archive write".into(),
             ))

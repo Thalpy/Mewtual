@@ -403,8 +403,9 @@ fn registry_adoption_store_crash_boundaries_keep_source_or_successor_and_retry()
                     AfterIntercept::Continue
                 }),
                 before_unlink: None,
-                after: Some(&mut |step: WriteTag, _: &Path| {
-                    if let Failure::Write(wanted, true) = failure {
+                after: Some(&mut |op: CompletedOperation, step: WriteTag, _: &Path| {
+                    if let (CompletedOperation::Write, Failure::Write(wanted, true)) = (op, failure)
+                    {
                         if step == wanted {
                             fired.set(true);
                             return AfterIntercept::Fail(invalid(

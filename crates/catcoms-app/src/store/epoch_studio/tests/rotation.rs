@@ -244,7 +244,15 @@ fn studio_rotation_store_every_write_crash_resumes_exact_decision_and_preserves_
                 f.edit(&mut store, &mut b, f.title());
                 warm(&f, &mut store);
                 let mut b = budget(&mut store, &f);
+                let source_before = fs::read(f.path(&store)).unwrap();
                 let hit = std::cell::Cell::new(false);
+                // Every completed physical operation, in order. Without this the Source case
+                // cannot tell which event it failed at: this transaction flushes the existing
+                // source before sealing it, so `(Sync, Source)` and `(Write, Source)` carry the
+                // same tag and the same path, and an injection that fired on the first one
+                // would pass every assertion below while testing the wrong barrier.
+                let completed: std::cell::RefCell<Vec<(CompletedOperation, WriteTag)>> =
+                    std::cell::RefCell::new(Vec::new());
                 let result = store.rotate_studio_owner_with_io(
                     SERVER,
                     &f.group,
@@ -266,8 +274,9 @@ fn studio_rotation_store_every_write_crash_resumes_exact_decision_and_preserves_
                         }),
                         before_sync: None,
                         before_unlink: None,
-                        after: Some(&mut |step: WriteTag, _: &Path| {
-                            if step == boundary && after {
+                        after: Some(&mut |op: CompletedOperation, step: WriteTag, _: &Path| {
+                            completed.borrow_mut().push((op, step));
+                            if op == CompletedOperation::Write && step == boundary && after {
                                 hit.set(true);
                                 return AfterIntercept::Fail(AppError::Io(
                                     "injected rotation write failure".into(),
@@ -279,11 +288,48 @@ fn studio_rotation_store_every_write_crash_resumes_exact_decision_and_preserves_
                 );
                 assert!(result.is_err());
                 assert!(hit.get(), "boundary {boundary:?}");
+                if after {
+                    let seen = completed.borrow();
+                    assert_eq!(
+                        seen.last(),
+                        Some(&(CompletedOperation::Write, boundary)),
+                        "the injection fired at some earlier operation, not after the \
+                         {boundary:?} replacement it names: {seen:?}"
+                    );
+                    if boundary == WriteTag::Source {
+                        // The transaction flushes the held source before sealing it. The
+                        // injection must have seen that flush and declined it.
+                        assert!(
+                            seen.contains(&(CompletedOperation::Sync, WriteTag::Source)),
+                            "the held source was never flushed before the seal, so this case \
+                             no longer covers the order it was written for: {seen:?}"
+                        );
+                    }
+                }
                 assert!(b.requires_reconciliation());
                 drop(store);
                 let mut store = open(root.path());
                 let held = store.load_epoch_owner_receipts(SERVER, &f.logical).unwrap();
                 assert_eq!(held.pending(), Some(decision.receipt()));
+                // The durable prefix for this boundary. A failure after the Source replacement
+                // leaves the sealed bytes on disk; a failure before it leaves the held source
+                // exactly as it was. Raw bytes, because a reloaded unit can normalize.
+                if boundary == WriteTag::Source {
+                    let durable = fs::read(f.path(&store)).unwrap();
+                    if after {
+                        assert_ne!(
+                            durable, source_before,
+                            "the sealed source never reached disk, so this case did not fail \
+                             after the Source replacement"
+                        );
+                    } else {
+                        assert_eq!(
+                            durable, source_before,
+                            "a failure before the Source replacement must leave the held \
+                             source untouched"
+                        );
+                    }
+                }
                 warm(&f, &mut store);
                 let (_, installed) = rotate(&f, &mut store);
                 assert_eq!(installed.epoch(), 1);
@@ -668,8 +714,10 @@ fn studio_rotation_store_unwind_after_successor_write_poisoned_budget_reopens_sa
                 before: None,
                 before_sync: None,
                 before_unlink: None,
-                after: Some(&mut |step: WriteTag, _: &Path| {
-                    assert_ne!(step, WriteTag::Successor, "injected post-write unwind");
+                after: Some(&mut |op: CompletedOperation, step: WriteTag, _: &Path| {
+                    if op == CompletedOperation::Write {
+                        assert_ne!(step, WriteTag::Successor, "injected post-write unwind");
+                    }
                     AfterIntercept::Continue
                 }),
             },

@@ -493,8 +493,8 @@ fn studio_overlay_handoff_crash_barriers_reopen_without_signed_prefixes_or_dupli
                             }),
                             before_sync: None,
                             before_unlink: None,
-                            after: Some(&mut |at: WriteTag, _: &Path| {
-                                if at == step && after {
+                            after: Some(&mut |op: CompletedOperation, at: WriteTag, _: &Path| {
+                                if op == CompletedOperation::Write && at == step && after {
                                     hit.set(true);
                                     return AfterIntercept::Fail(invalid("injected handoff write"));
                                 }
@@ -554,8 +554,11 @@ fn studio_overlay_handoff_crash_barriers_reopen_without_signed_prefixes_or_dupli
                             AfterIntercept::Fail(invalid("injected handoff sync"))
                         }),
                         before_unlink: None,
-                        after: Some(&mut |step: WriteTag, _: &Path| {
-                            if !after || step != WriteTag::Source {
+                        // Deliberately after the *sync*: this case means "let the transaction
+                        // flush, then fail", which is a different event from the replacement.
+                        after: Some(&mut |op: CompletedOperation, step: WriteTag, _: &Path| {
+                            if !after || op != CompletedOperation::Sync || step != WriteTag::Source
+                            {
                                 return AfterIntercept::Continue;
                             }
                             hit.set(true);

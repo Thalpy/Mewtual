@@ -442,8 +442,8 @@ fn studio_pages_write_and_flush_failure_require_exact_retry_after_reconciliation
                     AfterIntercept::Fail(invalid("injected flush failure"))
                 }),
                 before_unlink: None,
-                after: Some(&mut |_: WriteTag, _: &Path| {
-                    if failure == 1 {
+                after: Some(&mut |op: CompletedOperation, _: WriteTag, _: &Path| {
+                    if op == CompletedOperation::Write && failure == 1 {
                         return AfterIntercept::Fail(invalid("injected write failure"));
                     }
                     AfterIntercept::Continue

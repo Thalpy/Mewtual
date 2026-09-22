@@ -68,7 +68,12 @@ impl ServerStore {
                 .map_or(Intercept::Continue, |i| i.before(target, step))
         };
         #[cfg(test)]
-        let mut interrupt_after = |step: WriteTag, _: &Path| {
+        let mut interrupt_after = |op: CompletedOperation, step: WriteTag, _: &Path| {
+            // Only after a replacement: the interruption models a record that is durable but
+            // unaccounted, and this transaction flushes some records before replacing them.
+            if op != CompletedOperation::Write {
+                return AfterIntercept::Continue;
+            }
             interruption
                 .as_ref()
                 .map_or(AfterIntercept::Continue, |i| i.after(target, step))

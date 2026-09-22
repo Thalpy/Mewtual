@@ -246,8 +246,8 @@ fn registry_install_crash_boundaries_keep_source_or_successor_and_resume_without
                         }),
                         before_sync: None,
                         before_unlink: None,
-                        after: Some(&mut |at: WriteTag, _: &Path| {
-                            if at == step && mode == 1 {
+                        after: Some(&mut |op: CompletedOperation, at: WriteTag, _: &Path| {
+                            if op == CompletedOperation::Write && at == step && mode == 1 {
                                 return AfterIntercept::Fail(AppError::Io(
                                     "injected installation write failure".into(),
                                 ));

@@ -149,8 +149,8 @@ fn studio_overlay_handoff_full_signed_digest_prevents_false_completion() {
                     }),
                     before_sync: None,
                     before_unlink: None,
-                    after: Some(&mut |step: WriteTag, _: &Path| {
-                        if step == WriteTag::Source {
+                    after: Some(&mut |op: CompletedOperation, step: WriteTag, _: &Path| {
+                        if op == CompletedOperation::Write && step == WriteTag::Source {
                             return AfterIntercept::Fail(invalid("substituted signed source"));
                         }
                         AfterIntercept::Continue
@@ -219,8 +219,8 @@ fn studio_overlay_handoff_partial_manifest_keeps_the_entire_branch() {
                 }),
                 before_sync: None,
                 before_unlink: None,
-                after: Some(&mut |step: WriteTag, _: &Path| {
-                    if step == WriteTag::Source {
+                after: Some(&mut |op: CompletedOperation, step: WriteTag, _: &Path| {
+                    if op == CompletedOperation::Write && step == WriteTag::Source {
                         return AfterIntercept::Fail(invalid("partial signed source"));
                     }
                     AfterIntercept::Continue
@@ -288,8 +288,8 @@ fn studio_overlay_handoff_rechecks_source_after_prepared_before_candidate_write(
             before: None,
             before_sync: None,
             before_unlink: None,
-            after: Some(&mut |step: WriteTag, _: &Path| {
-                if step == WriteTag::Prepared {
+            after: Some(&mut |op: CompletedOperation, step: WriteTag, _: &Path| {
+                if op == CompletedOperation::Write && step == WriteTag::Prepared {
                     hit = true;
                     write_for_test(&source_path, &changed).unwrap();
                 }

@@ -177,15 +177,20 @@ fn studio_adoption_store_all_write_boundaries_preserve_recovery_and_exact_retry(
                             }),
                             before_sync: None,
                             before_unlink: None,
-                            after: Some(&mut |phase: WriteTag, _: &Path| {
-                                if phase == boundary && after_write {
-                                    hit.set(true);
-                                    return AfterIntercept::Fail(AppError::Io(
-                                        "injected settlement boundary".into(),
-                                    ));
+                            after: Some(
+                                &mut |op: CompletedOperation, phase: WriteTag, _: &Path| {
+                                    if op == CompletedOperation::Write
+                                        && phase == boundary
+                                        && after_write
+                                    {
+                                        hit.set(true);
+                                        return AfterIntercept::Fail(AppError::Io(
+                                            "injected settlement boundary".into(),
+                                        ));
+                                    }
+                                    AfterIntercept::Continue
                                 }
-                                AfterIntercept::Continue
-                            }),
+                            ),
                         }
                     )
                     .is_err());

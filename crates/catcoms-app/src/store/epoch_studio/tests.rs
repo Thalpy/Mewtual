@@ -639,8 +639,8 @@ fn studio_store_crash_matrix_has_intent_first_and_no_ciphertext_before_both_barr
                         }),
                         before_sync: None,
                         before_unlink: None,
-                        after: Some(&mut |tag: WriteTag, _: &Path| {
-                            if tag == wanted && mode == 1 {
+                        after: Some(&mut |op: CompletedOperation, tag: WriteTag, _: &Path| {
+                            if op == CompletedOperation::Write && tag == wanted && mode == 1 {
                                 return AfterIntercept::Fail(AppError::Io(
                                     "injected persistence failure".into(),
                                 ));
@@ -1005,4 +1005,146 @@ fn studio_store_fault_persists_before_reporting_and_failed_fault_save_can_retry(
     assert_eq!(restored.phase(), EpochPhase::Fault);
     assert_eq!(restored.projection().unwrap(), projection);
     assert_eq!(f.intents(&store), 1);
+}
+
+/// The Studio consumer of `WriteStep::flush_only`.
+///
+/// Handoff resolution relies on this leaf refusing a replacement: a Complete evidence arm must
+/// flush the held source unchanged, never rewrite it. That caller never reaches a replacement,
+/// so it does not cover the refusal. See the Intents counterpart for why both controls exist.
+#[test]
+fn a_flush_only_step_refuses_a_studio_source_replacement_but_still_reaches_the_flush() {
+    let root = tempfile::tempdir().unwrap();
+    let f = Fixture::new(false);
+    let mut store = open(root.path());
+
+    // A saved source to replace.
+    let mut unit = StudioEpoch::new(&f.group, f.target, f.device.device_id()).unwrap();
+    let op = unit
+        .edit_or_reseal(&f.device, &f.group, &mut rng(), &f.insert(), 100)
+        .unwrap();
+    let mut b = budget(&mut store, &f);
+    store
+        .ingest_studio_epoch(
+            SERVER,
+            &f.group,
+            f.target,
+            &f.device,
+            &op,
+            &mut rng(),
+            &mut b,
+        )
+        .unwrap();
+    let held = fs::read(f.path(&store)).unwrap();
+
+    // An otherwise-valid replacement: the saved unit with one more accepted edit.
+    let advanced = |store: &ServerStore| {
+        let mut state = f.load(store).unwrap();
+        let observed = state
+            .source
+            .as_ref()
+            .map(super::source::SourceVersion::record);
+        let before = state.unit.snapshot().unwrap();
+        let mut advanced = state.unit;
+        advanced
+            .edit_or_reseal(&f.device, &f.group, &mut rng(), &f.title(), 101)
+            .unwrap();
+        (advanced, observed, before)
+    };
+
+    let (unit, observed, before) = advanced(&store);
+    let mut b = budget(&mut store, &f);
+    let reached = std::cell::Cell::new(false);
+    let refused = store.save_studio_source(
+        SERVER,
+        unit,
+        observed,
+        &before,
+        WritePurpose::Ordinary,
+        &mut rng(),
+        &mut b.storage,
+        WriteStep::flush_only(WriteTag::Source, "this path requires an unchanged source"),
+        &mut WriteHooks::Hooked {
+            before: Some(&mut |_: WriteTag, _: &Path, _: &[u8]| {
+                reached.set(true);
+                Intercept::Continue
+            }),
+            before_sync: None,
+            before_unlink: None,
+            after: None,
+        },
+    );
+    assert!(
+        refused
+            .unwrap_err()
+            .to_string()
+            .contains("this path requires an unchanged source"),
+        "the flush-only step did not refuse the replacement"
+    );
+    assert!(
+        !reached.get(),
+        "the transaction reached its replacement despite a flush-only step"
+    );
+    assert_eq!(
+        fs::read(f.path(&store)).unwrap(),
+        held,
+        "the source changed"
+    );
+
+    // Control one: the same replacement is accepted under an ordinary step.
+    let (unit, observed, before) = advanced(&store);
+    let mut b = budget(&mut store, &f);
+    store
+        .save_studio_source(
+            SERVER,
+            unit,
+            observed,
+            &before,
+            WritePurpose::Ordinary,
+            &mut rng(),
+            &mut b.storage,
+            WriteStep::new(WriteTag::Source),
+            &mut WriteHooks::None,
+        )
+        .expect("an ordinary step must accept the same replacement");
+    assert_ne!(
+        fs::read(f.path(&store)).unwrap(),
+        held,
+        "the control did not actually replace anything"
+    );
+
+    // Control two: an unchanged source under the same flush-only step reaches its sync.
+    let mut state = f.load(&store).unwrap();
+    let observed = state
+        .source
+        .as_ref()
+        .map(super::source::SourceVersion::record);
+    let before = state.unit.snapshot().unwrap();
+    let mut b = budget(&mut store, &f);
+    let synced = std::cell::Cell::new(false);
+    store
+        .save_studio_source(
+            SERVER,
+            state.unit,
+            observed,
+            &before,
+            WritePurpose::Ordinary,
+            &mut rng(),
+            &mut b.storage,
+            WriteStep::flush_only(WriteTag::Source, "this path requires an unchanged source"),
+            &mut WriteHooks::Hooked {
+                before: None,
+                before_sync: Some(&mut |_: WriteTag, _: &Path, _: u64| {
+                    synced.set(true);
+                    AfterIntercept::Continue
+                }),
+                before_unlink: None,
+                after: None,
+            },
+        )
+        .expect("a flush-only step must still permit the flush");
+    assert!(
+        synced.get(),
+        "the flush-only step returned success without reaching a sync"
+    );
 }

@@ -144,8 +144,8 @@ fn registry_local_each_write_failure_retains_only_safe_state_and_retry_recovers(
                 }
                 Intercept::Fail(AppError::Io("injected failed persistence".into()))
             };
-            let mut after = |tag: WriteTag, _: &Path| {
-                if tag == wanted && mode == 1 {
+            let mut after = |op: CompletedOperation, tag: WriteTag, _: &Path| {
+                if op == CompletedOperation::Write && tag == wanted && mode == 1 {
                     return AfterIntercept::Fail(AppError::Io(
                         "injected failed persistence".into(),
                     ));

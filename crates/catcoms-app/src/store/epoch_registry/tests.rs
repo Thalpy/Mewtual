@@ -249,7 +249,10 @@ fn registry_store_failed_write_and_post_rename_failure_require_reconciliation_an
                     panic!("first write cannot sync-only")
                 }),
                 before_unlink: None,
-                after: Some(&mut |_: WriteTag, _: &Path| {
+                after: Some(&mut |op: CompletedOperation, _: WriteTag, _: &Path| {
+                    if op != CompletedOperation::Write {
+                        return AfterIntercept::Continue;
+                    }
                     AfterIntercept::Fail(AppError::Io("injected write/durability failure".into()))
                 }),
             },
@@ -806,5 +809,114 @@ fn registry_store_receipt_retry_after_failed_flush_and_removed_owner_inventory()
             .unwrap()
             .phase(),
         EpochPhase::Closing
+    );
+}
+
+/// The Registry consumer of `WriteStep::flush_only`.
+///
+/// Three production callers rely on this leaf refusing a replacement: installation's source
+/// preparation, owner rotation's source preparation, and replay's assessment. None of them
+/// reaches a replacement in practice, so none covers the refusal. See the Intents counterpart
+/// for why both controls are needed.
+#[test]
+fn a_flush_only_step_refuses_a_registry_replacement_but_still_reaches_the_flush() {
+    let root = tempfile::tempdir().unwrap();
+    let mut f = Fixture::new();
+    let op = f.op(1);
+    let mut store = open(root.path());
+    let mut budget = budget(&mut store, &f);
+    f.ingest(&mut store, &op, &mut budget).unwrap();
+    let held = fs::read(f.path(&store)).unwrap();
+
+    // An otherwise-valid replacement: ingest one more operation into the saved epoch.
+    let next = f.op(2);
+    let mut budget = self::budget(&mut store, &f);
+    let reached = std::cell::Cell::new(false);
+    let refused = store.update_registry_with_io(
+        SERVER,
+        &f.group,
+        f.key.bucket(),
+        &f.device,
+        true,
+        WritePurpose::Ordinary,
+        &mut rng(),
+        &mut budget,
+        |unit, _| unit.ingest(&next, &f.group, &f.device).map_err(invalid),
+        WriteStep::flush_only(WriteTag::Source, "this path must not rewrite the epoch"),
+        &mut WriteHooks::Hooked {
+            before: Some(&mut |_: WriteTag, _: &Path, _: &[u8]| {
+                reached.set(true);
+                Intercept::Continue
+            }),
+            before_sync: None,
+            before_unlink: None,
+            after: None,
+        },
+    );
+    assert!(
+        refused
+            .unwrap_err()
+            .to_string()
+            .contains("this path must not rewrite the epoch"),
+        "the flush-only step did not refuse the replacement"
+    );
+    assert!(
+        !reached.get(),
+        "the transaction reached its replacement despite a flush-only step"
+    );
+    assert_eq!(fs::read(f.path(&store)).unwrap(), held, "the epoch changed");
+
+    // Control one: the same replacement is accepted under an ordinary step.
+    let mut budget = self::budget(&mut store, &f);
+    store
+        .update_registry_with_io(
+            SERVER,
+            &f.group,
+            f.key.bucket(),
+            &f.device,
+            true,
+            WritePurpose::Ordinary,
+            &mut rng(),
+            &mut budget,
+            |unit, _| unit.ingest(&next, &f.group, &f.device).map_err(invalid),
+            WriteStep::new(WriteTag::Source),
+            &mut WriteHooks::None,
+        )
+        .expect("an ordinary step must accept the same replacement");
+    assert_ne!(
+        fs::read(f.path(&store)).unwrap(),
+        held,
+        "the control did not actually replace anything"
+    );
+
+    // Control two: an unchanged epoch under the same flush-only step reaches its sync.
+    let mut budget = self::budget(&mut store, &f);
+    let synced = std::cell::Cell::new(false);
+    store
+        .update_registry_with_io(
+            SERVER,
+            &f.group,
+            f.key.bucket(),
+            &f.device,
+            true,
+            WritePurpose::Ordinary,
+            &mut rng(),
+            &mut budget,
+            |_, _| Ok(()),
+            WriteStep::flush_only(WriteTag::Source, "this path must not rewrite the epoch"),
+            &mut WriteHooks::Hooked {
+                before: None,
+                before_sync: Some(&mut |_: WriteTag, _: &Path, _: u64| {
+                    synced.set(true);
+                    AfterIntercept::Continue
+                }),
+                before_unlink: None,
+                after: None,
+            },
+        )
+        .expect("a flush-only step must still permit the flush");
+    assert!(
+        synced.get(),
+        "the flush-only step returned success without reaching a sync"
     );
 }

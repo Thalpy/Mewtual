@@ -58,8 +58,8 @@ fn studio_manual_recovery_disposition_is_recovery_first_crash_safe_and_not_seed_
                             }),
                             before_sync: None,
                             before_unlink: None,
-                            after: Some(&mut |tag: WriteTag, _: &Path| {
-                                if tag == wanted && after_write {
+                            after: Some(&mut |op: CompletedOperation, tag: WriteTag, _: &Path| {
+                                if op == CompletedOperation::Write && tag == wanted && after_write {
                                     hit.set(true);
                                     return AfterIntercept::Fail(AppError::Io(
                                         "injected disposition barrier".into(),

@@ -237,8 +237,8 @@ fn studio_discovery_store_source_flush_and_journal_write_fail_before_proof_and_r
                         Intercept::Fail(invalid("injected journal write"))
                     }),
                     before_unlink: None,
-                    after: Some(&mut |_: WriteTag, _: &Path| {
-                        if failure == "journal_after" {
+                    after: Some(&mut |op: CompletedOperation, _: WriteTag, _: &Path| {
+                        if op == CompletedOperation::Write && failure == "journal_after" {
                             return AfterIntercept::Fail(invalid("injected journal write"));
                         }
                         AfterIntercept::Continue

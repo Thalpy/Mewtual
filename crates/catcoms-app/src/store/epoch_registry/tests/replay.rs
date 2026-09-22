@@ -417,8 +417,8 @@ fn registry_replay_failed_tombstone_save_and_flush_retry_the_exact_signed_change
                     before_sync: None,
                     before_unlink: None,
                     // Only the epoch replacement: the source and intent flushes precede it.
-                    after: Some(&mut |tag: WriteTag, _: &Path| {
-                        if mode == 1 && tag == WriteTag::Epoch {
+                    after: Some(&mut |op: CompletedOperation, tag: WriteTag, _: &Path| {
+                        if op == CompletedOperation::Write && mode == 1 && tag == WriteTag::Epoch {
                             return AfterIntercept::Fail(AppError::Io(
                                 "injected replay save failure".into(),
                             ));

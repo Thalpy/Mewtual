@@ -283,7 +283,10 @@ impl ServerStore {
         let mut fail_before = |_: WriteTag, _: &Path, _: &[u8]| {
             Intercept::Fail(AppError::Io("injected completion before write".into()))
         };
-        let mut fail_after = |_: WriteTag, _: &Path| {
+        let mut fail_after = |op: CompletedOperation, _: WriteTag, _: &Path| {
+            if op != CompletedOperation::Write {
+                return AfterIntercept::Continue;
+            }
             AfterIntercept::Fail(AppError::CommittedButNotDurable(
                 "injected completion flush failure".into(),
             ))
@@ -879,7 +882,10 @@ mod tests {
             // The replacement itself completes; only its durability barrier fails. That is what
             // the old seam modelled by handing in a writer whose flush returned an error, and
             // the after decision is where the same failure now lands: the bytes are in place.
-            let mut flush_failure = |_: WriteTag, _: &Path| {
+            let mut flush_failure = |op: CompletedOperation, _: WriteTag, _: &Path| {
+                if op != CompletedOperation::Write {
+                    return AfterIntercept::Continue;
+                }
                 AfterIntercept::Fail(AppError::CommittedButNotDurable("flush failure".into()))
             };
             let mut hooks = WriteHooks::Hooked {

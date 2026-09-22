@@ -658,8 +658,9 @@ mod tests {
                         AfterIntercept::Fail(AppError::Io("unlink failed".into()))
                     }
                 };
-                let mut interrupt = |_: WriteTag, _: &Path| {
-                    if panic_after_unlink {
+                let mut interrupt = |op: CompletedOperation, _: WriteTag, _: &Path| {
+                    // Specifically after a removal, not after the batch's parent sync.
+                    if panic_after_unlink && op == CompletedOperation::Unlink {
                         panic!("interrupted after unlink");
                     }
                     AfterIntercept::Continue

@@ -453,8 +453,8 @@ fn registry_pass_post_rename_failure_and_unwind_pause_without_skipping_or_early_
                         before_unlink: None,
                         // Only the epoch replacement. The transaction flushes the source and
                         // the intent ledger first, and this must not fire on either.
-                        after: Some(&mut |tag: WriteTag, _: &Path| {
-                            if tag != WriteTag::Epoch {
+                        after: Some(&mut |op: CompletedOperation, tag: WriteTag, _: &Path| {
+                            if op != CompletedOperation::Write || tag != WriteTag::Epoch {
                                 return AfterIntercept::Continue;
                             }
                             if unwind {

@@ -767,10 +767,26 @@ mod persistence {
         }
     }
 
+    /// Which physical operation just completed.
+    ///
+    /// The after decision needs this because **a tag and a path cannot distinguish the
+    /// operations**: a transaction routinely flushes a record and then, later in the same
+    /// transaction, replaces that same record. Both events carry the same tag and the same path.
+    /// A hook told only "something finished on this record" fires on whichever comes first,
+    /// which is how two rotation crash matrices came to test the initial Source flush while
+    /// claiming to test the Source replacement.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    #[allow(dead_code)]
+    pub(in crate::store) enum CompletedOperation {
+        Write,
+        Sync,
+        Unlink,
+    }
+
     #[cfg(test)]
     type BeforeHook<'h> = &'h mut dyn FnMut(WriteTag, &Path, &[u8]) -> Intercept;
     #[cfg(test)]
-    type AfterHook<'h> = &'h mut dyn FnMut(WriteTag, &Path) -> AfterIntercept;
+    type AfterHook<'h> = &'h mut dyn FnMut(CompletedOperation, WriteTag, &Path) -> AfterIntercept;
     /// Decides before an unlink. Like the after decision it carries only the record it concerns:
     /// a removal has no payload that could be substituted for another.
     #[cfg(test)]
@@ -781,17 +797,11 @@ mod persistence {
     #[cfg(test)]
     type SyncHook<'h> = &'h mut dyn FnMut(WriteTag, &Path, u64) -> AfterIntercept;
 
-    /// Hooks around one mutation, tagged by which write within the transaction it is.
+    /// Test-only perturbation and observation around a transaction's own physical operations.
     ///
-    // Requirement 3, **applied to one path so far**: the draft archive writer, whose forwarding
-    // tree is closed (one function, no production callers, five tests in one file), which is why
-    // it went first. The remaining transaction functions still take `writer`/`sync` closure
-    // parameters; until each is converted, requirement 3 holds for the converted paths only.
-    //
-    // Conversion is per complete mutation path, not by sweep: two sweeps diverged, the second
-    // going 170 -> 181 -> 207 unresolved sites, because a leaf's callers forward through the
-    // tagged transaction layer and each layer's tests assert that path's own barriers. The unit
-    // that converges is a physical write site together with everything that forwards into it.
+    /// Every transaction in the crate now performs its own write, sync and unlink; no caller
+    /// supplies an implementation of any of them. A hook may refuse on either side of an
+    /// operation, or substitute the bytes of a replacement, and that is all.
     ///
     /// **In a non-test build this has exactly one inhabitant, `None`.** There is no variant a
     /// production caller could construct that carries an implementation, so "production supplies
@@ -980,7 +990,7 @@ mod persistence {
                 {
                     Err(error.build())
                 }
-                other => other.after_any(tag, path),
+                other => other.after_completed(CompletedOperation::Write, tag, path),
             }
         }
 
@@ -996,7 +1006,7 @@ mod persistence {
             tag: WriteTag,
             path: &Path,
         ) -> Result<(), AppError> {
-            self.after_any(tag, path)
+            self.after_completed(CompletedOperation::Sync, tag, path)
         }
 
         /// Decide after one removal out of a batch. A batch consults this once per completed
@@ -1006,13 +1016,19 @@ mod persistence {
             tag: WriteTag,
             path: &Path,
         ) -> Result<(), AppError> {
-            self.after_any(tag, path)
+            self.after_completed(CompletedOperation::Unlink, tag, path)
         }
 
-        /// The closure-hook half, shared by all three: a `Hooked` test decides for itself which
-        /// operation it cares about, using the tag and path.
-        fn after_any(
+        /// The closure-hook half, shared by all three.
+        ///
+        /// `op` is passed explicitly rather than left for the hook to infer. A hook cannot work
+        /// it out from the tag and the path, because the same record is commonly flushed and
+        /// then replaced within one transaction, and both events carry the same pair. Hooks
+        /// that deliberately observe syncs keep working; hooks that mean "after the write" can
+        /// now say so.
+        fn after_completed(
             &mut self,
+            #[cfg_attr(not(test), allow(unused_variables))] op: CompletedOperation,
             #[cfg_attr(not(test), allow(unused_variables))] tag: WriteTag,
             #[cfg_attr(not(test), allow(unused_variables))] path: &Path,
         ) -> Result<(), AppError> {
@@ -1024,7 +1040,7 @@ mod persistence {
                 #[cfg(test)]
                 Self::MustNotWrite(_) => Ok(()),
                 #[cfg(test)]
-                Self::Hooked { after, .. } => match after.as_mut().map(|h| h(tag, path)) {
+                Self::Hooked { after, .. } => match after.as_mut().map(|h| h(op, tag, path)) {
                     None | Some(AfterIntercept::Continue) => Ok(()),
                     Some(AfterIntercept::Fail(error)) => Err(error),
                 },
@@ -1203,7 +1219,7 @@ mod persistence {
 
 pub(crate) use persistence::EpochMutation;
 #[cfg(test)]
-pub(in crate::store) use persistence::{AfterIntercept, FailError, Intercept};
+pub(in crate::store) use persistence::{AfterIntercept, CompletedOperation, FailError, Intercept};
 pub(in crate::store) use persistence::{WriteHooks, WriteStep, WriteTag};
 // Only the test wrappers leave the module. In a non-test build this import does not exist, so
 // nothing outside `persistence` can name a path-generic physical operation at all.

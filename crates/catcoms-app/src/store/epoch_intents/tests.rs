@@ -1040,3 +1040,135 @@ fn intent_metadata_rail_and_server_admission_refuse_without_poisoning_untouched_
     assert!(!limits.0.requires_reconciliation());
     assert_eq!(inventory(&mut store).records().len(), 0);
 }
+
+/// The Intents consumer of `WriteStep::flush_only`.
+///
+/// Five production callers construct flush-only steps to say "this path must not rewrite its
+/// record", and three leaves enforce that with `permit_replacement()`. Those callers never reach
+/// a replacement in practice, so the refusal arm has no coverage from them: deleting the leaf's
+/// call would leave every existing test green. This drives the leaf directly.
+///
+/// Both controls matter. Without the first, an unrelated fence or a stale budget could produce
+/// the same error and the test would pass with the policy deleted. Without the second, "the
+/// flush-only step was accepted" could mean the transaction did nothing at all.
+#[test]
+fn a_flush_only_step_refuses_an_intent_replacement_but_still_reaches_the_flush() {
+    let root = tempfile::tempdir().unwrap();
+    let (device, group, doc) = fixture();
+    let mut store = open(root.path());
+    let mut limits = budgets(&mut store, &doc);
+    prepare(&mut store, &doc, op(&doc, 1), &device, &group, &mut limits).unwrap();
+
+    let scope = scope_bytes(SERVER, &doc).unwrap();
+    let path = store.epoch_intent_path(&scope);
+    let held = fs::read(&path).unwrap();
+
+    // An otherwise-valid replacement: one more intent on top of the saved ledger.
+    let replacement = |store: &mut ServerStore| {
+        let mut state = store.load_epoch_intents(SERVER, &doc).unwrap();
+        state
+            .ledger
+            .prepare(device.device_id(), op(&doc, 2))
+            .unwrap();
+        state
+    };
+    let old = || {
+        fs::metadata(&path)
+            .map(|meta| meta.len())
+            .ok()
+            .filter(|_| true)
+    };
+
+    // Refused by the policy, before anything is charged and without consulting the write hook.
+    let mut limits = budgets(&mut store, &doc);
+    let state = replacement(&mut store);
+    let reached = std::cell::Cell::new(false);
+    let refused = store.write_prepared_intents(
+        SERVER,
+        &doc,
+        state,
+        old(),
+        false,
+        &mut rng(),
+        &mut limits.0,
+        &mut limits.1,
+        WriteStep::flush_only(WriteTag::Intents, "this path must not rewrite its intents"),
+        &mut WriteHooks::Hooked {
+            before: Some(&mut |_: WriteTag, _: &Path, _: &[u8]| {
+                reached.set(true);
+                Intercept::Continue
+            }),
+            before_sync: None,
+            before_unlink: None,
+            after: None,
+        },
+    );
+    assert!(
+        refused
+            .unwrap_err()
+            .to_string()
+            .contains("this path must not rewrite its intents"),
+        "the flush-only step did not refuse the replacement"
+    );
+    assert!(
+        !reached.get(),
+        "the transaction reached its replacement despite a flush-only step"
+    );
+    assert_eq!(fs::read(&path).unwrap(), held, "the held ledger changed");
+
+    // Control one: the same replacement is accepted under an ordinary step, so the refusal
+    // above is attributable to the policy and not to the candidate, fence or budget.
+    let mut limits = budgets(&mut store, &doc);
+    let state = replacement(&mut store);
+    store
+        .write_prepared_intents(
+            SERVER,
+            &doc,
+            state,
+            old(),
+            false,
+            &mut rng(),
+            &mut limits.0,
+            &mut limits.1,
+            WriteStep::new(WriteTag::Intents),
+            &mut WriteHooks::None,
+        )
+        .expect("an ordinary step must accept the same replacement");
+    assert_ne!(
+        fs::read(&path).unwrap(),
+        held,
+        "the control did not actually replace anything"
+    );
+
+    // Control two: an unchanged record under the same flush-only step really reaches its sync.
+    // Observed, not inferred from a successful return.
+    let mut limits = budgets(&mut store, &doc);
+    let state = store.load_epoch_intents(SERVER, &doc).unwrap();
+    let synced = std::cell::Cell::new(false);
+    store
+        .write_prepared_intents(
+            SERVER,
+            &doc,
+            state,
+            old(),
+            true,
+            &mut rng(),
+            &mut limits.0,
+            &mut limits.1,
+            WriteStep::flush_only(WriteTag::Intents, "this path must not rewrite its intents"),
+            &mut WriteHooks::Hooked {
+                before: None,
+                before_sync: Some(&mut |_: WriteTag, _: &Path, _: u64| {
+                    synced.set(true);
+                    AfterIntercept::Continue
+                }),
+                before_unlink: None,
+                after: None,
+            },
+        )
+        .expect("a flush-only step must still permit the flush");
+    assert!(
+        synced.get(),
+        "the flush-only step returned success without reaching a sync"
+    );
+}

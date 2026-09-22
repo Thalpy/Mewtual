@@ -69,7 +69,14 @@ fn studio_frozen_owner_store_crash_matrix_retains_full_source_then_recovery_then
                 let mut store = open(root.path());
                 warm(&f, &mut store);
                 let mut b = budget(&mut store, &f);
+                let source_before = fs::read(f.path(&store)).unwrap();
                 let hit = std::cell::Cell::new(false);
+                // As in the ordinary matrix: the takeover flushes the held source before it
+                // seals it, so a Source-tagged after decision sees two events on one record.
+                // This fixture masks the difference especially well, because the predecessor is
+                // already Closing and the "unchanged projection" checks below hold either way.
+                let completed: std::cell::RefCell<Vec<(CompletedOperation, WriteTag)>> =
+                    std::cell::RefCell::new(Vec::new());
                 let result = store.rotate_studio_owner_with_io(
                     SERVER,
                     &f.group,
@@ -89,8 +96,13 @@ fn studio_frozen_owner_store_crash_matrix_retains_full_source_then_recovery_then
                         }),
                         before_sync: None,
                         before_unlink: None,
-                        after: Some(&mut |step: WriteTag, _: &Path| {
-                            if step == failure && !hit.get() && after_write {
+                        after: Some(&mut |op: CompletedOperation, step: WriteTag, _: &Path| {
+                            completed.borrow_mut().push((op, step));
+                            if op == CompletedOperation::Write
+                                && step == failure
+                                && !hit.get()
+                                && after_write
+                            {
                                 hit.set(true);
                                 return AfterIntercept::Fail(invalid(
                                     "injected frozen takeover crash",
@@ -104,6 +116,33 @@ fn studio_frozen_owner_store_crash_matrix_retains_full_source_then_recovery_then
                     hit.get() && result.is_err(),
                     "{art}/{failure:?}/{after_write}"
                 );
+                if after_write {
+                    let seen = completed.borrow();
+                    assert_eq!(
+                        seen.last(),
+                        Some(&(CompletedOperation::Write, failure)),
+                        "the injection fired at an earlier operation, not after the {failure:?} \
+                         replacement it names: {seen:?}"
+                    );
+                }
+                // The predecessor is already Closing, so phase and projection cannot tell a
+                // failure after the takeover's Source replacement from one before it. The
+                // record's own bytes can.
+                if failure == WriteTag::Source {
+                    let durable = fs::read(f.path(&store)).unwrap();
+                    if after_write {
+                        assert_ne!(
+                            durable, source_before,
+                            "the takeover's sealed source never reached disk"
+                        );
+                    } else {
+                        assert_eq!(
+                            durable, source_before,
+                            "a failure before the Source replacement must leave the \
+                             predecessor's source untouched"
+                        );
+                    }
+                }
                 let held = f.load(&store).unwrap();
                 let installed = held.epoch() == 1;
                 if !installed {
