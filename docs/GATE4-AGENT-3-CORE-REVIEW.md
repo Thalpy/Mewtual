@@ -1,111 +1,113 @@
-# Agent 3 core follow-up: four implementation design corrections
+# Agent 3 core follow-up findings and dispositions
 
-Base: `918ffb9b3034c43ed33574225e04f1be2e87090d`. The accepted revision-14 design remains
-the baseline. A read-only adversarial source audit found the four concrete paths below before
-the typed transitions were implemented. **These proposed corrections are not yet accepted.**
-The first leaf checkpoint implements only C-3/C-4/C-8 and the C-5 sequence getter, unaffected
-by these questions. No new gate, journal or typed-source format has been written.
+Implementation base: `918ffb9b3034c43ed33574225e04f1be2e87090d`.
+Independent review: REQUEST CHANGES at `8d4cc53a529c86bdad76170f7825f7dbd682dfa9`.
+Revision 14 remains the baseline with the corrections below. The leaf checkpoint implements
+C-3/C-4/C-8 and C-5's sequence getter only; no report, typed transition or journal format exists.
 
-## AG3-CORE-001: reopening with quarantine is not restorable (High)
+| Finding | Current disposition |
+|---|---|
+| CORE-001 High | User accepted: clear rejected quarantine only on repair to Open; preserve accepted work/accounting |
+| CORE-002 High | User accepted with exact-state rebinding: private unchanged-Fault screening commit |
+| CORE-003 High | User accepted only for the effective canonical reconciled decision |
+| CORE-004 High | Concrete revised journal-role/provenance proposal; independent verdict pending |
+| CORE-005 High | Concrete local Observed-owner provenance proposal; independent verdict pending |
+| IMP-001 Medium | Implemented at `f16e1e5`; regression isolation refined at `27e1b99` |
+| TEST-013 | Same-document headless negative implemented; real report/no-write negative remains unimplemented |
 
-`EpochGate::admit_inbound_locked` permits bounded rejected hashes during Closing. Moving to
-Fault preserves that quarantine. Design C-1 says repair leaves it untouched, but C-2 cases 1b
-and 5 reopen the gate. `EpochGate::decode` accepts Open only with an empty quarantine. The
-proposed transition therefore creates a source that cannot survive restart. Merely allowing
-Open quarantine is insufficient: re-admitting the same envelope leaves a hash in both the
-accepted set and quarantine, another restore rejection.
+## CORE-001: reopening with quarantine is not restorable
 
-Proposed narrow correction: when repair reopens a Fault gate, clear only the rejected-hash
-quarantine under the same gate lock. Preserve every accepted operation, domain id, byte total,
-per-device total and signed log entry. These hashes are neither admitted content nor durable
-intents; replay/catch-up supplies any actual missing operations through ordinary admission.
-Closing repair targets keep the existing quarantine. No gate encoding change is needed.
+Closing can retain bounded rejected hashes, and Fault preserves them. Open decode requires an
+empty quarantine; leaving it intact either breaks restore or later places the same hash in both
+accepted and quarantined sets.
 
-Required regression: Studio and Registry, Closing -> quarantined inbound envelope -> Fault ->
-case 1b or 5 -> snapshot/reopen. Then admit that formerly quarantined envelope through the real
-typed path and reopen again. Assert accepted work and accounting are unchanged by repair.
+Accepted correction: clear only rejected quarantine under the same gate lock when repair chooses
+Open. Preserve accepted operations, IDs, byte totals, per-device totals and signed log. Closing
+targets retain quarantine. Required typed Studio/Registry regression: Closing -> rejected inbound
+-> Fault -> reopen by repair -> snapshot/reopen -> ordinary re-admission -> snapshot/reopen.
 
-## AG3-CORE-002: screening cannot use C-1 verbatim (High)
+## CORE-002: screening cannot use the ordinary transition commit
 
-C-1 allows only Open/Closing targets; C-2 case 6d must preserve a different Fault. The proposed
-typed wrapper unconditionally invokes C-1, so it cannot commit the screening disposition that
-releases a pending unrelated repair. This recreates the deadlock AG3-DES-019 was meant to close.
+C-2 case 6d must keep unrelated Fault(B) while recording repair A. C-1's normal Open/Closing targets
+cannot represent that. A phase-only equality would also admit a stale plan after fault evidence or
+its receipt binding changed.
 
-Proposed correction: distinguish a validated transition from an unchanged-gate screening
-commit. The screening commit checks the exact expected phase/hash, preserves them and the
-unrelated fault pair byte-for-byte, and swaps only the book's repair evidence and typed provenance
-under that lock. Settled remains a refusal. It must not become a general Fault-to-Fault mutation
-escape hatch; the private planner supplies the validated candidate.
+Accepted correction: a distinct private screening candidate/commit, rechecking the exact planned
+gate phase, relevant receipt hash, fault pair and book repair state under lock. Preserve B's bytes
+and gate while changing only validated screening evidence/provenance. Settled refuses; this is not
+a generic Fault-to-Fault writer. N33/N38 must run through both typed APIs and restart; receipt head
+still reports Fault(B), exact retry is Screened, and B remains repairable.
 
-Required regression: N33/N38 through both typed APIs. Apply unrelated repair A while Fault B
-stands, snapshot/reopen, exact retry still returns Screened, B remains unchanged and repairable.
-Do not assert that `receipt_head()` succeeds for this case; it must continue reporting Fault.
+## CORE-003: an unpublished canonical reconciliation can be repaired again
 
-## AG3-CORE-003: a reconciled loser must itself be repairable (High)
+R1 -> repair to R2 -> repair of effective R2 to R3 before publication cannot ignore `reconciled`.
+The accepted correction applies only to the **effective canonical decision**. Historical high_water
+must not override unrelated canonical or pending work. Validate complete evidence and live repair
+before replacing R2 atomically. Keep source sequence and nonterminal/recovery fences.
 
-C-7 examines `in_flight` and `high_water` only. Publish R1, repair `{R1,R2}` to R2, then before
-R2 is published repair `{R2,R3}` to R3. The preferred decision is now `reconciled = R2`, but the
-stated implementation returns `Ok(false)` and continues selecting the repudiated R2.
+Required regression: consecutive repairs without publication, restart, publish R3, restart and
+prepare the next receipts; malformed evidence leaves all state unchanged.
 
-Proposed correction: include the **current canonical `reconciled` head** among decisions eligible
-for an exact named-loser replacement. Verify the live repair and its complete evidence against
-that retained loser and the supplied winner before mutating. A second reconciliation replaces
-that canonical decision atomically, never invents publication, and retains the existing
-source/owner-record sequence checks as prerequisites. This does not make historical publication
-evidence authoritative over an unrelated canonical head (see CORE-004).
+## CORE-004: roles, cross-baseline rewind and bounded provenance
 
-Required regression: two consecutive repairs without intermediate publication, restart, publish
-R3, restart, and prepare the next receipt. Test wrong evidence and unchanged state on refusal.
+The old contract conflated journal tenure identity with receipt inheritance, allowed historical
+high_water matches to clobber newer canonical decisions and demanded increasing epochs across a
+repair-selected baseline. It also failed to preserve a retired pending descendant outside the
+repair pair.
 
-## AG3-CORE-004: canonical selection and publication history can diverge (High)
+The concrete [revision-15 proposal](GATE4-AGENT-3-AUTHORITY-FOLLOWUP.md#core-004-publication-facts-obligations-and-canonical-decisions)
+separates identity, actual publication, pending obligation and canonical repair choice. It allows
+published R(4,A) with reconciled S(2,B), preserves complete retired pending receipt/close at B1,
+retains bounded latest proof, rejects stale callbacks and gives evidence-only cleanup a publication
+hold. No v2 journal implementation has begun. Independent design acceptance is still required.
 
-N7(b) retains published R(e-1), removes pending losing L(e), and reconciles to selected S(e).
-The conflict may change inherited baseline. The existing journal decoder requires every retained
-receipt's full `TenureSelection` (including inheritance) to equal the journal's single selection.
-No one selection can describe both R and S in this valid repaired shape, so v2 as currently
-specified rejects its own admitted state.
+## CORE-005: self-signatures are not historical owner authority
 
-**Open contract, not a complete proposed correction.** Separating canonical selection from
-historical publication is necessary, but a second static review demonstrated that merely allowing
-different inheritance while retaining C-7's numeric ordering is insufficient. Three decisions
-need an explicit design disposition before implementing this journal boundary:
+C-4 correctly proves bounded canonical shape, self-signature and conflict. A current authenticated
+member can sign a conflicting pair for the right document despite never being owner. The old
+report contract would admit it into permanent evidence capacity, owner choices and proof gates.
 
-1. **Cross-epoch rewind.** A valid differing-baseline pair may be L(5,A) versus S(2,B), while
-   the journal has published R(4,A) and pending L(5,A). The selected canonical epoch 2 is below
-   historical publication epoch 4. Requiring publication to precede the canonical head refuses
-   this valid choice indefinitely. The v2 representation and subsequent publication lifecycle
-   must support that repair or explicitly narrow supported repairs and acknowledge the liveness
-   limitation. Refusal alone cannot be described as completing B1.
-2. **Historical evidence is not canonical authority.** Start with published R(4,A), pending
-   L(5,A); repair {L(5,A), S(5,B)} selects S, retaining published R and reconciled S. A later
-   repair {R(4,A), T(4,C)} selecting T must not overwrite unrelated newer canonical S merely
-   because historical R is a named loser. The healthy source screens this repair and stays on
-   S; journal reconciliation must agree. The disposition must classify authoritative canonical
-   and pending decisions separately from evidence-only publication history. Here A/B/C can
-   be distinct inherited checkpoints at epochs 1/2/3 respectively, so every receipt shape is valid.
-3. **Pending descendants and stale completions.** With published L(4,A), pending N(5,A), a
-   repair {L(4,A), S(4,B)} selects a new baseline. Retaining N as publishable preserves a known
-   losing branch; silently deleting it loses an irrevocable decision outside the exact pair.
-   Specify bounded durable evidence and publication-obligation dispositions for an exact losing
-   pending decision, a provable losing-baseline descendant, and unrelated higher same-baseline
-   progress. A stale completion callback must not republish repudiated state. Blanket refusal
-   would be an explicit incomplete-liveness policy, not a total repair implementation.
+No report consumer exists yet, so this is a confirmed future contract defect, not a demonstrated
+present network-reachable exploit. The C-4 API remains narrow and documents this boundary.
+The new primitive member-forgery test is a limitation demonstration, **not** the missing
+report-admission/no-write security regression.
 
-Any solution must preserve full document/owner/tenure binding, truthful `published()` results,
-bounded evidence, v1 compatibility, and atomic preflight before mutation. No journal format or
-runtime transition has been changed while these questions remain open.
+The [proposed authority contract](GATE4-AGENT-3-AUTHORITY-FOLLOWUP.md#core-005-local-historical-owner-provenance)
+uses one receiver-local archived Observed-tenure witness in the matching durable MLS snapshot,
+then private exact-pair admission attestations. Every authority check precedes durable capacity,
+source, overflow and proof changes. Reserved-first staging retains attestations until B1 transfers
+them atomically. Unresolved pairs retain eligibility; terminal recycling removes their attestations.
+Agent 2's tenure seam and Agent 4's snapshot integration are dependencies, not implemented APIs.
 
-Required regressions: N7/N28 for same and different inherited baselines; winner before, equal
-to and after the historical publication epoch; the two consecutive-repair sequences in
-CORE-003 and item 2 above; all three pending classifications; restart before/after publication;
-stale callbacks; next two receipts; malformed mixed document/owner/tenure and nonadjacent
-pending records. Verify source and journal choose the same canonical head in each sequence.
+Independent review must explicitly assess the liveness limits: newcomers/Imported history,
+evicted unadmitted history, re-reported completed pairs after recycling, and ownership turnover
+during unfinished replacement. No full Gate 4 liveness claim is made.
 
-## Review request
+## IMP-001 and implementation re-review
 
-Review CORE-001/002 and the bounded CORE-003 correction against revision 14 section 5.1 and
-the actual epoch, Studio and Registry admission/restart/journal code. Resolve the three explicit
-CORE-004 questions before accepting a complete journal contract. Return an explicit bounded
-design verdict, especially on clearing rejected hashes and canonical/publication precedence. This is
-not runtime repair acceptance, native registration, or full Gate 4 acceptance. C-1/C-2/C-5/C-6/C-7
-implementation remains pending this correction; independent C-3/C-4/C-8 verification continues.
+`ReceiptBook::decode_mode` now rejects `previous_until_installed` whenever `latest` is absent,
+even with valid same-document resolved evidence. A signed same-document predecessor regression
+covers both v4/v5, with valid headless controls. The ninth mutation removes precisely this guard.
+
+Read-only implementation review found no BLOCKER/HIGH/MEDIUM. Its LOW scope-negative masking gap
+was fixed at `27e1b99`: an otherwise valid **headed** repaired book accepts a same-document
+predecessor and rejects a re-signed foreign predecessor, independently in both modes. The short
+re-review closed that gap. Local focused suite: **20 passed, 0 failed**. Complete check/run evidence,
+including failures and pending work, is in [status](GATE4-AGENT-3-STATUS.md).
+
+## Internal design review and requested independent verdict
+
+The read-only design reviewer inspected the actual proposal and neighboring snapshot, tenure,
+source and journal paths. It found and then re-reviewed corrections for:
+
+- exact attestation retry ordering after archive turnover;
+- cross-tenure healthy-journal screening before replacement-only identity checks;
+- lost attestation on source drain and terminal recycling;
+- evidence-only provenance after subsequent publications;
+- explicit restore epoch/device checks and mid-replacement turnover limitations.
+
+No BLOCKER/HIGH remained preventing submission for independent **design** review. This is not
+implementation acceptance, a substitute for the user's review, or acceptance of the liveness limits.
+The actual report/no-write, historical-owner positive and typed lifecycle regressions remain future
+mandatory work. Request a finding re-review of IMP-001 and a separate design verdict on CORE-004/005;
+CORE-001/002/003 need no repeated approval for their already accepted corrections.

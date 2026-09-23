@@ -1,31 +1,84 @@
 # Gate 4 Agent 3 status: runtime signed fault repair
 
 Owner: Agent 3 ([assignment](GATE4-AGENT-HANDOFFS.md#agent-3-runtime-signed-fault-repair)).
-Proposal: [GATE4-AGENT-3-DESIGN](GATE4-AGENT-3-DESIGN.md), currently revision 14.
+Proposal: [GATE4-AGENT-3-DESIGN](GATE4-AGENT-3-DESIGN.md), revision 15 **proposed**.
 Review preamble: 3. Current entries override older ones.
 
-## Independent review response, 2026-09-23 (in progress)
+## Independent review response, 2026-09-23
 
 User-supplied verdict at `8d4cc53a529c86bdad76170f7825f7dbd682dfa9`: **REQUEST CHANGES**.
-C-3 and the C-5 sequence getter passed. C-4 passed only as a shape/self-signature/conflict
-primitive; **AG3-CORE-005 (High)** blocks its intended report consumer until historical owner
-authority is independently established. `report_studio_fault` does not exist and this issue
-is not presently a network-reachable report boundary. No primitive test is report-admission proof.
+C-3 and C-5's getter passed. C-4 passed as a self-signature/conflict primitive only.
+The [finding ledger](GATE4-AGENT-3-CORE-REVIEW.md) records every disposition.
 
-**AG3-IMP-001 (Medium)** is addressed in the decoder with a dedicated v4/v5 regression: a
-headless book cannot retain a predecessor, including a valid same-document receipt. Removing
-only that guard is now the ninth mutation. A separate limitation test demonstrates that a
-current non-owner member can self-sign a pair accepted by C-4 but rejected as current-owner
-authority. Its test name/comments explicitly do not claim the missing report/no-write test.
-Execution of this revision is pending; prior 225-test/eight-mutation evidence is not a pass
-for the new guard. Local format and diff-whitespace checks pass.
+- **IMP-001 fixed** at `f16e1e5919c3e8a4017bd5f4921f6f0d45a77462`: no headless receipt book
+  may retain a predecessor, even a valid same-document one. v4/v5 controls and the ninth isolated
+  mutation exercise precisely that guard.
+- **Implementation re-review complete:** no BLOCKER/HIGH/MEDIUM. Its LOW test-masking gap was
+  corrected at `27e1b9998022c1dcaa9e3c411909467d4fbeb383` and re-reviewed: a headed positive/
+  foreign-document negative isolates the retained-receipt scope check independently.
+- **CORE-001/002/003 accepted by the user review**, with exact-state screening and only the
+  effective canonical reconciliation eligible for repeated repair. Main design now incorporates
+  those corrections. Their runtime APIs remain unimplemented.
+- **CORE-004/005 remain proposed, not accepted or implemented.** The concrete
+  [authority/journal follow-up](GATE4-AGENT-3-AUTHORITY-FOLLOWUP.md) separates publication roles,
+  retains bounded repair/retired-pending evidence, and proposes one archived Observed-tenure
+  witness plus private per-pair admission attestations. Internal read-only adversarial review
+  corrected retry ordering, source-transfer/recycling retention and publication cleanup. Its
+  short re-review also checked the synchronized main design/ledger: no BLOCKER/HIGH prevents
+  submitting this proposal for independent design review. It does not accept the liveness limits.
+- **TEST-013(a) remains missing:** there is no report-admission implementation. The member-forgery
+  primitive test demonstrates C-4's limit; it is not the required authenticated report/no-write
+  security regression. Neither Studio nor Registry can issue/apply runtime repair here.
 
-CORE-001/002/003 design corrections were accepted by the supplied review, with exact-state
-rebinding for screening and effective-canonical-head scope for repeated reconciliation.
-CORE-004 is being rewritten around separate tenure identity, publication/canonical roles and
-bounded reconciliation provenance. A read-only adversarial design review of CORE-005 has been
-requested now; implementation re-review and the user's independent follow-up review are still
-required. No new report, gate, journal or persistence boundary is implemented in this fix.
+The proposed liveness limits need an explicit independent verdict: Imported/newcomer history,
+evicted unadmitted history and recycled completed reports can remain unavailable. Ownership
+turnover during an unfinished replacement can also leave a durable hold; no recovery transition
+is claimed for that case. These limits prevent any full Gate 4 completion claim.
+
+Agent 2 must agree the archived Observed witness/durable capability seam; Agent 4 owns shared
+snapshot/schema integration. Agent 3 has changed no other agent's files, refs, current checkout,
+common workflow, lockfile or native registration. Work remains on the isolated worktree below.
+
+### Verification for this review response
+
+Local at `27e1b99`: `cargo test --locked -j 1 -p catcoms-replication --lib
+epoch::repair_state::tests::` **PASS, 20/20**, using the existing target during a verified idle
+Cargo slot. `cargo fmt --all -- --check`, diff whitespace, Python parse and nine unique mutation
+anchors pass. The implementation reviewer ran static checks only.
+
+[Core CI at f16e1e5](https://github.com/Thalpy/Mewtual/actions/runs/35809647688) **PASS on Linux
+and Windows**: **227/227** full replication-library tests on each, all **nine** intended mutation
+failures followed by byte-exact restoration and nine passing controls. Actual checkout in both
+logs: **`e296989c1820e06349c1f0445744099195a22d56`**, merging into Agent 1 base
+`988cc7afad42e60884907e3a33de0158adb1d5d3`. This differs from earlier CI merge bases.
+Logs are saved in ignored `logs/agent3-core-f16-{linux,windows}.log`.
+
+[Full CI at f16e1e5](https://github.com/Thalpy/Mewtual/actions/runs/35809647674), same actual
+checkout: frontend **1,229/1,229**, frontend check/build and root formatting/strict Clippy pass.
+Native full test compilation fails on existing unused-code diagnostics in
+`media_decode.rs`/`security_intent.rs` under `-D warnings`; the later native check is not
+reached. `cargo deny check` fails on unchanged rustls 0.23.40 / RUSTSEC-2026-0285.
+Root full suites are still running at this entry; the ambient gate is consequently pending.
+The previously executed local ambient gate failed on seven untouched calls, listed below.
+These failures are reported, not fixed across Agent 4's integration-owned surfaces.
+
+The final test-only refinement at `27e1b99` has its own
+[core/mutation run](https://github.com/Thalpy/Mewtual/actions/runs/35811047096) and
+[full required CI run](https://github.com/Thalpy/Mewtual/actions/runs/35811047134), currently
+running. The latest desktop log confirms actual merge checkout
+**`0651da0ac579168938005b0cbbe161e3ca86b1c2`**, into base
+`28bb73d2e29ee03841ebe053afad203602df872e`: frontend 1,229/1,229, check and build pass again;
+native full tests stop on the same unused-code errors. The latest deny job again reports
+RUSTSEC-2026-0285 (bans/licenses/sources pass). The f16 core result is not presented as execution
+of the new headed test. All three mandatory
+full-suite commands are invoked by this CI; focused/local checks do not replace them.
+Startup/flow gates are not applicable to this decoder/core-test scope, which changes no setup,
+process, UI or native command behavior.
+
+**Independent review requested next:** finding re-review of IMP-001 and design review of
+CORE-004/005, using review preamble 3 with the immutable reviewed base and new documentation
+head. The internal reviewer is not a substitute. No new authority/persistence implementation
+will proceed before that required independent disposition.
 
 ## Implementation restart, 2026-09-23
 
