@@ -347,18 +347,12 @@ fn repair_headless_decode_keeps_scope_sequence_and_legacy_constraints() {
     f.apply();
     f.book.latest = None;
     f.book.tenure = None;
-    for mutation in 0..4 {
+    for mutation in 0..3 {
         let mut book = f.book.clone();
         match mutation {
             0 => book.tenure = Some(TenureSelection::from(&f.selected)),
             1 => book.repair_sequence = 2,
-            2 => {
-                let mut foreign = f.selected.clone();
-                foreign.document.logical_key[0] ^= 1;
-                foreign.signature = f.owner.sign(&foreign.signature_hash()).unwrap();
-                book.previous_until_installed = Some(foreign);
-            }
-            3 => book.resolved_repair.as_mut().unwrap().selected = f.losing.clone(),
+            2 => book.resolved_repair.as_mut().unwrap().selected = f.losing.clone(),
             _ => unreachable!(),
         }
         assert!(
@@ -379,6 +373,35 @@ fn repair_headless_decode_keeps_scope_sequence_and_legacy_constraints() {
         let restored = ReceiptBook::decode_mode(&bytes, adoption).unwrap();
         assert!(restored.document.is_none());
         assert_eq!(restored.encode_mode(adoption).unwrap(), bytes);
+    }
+}
+
+#[test]
+fn repair_headed_book_checks_retained_predecessor_document() {
+    let mut f = Fixture::new(false);
+    f.apply();
+    let predecessor = f.sign(1, InheritedCheckpoint::EpochZero, 5);
+    let mut foreign = predecessor.clone();
+    foreign.document.logical_key[0] ^= 1;
+    foreign.signature = f.owner.sign(&foreign.signature_hash()).unwrap();
+    foreign.verify_signature_only().unwrap();
+    for adoption in [false, true] {
+        // Keep a valid latest receipt and tenure so the independent headless-predecessor
+        // guard cannot mask the document-scope check on this retained receipt.
+        assert!(f.book.latest().is_some());
+        f.book.previous_until_installed = Some(predecessor.clone());
+        let valid = f.book.encode_mode(adoption).unwrap();
+        let restored = ReceiptBook::decode_mode(&valid, adoption).unwrap();
+        assert_eq!(restored.encode_mode(adoption).unwrap(), valid);
+
+        f.book.previous_until_installed = Some(foreign.clone());
+        assert!(
+            matches!(
+                ReceiptBook::decode_mode(&f.book.encode_mode(adoption).unwrap(), adoption),
+                Err(ReplError::Malformed)
+            ),
+            "a headed repaired book must reject a foreign-document predecessor"
+        );
     }
 }
 
