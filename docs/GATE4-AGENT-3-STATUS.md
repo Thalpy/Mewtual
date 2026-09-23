@@ -1,84 +1,77 @@
 # Gate 4 Agent 3 status: runtime signed fault repair
 
 Owner: Agent 3 ([assignment](GATE4-AGENT-HANDOFFS.md#agent-3-runtime-signed-fault-repair)).
-Proposal: [GATE4-AGENT-3-DESIGN](GATE4-AGENT-3-DESIGN.md), revision 15 **proposed**.
+Proposal: [GATE4-AGENT-3-DESIGN](GATE4-AGENT-3-DESIGN.md), revision 16 follow-up.
 Review preamble: 3. Current entries override older ones.
 
-## Independent review response, 2026-09-23
+## Independent review response, 2026-09-23: revision 16
 
-User-supplied verdict at `8d4cc53a529c86bdad76170f7825f7dbd682dfa9`: **REQUEST CHANGES**.
-C-3 and C-5's getter passed. C-4 passed as a self-signature/conflict primitive only.
-The [finding ledger](GATE4-AGENT-3-CORE-REVIEW.md) records every disposition.
+Latest user-supplied review base: **`a7513697fb482abc235cadb8414d491f7851b6ce`**.
+The [finding ledger](GATE4-AGENT-3-CORE-REVIEW.md) records the split disposition:
 
-- **IMP-001 fixed** at `f16e1e5919c3e8a4017bd5f4921f6f0d45a77462`: no headless receipt book
-  may retain a predecessor, even a valid same-document one. v4/v5 controls and the ninth isolated
-  mutation exercise precisely that guard.
-- **Implementation re-review complete:** no BLOCKER/HIGH/MEDIUM. Its LOW test-masking gap was
-  corrected at `27e1b9998022c1dcaa9e3c411909467d4fbeb383` and re-reviewed: a headed positive/
-  foreign-document negative isolates the retained-receipt scope check independently.
-- **CORE-001/002/003 accepted by the user review**, with exact-state screening and only the
-  effective canonical reconciliation eligible for repeated repair. Main design now incorporates
-  those corrections. Their runtime APIs remain unimplemented.
-- **CORE-004/005 remain proposed, not accepted or implemented.** The concrete
-  [authority/journal follow-up](GATE4-AGENT-3-AUTHORITY-FOLLOWUP.md) separates publication roles,
-  retains bounded repair/retired-pending evidence, and proposes one archived Observed-tenure
-  witness plus private per-pair admission attestations. Internal read-only adversarial review
-  corrected retry ordering, source-transfer/recycling retention and publication cleanup. Its
-  short re-review also checked the synchronized main design/ledger: no BLOCKER/HIGH prevents
-  submitting this proposal for independent design review. It does not accept the liveness limits.
-- **TEST-013(a) remains missing:** there is no report-admission implementation. The member-forgery
-  primitive test demonstrates C-4's limit; it is not the required authenticated report/no-write
-  security regression. Neither Studio nor Registry can issue/apply runtime repair here.
+- **IMP-001 PASS/CLOSED.** The implementation and independent v4/v5 regressions are accepted;
+  final core CI is green on Linux and Windows. No further codec change is made here.
+- **CORE-005 bounded design PASS**, including the finite-history, late-reporter and device-local
+  authority limits. Universal peer convergence is not a claim. Agent 2 must still agree/implement
+  the archived Observed witness and matching durable capability; N49/N50 production-consumer
+  tests and Agent 4's snapshot integration remain required.
+- **CORE-001/002/003 remain accepted.** No new approval is requested for them.
+- **CORE-004 REQUEST CHANGES:** CORE-006 (P1) replaces effect equality with joint compatibility;
+  CORE-007 (P1) moves the earliest possible owner-turnover hold to B1, before B2.
+- **TEST-014 (P2):** N3b now includes source Transitioned/journal NoChange with H as published
+  and pending; N51 adds the reverse Screened/Replace and negative authority/evidence cases;
+  N52 covers observed owner turnover after B1 before B2 and separately after B2 before B6,
+  including a journal NoChange. These integrated tests are planned, not implemented or executed.
 
-The proposed liveness limits need an explicit independent verdict: Imported/newcomer history,
-evicted unadmitted history and recycled completed reports can remain unavailable. Ownership
-turnover during an unfinished replacement can also leave a durable hold; no recovery transition
-is claimed for that case. These limits prevent any full Gate 4 completion claim.
+The [revised journal contract](GATE4-AGENT-3-AUTHORITY-FOLLOWUP.md#core-006-compatible-independent-source-and-journal-effects)
+checks independently computed source and journal candidates. No proven losing decision may
+remain usable for proof, settlement or installation; guarded losing recovery/history is retained.
+Different non-losing heads are compatible without weakening the existing three-way proof check.
+A journal NoChange still persists the owner repair and its target claim.
 
-Agent 2 must agree the archived Observed witness/durable capability seam; Agent 4 owns shared
-snapshot/schema integration. Agent 3 has changed no other agent's files, refs, current checkout,
-common workflow, lockfile or native registration. Work remains on the isolated worktree below.
+The proposed turnover limitation covers **any time after B1 until durable terminal/recycling**.
+Pre-B2, the source is unchanged but the owner record may already have reconciled the journal or
+retired pending evidence. Post-B2, committed source/recovery work may also be stranded. Every
+ordinary prepare/reset/proof/publication path must respect the persisted repair claim, even
+without journal provenance. Old issuer authority is never renewed by restart. No cancellation is
+introduced; same-transaction authorized progress and already-terminal cleanup retain their rules.
 
-### Verification for this review response
+**Scope:** four Agent 3 documentation files only. No code, schema, native registration, shared
+workflow/lockfile, Agent 1/2 files or refs changed. C-7 remains unimplemented pending independent
+re-review of these corrections. There is still no runtime report-admission/no-write regression;
+the C-4 member-forgery primitive test does not substitute for N49.
 
-Local at `27e1b99`: `cargo test --locked -j 1 -p catcoms-replication --lib
-epoch::repair_state::tests::` **PASS, 20/20**, using the existing target during a verified idle
-Cargo slot. `cargo fmt --all -- --check`, diff whitespace, Python parse and nine unique mutation
-anchors pass. The implementation reviewer ran static checks only.
+**Internal review complete:** the read-only reviewer inspected the actual four-document diff
+against `a751369` and neighboring enforcement paths. No BLOCKER/HIGH/MEDIUM remains preventing
+independent re-review. One LOW accepted/proposed label mismatch was corrected and re-reviewed.
+The review confirms the independent effects, B1/NoChange fence and test matrix; no Cargo was run.
+It cannot substitute for the user's verdict. Only CORE-006/007 and TEST-014 are the new
+independent review request; accepted CORE-005 is preserved.
 
-[Core CI at f16e1e5](https://github.com/Thalpy/Mewtual/actions/runs/35809647688) **PASS on Linux
-and Windows**: **227/227** full replication-library tests on each, all **nine** intended mutation
-failures followed by byte-exact restoration and nine passing controls. Actual checkout in both
-logs: **`e296989c1820e06349c1f0445744099195a22d56`**, merging into Agent 1 base
-`988cc7afad42e60884907e3a33de0158adb1d5d3`. This differs from earlier CI merge bases.
-Logs are saved in ignored `logs/agent3-core-f16-{linux,windows}.log`.
+### Verification
 
-[Full CI at f16e1e5](https://github.com/Thalpy/Mewtual/actions/runs/35809647674), same actual
-checkout: frontend **1,229/1,229**, frontend check/build and root formatting/strict Clippy pass.
-Native full test compilation fails on existing unused-code diagnostics in
-`media_decode.rs`/`security_intent.rs` under `-D warnings`; the later native check is not
-reached. `cargo deny check` fails on unchanged rustls 0.23.40 / RUSTSEC-2026-0285.
-Root full suites are still running at this entry; the ambient gate is consequently pending.
-The previously executed local ambient gate failed on seven untouched calls, listed below.
-These failures are reported, not fixed across Agent 4's integration-owned surfaces.
+No backend/frontend suites are rerun for this documentation-only revision: it changes no runtime
+or build behavior. Diff whitespace and contract-reference checks pass; read-only adversarial
+design review/re-review completed as above.
+The previous implementation's final execution evidence is now complete for the focused boundary:
 
-The final test-only refinement at `27e1b99` has its own
-[core/mutation run](https://github.com/Thalpy/Mewtual/actions/runs/35811047096) and
-[full required CI run](https://github.com/Thalpy/Mewtual/actions/runs/35811047134), currently
-running. The latest desktop log confirms actual merge checkout
-**`0651da0ac579168938005b0cbbe161e3ca86b1c2`**, into base
-`28bb73d2e29ee03841ebe053afad203602df872e`: frontend 1,229/1,229, check and build pass again;
-native full tests stop on the same unused-code errors. The latest deny job again reports
-RUSTSEC-2026-0285 (bans/licenses/sources pass). The f16 core result is not presented as execution
-of the new headed test. All three mandatory
-full-suite commands are invoked by this CI; focused/local checks do not replace them.
-Startup/flow gates are not applicable to this decoder/core-test scope, which changes no setup,
-process, UI or native command behavior.
-
-**Independent review requested next:** finding re-review of IMP-001 and design review of
-CORE-004/005, using review preamble 3 with the immutable reviewed base and new documentation
-head. The internal reviewer is not a substitute. No new authority/persistence implementation
-will proceed before that required independent disposition.
+- Local `cargo test --locked -j 1 -p catcoms-replication --lib epoch::repair_state::tests::`:
+  **20/20 PASS** at `27e1b9998022c1dcaa9e3c411909467d4fbeb383`.
+- [Final core/mutation CI](https://github.com/Thalpy/Mewtual/actions/runs/35811047096):
+  **Linux and Windows each PASS 228/228 tests and all nine intended mutations, exact restorations
+  and nine restored controls.** Both actual merge checkouts are
+  `0651da0ac579168938005b0cbbe161e3ca86b1c2`, into base
+  `28bb73d2e29ee03841ebe053afad203602df872e`. Both logs were inspected; ignored local copies
+  are `logs/agent3-core-27e-linux.log` and `logs/agent3-core-27e-windows.log`.
+- [Full required CI](https://github.com/Thalpy/Mewtual/actions/runs/35811047134) at that code:
+  frontend **1,229/1,229**, frontend check/build and Linux/Windows formatting/strict Clippy pass.
+  Native full tests fail during compilation on unchanged unused-code diagnostics under
+  `-D warnings`; the later native check is not reached. Cargo-deny fails on unchanged
+  rustls 0.23.40 / RUSTSEC-2026-0285 (bans/licenses/sources pass).
+- Root full suites remain **in progress**, so their subsequent ambient gates have not run.
+  The local ambient gate was run and failed on the seven untouched calls recorded below.
+  No full-suite, integration or Gate 4 PASS is claimed. Startup/flow gates do not apply to this
+  documentation revision or the unchanged core decoder/test scope.
 
 ## Implementation restart, 2026-09-23
 

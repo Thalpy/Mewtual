@@ -1,7 +1,8 @@
 # Agent 3 core follow-up findings and dispositions
 
 Implementation base: `918ffb9b3034c43ed33574225e04f1be2e87090d`.
-Independent review: REQUEST CHANGES at `8d4cc53a529c86bdad76170f7825f7dbd682dfa9`.
+Latest independent review: split verdict at `a7513697fb482abc235cadb8414d491f7851b6ce`:
+IMP-001 CLOSED, CORE-005 bounded design PASS, CORE-004 REQUEST CHANGES (CORE-006/007).
 Revision 14 remains the baseline with the corrections below. The leaf checkpoint implements
 C-3/C-4/C-8 and C-5's sequence getter only; no report, typed transition or journal format exists.
 
@@ -10,10 +11,13 @@ C-3/C-4/C-8 and C-5's sequence getter only; no report, typed transition or journ
 | CORE-001 High | User accepted: clear rejected quarantine only on repair to Open; preserve accepted work/accounting |
 | CORE-002 High | User accepted with exact-state rebinding: private unchanged-Fault screening commit |
 | CORE-003 High | User accepted only for the effective canonical reconciled decision |
-| CORE-004 High | Concrete revised journal-role/provenance proposal; independent verdict pending |
-| CORE-005 High | Concrete local Observed-owner provenance proposal; independent verdict pending |
-| IMP-001 Medium | Implemented at `f16e1e5`; regression isolation refined at `27e1b99` |
+| CORE-004 High | Remains REQUEST CHANGES; revision 16 addresses CORE-006/007 for re-review |
+| CORE-005 High | **Bounded design PASS**, including stated finite-history/convergence limits; Agent 2 seam and production tests still required |
+| CORE-006 P1 | Proposed correction: independently computed effects with a joint compatibility postcondition |
+| CORE-007 P1 | Proposed correction: turnover may strand repair from B1 through durable terminal/recycling |
+| IMP-001 Medium | **PASS/CLOSED**; implemented at `f16e1e5`, regression isolation at `27e1b99` |
 | TEST-013 | Same-document headless negative implemented; real report/no-write negative remains unimplemented |
+| TEST-014 P2 | Planned N3b/N51 source/journal asymmetries and N52 pre-B2/post-B2 churn; no execution claimed |
 
 ## CORE-001: reopening with quarantine is not restorable
 
@@ -55,11 +59,12 @@ high_water matches to clobber newer canonical decisions and demanded increasing 
 repair-selected baseline. It also failed to preserve a retired pending descendant outside the
 repair pair.
 
-The concrete [revision-15 proposal](GATE4-AGENT-3-AUTHORITY-FOLLOWUP.md#core-004-publication-facts-obligations-and-canonical-decisions)
+The concrete [journal proposal](GATE4-AGENT-3-AUTHORITY-FOLLOWUP.md#core-004-publication-facts-obligations-and-canonical-decisions)
 separates identity, actual publication, pending obligation and canonical repair choice. It allows
 published R(4,A) with reconciled S(2,B), preserves complete retired pending receipt/close at B1,
 retains bounded latest proof, rejects stale callbacks and gives evidence-only cleanup a publication
-hold. No v2 journal implementation has begun. Independent design acceptance is still required.
+hold. The independent review accepted that direction and its bounds/provenance, but found
+CORE-006/007 below. No v2 journal implementation has begun; re-review remains required.
 
 ## CORE-005: self-signatures are not historical owner authority
 
@@ -72,16 +77,48 @@ present network-reachable exploit. The C-4 API remains narrow and documents this
 The new primitive member-forgery test is a limitation demonstration, **not** the missing
 report-admission/no-write security regression.
 
-The [proposed authority contract](GATE4-AGENT-3-AUTHORITY-FOLLOWUP.md#core-005-local-historical-owner-provenance)
+The [accepted authority contract](GATE4-AGENT-3-AUTHORITY-FOLLOWUP.md#core-005-local-historical-owner-provenance)
 uses one receiver-local archived Observed-tenure witness in the matching durable MLS snapshot,
 then private exact-pair admission attestations. Every authority check precedes durable capacity,
 source, overflow and proof changes. Reserved-first staging retains attestations until B1 transfers
 them atomically. Unresolved pairs retain eligibility; terminal recycling removes their attestations.
 Agent 2's tenure seam and Agent 4's snapshot integration are dependencies, not implemented APIs.
 
-Independent review must explicitly assess the liveness limits: newcomers/Imported history,
-evicted unadmitted history, re-reported completed pairs after recycling, and ownership turnover
-during unfinished replacement. No full Gate 4 liveness claim is made.
+The independent review of `a751369` explicitly accepted the finite-history limits: newcomers/
+Imported history, evicted unadmitted history, re-reported completed pairs after recycling and
+device-local attestations. Universal peer convergence is not claimed and the limitation must
+remain in the eventual product/integration verdict. Owner-turnover timing is the separate
+CORE-007 correction below. This acceptance is design-only, not production N49/N50 evidence.
+
+## CORE-006: compatibility is not classification equality (P1)
+
+Case 1a can clear source Fault on `{S,L}` by selecting installed opening S while positively
+preserving later sealing H. A journal whose effective choice is H must stay unchanged, whether
+H is high_water or in_flight. Requiring equal effects rejects this accepted path at B1.
+
+Revision 16 instead computes source and journal candidates independently. Their joint check
+requires no resulting covered journal choice or usable source proof/settlement/install anchor,
+with explicit guarded retention of losing recovery and unrelated Fault evidence. All ordinary
+authority, exact-state, sequence and recovery rules remain. Different effect tags and different
+non-losing heads can be compatible; the existing three-way proof equality is not weakened.
+
+N3b's integrated extension must exercise `(Transitioned, NoChange)` with both H roles, B1/B2
+and restart. N51 adds `(Screened, Replace)` and pending retirement, plus covered-target/missing-close
+refusals. These are planned tests, not implementation evidence.
+
+## CORE-007: turnover can strand the transaction before B2 (P1)
+
+After A saves B1, its repair already owns the target and may have changed the journal. If B
+becomes the MLS owner before B2, A fails live verification and B cannot overwrite the nonterminal
+repair. No B2 source transition exists to finish. A journal NoChange does not remove that record
+claim, and the ordinary newer-tenure journal path cannot bypass it.
+
+Revision 16 chooses the explicit fail-closed limitation from **B1 until durable terminal/recycling**,
+as the reviewer offered, rather than adding cancellation. Pre-B2 source state stays unchanged;
+post-B2 can also retain committed source/recovery work. N52 must cover both intervals through
+real MLS turnover and restart, including Replace, retired-pending and NoChange, refusal of old/new
+owner repair attempts and ordinary prepare/reset/proof/publication bypasses. Retain all evidence;
+same-transaction valid progress and already-terminal inert cleanup keep their accepted rules.
 
 ## IMP-001 and implementation re-review
 
@@ -89,13 +126,16 @@ during unfinished replacement. No full Gate 4 liveness claim is made.
 even with valid same-document resolved evidence. A signed same-document predecessor regression
 covers both v4/v5, with valid headless controls. The ninth mutation removes precisely this guard.
 
+The independent review at `a751369` explicitly **closed IMP-001** based on the actual code,
+isolated regressions and green final 228-test/nine-mutation CI on both platforms.
+
 Read-only implementation review found no BLOCKER/HIGH/MEDIUM. Its LOW scope-negative masking gap
 was fixed at `27e1b99`: an otherwise valid **headed** repaired book accepts a same-document
 predecessor and rejects a re-signed foreign predecessor, independently in both modes. The short
 re-review closed that gap. Local focused suite: **20 passed, 0 failed**. Complete check/run evidence,
 including failures and pending work, is in [status](GATE4-AGENT-3-STATUS.md).
 
-## Internal design review and requested independent verdict
+## Historical revision-15 internal review
 
 The read-only design reviewer inspected the actual proposal and neighboring snapshot, tenure,
 source and journal paths. It found and then re-reviewed corrections for:
@@ -106,8 +146,11 @@ source and journal paths. It found and then re-reviewed corrections for:
 - evidence-only provenance after subsequent publications;
 - explicit restore epoch/device checks and mid-replacement turnover limitations.
 
-No BLOCKER/HIGH remained preventing submission for independent **design** review. This is not
-implementation acceptance, a substitute for the user's review, or acceptance of the liveness limits.
-The actual report/no-write, historical-owner positive and typed lifecycle regressions remain future
-mandatory work. Request a finding re-review of IMP-001 and a separate design verdict on CORE-004/005;
-CORE-001/002/003 need no repeated approval for their already accepted corrections.
+That internal verdict did not replace independent review, which subsequently found CORE-006/007.
+Revision 16's new read-only adversarial review inspected the actual corrections, test matrix and
+surrounding enforcement paths. No BLOCKER/HIGH/MEDIUM remains preventing independent re-review;
+one LOW CORE-005 accepted/proposed label mismatch was corrected and re-reviewed. This static
+verdict is not execution or independent acceptance. The requested independent verdict is limited
+to CORE-004's CORE-006/007 and TEST-014;
+preserve the accepted CORE-001/002/003/005 and closed IMP-001. Report/no-write, historical-owner
+positive and typed lifecycle implementation regressions remain mandatory future work.

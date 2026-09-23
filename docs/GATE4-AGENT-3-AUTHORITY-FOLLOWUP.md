@@ -1,9 +1,11 @@
-# Agent 3: historical authority and journal roles (proposed revision 15)
+# Agent 3: historical authority and journal roles (revision 16 follow-up)
 
-Review base: `8d4cc53a529c86bdad76170f7825f7dbd682dfa9`; the user's verdict was REQUEST
-CHANGES. This is the concrete follow-up for CORE-004/005. **These new persistence and authority
-contracts are proposed, not implemented or independently accepted.** CORE-001/002/003 were
-accepted subject to the conditions in the supplied review. IMP-001 is a separate codec fix.
+Review base: `a7513697fb482abc235cadb8414d491f7851b6ce`. The independent verdict closed IMP-001
+and **accepted CORE-005 at the bounded design boundary**, including its finite-history and
+convergence limits. CORE-001/002/003 remain accepted. CORE-004 still requires corrections for
+CORE-006/007 and TEST-014; this revision proposes those corrections. **The new journal and
+authority contracts remain unimplemented.** No journal/C-7 implementation precedes the new
+independent verdict. CORE-005's Agent 2 dependency and production-consumer tests remain required.
 
 ## CORE-005: local historical-owner provenance
 
@@ -129,17 +131,18 @@ an exact re-report must obtain current/archived provenance again; if that histor
 over, it refuses as unavailable. The source's raw resolved-repair bytes cannot replace the
 missing attestation. This explicitly narrows revision 14's unconditional terminal-pair no-op
 claim (N31c). It avoids an unbounded completed-pair cache; a later reporter still faulted on
-such an old pair may remain unavailable. This liveness limit requires independent acceptance.
+such an old pair may remain unavailable. The independent review of `a751369` accepted this limit.
 
 ### Explicit liveness limits and tests
 
-This deliberately narrows revision 14's arbitrary-history admission. A newcomer that knew a
+This accepted bounded-design tradeoff narrows revision 14's arbitrary-history admission. A newcomer that knew a
 former owner only through Imported/proof-carried tenure cannot admit that owner's later report.
 Another positively observed retirement can evict eligibility for an **unadmitted** older pair.
 Unresolved admitted pairs do not expire or lose their attestations; completed pairs can be
 recycled as above. The old two-peer genesis/Welcome
 version of N17 is therefore no longer an unconditional convergence claim. No transferable MLS
-history protocol is claimed. These limits require the user's independent design disposition.
+history protocol is claimed. The review of `a751369` explicitly accepted these limits; they
+must remain visible in the eventual Gate 4 product/integration verdict.
 
 Required regressions (both Studio and Registry):
 
@@ -184,8 +187,9 @@ Only an effective decision that is the exact loser or a **provable differing-bas
 descendant may be replaced. Same-baseline unknown ancestry is not proof. A repair naming only
 historical high_water while a different canonical/pending choice stands is screening-only and
 leaves the journal unchanged. An unrelated higher same-baseline in_flight is likewise preserved;
-the journal does not install a competing reconciled value behind it. Source and journal planning
-must agree on this classification before B1, or return an explicit hold without mutation.
+the journal does not install a competing reconciled value behind it. Source and journal effects
+are planned independently and checked for **compatibility**, not classification equality, before
+B1 as specified below (CORE-006).
 
 For an exact/provable losing in_flight, retire its publication obligation. Before doing so, retain
 its full signed receipt **and its exact bound CloseRecord** in the candidate's provenance; that
@@ -194,6 +198,73 @@ decision. A missing, malformed, wrong-scope or wrong-hash close is a refusal, ne
 discard pending evidence. The API consequently also accepts the optional retiring pending close
 from the owner's already-validated record. It is forbidden to clear an obligation first and save
 its evidence in a later write.
+
+### CORE-006: compatible independent source and journal effects
+
+The joint planner produces two effects against one exact captured source/journal/custody state:
+
+```text
+SourceRepairEffect  = Transitioned | Retargeted | Screened   // existing C-2 disposition
+JournalRepairEffect = Replace | RetirePendingAndReplace | Normalize | NoChange
+```
+
+These are derived descriptions of complete private validated candidates, not caller-supplied
+authority. The source effect includes its exact planned book, gate, adoption state and required
+continuation. `Replace` installs an eligible canonical reconciliation; `RetirePendingAndReplace`
+also retires the exact/provable losing publication obligation with its bound close evidence.
+`Normalize` selects the already-published exact winner without a phantom unpublished head; any
+pending retirement still requires the same eligibility and full evidence. It cannot normalize
+away unrelated pending work. `NoChange` preserves every journal role and existing close binding.
+It does not skip current repair authority, full admitted evidence, sequence or transaction fences.
+
+Define `covered_R(receipt)` using the exact-loser/provable differing-baseline rule already used
+by `ReceiptBook::is_repaired_loser`, applied to this repair's complete verified pair. A higher
+epoch or absence of conflict alone proves no ancestry. Joint compatibility requires:
+
+1. Both candidates pass their own existing scope, authority, source-shape, sequence, journal-role,
+   nonterminal and recovery/evidence checks. Neither effect overrides the other's refusal.
+2. The resulting journal's effective publication choice, `in_flight.or(reconciled).or(high_water)`,
+   is absent or is not covered by R. An unrelated or positively preserved choice is legal; it
+   need not equal R's selected receipt or the source's resulting head. Historical high_water
+   behind that choice and retired pending receipts remain non-authorizing evidence.
+3. No covered source receipt remains eligible to prove, settle or install. Inspect the resulting
+   latest, opening, retained adoption target, gate receipt binding and planned install together.
+   This is an authority postcondition, not a ban on retaining evidence: an old opening/branch
+   awaiting repair recovery can remain only behind the existing adoption/continuation guards;
+   an unchanged unrelated Fault remains blocked; cross-tenure screening/unblocking cannot grant
+   old-tenure installation. Every retained covered anchor must have an explicit enforcing guard,
+   not merely an effect label. Full losing work and unrelated fault evidence remain preserved.
+4. Existing custody, exact-state and publication guards cover B1 through application. B1 saves
+   only the owner candidate; it does not pretend the projected source effect has crossed B2.
+   The pre-B2 target fence prevents the old source from bypassing the pending repair. B2 rechecks
+   the actual current state/authority and commits the compatible source candidate; a stale or
+   incompatible candidate holds rather than silently reclassifying a promised replacement.
+
+Thus the following asymmetric outcomes are permitted when those postconditions pass:
+
+| Source effect | Journal effect | Concrete reason |
+|---|---|---|
+| Transitioned (case 1a) | NoChange | Installed opening S wins `{S,L}`; positively justified sealing H remains source head and journal high_water **or** in_flight |
+| Screened (case 6b) | Replace / RetirePendingAndReplace | Source has no covered usable anchor; its separate journal has an effective losing choice |
+| Screened (case 6d) | A valid journal effect, including NoChange | Unrelated Fault(B) and its evidence remain unchanged and cannot serve/install through that fault |
+
+Other combinations are checked by the same postconditions; there is no equality requirement on
+the effect tags, nor an unconditional equality requirement on their resulting receipt hashes.
+If a postcondition fails, return a precise compatibility hold before B1 with no mutation. A
+journal `NoChange` still allows the repair record, admission binding and source transaction to
+be persisted and applied. It does not mean the whole repair is a no-op.
+
+The existing three-way proof check (held source receipt, head selector's chosen receipt and
+effective owner choice) is unchanged. The selector's chosen head is not necessarily the repair
+winner: case 1a can keep H in all three positions. Compatible differing heads may leave an ordinary
+head proof unavailable; this contract does not force convergence by weakening that check.
+Source guards are concrete: ordinary
+settlement requires Closing and non-adopting; adoption requires Closing, adopting, exact latest
+target and current-owner validation; successor commit rechecks the source version. Fault head/seed
+service refuses. C-3 prevents covered retained anchors from blocking later admission. During a
+retarget, the losing opening/log is recovery evidence only under the target claim and exact S
+install plan. Neither a disposition tag nor `install_pending` alone replaces that claim, especially
+before B2; restore and later source/callback writes must retain/recheck the derived durable fence.
 
 ### Bounded provenance and repeated repairs
 
@@ -253,14 +324,33 @@ authority/custody checks; removing already-terminal evidence is not a new public
 change must first complete required source recovery and cleanup before replacing the journal,
 so ordinary tenure reset cannot silently erase retired pending evidence.
 
-**Mid-replacement owner turnover is an explicit unresolved liveness limit.** If A departs after
-B2 but before selected-seed recovery/B6, A's old repair fails the mandatory live retry guard and
-a new repair cannot bypass the existing nonterminal fence. The proposed journal cannot discard
-that transaction to reset tenure. It holds durably with evidence retained; finalization is not
-claimed universally reachable. A recovery/cancellation transition would require a separate
-reviewed contract that preserves losing work and authority. Test this churn sequence, alongside
-the ordinary same-tenure path that fetches the seed, completes B6 and cleanup without any new
-publication. This proposal does not claim full Gate 4 liveness acceptance.
+**CORE-007: owner turnover can strand a transaction from B1 onward.** An owner change at any
+time **after B1 and before the repair transaction is durably terminal/recycled** may leave an
+indefinite durable hold. If A's pending repair was saved at B1 and ownership changes to B before
+B2, A's repair fails the mandatory live authority guard and B cannot replace it through the
+nonterminal fence. B1 may already have reconciled the journal or retired a pending obligation;
+the source is still pre-application. Owner rotation fences do not preserve A's MLS authority.
+
+After B2, the same authority/nonterminal conflict may additionally strand committed source
+transition, selected-seed, recovery or B6 work. In either interval, retain all source, journal,
+retired-close, pair/attestation and transaction evidence. Restart, ordinary tenure reset, proof
+service, publication completion and a new-owner retry cannot silently clear or bypass the hold.
+An old repair that lost live authority is not servable as a current repair. Already-terminal
+idempotent cleanup remains governed by its existing predicates; no new cancellation is inferred.
+
+The durable ownership predicate is the owner record's pending repair, **even when the journal
+effect was NoChange and no new journal provenance exists**. Every store path into ordinary
+journal prepare, newer-tenure reset and publication completion must check that record claim;
+the existing core journal's newer-tenure allowance cannot override it. Under unchanged current
+authority, the same transaction's valid continuation, B2/B3 serving and selected publication
+remain allowed by their existing rules. Exact completed publication retries may be inert. The
+fence blocks competing work and stale authority, not its own otherwise valid progress.
+
+This revision adopts the broader fail-closed limitation rather than adding cancellation. A
+recovery/cancellation transition would require a separate reviewed contract preserving losing
+work and authority. Finalization is not claimed universally reachable. The ordinary same-tenure
+path still fetches the seed, completes B6 and cleanup without a new publication. The expanded
+B1 boundary needs independent disposition; this is not full Gate 4 liveness acceptance.
 
 Required tests: winner before/equal/after old publication; two repairs without publication;
 historical-only repair screening; each pending classification; missing/wrong pending close;
@@ -269,7 +359,26 @@ same-published normalization; stale callbacks; publication followed by source-fi
 the reverse order; evidence-only hold rejects second publication but permits cleanup/retry;
 reserved-first seal and B1 crashes across archive turnover; interrupted B1; restart at every
 transition; next two receipts; v1 compatibility;
-malformed mixed group/key/start, role and selection. Assert source/journal agreement throughout.
+malformed mixed group/key/start, role and selection. Assert the joint compatibility postconditions
+throughout, not equality of independent effect tags.
+
+**TEST-014, required integrated regressions in both Studio and Registry (planned, not executed):**
+
+- Extend N3b with `{S,L} -> S`, installed opening S, fault `{S,L}` and positively justified
+  later sealing H. First journal H is high_water; then repeat with H in_flight. B1 succeeds with
+  `(Transitioned, NoChange)` and leaves journal bytes, H's role and close binding unchanged;
+  B2 leaves Fault with source H preserved. Crash/reopen around both barriers and prove no phantom
+  S publication or retirement of H. A mutation requiring equal effects must fail this positive.
+- Exercise the other asymmetry: an unrelated healthy source screens while the journal's effective
+  loser is replaced, with and without pending retirement. Covered usable anchors or a missing
+  retired close refuse before B1; unknown same-baseline H is not invented losing ancestry.
+- After a real B1 (reconciliation-only, retired-pending and journal NoChange variants), change the observed
+  MLS owner **before B2**, then crash/reopen. The old repair cannot apply, the new owner cannot
+  overwrite it, and the exact source/owner evidence remains durable. Proof, publication, ordinary
+  rotation and retries must not bypass the hold; before B2 the source remains pre-application.
+- Keep the distinct B2-to-B6 owner-churn case. Verify the already-committed source disposition
+  and losing recovery/continuation remain retained and truthfully held. Do not accept a test that
+  faults for an unrelated scope error or claims an unimplemented cancellation recovered progress.
 
 ## Proposed bounds and implementation gate
 
@@ -284,7 +393,7 @@ Update the sealed/pre-read/accounting caps together; maximal encodings and one-o
 must be exercised before any format implementation is accepted. These are proposed constants,
 not changes to today's smaller codecs or storage limits.
 
-Request independent adversarial review of these precise authority, lifecycle, boundedness and
-liveness contracts before implementing them. Agent 2 must agree the archived Observed witness
+Request independent adversarial re-review of CORE-006/007 and TEST-014 before implementing
+CORE-004/C-7. Preserve the accepted CORE-005 boundary. Agent 2 must agree the archived Observed witness
 and durable capability seam; Agent 4 owns shared snapshot/schema integration and documentation.
 The report admission/no-write tests remain mandatory production-consumer tests, not helper tests.
