@@ -2763,7 +2763,192 @@ mod tests {
 
         // An unbudgeted scan of the same vault must agree, or parking changed the answer.
         let direct = collect(&mut store).unwrap();
-        assert_eq!(direct.records().count(), 1);
+        assert_eq!(canonical(&direct), canonical(&inventory));
+    }
+
+    /// Every field a budgeted scan could have got wrong, canonicalised for comparison.
+    ///
+    /// Counting records was not equivalence. A detached install that preserved an entry but
+    /// zeroed its footprint, or attributed it to the wrong document, would have satisfied a
+    /// count comparison exactly - and this cursor's output authorises storage accounting, so
+    /// those are the fields that matter most.
+    fn canonical(inventory: &EpochStorageInventory) -> (Vec<String>, Vec<String>) {
+        let mut records: Vec<String> = inventory
+            .records()
+            .map(|entry| {
+                format!(
+                    "{:?}|{}|{:?}|{}|{}|{}|{}|{}|{}",
+                    entry.kind,
+                    entry.server,
+                    entry.document.doc_type,
+                    hex::encode(&entry.document.server_id),
+                    hex::encode(&entry.document.logical_key),
+                    hex::encode(entry.record.id),
+                    hex::encode(entry.record.document),
+                    entry.record.footprint.content,
+                    // Both remaining components, so a misclassified pool is visible.
+                    entry.record.footprint.protocol + entry.record.footprint.settlement * 1_000_000,
+                )
+            })
+            .collect();
+        let mut orphans: Vec<String> = inventory
+            .orphans()
+            .map(|orphan| format!("{:?}|{}|{}", orphan.kind(), orphan.name(), orphan.bytes()))
+            .collect();
+        records.sort();
+        orphans.sort();
+        (records, orphans)
+    }
+
+    /// The equivalence the previous version only claimed: a budgeted scan that parks and
+    /// detaches every record produces the *same inventory*, not merely the same number of them.
+    ///
+    /// Multi-record and multi-family, with orphans, so that attribution, per-pool footprints and
+    /// staging accounting are all in the comparison. The rails are exercised across a park too:
+    /// a record is parked, validated and installed before the limit is reached, so the refusal
+    /// happens on a cursor that has already been through the detached path once.
+    #[test]
+    fn a_budgeted_scan_produces_the_same_inventory_as_an_unbudgeted_one() {
+        let root = tempfile::tempdir().unwrap();
+        let mut store = open(root.path());
+        for (group, key) in [
+            (&b"group-a"[..], &b"one"[..]),
+            (&b"group-a"[..], &b"two"[..]),
+            (&b"group-b"[..], &b"three"[..]),
+        ] {
+            let doc = document(group, key);
+            stage(&mut store, 7, &doc, 1);
+            stage(&mut store, 8, &doc, 2);
+        }
+        // Staging siblings of a real destination, so attribution resolves.
+        let attributed = document(b"group-a", b"one");
+        let final_path = store.epoch_recovery_path(&scope_bytes(7, &attributed).unwrap());
+        for n in 0..3u64 {
+            fs::write(
+                staging_candidate_for_test(&final_path, 700 + n),
+                vec![7; 16],
+            )
+            .unwrap();
+        }
+
+        let clock = ManualClock::new(0);
+        let mut cursor = store
+            .begin_epoch_storage_scan(EpochInventoryCoverage::RecoveryOnly)
+            .unwrap();
+        let mut parked_bodies = 0;
+        loop {
+            let progress = store
+                .step_epoch_storage_scan(&mut cursor, ENTRIES_PER_STEP, Some((&clock, 250)))
+                .unwrap();
+            if let Some(parked) = store.take_parked_record(&mut cursor) {
+                parked_bodies += 1;
+                let validated = parked.validate().unwrap();
+                store
+                    .install_validated_record(&mut cursor, validated)
+                    .unwrap();
+                continue;
+            }
+            if progress.complete {
+                break;
+            }
+        }
+        assert_eq!(
+            parked_bodies, 6,
+            "every record should have been parked, so this exercises the detached path for all \
+             of them rather than one"
+        );
+        let budgeted = store.finish_epoch_storage_scan(cursor).unwrap();
+        let direct = collect(&mut store).unwrap();
+
+        let (budgeted_records, budgeted_orphans) = canonical(&budgeted);
+        let (direct_records, direct_orphans) = canonical(&direct);
+        assert_eq!(
+            budgeted_records, direct_records,
+            "parking changed a record's attribution or accounting"
+        );
+        assert_eq!(
+            budgeted_orphans, direct_orphans,
+            "parking changed staging attribution"
+        );
+        assert_eq!(budgeted_records.len(), 6);
+        assert_eq!(budgeted_orphans.len(), 3);
+
+        // Per-server composition, which is what a budget is actually built from.
+        for (server, group) in [(7, &b"group-a"[..]), (8, &b"group-b"[..])] {
+            assert_eq!(
+                budgeted.records_for_server(server, group).unwrap(),
+                direct.records_for_server(server, group).unwrap(),
+                "per-server composition differs for {server}",
+            );
+        }
+        // Authenticated bytes are accounted once, not twice, when a record is read then parked.
+        assert_eq!(
+            budgeted
+                .records()
+                .map(|e| e.record.footprint.total().unwrap())
+                .sum::<u64>(),
+            direct
+                .records()
+                .map(|e| e.record.footprint.total().unwrap())
+                .sum::<u64>(),
+        );
+    }
+
+    /// A rail violation still refuses on a cursor that has already parked and installed once.
+    ///
+    /// The existing cardinality and byte-rail tests run through the unbudgeted wrapper, so none
+    /// of them reaches a limit on a cursor that has been through the detached path. Parking
+    /// bypasses no bound is a claim about exactly that case.
+    #[test]
+    fn a_rail_violation_still_refuses_after_a_record_has_been_parked_and_installed() {
+        let root = tempfile::tempdir().unwrap();
+        let mut store = open(root.path());
+        for key in [&b"one"[..], &b"two"[..], &b"three"[..]] {
+            stage(&mut store, 7, &document(b"group", key), 1);
+        }
+        let clock = ManualClock::new(0);
+        let mut cursor = store
+            .begin_epoch_storage_scan(EpochInventoryCoverage::RecoveryOnly)
+            .unwrap();
+        // Room for one record only; the cursor must still refuse the second, after having gone
+        // through park, detached validation and install for the first.
+        cursor_record_limit(&mut cursor, 1);
+
+        let mut installed = 0;
+        let refused = loop {
+            match store.step_epoch_storage_scan(&mut cursor, ENTRIES_PER_STEP, Some((&clock, 250)))
+            {
+                Ok(progress) => {
+                    if let Some(parked) = store.take_parked_record(&mut cursor) {
+                        let validated = parked.validate().unwrap();
+                        match store.install_validated_record(&mut cursor, validated) {
+                            Ok(()) => installed += 1,
+                            Err(error) => break error,
+                        }
+                        continue;
+                    }
+                    assert!(!progress.complete, "the rail was never reached");
+                }
+                Err(error) => break error,
+            }
+        };
+        assert!(
+            installed >= 1,
+            "the cursor refused before installing anything, so the refusal did not happen after \
+             a detached round trip"
+        );
+        assert!(
+            refused.to_string().contains("record limit"),
+            "a parked-and-installed cursor bypassed its record rail: {refused}"
+        );
+        assert!(
+            store.finish_epoch_storage_scan(cursor).is_err(),
+            "a cursor that hit its rail still issued an inventory"
+        );
+    }
+
+    fn cursor_record_limit(cursor: &mut EpochStorageCursor, limit: usize) {
+        cursor.record_limit = limit;
     }
 
     /// A clock that advances a fixed amount on every read, so a deadline is crossed by
@@ -2903,6 +3088,37 @@ mod tests {
                 .step_epoch_storage_scan(&mut cursor, 1, Some((&clock, 250)))
                 .is_err(),
             "a refused install let the scan continue with its record still outstanding"
+        );
+
+        // Wrong mount: a result produced before a reopen, installed after one. The earlier
+        // version of this test discussed four bindings and exercised three; this is the fourth.
+        let root = tempfile::tempdir().unwrap();
+        let mut store = open(root.path());
+        stage(&mut store, 7, &doc, 1);
+        let (_stale_cursor, parked) = park(&mut store);
+        let validated = parked.validate().unwrap();
+        drop(store);
+        let mut store = open(root.path());
+        let (mut reopened, _) = park(&mut store);
+        let error = store
+            .install_validated_record(&mut reopened, validated)
+            .unwrap_err();
+        // The identity check fires first for a cursor from another mount, which is correct: it
+        // is also a different scan. Vary only the mount by keeping the identity.
+        assert!(
+            error.to_string().contains("different scan"),
+            "a validation from a previous mount was installed: {error}"
+        );
+        let (mut same_mount, parked) = park(&mut store);
+        let mut forged = parked.validate().unwrap();
+        forged.identity = cursor_identity(&same_mount);
+        forged.mount = std::sync::Arc::new(());
+        let error = store
+            .install_validated_record(&mut same_mount, forged)
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("different mount"),
+            "a validation carrying another mount's identity was installed: {error}"
         );
 
         // Overtaken while detached: the case the design expects to happen in normal running.

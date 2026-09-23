@@ -1483,7 +1483,7 @@ overstatement: rail filtering bounds the *scheduling* impact, not the *retained 
 | --- | --- |
 | Scan is an owned `EpochStorageCursor`, store borrowed per call | The property was previously inexpressible: the old scanner held `&mut ServerStore` for its whole life, so no write could land between its steps |
 | Invalidation refused before resuming **and** before issuing | Two mutations, each caught at its own assertion |
-| N17 per family, with the real writers | All six, plus same-size replacement and failed write; Studio carries the negative half (a budget mint must not invalidate) |
+| N17 with the real writers | **Five of the six families** - Recovery, OwnerReceipts, Intents, Registry, Studio - plus the cleanup unlink, which is an operation class and not the sixth family. **DraftArchive is not covered.** Also the unchanged exact-retry flush and a failed write; Studio carries the negative half (a budget mint must not invalidate) |
 | Validation extracted as a pure function | Purity is now a signature, not a claim: if it ever needs the store back, the compiler says so |
 | Parked body, detached validation, four rebinding checks | Cursor identity, mount, record id, generation |
 | `MAX_INVENTORY_RESTARTS` with `Unstable` | Mutation: removing the bound fails at "restarted more times than its budget allows" |
@@ -1519,9 +1519,17 @@ travels *alongside* it in the job enum, exactly as `OverlayPlan` and `OverlayAss
 do - no second pool, no capacity released when only the waiter is cancelled. The storage layer
 neither creates nor holds it. The requirement attaches to the runtime variant when it is added.
 
-Until that conversion lands, **the custody bound exists but does not yet apply in production**:
-every shipping caller passes no budget and therefore never parks. The machinery is proved; its
-adoption is not.
+Until that conversion lands, every shipping caller passes no budget and therefore never parks.
+
+The accurate statement of what the budget now does, which is narrower than "the custody bound
+exists": **fresh typed validation can be detached, and a supplied deadline stops further units
+of work from beginning.** A single filesystem operation is not preemptible through this API, so
+this is not a measured latency ceiling, and no production bounded-custody claim follows until
+those callers adopt the budgeted path.
+
+Also not established here: the parked plaintext's residency is not charged to section 13.4's
+retained-input sum, and no runtime variant yet demonstrates that a cancelled waiter does not
+release a still-running validation's reservation. Both are activation requirements.
 
 ## Requirement 3: COMPLETE
 
