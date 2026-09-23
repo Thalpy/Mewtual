@@ -816,6 +816,57 @@ fn release_refuses_an_archive_it_cannot_decode() {
     );
 }
 
+/// The payload's document claim, checked on the destructive path too.
+///
+/// This test exists because the mutation pass found the guard unanchored: deleting
+/// `archive.document() != document` from release failed nothing, since the content comparison
+/// happens to catch the cases the other tests build. It is reachable on its own, and the
+/// consequence is specific: an archive for B sealed into A's record would be released by a user
+/// who confirmed a release for A, destroying B's only preserved evidence while the dialog, the
+/// scope and the content all agreed.
+#[test]
+fn release_refuses_an_archive_naming_another_document() {
+    let root = tempfile::tempdir().unwrap();
+    let a = Fixture::new(true);
+    let b = Fixture::new(true);
+    assert_ne!(a.group.group_id(), b.group.group_id());
+    let mut store = open(root.path());
+
+    // A genuine archive for B, built in this vault.
+    let (close_b, basis_b) = closing(&b, &mut store);
+    frame_branch(&b, &mut store, &close_b, &basis_b);
+    let archive_b = archive_for(&b, &mut store);
+    let content_b = archive_b.content();
+
+    // Give A a branch of its own, then seal B's archive into A's record.
+    let (close_a, basis_a) = closing(&a, &mut store);
+    frame_branch(&a, &mut store, &close_a, &basis_a);
+    crate::store::epoch_draft_archive::write_draft_archive_for_test(
+        &store,
+        SERVER,
+        &a.logical,
+        &archive_b.encode().unwrap(),
+        &mut rng(),
+    )
+    .unwrap();
+
+    // Release A, naming the content that really is in A's record. Only the document claim is
+    // wrong, so nothing else in the function can catch this.
+    let refused = release(&a, &mut store, content_b);
+    assert!(
+        refused.is_err(),
+        "release must refuse an archive whose payload names another document"
+    );
+    let scope = crate::store::epoch_draft_archive::scope_bytes(SERVER, &a.logical).unwrap();
+    assert!(
+        store
+            .read_scoped_draft_archive_plain(&scope)
+            .unwrap()
+            .is_some(),
+        "a refused release must leave the misplaced archive in place: it is still B's evidence"
+    );
+}
+
 /// `verify_record` before the unlink. A budget that does not know the record must not be spent
 /// destroying it: the mismatch means this process's accounting and the disk disagree, and the
 /// safe response is to invalidate rather than to delete and hope.
