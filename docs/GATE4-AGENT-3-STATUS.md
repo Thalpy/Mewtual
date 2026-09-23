@@ -26,12 +26,14 @@ exposure, or Gate 4 acceptance. No current source can leave Fault through this c
 - C-8: only repair-bearing book versions 4/5 can derive identity from resolved evidence when
   there is no current head. Latest/tenure consistency, retained scope and legacy framing remain.
 - Eight new core regressions exercise these leaves. `scripts/check-agent3-core-mutations.py`
-  covers M5 plus isolated admission, two restart-anchor and headless-identity regressions,
-  with exact restoration and one passing control after every mutation.
+  covers eight mutations: M5; admission and both restart-anchor checks; exact-hash-only
+  narrowing of each of those three checks; and headless identity. Each mutation requires
+  exact restoration and a passing control. Descendants on the provably losing inheritance
+  baseline are exercised as both retained anchor kinds; unknown same-baseline ancestry
+  still cannot authorize rollback.
 
-**Verification at this entry:** workspace formatting and `git diff --check` pass. Compiled
-tests, mutations and required full suites are pending; no pass is inferred from static review.
-Other agents have active local Cargo tests, so Agent 3 has not started another local build.
+**Verification is recorded below.** Local compiled checks wait for the other agents' Cargo
+commands to finish; no separate large target directory or competing build is created.
 
 **Dependency refresh against the base:** Agent 1's `EpochMutation` capability exists in
 `store.rs`; all future repair writes must use it, including retry/sync and failed-I/O paths.
@@ -47,11 +49,55 @@ different Fault, consecutive unpublished reconciliations, and differing-baseline
 publication evidence. They are recorded in
 [the core follow-up review](GATE4-AGENT-3-CORE-REVIEW.md). Those transitions are not implemented
 by this checkpoint; the revision-14 PASS is not claimed to settle these newly demonstrated paths.
+The second design audit confirmed CORE-001/002 and the direct canonical-head correction in
+CORE-003, but found three remaining journal decisions in CORE-004. That document labels them
+explicit open questions, not an accepted or total contract.
+
+The read-only implementation review found no BLOCKER/HIGH/MEDIUM defect in the leaf checkpoint.
+Its one LOW gap (retained losing-baseline descendant tests) was fixed and statically re-reviewed,
+including the three added isolating mutations. The review executed no Cargo commands and does
+not replace the user's independent review or execution evidence.
 
 Proposed shared documentation/UI update for Agent 4: document the evidence-checking APIs and
 headless book restore as core prerequisites; keep the current unavailable-native-repair row
 unchanged. In particular, do not claim `Repairing`, an owner choice, recovery-before-replacement,
 or peer convergence from these unit tests.
+
+### Verification evidence, initial leaf checkpoint
+
+Draft PR: [#28](https://github.com/Thalpy/Mewtual/pull/28), base `gate4-agent1-runtime`,
+head `66933c96a27ab76bac48f9bf0f540a8317ea9158`. No merges or shared-ref changes were made.
+[Initial required CI](https://github.com/Thalpy/Mewtual/actions/runs/35802458116)
+checked out PR merge **`2e9721fa2d6072e2f42c8d69dec4ec39907d4d7c`** (desktop job checkout log).
+The subsequent test-only descendant expansion does not change production code, but still
+needs execution at its own head. Current observations:
+
+| Check | Result |
+|---|---|
+| Local `cargo fmt --all -- --check` and `git diff --check` | PASS, including descendant expansion |
+| Python script parse and unique anchors for all eight mutations | PASS; this is not mutation execution |
+| CI root formatting and strict Clippy, Linux and Windows | PASS on initial leaf checkpoint |
+| CI `cargo test --all --all-features`, Linux and Windows | Running at this entry; not yet a PASS |
+| CI `npm --prefix apps/desktop test` | PASS: 1,229 passed, zero failed |
+| CI frontend `check` and `build` | PASS: zero check errors/warnings; Vite build completed |
+| CI native `cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml` | Attempted; compilation blocked by existing unused-code diagnostics under `RUSTFLAGS=-D warnings`, before tests |
+| CI native `cargo check` | Not reached after native compilation failure |
+| CI ambient-dependency gate | Pending behind root suite at this entry |
+| CI `cargo deny check` | FAIL: existing `rustls 0.23.40`, `RUSTSEC-2026-0285`; bans/licenses/sources passed |
+| Agent 3 focused mutations | Prepared; not yet executed |
+
+Native diagnostics are `SourceFormat::as_mime` (`src/media_decode.rs:109`) and unused
+security-intent APIs/fields (`src/security_intent.rs`, including `PendingApproval` fields at
+line 155). Those files and both lockfiles are unchanged by Agent 3. The supply-chain log
+recommends rustls >=0.23.45. Agent 4 owns the dependency/native integration disposition;
+this checkpoint adds no advisory ignore, warning suppression or unfinished native registration.
+Failure logs: [native/frontend](https://github.com/Thalpy/Mewtual/actions/runs/35802458116/job/106995653398),
+[supply chain](https://github.com/Thalpy/Mewtual/actions/runs/35802458116/job/106995653449).
+
+No startup, frontend-flow or visual gate is claimed: these leaves change no setup, process,
+UI, send/friend flow or native command. Agent 4's proposed isolated repair-core workflow patch
+is [GATE4-AGENT-3-CI.patch](GATE4-AGENT-3-CI.patch). It is supplied for integration, not installed
+into the shared workflows and not evidence that its tests or mutations have run.
 
 ## Checkpoints
 

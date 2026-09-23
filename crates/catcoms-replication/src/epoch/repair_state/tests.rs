@@ -328,30 +328,42 @@ fn repair_headless_decode_keeps_scope_sequence_and_legacy_constraints() {
 fn repair_losing_adoption_anchors_do_not_recreate_a_resolved_fault() {
     for different_baseline in [false, true] {
         for retained_as_opening in [false, true] {
-            let mut f = Fixture::new(different_baseline);
-            f.apply();
-            // Both anchors are independently checked by admission and restart. Exercise each
-            // alone so exempting only the opening or only the previous target cannot pass.
-            let opening = retained_as_opening.then_some(&f.losing);
-            if !retained_as_opening {
-                f.book.previous_until_installed = Some(f.losing.clone());
+            for descendant in [false, true] {
+                // A same-baseline repair identifies only the exact loser: its subsequent
+                // ancestry is unknown. Different inheritance also proves its branch lost.
+                if descendant && !different_baseline {
+                    continue;
+                }
+                let mut f = Fixture::new(different_baseline);
+                f.apply();
+                // Both anchors are independently checked by admission and restart. Exercise each
+                // alone so exempting only the opening or only the previous target cannot pass.
+                let anchor = if descendant {
+                    f.sign(9, f.losing.inherited.clone(), 8)
+                } else {
+                    f.losing.clone()
+                };
+                let opening = retained_as_opening.then_some(&anchor);
+                if !retained_as_opening {
+                    f.book.previous_until_installed = Some(anchor.clone());
+                }
+                let gate = EpochGate::new(f.document.clone(), 43, 3, f.owner.device_id());
+                assert_eq!(
+                    f.book
+                        .ingest_adoption(f.selected.clone(), &f.group, 0, &gate, opening)
+                        .unwrap(),
+                    ReceiptIngest::Duplicate,
+                    "the retained loser must not re-fault the selected checkpoint"
+                );
+                assert_eq!(gate.phase(), EpochPhase::Closing);
+                assert!(!f.book.is_faulted());
+                let bytes = f.book.encode_adoption().unwrap();
+                let restored = ReceiptBook::decode_adoption(&bytes).unwrap();
+                restored
+                    .verify_adoption_state(&f.document, &gate.inner.lock().unwrap(), opening)
+                    .expect("a repaired losing anchor must remain restorable");
+                assert_eq!(restored.encode_adoption().unwrap(), bytes);
             }
-            let gate = EpochGate::new(f.document.clone(), 43, 3, f.owner.device_id());
-            assert_eq!(
-                f.book
-                    .ingest_adoption(f.selected.clone(), &f.group, 0, &gate, opening)
-                    .unwrap(),
-                ReceiptIngest::Duplicate,
-                "the retained loser must not re-fault the selected checkpoint"
-            );
-            assert_eq!(gate.phase(), EpochPhase::Closing);
-            assert!(!f.book.is_faulted());
-            let bytes = f.book.encode_adoption().unwrap();
-            let restored = ReceiptBook::decode_adoption(&bytes).unwrap();
-            restored
-                .verify_adoption_state(&f.document, &gate.inner.lock().unwrap(), opening)
-                .expect("a repaired losing anchor must remain restorable");
-            assert_eq!(restored.encode_adoption().unwrap(), bytes);
         }
     }
 }

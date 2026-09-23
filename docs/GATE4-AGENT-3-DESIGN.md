@@ -1,11 +1,15 @@
 # Gate 4 Agent 3: runtime signed fault repair
 
-Status: **revision 14, design PASS at `d48280012cc653b458b1e3ce00b49f6ae2f23c0e`. No production code
-is written.**
+Status: **revision 14, design PASS at `d48280012cc653b458b1e3ce00b49f6ae2f23c0e`. Independent
+core leaves C-3/C-4/C-8 and the C-5 sequence accessor implemented at `66933c9`; verification
+and implementation review remain separate.** Current evidence is in
+[Agent 3 status](GATE4-AGENT-3-STATUS.md).
 
-The bounded repair design is accepted. Implementation, integration, mutation execution, CI evidence,
-Agent 2's unimplemented tenure seam, Agent 1's remaining I-4 and C-3 work, and full Gate 4
-acceptance all remain separate and unaccepted. A design PASS is not permission to start Gate 5.
+The bounded repair design is the accepted baseline. The implementation audit found concrete
+contradictions in remaining C-1/C-2/C-7 transitions, recorded in
+[the core follow-up review](GATE4-AGENT-3-CORE-REVIEW.md). Those corrections are not yet
+accepted or implemented. Integration, mutation evidence, Agent 2's tenure seam, Agent 1's
+remaining runtime fences and full Gate 4 acceptance remain separate. Gate 5 stays closed.
 
 
 
@@ -685,7 +689,9 @@ Invariants, each with a mutant in 15.2:
 
 ## 5. Concrete APIs
 
-None of these exist. A proposed name is not an implementation.
+This section is the accepted revision-14 plan. As of the `66933c9` leaf checkpoint, C-3/C-4/C-8
+and C-5's sequence getter exist; the remaining proposed APIs do not. See current status and the
+core follow-up review above. A proposed name is not an implementation or runtime acceptance.
 
 ### 5.1 Core additions, `catcoms-replication`
 
@@ -3221,4 +3227,3 @@ No U-questions remain open.
 Return a design verdict for this bounded repair scope, or numbered findings with concrete failure
 paths and required corrections. Implementation, integration and full Gate 4 remain separate.
 ```
-

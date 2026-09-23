@@ -47,11 +47,12 @@ C-7 examines `in_flight` and `high_water` only. Publish R1, repair `{R1,R2}` to 
 R2 is published repair `{R2,R3}` to R3. The preferred decision is now `reconciled = R2`, but the
 stated implementation returns `Ok(false)` and continues selecting the repudiated R2.
 
-Proposed correction: include `reconciled` among decisions eligible for an exact named-loser
-replacement. Verify the live repair and its complete evidence against that retained loser and
-the supplied winner before mutating. A second reconciliation replaces the canonical decision
-atomically, never invents publication, and retains the existing source/owner-record sequence
-checks as prerequisites. This does not add an unbounded journal repair history.
+Proposed correction: include the **current canonical `reconciled` head** among decisions eligible
+for an exact named-loser replacement. Verify the live repair and its complete evidence against
+that retained loser and the supplied winner before mutating. A second reconciliation replaces
+that canonical decision atomically, never invents publication, and retains the existing
+source/owner-record sequence checks as prerequisites. This does not make historical publication
+evidence authoritative over an unrelated canonical head (see CORE-004).
 
 Required regression: two consecutive repairs without intermediate publication, restart, publish
 R3, restart, and prepare the next receipt. Test wrong evidence and unchanged state on refusal.
@@ -64,25 +65,47 @@ receipt's full `TenureSelection` (including inheritance) to equal the journal's 
 No one selection can describe both R and S in this valid repaired shape, so v2 as currently
 specified rejects its own admitted state.
 
-Proposed correction to the v2 contract: the journal selection follows the canonical head and
-any adjacent pending receipt. Historical `high_water` retained behind `reconciled` must match
-document, owner key and tenure identity/start, but may have a different inheritance selection.
-Its closed epoch must remain strictly below the reconciled decision, preserving C-7's ordering
-rule. `published()` continues to report only completed publication. On promotion/supersession,
-ordinary canonical adjacency resumes; v1 validation and encoding stay unchanged.
+**Open contract, not a complete proposed correction.** Separating canonical selection from
+historical publication is necessary, but a second static review demonstrated that merely allowing
+different inheritance while retaining C-7's numeric ordering is insufficient. Three decisions
+need an explicit design disposition before implementing this journal boundary:
 
-The mutation must preflight the complete resulting v2 shape before changing the journal. Shapes
-outside those invariants need an explicit refusal, not silently discarded publication evidence.
-Review must check interactions with an unrelated newer pending decision before this is implemented.
+1. **Cross-epoch rewind.** A valid differing-baseline pair may be L(5,A) versus S(2,B), while
+   the journal has published R(4,A) and pending L(5,A). The selected canonical epoch 2 is below
+   historical publication epoch 4. Requiring publication to precede the canonical head refuses
+   this valid choice indefinitely. The v2 representation and subsequent publication lifecycle
+   must support that repair or explicitly narrow supported repairs and acknowledge the liveness
+   limitation. Refusal alone cannot be described as completing B1.
+2. **Historical evidence is not canonical authority.** Start with published R(4,A), pending
+   L(5,A); repair {L(5,A), S(5,B)} selects S, retaining published R and reconciled S. A later
+   repair {R(4,A), T(4,C)} selecting T must not overwrite unrelated newer canonical S merely
+   because historical R is a named loser. The healthy source screens this repair and stays on
+   S; journal reconciliation must agree. The disposition must classify authoritative canonical
+   and pending decisions separately from evidence-only publication history. Here A/B/C can
+   be distinct inherited checkpoints at epochs 1/2/3 respectively, so every receipt shape is valid.
+3. **Pending descendants and stale completions.** With published L(4,A), pending N(5,A), a
+   repair {L(4,A), S(4,B)} selects a new baseline. Retaining N as publishable preserves a known
+   losing branch; silently deleting it loses an irrevocable decision outside the exact pair.
+   Specify bounded durable evidence and publication-obligation dispositions for an exact losing
+   pending decision, a provable losing-baseline descendant, and unrelated higher same-baseline
+   progress. A stale completion callback must not republish repudiated state. Blanket refusal
+   would be an explicit incomplete-liveness policy, not a total repair implementation.
 
-Required regression: N7/N28 for same and different inherited baselines, preserving the published
-receipt, round-tripping v2, completing the actual canonical publication, and issuing the next two
-receipts. Include malformed mixed document/owner/tenure and nonadjacent pending records.
+Any solution must preserve full document/owner/tenure binding, truthful `published()` results,
+bounded evidence, v1 compatibility, and atomic preflight before mutation. No journal format or
+runtime transition has been changed while these questions remain open.
+
+Required regressions: N7/N28 for same and different inherited baselines; winner before, equal
+to and after the historical publication epoch; the two consecutive-repair sequences in
+CORE-003 and item 2 above; all three pending classifications; restart before/after publication;
+stale callbacks; next two receipts; malformed mixed document/owner/tenure and nonadjacent
+pending records. Verify source and journal choose the same canonical head in each sequence.
 
 ## Review request
 
-Review these four corrections against revision 14 section 5.1 and the actual epoch, Studio and
-Registry admission/restart/journal code. Return an explicit bounded design verdict, especially
-on clearing rejected hashes and the precise v2 canonical-versus-publication invariant. This is
+Review CORE-001/002 and the bounded CORE-003 correction against revision 14 section 5.1 and
+the actual epoch, Studio and Registry admission/restart/journal code. Resolve the three explicit
+CORE-004 questions before accepting a complete journal contract. Return an explicit bounded
+design verdict, especially on clearing rejected hashes and canonical/publication precedence. This is
 not runtime repair acceptance, native registration, or full Gate 4 acceptance. C-1/C-2/C-5/C-6/C-7
 implementation remains pending this correction; independent C-3/C-4/C-8 verification continues.

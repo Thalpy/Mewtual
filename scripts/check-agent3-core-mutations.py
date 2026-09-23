@@ -46,6 +46,35 @@ MUTATIONS = [
         ANCHOR_TEST, "a repaired losing anchor must remain restorable",
     ),
     (
+        "C3-admission-descendant", "crates/catcoms-replication/src/epoch/adoption.rs",
+        "receipts_conflict(prior, &receipt) && !self.is_repaired_loser(prior)",
+        "receipts_conflict(prior, &receipt) && !self.resolved_repair.as_ref()"
+        ".is_some_and(|r| r.losing.hash() == prior.hash())", ANCHOR_TEST,
+        "the retained loser must not re-fault the selected checkpoint",
+    ),
+    (
+        "C3-previous-restart-descendant", "crates/catcoms-replication/src/epoch/adoption.rs",
+        "self.previous_until_installed.as_ref().is_none_or(|prior| {\n"
+        "                        prior.tenure_id != latest.tenure_id\n"
+        "                            || self.is_repaired_loser(prior)",
+        "self.previous_until_installed.as_ref().is_none_or(|prior| {\n"
+        "                        prior.tenure_id != latest.tenure_id\n"
+        "                            || self.resolved_repair.as_ref()"
+        ".is_some_and(|r| r.losing.hash() == prior.hash())",
+        ANCHOR_TEST, "a repaired losing anchor must remain restorable",
+    ),
+    (
+        "C3-opening-restart-descendant", "crates/catcoms-replication/src/epoch/adoption.rs",
+        "opening.is_none_or(|prior| {\n"
+        "                        prior.tenure_id != latest.tenure_id\n"
+        "                            || self.is_repaired_loser(prior)",
+        "opening.is_none_or(|prior| {\n"
+        "                        prior.tenure_id != latest.tenure_id\n"
+        "                            || self.resolved_repair.as_ref()"
+        ".is_some_and(|r| r.losing.hash() == prior.hash())",
+        ANCHOR_TEST, "a repaired losing anchor must remain restorable",
+    ),
+    (
         "C8-headless-identity", "crates/catcoms-replication/src/epoch.rs",
         ".map(|receipt| receipt.document.clone())\n"
         "            .or_else(|| resolved_repair.as_ref().map(|r| r.repair.document.clone()))",
