@@ -631,6 +631,377 @@ fn draft_archive_of_a_frame_branch_round_trips_through_real_storage() {
     assert_eq!(read.encode().unwrap(), bytes);
 }
 
+/// Release one archive through the production path, with a freshly reconciled budget.
+fn release(f: &Fixture, store: &mut ServerStore, expected: [u8; 32]) -> Result<(), AppError> {
+    let mut b = budget(store, f);
+    store.release_studio_draft_archive_with_io(
+        SERVER,
+        &f.logical,
+        expected,
+        &mut b.storage,
+        &mut b.intents,
+        &mut WriteHooks::None,
+    )
+}
+
+/// The mirror of N19, and the test that makes release *mean* something.
+///
+/// N19 proves the archive is the sole thing keeping a disposed branch's pixels alive. On its own
+/// that is only half a guarantee: a release that unlinked nothing, or that left a record the
+/// scanner still read, would pass every other test in this module, because they all assert the
+/// archive is present or is refused. Here the same vault is driven all the way round: the pixels
+/// are pinned *because* of the archive, and reclaimable again *because* it was released, with
+/// nothing else in the vault changing between the two observations.
+///
+/// This is also the only test that proves release reaches the scanner at all rather than merely
+/// returning `Ok`.
+#[test]
+fn releasing_an_archive_makes_its_sole_references_reclaimable() {
+    let root = tempfile::tempdir().unwrap();
+    let f = Fixture::new(true);
+    let mut store = open(root.path());
+    let (close, basis) = closing(&f, &mut store);
+    let operation_cids = frame_branch(&f, &mut store, &close, &basis);
+
+    let archive = archive_for(&f, &mut store);
+    let content = archive.content();
+    let state = store.load_epoch_intents(SERVER, &f.logical).unwrap();
+    let base_cids = state.overlay().unwrap().base_blob_cids().unwrap();
+    drop(state);
+
+    // Strip every other namer, exactly as N19 does, so the archive is the sole holder.
+    let intent_scope = crate::store::epoch_intents::scope_bytes(SERVER, &f.logical).unwrap();
+    fs::remove_file(store.epoch_intent_path(&intent_scope)).unwrap();
+    fs::remove_file(f.path(&store)).unwrap();
+
+    let mut b = budget(&mut store, &f);
+    store
+        .write_studio_draft_archive_with_io(
+            SERVER,
+            &f.logical,
+            &archive,
+            &mut rng(),
+            &mut b.storage,
+            &mut b.intents,
+            &mut WriteHooks::None,
+        )
+        .expect("the archive must persist");
+    drop(b);
+    drop(store);
+
+    let pinned = |pins: &crate::store::CreativeReferences, cid: &[u8; 32]| {
+        pins.for_group(&f.group.group_id())
+            .any(|held| *held == catcoms_storage::Cid::from_bytes(*cid))
+    };
+
+    // Held, on the strength of the archive alone.
+    let mut store = open(root.path());
+    let pins = store.creative_pinned_cids().unwrap();
+    for cid in operation_cids.iter().chain(base_cids.iter()) {
+        assert!(
+            pinned(&pins, cid),
+            "precondition broken: {cid:?} must be pinned by the archive before release"
+        );
+    }
+    drop(pins);
+
+    release(&f, &mut store, content).expect("release must succeed");
+
+    let scope = crate::store::epoch_draft_archive::scope_bytes(SERVER, &f.logical).unwrap();
+    assert!(
+        store
+            .read_scoped_draft_archive_plain(&scope)
+            .unwrap()
+            .is_none(),
+        "release must remove the record"
+    );
+
+    drop(store);
+    let mut store = open(root.path());
+    let pins = store.creative_pinned_cids().unwrap();
+    for cid in operation_cids.iter().chain(base_cids.iter()) {
+        assert!(
+            !pinned(&pins, cid),
+            "{cid:?} is still pinned after its only holder was released, so the scan is reading \
+             a record release was supposed to have destroyed"
+        );
+    }
+}
+
+/// The content binding. A confirmation literal proves the user typed something; it cannot prove
+/// they typed it about the archive that is on disk now. Between the read that populated the
+/// dialog and the release, the archive can have been replaced, and destroying the replacement
+/// would be destroying evidence nobody agreed to destroy.
+#[test]
+fn release_refuses_an_archive_other_than_the_one_it_names() {
+    let root = tempfile::tempdir().unwrap();
+    let f = Fixture::new(true);
+    let mut store = open(root.path());
+    let (close, basis) = closing(&f, &mut store);
+    frame_branch(&f, &mut store, &close, &basis);
+    let archive = preserve(&f, &mut store).expect("preserve");
+
+    let mut wrong = archive.content();
+    wrong[0] ^= 0xff;
+    let refused = release(&f, &mut store, wrong);
+    assert!(
+        refused.is_err(),
+        "release must refuse a content it was not asked to destroy"
+    );
+
+    let scope = crate::store::epoch_draft_archive::scope_bytes(SERVER, &f.logical).unwrap();
+    assert!(
+        store
+            .read_scoped_draft_archive_plain(&scope)
+            .unwrap()
+            .is_some(),
+        "a refused release must leave the archive intact"
+    );
+    // And the correct content still releases it, so the refusal was about identity and not a
+    // blanket failure that would make this test pass for the wrong reason.
+    release(&f, &mut store, archive.content()).expect("the named archive must release");
+    assert!(store
+        .read_scoped_draft_archive_plain(&scope)
+        .unwrap()
+        .is_none());
+}
+
+#[test]
+fn release_refuses_when_no_archive_is_preserved() {
+    let root = tempfile::tempdir().unwrap();
+    let f = Fixture::new(true);
+    let mut store = open(root.path());
+    let (close, basis) = closing(&f, &mut store);
+    frame_branch(&f, &mut store, &close, &basis);
+
+    // Reporting success here would report the same thing whether the archive was already gone or
+    // the scope was computed wrongly, and the second destroys the wrong evidence elsewhere.
+    assert!(
+        release(&f, &mut store, [0; 32]).is_err(),
+        "release must not report success when it found nothing"
+    );
+}
+
+/// Fail-closed on the way out as well as on the way in. An archive this build cannot parse is
+/// refused rather than unlinked on the strength of its filename: the destructive path is the last
+/// place to start trusting a record the reading path refuses.
+#[test]
+fn release_refuses_an_archive_it_cannot_decode() {
+    let root = tempfile::tempdir().unwrap();
+    let f = Fixture::new(true);
+    let mut store = open(root.path());
+    let (close, basis) = closing(&f, &mut store);
+    frame_branch(&f, &mut store, &close, &basis);
+
+    crate::store::epoch_draft_archive::write_draft_archive_for_test(
+        &store,
+        SERVER,
+        &f.logical,
+        b"not a draft archive payload",
+        &mut rng(),
+    )
+    .unwrap();
+
+    assert!(
+        release(&f, &mut store, [0; 32]).is_err(),
+        "release must refuse an undecodable archive rather than unlink it"
+    );
+    let scope = crate::store::epoch_draft_archive::scope_bytes(SERVER, &f.logical).unwrap();
+    assert!(
+        store
+            .read_scoped_draft_archive_plain(&scope)
+            .unwrap()
+            .is_some(),
+        "a refused release must leave even an unreadable record in place for diagnosis"
+    );
+}
+
+/// `verify_record` before the unlink. A budget that does not know the record must not be spent
+/// destroying it: the mismatch means this process's accounting and the disk disagree, and the
+/// safe response is to invalidate rather than to delete and hope.
+#[test]
+fn release_refuses_a_record_its_budget_does_not_know() {
+    let root = tempfile::tempdir().unwrap();
+    let f = Fixture::new(true);
+    let mut store = open(root.path());
+    let (close, basis) = closing(&f, &mut store);
+    frame_branch(&f, &mut store, &close, &basis);
+
+    // Build the budget FIRST, so it is reconciled against a vault with no archive.
+    let mut b = budget(&mut store, &f);
+
+    // Then place a genuine, decodable archive behind its back, bypassing accounting.
+    let archive = archive_for(&f, &mut store);
+    let content = archive.content();
+    crate::store::epoch_draft_archive::write_draft_archive_for_test(
+        &store,
+        SERVER,
+        &f.logical,
+        &archive.encode().unwrap(),
+        &mut rng(),
+    )
+    .unwrap();
+
+    let refused = store.release_studio_draft_archive_with_io(
+        SERVER,
+        &f.logical,
+        content,
+        &mut b.storage,
+        &mut b.intents,
+        &mut WriteHooks::None,
+    );
+    assert!(
+        refused.is_err(),
+        "release must refuse when its budget never accounted the record it is destroying"
+    );
+    let scope = crate::store::epoch_draft_archive::scope_bytes(SERVER, &f.logical).unwrap();
+    assert!(
+        store
+            .read_scoped_draft_archive_plain(&scope)
+            .unwrap()
+            .is_some(),
+        "a release refused on accounting must not have unlinked anything"
+    );
+}
+
+/// Release is the one operation in this family that cannot be expressed as a replacement, so it
+/// ends with both budgets closed. Proving that matters because the alternative, subtracting the
+/// freed bytes by hand, is a second representation of occupancy maintained beside the inventory's
+/// and drifting the first time a subtraction is wrong.
+#[test]
+fn release_closes_both_budgets_so_the_next_write_must_reconcile() {
+    let root = tempfile::tempdir().unwrap();
+    let f = Fixture::new(true);
+    let mut store = open(root.path());
+    let (close, basis) = closing(&f, &mut store);
+    frame_branch(&f, &mut store, &close, &basis);
+    let archive = preserve(&f, &mut store).expect("preserve");
+
+    let mut b = budget(&mut store, &f);
+    store
+        .release_studio_draft_archive_with_io(
+            SERVER,
+            &f.logical,
+            archive.content(),
+            &mut b.storage,
+            &mut b.intents,
+            &mut WriteHooks::None,
+        )
+        .expect("release must succeed");
+
+    assert!(
+        b.storage.requires_reconciliation(),
+        "the storage budget still believes it accounts a record that no longer exists"
+    );
+    // The intent budget was poisoned before the unlink and never restored, so it cannot authorise
+    // a further write either.
+    let again = store.write_studio_draft_archive_with_io(
+        SERVER,
+        &f.logical,
+        &archive,
+        &mut rng(),
+        &mut b.storage,
+        &mut b.intents,
+        &mut WriteHooks::None,
+    );
+    assert!(
+        again.is_err(),
+        "a budget carried across a release must not authorise the next archive write"
+    );
+    drop(b);
+
+    // A reconciled budget writes again normally: the closure is a fail-closed step, not damage.
+    preserve(&f, &mut store).expect("a rebuilt budget must be able to preserve again");
+}
+
+/// Requirement 3 for the destructive path: the store owns the unlink, and a hook decides only on
+/// either side of it.
+///
+/// The asymmetry is the point. Refusing before leaves the archive whole. Refusing after cannot
+/// put it back, and the test says so explicitly rather than leaving a reader to assume a failed
+/// call means an unchanged vault: for a destructive operation that assumption is exactly wrong,
+/// and a caller that retried on error expecting idempotence would be surprised by the refusal
+/// from the now-absent record instead.
+#[test]
+fn release_consults_hooks_on_both_sides_of_its_unlink() {
+    let root = tempfile::tempdir().unwrap();
+    let f = Fixture::new(true);
+    let mut store = open(root.path());
+    let (close, basis) = closing(&f, &mut store);
+    frame_branch(&f, &mut store, &close, &basis);
+    let archive = preserve(&f, &mut store).expect("preserve");
+    let scope = crate::store::epoch_draft_archive::scope_bytes(SERVER, &f.logical).unwrap();
+
+    // Refusing before the unlink leaves the record exactly where it was.
+    let mut tags = Vec::new();
+    {
+        let mut before_unlink = |tag: WriteTag, _p: &std::path::Path| {
+            tags.push(tag);
+            AfterIntercept::Fail(AppError::Io("injected refusal before the unlink".into()))
+        };
+        let mut hooks = WriteHooks::Hooked {
+            before: None,
+            before_sync: None,
+            before_unlink: Some(&mut before_unlink),
+            after: None,
+        };
+        let mut b = budget(&mut store, &f);
+        let refused = store.release_studio_draft_archive_with_io(
+            SERVER,
+            &f.logical,
+            archive.content(),
+            &mut b.storage,
+            &mut b.intents,
+            &mut hooks,
+        );
+        assert!(refused.is_err(), "a refusal before the unlink must fail");
+    }
+    assert_eq!(
+        tags,
+        vec![WriteTag::Archive],
+        "the release must carry the archive tag"
+    );
+    assert!(
+        store
+            .read_scoped_draft_archive_plain(&scope)
+            .unwrap()
+            .is_some(),
+        "a release refused before the unlink must leave the archive intact"
+    );
+
+    // Refusing after it still fails the call, and the archive is gone: the operation completed.
+    {
+        let mut after = |op: CompletedOperation, tag: WriteTag, _p: &std::path::Path| {
+            assert_eq!(tag, WriteTag::Archive);
+            assert_eq!(op, CompletedOperation::Unlink, "release removes");
+            AfterIntercept::Fail(AppError::Io("injected failure after the unlink".into()))
+        };
+        let mut hooks = WriteHooks::Hooked {
+            before: None,
+            before_sync: None,
+            before_unlink: None,
+            after: Some(&mut after),
+        };
+        let mut b = budget(&mut store, &f);
+        let refused = store.release_studio_draft_archive_with_io(
+            SERVER,
+            &f.logical,
+            archive.content(),
+            &mut b.storage,
+            &mut b.intents,
+            &mut hooks,
+        );
+        assert!(refused.is_err(), "a failure after the unlink must fail");
+    }
+    assert!(
+        store
+            .read_scoped_draft_archive_plain(&scope)
+            .unwrap()
+            .is_none(),
+        "the unlink had already happened: a failure after it cannot restore the archive"
+    );
+}
+
 /// Requirement 3 for this path: the caller decides *around* the physical operation, it does not
 /// supply one. Both the replacement and the exact-retry sync are the store's own, and a hook can
 /// only refuse on either side of them.
