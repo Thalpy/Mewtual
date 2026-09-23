@@ -285,10 +285,10 @@ impl OwnerReceiptJournal {
             .high_water
             .as_ref()
             .is_some_and(|r| r.hash() == receipt_hash)
-            && !self
+            && self
                 .in_flight
                 .as_ref()
-                .is_some_and(|r| r.hash() == receipt_hash)
+                .is_none_or(|r| r.hash() != receipt_hash)
         {
             // A repaired baseline can later reselect the exact historical publication as an
             // adjacent pending decision. That active obligation must complete below; only a

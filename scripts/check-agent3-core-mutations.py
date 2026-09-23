@@ -17,10 +17,10 @@ ANCHOR_TEST = "repair_losing_adoption_anchors_do_not_recreate_a_resolved_fault"
 MUTATIONS = [
     (
         "C7-active-historical-publication", "crates/catcoms-replication/src/epoch/owner_journal.rs",
-        "            && !self\n"
+        "            && self\n"
         "                .in_flight\n"
         "                .as_ref()\n"
-        "                .is_some_and(|r| r.hash() == receipt_hash)\n", "",
+        "                .is_none_or(|r| r.hash() != receipt_hash)\n", "",
         "epoch::owner_journal::tests::reselected_historical_publication_completes_its_new_pending_obligation",
         "active reselected publication must complete even when its hash equals historical high-water",
     ),
