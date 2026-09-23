@@ -311,7 +311,7 @@ impl ServerStore {
     /// store cannot distinguish "this archive was already released" from "the caller addressed a
     /// scope that never held one", and collapsing those would be the bug. A caller that receives
     /// [`AppError::CommittedButNotDurable`] must reconcile and re-read the archive state, not
-    /// resend the request. Design section 16.2 records this exemption.
+    /// resend the request. Design section 12.1 records this exemption.
     #[cfg_attr(
         not(test),
         expect(

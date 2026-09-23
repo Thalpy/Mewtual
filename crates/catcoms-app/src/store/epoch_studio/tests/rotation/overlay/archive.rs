@@ -1177,6 +1177,104 @@ fn a_budget_release_never_touched_is_also_refused_afterwards() {
     );
 }
 
+/// The `intent_generation` rotation, isolated at last.
+///
+/// The two tests above cannot do this, and the previous review round was right that I gave up on
+/// it too early. Their probes write a record whose map entry the release changed, so
+/// `preflight`'s `records.get(&id) != old` refuses before the generation is ever compared, and
+/// deleting the rotation leaves them green.
+///
+/// The fix is a **different document in the same group**. A's release does not touch B's intent
+/// record, so B's map entry still matches disk and the record check passes. The rotation is then
+/// the only fence left, which is exactly the production-reachable hazard: an `EpochStudioBudget`
+/// is per `(server, group)`, a group holds many documents, and a budget captured before a release
+/// on A would otherwise go on spending stale vault accounting on B.
+///
+/// The control at the end is what makes the refusal attributable. Without it, a refusal for an
+/// unrelated reason - a malformed operation, a document the group will not accept - would satisfy
+/// the assertion and prove nothing.
+#[test]
+fn a_stale_intent_budget_cannot_write_another_document_after_a_release() {
+    let root = tempfile::tempdir().unwrap();
+    let f = Fixture::new(true);
+    let mut store = open(root.path());
+    let (close, basis) = closing(&f, &mut store);
+    frame_branch(&f, &mut store, &close, &basis);
+    let archive = preserve(&f, &mut store).expect("preserve");
+
+    // Second document, same group, untouched by the release below.
+    let other_target = StudioTarget::Flipnote {
+        channel: [7; 16],
+        object: [10; 16],
+    };
+    let other = other_target.document(&f.group.group_id()).unwrap();
+    assert_ne!(
+        other.logical_key, f.logical.logical_key,
+        "the probe must address a different document, or its record entry moves with the release"
+    );
+    let operation = |n: u8| DomainOp {
+        nonce: [n; 16],
+        doc_type: other.doc_type,
+        logical_key: other.logical_key.clone(),
+        body: FlipnoteOp::SetHeader(FlipnoteHeader::Title("bystander".into()))
+            .encode()
+            .unwrap(),
+    };
+
+    // Captured before the release, and never handed to it.
+    let bystander = budget(&mut store, &f);
+
+    let mut b = budget(&mut store, &f);
+    store
+        .release_studio_draft_archive_with_io(
+            SERVER,
+            &f.logical,
+            archive.archive_id().unwrap(),
+            &mut b.storage,
+            &mut b.intents,
+            &mut WriteHooks::None,
+        )
+        .expect("release must succeed");
+    drop(b);
+
+    // Fresh storage so it cannot be the refusing party; stale intents whose record map for B is
+    // still correct, so the map cannot be the refusing party either.
+    let mut fresh = budget(&mut store, &f);
+    let mut stale = bystander.intents;
+    let refused = store.prepare_epoch_intent(
+        SERVER,
+        &other,
+        operation(0x41),
+        &f.device,
+        &f.group,
+        &mut rng(),
+        &mut fresh.storage,
+        &mut stale,
+    );
+    assert!(
+        refused.is_err(),
+        "an intent budget captured before a release went on to authorise a write to another \
+         document in the same group, spending vault accounting that the release invalidated"
+    );
+
+    // Control: the same write with budgets rebuilt after the release must succeed, so the refusal
+    // above is attributable to the stale budget and not to the document, the operation or the
+    // group.
+    let mut good = budget(&mut store, &f);
+    store
+        .prepare_epoch_intent(
+            SERVER,
+            &other,
+            operation(0x42),
+            &f.device,
+            &f.group,
+            &mut rng(),
+            &mut good.storage,
+            &mut good.intents,
+        )
+        .expect("a reconciled budget must be able to write this very document");
+}
+
 /// Finding 2: the closure must hold across the failure that actually returns early.
 ///
 /// A successful `remove_file` followed by a failed parent sync returns

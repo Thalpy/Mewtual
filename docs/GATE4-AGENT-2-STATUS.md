@@ -469,32 +469,40 @@ operation whose purpose is to remove records. The exemption also lives in the fu
 comment, because a rule that lives only in a design document is one the next caller's author will
 not read.
 
-**Medium: the invalidation rails were not independently anchored.** Partly fixed, and **partly a
-negative result that must not be dressed up as a fix**:
+**Medium: the invalidation rails were not independently anchored.** Now closed, in two rounds.
 
 | Rail | State |
 |---|---|
 | storage-budget closure across a destructive failure | anchored, mutation 10 |
 | `inventory_generation` rotation | anchored, mutation 13 |
 | over-cap release remediation | anchored, mutation 14 |
-| `intents.begin_write()` | **NOT anchored** |
-| `intent_generation` rotation | **NOT anchored** |
+| `intent_generation` rotation | anchored, mutation 12b |
+| `intents.begin_write()` | redundant hardening, deliberately unanchored |
 
-Mutations 11 and 12 removed each intent rail and **failed nothing**. Mutation 13b removed **both**
-and still failed nothing. The reason is that every probe available at this seam writes a record
-whose map entry the release changed, so `preflight`'s `records.get(&id) != old` check refuses
-first and hides both rails behind it.
+The first attempt failed and the failure is worth keeping. Mutations 11 and 12 removed each intent
+rail and **failed nothing**; removing **both** still failed nothing. Every probe I had written
+wrote a record whose map entry the release had changed, so `preflight`'s
+`records.get(&id) != old` refused before the generation was ever compared and hid both rails
+behind it. Two tests that claimed to isolate the rails were renamed to say what they actually
+prove.
 
-My first attempt at this finding claimed two tests isolated these rails. It did not, and the
-tests were renamed to say what they actually prove: that a budget carried across a release cannot
-authorise the next write, and that the damage is not confined to the budget release was handed.
+I then recorded the rotation as test debt for the disposal slice, on the grounds that isolating it
+needed a multi-document fixture this module lacked. **The re-review disagreed and was right.** No
+second Studio source is needed: a second logical document in the same group plus the ordinary
+`prepare_epoch_intent` path is enough, because A's release does not touch B's intent record, so
+B's map entry still matches disk and the rotation is the only remaining fence. That is
+`a_stale_intent_budget_cannot_write_another_document_after_a_release`, and deleting the rotation
+now fails it and only it.
 
-The rails are **not** dead code. They cover a write to a *different document in the same group*,
-whose map entry the release did not disturb - reachable in production, because an
-`EpochStudioBudget` is per `(server, group)` and a group holds many documents. Building that probe
-needs two documents under one group, which this fixture cannot do cheaply. **Recorded as test debt
-for the disposal slice**, where a multi-document fixture exists anyway. Until then the two rails
-are retained, consistent with `write_prepared_intents`' discipline, and honestly unproved.
+The lesson is the one worth carrying: "this needs an expensive fixture" was an assumption about
+the *probe*, not a fact about the code, and it went unchallenged because the honest negative
+result felt like enough diligence on its own. Documenting a gap is not the same as establishing
+that the gap is hard to close.
+
+`intents.begin_write()` remains deliberately unanchored. With the rotation in place no stale
+intent budget can preflight, so a surviving mutation there implies no safety regression. It is
+kept as redundant hardening, consistent with `write_prepared_intents`' discipline, and the
+re-review explicitly did not require an anchor for it.
 
 The mutations ran against a private `CARGO_TARGET_DIR` (`M:/catcoms-agent2-target`): the shared
 workspace target is contended by the other agents' test binaries, whose long runs hold
