@@ -453,11 +453,16 @@ The design is accepted; implementation has not started. Before it does:
    proof.
 4. **Branch placement: settled.** Everything stays on `gate4-agent1-runtime` for now, by the user's
    decision. Agent 4 may still relocate these documents at integration.
-5. **Two seam artefacts retire with this design's implementation.** Agent 1's M19 is superseded by
-   M28 when the collector lands, with a different assertion; and `write_draft_archive_for_test`, the
-   `cfg(test)` hand-sealer that exists only because the family has no writer, is deleted when
-   `write_studio_draft_archive_with_io` lands, with the seam's regressions repointed at the real
-   writer.
+5. **CORRECTED, and this entry is the example R-1 exists to prevent.** This item used to claim two
+   seam artefacts retire with this design's implementation: that M19 is superseded by M28 when the
+   collector lands, and that `write_draft_archive_for_test` is deleted when
+   `write_studio_draft_archive_with_io` lands. **Both claims were wrong, and design rule R-1 was
+   written because of them.** Each reasoned from *implementation succession* while the artefact
+   also provided *unique state reachability*: M19 asserts a property M28 does not, and the
+   `cfg(test)` hand-sealer is the only way to reach a malformed-archive state the real writer
+   cannot produce, so it is retained as **fault injection** with its doc-comment rewritten to say
+   so. Neither is retired. Before any future entry in this document says "X retires when Y lands",
+   it must answer R-1's five questions first.
 6. The shared central edits listed above stay coordinated with Agent 4: the control and dispatch
    enums, `StudioSettlementState`, the inventory family and the `catcoms-mls` receive rule.
 
