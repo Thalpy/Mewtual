@@ -1,0 +1,43 @@
+name: Agent 3 repair core
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/agent3-repair-core.yml'
+      - 'scripts/check-agent3-core-mutations.py'
+      - 'crates/catcoms-replication/**'
+      - 'crates/catcoms-mls/**'
+      - 'crates/catcoms-crypto/**'
+      - 'Cargo.lock'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  repair-core:
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Record actual checkout
+        run: git rev-parse HEAD
+      - uses: dtolnay/rust-toolchain@1.89.0
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Test complete replication library
+        run: cargo test --locked -j 1 -p catcoms-replication --lib
+      - name: Verify repair mutations and exact restored controls
+        run: python scripts/check-agent3-core-mutations.py
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: agent3-core-mutations-${{ matrix.os }}
+          path: logs/agent3-core-mutations/
+          if-no-files-found: error

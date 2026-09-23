@@ -95,9 +95,25 @@ Failure logs: [native/frontend](https://github.com/Thalpy/Mewtual/actions/runs/3
 [supply chain](https://github.com/Thalpy/Mewtual/actions/runs/35802458116/job/106995653449).
 
 No startup, frontend-flow or visual gate is claimed: these leaves change no setup, process,
-UI, send/friend flow or native command. Agent 4's proposed isolated repair-core workflow patch
-is [GATE4-AGENT-3-CI.patch](GATE4-AGENT-3-CI.patch). It is supplied for integration, not installed
-into the shared workflows and not evidence that its tests or mutations have run.
+UI, send/friend flow or native command. The separate
+`.github/workflows/agent3-repair-core.yml` is branch-local verification wiring, added in its own
+identifiable commit so the complete replication suite and eight mutations can execute without
+waiting on the shared local build target. It changes no existing common workflow. Agent 4 owns
+integration and required-check configuration; the exact patch is also supplied as
+[GATE4-AGENT-3-CI.patch](GATE4-AGENT-3-CI.patch). Its presence is not execution evidence.
+
+**Local focused execution at `703c84d86dab41c3dc4e885835ad3eb1300bffd5`:**
+`cargo test --locked -j 1 -p catcoms-replication --lib epoch::repair_state::tests::` passed:
+17 passed, zero failed/ignored (includes the eight new regressions). It started only after
+the other agents' Cargo work became idle and reused the existing target directory.
+The eight-mutation local runner is separately queued behind their next full app suite.
+
+The local ambient-dependency script was also executed and **failed** on seven existing calls:
+`Instant::now` in native `media_decode.rs` lines 333/426/444/504, and `tokio::time::sleep` in
+`studio/receiver/catchup/tests.rs:1848`, `studio_exchange/tests/scheduling.rs:150`, and
+`tests/support/studio_preview.rs:329` under `catcoms-app`. All four files are byte-identical
+to the base; Agent 1's existing status already records the ambient gate as red. This failure
+is retained explicitly for Agent 4 and is not suppressed by the new focused workflow.
 
 ## Checkpoints
 
