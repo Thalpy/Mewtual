@@ -650,7 +650,9 @@ impl ServerStore {
         steps: usize,
         budget: Option<(&dyn catcoms_rt::Clock, u64)>,
     ) -> Result<EpochStorageScanProgress, AppError> {
-        cursor.step_with(self, steps, budget)
+        cursor
+            .step_with(self, steps, budget)
+            .map_err(CursorFailure::into_error)
     }
 
     /// Begin a commit attempt's inventory work, with its own restart budget.
@@ -675,14 +677,14 @@ impl ServerStore {
         steps: usize,
         budget: Option<(&dyn catcoms_rt::Clock, u64)>,
     ) -> Result<EpochInventoryStep, AppError> {
-        match self.step_epoch_storage_scan(&mut job.cursor, steps, budget) {
+        match job.cursor.step_with(self, steps, budget) {
             Ok(progress) => Ok(if job.cursor.parked.is_some() {
                 EpochInventoryStep::Parked
             } else {
                 EpochInventoryStep::Stepped(progress)
             }),
-            Err(error) if is_invalidation(&error) => self.restart_job(job),
-            Err(error) => Err(error),
+            Err(CursorFailure::Invalidated(_)) => self.restart_job(job),
+            Err(other) => Err(other.into_error()),
         }
     }
 
@@ -701,8 +703,8 @@ impl ServerStore {
     ) -> Result<EpochInventoryStep, AppError> {
         match job.cursor.install_validated(self, validated) {
             Ok(()) => Ok(EpochInventoryStep::Stepped(job.cursor.progress)),
-            Err(error) if is_invalidation(&error) => self.restart_job(job),
-            Err(error) => Err(error),
+            Err(CursorFailure::Invalidated(_)) => self.restart_job(job),
+            Err(other) => Err(other.into_error()),
         }
     }
 
@@ -721,7 +723,7 @@ impl ServerStore {
         } = job;
         match cursor.finish_with(self) {
             Ok(inventory) => Ok(EpochInventoryOutcome::Complete(Box::new(inventory))),
-            Err(error) if is_invalidation(&error) => {
+            Err(CursorFailure::Invalidated(_)) => {
                 if restarts >= MAX_INVENTORY_RESTARTS {
                     return Ok(EpochInventoryOutcome::Unstable);
                 }
@@ -733,7 +735,7 @@ impl ServerStore {
                     },
                 )))
             }
-            Err(error) => Err(error),
+            Err(other) => Err(other.into_error()),
         }
     }
 
@@ -761,7 +763,9 @@ impl ServerStore {
         cursor: &mut EpochStorageCursor,
         validated: ValidatedEpochRecord,
     ) -> Result<(), AppError> {
-        cursor.install_validated(self, validated)
+        cursor
+            .install_validated(self, validated)
+            .map_err(CursorFailure::into_error)
     }
 
     /// Consume a cursor and issue its inventory. Rechecks invalidation: a scan that completed
@@ -770,7 +774,7 @@ impl ServerStore {
         &self,
         cursor: EpochStorageCursor,
     ) -> Result<EpochStorageInventory, AppError> {
-        cursor.finish_with(self)
+        cursor.finish_with(self).map_err(CursorFailure::into_error)
     }
 }
 
@@ -781,11 +785,11 @@ impl EpochStorageCursor {
     /// first keeps an overtaken cursor from spending custody on results it must discard, and
     /// the second catches a write that lands after the traversal reached EOF but before the
     /// caller consumed the inventory.
-    fn check_not_invalidated(&self, store: &ServerStore) -> Result<(), AppError> {
+    fn check_not_invalidated(&self, store: &ServerStore) -> Result<(), CursorFailure> {
         if !std::sync::Arc::ptr_eq(&self.generation, &store.inventory_generation) {
-            return Err(invalid(
+            return Err(CursorFailure::Invalidated(invalid(
                 "epoch storage inventory was invalidated by a concurrent record mutation",
-            ));
+            )));
         }
         Ok(())
     }
@@ -820,7 +824,9 @@ impl EpochStorageCursor {
         store: &ServerStore,
     ) -> Result<super::super::creative_references::CreativeReferences, AppError> {
         // A reference scan installs protection, so a stale one is worse than a stale budget.
-        self.check_not_invalidated(store)?;
+        // Not job-driven, so its typed failure collapses to the public error here.
+        self.check_not_invalidated(store)
+            .map_err(CursorFailure::into_error)?;
         if self.failed || !self.progress.complete || !self.inventory.orphans.is_empty() {
             // Partial temporary files may contain a not-yet-published reference. Never guess.
             return Err(invalid(
@@ -914,28 +920,32 @@ impl EpochStorageCursor {
         &mut self,
         store: &mut ServerStore,
         validated: ValidatedEpochRecord,
-    ) -> Result<(), AppError> {
+    ) -> Result<(), CursorFailure> {
         // All four, and the generation last so its message is the one a caller sees when a write
         // landed while the validation was detached - which is the expected outcome, not a bug.
+        //
+        // Only that last one is an invalidation. A result from another scan, another mount or
+        // another record is a caller error, and restarting would hide it.
+        let fault = |message: &'static str| CursorFailure::Fault(invalid(message));
         if !std::sync::Arc::ptr_eq(&self.identity, &validated.identity) {
-            return Err(invalid("validated record belongs to a different scan"));
+            return Err(fault("validated record belongs to a different scan"));
         }
         if !std::sync::Arc::ptr_eq(&self.mount, &validated.mount) {
-            return Err(invalid(
+            return Err(fault(
                 "validated record was produced under a different mount",
             ));
         }
         match self.awaiting {
             Some(key) if key == validated.key => {}
             // Left set, so the caller can still install the right one.
-            Some(_) => return Err(invalid("validated record is not the one this scan parked")),
-            None => return Err(invalid("this scan has no parked record to install")),
+            Some(_) => return Err(fault("validated record is not the one this scan parked")),
+            None => return Err(fault("this scan has no parked record to install")),
         }
         self.check_not_invalidated(store)?;
         if !std::sync::Arc::ptr_eq(&self.generation, &validated.generation) {
-            return Err(invalid(
+            return Err(CursorFailure::Invalidated(invalid(
                 "validated record was produced before a concurrent record mutation",
-            ));
+            )));
         }
         self.install_body(
             store,
@@ -945,7 +955,8 @@ impl EpochStorageCursor {
             validated.size,
             validated.digest,
             validated.body,
-        )?;
+        )
+        .map_err(CursorFailure::Fault)?;
         // Only now: a failed merge leaves the record outstanding rather than quietly dropped.
         self.awaiting = None;
         self.parked = None;
@@ -957,19 +968,22 @@ impl EpochStorageCursor {
         store: &mut ServerStore,
         steps: usize,
         budget: Option<(&dyn catcoms_rt::Clock, u64)>,
-    ) -> Result<EpochStorageScanProgress, AppError> {
+    ) -> Result<EpochStorageScanProgress, CursorFailure> {
         // Before resuming any expensive work, not after. A cursor that has been overtaken must
         // not pay for traversal or record authentication it is going to throw away.
         self.check_not_invalidated(store)?;
         if self.awaiting.is_some() {
-            return Err(invalid(
+            return Err(CursorFailure::Fault(invalid(
                 "this scan has a parked record; validate and install it before stepping",
-            ));
+            )));
         }
         // One clock read per visit, at entry. The deadline is then a fixed target rather than a
         // moving one, and the classifier below compares against what is left of it.
         let deadline = budget.map(|(clock, ms)| (clock, clock.monotonic_ms().saturating_add(ms)));
+        // Everything the scan itself can fail at is a fault: a corrupt record, an exhausted rail
+        // or a vanished file is not fixed by starting again.
         self.guarded_step(store, steps, deadline, Self::step_inner)
+            .map_err(CursorFailure::Fault)
     }
 
     #[allow(clippy::type_complexity)]
@@ -1214,12 +1228,14 @@ impl EpochStorageCursor {
 
     /// Consume only a successful EOF result. A completed result is metadata, not a storage lease;
     /// future callers must keep the coordinator exclusive until the complete budget is installed.
-    fn finish_with(mut self, store: &ServerStore) -> Result<EpochStorageInventory, AppError> {
+    fn finish_with(mut self, store: &ServerStore) -> Result<EpochStorageInventory, CursorFailure> {
         // Again before issuing, not only before resuming: a write can land after the traversal
         // reaches EOF and before the caller consumes the result.
         self.check_not_invalidated(store)?;
         if self.failed || !self.progress.complete {
-            return Err(invalid("epoch storage inventory is incomplete"));
+            return Err(CursorFailure::Fault(invalid(
+                "epoch storage inventory is incomplete",
+            )));
         }
         // Stamp the budget-ownership token at issue, not at begin.
         //
@@ -1265,10 +1281,14 @@ impl EpochStorageScan<'_> {
     pub fn step(&mut self) -> Result<EpochStorageScanProgress, AppError> {
         // No budget: this form holds the store across every step, so parking a body would
         // strand the scan rather than shorten any custody hold.
-        self.cursor.step_with(self.store, ENTRIES_PER_STEP, None)
+        self.cursor
+            .step_with(self.store, ENTRIES_PER_STEP, None)
+            .map_err(CursorFailure::into_error)
     }
     pub fn finish(self) -> Result<EpochStorageInventory, AppError> {
-        self.cursor.finish_with(self.store)
+        self.cursor
+            .finish_with(self.store)
+            .map_err(CursorFailure::into_error)
     }
 }
 
@@ -1518,11 +1538,30 @@ impl std::fmt::Debug for EpochInventoryOutcome {
     }
 }
 
+/// Why a cursor operation failed, as a type rather than as a message.
+///
 /// Only an invalidation may be absorbed by a restart. Every other failure is the scan's own and
 /// must surface: retrying a corrupt record or an exhausted rail would spend the budget hiding a
-/// fault that is not going to fix itself.
-fn is_invalidation(error: &AppError) -> bool {
-    matches!(error, AppError::Invalid(message) if message.contains("invalidated"))
+/// fault that is not going to fix itself, and would report "try again later" for something no
+/// amount of waiting repairs.
+///
+/// This was a substring match on the error text. That recognised English rather than the event
+/// "this cursor's generation no longer matches": an unrelated `Invalid` whose message happened
+/// to contain the word would have consumed a restart and eventually become `Unstable`, and
+/// rewording the genuine message would have silently disabled automatic restart. The public
+/// surface is unchanged - `AppError` is not widened - because the distinction only needs to
+/// survive as far as the job layer, which is inside this module.
+enum CursorFailure {
+    Invalidated(AppError),
+    Fault(AppError),
+}
+
+impl CursorFailure {
+    fn into_error(self) -> AppError {
+        match self {
+            Self::Invalidated(error) | Self::Fault(error) => error,
+        }
+    }
 }
 
 /// Everything one record's typed validation produces.
@@ -3005,5 +3044,65 @@ mod tests {
             !error.to_string().contains("invalidated"),
             "a corruption fault was misclassified as an invalidation: {error}"
         );
+    }
+
+    /// Restart eligibility is decided by `CursorFailure`, not by the error's text.
+    ///
+    /// It was once a substring match on the message, so a fault whose text happened to contain
+    /// "invalidated" would have consumed a restart and eventually reported `Unstable` - "try
+    /// again later" for something no waiting repairs - and rewording the genuine message would
+    /// have silently disabled restart.
+    ///
+    /// There is deliberately no "fault whose message contains the word" case here, because with
+    /// the typed distinction that bug is **not expressible**: no code path reads the text. What
+    /// is testable is that the two classes are still told apart at all - a second, structurally
+    /// different fault surfaces rather than restarting, and a real invalidation still restarts -
+    /// so the fix did not simply stop absorbing everything.
+    #[test]
+    fn restart_eligibility_follows_the_failure_kind_and_not_the_error_text() {
+        let root = tempfile::tempdir().unwrap();
+        let mut store = open(root.path());
+        // A name in the covered family whose body is a directory: the traversal refuses it, by
+        // a different mechanism from the corruption test above.
+        let parent = root.path().join("servers");
+        fs::create_dir(parent.join(format!("{}.recovery", hex::encode([9u8; 32])))).unwrap();
+
+        let mut job = store
+            .begin_epoch_inventory_job(EpochInventoryCoverage::RecoveryOnly)
+            .unwrap();
+        let outcome = loop {
+            match store.step_epoch_inventory_job(&mut job, ENTRIES_PER_STEP, None) {
+                Ok(EpochInventoryStep::Restarted) => {
+                    panic!("a traversal fault consumed a restart from the budget")
+                }
+                Ok(EpochInventoryStep::Unstable) => {
+                    panic!("a traversal fault was reported as an unstable vault")
+                }
+                Ok(EpochInventoryStep::Stepped(progress)) if progress.complete => {
+                    panic!("the fixture did not produce a fault, so this proves nothing")
+                }
+                Ok(_) => {}
+                Err(error) => break error,
+            }
+        };
+        // The point is the classification, not the wording: this is a fault regardless of what
+        // its message happens to say.
+        assert!(
+            outcome.to_string().contains("not a regular file"),
+            "unexpected fault, so the classifier was not exercised: {outcome}"
+        );
+
+        // And the typed distinction is what decides: an actual invalidation on a fresh job still
+        // restarts, proving the classifier did not simply stop absorbing everything.
+        let mut job = store
+            .begin_epoch_inventory_job(EpochInventoryCoverage::RecoveryOnly)
+            .unwrap();
+        store.epoch_mutation_guard();
+        assert!(matches!(
+            store
+                .step_epoch_inventory_job(&mut job, ENTRIES_PER_STEP, None)
+                .unwrap(),
+            EpochInventoryStep::Restarted
+        ));
     }
 }
