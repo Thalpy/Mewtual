@@ -32,8 +32,10 @@ pub const MAX_RECOVERY_SNAPSHOT_BYTES: usize = 6 * 1024 * 1024;
 pub const MAX_RECOVERY_SLOTS_BYTES: usize = 3 * MAX_RECOVERY_SNAPSHOT_BYTES + 1024;
 /// Maximum plaintext bytes in one peer's constant-sized receipt/fault book.
 pub const MAX_RECEIPT_BOOK_BYTES: usize = 8 * 1024;
-/// Maximum plaintext bytes in one owner's high-water/in-flight receipt journal.
-pub const MAX_OWNER_RECEIPT_JOURNAL_BYTES: usize = 3 * MAX_RECEIPT_BYTES + 256;
+/// Maximum plaintext journal: three receipt roles, a repair and its pair, one retired receipt,
+/// one retired close, plus identity/framing. Version 1 keeps its original smaller decode cap.
+pub const MAX_OWNER_RECEIPT_JOURNAL_BYTES: usize =
+    7 * MAX_RECEIPT_BYTES + MAX_CLOSE_RECORD_BYTES + 1024;
 /// Maximum plaintext bytes in one persisted epoch lifecycle gate.
 pub const MAX_EPOCH_GATE_BYTES: usize = 3 * 1024 * 1024;
 /// Maximum number of vault-sealed pending intents for one logical document.
@@ -1944,192 +1946,6 @@ impl ReceiptBook {
     }
 }
 
-/// Crash-journaled owner state for producing receipts for one logical document.
-///
-/// `prepare` mutates the journal but does not authorize publication by itself: the caller must
-/// atomically persist [`Self::encode`] before sending [`Self::in_flight`]. Restoring those bytes
-/// after a crash yields exactly the same signed receipt for republication.
-#[derive(Clone, Debug, Default)]
-pub struct OwnerReceiptJournal {
-    document: Option<LogicalDocument>,
-    tenure: Option<TenureSelection>,
-    high_water: Option<Receipt>,
-    in_flight: Option<Receipt>,
-}
-
-impl OwnerReceiptJournal {
-    /// Prepare one irrevocable decision. An exact retry is idempotent; any conflicting pending
-    /// decision or inherited checkpoint is rejected.
-    pub fn prepare(
-        &mut self,
-        receipt: Receipt,
-        group: &ServerGroup,
-        expected_tenure_start_group_epoch: u64,
-    ) -> Result<(), ReplError> {
-        receipt.verify_current_owner(group, expected_tenure_start_group_epoch)?;
-        self.prepare_verified(receipt)
-    }
-
-    fn prepare_verified(&mut self, receipt: Receipt) -> Result<(), ReplError> {
-        if self
-            .document
-            .as_ref()
-            .is_some_and(|document| document != &receipt.document)
-        {
-            return Err(ReplError::EpochScope);
-        }
-        let selection = TenureSelection::from(&receipt);
-        let changes_tenure = self
-            .tenure
-            .as_ref()
-            .is_some_and(|tenure| tenure != &selection);
-        if (self.tenure.is_none() || changes_tenure)
-            && (receipt.closed_epoch != receipt.inherited.epoch()
-                || self.tenure.as_ref().is_some_and(|tenure| {
-                    selection.tenure_start_group_epoch <= tenure.tenure_start_group_epoch
-                }))
-        {
-            return Err(ReplError::ReceiptConflict);
-        }
-        // A previous tenure's unfinished publication must not strand a returning owner. Only
-        // an externally verified, strictly newer tenure may replace it, under the same durable
-        // persist-before-publish transition. Within a tenure the pending choice is irrevocable.
-        if !changes_tenure {
-            if let Some(pending) = &self.in_flight {
-                return if pending.hash() == receipt.hash() {
-                    Ok(())
-                } else {
-                    Err(ReplError::ReceiptConflict)
-                };
-            }
-        }
-        if !changes_tenure {
-            if let Some(high_water) = &self.high_water {
-                if receipt.closed_epoch < high_water.closed_epoch {
-                    return Err(ReplError::ReceiptConflict);
-                }
-                if receipt.closed_epoch == high_water.closed_epoch {
-                    return if receipt.hash() == high_water.hash() {
-                        Ok(())
-                    } else {
-                        Err(ReplError::ReceiptConflict)
-                    };
-                }
-                if receipt.closed_epoch != high_water.closed_epoch + 1 {
-                    return Err(ReplError::ReceiptConflict);
-                }
-            }
-        }
-
-        // All fallible consistency checks precede mutation. A rejected first decision must not
-        // bind an otherwise-empty journal to an attacker's document or partial tenure.
-        self.document
-            .get_or_insert_with(|| receipt.document.clone());
-        if changes_tenure {
-            // A returning owner starts a distinct journal tenure. The new in-flight first receipt
-            // is the persist-before-publish decision; the old high-water is no longer needed to
-            // reproduce it after a crash.
-            self.high_water = None;
-            self.tenure = Some(selection.clone());
-        } else if self.tenure.is_none() {
-            self.tenure = Some(selection);
-        }
-        self.in_flight = Some(receipt);
-        Ok(())
-    }
-
-    /// Decision that must be published (or republished after restore) once the journal is durable.
-    pub fn in_flight(&self) -> Option<&Receipt> {
-        self.in_flight.as_ref()
-    }
-
-    /// Latest completed publication, retained as the constant-sized high-water decision.
-    /// This is historical local state, not proof that the signer is still the current owner.
-    pub fn published(&self) -> Option<&Receipt> {
-        self.high_water.as_ref()
-    }
-
-    /// Mark the exact in-flight receipt published, advancing constant-sized high-water state.
-    /// An exact completed retry is inert, including when a later receipt is pending. The store
-    /// must still re-save on retry: its previous rename may have preceded a failed directory sync.
-    pub fn mark_published(&mut self, receipt_hash: Hash32) -> Result<(), ReplError> {
-        if self
-            .high_water
-            .as_ref()
-            .is_some_and(|r| r.hash() == receipt_hash)
-        {
-            return Ok(());
-        }
-        let pending = self.in_flight.take().ok_or(ReplError::ReceiptConflict)?;
-        if pending.hash() != receipt_hash {
-            self.in_flight = Some(pending);
-            return Err(ReplError::ReceiptConflict);
-        }
-        self.high_water = Some(pending);
-        Ok(())
-    }
-
-    /// Canonical plaintext journal bytes; the application seals these in its vault.
-    pub fn encode(&self) -> Vec<u8> {
-        let mut e = Encoder::new();
-        e.put_u8(1);
-        put_receipt(&mut e, self.high_water.as_ref());
-        put_receipt(&mut e, self.in_flight.as_ref());
-        put_tenure(&mut e, self.tenure.as_ref());
-        e.finish()
-    }
-
-    /// Restore a journal. Receipt signatures are deliberately not re-authorized here because the
-    /// bytes are vault-sealed owner-local state; callers still verify before network publication.
-    pub fn decode(bytes: &[u8]) -> Result<Self, ReplError> {
-        if bytes.len() > MAX_OWNER_RECEIPT_JOURNAL_BYTES {
-            return Err(ReplError::EpochBound);
-        }
-        let mut d = Decoder::new(bytes);
-        if d.get_u8().map_err(|_| ReplError::Malformed)? != 1 {
-            return Err(ReplError::Malformed);
-        }
-        let high_water = get_receipt(&mut d)?;
-        let in_flight = get_receipt(&mut d)?;
-        let tenure = get_tenure(&mut d)?;
-        d.finish().map_err(|_| ReplError::Malformed)?;
-        let journal = Self {
-            document: high_water
-                .as_ref()
-                .or(in_flight.as_ref())
-                .map(|receipt| receipt.document.clone()),
-            high_water,
-            in_flight,
-            tenure,
-        };
-        if journal.document.is_some() != journal.tenure.is_some() {
-            return Err(ReplError::Malformed);
-        }
-        for receipt in [&journal.high_water, &journal.in_flight]
-            .into_iter()
-            .flatten()
-        {
-            if journal.document.as_ref() != Some(&receipt.document)
-                || journal.tenure.as_ref() != Some(&TenureSelection::from(receipt))
-            {
-                return Err(ReplError::Malformed);
-            }
-        }
-        match (&journal.high_water, &journal.in_flight) {
-            (None, Some(first)) if first.closed_epoch != first.inherited.epoch() => {
-                return Err(ReplError::Malformed);
-            }
-            (Some(high_water), Some(in_flight))
-                if in_flight.closed_epoch != high_water.closed_epoch + 1 =>
-            {
-                return Err(ReplError::Malformed);
-            }
-            _ => {}
-        }
-        Ok(journal)
-    }
-}
-
 /// Minimal metadata charged by the epoch gate for one already signature-verified `SignedOp`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct AdmittedOperation {
@@ -3369,6 +3185,8 @@ impl RecoverySlots {
 }
 
 mod adoption;
+mod owner_journal;
+pub use owner_journal::{JournalRepairEffect, OwnerReceiptJournal};
 mod repair_state;
 pub use repair_state::conflicting_receipt_pair;
 pub(crate) mod succession;

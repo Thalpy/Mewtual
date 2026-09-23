@@ -35,10 +35,10 @@ pub use doc::{AppliedOp, EncryptedDoc, MAX_DELIVERY_TARGETS};
 pub use epoch::{
     conflicting_receipt_pair, epoch_id, epoch_zero_id, tenure_id, Admission, AdmittedOperation,
     CloseRecord, ClosureStats, DomainOp, EpochGate, EpochPhase, InheritedCheckpoint, IntentLedger,
-    LocalIntent, LogicalDocument, OwnerReceiptJournal, Receipt, ReceiptBook, ReceiptHeadProof,
-    ReceiptIngest, ReceiptRepair, ReceiptRepairIngest, RecoveryConflict, RecoveryConflictValue,
-    RecoveryElement, RecoveryReason, RecoverySlots, RecoverySnapshot, RecoveryTombstone,
-    RecoveryTransition, VerifiedReceipt,
+    JournalRepairEffect, LocalIntent, LogicalDocument, OwnerReceiptJournal, Receipt, ReceiptBook,
+    ReceiptHeadProof, ReceiptIngest, ReceiptRepair, ReceiptRepairIngest, RecoveryConflict,
+    RecoveryConflictValue, RecoveryElement, RecoveryReason, RecoverySlots, RecoverySnapshot,
+    RecoveryTombstone, RecoveryTransition, VerifiedReceipt,
 };
 pub use op::{SealedOp, SignedOp};
 

@@ -1,11 +1,9 @@
 # Agent 3: historical authority and journal roles (revision 16 follow-up)
 
-Review base: `a7513697fb482abc235cadb8414d491f7851b6ce`. The independent verdict closed IMP-001
-and **accepted CORE-005 at the bounded design boundary**, including its finite-history and
-convergence limits. CORE-001/002/003 remain accepted. CORE-004 still requires corrections for
-CORE-006/007 and TEST-014; this revision proposes those corrections. **The new journal and
-authority contracts remain unimplemented.** No journal/C-7 implementation precedes the new
-independent verdict. CORE-005's Agent 2 dependency and production-consumer tests remain required.
+Revision 16 independently **PASS at `2b741e7`**: CORE-006/007 and TEST-014's design plan
+are closed. The C-7 journal core is now implemented; source/store/runtime integration and
+CORE-005's Agent 2 dependency and production-consumer tests remain required. The accepted
+contract below is unchanged; [status](GATE4-AGENT-3-STATUS.md) tracks code and verification.
 
 ## CORE-005: local historical-owner provenance
 

@@ -73,6 +73,16 @@ pub(super) struct ResolvedRepair {
 }
 
 impl ResolvedRepair {
+    /// Exact loser or a provable differing-baseline descendant. Same-baseline receipts carry
+    /// no ancestry chain, so a higher epoch alone never makes a receipt covered by this repair.
+    pub(super) fn covers(&self, receipt: &Receipt) -> bool {
+        receipt.document == self.repair.document
+            && receipt.tenure_id == self.repair.tenure_id
+            && (receipt.hash() == self.losing.hash()
+                || (TenureSelection::from(&self.selected) != TenureSelection::from(&self.losing)
+                    && TenureSelection::from(receipt) == TenureSelection::from(&self.losing)))
+    }
+
     pub(super) fn encode_into(&self, e: &mut Encoder) {
         for bytes in [
             self.repair.encode(),
@@ -129,15 +139,9 @@ impl ReceiptBook {
     /// identify only the named loser because receipts do not contain an ancestry chain. A third
     /// baseline remains new equivocation, not silently covered by the latest signed choice.
     pub(super) fn is_repaired_loser(&self, receipt: &Receipt) -> bool {
-        self.resolved_repair.as_ref().is_some_and(|resolved| {
-            receipt.document == resolved.repair.document
-                && receipt.tenure_id == resolved.repair.tenure_id
-                && (receipt.hash() == resolved.losing.hash()
-                    || (TenureSelection::from(&resolved.selected)
-                        != TenureSelection::from(&resolved.losing)
-                        && TenureSelection::from(receipt)
-                            == TenureSelection::from(&resolved.losing)))
-        })
+        self.resolved_repair
+            .as_ref()
+            .is_some_and(|resolved| resolved.covers(receipt))
     }
 }
 

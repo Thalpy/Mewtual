@@ -4,6 +4,35 @@ Owner: Agent 3 ([assignment](GATE4-AGENT-HANDOFFS.md#agent-3-runtime-signed-faul
 Proposal: [GATE4-AGENT-3-DESIGN](GATE4-AGENT-3-DESIGN.md), revision 16 follow-up.
 Review preamble: 3. Current entries override older ones.
 
+## C-7 implementation checkpoint, 2026-09-23
+
+The user's independent revision-16 verdict is **PASS** at `2b741e7`: CORE-006/007 and the
+TEST-014 design plan are closed; C-7 implementation is authorized. Earlier entries below are
+historical. The accepted bounded limitations remain; integrated TEST-014 execution is pending.
+
+Implemented `epoch/owner_journal.rs`: distinct publication/pending/reconciled roles, full retired
+receipt/close retention, bounded provenance, repeated repair, both finalization orders, strict
+v2 restore and exact v1 compatibility. No store/runtime caller uses the new repair APIs yet.
+Historical admission, global sequence, B1-B6/source compatibility and custody remain integration work.
+
+Read-only adversarial implementation review and re-review found and closed one HIGH: an active
+pending receipt could equal historical high-water after two repairs and never complete. Its test
+failed before the fix and passes afterward in both finalization orders. No blocker/high/medium
+remains in this leaf review. The mutation harness now pins that defect plus four other C-7 guards.
+
+Verification: 15 focused journal tests PASS; the full replication library passed 242 tests before
+that final regression/fix; frontend 1,229 tests PASS; replication strict Clippy PASS. All **14
+mutations, byte-exact restorations and restored controls PASS**, including five C-7 guards.
+The required ambient check fails on the same seven untouched calls recorded below; cargo-deny
+fails on unchanged rustls 0.23.40 / RUSTSEC-2026-0285 (bans/licenses/sources pass). Native tests
+and final full CI remain in progress; no full-suite or integrated repair PASS is claimed.
+
+Agent 4 integration note (shared documents are left to their owner): the journal cap is now
+**12,288 bytes**, propagating to **17,448 sealed owner-record bytes**. Update THREAT-MODEL's
+8,488-byte figure and no-journal-rebase statement, and INTERFACES' no-rebase-API statement when
+integrating this core. The leaf exists; durable runtime repair does not. Startup/flow gates are
+not applicable to this core-only change.
+
 ## Independent review response, 2026-09-23: revision 16
 
 Latest user-supplied review base: **`a7513697fb482abc235cadb8414d491f7851b6ce`**.

@@ -16,6 +16,46 @@ COMMAND = ["cargo", "test", "--locked", "-j", "1", "-p", "catcoms-replication", 
 ANCHOR_TEST = "repair_losing_adoption_anchors_do_not_recreate_a_resolved_fault"
 MUTATIONS = [
     (
+        "C7-active-historical-publication", "crates/catcoms-replication/src/epoch/owner_journal.rs",
+        "            && !self\n"
+        "                .in_flight\n"
+        "                .as_ref()\n"
+        "                .is_some_and(|r| r.hash() == receipt_hash)\n", "",
+        "epoch::owner_journal::tests::reselected_historical_publication_completes_its_new_pending_obligation",
+        "active reselected publication must complete even when its hash equals historical high-water",
+    ),
+    (
+        "C7-authority-before-retry", "crates/catcoms-replication/src/epoch/owner_journal.rs",
+        "        repair.verify_current_owner(group, issuer_tenure_start_group_epoch)?;\n", "",
+        "epoch::owner_journal::tests::live_authority_and_complete_evidence_precede_noop_and_exact_retry",
+        "operation must refuse",
+    ),
+    (
+        "C7-retired-close-signature", "crates/catcoms-replication/src/epoch/owner_journal.rs",
+        "    if !verify_with_public_bytes(\n"
+        "        &close.author_public_key,\n"
+        "        &close.signature_hash(),\n"
+        "        &close.signature,\n"
+        "    ) {\n"
+        "        return Err(ReplError::EpochAuthority);\n"
+        "    }\n", "",
+        "epoch::owner_journal::tests::pending_retirement_requires_exact_canonical_signed_close_before_mutation",
+        "operation must refuse",
+    ),
+    (
+        "C7-pending-publication-precedence", "crates/catcoms-replication/src/epoch/owner_journal.rs",
+        "            .in_flight\n            .as_ref()\n            .or(self.reconciled.as_ref())",
+        "            .reconciled\n            .as_ref()\n            .or(self.in_flight.as_ref())",
+        "epoch::owner_journal::tests::pending_successor_outranks_reconciliation_and_leaves_only_one_step_evidence",
+        "operation must refuse",
+    ),
+    (
+        "C7-ordinary-inheritance", "crates/catcoms-replication/src/epoch/owner_journal.rs",
+        "        && TenureSelection::from(base) == TenureSelection::from(next)\n", "",
+        "epoch::owner_journal::tests::ordinary_prepare_cannot_change_inheritance_or_skip_adjacency",
+        "operation must refuse",
+    ),
+    (
         "C8-headless-predecessor", "crates/catcoms-replication/src/epoch.rs",
         "        if latest.is_none() && previous_until_installed.is_some() {\n"
         "            return Err(ReplError::Malformed);\n"
@@ -96,7 +136,7 @@ MUTATIONS = [
 
 def run(test):
     return subprocess.run(
-        COMMAND + [PREFIX + test, "--", "--exact", "--nocapture"],
+        COMMAND + [test if test.startswith("epoch::") else PREFIX + test, "--", "--exact", "--nocapture"],
         cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
         text=True, encoding="utf-8", errors="replace", timeout=900, check=False,
     )

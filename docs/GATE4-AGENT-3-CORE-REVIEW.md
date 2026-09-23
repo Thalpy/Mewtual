@@ -1,23 +1,23 @@
 # Agent 3 core follow-up findings and dispositions
 
 Implementation base: `918ffb9b3034c43ed33574225e04f1be2e87090d`.
-Latest independent review: split verdict at `a7513697fb482abc235cadb8414d491f7851b6ce`:
-IMP-001 CLOSED, CORE-005 bounded design PASS, CORE-004 REQUEST CHANGES (CORE-006/007).
-Revision 14 remains the baseline with the corrections below. The leaf checkpoint implements
-C-3/C-4/C-8 and C-5's sequence getter only; no report, typed transition or journal format exists.
+Latest independent verdict: **revision 16 PASS at `2b741e7`**. CORE-006/007 and TEST-014's
+design plan are closed. The C-7 journal leaf is implemented alongside C-3/C-4/C-8 and C-5's
+sequence getter; report admission, typed transitions and runtime integration remain pending.
+See [status](GATE4-AGENT-3-STATUS.md) for execution and implementation-review findings.
 
 | Finding | Current disposition |
 |---|---|
 | CORE-001 High | User accepted: clear rejected quarantine only on repair to Open; preserve accepted work/accounting |
 | CORE-002 High | User accepted with exact-state rebinding: private unchanged-Fault screening commit |
 | CORE-003 High | User accepted only for the effective canonical reconciled decision |
-| CORE-004 High | Remains REQUEST CHANGES; revision 16 addresses CORE-006/007 for re-review |
+| CORE-004 High | Bounded design PASS; C-7 journal leaf implemented, integration pending |
 | CORE-005 High | **Bounded design PASS**, including stated finite-history/convergence limits; Agent 2 seam and production tests still required |
-| CORE-006 P1 | Proposed correction: independently computed effects with a joint compatibility postcondition |
-| CORE-007 P1 | Proposed correction: turnover may strand repair from B1 through durable terminal/recycling |
+| CORE-006 P1 | CLOSED at design: independent effects with a joint compatibility postcondition |
+| CORE-007 P1 | CLOSED at design: turnover may strand repair from B1 through durable terminal/recycling |
 | IMP-001 Medium | **PASS/CLOSED**; implemented at `f16e1e5`, regression isolation at `27e1b99` |
 | TEST-013 | Same-document headless negative implemented; real report/no-write negative remains unimplemented |
-| TEST-014 P2 | Planned N3b/N51 source/journal asymmetries and N52 pre-B2/post-B2 churn; no execution claimed |
+| TEST-014 P2 | Design plan CLOSED; N3b/N51 asymmetries and N52 churn execution remains pending |
 
 ## CORE-001: reopening with quarantine is not restorable
 

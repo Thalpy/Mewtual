@@ -1,20 +1,14 @@
 # Gate 4 Agent 3: runtime signed fault repair
 
-Status: **revision 16 proposed follow-up to review head
-`a7513697fb482abc235cadb8414d491f7851b6ce`: IMP-001 PASS/CLOSED; CORE-005 bounded design PASS,
-including its finite-history limits; CORE-001/002/003 remain accepted. CORE-004 remains REQUEST
-CHANGES for CORE-006/007 and TEST-014; this revision proposes the two local corrections.**
-Independent core leaves C-3/C-4/C-8 and the C-5 sequence accessor exist. Current evidence is in
-[Agent 3 status](GATE4-AGENT-3-STATUS.md).
+Status: **revision 16 independently PASS at `2b741e7`**. CORE-006/007 and TEST-014's
+design plan are closed; C-7 implementation is authorized. C-3/C-4/C-8, C-5's sequence accessor
+and the C-7 journal leaf exist. Runtime/store integration and integrated regressions remain
+pending. See [current implementation and verification](GATE4-AGENT-3-STATUS.md).
 
-The bounded repair design remains the baseline except where this revision explicitly corrects
-it. [The core findings ledger](GATE4-AGENT-3-CORE-REVIEW.md) records dispositions. The concrete
-[authority and journal follow-up](GATE4-AGENT-3-AUTHORITY-FOLLOWUP.md) specifies CORE-004/005
-contracts and their liveness limits. CORE-005 is independently accepted; neither is implemented.
-CORE-004/C-7 implementation still waits for independent re-review. Integration,
-mutation evidence, Agent 2's tenure seam, Agent 1's remaining runtime fences and full Gate 4
-acceptance remain separate. Gate 5 stays closed. Older revision histories below describe prior
-dispositions, not permission to bypass the new historical-authority admission boundary.
+The accepted [authority/journal contract](GATE4-AGENT-3-AUTHORITY-FOLLOWUP.md) and bounded
+liveness/history limitations remain unchanged. Agent 2's tenure seam, Agent 1's runtime fences
+and full Gate 4 acceptance remain separate. Gate 5 stays closed. Older revision histories below
+describe prior dispositions.
 
 
 
