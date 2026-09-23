@@ -415,13 +415,38 @@ Seven tests, one per guard. The load-bearing one is
 the pixels pinned because of the archive and reclaimable again because it was released. It is the
 only test that proves release reaches the scanner rather than merely returning `Ok`.
 
-**Mutation evidence: INCOMPLETE at the time of writing.** One of the seven is proved so far -
-deleting the `expected_content` comparison fails
-`release_refuses_an_archive_other_than_the_one_it_names` and **only** that test (16 passed, 1
-failed). The remaining six are unproved, so "one per guard" is the intent and not yet the
-evidence. The mutation run is slow because the shared workspace target is contended by the other
-agents' test binaries; slice 3's mutations are running against a private `CARGO_TARGET_DIR` to
-decouple from that.
+**Mutation evidence: COMPLETE, and it found a real gap.** Eight mutations, each restored
+byte-exact from git and followed by a passing restored run:
+
+| # | Mutation | Tests that failed |
+|---|---|---|
+| 1 | delete the `expected_content` comparison | `release_refuses_an_archive_other_than_the_one_it_names` only |
+| 2 | delete the `verify_record` call | `release_refuses_a_record_its_budget_does_not_know` only |
+| 3 | missing archive returns `Ok(())` | `release_refuses_when_no_archive_is_preserved` only |
+| 4 | delete `budget.invalidate()` | `release_closes_both_budgets_so_the_next_write_must_reconcile` only |
+| 5 | move `before_unlink` after the removal | `release_consults_hooks_on_both_sides_of_its_unlink` only |
+| 6 | skip the unlink entirely | **three** tests |
+| 7 | let an undecodable payload proceed | `release_refuses_an_archive_it_cannot_decode` only |
+| 8 | delete the `document()` check | `release_refuses_an_archive_naming_another_document` only |
+
+Two of these are worth keeping in mind rather than just counting:
+
+- **6 is not a guard mutation** and is not expected to fail one test. It deletes the operation
+  itself, and three tests independently notice the archive surviving. That is the right shape for
+  the core operation; only guards owe a single-test failure.
+- **8 did not exist until the mutation pass demanded it.** Deleting the document check originally
+  failed nothing, because the content comparison catches the cases the other tests happen to
+  build. The guard is reachable on its own: an archive for B sealed into A's record would be
+  released by a user who confirmed a release for A, destroying B's only preserved evidence while
+  the dialog, the scope and the content all agreed. The test now builds that vault and passes B's
+  real content, so the document claim is the only thing that can refuse it. This is the third time
+  in this scope that a mutation has converted a plausible-looking test set into a real one.
+
+The mutations ran against a private `CARGO_TARGET_DIR` (`M:/catcoms-agent2-target`): the shared
+workspace target is contended by the other agents' test binaries, whose long runs hold
+`catcoms_app-*.exe` open and fail the link with `LNK1104`. A ten-minute retry loop was not enough;
+a private target dir took the cycle to about 35 seconds. This is the opposite of the recorded
+shared-target hazard, which is about a *shared* dir poisoning a cache.
 
 **A pre-existing stack regression, reported to Agent 1, not caused by this slice.** While verifying
 slice 3, `store::epoch_studio` began aborting with exit `0xffffffff` and no panic message. The
