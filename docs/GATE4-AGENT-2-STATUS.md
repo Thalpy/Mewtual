@@ -442,6 +442,60 @@ Two of these are worth keeping in mind rather than just counting:
   real content, so the document claim is the only thing that can refuse it. This is the third time
   in this scope that a mutation has converted a plausible-looking test set into a real one.
 
+### Slice 3 adversarial review: all four findings addressed, and two mutations that survived
+
+The review of `47bad73` + `d023a9e` returned CHANGES REQUIRED with one High and three Mediums.
+Every one was correct. Fixed at `2dba8fa` and after.
+
+**High: the release token did not identify the archive.** `content()` is the *branch's* content
+identity, supplied by the caller and stored verbatim, so two archives of one branch that differ
+only in `replayable`, `provenance` or `generation` share it. Release-then-write is the only way to
+replace an archive, which makes the dangerous sequence ordinary rather than exotic: read A, A is
+released by another valid action, B is archived for the same branch, and the queued confirmation
+for A destroys B. New `StudioDraftArchive::archive_id`, a derive-key digest over the canonical
+payload, hashed over the body rather than the sealed record so re-sealing identical evidence does
+not change the identity a user was shown.
+
+**Medium: the storage budget closed too late.** The failure that matters returns early - unlink
+succeeds, parent sync fails - so a closure at the end of the happy path never ran. Both budgets
+now close before the first destructive step. Mutation 10 (move it back) fails only the new
+after-unlink test, which is direct evidence the finding was real.
+
+**Medium: release cannot honour the exact-retry contract.** Recorded as an explicit exemption in
+design 12.1, option (a): uncertainty resolves by reconcile-and-re-read, not by resending. Option
+(b), a release tombstone, was rejected: a new durable record family with its own accounting,
+bound, reference rules and eviction question, built solely to preserve a retry slogan for the one
+operation whose purpose is to remove records. The exemption also lives in the function's doc
+comment, because a rule that lives only in a design document is one the next caller's author will
+not read.
+
+**Medium: the invalidation rails were not independently anchored.** Partly fixed, and **partly a
+negative result that must not be dressed up as a fix**:
+
+| Rail | State |
+|---|---|
+| storage-budget closure across a destructive failure | anchored, mutation 10 |
+| `inventory_generation` rotation | anchored, mutation 13 |
+| over-cap release remediation | anchored, mutation 14 |
+| `intents.begin_write()` | **NOT anchored** |
+| `intent_generation` rotation | **NOT anchored** |
+
+Mutations 11 and 12 removed each intent rail and **failed nothing**. Mutation 13b removed **both**
+and still failed nothing. The reason is that every probe available at this seam writes a record
+whose map entry the release changed, so `preflight`'s `records.get(&id) != old` check refuses
+first and hides both rails behind it.
+
+My first attempt at this finding claimed two tests isolated these rails. It did not, and the
+tests were renamed to say what they actually prove: that a budget carried across a release cannot
+authorise the next write, and that the damage is not confined to the budget release was handed.
+
+The rails are **not** dead code. They cover a write to a *different document in the same group*,
+whose map entry the release did not disturb - reachable in production, because an
+`EpochStudioBudget` is per `(server, group)` and a group holds many documents. Building that probe
+needs two documents under one group, which this fixture cannot do cheaply. **Recorded as test debt
+for the disposal slice**, where a multi-document fixture exists anyway. Until then the two rails
+are retained, consistent with `write_prepared_intents`' discipline, and honestly unproved.
+
 The mutations ran against a private `CARGO_TARGET_DIR` (`M:/catcoms-agent2-target`): the shared
 workspace target is contended by the other agents' test binaries, whose long runs hold
 `catcoms_app-*.exe` open and fail the link with `LNK1104`. A ten-minute retry loop was not enough;

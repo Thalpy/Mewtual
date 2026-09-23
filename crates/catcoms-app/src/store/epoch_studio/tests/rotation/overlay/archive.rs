@@ -1056,14 +1056,22 @@ fn release_closes_both_budgets_so_the_next_write_must_reconcile() {
     preserve(&f, &mut store).expect("a rebuilt budget must be able to preserve again");
 }
 
-/// The intent budget's poison, anchored **independently** of the storage budget's.
+/// The intent budget release was given is unusable afterwards, with the storage budget rebuilt so
+/// it cannot be the thing that refuses.
 ///
-/// The test above cannot establish both: it hands the next write two stale budgets at once, so a
-/// storage refusal masks a missing `intents.begin_write()`. Here the storage budget is rebuilt
-/// from disk after the release and only the intent budget is stale, which leaves the intent
-/// poison as the only thing that can refuse.
+/// **This does not attribute the refusal to a particular rail, and an earlier version of this
+/// comment claimed it did.** Release closes the intent side three ways - `intents.begin_write()`,
+/// the `intent_generation` rotation, and the record map that no longer matches disk - and
+/// mutating away *both* of the first two leaves this test passing, because the map check refuses
+/// first. The rails are not dead: they cover a write to a **different** document in the same
+/// group, whose map entry the release did not disturb. That case needs two documents under one
+/// group, which this fixture cannot build cheaply, and is recorded as test debt for the disposal
+/// slice where such a fixture exists anyway.
+///
+/// What this test does prove, and what it is worth keeping for, is the end-to-end property: a
+/// budget carried across a release cannot authorise the next write.
 #[test]
-fn release_poisons_the_intent_budget_it_was_given_independently_of_storage() {
+fn release_leaves_the_intent_budget_it_was_given_unusable() {
     let root = tempfile::tempdir().unwrap();
     let f = Fixture::new(true);
     let mut store = open(root.path());
@@ -1109,16 +1117,20 @@ fn release_poisons_the_intent_budget_it_was_given_independently_of_storage() {
     );
 }
 
-/// The intent-generation rotation, which protects **other** budgets than the one passed in.
+/// A budget release never touched is also unusable afterwards.
 ///
-/// `intents.begin_write()` only poisons the budget release was handed. A second budget built from
-/// the same pre-release inventory is a separate object that knows nothing about the release, and
-/// the only thing standing between it and an accounted write is
-/// `self.intent_generation = Arc::new(())`. Deleting that rotation leaves the test above passing
-/// and this one failing, which is what makes them different properties rather than one property
-/// tested twice.
+/// **Like the test above, this does not isolate the rotation**, and saying otherwise was wrong.
+/// The bystander budget was built while the archive still existed, so its record map disagrees
+/// with disk after the release and refuses before the generation is ever compared: deleting
+/// `self.intent_generation = Arc::new(())` leaves this test green. Isolating the rotation needs a
+/// probe whose map entry the release did not change, which means a second document in the same
+/// group. Recorded as test debt for the disposal slice.
+///
+/// The property it does establish is still worth having and is not covered by the test above: the
+/// damage is not confined to the budget release was handed. Any budget captured before it is
+/// refused too.
 #[test]
-fn release_rotates_the_intent_generation_so_other_stale_budgets_refuse() {
+fn a_budget_release_never_touched_is_also_refused_afterwards() {
     let root = tempfile::tempdir().unwrap();
     let f = Fixture::new(true);
     let mut store = open(root.path());
