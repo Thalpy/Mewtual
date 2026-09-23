@@ -175,6 +175,29 @@ impl StudioDraftArchive {
     pub fn content(&self) -> [u8; 32] {
         self.content
     }
+
+    /// This archive's own identity: a digest of its canonical bytes.
+    ///
+    /// **Not interchangeable with [`Self::content`].** `content` is the *branch's* content
+    /// identity, supplied by the caller and stored verbatim, so two archives of the same branch
+    /// share it whenever they differ only in a label this type also carries: `replayable`,
+    /// `provenance` or `generation`. That is correct for `content`'s own purpose and useless as
+    /// an archive identity.
+    ///
+    /// The distinction is load-bearing for release, which destroys evidence. A release bound to
+    /// `content` would accept a token read from archive A and spend it on a later archive B with
+    /// the same branch content, destroying evidence the user never confirmed. Binding to the
+    /// canonical payload makes "release the archive I was shown" a statement about the archive
+    /// rather than about its branch.
+    ///
+    /// Hashed over the canonical body rather than the sealed record, so re-sealing identical
+    /// evidence does not change the identity a user was shown merely because the AEAD nonce
+    /// differs.
+    pub fn archive_id(&self) -> Result<[u8; 32], ReplError> {
+        let mut hash = blake3::Hasher::new_derive_key("catcoms/studio-draft-archive-id/v1");
+        hash.update(&self.encode()?);
+        Ok(*hash.finalize().as_bytes())
+    }
     pub fn generation(&self) -> u64 {
         self.generation
     }

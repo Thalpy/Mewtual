@@ -664,7 +664,7 @@ fn releasing_an_archive_makes_its_sole_references_reclaimable() {
     let operation_cids = frame_branch(&f, &mut store, &close, &basis);
 
     let archive = archive_for(&f, &mut store);
-    let content = archive.content();
+    let content = archive.archive_id().unwrap();
     let state = store.load_epoch_intents(SERVER, &f.logical).unwrap();
     let base_cids = state.overlay().unwrap().base_blob_cids().unwrap();
     drop(state);
@@ -728,10 +728,101 @@ fn releasing_an_archive_makes_its_sole_references_reclaimable() {
     }
 }
 
-/// The content binding. A confirmation literal proves the user typed something; it cannot prove
-/// they typed it about the archive that is on disk now. Between the read that populated the
-/// dialog and the release, the archive can have been replaced, and destroying the replacement
-/// would be destroying evidence nobody agreed to destroy.
+/// The binding must name the **archive**, not its branch.
+///
+/// This is the review finding that `content()` could not carry. `content` is the branch's content
+/// identity, so two archives of one branch that differ only in a label share it, and `replayable`
+/// is exactly such a label. Release-then-write is the only way to replace an archive, which makes
+/// the dangerous sequence ordinary rather than exotic: read A, queue the confirmation, A gets
+/// released by some other valid action, B is archived for the same branch, and the queued request
+/// arrives. Under a `content` binding it destroys B, which the user never saw.
+///
+/// The fixture builds precisely that pair and asserts the stale token is refused, so it fails if
+/// the binding ever reverts to branch content. The guard-the-guard assertions matter here: if the
+/// two archives did not actually share `content`, or did not actually differ, the refusal below
+/// would prove nothing about identity.
+#[test]
+fn a_stale_release_token_cannot_destroy_a_later_archive_of_the_same_branch() {
+    let root = tempfile::tempdir().unwrap();
+    let f = Fixture::new(true);
+    let mut store = open(root.path());
+    let (close, basis) = closing(&f, &mut store);
+    frame_branch(&f, &mut store, &close, &basis);
+
+    // A, and the token a UI read would have handed the user.
+    let archive_a = preserve(&f, &mut store).expect("preserve A");
+    let token_a = archive_a.archive_id().unwrap();
+
+    // A is released by some other valid action.
+    release(&f, &mut store, token_a).expect("A releases");
+
+    // B: the same branch, same content identity, differing only in the `replayable` label.
+    let state = store.load_epoch_intents(SERVER, &f.logical).unwrap();
+    let archive_b = StudioDraftArchive::from_branch(
+        state.overlay().unwrap(),
+        &state.ledger,
+        StudioOverlayProvenance::Closing,
+        false,
+        [3; 32],
+        [4; 32],
+        1,
+    )
+    .unwrap();
+    drop(state);
+
+    // Guard the guard, both halves.
+    assert_eq!(
+        archive_a.content(),
+        archive_b.content(),
+        "the fixture must produce two archives sharing branch content, or it cannot show that \
+         binding to content is unsafe"
+    );
+    assert_ne!(
+        token_a,
+        archive_b.archive_id().unwrap(),
+        "the two archives must have distinct archive identities, or there is nothing to refuse"
+    );
+
+    let mut b = budget(&mut store, &f);
+    store
+        .write_studio_draft_archive_with_io(
+            SERVER,
+            &f.logical,
+            &archive_b,
+            &mut rng(),
+            &mut b.storage,
+            &mut b.intents,
+            &mut WriteHooks::None,
+        )
+        .expect("B must persist");
+    drop(b);
+
+    // The queued confirmation for A arrives.
+    let refused = release(&f, &mut store, token_a);
+    assert!(
+        refused.is_err(),
+        "a token read from A must not destroy B: the user confirmed A"
+    );
+    let scope = crate::store::epoch_draft_archive::scope_bytes(SERVER, &f.logical).unwrap();
+    assert!(
+        store
+            .read_scoped_draft_archive_plain(&scope)
+            .unwrap()
+            .is_some(),
+        "B must survive a stale token for A"
+    );
+
+    // B's own token still releases it, so the refusal was about identity rather than a blanket
+    // failure that would make this test pass for the wrong reason.
+    release(&f, &mut store, archive_b.archive_id().unwrap()).expect("B's own token must release B");
+    assert!(store
+        .read_scoped_draft_archive_plain(&scope)
+        .unwrap()
+        .is_none());
+}
+
+/// The binding is enforced at all. A confirmation literal proves the user typed something; it
+/// cannot prove they typed it about the archive that is on disk now.
 #[test]
 fn release_refuses_an_archive_other_than_the_one_it_names() {
     let root = tempfile::tempdir().unwrap();
@@ -741,7 +832,7 @@ fn release_refuses_an_archive_other_than_the_one_it_names() {
     frame_branch(&f, &mut store, &close, &basis);
     let archive = preserve(&f, &mut store).expect("preserve");
 
-    let mut wrong = archive.content();
+    let mut wrong = archive.archive_id().unwrap();
     wrong[0] ^= 0xff;
     let refused = release(&f, &mut store, wrong);
     assert!(
@@ -759,7 +850,7 @@ fn release_refuses_an_archive_other_than_the_one_it_names() {
     );
     // And the correct content still releases it, so the refusal was about identity and not a
     // blanket failure that would make this test pass for the wrong reason.
-    release(&f, &mut store, archive.content()).expect("the named archive must release");
+    release(&f, &mut store, archive.archive_id().unwrap()).expect("the named archive must release");
     assert!(store
         .read_scoped_draft_archive_plain(&scope)
         .unwrap()
@@ -836,7 +927,7 @@ fn release_refuses_an_archive_naming_another_document() {
     let (close_b, basis_b) = closing(&b, &mut store);
     frame_branch(&b, &mut store, &close_b, &basis_b);
     let archive_b = archive_for(&b, &mut store);
-    let content_b = archive_b.content();
+    let content_b = archive_b.archive_id().unwrap();
 
     // Give A a branch of its own, then seal B's archive into A's record.
     let (close_a, basis_a) = closing(&a, &mut store);
@@ -883,7 +974,7 @@ fn release_refuses_a_record_its_budget_does_not_know() {
 
     // Then place a genuine, decodable archive behind its back, bypassing accounting.
     let archive = archive_for(&f, &mut store);
-    let content = archive.content();
+    let content = archive.archive_id().unwrap();
     crate::store::epoch_draft_archive::write_draft_archive_for_test(
         &store,
         SERVER,
@@ -933,7 +1024,7 @@ fn release_closes_both_budgets_so_the_next_write_must_reconcile() {
         .release_studio_draft_archive_with_io(
             SERVER,
             &f.logical,
-            archive.content(),
+            archive.archive_id().unwrap(),
             &mut b.storage,
             &mut b.intents,
             &mut WriteHooks::None,
@@ -963,6 +1054,275 @@ fn release_closes_both_budgets_so_the_next_write_must_reconcile() {
 
     // A reconciled budget writes again normally: the closure is a fail-closed step, not damage.
     preserve(&f, &mut store).expect("a rebuilt budget must be able to preserve again");
+}
+
+/// The intent budget's poison, anchored **independently** of the storage budget's.
+///
+/// The test above cannot establish both: it hands the next write two stale budgets at once, so a
+/// storage refusal masks a missing `intents.begin_write()`. Here the storage budget is rebuilt
+/// from disk after the release and only the intent budget is stale, which leaves the intent
+/// poison as the only thing that can refuse.
+#[test]
+fn release_poisons_the_intent_budget_it_was_given_independently_of_storage() {
+    let root = tempfile::tempdir().unwrap();
+    let f = Fixture::new(true);
+    let mut store = open(root.path());
+    let (close, basis) = closing(&f, &mut store);
+    frame_branch(&f, &mut store, &close, &basis);
+    let archive = preserve(&f, &mut store).expect("preserve");
+
+    let mut b = budget(&mut store, &f);
+    store
+        .release_studio_draft_archive_with_io(
+            SERVER,
+            &f.logical,
+            archive.archive_id().unwrap(),
+            &mut b.storage,
+            &mut b.intents,
+            &mut WriteHooks::None,
+        )
+        .expect("release must succeed");
+    let stale_intents = b.intents;
+    drop(b.storage);
+
+    // A storage budget that genuinely describes the post-release disk, so it cannot be the thing
+    // that refuses below.
+    let mut fresh = budget(&mut store, &f);
+    assert!(
+        !fresh.storage.requires_reconciliation(),
+        "the rebuilt storage budget must be usable, or this test proves nothing about intents"
+    );
+
+    let mut intents = stale_intents;
+    let refused = store.write_studio_draft_archive_with_io(
+        SERVER,
+        &f.logical,
+        &archive,
+        &mut rng(),
+        &mut fresh.storage,
+        &mut intents,
+        &mut WriteHooks::None,
+    );
+    assert!(
+        refused.is_err(),
+        "the intent budget release was given must be unusable on its own terms"
+    );
+}
+
+/// The intent-generation rotation, which protects **other** budgets than the one passed in.
+///
+/// `intents.begin_write()` only poisons the budget release was handed. A second budget built from
+/// the same pre-release inventory is a separate object that knows nothing about the release, and
+/// the only thing standing between it and an accounted write is
+/// `self.intent_generation = Arc::new(())`. Deleting that rotation leaves the test above passing
+/// and this one failing, which is what makes them different properties rather than one property
+/// tested twice.
+#[test]
+fn release_rotates_the_intent_generation_so_other_stale_budgets_refuse() {
+    let root = tempfile::tempdir().unwrap();
+    let f = Fixture::new(true);
+    let mut store = open(root.path());
+    let (close, basis) = closing(&f, &mut store);
+    frame_branch(&f, &mut store, &close, &basis);
+    let archive = preserve(&f, &mut store).expect("preserve");
+
+    // Two budgets from the same pre-release inventory. `b` goes into the release; `bystander`
+    // never touches it.
+    let mut b = budget(&mut store, &f);
+    let bystander = budget(&mut store, &f);
+    assert!(
+        !bystander.intents.requires_reconciliation_for_test(),
+        "the bystander must start usable, or the refusal below is not attributable to rotation"
+    );
+
+    store
+        .release_studio_draft_archive_with_io(
+            SERVER,
+            &f.logical,
+            archive.archive_id().unwrap(),
+            &mut b.storage,
+            &mut b.intents,
+            &mut WriteHooks::None,
+        )
+        .expect("release must succeed");
+    drop(b);
+
+    // Fresh storage, stale-but-never-poisoned intents: only the generation can refuse.
+    let mut fresh = budget(&mut store, &f);
+    let mut intents = bystander.intents;
+    let refused = store.write_studio_draft_archive_with_io(
+        SERVER,
+        &f.logical,
+        &archive,
+        &mut rng(),
+        &mut fresh.storage,
+        &mut intents,
+        &mut WriteHooks::None,
+    );
+    assert!(
+        refused.is_err(),
+        "a budget captured before the release must be refused by the rotated generation"
+    );
+}
+
+/// Finding 2: the closure must hold across the failure that actually returns early.
+///
+/// A successful `remove_file` followed by a failed parent sync returns
+/// `CommittedButNotDurable` before the end of the happy path. If the storage budget were closed
+/// at the end instead of before the destructive phase, the caller would keep a budget claiming a
+/// record this process can no longer see. The injected failure after the unlink reaches the same
+/// early-return shape, and is the one a hook can produce.
+#[test]
+fn a_release_that_fails_after_the_unlink_still_closes_both_budgets() {
+    let root = tempfile::tempdir().unwrap();
+    let f = Fixture::new(true);
+    let mut store = open(root.path());
+    let (close, basis) = closing(&f, &mut store);
+    frame_branch(&f, &mut store, &close, &basis);
+    let archive = preserve(&f, &mut store).expect("preserve");
+
+    let mut b = budget(&mut store, &f);
+    assert!(
+        !b.storage.requires_reconciliation(),
+        "the budget must start usable"
+    );
+    {
+        let mut after = |_op: CompletedOperation, _tag: WriteTag, _p: &std::path::Path| {
+            AfterIntercept::Fail(AppError::Io("injected failure after the unlink".into()))
+        };
+        let mut hooks = WriteHooks::Hooked {
+            before: None,
+            before_sync: None,
+            before_unlink: None,
+            after: Some(&mut after),
+        };
+        let failed = store.release_studio_draft_archive_with_io(
+            SERVER,
+            &f.logical,
+            archive.archive_id().unwrap(),
+            &mut b.storage,
+            &mut b.intents,
+            &mut hooks,
+        );
+        assert!(failed.is_err(), "the injected failure must fail the call");
+    }
+
+    // The archive really is gone, so the budget really is stale.
+    let scope = crate::store::epoch_draft_archive::scope_bytes(SERVER, &f.logical).unwrap();
+    assert!(
+        store
+            .read_scoped_draft_archive_plain(&scope)
+            .unwrap()
+            .is_none(),
+        "the unlink completed, so this is the stale-accounting case and not a no-op"
+    );
+    assert!(
+        b.storage.requires_reconciliation(),
+        "a release that failed after the unlink left a usable storage budget describing a record \
+         that no longer exists"
+    );
+    let refused = store.write_studio_draft_archive_with_io(
+        SERVER,
+        &f.logical,
+        &archive,
+        &mut rng(),
+        &mut b.storage,
+        &mut b.intents,
+        &mut WriteHooks::None,
+    );
+    assert!(
+        refused.is_err(),
+        "neither budget may authorise a write after a release failed past the unlink"
+    );
+}
+
+/// I-4 for the destructive path: release must rotate `inventory_generation`.
+///
+/// This is what stops a reference scan that observed the pre-release vault from later installing
+/// a protection set built when the archive still existed. The rotation happens inside
+/// `epoch_mutation_guard()`, and the Slice 3 mutation set did not anchor that call: every other
+/// release test would pass with the guard replaced by a direct syscall.
+///
+/// Stated at the generation rather than by parking a real cursor across the release. A cursor
+/// fixture would exercise more of the path, but `EpochStorageCursor` is Agent 1's actively
+/// changing C-3 surface, and a test of Agent 2's guard that breaks whenever that API moves is a
+/// test of the wrong thing. The generation is the contract both sides agree on: cursors refuse by
+/// comparing against exactly this value, so a release that rotates it cannot be overtaken, and a
+/// release that does not rotate it fails here.
+#[test]
+fn release_rotates_the_inventory_generation_so_a_scan_cannot_overtake_it() {
+    let root = tempfile::tempdir().unwrap();
+    let f = Fixture::new(true);
+    let mut store = open(root.path());
+    let (close, basis) = closing(&f, &mut store);
+    frame_branch(&f, &mut store, &close, &basis);
+    let archive = preserve(&f, &mut store).expect("preserve");
+
+    let before = store.inventory_generation();
+    release(&f, &mut store, archive.archive_id().unwrap()).expect("release must succeed");
+    let after = store.inventory_generation();
+
+    assert!(
+        !std::sync::Arc::ptr_eq(&before, &after),
+        "release removed an inventoried record without rotating the inventory generation, so a \
+         scan that captured the pre-release token could still install a protection set naming \
+         the archive's CIDs"
+    );
+}
+
+/// The remediation guarantee the sub-cap's grandfathering exists to provide.
+///
+/// `from_inventory` deliberately does not refuse an over-cap vault, because refusing would be
+/// self-locking: every accounted write needs a budget, so an over-cap vault would lose unrelated
+/// intent writes **and** lose the release that is its only way back under the policy. That
+/// argument is only sound if release actually works on such a vault. Until now it was inferred
+/// from two separately tested pieces; this executes it.
+///
+/// The tally is positioned with the test-only setter rather than by fabricating 16 MiB of real
+/// archives, so the class ceiling is untouched and a refusal would be attributable to the sub-cap
+/// alone. A mutation adding an archive-cap check to release must fail this test.
+#[test]
+fn an_over_cap_vault_can_still_release_its_way_back_under_the_policy() {
+    let root = tempfile::tempdir().unwrap();
+    let f = Fixture::new(true);
+    let mut store = open(root.path());
+    let (close, basis) = closing(&f, &mut store);
+    frame_branch(&f, &mut store, &close, &basis);
+    let archive = preserve(&f, &mut store).expect("preserve");
+
+    let mut b = budget(&mut store, &f);
+    b.intents
+        .set_archive_bytes_for_test(crate::store::epoch_intents::MAX_VAULT_DRAFT_ARCHIVE_BYTES + 1);
+    // Guard the guard, stated on the tally rather than by attempting a write. A write probe is
+    // the wrong instrument here: re-writing the same archive is an exact retry, which takes the
+    // sync-only path and deliberately skips the sub-cap, so it would succeed and the assertion
+    // would report the opposite of the truth. That growth really is refused above the cap is
+    // already proved by `the_archive_writer_refuses_at_the_sub_cap_not_the_class_ceiling`.
+    assert!(
+        b.intents.archive_bytes() > crate::store::epoch_intents::MAX_VAULT_DRAFT_ARCHIVE_BYTES,
+        "the fixture must actually be over the sub-cap, or the release below proves nothing"
+    );
+    store
+        .release_studio_draft_archive_with_io(
+            SERVER,
+            &f.logical,
+            archive.archive_id().unwrap(),
+            &mut b.storage,
+            &mut b.intents,
+            &mut WriteHooks::None,
+        )
+        .expect("an over-cap vault must still be able to release: it is the only way back");
+    drop(b);
+
+    // Rebuilt from disk, the vault is back under the policy and can write again.
+    let rebuilt = budget(&mut store, &f);
+    assert_eq!(
+        rebuilt.intents.archive_bytes(),
+        0,
+        "the released archive must be gone from the observed tally"
+    );
+    drop(rebuilt);
+    preserve(&f, &mut store).expect("a vault back under the cap must be able to preserve again");
 }
 
 /// Requirement 3 for the destructive path: the store owns the unlink, and a hook decides only on
@@ -1000,7 +1360,7 @@ fn release_consults_hooks_on_both_sides_of_its_unlink() {
         let refused = store.release_studio_draft_archive_with_io(
             SERVER,
             &f.logical,
-            archive.content(),
+            archive.archive_id().unwrap(),
             &mut b.storage,
             &mut b.intents,
             &mut hooks,
@@ -1037,7 +1397,7 @@ fn release_consults_hooks_on_both_sides_of_its_unlink() {
         let refused = store.release_studio_draft_archive_with_io(
             SERVER,
             &f.logical,
-            archive.content(),
+            archive.archive_id().unwrap(),
             &mut b.storage,
             &mut b.intents,
             &mut hooks,

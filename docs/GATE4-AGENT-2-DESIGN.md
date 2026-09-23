@@ -1547,6 +1547,40 @@ Agent 1's `LocalDraftRetained` and `LocalDraftHandedOff` are separate.
 | Disposal requested while `Prepared` | Refused by D2. |
 | Restart with a retained unconfirmed branch and no preview | Reconstructs by re-parsing its own persisted seed bytes against its receipt (8.1 part 3); `AwaitingSource` until an installed source exists. |
 | Restart mid-copy with the destination rotated | The destination stamp, `epoch_id` and fingerprint refuse; re-preview against the new Open epoch. |
+| **Release: unlink succeeded, parent-directory sync failed** | `CommittedButNotDurable`. **Not exact-retryable; see 12.1.** Both budgets are already closed. The caller reconciles and re-reads the archive state; it does not resend the request. |
+
+### 12.1 Release is exempt from the exact-retry contract
+
+Everywhere else in this design, an uncertain write is resolved by retrying the identical request.
+**Release cannot honour that, and the adversarial review of slice 3 was right to call the blanket
+claim false.**
+
+After a successful unlink whose directory sync failed, an exact retry finds no archive. The store
+is then asked to distinguish two states it genuinely cannot tell apart:
+
+- this exact archive was already released, and the retry should report success; and
+- no archive ever existed at this scope, because the caller addressed the wrong one.
+
+Collapsing those is the bug the missing-archive refusal exists to prevent, so the retry is refused
+and that refusal is correct.
+
+**The resolution is option (a): release is explicitly exempt, not made retryable.** Its contract is:
+
+> uncertain -> reconcile, then re-read the archive state.
+
+If the archive is absent after reconciliation, the outcome is reported as *completed after
+uncertainty*, not as an ordinary refusal, and the UI must not present the refusal text from a
+resent request as though the release had failed.
+
+The rejected alternative, option (b), was to persist terminal release evidence - a tombstone
+carrying the released archive identity - so an exact retry could recognise itself. That is a new
+durable record family, with its own accounting, bound, reference rules and eviction question,
+built solely to preserve a uniform retry slogan for the one operation whose whole purpose is to
+remove a record. The machinery is not justified by the benefit, and a tombstone that outlives the
+evidence it describes is its own preservation question.
+
+This exemption is carried in `release_studio_draft_archive_with_io`'s doc comment, because a rule
+that lives only in a design document is a rule the next writer of a caller will not read.
 
 ## 13. Prerequisites this design supplies to Agent 1
 
