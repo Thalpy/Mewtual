@@ -4,12 +4,16 @@
 
 use super::*;
 
-/// Validate historical equivocation without requiring a repair or a current-owner claim.
+/// Validate canonical, self-signed conflicting receipts without proving owner authority.
 ///
-/// Both receipts must have their canonical wire shape and authentic signatures, name the full
+/// Both receipts must have their canonical wire shape and valid self-signatures, name the full
 /// logical document and the same tenure, and actually conflict. Two successive consistent
 /// receipts are progress, not evidence. This mints no verified-receipt capability: callers still
 /// bind their numeric server/channel/store scope and separately establish live repair authority.
+/// In particular, a valid self-signature does not prove the key was ever a member or designated
+/// committer. Report admission must establish owner authority for the claimed historical tenure
+/// independently BEFORE persisting evidence or consuming capacity; authenticating the reporter
+/// does not establish the receipt signer's authority. This helper alone cannot admit a report.
 pub fn conflicting_receipt_pair(
     document: &LogicalDocument,
     a: &Receipt,

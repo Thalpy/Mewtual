@@ -146,6 +146,36 @@ fn repair_evidence_checks_canonical_signed_conflict_without_live_authority() {
 }
 
 #[test]
+fn repair_self_signed_member_pair_does_not_prove_owner_authority() {
+    let mut f = Fixture::new(false);
+    let member = MlsDevice::generate().unwrap();
+    f.group
+        .add_member(&f.owner, member.key_package().unwrap())
+        .unwrap();
+    assert!(f.group.member_device_ids().contains(&member.device_id()));
+    assert_eq!(f.group.designated_committer(), Some(f.owner.device_id()));
+    let sign = |close| {
+        Receipt::sign(
+            f.document.clone(),
+            2,
+            [close; 32],
+            [9; 32],
+            0,
+            InheritedCheckpoint::EpochZero,
+            &member,
+        )
+        .unwrap()
+    };
+    let (a, b) = (sign(6), sign(7));
+    // A malicious authenticated member can create canonical, correctly signed equivocation.
+    // The primitive deliberately accepts it: no membership/owner history is an input. This is
+    // a limitation test, NOT the future report-admission/no-write security regression.
+    conflicting_receipt_pair(&f.document, &a, &b).unwrap();
+    assert!(a.verify_current_owner(&f.group, 0).is_err());
+    assert!(b.verify_current_owner(&f.group, 0).is_err());
+}
+
+#[test]
 fn repair_evidence_rejects_shape_scope_tenure_duplicates_and_consistent_progress() {
     let f = Fixture::new(false);
     let mut malformed = f.losing.clone();
@@ -280,6 +310,34 @@ fn repair_headless_book_roundtrips_and_retains_its_evidence_identity() {
         assert_eq!(restored.repair_sequence(), 1);
         assert_eq!(restored.latest_repair(), Some(&f.repair));
         assert!(restored.is_repaired_loser(&f.losing));
+    }
+}
+
+#[test]
+fn repair_headless_book_rejects_a_same_document_predecessor() {
+    let mut f = Fixture::new(false);
+    f.apply();
+    f.book.latest = None;
+    f.book.tenure = None;
+    for adoption in [false, true] {
+        // The headless repair evidence is otherwise valid, including its document and stored
+        // sequence. A fully signed SAME-document receipt isolates predecessor presence from
+        // the existing foreign-document rejection and from typed gate/opening validation.
+        assert!(ReceiptBook::decode_mode(&f.book.encode_mode(adoption).unwrap(), adoption).is_ok());
+        f.selected.verify_signature_only().unwrap();
+        assert_eq!(f.selected.document, f.document);
+        f.book.previous_until_installed = Some(f.selected.clone());
+        let bytes = f.book.encode_mode(adoption).unwrap();
+        assert_eq!(bytes[0], if adoption { 5 } else { 4 });
+        assert!(
+            matches!(
+                ReceiptBook::decode_mode(&bytes, adoption),
+                Err(ReplError::Malformed)
+            ),
+            "a headless repaired book must reject a same-document predecessor"
+        );
+        f.book.previous_until_installed = None;
+        assert!(ReceiptBook::decode_mode(&f.book.encode_mode(adoption).unwrap(), adoption).is_ok());
     }
 }
 

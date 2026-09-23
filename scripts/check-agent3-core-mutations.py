@@ -16,6 +16,15 @@ COMMAND = ["cargo", "test", "--locked", "-j", "1", "-p", "catcoms-replication", 
 ANCHOR_TEST = "repair_losing_adoption_anchors_do_not_recreate_a_resolved_fault"
 MUTATIONS = [
     (
+        "C8-headless-predecessor", "crates/catcoms-replication/src/epoch.rs",
+        "        if latest.is_none() && previous_until_installed.is_some() {\n"
+        "            return Err(ReplError::Malformed);\n"
+        "        }\n",
+        "",
+        "repair_headless_book_rejects_a_same_document_predecessor",
+        "a headless repaired book must reject a same-document predecessor",
+    ),
+    (
         "M5-exact-pair", "crates/catcoms-replication/src/epoch/repair_state.rs",
         "|| self.receipt_hashes != hashes", "|| false",
         "repair_evidence_binds_the_exact_pair_even_when_it_shares_the_winner",

@@ -1884,6 +1884,12 @@ impl ReceiptBook {
         if tenure.is_some() != latest.is_some() {
             return Err(ReplError::Malformed);
         }
+        // A retained predecessor belongs to an existing latest target. Resolved repair
+        // evidence supplies scope for a headless book, not a target for an orphan predecessor.
+        // Keep this raw codec invariant independent of the enclosing typed restart checks.
+        if latest.is_none() && previous_until_installed.is_some() {
+            return Err(ReplError::Malformed);
+        }
         if let (Some(tenure), Some(latest)) = (&tenure, &latest) {
             if tenure != &TenureSelection::from(latest) {
                 return Err(ReplError::Malformed);

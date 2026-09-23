@@ -4,6 +4,29 @@ Owner: Agent 3 ([assignment](GATE4-AGENT-HANDOFFS.md#agent-3-runtime-signed-faul
 Proposal: [GATE4-AGENT-3-DESIGN](GATE4-AGENT-3-DESIGN.md), currently revision 14.
 Review preamble: 3. Current entries override older ones.
 
+## Independent review response, 2026-09-23 (in progress)
+
+User-supplied verdict at `8d4cc53a529c86bdad76170f7825f7dbd682dfa9`: **REQUEST CHANGES**.
+C-3 and the C-5 sequence getter passed. C-4 passed only as a shape/self-signature/conflict
+primitive; **AG3-CORE-005 (High)** blocks its intended report consumer until historical owner
+authority is independently established. `report_studio_fault` does not exist and this issue
+is not presently a network-reachable report boundary. No primitive test is report-admission proof.
+
+**AG3-IMP-001 (Medium)** is addressed in the decoder with a dedicated v4/v5 regression: a
+headless book cannot retain a predecessor, including a valid same-document receipt. Removing
+only that guard is now the ninth mutation. A separate limitation test demonstrates that a
+current non-owner member can self-sign a pair accepted by C-4 but rejected as current-owner
+authority. Its test name/comments explicitly do not claim the missing report/no-write test.
+Execution of this revision is pending; prior 225-test/eight-mutation evidence is not a pass
+for the new guard. Local format and diff-whitespace checks pass.
+
+CORE-001/002/003 design corrections were accepted by the supplied review, with exact-state
+rebinding for screening and effective-canonical-head scope for repeated reconciliation.
+CORE-004 is being rewritten around separate tenure identity, publication/canonical roles and
+bounded reconciliation provenance. A read-only adversarial design review of CORE-005 has been
+requested now; implementation re-review and the user's independent follow-up review are still
+required. No new report, gate, journal or persistence boundary is implemented in this fix.
+
 ## Implementation restart, 2026-09-23
 
 Agent 3 now works in **`gate4-agent3-repair`**, at
