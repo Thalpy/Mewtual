@@ -63,6 +63,48 @@ headless book restore as core prerequisites; keep the current unavailable-native
 unchanged. In particular, do not claim `Repairing`, an owner choice, recovery-before-replacement,
 or peer convergence from these unit tests.
 
+### Current checkpoint and follow-up verification
+
+Implementation: `66933c96a27ab76bac48f9bf0f540a8317ea9158`.
+Reviewed regression expansion: `703c84d86dab41c3dc4e885835ad3eb1300bffd5`.
+Separate branch-local verification wiring: `1a2ec4dfd7d848bf3a59d6fff6e12e24ee3bdcdc`.
+Only tests/docs/mutation controls changed after the first implementation commit; the wiring
+commit changes only its new workflow and this status. No existing common workflow was edited.
+
+[Expanded-regression CI on the original base](https://github.com/Thalpy/Mewtual/actions/runs/35803402782)
+uses head `703c84d` and actual merge checkout **`182b48212768a52aa0e73c3c61f5e508bc622d85`**,
+confirmed in its desktop checkout log. Frontend tests (1,229/1,229), check and build passed again;
+native full tests again stopped during compilation on the same untouched unused-code diagnostics.
+Formatting and strict Clippy also passed on both platforms with the expanded regressions.
+Root full suites are still running at this entry. The branch sources differ from `1a2ec4d`
+only in its new test workflow/status, but their **PR merge bases differ**: Agent 1 advanced
+`gate4-agent1-runtime` from `918ffb9` to `397f6895166ccabb95056396ff373199f0076f87` while
+verification was in flight. The later full run `35804059956` was initially cancelled as a
+duplicate; the checkout audit caught this distinction and it was **restarted as attempt 2**:
+[newer-base full CI](https://github.com/Thalpy/Mewtual/actions/runs/35804059956/attempts/2).
+It is running, not a PASS; record its actual checkout and results on completion. The older
+`66933c9` full run `35802458116` stays cancelled after retaining its partial logs. A cancellation
+is not verification evidence. No local rebase/merge or Agent 1/2 ref mutation was performed.
+
+[Dedicated repair-core run](https://github.com/Thalpy/Mewtual/actions/runs/35804060155)
+at `1a2ec4d` **PASSED on Windows and Linux**, each with **225 passed, zero failed/ignored**
+in the complete replication library. Both checkout logs confirm actual PR merge
+**`dda15bdcefb0cf43299a8f106ac0a360c489715d`**, merging `1a2ec4d` into the newer `397f689` base.
+On each platform all eight mutants failed at the intended named assertion, every source was
+restored byte-for-byte, and each of the eight restored exact controls passed. Both sets of raw
+logs were downloaded and checked: eight mutant logs and eight passing controls per platform.
+Artifacts: [Linux](https://github.com/Thalpy/Mewtual/actions/runs/35804060155/artifacts/10727522307),
+[Windows](https://github.com/Thalpy/Mewtual/actions/runs/35804060155/artifacts/10728035646).
+Local copies are under ignored `logs/agent3-core-ci-linux/` and `logs/agent3-core-ci-windows/`.
+
+The new workflow received a read-only static review with no findings. It has read-only permissions,
+serial locked builds and always-attempted evidence upload. The review did not execute its commands.
+No root-workspace, native, runtime, transport or full-Gate-4 PASS is inferred from this library run.
+
+The user has been asked for the independent CORE-001--004 design review required by the common
+handoff before those new gate/journal boundaries are implemented. No verdict is inferred from
+silence, routine implementation authorization, the internal static review, or these leaf tests.
+
 ### Verification evidence, initial leaf checkpoint
 
 Draft PR: [#28](https://github.com/Thalpy/Mewtual/pull/28), base `gate4-agent1-runtime`,
@@ -86,6 +128,10 @@ needs execution at its own head. Current observations:
 | CI `cargo deny check` | FAIL: existing `rustls 0.23.40`, `RUSTSEC-2026-0285`; bans/licenses/sources passed |
 | Agent 3 focused mutations | Prepared; not yet executed |
 
+This table is the initial-run record; the later dedicated mutation PASS above supersedes its last
+row. The final evidence update changes documentation only, so it does not rerun or queue another
+copy of the expensive suites. Existing complete-suite runs continue and remain explicitly pending.
+
 Native diagnostics are `SourceFormat::as_mime` (`src/media_decode.rs:109`) and unused
 security-intent APIs/fields (`src/security_intent.rs`, including `PendingApproval` fields at
 line 155). Those files and both lockfiles are unchanged by Agent 3. The supply-chain log
@@ -106,7 +152,9 @@ integration and required-check configuration; the exact patch is also supplied a
 `cargo test --locked -j 1 -p catcoms-replication --lib epoch::repair_state::tests::` passed:
 17 passed, zero failed/ignored (includes the eight new regressions). It started only after
 the other agents' Cargo work became idle and reused the existing target directory.
-The eight-mutation local runner is separately queued behind their next full app suite.
+The eight-mutation local runner waited up to 15 minutes for their next full app suite to finish,
+then exited `NO_LOCAL_SLOT` without invoking Cargo or touching source. No local mutation evidence
+is claimed; its execution moved to the dedicated hosted workflow. No local Agent 3 process remains.
 
 The local ambient-dependency script was also executed and **failed** on seven existing calls:
 `Instant::now` in native `media_decode.rs` lines 333/426/444/504, and `tokio::time::sleep` in
