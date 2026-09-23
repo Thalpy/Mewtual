@@ -400,17 +400,60 @@ constraint the handoffs record about exhausted RAM and disk. The alternative of 
 1's file was also rejected: reverting a peer's work mid-edit could corrupt their session. The
 working answer is to retry and to report which signals could not be obtained.
 
+### Slice 3: the release path, and a stack regression found on the way
+
+`release_studio_draft_archive_with_io` landed at `47bad73`. The design left its signature open;
+what slice 3 fixed, and why, is in the commit message and the function's own doc comment. The four
+decisions worth repeating here: `expected_content` binds the destruction to the archive the user
+was shown, decode happens before destroying, `verify_record` runs before the unlink, and **both
+budgets are closed afterwards with a reconcile required**, because release cannot be expressed as
+a replacement and hand-subtracting the freed bytes would be a second representation of occupancy
+maintained beside the inventory's.
+
+Seven tests, one per guard. The load-bearing one is
+`releasing_an_archive_makes_its_sole_references_reclaimable`, the mirror of N19: one vault shows
+the pixels pinned because of the archive and reclaimable again because it was released. It is the
+only test that proves release reaches the scanner rather than merely returning `Ok`.
+
+**Mutation evidence: INCOMPLETE at the time of writing.** One of the seven is proved so far -
+deleting the `expected_content` comparison fails
+`release_refuses_an_archive_other_than_the_one_it_names` and **only** that test (16 passed, 1
+failed). The remaining six are unproved, so "one per guard" is the intent and not yet the
+evidence. The mutation run is slow because the shared workspace target is contended by the other
+agents' test binaries; slice 3's mutations are running against a private `CARGO_TARGET_DIR` to
+decouple from that.
+
+**A pre-existing stack regression, reported to Agent 1, not caused by this slice.** While verifying
+slice 3, `store::epoch_studio` began aborting with exit `0xffffffff` and no panic message. The
+first comparison appeared to implicate slice 3 (three crashing runs with the changes, one passing
+run without), and that was **wrong**: the passing run predated Agent 1's C-3 commits, and the tree
+moved between the two samples because another agent's uncommitted `epoch_studio/tests.rs` was
+present for one and not the other. Re-running the comparison after the tree settled reproduced the
+crash **at HEAD with slice 3 stashed**, which is what actually attributes it.
+
+The cause is stack exhaustion, not logic:
+
+| Suite | default stack | `RUST_MIN_STACK=32 MiB` | `RUST_MIN_STACK=128 MiB` |
+|---|---|---|---|
+| `rotation::overlay::archive` | aborts after 15/17 | 17 passed | - |
+| `rotation::overlay::handoff` | aborts | aborts | 37 passed, 2 ignored |
+
+Every test passes in isolation, so it is cumulative depth rather than one deep test. The handoff
+suite needing somewhere between 32 MiB and 128 MiB of thread stack is the signal worth acting on,
+and it appeared with the C-3 parked-cursor work. Agent 2 is not fixing this: it is Agent 1's area.
+Slice 3's own evidence was taken at `RUST_MIN_STACK=33554432`, and **that is a workaround, not a
+result** - any later claim that this scope is green must say which stack size it used.
+
 ### Built so far
 
 The payload codec, the reference collector that narrows Agent 1's fail-closed arm under I-5, the
-archive record writer with its accounting and sub-cap, and the archive tally on
-`EpochIntentBudget`.
+archive record writer with its accounting and sub-cap, the archive tally on `EpochIntentBudget`,
+and **the archive release path** (slice 3).
 
 ### Not yet built
 
-The archive release path, the disposal transaction (which is the writer's first production
-caller), the v3 record arms, the composite copy capture, the lifecycle classifier, the tenure
-work and every native command.
+The disposal transaction (which is the writer's first production caller), the v3 record arms, the
+composite copy capture, the lifecycle classifier, the tenure work and every native command.
 
 **Sections above this point are an append-only ledger and are dated.** Where an earlier entry
 says something is not yet built, read it as the state at that entry's date, not as current
