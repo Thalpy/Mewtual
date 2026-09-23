@@ -660,16 +660,10 @@ impl ServerStore {
     pub fn begin_epoch_inventory_job(
         &mut self,
         coverage: EpochInventoryCoverage,
-        references: bool,
     ) -> Result<EpochInventoryJob, AppError> {
-        let mut cursor = self.begin_epoch_storage_scan(coverage)?;
-        if references {
-            cursor.collect_creative_references(self)?;
-        }
         Ok(EpochInventoryJob {
-            cursor,
+            cursor: self.begin_epoch_storage_scan(coverage)?,
             coverage,
-            references,
             restarts: 0,
         })
     }
@@ -715,29 +709,30 @@ impl ServerStore {
     /// Finish, or restart once more, or report that the vault will not hold still.
     pub fn finish_epoch_inventory_job(
         &mut self,
-        mut job: EpochInventoryJob,
+        job: EpochInventoryJob,
     ) -> Result<EpochInventoryOutcome, AppError> {
-        let references = job.references;
-        let cursor = std::mem::replace(
-            &mut job.cursor,
-            self.begin_epoch_storage_scan(job.coverage)?,
-        );
-        let finished = if references {
-            cursor.finish_creative_references(self).map(|_| None)
-        } else {
-            cursor.finish_with(self).map(Some)
-        };
-        match finished {
-            Ok(Some(inventory)) => Ok(EpochInventoryOutcome::Complete(Box::new(inventory))),
-            // A reference scan installs protection rather than returning an inventory; its
-            // caller wants the protection, and an empty completion says the install happened.
-            Ok(None) => Ok(EpochInventoryOutcome::Complete(Box::new(
-                EpochStorageInventory::empty(job.coverage, self.intent_generation.clone()),
-            ))),
-            Err(error) if is_invalidation(&error) => match self.restart_job(&mut job)? {
-                EpochInventoryStep::Unstable => Ok(EpochInventoryOutcome::Unstable),
-                _ => Ok(EpochInventoryOutcome::Restarted(Box::new(job))),
-            },
+        // Destructured rather than moved out of a still-live job, so the success path opens no
+        // directory it does not need. Replacing the cursor in place cost a `read_dir` on every
+        // finish, and could turn a completed scan into an error if that open happened to fail.
+        let EpochInventoryJob {
+            cursor,
+            coverage,
+            restarts,
+        } = job;
+        match cursor.finish_with(self) {
+            Ok(inventory) => Ok(EpochInventoryOutcome::Complete(Box::new(inventory))),
+            Err(error) if is_invalidation(&error) => {
+                if restarts >= MAX_INVENTORY_RESTARTS {
+                    return Ok(EpochInventoryOutcome::Unstable);
+                }
+                Ok(EpochInventoryOutcome::Restarted(Box::new(
+                    EpochInventoryJob {
+                        cursor: self.begin_epoch_storage_scan(coverage)?,
+                        coverage,
+                        restarts: restarts + 1,
+                    },
+                )))
+            }
             Err(error) => Err(error),
         }
     }
@@ -748,11 +743,7 @@ impl ServerStore {
             return Ok(EpochInventoryStep::Unstable);
         }
         job.restarts += 1;
-        let mut cursor = self.begin_epoch_storage_scan(job.coverage)?;
-        if job.references {
-            cursor.collect_creative_references(self)?;
-        }
-        job.cursor = cursor;
+        job.cursor = self.begin_epoch_storage_scan(job.coverage)?;
         Ok(EpochInventoryStep::Restarted)
     }
 
@@ -1429,10 +1420,17 @@ pub const MAX_INVENTORY_RESTARTS: usize = 3;
 /// The restart count belongs here rather than in the cursor because a restart *replaces* the
 /// cursor. Keeping it in the thing that outlives the cursor is what makes the budget a property
 /// of the attempt, as the design specifies, instead of resetting every time a scan is retried.
+/// Budget inventories only, deliberately.
+///
+/// A reference scan does not return an inventory; it installs deletion protection and yields
+/// the reference set. An earlier version of this type accepted a `references` flag and, on
+/// finishing one, returned `Complete` carrying an **empty** inventory - which a caller could
+/// have built a zero budget from without anything having failed. Reference scans therefore
+/// drive the cursor directly until their own runtime adoption gives them an outcome type that
+/// says what they actually produce.
 pub struct EpochInventoryJob {
     cursor: EpochStorageCursor,
     coverage: EpochInventoryCoverage,
-    references: bool,
     restarts: usize,
 }
 
@@ -2786,7 +2784,7 @@ mod tests {
         stage(&mut store, 7, &doc, 1);
 
         let mut job = store
-            .begin_epoch_inventory_job(EpochInventoryCoverage::RecoveryOnly, false)
+            .begin_epoch_inventory_job(EpochInventoryCoverage::RecoveryOnly)
             .unwrap();
         let mut restarts = 0;
         let unstable = loop {
@@ -2830,7 +2828,7 @@ mod tests {
         // And the vault is fine: once writes stop, a fresh attempt completes. `Unstable`
         // described the vault's behaviour, not damage to it.
         let mut job = store
-            .begin_epoch_inventory_job(EpochInventoryCoverage::RecoveryOnly, false)
+            .begin_epoch_inventory_job(EpochInventoryCoverage::RecoveryOnly)
             .unwrap();
         loop {
             match store
@@ -2869,7 +2867,7 @@ mod tests {
         fs::write(&path, bytes).unwrap();
 
         let mut job = store
-            .begin_epoch_inventory_job(EpochInventoryCoverage::RecoveryOnly, false)
+            .begin_epoch_inventory_job(EpochInventoryCoverage::RecoveryOnly)
             .unwrap();
         let error = loop {
             match store.step_epoch_inventory_job(&mut job, ENTRIES_PER_STEP, None) {
