@@ -1200,3 +1200,75 @@ fn a_cursor_parked_across_a_studio_source_write_refuses_but_survives_a_budget_mi
         "a cursor parked across a Studio source write still issued an inventory"
     );
 }
+
+/// The surviving cursor must also be *usable*, not merely un-refused.
+///
+/// `studio_generation` rotates on a budget mint and on budget entry - bookkeeping that touches no
+/// record, and so correctly does not rotate `inventory_generation`. A cursor stamped at begin
+/// would pass every invalidation check and then hand back an inventory the budget consumer
+/// rejects as stale: the negative property inverted, where harmless activity does not kill the
+/// cursor but still wastes it.
+///
+/// The earlier test stops at "the next step succeeded". This one continues through the actual
+/// consumer, which is the only place the defect was visible.
+#[test]
+fn a_cursor_that_spans_budget_bookkeeping_still_mints_a_budget_from_its_inventory() {
+    let root = tempfile::tempdir().unwrap();
+    let f = Fixture::new(false);
+    let mut store = open(root.path());
+    let mut b = budget(&mut store, &f);
+    f.edit(&mut store, &mut b, f.insert());
+
+    let mut cursor = store
+        .begin_epoch_storage_scan(
+            EpochInventoryCoverage::RecoveryOwnerReceiptsIntentsRegistryAndStudio,
+        )
+        .unwrap();
+    store.step_epoch_storage_scan(&mut cursor, 1, None).unwrap();
+
+    // Budget-only bookkeeping while the cursor is parked: a mint, and an entry through a real
+    // scoped operation. Both rotate `studio_generation`; neither touches a record.
+    let mut other = budget(&mut store, &f);
+    store
+        .load_studio_epoch(SERVER, &f.group, f.target, &f.device)
+        .unwrap();
+    let _ = other.storage.usage();
+    f.edit(&mut store, &mut other, f.title());
+    // That edit *is* a write, so take a fresh cursor for the no-write case below and use this
+    // one only to confirm a write still refuses.
+    assert!(
+        store.step_epoch_storage_scan(&mut cursor, 1, None).is_err(),
+        "control is broken: the intervening edit did not invalidate, so the case below would \
+         prove nothing about budget-only activity"
+    );
+    drop(store.finish_epoch_storage_scan(cursor));
+
+    // Now the real case: no record mutation at all between begin and finish, only mints.
+    let mut cursor = store
+        .begin_epoch_storage_scan(
+            EpochInventoryCoverage::RecoveryOwnerReceiptsIntentsRegistryAndStudio,
+        )
+        .unwrap();
+    store.step_epoch_storage_scan(&mut cursor, 1, None).unwrap();
+    let minted = budget(&mut store, &f);
+    drop(minted);
+    let minted_again = budget(&mut store, &f);
+    drop(minted_again);
+    while !store
+        .step_epoch_storage_scan(&mut cursor, 64, None)
+        .unwrap()
+        .complete
+    {}
+    let inventory = store
+        .finish_epoch_storage_scan(cursor)
+        .expect("budget bookkeeping alone must not invalidate a cursor");
+
+    let mut minted = store
+        .studio_storage_budget(SERVER, &f.group, &inventory)
+        .expect(
+            "a cursor that survived budget bookkeeping issued an inventory its own budget \
+             consumer refuses, so surviving bought nothing",
+        );
+    // And the minted budget is entered, which is the second rotation point.
+    f.edit(&mut store, &mut minted, f.domain(f.title().body, 9));
+}

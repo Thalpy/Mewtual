@@ -1006,13 +1006,29 @@ impl EpochStorageCursor {
         steps: usize,
         deadline: Option<(&dyn catcoms_rt::Clock, u64)>,
     ) -> Result<EpochStorageScanProgress, AppError> {
-        // Read once per record that might be parked, not per entry: a traversal step that skips
-        // uncovered filenames does no validation and needs no clock.
-        let remaining_ms = deadline.map(|(clock, at)| at.saturating_sub(clock.monotonic_ms()));
         if self.progress.complete {
             return Ok(self.progress);
         }
-        for _ in 0..steps {
+        // The budget bounds the visit, not only the choice to detach a validator.
+        //
+        // An earlier version sampled the clock once and used it solely for that choice, so a
+        // step over ignored filenames, orphans or cache hits ran the whole requested entry count
+        // no matter how long it had already taken: with no fresh validation to classify, an
+        // expired budget had no effect at all. `steps` bounded it; `budget_ms` did not.
+        //
+        // A single filesystem operation is not preemptible through this API, so this is not a
+        // measured latency ceiling. It is the weaker and honest guarantee the design asks for:
+        // once the deadline is known to have passed, no further unit of work begins.
+        let expired = |deadline: Option<(&dyn catcoms_rt::Clock, u64)>| {
+            deadline.is_some_and(|(clock, at)| clock.monotonic_ms() >= at)
+        };
+        for processed in 0..steps {
+            // Never on the first iteration: a visit that begins already past its deadline must
+            // still make one unit of progress, or a cursor could be starved forever by a budget
+            // it can never satisfy.
+            if processed > 0 && expired(deadline) {
+                return Ok(self.progress);
+            }
             let Some(entry) = self.directory.next() else {
                 self.progress.complete = true;
                 break;
@@ -1117,8 +1133,15 @@ impl EpochStorageCursor {
                         // has returned would not have bounded anything, so the decision is made
                         // on facts known now: family, authenticated size, and whether this scan
                         // is collecting references.
-                        if let Some(remaining) = remaining_ms.as_ref() {
-                            if !validation_fits(family, size, self.references.is_some(), *remaining)
+                        //
+                        // The remaining budget is sampled here rather than at step entry,
+                        // because the read and authentication of this record's body have already
+                        // consumed some of it. Classifying against a stale figure would admit a
+                        // validator on the strength of time that was spent getting to it.
+                        let remaining_ms =
+                            deadline.map(|(clock, at)| at.saturating_sub(clock.monotonic_ms()));
+                        if let Some(remaining) = remaining_ms {
+                            if !validation_fits(family, size, self.references.is_some(), remaining)
                             {
                                 self.awaiting = Some((family, hash));
                                 self.parked = Some(ParkedEpochRecord {
@@ -1191,13 +1214,31 @@ impl EpochStorageCursor {
 
     /// Consume only a successful EOF result. A completed result is metadata, not a storage lease;
     /// future callers must keep the coordinator exclusive until the complete budget is installed.
-    fn finish_with(self, store: &ServerStore) -> Result<EpochStorageInventory, AppError> {
+    fn finish_with(mut self, store: &ServerStore) -> Result<EpochStorageInventory, AppError> {
         // Again before issuing, not only before resuming: a write can land after the traversal
         // reaches EOF and before the caller consumes the result.
         self.check_not_invalidated(store)?;
         if self.failed || !self.progress.complete {
             return Err(invalid("epoch storage inventory is incomplete"));
         }
+        // Stamp the budget-ownership token at issue, not at begin.
+        //
+        // `studio_generation` rotates on a budget mint and on budget *entry* - bookkeeping that
+        // touches no record and therefore, correctly, does not rotate `inventory_generation`. A
+        // cursor that spanned one of those would otherwise survive every invalidation check and
+        // then hand back an inventory `studio_storage_budget` refuses as stale, which is the
+        // negative property inverted: harmless activity would not kill the cursor but would
+        // still waste it.
+        //
+        // This is not a continuing lease. It stamps the moment of issue, under the same custody
+        // that just confirmed the disk state is current; an already-issued inventory still ages
+        // exactly as before, and the next mint or entry still invalidates it.
+        //
+        // `intent_generation` is deliberately *not* refreshed. Every site that rotates it takes
+        // the mutation guard immediately afterwards, so it cannot move without
+        // `inventory_generation` moving too - and if that ever stopped being true, refreshing
+        // here would silently mask the staleness instead of refusing.
+        self.inventory.studio_generation = store.studio_generation.clone();
         Ok(self.inventory)
     }
 }
@@ -2684,6 +2725,85 @@ mod tests {
         // An unbudgeted scan of the same vault must agree, or parking changed the answer.
         let direct = collect(&mut store).unwrap();
         assert_eq!(direct.records().count(), 1);
+    }
+
+    /// A clock that advances a fixed amount on every read, so a deadline is crossed by
+    /// construction rather than by hoping the work takes long enough.
+    #[derive(Debug)]
+    struct SteppingClock {
+        ms: std::sync::atomic::AtomicU64,
+        step: u64,
+    }
+
+    impl catcoms_rt::Clock for SteppingClock {
+        fn now_ms(&self) -> u64 {
+            self.monotonic_ms()
+        }
+        fn monotonic_ms(&self) -> u64 {
+            self.ms
+                .fetch_add(self.step, std::sync::atomic::Ordering::SeqCst)
+                + self.step
+        }
+        fn sleep(
+            &self,
+            _: std::time::Duration,
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + '_>> {
+            Box::pin(std::future::ready(()))
+        }
+    }
+
+    /// The supplied budget must bound the *visit*, not only the choice to detach a validator.
+    ///
+    /// The fixture deliberately contains nothing that needs fresh typed validation: only
+    /// filenames outside the coverage and canonical staging siblings, which are counted without
+    /// being read. An earlier implementation sampled the clock once and consulted it solely when
+    /// classifying a validator, so with nothing to classify an expired budget had no effect and
+    /// the step ran the full requested entry count. `steps` bounded it; `budget_ms` did not.
+    #[test]
+    fn a_supplied_deadline_stops_traversal_even_with_no_validation_to_classify() {
+        let root = tempfile::tempdir().unwrap();
+        let mut store = open(root.path());
+        // Deliberately nothing that can be parked. Parking also ends a step, so a fixture
+        // containing one cold record would satisfy a "stopped early" assertion whether or not
+        // the deadline did anything - which is exactly how the first version of this test
+        // passed against the unfixed code. These names are outside the coverage: they are
+        // traversed and classified, and nothing else.
+        let parent = root.path().join("servers");
+        for n in 0..48 {
+            fs::write(parent.join(format!("unrelated-{n}.bin")), []).unwrap();
+        }
+
+        // 200 ms per clock read against a 250 ms budget: the entry sample sets the deadline and
+        // the next one is already past it, so the visit stops after one unit of work.
+        let clock = SteppingClock {
+            ms: std::sync::atomic::AtomicU64::new(0),
+            step: 200,
+        };
+        let mut cursor = store
+            .begin_epoch_storage_scan(EpochInventoryCoverage::RecoveryOnly)
+            .unwrap();
+        let bounded = store
+            .step_epoch_storage_scan(&mut cursor, MAX_DIRECTORY_ENTRIES, Some((&clock, 250)))
+            .unwrap();
+        assert!(!bounded.complete, "an expired budget ran the scan to EOF");
+        assert!(
+            bounded.visited_entries < 49,
+            "the deadline did not stop traversal: {} entries visited with no validation to \
+             classify",
+            bounded.visited_entries
+        );
+
+        // Still resumable, and an unbudgeted continuation reaches the same place an unbudgeted
+        // scan would: the bound yielded, it did not damage or skip anything.
+        while !store
+            .step_epoch_storage_scan(&mut cursor, MAX_DIRECTORY_ENTRIES, None)
+            .unwrap()
+            .complete
+        {}
+        let resumed = store.finish_epoch_storage_scan(cursor).unwrap();
+        let direct = collect(&mut store).unwrap();
+        assert_eq!(resumed.records().count(), direct.records().count());
+        assert_eq!(resumed.orphans().count(), direct.orphans().count());
     }
 
     /// The four bindings a detached validation is rechecked against.
