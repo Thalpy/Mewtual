@@ -1531,6 +1531,119 @@ Also not established here: the parked plaintext's residency is not charged to se
 retained-input sum, and no runtime variant yet demonstrates that a cancelled waiter does not
 release a still-running validation's reservation. Both are activation requirements.
 
+### The C-3 storage review: C3-001, C3-002, C3-003 closed; C3-TEST-001 closed here
+
+The reviewed C-3 code is at `e6111ed`. **Any accepted combined checkpoint must also include
+`397f689`**, which restores a check of Agent 2's that I deleted by mistake with a path-scoped
+`git add -A` while their tree was mid-mutation. `e6111ed` alone is not a safe base.
+
+C3-TEST-001 asked for three things in the equivalence test, and a fourth was found while
+supplying them.
+
+**Compare each footprint field directly, and observe the real counters.** The old `canonical`
+helper packed two footprint fields as `protocol + settlement * 1_000_000`, which is lossy: an
+offsetting pair of errors cancels. It is now a `CanonicalRecord` tuple with separate fields, all
+four `(server, group)` combinations are compared rather than one, and the test retains the
+budgeted run's `EpochScanProgress` and compares the scan's own accounting against the unbudgeted
+run's via a new `collect_with_progress`. An independent expected byte total is anchored, so the
+comparison cannot pass by both sides being zero. Both mutations the review named -
+`self.progress.authenticated_bytes = 0` and `+= validated.size` - now fail at *"parking changed
+the scan's own accounting counters"*.
+
+**Aggregate-byte refusal and persistent poisoning after a detached round trip.** The rail test
+now lifts the limit after the refusal and requires the cursor still to refuse with "restart
+required": the refusal is a property of the cursor, not of the current limit. A second case,
+`the_aggregate_byte_rail_still_refuses_after_a_record_has_been_parked_and_installed`, drives the
+rail through a full park-and-install cycle first.
+
+**The focused reference-scan case is supplied, not deferred.** It compares budgeted against
+unbudgeted CID collection.
+
+**The fourth thing, found by mutation: equivalence alone could not see a shared defect.** Both
+sides of that comparison run the same `install_body` merge - deliberately, since that sharing is
+what makes the comparison meaningful - so dropping CIDs inside the merge empties *both* sets and
+the equality still holds. The first mutation I ran did fail, but at the fixture guard, which
+reports the fixture as broken rather than the code. The test now also asserts *absolutely* that
+the budgeted scan collects the fixture's own known pixel. Re-verified with a mutation confined
+to the detached path: it fails at "a budgeted reference scan lost the fixture's own pixel".
+
+Five corrections in the same pass. The first two were found by re-deriving the claims rather
+than re-reading them; the next two were found by tooling; the last is to wording I wrote while
+making the first four.
+
+- The deadline test's comment had the arithmetic wrong. `SteppingClock` post-increments, so at
+  200 ms/read against a 250 ms budget the entry sample reads 200 and fixes the deadline at 450;
+  the next sample reads 400, which is *not* past it. **Two** entries are processed, not one. The
+  assertion was a loose `< 49`; since the arithmetic is fully deterministic it is now `== 2`.
+- `a_cursor_that_spans_budget_bookkeeping_still_mints_a_budget_from_its_inventory` claimed mint
+  *and* entry activity. Its surviving-cursor leg exercises mints only. Budget entry is not
+  independently reachable - `enter_studio_epoch_budget` is internal and always runs inside
+  `edit_studio_epoch`, which writes a record and so legitimately invalidates the cursor - so
+  entry appears only in the control leg, where the refusal is the point. The doc comment now
+  says exactly that, and an inline comment that contradicted itself two lines later is fixed.
+
+**A third correction, to my own fix.** Splitting the old `|`-separated format string into tuple
+fields silently dropped `entry.document.doc_type`. Nine fields went in and nine came out - the
+count still looked right - so the loss was invisible on inspection and no test noticed, because
+every record in that fixture happens to share a `doc_type`. It is restored as field three. The
+general lesson, which is why it is recorded rather than quietly fixed: a formatted string with
+*n* separators and a tuple with *n* elements are not evidence of the same *n*.
+
+**A fourth, found by clippy rather than by a test.** The equivalence test tracked the budgeted
+scan's progress in a variable reassigned at three points in the loop, including once after each
+detached install. Clippy reported the post-install assignment as never read - correctly: the
+next iteration's assignment always overwrote it first. The comparison *was* reading the right
+value, because the final step's progress reflects every install, but by accident of control flow
+rather than by construction, and the post-install capture I thought I was making did not exist.
+It is now a single read of the cursor's own counters taken immediately before `finish` consumes
+it, which cannot be wrong in that way. Recorded because a passing test said nothing about this;
+the lint did.
+
+The same pass gated `collect_cursor_creative_references` and `finish_cursor_creative_references`
+behind `#[cfg(test)]`. No production path drives an owned cursor yet - `creative_pinned_cids`
+reaches the same two cursor methods through `EpochStorageScan`, which holds the borrow - so
+ungated they were dead code in a shipping build. The test loses nothing: it still exercises the
+same cursor methods production uses. They ungate with the runtime adoption.
+
+**A fifth, to a claim in this same pass.** I wrote that the expected byte total was "anchored
+independently of either scan". It is not - it is derived from the budgeted inventory's own
+records. What it actually provides is a *different code path*: per-record footprints produced by
+validation, versus counters accumulated by the scan. That still defeats a mutation skewing both
+scans identically, which is the property that was wanted, but it is not external anchoring and
+the comment no longer says it is.
+
+The deadline's public contract is now stated on `step_epoch_storage_scan` rather than implied:
+the deadline is checked between entry-processing units, with a one-entry minimum for a nonzero
+step allowance, and individual entry work is not preempted. A visit can therefore overrun its
+budget by the cost of whichever entry was in flight; callers needing a hard ceiling must bound
+`steps` as well.
+
+### The full parallel library suite is not a clean signal on this machine
+
+Two consecutive full `--lib` runs at the same tree, default thread count, `-j 2`:
+
+| Run | Result | Failures |
+|---|---|---|
+| 1 | 710 passed, 1 failed, 11 ignored (587 s) | `scheduling::studio_actor_owner_return_..._cancelled_preview_transport` |
+| 2 | 707 passed, 4 failed, 11 ignored (613 s) | the three `studio_actor_owner_return_...` cases and `succession::joining::studio_actor_post_succession_joiner_reads_open_history_provisionally` |
+
+**A different subset each run, and all four pass serially in 35 s at that same tree.** The
+failure text is the diagnosis: `passes=160/160, injected=40000/40000 ms`, against a budget whose
+own comment records a healthy run as 91 to 132 passes. That is the scheduled actor starving for
+wall clock, not a wrong result - it matches the already-tracked `studio_actor_owner_return`
+Linux CI failure and the known `studio_exchange::tests::unopened` behaviour.
+
+This work cannot be the cause, and that is checkable rather than asserted: the uncommitted
+production delta is one doc comment plus `collect_cursor_creative_references` and
+`finish_cursor_creative_references`, which no production path calls - only the new test does.
+Everything else in the diff is inside `mod tests`.
+
+**Consequence for evidence in this ledger:** a green full-suite number from a default-threaded
+run is not reproducible here, so it should not be quoted as one. The ledger's existing rule -
+`-j 1`, no concurrent Cargo work - exists for this reason, and I did not follow it for these two
+runs. The C-3 acceptance evidence is the serial run: `store::epoch_recovery::inventory` plus
+`store::epoch_studio::tests` at `--test-threads=1`, **167 passed, 0 failed, 3 ignored**.
+
 ## Requirement 3: COMPLETE
 
 ### Exact-head execution evidence

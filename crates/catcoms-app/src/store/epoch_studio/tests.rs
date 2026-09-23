@@ -1201,6 +1201,90 @@ fn a_cursor_parked_across_a_studio_source_write_refuses_but_survives_a_budget_mi
     );
 }
 
+/// Reference collection survives the detached path with the same result.
+///
+/// The other equivalence test is Recovery-only, so it says nothing about the one thing a
+/// reference scan produces: the CID set. That set is collected *inside* the validation that
+/// parking moves out of the visit, and it is merged at install rather than where it was
+/// computed - which is exactly the seam a refactor could drop a family's references at, while
+/// every record, footprint and orphan comparison stayed identical.
+///
+/// This also covers the cache exclusion: a reference scan must never take a cached record,
+/// because the cache holds validation metadata and not the CIDs.
+#[test]
+fn a_budgeted_reference_scan_collects_the_same_cids_as_an_unbudgeted_one() {
+    let root = tempfile::tempdir().unwrap();
+    let f = Fixture::new(true);
+    let mut store = open(root.path());
+    let mut b = budget(&mut store, &f);
+    f.edit(&mut store, &mut b, f.insert());
+
+    // The pixel this fixture's inserted frame names. Asserted absolutely rather than only
+    // against the unbudgeted run, because both runs share `install_body`: a mutation in that
+    // shared merge empties *both* sets, and an equivalence comparison would still hold. The
+    // equality check below catches divergence between the paths; this catches the shared defect.
+    let known = catcoms_storage::Cid::from_bytes([3; 32]);
+
+    // Warm the validation cache first, so a budgeted reference scan that wrongly consulted it
+    // would find entries waiting rather than an empty cache that hides the mistake.
+    let warmed = store.creative_pinned_cids().unwrap();
+    let expected: Vec<_> = warmed.for_group(&f.group.group_id()).copied().collect();
+    assert!(
+        expected.contains(&known),
+        "the fixture's own pixel is not protected, so the comparison below would compare two \
+         empty sets"
+    );
+    drop(warmed);
+
+    let clock = catcoms_rt::ManualClock::new(0);
+    // Mark protection unknown, as `creative_pinned_cids` does, so the budgeted scan installs
+    // its own set rather than being refused as a duplicate install.
+    store.creative_protection.lock().unwrap().unknown_for_test();
+    let mut cursor = store
+        .begin_epoch_storage_scan(
+            EpochInventoryCoverage::RecoveryOwnerReceiptsIntentsRegistryAndStudio,
+        )
+        .unwrap();
+    store
+        .collect_cursor_creative_references(&mut cursor)
+        .unwrap();
+    let mut parked_bodies = 0;
+    loop {
+        let progress = store
+            .step_epoch_storage_scan(&mut cursor, 64, Some((&clock, 250)))
+            .unwrap();
+        if let Some(parked) = store.take_parked_record(&mut cursor) {
+            parked_bodies += 1;
+            let validated = parked.validate().unwrap();
+            store
+                .install_validated_record(&mut cursor, validated)
+                .unwrap();
+            continue;
+        }
+        if progress.complete {
+            break;
+        }
+    }
+    assert!(
+        parked_bodies > 0,
+        "nothing was parked, so the detached path was not exercised"
+    );
+    let collected = store.finish_cursor_creative_references(cursor).unwrap();
+    let mut got: Vec<_> = collected.for_group(&f.group.group_id()).copied().collect();
+    assert!(
+        got.contains(&known),
+        "a budgeted reference scan lost the fixture's own pixel, so parking dropped references \
+         the unbudgeted path also would have: {got:?}"
+    );
+    let mut want = expected.clone();
+    got.sort();
+    want.sort();
+    assert_eq!(
+        got, want,
+        "a budgeted reference scan collected a different CID set from an unbudgeted one"
+    );
+}
+
 /// The surviving cursor must also be *usable*, not merely un-refused.
 ///
 /// `studio_generation` rotates on a budget mint and on budget entry - bookkeeping that touches no
@@ -1211,6 +1295,13 @@ fn a_cursor_parked_across_a_studio_source_write_refuses_but_survives_a_budget_mi
 ///
 /// The earlier test stops at "the next step succeeded". This one continues through the actual
 /// consumer, which is the only place the defect was visible.
+///
+/// Scope, precisely: the surviving-cursor leg below exercises **mints only**. Budget *entry* is
+/// not independently reachable - `enter_studio_epoch_budget` is internal and always runs inside
+/// `edit_studio_epoch`, which writes a record and so legitimately invalidates the cursor. Entry
+/// therefore appears here only in the control leg, where it is inseparable from that write. The
+/// claim this test establishes is that mint-only bookkeeping neither kills a cursor nor wastes
+/// it; the entry rotation is covered by the control's *refusal*, not by a survival case.
 #[test]
 fn a_cursor_that_spans_budget_bookkeeping_still_mints_a_budget_from_its_inventory() {
     let root = tempfile::tempdir().unwrap();
@@ -1226,8 +1317,10 @@ fn a_cursor_that_spans_budget_bookkeeping_still_mints_a_budget_from_its_inventor
         .unwrap();
     store.step_epoch_storage_scan(&mut cursor, 1, None).unwrap();
 
-    // Budget-only bookkeeping while the cursor is parked: a mint, and an entry through a real
-    // scoped operation. Both rotate `studio_generation`; neither touches a record.
+    // Control: bookkeeping *plus* a real write while the cursor is parked. The mint and the
+    // entry both rotate `studio_generation`, and the edit that carries the entry also rewrites
+    // the record - so this leg must refuse, and it establishes that the fixture can invalidate
+    // at all. Only the second leg is the mint-only case.
     let mut other = budget(&mut store, &f);
     store
         .load_studio_epoch(SERVER, &f.group, f.target, &f.device)

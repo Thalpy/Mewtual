@@ -97,6 +97,12 @@ impl Protection {
         self.generation = Arc::new(());
         self.pins = None;
     }
+    /// The same reset `creative_pinned_cids` performs, for a test that drives a reference scan
+    /// through the cursor instead of through that wrapper.
+    #[cfg(test)]
+    pub(in crate::store) fn unknown_for_test(&mut self) {
+        self.unknown();
+    }
     pub(super) fn install(
         &mut self,
         generation: &Arc<()>,
