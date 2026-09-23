@@ -338,7 +338,11 @@ impl ServerStore {
         if archive.document() != document {
             return Err(invalid("draft archive names another logical document"));
         }
-        let _ = expected_content;
+        if archive.content() != expected_content {
+            return Err(invalid(
+                "draft archive changed since it was read; release names a different archive",
+            ));
+        }
 
         // Prove the accounting matches disk before spending it. A mismatch here invalidates the
         // inventory instead of destroying a record the budget never knew about.
