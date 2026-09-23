@@ -1874,7 +1874,13 @@ impl ReceiptBook {
         };
         d.finish().map_err(|_| ReplError::Malformed)?;
 
-        let document = latest.as_ref().map(|receipt| receipt.document.clone());
+        // A cross-tenure repair can unblock an epoch-zero source with no installed opening:
+        // it retains evidence and anti-replay state, but no obsolete current head/tenure. Only
+        // versions 4/5 carry resolved evidence; legacy books gain no new source of identity.
+        let document = latest
+            .as_ref()
+            .map(|receipt| receipt.document.clone())
+            .or_else(|| resolved_repair.as_ref().map(|r| r.repair.document.clone()));
         if tenure.is_some() != latest.is_some() {
             return Err(ReplError::Malformed);
         }
@@ -3358,6 +3364,7 @@ impl RecoverySlots {
 
 mod adoption;
 mod repair_state;
+pub use repair_state::conflicting_receipt_pair;
 pub(crate) mod succession;
 
 #[cfg(test)]

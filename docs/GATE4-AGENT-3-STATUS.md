@@ -4,6 +4,55 @@ Owner: Agent 3 ([assignment](GATE4-AGENT-HANDOFFS.md#agent-3-runtime-signed-faul
 Proposal: [GATE4-AGENT-3-DESIGN](GATE4-AGENT-3-DESIGN.md), currently revision 14.
 Review preamble: 3. Current entries override older ones.
 
+## Implementation restart, 2026-09-23
+
+Agent 3 now works in **`gate4-agent3-repair`**, at
+`M:\Git (local)\CatComs\target\gate4-agent3-repair`, isolated from the mutable Agent 1/2
+checkout. Base: **`918ffb9b3034c43ed33574225e04f1be2e87090d`**. No shared branch is switched,
+reset, rebased or force-pushed. Commits use explicit Agent 3 pathspecs; mutation scripts run
+only on this worktree. The older shared-checkout description below is historical.
+
+**First implementation checkpoint: C-3, C-4, C-8 and the C-5 sequence accessor only.**
+This is not the complete core repair transition, a store transaction, runtime repair, native
+exposure, or Gate 4 acceptance. No current source can leave Fault through this checkpoint.
+
+- C-4: `conflicting_receipt_pair` checks bounded canonical full receipts, historical signatures,
+  full logical scope and genuine same-tenure conflict, without returning authority.
+  `ReceiptRepair::check_evidence` adds the exact pair, selection, fault tenure, v2 and sequence
+  bindings. `ResolvedRepair::verify` reuses it while retaining signature, role, enclosing-document
+  and stored-sequence checks. The live authority guard and `apply_repair` retry ordering remain.
+- C-3: verified losing receipts remain preserved evidence but cease to be adoption anchors,
+  both during admission and restart. Unrepaired newer anchors and genuine third baselines refuse.
+- C-8: only repair-bearing book versions 4/5 can derive identity from resolved evidence when
+  there is no current head. Latest/tenure consistency, retained scope and legacy framing remain.
+- Eight new core regressions exercise these leaves. `scripts/check-agent3-core-mutations.py`
+  covers M5 plus isolated admission, two restart-anchor and headless-identity regressions,
+  with exact restoration and one passing control after every mutation.
+
+**Verification at this entry:** workspace formatting and `git diff --check` pass. Compiled
+tests, mutations and required full suites are pending; no pass is inferred from static review.
+Other agents have active local Cargo tests, so Agent 3 has not started another local build.
+
+**Dependency refresh against the base:** Agent 1's `EpochMutation` capability exists in
+`store.rs`; all future repair writes must use it, including retry/sync and failed-I/O paths.
+C-3's storage scanner exists; runtime adoption remains Agent 1's checkpoint. Agent 2's
+`verification_owner_tenure_start` / `authoring_owner_tenure_start` split still does not exist.
+Agent 3 accepts T1-T5 as written and will not substitute the single current accessor, a carried
+receipt field or the current MLS epoch for authoring evidence. This leaf checkpoint consumes
+neither runtime dependency. Agent 4 continues to own shared registrations, workflows and docs.
+
+**Read-only preimplementation review found four confirmed design/source mismatches** in
+the remaining C-1/C-2/C-7 work: Open quarantine restoration, screening while retaining a
+different Fault, consecutive unpublished reconciliations, and differing-baseline journal
+publication evidence. They are recorded in
+[the core follow-up review](GATE4-AGENT-3-CORE-REVIEW.md). Those transitions are not implemented
+by this checkpoint; the revision-14 PASS is not claimed to settle these newly demonstrated paths.
+
+Proposed shared documentation/UI update for Agent 4: document the evidence-checking APIs and
+headless book restore as core prerequisites; keep the current unavailable-native-repair row
+unchanged. In particular, do not claim `Repairing`, an owner choice, recovery-before-replacement,
+or peer convergence from these unit tests.
+
 ## Checkpoints
 
 | Date | Checkpoint | Base | Head | Kind | Verdict |
