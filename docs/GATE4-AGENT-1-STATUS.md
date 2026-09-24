@@ -1703,10 +1703,12 @@ barely moves with record size.
 1. **Reference collection is the expensive validator, by roughly an order of magnitude per
    byte.** Accounting runs about 1.4 to 2.6 us per KiB; reference collection about 13 to 15.
    The design's expensive case is the one that was previously unmeasured.
-2. **Reference-collection cost tracks the reference count rather than bytes** - about 3.1, 3.8
-   and 4.4 us per reference at 16, 128 and 512 in this run. A structural axis, not a byte axis.
-   **See the variance section below before using these numbers**: a second run of the identical
-   fixtures gave 4.8, 6.5 and 8.1, so the direction holds and the rate does not.
+2. **Reference-collection cost tracks the reference count rather than bytes.** A structural
+   axis, not a byte axis. Three measurements of the identical fixtures at 16, 128 and 512
+   references: 3.1 / 3.8 / 4.4 us each block-ordered, then 4.8 / 6.5 / 8.1 block-ordered again,
+   then **2.9 / 3.2 / 3.7 interleaved**. The direction is consistent across all three; the rate
+   is not, and the interleaved set is both the lowest and by far the flattest - which is what
+   the discipline was expected to do.
 3. **The installation term is small at these reference counts.** This was the open question
    about the missing phase, and the answer is concrete: `install_validated_record` stayed below
    millisecond resolution even summed over eight trials, including the 512-CID merge. It is
@@ -1805,35 +1807,67 @@ parks on every trial, which the fixture now asserts rather than assumes.
 ### Registry and Studio measured, and they invert the Recovery conclusion
 
 These are the families whose expensive typed reconstruction motivated C-3, so they are the ones
-whose numbers matter. Release, 8 trials, fresh cache, means per record per trial.
+whose numbers matter. Release, 8 trials, fresh cache, **all 23 cases interleaved**, reported as
+`min/median/max` microseconds per record per trial.
 
-| family | ops | authenticated bytes | read-and-park | validation | fraction of the two |
+| family | ops | authenticated bytes | read-and-park | validation | fraction |
 |---|---|---|---|---|---|
-| Registry | 2 | 321 650 | 2 125 us | 3 425 us | 61% |
-| Registry | 8 | 1 285 460 | 5 125 us | 13 421 us | 72% |
-| Registry | 24 | 3 855 634 | 13 750 us | 39 056 us | 73% |
-| Studio | 3 | 322 505 | 3 500 us | 5 453 us | 60% |
-| Studio | 12 | 1 768 854 | 6 250 us | 23 218 us | 78% |
-| Studio | 32 | 4 179 459 | 14 750 us | 59 099 us | 80% |
+| Registry | 2 | 321 650 | 0/1 000/1 000 | 1 218/**1 546**/1 703 | 60% |
+| Registry | 8 | 1 285 460 | 2 000/**3 000**/5 000 | 4 703/**5 171**/5 734 | 63% |
+| Registry | 24 | 3 855 634 | 6 000/**7 000**/7 000 | 14 125/**15 343**/16 343 | 68% |
+| Studio | 3 | 322 505 | 0/1 000/2 000 | 1 671/**1 890**/2 515 | 65% |
+| Studio | 12 | 1 768 854 | 2 000/**4 000**/5 000 | 8 296/**9 328**/9 875 | 69% |
+| Studio | 32 | 4 179 459 | 6 000/**8 000**/10 000 | 21 750/**24 609**/26 640 | 75% |
 
-**The Recovery figure was not representative, and this is the correction.** At comparable size -
-about 4 MB - Recovery's validation was 11 ms against 9 ms of read-and-park, a 55% share.
-Studio's is **59 ms against 15 ms, an 80% share**: five times Recovery's validation cost for the
-same bytes, with read-and-park barely different. Registry sits between them at 73%. So on the
-families C-3 exists for, validation is 2.4x to 4x the read-and-park term rather than comparable
-to it, and `validation_fits` has correspondingly more to move than the first profile implied.
+**Interleaving changed the Registry and Studio absolutes by about 2.5x, and the block-ordered
+figures previously recorded here are withdrawn.** Registry at 24 ops read 39 056 us block-ordered
+and 15 343 us interleaved; Studio at 32 ops, 59 099 against 24 609. Recovery moved far less and
+stayed inside its own spread. Nothing about the code changed between them - only the order cases
+were built and run in. The earlier numbers measured each fixture immediately after building it;
+these measure every case from the same steady state.
 
-**Validation is near-perfectly linear in operation count**, which is the structural axis and not
-a byte axis:
+That is a 2.4x methodological effect on the design's headline family, from ordering alone. It is
+the clearest possible argument for the discipline, and it means **no absolute figure produced by
+the block-ordered harness should be quoted.**
 
-- Registry: 1 712, 1 678, 1 627 us per operation at 2, 8 and 24.
-- Studio: 1 818, 1 935, 1 847 us per operation at 3, 12 and 32.
+**A specific claim of mine that this corrects.** I reported Studio's validation as "five times
+Recovery's for the same bytes". Within one interleaved run it is **2.5x**: Studio at 32 ops is
+24 609 us against Recovery's 9 953 us at 4.19 MB. The direction was right and the multiple was
+inflated by comparing two differently-ordered measurements.
 
-Flat within 5% across a 12x and 11x operation range, and that flatness is a **within-run**
-comparison, which the variance section below explains is the kind that survives. A threshold for
-these families should be written against operation count; authenticated size is a proxy for it
-only while the per-operation payload stays constant. The absolute constants - roughly 1.65 ms
-and 1.85 ms per operation - are **shape, not calibration**, and each table is a single run.
+**Validation is linear in operation count**, which is the structural axis and not a byte axis:
+
+- Registry: 773, 646, 639 us per operation at 2, 8 and 24.
+- Studio: 630, 777, 769 us per operation at 3, 12 and 32.
+
+Flat within about 5% above the smallest point in each family, across a 12x and 11x operation
+range. A threshold for these families should be written against operation count; authenticated
+size is a proxy only while the per-operation payload stays constant. The constants themselves
+are **shape, not calibration** - they moved 2.5x under reordering.
+
+**What survived the reordering, and is therefore worth believing:** validation exceeds
+read-and-park on both families and the gap widens with operation count; per-operation cost is
+flat; reference collection costs the same as accounting for both; Studio's validator is the
+most expensive per byte. **What did not survive:** every absolute, and the size of the
+Studio-versus-Recovery multiple.
+
+### Read-and-park sits at the clock's resolution below about a megabyte
+
+The spread makes visible what a mean concealed. `read_and_park` for the 322 KB Registry and
+Studio records reads `0/1 000/1 000` - half the samples are zero. The block-ordered harness
+reported a mean of 2 125 us for the same phase, which looked like a measurement and was an
+artifact of averaging zeros, ones and twos.
+
+So the fraction column is **not trustworthy for any row whose read-and-park median is at or
+below one millisecond**, which is every sub-megabyte row in these tables. It is retained for the
+larger rows, where both phases resolve.
+
+This also produced a real defect, caught by the output: a phase with seven zero samples and one
+1 ms sample passes a "did this resolve" check on its *sum* while its median is still zero, and
+the fraction then printed **100% deferrable** - the same trap as the earlier `visit_ms == 0`
+case, one level down. Small reference-scan rows hit it. The fraction is now suppressed unless
+both medians are nonzero, and `c3_a_phase_median_of_zero_reports_no_fraction` pins it with a
+positive control.
 
 **Reference collection is free for Registry and Studio, and expensive for Recovery.** That looked
 contradictory until the reason was checked, and the reason is structural:
@@ -1844,12 +1878,15 @@ contradictory until the reason was checked, and the reason is structural:
 | Studio | already a full typed reconstruction | `blob_cids()` on the unit it has already restored |
 | Registry | no CID collection at all for `DocRegistry` | nothing |
 
-Measured: Studio at 32 ops was 59 099 us accounting against 55 994 us reference-collecting, and
-Registry at 24 ops 39 056 against 36 775 - both differences inside the established run-to-run
-variance. Recovery's reference collection, by contrast, ran roughly ten times its accounting
-validator per byte. **So "does this scan collect references" is a first-order input to the
-classifier for Recovery and very nearly irrelevant for Registry and Studio.** It is already a
-`validation_fits` parameter; this says what it is worth per family.
+Measured under interleaving, medians: Studio at 32 ops was 24 609 us accounting against 23 375 us
+reference-collecting, and Registry at 24 ops 15 343 against 15 375 - differences inside their
+own min/max spreads. Recovery's reference collection, by contrast, runs many times its
+accounting validator per byte. **So "does this scan collect references" is a first-order input
+to the classifier for Recovery and very nearly irrelevant for Registry and Studio.** It is
+already a `validation_fits` parameter; this says what it is worth per family.
+
+This is one of the findings that **held across both orderings**, which is why it is stated
+plainly while the absolutes are not.
 
 **Installation stayed below resolution in every one of these cases**, including the 3.8 MB
 Registry and 4.2 MB Studio records.
@@ -1975,16 +2012,44 @@ What survives it and what does not:
   cost tracks reference count "near-linearly" is retained only as a direction, not a rate.
 - The Registry and Studio tables above are from **one run each**. They have not been repeated.
 
-The measurement discipline that would fix this - repeat whole profiles, interleave cases, report
-distribution rather than mean - is not in place yet and is the next thing this harness needs if
-these numbers are ever to calibrate anything. Reported here rather than quietly averaged away.
+### The repetition discipline, now in place
+
+All three parts of what the variance above demanded are implemented, and they change what the
+profile is allowed to claim rather than making any single number better.
+
+**Cases are interleaved, not run in blocks.** Every fixture and mode is built up front as a
+`Case` owning its own store, and `run_interleaved` runs one trial of *every* case before the
+second trial of any of them. Previously each case's eight trials ran consecutively, so comparing
+two cases compared two different moments in a long run - and with drift of that size on this
+machine, that comparison was not safe to make. Round-robin spreads the drift across every case.
+It does not make a figure more accurate; it makes differences **within one profile** mean
+something. Differences between separate runs still do not.
+
+Because a `Case` owns its store, each of the three modes gets its own build of the same fixture
+shape. That is the cost of interleaving them with each other, and it is worth paying: the
+fresh/warm/reference comparison was previously three consecutive profiles of one store.
+
+**Every timing is reported as `min/median/max` microseconds, never a mean**, with the raw
+millisecond total alongside so an all-zero spread reads as "below the clock's resolution" rather
+than "free". The deferrable fraction is taken from medians and suppressed unless both components
+resolved.
+
+**The structural preconditions are asserted per case, after the run**, by
+`check_case_structure`: every trial completed; a cleared cache parked the record in every trial
+and reported no hits; a warm accounting scan of a cacheable family did report hits; a reference
+scan reported none. The smoke tests additionally require that all three phase sample vectors
+have the same length as the trial count, since a spread over ragged samples would silently
+divide by the wrong number.
+
+None of this repeats whole *runs*, which is the one remaining part: cross-run variance is still
+unmeasured except by the accident recorded above, and remains the reason no absolute constant
+here should be treated as calibration.
 
 ### Not covered
 
-- **Repetition discipline.** The single most valuable next step, ahead of more families: repeat
-  whole profiles, interleave cases rather than running them in blocks, and report a
-  distribution instead of a mean. The variance section above is why. Every table here is one
-  run.
+- **Repeating whole runs.** Interleaving, distributions and per-case structural checks are now
+  in place (see "The repetition discipline"), but nothing repeats an entire profile and compares
+  run against run. Cross-run variance is still known only from the accident recorded above.
 - **Near-ceiling shapes for Registry and Studio.** Measured to 24 and 32 operations; neither is
   at its largest accepted shape, and the per-operation constant is what would be extrapolated.
 - **OwnerReceipts, Intents and DraftArchive**, which are unmeasured.
