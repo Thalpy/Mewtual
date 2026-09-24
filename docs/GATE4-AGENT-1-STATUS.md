@@ -1644,6 +1644,93 @@ run is not reproducible here, so it should not be quoted as one. The ledger's ex
 runs. The C-3 acceptance evidence is the serial run: `store::epoch_recovery::inventory` plus
 `store::epoch_studio::tests` at `--test-threads=1`, **167 passed, 0 failed, 3 ignored**.
 
+## Design 13.7, partially delivered: the first measurement in this design
+
+Until now every measurement obligation in design 13 was outstanding and the ledger said so. This
+is the first one with numbers behind it. It is **partial**, and the boundaries are stated below
+rather than left to be discovered.
+
+### The result that changes something
+
+9.2's premise is that detaching a validation bounds custody. **It bounds about half of it.**
+
+A visit does two kinds of per-record work, and `validation_fits` is in a position to move only
+the second:
+
+1. Open, read, authenticate, decode the scope, check the filename against the authenticated
+   scope, digest the plaintext, consult the cache. This *must* precede classification, because
+   the classifier's inputs are the family and the authenticated size and neither is known until
+   the body is authenticated. No threshold can defer it.
+2. `validate_record_body`. This is the entirety of what parking moves out of the visit.
+
+Measured on staged Recovery records, release build, `SystemClock`:
+
+| authenticated bytes | deferrable (term 2) | unavoidable visit (term 1) | deferrable share |
+|---|---|---|---|
+| 1 195 | below resolution | below resolution | unresolved |
+| 16 555 | 31 us | below resolution | unresolved |
+| 262 315 | 828 us | 1 ms | 45% |
+| 1 048 747 | 2 953 us | 2 ms | 59% |
+| 4 194 475 | 12 593 us | 10 ms | 55% |
+
+Above a quarter-megabyte the deferrable term is roughly linear at **2.5 to 3 us per KiB**. Below
+about a megabyte, term 1 does not resolve against a millisecond clock, so those rows report
+`unresolved` rather than a ratio - a `visit_ms` of 0 would otherwise print as "100% deferrable",
+which is the opposite of what it means.
+
+**What follows for the threshold.** A perfectly tuned `validation_fits` cannot bring a visit's
+custody below term 1. Parking is worth roughly a halving at megabyte scale, not an order of
+magnitude, and the remaining half scales with bytes just as the deferred half does. If a visit
+needs a hard custody ceiling, the threshold cannot deliver it alone; bounding `steps` and the
+per-record byte ceiling are the levers that can.
+
+### What is measured, and what is extrapolation
+
+Measured: Recovery, without reference collection, from 1 KiB to 4 MiB.
+
+**Extrapolated, and labelled as such:** `MAX_RECOVERY_SLOTS_BYTES` is `3 * 6 MiB + 1024`, about
+18 MiB, which is 4.5x beyond the largest measured point. Carrying the observed rates out to it
+gives roughly 45 ms deferrable and 40 ms unavoidable. That is an extrapolation from a linear fit
+over a range that does not include the ceiling, not a measurement of the ceiling, and it should
+not be quoted as one.
+
+Run-to-run variance on the identical 4 MiB record was about 20% across two runs, so no figure
+here is better than one significant digit.
+
+### Not covered
+
+- **Reference collection, for Recovery.** The inspector decodes and validates every operation in
+  the projection, so it needs a canonically valid one; the opaque projections this harness
+  stages would be refused. 13.7's "with and without reference collection" is therefore half
+  done. The with-references path is exercised for correctness by
+  `a_budgeted_reference_scan_collects_the_same_cids_as_an_unbudgeted_one`, but not timed.
+- **The other five families.** OwnerReceipts, Intents, Registry, Studio and DraftArchive are
+  unmeasured. Per-family figures are what 13.7 actually asks for; one family establishes the
+  method and the shape of the answer, not the answer.
+- **Restart rate under concurrent writes**, and visits per full scan on a realistic multi-family
+  vault. The `visits=6 records=5` figure here is an artifact of parking every record in a
+  five-record fixture, not a scan-shape measurement.
+
+`validation_fits` is therefore **unchanged** and still returns false for everything. One family's
+curve without its reference-collection half is not enough to set a threshold, and 9.2's rule for
+the absence of the figures is to default to detaching. Changing it on this evidence would be
+exactly the overreach the rule exists to prevent.
+
+### How it is built
+
+`ParkedEpochRecord::validate` now delegates to a private `run(&self)`, and a `#[cfg(test)]`
+`revalidate` calls the same `run`. That is deliberate: a measurement with its own copy of the
+validation would stop measuring the production path the first time either changed, and nothing
+would say so. The batching exists because `scripts/check-no-ambient.sh` forbids `Instant::now`
+everywhere under `crates/`, test code included, so the finest available clock is
+`catcoms_rt::Clock` at milliseconds and one record's validation can round to zero against it.
+
+Two tests, following the existing `studio_source_profile_smoke` / `profile_studio_source_operations`
+pattern: `c3_visit_profile_smoke` runs in the ordinary suite on a `ManualClock` and asserts only
+structure - every record parks, a parked record ends its visit, `largest()` selects the largest -
+and deliberately asserts nothing about duration, since a timing assertion in CI is a machine-speed
+assertion in disguise. `profile_c3_visit_cost` is `#[ignore]`d and prints.
+
 ## Requirement 3: COMPLETE
 
 ### Exact-head execution evidence
@@ -2398,10 +2485,13 @@ Through the four design passes no Cargo command was executed. Implementation exe
 under "Executed evidence for C-1" above; every run there used `-j 1` with the per-package test
 debug override and no concurrent Cargo work, as the shared machine requires.
 
-**No measurement exists yet.** Quoted performance numbers still come from the existing
-[P1-PERFORMANCE](P1-PERFORMANCE.md) debug-profile observations. Design 13's eight measurements are
-outstanding, including the C-1 before-and-after comparison that would quantify what the structural
-decode actually saves: the code is in, the number is not.
+**One of design 13's eight measurements now has numbers: 13.7, partially** - Recovery only,
+without reference collection, 1 KiB to 4 MiB. See "Design 13.7, partially delivered" above for
+what it found, what is extrapolation and what is still uncovered. The other seven are
+outstanding, including the C-1 before-and-after comparison that would quantify what the
+structural decode actually saves: the code is in, the number is not. Performance numbers quoted
+elsewhere in this ledger still come from the existing
+[P1-PERFORMANCE](P1-PERFORMANCE.md) debug-profile observations.
 
 ## Proposed UI-hooks update (for Agent 4, not yet applicable)
 
@@ -2472,8 +2562,12 @@ Accompanying prose:
    adoption of the cursor at six call sites, which is its own checkpoint.
 2. Then **Flow R**, which needs no media and is independent. It was deliberately sequenced after
    this boundary so it is not built on the unbounded inventory path and then split again.
-3. Produce design 13's eight measurements as each item lands; C-1's before-and-after is the first
-   and is cheap, since the opt-in profile already exists. **No measurement exists yet.**
+3. Produce design 13's eight measurements as each item lands; C-1's before-and-after is cheap,
+   since the opt-in profile already exists. **13.7 is partially done** - Recovery only, without
+   reference collection - and found that the classifier can defer only about half a record's
+   cost at megabyte scale. Finishing it needs the other five families, the with-references half
+   (which needs canonically valid projections, not opaque filler), and the restart rate under
+   concurrent writes. The remaining seven measurements have no numbers.
 4. R4-TEST-001 stays open until the reviewer can inspect `079e59a` on GitHub. C-1's call-site table
    in design 5.1 still has no test asserting that no moved call site needs a projection.
 5. Track the Linux ordinary two-process smoke failure observed on `7b9cf3e` in the integration

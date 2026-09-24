@@ -447,19 +447,7 @@ impl ParkedEpochRecord {
     /// The detached stage. Runs the same pure validation the inline path runs, with no store, no
     /// device key and no MLS secret, so it needs no custody and can happen in another visit.
     pub fn validate(self) -> Result<ValidatedEpochRecord, AppError> {
-        // The scope is the first field of the authenticated plaintext; re-deriving it is a slice
-        // read, not a second validation, and keeps the parked body a single owned buffer.
-        let mut decoder = Decoder::new(&self.plain);
-        let scope = decoder.get_bytes().map_err(invalid)?;
-        let body = validate_record_body(
-            self.key.0,
-            &self.plain,
-            scope,
-            self.server,
-            &self.document,
-            self.size,
-            self.references,
-        )?;
+        let body = self.run()?;
         Ok(ValidatedEpochRecord {
             identity: self.identity,
             mount: self.mount,
@@ -471,6 +459,48 @@ impl ParkedEpochRecord {
             digest: self.digest,
             body,
         })
+    }
+
+    /// The validation itself, borrowing rather than consuming.
+    ///
+    /// Split out so [`Self::validate`] and the design 13.7 measurement cannot drift apart. A
+    /// measurement that timed its own copy of this would stop measuring the production path the
+    /// first time one of them changed, and nothing would say so.
+    fn run(&self) -> Result<ValidatedRecordBody, AppError> {
+        // The scope is the first field of the authenticated plaintext; re-deriving it is a slice
+        // read, not a second validation, and keeps the parked body a single owned buffer.
+        let mut decoder = Decoder::new(&self.plain);
+        let scope = decoder.get_bytes().map_err(invalid)?;
+        validate_record_body(
+            self.key.0,
+            &self.plain,
+            scope,
+            self.server,
+            &self.document,
+            self.size,
+            self.references,
+        )
+    }
+}
+
+#[cfg(test)]
+impl ParkedEpochRecord {
+    /// The three facts `validation_fits` classifies on, for a measurement that has to group its
+    /// results by them. The cursor reads its own fields directly and needs no accessor.
+    pub(in crate::store) fn classification(&self) -> (EpochRecordKind, u64, bool) {
+        (self.key.0, self.size, self.references)
+    }
+
+    /// Run the detached validation again, without consuming the record.
+    ///
+    /// [`Self::validate`] takes `self`, which is right for production: a parked body is validated
+    /// once and installed. Design 13.7 needs its *cost*, and the only clock available has
+    /// millisecond resolution - `scripts/check-no-ambient.sh` forbids `Instant::now` everywhere
+    /// under `crates/`, test code included. One record's validation can round to zero against
+    /// that, so the measurement times a batch of repetitions and divides, which needs an input it
+    /// can run more than once.
+    pub(in crate::store) fn revalidate(&self) -> Result<(), AppError> {
+        self.run().map(|_| ())
     }
 }
 
@@ -1771,6 +1801,8 @@ mod tests {
     use catcoms_rt::ManualClock;
     use rand_chacha::ChaCha20Rng;
     use rand_core::SeedableRng;
+
+    mod performance;
 
     fn open(path: &Path) -> ServerStore {
         ServerStore::open(path, b"inventory-test", &mut ChaCha20Rng::seed_from_u64(1)).unwrap()
