@@ -5,6 +5,9 @@
 use super::repair_state::ResolvedRepair;
 use super::*;
 
+mod joint;
+pub use joint::ReceiptRepairPlan;
+
 /// What the original application did. Later progress must never change this persisted label.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RepairDisposition {

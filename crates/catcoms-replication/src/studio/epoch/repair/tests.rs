@@ -156,3 +156,8 @@ include!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/src/epoch/repair_transition/typed_tests.rs"
 ));
+
+include!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/src/epoch/repair_transition/joint_typed_tests.rs"
+));

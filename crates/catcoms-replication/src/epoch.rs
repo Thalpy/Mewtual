@@ -3191,7 +3191,7 @@ mod repair_state;
 pub use repair_state::conflicting_receipt_pair;
 pub(crate) mod repair_transition;
 pub use repair_transition::{
-    RepairDisposition, RepairHold, SourceRepairOutcome, SourceRepairState,
+    ReceiptRepairPlan, RepairDisposition, RepairHold, SourceRepairOutcome, SourceRepairState,
 };
 pub(crate) mod succession;
 

@@ -16,6 +16,36 @@ COMMAND = ["cargo", "test", "--locked", "-j", "1", "-p", "catcoms-replication", 
 ANCHOR_TEST = "repair_losing_adoption_anchors_do_not_recreate_a_resolved_fault"
 MUTATIONS = [
     (
+        "CORE006-nonterminal-nochange", "crates/catcoms-replication/src/epoch/repair_transition/joint.rs",
+        "        journal.check_repair_progress(repair)?;", "",
+        "registry_epoch::repair::tests::joint_repair_nochange_cannot_bypass_unfinished_journal_provenance",
+        "unfinished journal must fence even NoChange",
+    ),
+    (
+        "CORE006-effective-choice", "crates/catcoms-replication/src/epoch/repair_transition/joint.rs",
+        "if journal\n        .effective_choice()\n        .is_some_and(|r| resolved.covers(r))\n    {", "if false {",
+        "epoch::repair_transition::joint::tests::joint_compatibility_rejects_covered_roles_and_inconsistent_gate_binding",
+        "covered journal choice must refuse",
+    ),
+    (
+        "CORE006-covered-source", "crates/catcoms-replication/src/epoch/repair_transition/joint.rs",
+        "if book.latest().is_some_and(|r| resolved.covers(r)) {", "if false {",
+        "epoch::repair_transition::joint::tests::joint_compatibility_rejects_covered_roles_and_inconsistent_gate_binding",
+        "unsafe source role 0 must refuse",
+    ),
+    (
+        "CORE006-source-version", "crates/catcoms-replication/src/epoch/repair_transition/joint.rs",
+        "            || source_version != plan.source_version\n", "",
+        "epoch::repair_transition::joint::tests::joint_commit_fences_gate_races_even_after_fingerprint_comparison_and_on_retry",
+        "source fingerprint mismatch must refuse",
+    ),
+    (
+        "CORE006-journal-version", "crates/catcoms-replication/src/epoch/repair_transition/joint.rs",
+        "            || current_journal.encode() != plan.journal.encode()\n", "",
+        "registry_epoch::repair::tests::joint_repair_delayed_plan_rejects_source_journal_and_authority_changes",
+        "stale joint plan must refuse",
+    ),
+    (
         "C1-complete-gate-stamp", "crates/catcoms-replication/src/epoch/repair_transition.rs",
         "*inner != *expected || inner.phase == EpochPhase::Settled", "inner.phase == EpochPhase::Settled",
         "epoch::repair_transition::tests::repair_commit_checks_every_gate_field_and_never_runs_callback_on_failure",

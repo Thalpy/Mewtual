@@ -72,6 +72,20 @@ fn adjacent(base: &Receipt, next: &Receipt) -> bool {
 }
 
 impl OwnerReceiptJournal {
+    /// Joint preflight must enforce progress even when independent role reconciliation would
+    /// return NoChange. A finalized older proof can be superseded; unfinished source evidence
+    /// and non-increasing sequences cannot. Exact retry still checks live authority elsewhere.
+    pub(super) fn check_repair_progress(&self, repair: &ReceiptRepair) -> Result<(), ReplError> {
+        if self.provenance.as_ref().is_some_and(|p| {
+            p.resolved.repair != *repair
+                && (!p.source_finalized
+                    || repair.repair_sequence <= p.resolved.repair.repair_sequence)
+        }) {
+            return Err(ReplError::ReceiptConflict);
+        }
+        Ok(())
+    }
+
     /// Prepare an irrevocable publication obligation after checking present owner authority.
     /// Only a repair may change inherited selection within an owner tenure.
     pub fn prepare(
