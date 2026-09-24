@@ -4,6 +4,34 @@ Owner: Agent 3 ([assignment](GATE4-AGENT-HANDOFFS.md#agent-3-runtime-signed-faul
 Proposal: [GATE4-AGENT-3-DESIGN](GATE4-AGENT-3-DESIGN.md), revision 16 follow-up.
 Review preamble: 3. Current entries override older ones.
 
+## CORE-006 implementation checkpoint, 2026-09-24
+
+Code: `35492b116a94abeaedb6e06d47934b7df086f89c`. Added immutable joint repair plans for Registry,
+Studio Index and Flipnote. Source/journal effects are independently derived; covered live choices,
+unfinalized earlier journal repairs (including NoChange), stale versions and owner turnover refuse.
+Preparation preserves both inputs. An original-journal comparison supports B1 preflight; application
+rechecks the exact candidate journal, whole source and final locked gate stamp, including exact retry.
+These remain core APIs: historical admission, custody, global sequence and the durable transaction
+claim/B1-B6 writes are still integration work. A plan does not certify a store write or grant custody.
+
+Read-only design/implementation review and final re-review: no BLOCKER/HIGH/MEDIUM remains; the
+LOW negative-test isolation gaps were fixed. All 22 focused joint tests pass. All five new mutation
+guards fail at their intended assertions, restore byte-exactly and pass their restored controls.
+[Core CI 36056471336](https://github.com/Thalpy/Mewtual/actions/runs/36056471336) passes on Linux and
+Windows: **295 library tests and all 25 mutation/restoration/control checks on each platform**.
+Actual CI merge checkout: `580c1b0a1aea93502506cd42b5eb4b217ac6ebaf` (Agent 1 base `48f9069`).
+
+Required local validation is complete:
+`cargo test -j 1 --all --all-features --no-fail-fast -- --test-threads=2` PASS
+(1,846 passed, 13 existing ignored; includes replication 295 + 47 integration);
+`cargo test -j 1 --manifest-path apps/desktop/src-tauri/Cargo.toml` PASS (261 unit + 5 ACL);
+`npm.cmd --prefix apps/desktop test` PASS (1,229). `cargo fmt --all -- --check`, explicit rustfmt checks
+for both included test files, and `cargo clippy -j 1 --all-targets --all-features -- -D warnings` PASS.
+`bash scripts/check-no-ambient.sh` still fails the seven untouched calls listed below;
+`cargo deny check` still fails unchanged rustls 0.23.40 / RUSTSEC-2026-0285. Broader CI `36056471088` also has
+completed failures in native unused-code checks and cargo-deny. No integrated Gate 4 PASS is claimed.
+Startup/flow gates do not apply to this core-only change. Shared integration remains Agent 4-owned.
+
 ## C-1/C-2/C-5/C-6 implementation checkpoint, 2026-09-24
 
 Implemented the shared atomic gate/book repair transition and typed Studio/Registry adapters,
@@ -27,8 +55,8 @@ Clippy PASS. Full root tests were run, then retried outside the sandbox with two
 assertion report; remaining targets completed, including all 47 replication integration tests.
 A separate full replication run also exited abnormally; an isolated app diagnostic passed.
 The local exit cause is unresolved; independent complete core CI is green, not a full-workspace
-PASS. Full CI `36005323438` remains running; its completed native job fails untouched unused-code
-diagnostics under `-D warnings`. Existing ambient failures (seven untouched calls) and cargo-deny
+PASS. Full CI `36005323438` failed the unchanged owner-return scheduling test on both platforms,
+native unused-code diagnostics under `-D warnings`, and cargo-deny. Existing ambient failures (seven untouched calls) and cargo-deny
 rustls 0.23.40 / RUSTSEC-2026-0285 remain. Startup/flow gates are not applicable to this core change.
 
 The C-2 table and C-5 predicate now state the tested edge cases precisely: covered opening takes
