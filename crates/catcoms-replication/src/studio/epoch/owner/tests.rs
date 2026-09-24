@@ -170,6 +170,52 @@ impl Fixture {
 }
 
 #[test]
+fn studio_repair_binding_survives_ordinary_checkpoint_successor() {
+    for art in [false, true] {
+        let mut f = Fixture::new(art);
+        f.fill();
+        let decision = f.decide(None);
+        let selected = decision.receipt().clone();
+        f.source.seal(selected.clone(), &f.group, 0).unwrap();
+        let losing = Receipt::sign(
+            selected.document.clone(),
+            selected.closed_epoch,
+            [99; 32],
+            selected.seed_change_hash,
+            0,
+            selected.inherited.clone(),
+            &f.owner,
+        )
+        .unwrap();
+        assert_eq!(
+            f.source.seal(losing.clone(), &f.group, 0).unwrap(),
+            ReceiptIngest::Fault
+        );
+        let repair = crate::ReceiptRepair::sign_in_tenure(
+            selected.document.clone(),
+            selected.tenure_id,
+            [selected.hash(), losing.hash()],
+            selected.hash(),
+            1,
+            0,
+            &f.owner,
+        )
+        .unwrap();
+        f.source
+            .apply_receipt_repair(&repair, &selected, &losing, &f.group, 0)
+            .unwrap();
+        let plan = f.plan(&decision);
+        f.source = f.source.checkpoint_successor(&plan, &f.group, 0).unwrap();
+        f.restart();
+        let state = f.source.repair_state().unwrap();
+        assert_eq!(state.disposition, crate::RepairDisposition::Transitioned);
+        assert_eq!(state.repair, repair);
+        assert!(state.installed);
+        assert!(!state.install_pending);
+    }
+}
+
+#[test]
 fn studio_owner_settlement_resumes_exact_close_after_later_edit_and_restart() {
     for art in [false, true] {
         let mut f = Fixture::new(art);

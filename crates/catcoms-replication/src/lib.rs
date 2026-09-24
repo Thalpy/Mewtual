@@ -38,7 +38,8 @@ pub use epoch::{
     JournalRepairEffect, LocalIntent, LogicalDocument, OwnerReceiptJournal, Receipt, ReceiptBook,
     ReceiptHeadProof, ReceiptIngest, ReceiptRepair, ReceiptRepairIngest, RecoveryConflict,
     RecoveryConflictValue, RecoveryElement, RecoveryReason, RecoverySlots, RecoverySnapshot,
-    RecoveryTombstone, RecoveryTransition, VerifiedReceipt,
+    RecoveryTombstone, RecoveryTransition, RepairDisposition, RepairHold, SourceRepairOutcome,
+    SourceRepairState, VerifiedReceipt,
 };
 pub use op::{SealedOp, SignedOp};
 

@@ -1985,7 +1985,7 @@ pub enum EpochPhase {
     Fault,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 struct EpochGateInner {
     owner: DeviceId,
     phase: EpochPhase,
@@ -3189,6 +3189,10 @@ mod owner_journal;
 pub use owner_journal::{JournalRepairEffect, OwnerReceiptJournal};
 mod repair_state;
 pub use repair_state::conflicting_receipt_pair;
+pub(crate) mod repair_transition;
+pub use repair_transition::{
+    RepairDisposition, RepairHold, SourceRepairOutcome, SourceRepairState,
+};
 pub(crate) mod succession;
 
 #[cfg(test)]

@@ -4,6 +4,36 @@ Owner: Agent 3 ([assignment](GATE4-AGENT-HANDOFFS.md#agent-3-runtime-signed-faul
 Proposal: [GATE4-AGENT-3-DESIGN](GATE4-AGENT-3-DESIGN.md), revision 16 follow-up.
 Review preamble: 3. Current entries override older ones.
 
+## C-1/C-2/C-5/C-6 implementation checkpoint, 2026-09-24
+
+Implemented the shared atomic gate/book repair transition and typed Studio/Registry adapters,
+strict v3 action provenance, successor propagation, and whole-source Repair adoption/recovery.
+Accepted operations remain intact; only an Open repair clears rejected quarantine. Current
+authority precedes retry, screening preserves unrelated faults, and cross-tenure choices never
+authorize installing the old owner's seed. Ordinary adoption cannot erase a pending continuation.
+No runtime/store caller uses these new APIs yet; historical admission, custody, joint journal/source
+compatibility and the B1-through-recycling durable claim remain integration work.
+
+Implementation review found two HIGH issues (covered live roles accepted by v3 restore and
+ordinary adoption bypassing pending repair) and one MEDIUM (39-byte Registry protocol undercount).
+All are fixed with regressions; the two HIGH tests failed before the fixes. A LOW coverage gap is
+closed by re-admitting the same real quarantined envelope after Open repair and restart.
+Final bounded re-review found no remaining BLOCKER/HIGH/MEDIUM. Full suites are in progress.
+Focused repair tests: 50 unit + 1
+integration PASS; frontend: 1,229 PASS; formatting PASS. Six new mutation guards bring the harness
+to 20; execution is pending. Existing ambient failures (seven untouched calls) and cargo-deny
+rustls 0.23.40 / RUSTSEC-2026-0285 remain. Startup/flow gates are not applicable to this core change.
+
+The C-2 table and C-5 predicate now state the tested edge cases precisely: covered opening takes
+precedence over ordinary settlement; a retained seal must match inheritance and not be covered;
+Screened never owns installation; healthy cross-tenure sources preserve their roles. Shared
+architecture/interface/threat/handover integration remains Agent 4-owned, as below.
+
+Prior C-7 verification is now complete: native 261 unit + 5 ACL tests PASS; strict workspace
+Clippy PASS; core CI run `35859493103` passed on Linux and Windows (243 tests and all 14 then-current
+mutations). Full CI `35859493193` failed unchanged Studio exchange scheduling tests, native unused
+code under `-D warnings`, and the rustls advisory. It was not a full-suite PASS.
+
 ## C-7 implementation checkpoint, 2026-09-23
 
 The user's independent revision-16 verdict is **PASS** at `2b741e7`: CORE-006/007 and the

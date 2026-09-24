@@ -8,6 +8,7 @@ use crate::{RecoveryReason, RecoverySnapshot, VerifiedCheckpoint};
 /// It is not network provenance, a durable recovery acknowledgement, or an editing lease.
 pub struct StudioAdoptionPlan {
     receipt: Receipt,
+    reason: RecoveryReason,
     checkpoint: VerifiedCheckpoint,
     source_version: [u8; 32],
     recovery: Option<RecoverySnapshot>,
@@ -60,6 +61,17 @@ impl StudioEpoch {
         if receipt.document != self.logical {
             return Err(ReplError::EpochScope);
         }
+        if let Some(outcome) = self.repair_binding.as_ref().and_then(|binding| {
+            binding.pending_admission(
+                &self.receipts,
+                self.phase(),
+                self.opening.as_ref(),
+                self.adopting,
+                &receipt,
+            )
+        }) {
+            return outcome;
+        }
         self.refresh_owner(group)?;
         if self.opened_by(&receipt) {
             return Ok(ReceiptIngest::Duplicate);
@@ -86,6 +98,37 @@ impl StudioEpoch {
         group: &ServerGroup,
         tenure: u64,
     ) -> Result<StudioAdoptionPlan, ReplError> {
+        if self.repair_install_pending() {
+            return Err(ReplError::ReceiptConflict);
+        }
+        self.prepare_adoption(receipt, raw_seed, group, tenure, RecoveryReason::Rewound)
+    }
+
+    /// Continue only the exact committed repair, retaining the complete losing source as Repair
+    /// evidence. This does not acknowledge durable recovery or authorize source replacement.
+    pub fn prepare_repair_adoption(
+        &mut self,
+        receipt: &Receipt,
+        raw_seed: &[u8],
+        group: &ServerGroup,
+        tenure: u64,
+    ) -> Result<StudioAdoptionPlan, ReplError> {
+        let state = self.repair_state().ok_or(ReplError::ReceiptConflict)?;
+        state.repair.verify_current_owner(group, tenure)?;
+        if !state.install_pending || &state.selected != receipt {
+            return Err(ReplError::ReceiptConflict);
+        }
+        self.prepare_adoption(receipt, raw_seed, group, tenure, RecoveryReason::Repair)
+    }
+
+    fn prepare_adoption(
+        &mut self,
+        receipt: &Receipt,
+        raw_seed: &[u8],
+        group: &ServerGroup,
+        tenure: u64,
+        reason: RecoveryReason,
+    ) -> Result<StudioAdoptionPlan, ReplError> {
         if !self.adopting
             || self.phase() != EpochPhase::Closing
             || self.receipts.is_faulted()
@@ -108,12 +151,13 @@ impl StudioEpoch {
             Some(StudioRecovery::snapshot(
                 &self.projection()?,
                 self.opening.as_ref().map(|r| r.close_record_hash),
-                RecoveryReason::Rewound,
+                reason,
                 self.opening.as_ref().map_or([0; 32], Receipt::hash),
                 &recovery::current_operations(&self.doc)?,
             )?)
         };
         Ok(StudioAdoptionPlan {
+            reason,
             receipt: receipt.clone(),
             checkpoint,
             source_version: source_version(self)?,
@@ -129,6 +173,18 @@ impl StudioEpoch {
         group: &ServerGroup,
         tenure: u64,
     ) -> Result<Self, ReplError> {
+        let expected_reason = if self.repair_install_pending() {
+            self.repair_state()
+                .ok_or(ReplError::ReceiptConflict)?
+                .repair
+                .verify_current_owner(group, tenure)?;
+            RecoveryReason::Repair
+        } else {
+            RecoveryReason::Rewound
+        };
+        if plan.reason != expected_reason {
+            return Err(ReplError::ReceiptConflict);
+        }
         if !self.adopting
             || self.phase() != EpochPhase::Closing
             || self.receipts.is_faulted()
@@ -146,6 +202,7 @@ impl StudioEpoch {
             plan.checkpoint.bytes(),
         )?;
         successor.receipts = self.receipts.clone();
+        successor.repair_binding = self.repair_binding;
         successor.receipts.mark_latest_installed();
         Ok(successor)
     }

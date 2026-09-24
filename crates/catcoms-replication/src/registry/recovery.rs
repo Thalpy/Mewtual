@@ -37,13 +37,13 @@ impl RegistryRecovery {
         &self.projection
     }
 
-    /// For Excluded, the held receipt selecting the closure. For Rewound, the SOURCE opening
+    /// For Excluded, the held receipt selecting the closure. For Rewound/Repair, the SOURCE opening
     /// receipt (all-zero only for epoch zero), not the destination. Never signature authority.
     pub fn receipt_hash(&self) -> [u8; 32] {
         self.receipt_hash
     }
 
-    /// Excluded accepted operations (ALL source operations for Rewound), in derived-id order.
+    /// Excluded accepted operations (ALL source operations for Rewound/Repair), in derived-id order.
     /// Only their original authors may replay
     /// their own durable intents. Other members can later Restore using their OWN new operations.
     pub fn excluded_operations(&self) -> &BTreeMap<[u8; 32], LocalIntent> {
@@ -97,11 +97,15 @@ impl RegistryRecovery {
     /// Whole-version evidence when the selected checkpoint's closure is not locally held.
     /// Destination-independent bytes are essential: fresh owner selections must not consume
     /// recovery slots or restart the seven-day eviction warning for the same frozen source.
-    pub(crate) fn snapshot_for_rewind(
+    pub(crate) fn snapshot_for_replacement(
         projection: RegistryProjection,
         opening: Option<&crate::Receipt>,
         operations: BTreeMap<[u8; 32], LocalIntent>,
+        reason: RecoveryReason,
     ) -> Result<Option<RecoverySnapshot>, ReplError> {
+        if !matches!(reason, RecoveryReason::Rewound | RecoveryReason::Repair) {
+            return Err(ReplError::Malformed);
+        }
         if operations.is_empty()
             && projection.pointers.is_empty()
             && projection.overflow.is_empty()
@@ -114,7 +118,7 @@ impl RegistryRecovery {
             logical_key: projection.document.logical_key.clone(),
             epoch: projection.epoch,
             base_close_record_hash: opening.map(|receipt| receipt.close_record_hash),
-            reason: RecoveryReason::Rewound,
+            reason,
             projection: Vec::new(),
             tombstones: Vec::new(),
             elements: Vec::new(),
@@ -141,17 +145,21 @@ impl RegistryRecovery {
         expected: &LogicalDocument,
         bucket: u8,
     ) -> Result<Self, ReplError> {
+        let whole_source = matches!(
+            snapshot.reason,
+            RecoveryReason::Rewound | RecoveryReason::Repair
+        );
         if expected.server_id.is_empty()
             || expected.server_id.len() > 256
             || *expected != registry_document(&expected.server_id, bucket)?
             || snapshot.doc_type != DocType::DocRegistry
             || snapshot.logical_key != expected.logical_key
             || snapshot.epoch > MAX_REGISTRY_EPOCH
-            || (snapshot.epoch == MAX_REGISTRY_EPOCH && snapshot.reason != RecoveryReason::Rewound)
+            || (snapshot.epoch == MAX_REGISTRY_EPOCH && !whole_source)
             || (snapshot.epoch == 0) != snapshot.base_close_record_hash.is_none()
             || !matches!(
                 snapshot.reason,
-                RecoveryReason::Excluded | RecoveryReason::Rewound
+                RecoveryReason::Excluded | RecoveryReason::Rewound | RecoveryReason::Repair
             )
             || !snapshot.elements.is_empty()
             || !snapshot.tombstones.is_empty()
@@ -217,8 +225,8 @@ impl RegistryRecovery {
         if (excluded.is_empty()
             && overflow.is_empty()
             && tombstones.is_empty()
-            && (snapshot.reason != RecoveryReason::Rewound || pointers.is_empty()))
-            || (snapshot.reason == RecoveryReason::Rewound
+            && (!whole_source || pointers.is_empty()))
+            || (whole_source
                 && (excluded.keys().copied().collect::<Vec<_>>() != snapshot.applied_ops
                     || ((snapshot.epoch == 0) != (receipt_hash == [0; 32]))))
         {

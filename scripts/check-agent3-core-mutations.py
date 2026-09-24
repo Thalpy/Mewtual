@@ -16,6 +16,43 @@ COMMAND = ["cargo", "test", "--locked", "-j", "1", "-p", "catcoms-replication", 
 ANCHOR_TEST = "repair_losing_adoption_anchors_do_not_recreate_a_resolved_fault"
 MUTATIONS = [
     (
+        "C1-complete-gate-stamp", "crates/catcoms-replication/src/epoch/repair_transition.rs",
+        "*inner != *expected || inner.phase == EpochPhase::Settled", "inner.phase == EpochPhase::Settled",
+        "epoch::repair_transition::tests::repair_commit_checks_every_gate_field_and_never_runs_callback_on_failure",
+        "assertion failed:",
+    ),
+    (
+        "C5-covered-live-head", "crates/catcoms-replication/src/epoch/repair_transition.rs",
+        "if book.latest().is_some_and(|r| resolved.covers(r)) {", "if false {",
+        "registry_epoch::repair::tests::repair_restore_rejects_covered_live_heads_and_screened_openings",
+        "accepted covered live role",
+    ),
+    (
+        "C5-retargeted-mode", "crates/catcoms-replication/src/epoch/repair_transition.rs",
+        "if self.disposition == RepairDisposition::Retargeted && !adopting && opening.is_none() {", "if false {",
+        "registry_epoch::repair::tests::repair_restore_rejects_retargeted_without_adoption_or_installed_opening",
+        "assertion failed:",
+    ),
+    (
+        "C6-pending-continuation", "crates/catcoms-replication/src/epoch/repair_transition.rs",
+        "if !self.state(book, phase, opening, adopting)?.install_pending {", "if true {",
+        "registry_epoch::repair::tests::repair_pending_continuation_fences_competing_public_adoption_and_seal",
+        "assertion failed:",
+    ),
+    (
+        "C5-registry-protocol-growth", "crates/catcoms-replication/src/registry_epoch.rs",
+        "let repair_binding = if self.repair_binding.is_some() { 39 } else { 0 };", "let repair_binding = 0;",
+        "registry_epoch::repair::tests::repair_protocol_allowance_matches_actual_snapshot_growth",
+        "assertion `left == right` failed",
+    ),
+    (
+        "C6-screened-pending", "crates/catcoms-replication/src/epoch/repair_transition.rs",
+        "install_pending: self.disposition != RepairDisposition::Screened\n                && adopting",
+        "install_pending: adopting",
+        "registry_epoch::repair::tests::repair_screening_does_not_claim_ordinary_adoption_or_replace_unrelated_fault",
+        "assertion failed:",
+    ),
+    (
         "C7-active-historical-publication", "crates/catcoms-replication/src/epoch/owner_journal.rs",
         "            && self\n"
         "                .in_flight\n"
@@ -136,7 +173,7 @@ MUTATIONS = [
 
 def run(test):
     return subprocess.run(
-        COMMAND + [test if test.startswith("epoch::") else PREFIX + test, "--", "--exact", "--nocapture"],
+        COMMAND + [test if "::" in test else PREFIX + test, "--", "--exact", "--nocapture"],
         cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
         text=True, encoding="utf-8", errors="replace", timeout=900, check=False,
     )

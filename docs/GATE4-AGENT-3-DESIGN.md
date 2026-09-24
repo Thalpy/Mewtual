@@ -841,13 +841,13 @@ reshaped by a repair **unless it is itself sitting on the repudiated branch** (c
 |---|---|---|---|---|---|
 | 6a | **not faulted**, same-tenure, `O == Some(L)` | `Closing` | `S.hash()` | `true` | `Some(S)` |
 | 6c | **not faulted**, same-tenure, an own anchor is covered by the repair (below) | `Closing` | `S.hash()` | `true` | `Some(S)` |
-| 6b | **not faulted**, no own anchor covered: screening only | unchanged | unchanged | unchanged | none |
+| 6b | **not faulted**, cross-tenure or no own anchor covered: screening only | unchanged | unchanged | unchanged | none |
 | 6d | **faulted on a different pair**: screening only | unchanged | unchanged | unchanged | none |
 | 1a | faulted on the pair, same-tenure, `O == Some(S)`, `H` qualifies (below) | `Closing` | `H.hash()` | `false` | none |
 | 1b | faulted on the pair, same-tenure, `O == Some(S)`, `H` does not qualify | `Open` | none | `false` | none |
-| 2a | faulted on the pair, same-tenure, `S.closed_epoch == E`, `!source.adopting` | `Closing` | `S.hash()` | `false` | none |
+| 2a | faulted on the pair, same-tenure, `S.closed_epoch == E`, `!source.adopting`, opening not covered | `Closing` | `S.hash()` | `false` | none |
 | 2b | faulted on the pair, same-tenure, `S.closed_epoch == E`, `source.adopting` | `Closing` | `S.hash()` | `true` | `Some(S)` |
-| 3 | faulted on the pair, same-tenure, `O == Some(L)` | `Closing` | `S.hash()` | `true` | `Some(S)` |
+| 3 | faulted on the pair, same-tenure, opening covered (exact loser or losing baseline); takes precedence over 2a/2b | `Closing` | `S.hash()` | `true` | `Some(S)` |
 | 4 | faulted on the pair, same-tenure, `source.adopting`, none of the above | `Closing` | `S.hash()` | `true` | `Some(S)` |
 | 5 | **faulted on the pair**, cross-tenure: `Unblocked` | `Open` | none | `false` | none |
 | 8 | otherwise | refuse: `Held(UnsupportedShape)` | | | |
@@ -874,7 +874,7 @@ shown to descend from either side. Such a head falls to case 6b and is left alon
 invents no ancestry for it; 15.1 N32 asserts that explicitly so the limitation is visible rather
 than accidental.
 
-Case 6b is now the outcome only for a source with **no** covered anchor: it records
+For a same-tenure repair, case 6b is the outcome only with **no** covered anchor: it records
 `resolved_repair` and `repair_sequence` so the loser and its baseline descendants are screened from
 then on, and touches no gate, head, adoption mode or retained progress. Case 6a keeps the
 descendant-convergence path, but only same-tenure, because a cross-tenure selected receipt cannot be
@@ -890,7 +890,8 @@ decided next. The source's own fault is retained untouched. `Held(PairMismatch)`
 removed as an outcome; a genuinely malformed pair is still caught by `check_evidence`.
 
 `H` qualifies in case 1a only under a **positive** justification, never merely the absence of a
-conflict: `H.closed_epoch == E`, `H.tenure_id == S.tenure_id`, `H != L`, and `O == Some(S)`, so the
+conflict: `H.closed_epoch == E`, `TenureSelection::from(H) == TenureSelection::from(S)`,
+`H` is not covered by the repair, and `O == Some(S)`, so the
 epoch `H` seals is the one the selected checkpoint opened. That is the only lineage statement
 receipts support; they carry no ancestry chain. In every other same-tenure case the head is `S`.
 This resolves AG3-DES-003: in the reviewer's counterexample `O == Some(L)`, which is case 3, so the
@@ -922,7 +923,7 @@ that rewinds this branch, stages an ordinary `Rewound` snapshot. A same-tenure h
 with the tenure that is over, which is safe precisely because this case requires the source to have
 been faulted: an unfaulted source keeps everything through case 6b.
 
-`RepairHold` distinguishes `SequenceNotNewer`, `RepairInProgress`, `ScopeMismatch`, `Settled` and
+`RepairHold` distinguishes `SequenceNotNewer`, `RepairInProgress`, `Settled` and
 `UnsupportedShape`. `PairMismatch` and `NoFault` are gone: both of those shapes are now the
 screening cases 6d and 6b, which is what removes the AG3-DES-019 deadlock. A `Held` result is a successful observation the caller reports,
 never an error that discards evidence, exactly as `StudioAdoptionOutcome::Fault` is handled at
@@ -1053,8 +1054,10 @@ impl ReceiptBook { pub fn repair_sequence(&self) -> u64; }
 
 `installed` is `self.opened_by(&selected)`, matching the existing adoption test
 (`store/epoch_studio/adoption.rs:89`). `install_pending` is
-`resolved_repair.is_some() && self.adopting && self.phase() == Closing && latest == selected &&
-!installed`. It is the single eligibility predicate both runtime steps use (10.3).
+`exact_repair_binding && disposition != Screened && self.adopting && self.phase() == Closing &&
+latest == selected && !installed`. Screening does not take ownership of ordinary adoption.
+The implemented shared result/state types are `SourceRepairOutcome` and `SourceRepairState`;
+scope mismatches return `ReplError::EpochScope`. These APIs perform no durable transaction.
 
 **Where the disposition tag lives.** In the **Studio restart unit's own snapshot**, not in core's
 `ResolvedRepair` encoding, because book versions 4 and 5 are existing, accepted and tested code and
@@ -1070,7 +1073,7 @@ is:
 
 ```text
 v1 / v2 : <1|2> | channel | ...            unchanged, byte compatible
-v3      : 3 | u8 adopting | u8 disposition | u8 repair_bound | repair_hash[32] | channel | ...
+v3      : 3 | u8 adopting | u8 disposition | u8 repair_bound=1 | u32(32) | repair_hash[32] | channel | ...
 ```
 
 `repair_bound` and `repair_hash` bind the disposition to the **exact** resolved repair, by its
@@ -1095,6 +1098,12 @@ only one value answers the question.
 Because case 5 sets neither `adopting` nor an install, a cross-tenure repair can never leave a
 source claimed by `repair_install_pending()` for a checkpoint that `select_repaired_checkpoint` is
 forbidden to install.
+
+The implemented leaf also fences competing ordinary begin/seal calls while `install_pending`:
+exact selected retries are `Duplicate`, covered losers are `Stale`, and other receipts refuse
+without mutation. This preserves the local continuation; the broader durable B1-through-recycling
+claim fence remains mandatory store integration work. Legacy v1/v2 resolved books remain readable
+without inventing an action; an unbound exact repair retry holds `UnsupportedShape`.
 
 **C-6. Recovery reason.** `prepare_checkpoint_adoption` gains a private reason parameter and a
 public `prepare_repair_adoption(receipt, raw_seed, group, tenure)` wrapper passing
