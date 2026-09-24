@@ -1,0 +1,850 @@
+//! Scheduled automatic handoff (Flow H), stages H1 to H6.
+//!
+//! One job per actor, sharing the same per-actor admission and the same four-slot process-wide
+//! preparation pool as local Save, because "one overlay operation is live per server at a time"
+//! is a property of the actor, not of a particular flow.
+//!
+//! The stages alternate custody and detachment:
+//!
+//! ```text
+//! H1 probe + capture   custody      cheap: bounded reads, structural decode, authority mint
+//! H2 prepare           detached     full decode_vault, successor restore, change set
+//! H3 sign slice        custody      bounded turns, repeated across background turns
+//! H4 assemble          detached     finish, complete, snapshot, record encodings
+//! H5 commit            custody      Prepared -> whole Source -> Completed
+//! H6 notify            custody      settlement notice for the finished transfer
+//! ```
+//!
+//! Only H3 is paged. H2 and H4 are single detached jobs, and H5 is the accepted durable
+//! transaction, unchanged.
+use super::*;
+use crate::store::{StudioHandoffCapture, StudioHandoffCommit, StudioHandoffPlan};
+use crate::studio::overlay::OverlayOwnership;
+use std::collections::BTreeMap;
+
+/// Where a job is, and who owns its bundle right now. `Detached` carries no ownership on purpose:
+/// a worker holds it, so a cancelled waiter cannot take it back and admission stays occupied until
+/// that worker actually ends.
+pub(super) enum HandoffStage {
+    /// H1 done; waiting for a background turn to detach H2.
+    Captured(Box<StudioHandoffCapture>, OverlayOwnership),
+    /// H2 or H4 is running on a worker, which owns the bundle.
+    Detached,
+    /// H3: signing, paged across visits.
+    Signing(Box<StudioHandoffPlan>, OverlayOwnership),
+    /// H4 done; waiting for a custody visit to run H5.
+    Ready(Box<StudioHandoffCommit>, OverlayOwnership),
+}
+
+pub(super) struct HandoffJob {
+    pub(super) target: StudioTarget,
+    pub(super) stage: HandoffStage,
+    /// Which job this is, counted per actor and never reused.
+    ///
+    /// The target is **not** an identity. `handoff_check_authority` abandons at any stage,
+    /// `Detached` included, and a worker that has already been given the bundle keeps running
+    /// after its job is gone. Once that target's backoff expires a fresh job can be captured for
+    /// it, and a completion routed on target alone would then install the dead worker's result
+    /// into the live job: a plan pinned to the superseded epoch, unsignable for ever, in place of
+    /// a capture that was fine.
+    pub(super) token: u64,
+    /// The observed owner tenure H1 minted this job's authority under.
+    pub(super) tenure: u64,
+    /// The MLS epoch H1 minted it under.
+    ///
+    /// Tenure alone is **not** enough, and assuming it was is what made the first version of this
+    /// check blind to the very failure it was written for. `observed_owner_tenure_start` reports
+    /// when the current owner's tenure *began*, and a same-owner MLS commit preserves that value
+    /// (`OwnerTenure::applied` takes the "same owner preserves knowledge" branch). But
+    /// `StudioHandoffAuthority` pins `group.epoch()`, so that same commit makes the job
+    /// permanently unsignable while the tenure comparison still matches.
+    pub(super) mls: u64,
+}
+
+/// Per-actor handoff scheduling. Holds at most one job.
+#[derive(Default)]
+pub(super) struct HandoffRuntime {
+    pub(super) job: Option<HandoffJob>,
+    /// 7.2's memo: targets with no transferable overlay, valid only while the store's intent
+    /// generation is unchanged, so a quiescent vault is not re-probed every background turn.
+    quiet: Vec<StudioTarget>,
+    quiet_generation: Option<Arc<()>>,
+    /// Backoff after a refused probe or an abandoned job. **Per target**, because a shared scalar
+    /// lets one permanently ineligible document starve every other document on the rail: the
+    /// probe would keep selecting it, keep failing, and drive the shared hold to its maximum.
+    /// Design 7.3's pacing: 30 s doubling to 300 s, reset on durable progress.
+    next_at: BTreeMap<StudioTarget, u64>,
+    hold_ms: BTreeMap<StudioTarget, u64>,
+    /// Round-robin cursor over the watch rail, so selection rotates instead of always taking the
+    /// first eligible target.
+    selection: usize,
+    /// Source of `HandoffJob::token`. Monotonic per actor; a value is never reused, so a
+    /// completion from an abandoned job can always be told from a live one.
+    next_token: u64,
+    /// When to look again after the shared pool refused a reservation.
+    ///
+    /// Deliberately **not** a per-target hold. Losing a race for capacity says nothing about the
+    /// document, so charging it the doubling ineligibility backoff penalised an eligible target
+    /// for being unlucky. But recording nothing at all left no future retry either: the
+    /// reservation is a `try_acquire`, so this actor is not queued behind the permit and nothing
+    /// tells it when capacity returns. One flat, non-escalating deadline, cleared as soon as a
+    /// reservation succeeds.
+    probe_retry_at: Option<u64>,
+}
+
+const FIRST_HOLD_MS: u64 = 30_000;
+const MAX_HOLD_MS: u64 = 300_000;
+/// Flat retry after the shared pool is full. Short, because the condition is other actors' work
+/// finishing rather than anything about this document, and non-escalating for the same reason.
+const CAPACITY_RETRY_MS: u64 = 2_000;
+
+impl HandoffRuntime {
+    pub(super) fn busy(&self) -> bool {
+        self.job.is_some()
+    }
+
+    /// True when a signing slice could run right now. Signing needs no new permit and no retained
+    /// source, so it is allowed on any background turn, which is why the gate is about priority
+    /// rather than about capacity.
+    ///
+    /// Both this and `can_commit` take `now` and consult the same `held` that `runnable` does.
+    /// They must: a scheduler predicate that ignores the backoff its own failure path records is
+    /// not pacing, it is a hot loop with a bookkeeping side effect. That is precisely what an H5
+    /// budget refusal became: `hold_target` wrote the deadline and the commit arm never read it,
+    /// so the most expensive stage in the flow retried on every turn.
+    pub(super) fn can_sign(&self, now: u64) -> bool {
+        self.stage_due(now, |stage| matches!(stage, HandoffStage::Signing(..)))
+    }
+
+    pub(super) fn can_commit(&self, now: u64) -> bool {
+        self.stage_due(now, |stage| matches!(stage, HandoffStage::Ready(..)))
+    }
+
+    fn stage_due(&self, now: u64, want: impl Fn(&HandoffStage) -> bool) -> bool {
+        self.job
+            .as_ref()
+            .is_some_and(|job| want(&job.stage) && !self.held(job.target, now))
+    }
+
+    fn hold_target(&mut self, target: StudioTarget, now: u64) {
+        let next = match self.hold_ms.get(&target) {
+            Some(ms) => (ms * 2).min(MAX_HOLD_MS),
+            None => FIRST_HOLD_MS,
+        };
+        self.hold_ms.insert(target, next);
+        self.next_at.insert(target, now.saturating_add(next));
+    }
+
+    fn held(&self, target: StudioTarget, now: u64) -> bool {
+        self.next_at.get(&target).is_some_and(|at| now < *at)
+    }
+
+    // There is deliberately no `hold(&mut self)` that reads `self.job`. Every caller that gives up
+    // on a job has already removed it, so such a method silently records nothing — which is
+    // exactly how an H5 refusal became an unpaced retry of the most expensive stage in the flow.
+    // `hold_target` takes the target explicitly so the mistake cannot recur.
+
+    /// Durable progress resets that target's pacing, so a server that transfers successfully does
+    /// not inherit a long hold from an earlier refusal.
+    fn progressed(&mut self, target: StudioTarget) {
+        self.hold_ms.remove(&target);
+        self.next_at.remove(&target);
+    }
+
+    /// The tenure and MLS epoch the live job was minted under, if there is one.
+    fn authority(&self) -> Option<(u64, u64)> {
+        self.job.as_ref().map(|job| (job.tenure, job.mls))
+    }
+
+    /// A job that could make progress this turn. `busy` alone is not that: a job held by backoff,
+    /// or one waiting on a gate, cannot run, and treating it as pending keeps the driver awake at
+    /// its active cadence for the whole life of the job.
+    pub(super) fn runnable(&self, now: u64) -> bool {
+        match self.job.as_ref().map(|job| (&job.stage, job.target)) {
+            Some((HandoffStage::Detached, _)) => false,
+            Some((_, target)) => !self.held(target, now),
+            None => false,
+        }
+    }
+
+    /// Milliseconds until the live job's backoff expires, if one is held.
+    ///
+    /// Gating execution on the hold is only half of pacing; without this the other half is a
+    /// stall. A held job reports `runnable() == false`, so `pending()` is false, so a quiescent
+    /// actor schedules no further Studio turn — and a `Ready` job holds this actor's admission
+    /// and one of four process-wide preparation permits for as long as that lasts. Nothing else
+    /// in the loop is watching this deadline, so four quiescent actors could take the whole pool
+    /// and never give it back. The actor merges this into the same injected-clock wake it already
+    /// computes for delivery throttling.
+    ///
+    /// Only a live job counts. An abandoned target holds no resource, so re-probing it can wait
+    /// for ordinary Studio work; waking the actor for it would be a timer per remembered target
+    /// rather than a timer per held resource.
+    pub(super) fn wake_in(&self, now: u64, rail: &[StudioTarget]) -> Option<u64> {
+        if let Some(job) = self.job.as_ref() {
+            if matches!(job.stage, HandoffStage::Detached) {
+                return None;
+            }
+            // Strictly future by construction: the caller samples `now` once for this and for
+            // `pending`, and at or past the deadline the job is runnable, so `pending` carries it.
+            return self
+                .next_at
+                .get(&job.target)
+                .filter(|at| now < **at)
+                .map(|at| at - now);
+        }
+        // No job, and still something to come back for. With no job `runnable` is false by
+        // definition, so unlike the branch above there is nothing for `pending` to carry and the
+        // deadline cannot simply be dropped once it passes: `now == D` would leave the actor with
+        // neither pending work nor a wake, and the timer that just fired would be the last one.
+        // A due deadline is therefore reported through `probe_due` below, and this publishes only
+        // what is still ahead.
+        //
+        // A capacity refusal selects no target and
+        // records no per-target hold, so without this the actor has no waiter on the shared pool
+        // (the reservation is a `try_acquire`) and nothing tells it capacity returned; an
+        // abandoned job leaves a deadline behind but takes the job with it. Neither strands a
+        // resource, which is why this is not the P1 above — but an automatic transfer that only
+        // resumes when unrelated Studio work happens by is not automatic.
+        //
+        // Only **future** deadlines, and only for targets still on the rail. An expired one would
+        // publish a zero delay every iteration while the probe memoises the target as quiet and
+        // declines to act on it, which is a spin rather than a wake. Restricting to the rail also
+        // keeps a deadline for a target that is no longer watched from waking the actor at all.
+        // Same precedence as `probe_due` and for the same reason. Without it a target deadline
+        // earlier than the capacity gate still wakes the actor for a turn that can only return at
+        // that gate, which is an unnecessary wake even once `probe_due` is right.
+        if let Some(at) = self.probe_retry_at {
+            return (now < at).then(|| at - now);
+        }
+        rail.iter()
+            .filter_map(|t| self.next_at.get(t))
+            .filter(|at| now < **at)
+            .map(|at| at - now)
+            .min()
+    }
+
+    /// Whether a probe would do something now, with no job to carry it.
+    ///
+    /// This is `runnable`'s counterpart for the no-job case, and both halves of the pair it forms
+    /// with `wake_in` are needed for the same reason the job branch needed them: a deadline that
+    /// gates execution but never reaches the driver is a stall, and one that reaches the driver
+    /// but gates nothing is a hot loop. A due `probe_retry_at` or a rail target whose hold has
+    /// expired means the next turn has work; `is_quiet` excludes targets the probe would skip
+    /// anyway, which is what stops an expired deadline reporting "due" for ever.
+    pub(super) fn probe_due(&self, now: u64, rail: &[StudioTarget]) -> bool {
+        if self.job.is_some() {
+            return false;
+        }
+        // The capacity gate **dominates** every per-target deadline while it stands, because
+        // `handoff_probe` returns at that gate regardless of which target is due. Reporting a
+        // target as due underneath it would be reporting work the probe is not permitted to do:
+        // the receiver would sit at its active cadence for the whole capacity wait, taking a turn
+        // that returns immediately, while the two-second pacing correctly throttled only the
+        // `try_acquire` and not the turns around it. Two deadline systems, disagreeing.
+        if let Some(at) = self.probe_retry_at {
+            return now >= at;
+        }
+        rail.iter()
+            .any(|t| self.next_at.get(t).is_some_and(|at| now >= *at))
+    }
+
+    fn remaining(&self) -> Option<usize> {
+        match self.job.as_ref().map(|job| &job.stage) {
+            Some(HandoffStage::Signing(plan, _)) => Some(plan.remaining()),
+            _ => None,
+        }
+    }
+
+    /// Release a job that cannot advance because the receiver is paused.
+    ///
+    /// A paused receiver never reaches `background_step` and `detach` returns nothing, so a
+    /// `Captured`, `Signing` or `Ready` job can never progress, while `pending` is false so the
+    /// driver idles. Unlike Flow S, where a parked capture implies a user Save, Flow H creates
+    /// these automatically on any background turn, so paused actors could otherwise exhaust the
+    /// four-slot process-wide pool with no user action anywhere. `Detached` is left alone: its
+    /// worker owns the bundle and releases it when it ends.
+    pub(super) fn release_if_stalled(&mut self, now: u64) {
+        if matches!(self.job.as_ref().map(|job| &job.stage), Some(stage) if !matches!(stage, HandoffStage::Detached))
+        {
+            self.abandon(now);
+        }
+    }
+
+    /// Give up on the current job and release everything it holds.
+    ///
+    /// Every stage that can fail routes here. A handoff is opportunistic background work: nothing
+    /// about it should pause the actor or keep capacity that can no longer be used. Signed work is
+    /// cheap to redo from H1; a stranded admission token and a process-wide preparation permit are
+    /// not cheap at all. `Detached` holds nothing, because a worker owns its bundle and releases
+    /// it when it ends.
+    fn abandon(&mut self, now: u64) {
+        // The target must be read before the job is cleared. Clearing first leaves `hold` with
+        // nothing to back off, and the probe then restarts the same job on the very next turn,
+        // which is a hot loop rather than a release.
+        if let Some(target) = self.job.take().map(|job| job.target) {
+            self.hold_target(target, now);
+        }
+    }
+
+    fn quiet_for(&mut self, generation: &Arc<()>, target: StudioTarget) {
+        if !self
+            .quiet_generation
+            .as_ref()
+            .is_some_and(|g| Arc::ptr_eq(g, generation))
+        {
+            self.quiet.clear();
+            self.quiet_generation = Some(generation.clone());
+        }
+        if !self.quiet.contains(&target) {
+            self.quiet.push(target);
+        }
+        // A memoised target needs no deadline: the memo is its gate, and an intent write rotating
+        // the generation is what reopens it. Leaving an expired hold behind would make `probe_due`
+        // report work for ever on a target the probe then declines to act on, which is the spin
+        // the future-only filter in `wake_in` was reaching for and getting wrong. Clearing here
+        // also keeps the pacing maps from accumulating an entry per quiescent document.
+        self.next_at.remove(&target);
+        self.hold_ms.remove(&target);
+    }
+
+    fn is_quiet(&self, generation: &Arc<()>, target: StudioTarget) -> bool {
+        self.quiet_generation
+            .as_ref()
+            .is_some_and(|g| Arc::ptr_eq(g, generation))
+            && self.quiet.contains(&target)
+    }
+
+    #[cfg(test)]
+    pub(super) fn stage_for_test(&self) -> Option<&'static str> {
+        self.job.as_ref().map(|job| match job.stage {
+            HandoffStage::Captured(..) => "captured",
+            HandoffStage::Detached => "detached",
+            HandoffStage::Signing(..) => "signing",
+            HandoffStage::Ready(..) => "ready",
+        })
+    }
+
+    /// Move the job's recorded **owner tenure** away from the live one, which is what an owner
+    /// change or an unobserved gap does.
+    #[cfg(test)]
+    pub(super) fn stale_tenure_for_test(&mut self) {
+        if let Some(job) = self.job.as_mut() {
+            job.tenure = u64::MAX;
+        }
+    }
+
+    /// Move the job's recorded **MLS epoch** away from the live one, which is what any commit
+    /// does: a member joining or leaving, or a key rotating.
+    ///
+    /// This is the case the first version of the authority check could not see, because a
+    /// same-owner commit leaves the observed tenure start untouched. Only the precondition is
+    /// simulated; the comparison, the abandonment and the receiver's reaction are production.
+    #[cfg(test)]
+    pub(super) fn stale_mls_for_test(&mut self) {
+        if let Some(job) = self.job.as_mut() {
+            job.mls = job.mls.wrapping_add(1);
+        }
+    }
+
+    /// Record the backoff an H5 budget refusal records, without contriving a budget failure.
+    ///
+    /// Only the precondition is simulated. The gate that reads the hold, the deadline the actor
+    /// wakes on and the receiver's behaviour either side of it are all production.
+    #[cfg(test)]
+    pub(super) fn hold_live_job_for_test(&mut self, now: u64) {
+        if let Some(target) = self.job.as_ref().map(|job| job.target) {
+            self.hold_target(target, now);
+        }
+    }
+
+    /// Whether the rail scan ran. It advances the cursor, and nothing else does, so an unchanged
+    /// cursor means the probe returned before reading any intent body.
+    /// The raw capacity retry. `wake_in` cannot witness it once a job exists, because that takes
+    /// the live-job branch and never looks here.
+    /// Record the per-target pacing a refused probe records, without contriving a refusal.
+    #[cfg(test)]
+    pub(super) fn hold_target_for_test(&mut self, target: StudioTarget, now: u64) {
+        self.hold_target(target, now);
+    }
+
+    #[cfg(test)]
+    pub(super) fn probe_retry_for_test(&self) -> Option<u64> {
+        self.probe_retry_at
+    }
+
+    #[cfg(test)]
+    pub(super) fn selection_for_test(&self) -> usize {
+        self.selection
+    }
+
+    #[cfg(test)]
+    pub(super) fn held_for_test(&self, target: StudioTarget, now: u64) -> bool {
+        self.held(target, now)
+    }
+
+    #[cfg(test)]
+    pub(super) fn token_for_test(&self) -> Option<u64> {
+        self.job.as_ref().map(|job| job.token)
+    }
+
+    #[cfg(test)]
+    pub(super) fn remaining_for_test(&self) -> Option<usize> {
+        match self.job.as_ref().map(|job| &job.stage) {
+            Some(HandoffStage::Signing(plan, _)) => Some(plan.remaining()),
+            _ => None,
+        }
+    }
+}
+
+impl StudioReceiver {
+    /// Abandon a job whose authority has moved, at **any** stage.
+    ///
+    /// A job's `StudioHandoffAuthority` pins **both** the owner tenure and the MLS epoch it was
+    /// minted under, so both have to be compared. `observed_owner_tenure_start` alone is not a
+    /// proxy for the pair: it reports when the current owner's tenure *began*, and a same-owner
+    /// commit leaves that value untouched, so a check written on tenure alone cannot see the
+    /// commonest way a job dies.
+    ///
+    /// Once either fact moves, the job can never be signed (H3 rechecks before every signature)
+    /// and can never be committed (the H5 stamp carries the tenure). Parking it would strand this
+    /// actor's admission and one of four process-wide preparation permits permanently, and letting
+    /// the refusal surface as an error would pause the receiver's whole background loop.
+    ///
+    /// So: drop it, release the bundle, back that target off, and carry on. Signed work is cheap
+    /// to redo from H1; the capacity is not.
+    pub(super) fn handoff_check_authority<T: MeshTransport, R: CryptoRngCore>(
+        &mut self,
+        server: &mut Server<T, R>,
+    ) {
+        let Some((tenure, mls)) = self.handoff.authority() else {
+            return;
+        };
+        // BOTH facts, not just tenure. Comparing tenure alone missed a same-owner MLS commit
+        // entirely, which is the commonest way a job dies: a member joins or leaves, or a key
+        // rotates, `OwnerTenure::applied` takes its "same owner preserves knowledge" branch so
+        // the tenure start is unchanged, and the job is silently unsignable for ever. The
+        // fallback that was meant to catch it, `sign_next` refusing, never runs on a priority
+        // turn, because `sign_slice` yields before it signs.
+        let live_mls = server.sync.with_registry_context(|g, _, _, _| g.epoch());
+        if server.sync.observed_owner_tenure_start() != Some(tenure) || live_mls != mls {
+            self.handoff.abandon(server.runtime_clock().monotonic_ms());
+        }
+    }
+
+    /// H1. Find a target whose accepted local draft can now be transferred, and capture it.
+    ///
+    /// Round-robin over the watch rail, one target per turn. A target with no transferable branch
+    /// is memoised against the store's intent generation (7.2), so a quiescent vault costs one
+    /// cheap structural read per target and then nothing until an intent write rotates the token.
+    ///
+    /// A refusal is ordinary: a Closing document that has not rotated yet refuses every time, and
+    /// per-target paced backoff rather than a hot loop is what keeps that cheap.
+    ///
+    /// Nothing here can fail the background turn. A probe is the least urgent work the receiver
+    /// does, and no outcome of it justifies pausing catch-up, replay and receive.
+    pub(super) fn handoff_probe<T: MeshTransport + 'static, R: CryptoRngCore>(
+        &mut self,
+        server: &mut Server<T, R>,
+        store: &mut ServerStore,
+        id: u64,
+    ) {
+        // A capacity retry is owed only because an eligible target could not get a permit. Where
+        // there is no eligible target it has outlived its reason, and because it is global rather
+        // than per-target nothing else would ever consume it: `probe_due` would keep reporting
+        // work while this returns immediately, holding the receiver at its active cadence for
+        // ever. Every path out of this function that is not the retry's own gate therefore
+        // consumes it, which is what makes "due implies the next probe does something" true.
+        if self.handoff.busy() || self.watches.is_empty() {
+            self.handoff.probe_retry_at = None;
+            return;
+        }
+        let now = server.runtime_clock().monotonic_ms();
+        // 7.2, whose section title is "Reservation precedes every body read". The rail scan below
+        // is body reads: `load_epoch_intents_structural` reads and structurally decodes an
+        // authenticated intent record per candidate. Reserving after it, which is what "before the
+        // first authorization read" amounted to, let a background probe decode several records
+        // per turn while holding neither this actor's admission nor one of the four process-wide
+        // permits, defeating the admission control the pool exists to provide.
+        //
+        // Failing to reserve is now free: no target is selected yet, so nothing is backed off.
+        // That is deliberate. Charging a doubling per-target hold for losing a race on capacity
+        // penalised a perfectly eligible document for being unlucky, and escalated contention the
+        // same way it escalates genuine ineligibility.
+        let generation = store.intent_generation();
+        let rail: Vec<_> = self.watches.iter().map(|(w, _)| w.target).collect();
+        // Whether any target could need a body read at all is decided from memoised state and
+        // deadlines alone: `intent_generation` is a token comparison, and `is_quiet`/`held` are
+        // in-memory lookups. Reserving before *this* would take a process-wide permit on every
+        // background turn of a wholly quiescent vault and could transiently refuse a concurrent
+        // Save, which is the opposite of what 7.2's memo is for.
+        if !rail
+            .iter()
+            .any(|t| !self.handoff.is_quiet(&generation, *t) && !self.handoff.held(*t, now))
+        {
+            // Same reason as the empty rail above: nothing here could use a permit, so a capacity
+            // retry has nothing left to be owed to.
+            self.handoff.probe_retry_at = None;
+            return;
+        }
+        // The gate half of that retry. Recording a deadline the probe itself never reads is the
+        // same mistake as an H5 hold no commit arm consulted: under unrelated Studio traffic this
+        // would re-attempt the reservation on every single turn while claiming to pace at two
+        // seconds. Cheap as `try_acquire` is, the claim has to be true.
+        if self.handoff.probe_retry_at.is_some_and(|at| now < at) {
+            return;
+        }
+        let Some(ownership) = self.catchup.reserve_overlay() else {
+            // No target is charged, but a flat retry is recorded so the actor comes back when
+            // capacity plausibly has. Without it a quiescent actor with an eligible draft waits
+            // for unrelated Studio work before trying again.
+            self.handoff.probe_retry_at = Some(now.saturating_add(CAPACITY_RETRY_MS));
+            return;
+        };
+        self.handoff.probe_retry_at = None;
+        let group = server.group_id();
+        let device = server
+            .sync
+            .with_registry_context(|_, d, _, _| d.device_id());
+
+        // Round-robin from the cursor, so one ineligible document cannot monopolise selection.
+        // A read error is recorded as an error, never silently memoised as "nothing here": doing
+        // that would suppress every handoff on this actor until an unrelated intent write
+        // happened to rotate the generation token.
+        let start = self.handoff.selection % rail.len();
+        self.handoff.selection = start.wrapping_add(1);
+        let mut found = None;
+        // The target that actually failed to read, not the cursor's origin. Holding the origin
+        // left the failing record to be re-read every turn while penalising an innocent,
+        // eligible document, and because the cursor advances each turn a single bad record
+        // walked the whole rail to the 300 s cap.
+        let mut unreadable: Option<StudioTarget> = None;
+        let mut quiet = Vec::new();
+        for offset in 0..rail.len() {
+            let target = rail[(start + offset) % rail.len()];
+            if self.handoff.is_quiet(&generation, target) || self.handoff.held(target, now) {
+                continue;
+            }
+            let Ok(logical) = target.document(&group) else {
+                continue;
+            };
+            // Structural: the probe needs the branch's author and basis, never its projection.
+            match store.load_epoch_intents_structural(id, &logical) {
+                Ok(state) => match state.handoff_metadata().and_then(|m| m.overlay()) {
+                    Some(overlay) if overlay.author() == device => {
+                        found = Some((target, overlay.basis()));
+                        break;
+                    }
+                    _ => quiet.push(target),
+                },
+                Err(_) => unreadable = unreadable.or(Some(target)),
+            }
+        }
+        // Only targets actually read and found to have nothing are memoised.
+        for target in quiet {
+            self.handoff.quiet_for(&generation, target);
+        }
+        // Nothing to schedule: 7.2's other half, releasing immediately, which dropping
+        // `ownership` on return does.
+        let Some((target, basis)) = found else {
+            if let Some(bad) = unreadable {
+                self.handoff.hold_target(bad, now);
+            }
+            return;
+        };
+
+        // A transfer needs a live tenure to mint its authority. Without one there is nothing to
+        // capture, and the reservation is released by dropping `ownership` on return.
+        let Some(tenure) = server.sync.observed_owner_tenure_start() else {
+            self.handoff.hold_target(target, now);
+            return;
+        };
+        let Ok(mut budget) = self.handoff_budget(server, store, id) else {
+            self.handoff.hold_target(target, now);
+            return;
+        };
+        let started = server.sync.with_registry_context(|g, d, _, rng| {
+            store.start_studio_handoff(id, g, target, d, basis, Some(tenure), rng, &mut budget)
+        });
+        match started {
+            Ok(crate::store::StudioHandoffStart::Captured(capture)) => {
+                self.handoff.next_token = self.handoff.next_token.saturating_add(1);
+                self.handoff.job = Some(HandoffJob {
+                    target,
+                    stage: HandoffStage::Captured(capture, ownership),
+                    token: self.handoff.next_token,
+                    tenure,
+                    mls: server.sync.with_registry_context(|g, _, _, _| g.epoch()),
+                });
+            }
+            Ok(crate::store::StudioHandoffStart::Settled(_)) => {
+                // Already transferred and acknowledged. Durable progress, so pacing resets and
+                // the reservation is released by dropping `ownership` here.
+                self.handoff.progressed(target);
+                self.settlement
+                    .note(target, StudioSettlementState::RefreshRequired);
+            }
+            Err(_) => {
+                // Not eligible yet, or not eligible at all. Both are ordinary; back off.
+                self.handoff.hold_target(target, now);
+            }
+        }
+    }
+
+    /// Take whichever detached stage is ready, if any. H2 and H4 are single jobs; H3 is not here
+    /// because signing never detaches.
+    pub(super) fn handoff_detach<T: MeshTransport>(&mut self) -> Option<StudioBackgroundJob<T>> {
+        let job = self.handoff.job.as_mut()?;
+        let target = job.target;
+        let token = job.token;
+        match std::mem::replace(&mut job.stage, HandoffStage::Detached) {
+            HandoffStage::Captured(capture, ownership) => Some(
+                StudioBackgroundJob::handoff_prepare(capture, ownership, target, token),
+            ),
+            // H4 detaches only once the whole branch is signed; a partly signed plan goes back.
+            HandoffStage::Signing(plan, ownership) if plan.remaining() == 0 => Some(
+                StudioBackgroundJob::handoff_assemble(plan, ownership, target, token),
+            ),
+            stage => {
+                job.stage = stage;
+                None
+            }
+        }
+    }
+
+    /// H3. One bounded signing slice, under custody, on a background turn.
+    ///
+    /// `priority` is 7.3's placement answer: authoritative service interest, inbound on any watch,
+    /// or a parked background result. A yield signs zero and says so, which is a different event
+    /// from a slice that hit its turn cap or its deadline with work left.
+    pub(super) fn handoff_sign<T: MeshTransport + 'static, R: CryptoRngCore>(
+        &mut self,
+        server: &mut Server<T, R>,
+        store: &mut ServerStore,
+        priority: bool,
+    ) -> Option<crate::store::SigningSlice> {
+        let now = server.runtime_clock().monotonic_ms();
+        if !self.handoff.can_sign(now) {
+            return None;
+        }
+        // Nothing left to sign: H4 detaches next turn. Re-entering `sign_next` here would
+        // recheck live authority for no signature and could abandon a finished plan.
+        if self.handoff.remaining() == Some(0) {
+            return None;
+        }
+        let tenure = server.sync.observed_owner_tenure_start()?;
+        // Per-visit wrapper reauthentication, before the first `sign_next` of the slice.
+        //
+        // Design 6.1's stage table puts this at H3, and `sign_next`'s live-authority recheck is
+        // not a substitute: it proves who is signing and under what epoch and tenure, not that
+        // the bytes H2 reconstructed from are still the bytes on disk. A same-size authenticated
+        // wrapper replacement between visits passes every authority check and is signed against.
+        // A mismatch signs zero, abandons and backs off, exactly as a refused signature does.
+        //
+        // **After** the priority test, not before it. 7.3 says a priority turn yields
+        // immediately, and this check reads and hashes the whole authenticated intent record plus
+        // the bounded source record: body work under custody, which is exactly what the priority
+        // gate exists to get out of the way of. Doing it first also gave a priority turn a way to
+        // abandon the job on a transient read error, when that turn was never allowed to start a
+        // signing visit at all. A yield is not a visit, so it reauthenticates nothing.
+        if !priority && !self.handoff_plan_is_current(server, store, tenure) {
+            self.handoff.abandon(now);
+            return None;
+        }
+        let job = self.handoff.job.as_mut()?;
+        let HandoffStage::Signing(plan, _) = &mut job.stage else {
+            return None;
+        };
+        let clock = server.runtime_clock();
+        let slice = server.sync.with_registry_context(|group, device, _, _| {
+            plan.sign_slice(
+                device,
+                group,
+                tenure,
+                priority,
+                crate::store::MAX_SIGNING_TURNS_PER_VISIT,
+                Some((&*clock, crate::store::SIGNING_SLICE_BUDGET_MS)),
+            )
+        });
+        match slice {
+            Ok(slice) => Some(slice),
+            // A refused signature is an expected outcome, not a vault fault: the design says a
+            // detached result can become a stale proposal that H3 declines to sign. Abandon the
+            // job, release its bundle and back off. It must never reach the receiver's storage
+            // pause, which would stop catch-up, replay and receive until the user happens to open
+            // a Studio document.
+            Err(_) => {
+                let now = server.runtime_clock().monotonic_ms();
+                self.handoff.abandon(now);
+                None
+            }
+        }
+    }
+
+    /// Whether the live `Signing` plan's stamp still matches the store and the live context.
+    ///
+    /// A read failure answers "not current". This runs on a background turn where nothing may
+    /// fail the turn, and the conservative answer costs one abandoned handoff, which is cheap to
+    /// redo from H1; the permissive answer would sign against records that could not be read back.
+    fn handoff_plan_is_current<T: MeshTransport + 'static, R: CryptoRngCore>(
+        &self,
+        server: &mut Server<T, R>,
+        store: &mut ServerStore,
+        tenure: u64,
+    ) -> bool {
+        let Some(HandoffStage::Signing(plan, _)) = self.handoff.job.as_ref().map(|job| &job.stage)
+        else {
+            return false;
+        };
+        server.sync.with_registry_context(|group, device, _, _| {
+            store
+                .studio_handoff_plan_is_current(group, device, Some(tenure), plan)
+                .unwrap_or(false)
+        })
+    }
+
+    /// H5 and H6. Commit the assembled transfer, then notify.
+    ///
+    /// Nothing here can fail the background turn. A refused stamp, a budget that will not build,
+    /// a write that errors: all of them abandon the job, release its bundle and back off. Pausing
+    /// the receiver for any of them would stop catch-up, replay and receive until the user next
+    /// opened a Studio document, which is a far worse outcome than a retried transfer.
+    pub(super) fn handoff_commit<T: MeshTransport + 'static, R: CryptoRngCore>(
+        &mut self,
+        server: &mut Server<T, R>,
+        store: &mut ServerStore,
+        id: u64,
+    ) -> Option<StudioTarget> {
+        let now = server.runtime_clock().monotonic_ms();
+        if !self.handoff.can_commit(now) {
+            return None;
+        }
+        let target = self
+            .handoff
+            .job
+            .as_ref()
+            .expect("checked just above")
+            .target;
+        // The budget is built BEFORE the job is taken. Taking first meant any transient inventory
+        // or generation failure discarded H1 to H4 entirely: a detached full vault decode plus
+        // every signature, thrown away for a retryable error. Flow S gets this right by taking its
+        // plan only when the commit is about to run.
+        let Ok(mut budget) = self.handoff_budget(server, store, id) else {
+            self.handoff.hold_target(target, now);
+            return None;
+        };
+        let job = self.handoff.job.take().expect("checked just above");
+        let HandoffStage::Ready(commit, ownership) = job.stage else {
+            unreachable!("can_commit checked the stage")
+        };
+        let tenure = server.sync.observed_owner_tenure_start();
+        let committed = server.sync.with_registry_context(|group, device, _, rng| {
+            store.commit_studio_handoff(
+                id,
+                group,
+                target,
+                device,
+                *commit,
+                tenure,
+                rng,
+                &mut budget,
+            )
+        });
+        // Explicit: admission and the shared slot are released only after the write attempt
+        // returns, on success and on error alike.
+        drop(ownership);
+        match committed {
+            Ok(_) => {
+                // H6. Durable progress: pacing resets and the view is stale.
+                self.handoff.progressed(target);
+                self.settlement
+                    .note(target, StudioSettlementState::RefreshRequired);
+                Some(target)
+            }
+            Err(_) => {
+                // `hold_target`, not `hold`: the job is already taken, so the job-reading variant
+                // would record nothing and the probe would re-capture the same target on the very
+                // next turn, replaying two inventory drains, a full detached decode and every
+                // signature before failing identically. H5 has refusals H1 does not — the
+                // three-write preflights and the reference check — so this is reachable and not
+                // self-limiting.
+                self.handoff.hold_target(target, now);
+                None
+            }
+        }
+    }
+
+    /// A detached handoff stage came back.
+    ///
+    /// The three outcomes are deliberately **not** collapsed into one arm. A completion that does
+    /// not belong to the job this actor is currently running must be ignored, never used to clear
+    /// it: that job may be mid-signing with real work and a live `OverlayOwnership`, and dropping
+    /// it there would discard both.
+    ///
+    /// "Belongs to" means the job **token**, not the target. Authority can move while a stage is
+    /// detached, and `handoff_check_authority` abandons at any stage including `Detached`, so the
+    /// worker outlives its job. Once that target's backoff expires a new job for the same target
+    /// is legitimate, and a target match would then let the dead worker overwrite it.
+    pub(super) fn handoff_complete(&mut self, result: HandoffCompletion, now: u64) {
+        let mine =
+            |job: &Option<HandoffJob>, token| job.as_ref().is_some_and(|job| job.token == token);
+        match result {
+            HandoffCompletion::Prepared(token, Ok((plan, ownership)))
+                if mine(&self.handoff.job, token) =>
+            {
+                self.handoff.job.as_mut().expect("checked").stage =
+                    HandoffStage::Signing(plan, ownership);
+            }
+            HandoffCompletion::Assembled(token, Ok((commit, ownership)))
+                if mine(&self.handoff.job, token) =>
+            {
+                self.handoff.job.as_mut().expect("checked").stage =
+                    HandoffStage::Ready(commit, ownership);
+            }
+            // A stage this actor asked for refused. The worker already released its bundle.
+            HandoffCompletion::Prepared(token, Err(_))
+            | HandoffCompletion::Assembled(token, Err(_))
+                if mine(&self.handoff.job, token) =>
+            {
+                self.handoff.abandon(now);
+            }
+            // The waiter was cancelled. The worker still owns its bundle and releases it when it
+            // ends, so nothing is freed here; the job is simply no longer tracked. `abandon` both
+            // clears it and backs its target off, which is what this arm has to do.
+            HandoffCompletion::Cancelled(token) if mine(&self.handoff.job, token) => {
+                self.handoff.abandon(now);
+            }
+            // A completion for something this actor is not working on. Ignore it entirely: the
+            // current job, whatever stage it is in, is untouched.
+            _ => {}
+        }
+        // A worker can finish after the receiver has paused, and a successful one hands its bundle
+        // back: the job leaves `Detached`, which `release_if_stalled` deliberately exempts, and
+        // arrives at `Signing` or `Ready` holding admission and a process-wide permit. `pending`
+        // begins with `!self.paused`, so no further turn is ever scheduled and the release hook in
+        // `run`'s paused path is never reached. The bundle would sit there until the user happened
+        // to open a Studio document successfully.
+        //
+        // The pause check belongs here rather than in the caller because this is the only point
+        // where a job can re-enter a holding stage from `Detached`.
+        if self.paused {
+            self.handoff.release_if_stalled(now);
+        }
+    }
+
+    /// A five-family inventory and the Studio budget this actor needs for a handoff visit, built
+    /// the same way the receive path builds one.
+    fn handoff_budget<T: MeshTransport + 'static, R: CryptoRngCore>(
+        &mut self,
+        server: &mut Server<T, R>,
+        store: &mut ServerStore,
+        id: u64,
+    ) -> Result<crate::store::EpochStudioBudget, AppError> {
+        let mut scan = store.scan_epoch_storage_with_studio()?;
+        while !scan.step()?.complete {}
+        let inventory = scan.finish()?;
+        server
+            .sync
+            .with_registry_context(|g, _, _, _| store.studio_storage_budget(id, g, &inventory))
+    }
+}

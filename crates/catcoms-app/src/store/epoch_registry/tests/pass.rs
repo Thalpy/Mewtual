@@ -1,6 +1,6 @@
 //! Pass orchestration tests use the real checked replay adapter and vault. Only the failure
 //! seam injects IO errors/unwinds; authority, intent selection and publication gating stay real.
-use super::replay::{budgets, intent_bytes, journal, put, sync, tombstone};
+use super::replay::{budgets, intent_bytes, journal, put, tombstone};
 use super::*;
 use crate::store::epoch_registry::pass::REPLAY_INTERVAL_MS;
 use catcoms_replication::SignedOp;
@@ -447,16 +447,24 @@ fn registry_pass_post_rename_failure_and_unwind_pause_without_skipping_or_early_
                     &mut rng(),
                     &mut budget,
                     &mut intents,
-                    |path, bytes| {
-                        atomic_write(path, bytes)?;
-                        if unwind {
-                            panic!("injected post-rename replay-pass unwind");
-                        }
-                        Err(AppError::Io(
-                            "injected post-rename replay-pass failure".into(),
-                        ))
+                    &mut WriteHooks::Hooked {
+                        before: None,
+                        before_sync: None,
+                        before_unlink: None,
+                        // Only the epoch replacement. The transaction flushes the source and
+                        // the intent ledger first, and this must not fire on either.
+                        after: Some(&mut |op: CompletedOperation, tag: WriteTag, _: &Path| {
+                            if op != CompletedOperation::Write || tag != WriteTag::Epoch {
+                                return AfterIntercept::Continue;
+                            }
+                            if unwind {
+                                panic!("injected post-rename replay-pass unwind");
+                            }
+                            AfterIntercept::Fail(AppError::Io(
+                                "injected post-rename replay-pass failure".into(),
+                            ))
+                        }),
                     },
-                    &mut sync,
                 )
             })
         }));
@@ -676,7 +684,7 @@ fn registry_pass_maximal_ledger_keeps_only_bounded_ids_and_checks_inventory_at_b
         .join("servers")
         .join(format!("{}.intents", blake3::hash(&scope).to_hex()));
     let sealed = frame(&seal(&store.keys.db_key().unwrap(), &e.finish(), &mut rng()).unwrap());
-    atomic_write(&path, &sealed).unwrap();
+    write_for_test(&path, &sealed).unwrap();
     assert!(store
         .begin_registry_replay(
             SERVER,

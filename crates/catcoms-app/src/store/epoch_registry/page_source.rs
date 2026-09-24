@@ -38,7 +38,7 @@ impl ServerStore {
     /// Reuse the verified prepared graph; unchanged history is never reconstructed here.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn registry_maintenance_hint(
-        &self,
+        &mut self,
         server: u64,
         group: &ServerGroup,
         bucket: u8,
@@ -65,10 +65,10 @@ impl ServerStore {
                     record,
                 )
                 .map_err(invalid)?;
-            sync_registry(
-                &self.registry_epoch_path(&scope_bytes(server, &logical)?),
-                record.footprint.total().map_err(invalid)?,
-            )?;
+            // I-4: an unchanged-file flush still invalidates a captured inventory.
+            let path = self.registry_epoch_path(&scope_bytes(server, &logical)?);
+            let bytes = record.footprint.total().map_err(invalid)?;
+            self.epoch_mutation_guard().sync_registry(&path, bytes)?;
             reservation.commit();
         }
         prepared

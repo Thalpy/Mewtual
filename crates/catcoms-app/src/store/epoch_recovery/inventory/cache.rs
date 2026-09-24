@@ -58,6 +58,19 @@ impl RecordCache {
             record,
         });
     }
+
+    /// Drop every memoized validation.
+    ///
+    /// Only design 13.7's measurement needs this. Registry and Studio are the two cacheable
+    /// families, so a repeated-trial profile of them measures one fresh validation and then
+    /// seven cache hits unless the cache is cleared between trials - and a cache hit is never
+    /// parked, so those seven trials would contribute no validation sample at all while the
+    /// mean silently divided by the wrong count. Clearing makes "fresh validation" repeatable;
+    /// *not* clearing is the separate cache-hit measurement.
+    #[cfg(test)]
+    pub(in crate::store) fn clear_for_test(&mut self) {
+        self.0.clear();
+    }
 }
 
 #[cfg(test)]

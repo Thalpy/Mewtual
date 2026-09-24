@@ -513,7 +513,12 @@ async fn owner_return(pressure: Pressure) {
     *wire.hidden_peer.lock().unwrap() = None;
     let start = p.clock.monotonic_ms();
     let (mut studio_installed, mut registry_installed) = (false, false);
+    // Passes actually consumed. The budget is exactly 160 turns of 250 ms, so this and the
+    // injected elapsed time are the same quantity seen two ways; both are reported because the
+    // failure hypothesis is about *turns that accomplished nothing*, not about wall time.
+    let mut passes_used = 0;
     for pass in 0..160 {
+        passes_used = pass + 1;
         turn(&owner, &client, &p.clock, None, true).await;
         assert_eq!(
             client.actor.studio_scheduling_for_test(None).await.1,
@@ -543,15 +548,27 @@ async fn owner_return(pressure: Pressure) {
             break;
         }
     }
+    // One assertion reporting both classes, because two sequential ones stop at the first: the
+    // Studio failure hid Registry's state in every trace collected so far.
+    //
+    // The pass count is descriptive, not diagnostic, and the earlier comment here claimed
+    // otherwise. The loop's only early exit is the same conjunction this assertion tests, so
+    // reaching a failure here *always* means all 160 passes ran: `passes=160` is entailed by the
+    // failure rather than evidence about its cause, and "far fewer passes" is not a reachable
+    // outcome. Capacity refusals, expired requests, other work being selected, and a record that
+    // installed with a mismatched projection all produce the identical line.
+    //
+    // For context, a healthy run uses 132 passes (Parser, Transport) or 91 (Ready). Establishing
+    // *why* a failing run exhausted the budget needs progress and refusal observations —
+    // selected work, acquisition outcome, request deadlines, source-state transitions — which
+    // this does not collect. The booleans below are also conjunctions of presence, id, phase or
+    // epoch, and projection equality, so a `false` does not say which conjunct failed.
+    let injected = p.clock.monotonic_ms() - start;
     assert!(
-        studio_installed,
-        "Studio must install through the reserved slot"
+        studio_installed && registry_installed,
+        "{pressure:?}: install incomplete — studio={studio_installed} registry={registry_installed},          passes={passes_used}/160, injected={injected}/40000 ms since owner return"
     );
-    assert!(
-        registry_installed,
-        "Registry must install through the reserved slot"
-    );
-    assert!(p.clock.monotonic_ms() - start <= 40_000);
+    assert!(injected <= 40_000);
     eprintln!(
         "{pressure:?}: both classes installed after {} ms",
         p.clock.monotonic_ms() - start

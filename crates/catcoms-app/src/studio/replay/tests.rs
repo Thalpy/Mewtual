@@ -582,3 +582,211 @@ fn studio_replay_topology_handles_reverse_ids_missing_prerequisites_and_max_chai
     choices.insert(id(count), ReplayChoice::After(id(count + 1)));
     assert_eq!(ordered(&choices).1.len(), count as usize);
 }
+
+/// R4 / N25. Accepted Closing-overlay entries must be excluded from ordinary replay SELECTION,
+/// not merely left to `choose` returning `NoEvidence` for them. The assertion is on the actual
+/// `ReplayEvidence.own` set produced by the production path, with a comparable unannotated own
+/// intent present as the control: a test of the `is_overlay` predicate alone would not cover the
+/// call site and would survive deletion of the filter.
+#[tokio::test]
+async fn studio_replay_evidence_excludes_accepted_overlay_ids_and_keeps_ordinary_own_intents() {
+    use crate::store::EpochStudioBudget;
+    use crate::studio::StudioRequest;
+    use catcoms_mls::MlsDevice;
+    use catcoms_replication::studio::{IndexOp, StudioExpiry, StudioKind, StudioOverlaySave};
+    use catcoms_rt::{Hub, ManualClock, PeerId};
+    use rand_chacha::ChaCha20Rng;
+    use rand_core::SeedableRng;
+
+    const SERVER: u64 = 7;
+    let rng = || ChaCha20Rng::seed_from_u64(451);
+    let hub = Hub::new();
+    let clock = ManualClock::new(1000);
+    let mut server = Server::found(
+        hub.join(PeerId::from_u64(1)),
+        MlsDevice::generate().unwrap(),
+        rng(),
+        Box::new(clock.clone()),
+        "replay-exclusion",
+    )
+    .unwrap();
+    let channel = crate::channel_id("general").to_be_bytes();
+    let target = StudioTarget::Index { channel };
+    let root = tempfile::tempdir().unwrap();
+    let mut store = ServerStore::open(root.path(), b"replay-exclusion", &mut rng()).unwrap();
+    let logical = target.document(&server.group_id()).unwrap();
+    let budget = |store: &mut ServerStore, server: &mut Server<_, _>| -> EpochStudioBudget {
+        let mut scan = store.scan_epoch_storage_with_studio().unwrap();
+        while !scan.step().unwrap().complete {}
+        let inventory = scan.finish().unwrap();
+        server
+            .sync
+            .with_registry_context(|g, _, _, _| store.studio_storage_budget(SERVER, g, &inventory))
+            .unwrap()
+    };
+    let domain = |body: Vec<u8>, nonce: u8| DomainOp {
+        body,
+        nonce: [nonce; 16],
+        doc_type: logical.doc_type,
+        logical_key: logical.logical_key.clone(),
+    };
+    let put = |object: [u8; 16], title: &str, device: crate::DeviceId| {
+        IndexOp::PutObject {
+            object,
+            kind: StudioKind::Flipnote,
+            title: title.into(),
+            created_by: device,
+            ts: 100,
+            expiry: StudioExpiry::Never,
+        }
+        .encode()
+        .unwrap()
+    };
+
+    // An installed source with one signed operation, so the document exists and can be closed.
+    let mut b = budget(&mut store, &mut server);
+    let close = server
+        .sync
+        .with_registry_context(|g, d, _, r| {
+            let mut source =
+                catcoms_replication::studio::StudioEpoch::new(g, target, d.device_id()).unwrap();
+            let seed = domain(put([4; 16], "shared seed", d.device_id()), 1);
+            let packet = source.edit_or_reseal(d, g, r, &seed, 100).unwrap();
+            store.ingest_studio_epoch(SERVER, g, target, d, &packet, r, &mut b)?;
+            // Real large signed operations, as the shared overlay fixture does, so the source
+            // actually reaches the production rotation threshold.
+            let title = domain(
+                IndexOp::SetTitle {
+                    object: [4; 16],
+                    title: "retained local draft".into(),
+                }
+                .encode()
+                .unwrap(),
+                9,
+            );
+            for n in 10..20u8 {
+                let mut op = title.clone();
+                op.nonce = [n; 16];
+                let mut copy = catcoms_replication::studio::StudioEpoch::restore(
+                    &source.snapshot().unwrap(),
+                    g,
+                    target,
+                    d.device_id(),
+                )
+                .unwrap();
+                let packet = copy.edit_or_reseal(d, g, r, &op, 100).unwrap();
+                let opened = packet
+                    .open(&g.channel_secret(d, packet.doc_type, packet.doc_id).unwrap())
+                    .unwrap();
+                let mut change = automerge::Change::from_bytes(opened.delta)
+                    .unwrap()
+                    .decode();
+                change.message = Some("x".repeat(220_000));
+                let change = automerge::Change::from(change);
+                let signed = catcoms_replication::SignedOp::sign_domain(
+                    d,
+                    logical.doc_type,
+                    source.doc_id(),
+                    change.raw_bytes().to_vec(),
+                    &op,
+                )
+                .unwrap();
+                let packet = catcoms_replication::SealedOp::seal(&signed, g, d, r).unwrap();
+                source.ingest(&packet, g, d).unwrap();
+                store.ingest_studio_epoch(SERVER, g, target, d, &packet, r, &mut b)?;
+            }
+            let decision = source.new_owner_decision(g, d, 0, None).unwrap();
+            store.seal_studio_epoch(
+                SERVER,
+                g,
+                target,
+                d,
+                decision.receipt().clone(),
+                0,
+                r,
+                &mut b,
+            )?;
+            Ok::<_, crate::AppError>(decision.close().clone())
+        })
+        .unwrap();
+
+    // The accepted Closing-overlay entry.
+    let annotated = domain(put([6; 16], "accepted overlay", server.device_id()), 3);
+    let annotated_id = annotated.id(&server.device_id());
+    let mut b = budget(&mut store, &mut server);
+    let basis = server
+        .prepare_studio_closing_overlay(&mut store, SERVER, target, &close, &mut b)
+        .unwrap()
+        .fingerprint();
+    let StudioOverlaySave::Local(draft) = server
+        .save_studio_closing_overlay(&mut store, SERVER, target, &close, basis, annotated, &mut b)
+        .unwrap()
+    else {
+        panic!("expected actual local acceptance")
+    };
+    assert_eq!(draft.accepted(), 1);
+
+    // Install the pristine successor, so the current source is Open and replay selection runs.
+    // A large source must pass the existing detached preparation before rotation touches it.
+    let capture = server
+        .sync
+        .with_registry_context(|g, d, _, _| store.capture_studio_source(SERVER, g, target, d))
+        .unwrap()
+        .expect("the installed source is present");
+    let prepared = capture.rebuild().unwrap();
+    assert!(server
+        .sync
+        .with_registry_context(|g, d, _, _| store.install_prepared_studio_source(g, d, prepared))
+        .unwrap());
+    let mut b = budget(&mut store, &mut server);
+    server
+        .sync
+        .with_registry_context(|g, d, _, r| {
+            store.install_sealed_studio_successor_for_test(SERVER, g, target, d, &close, r, &mut b)
+        })
+        .unwrap();
+    let epoch = server
+        .studio_transaction(&mut store, SERVER, StudioRequest::Read { target })
+        .unwrap()
+        .expect("the successor is readable")
+        .epoch_id;
+
+    // The control: an ordinary own intent on the successor, unannotated and still pending.
+    let ordinary_body = put([5; 16], "ordinary pending", server.device_id());
+    let ordinary_id = domain(ordinary_body.clone(), 2).id(&server.device_id());
+    server
+        .studio_transaction(
+            &mut store,
+            SERVER,
+            StudioRequest::Apply {
+                target,
+                epoch_id: epoch,
+                nonce: [2; 16],
+                body: ordinary_body,
+            },
+        )
+        .unwrap();
+
+    // Both entries are pending and authored locally; only the annotation differs.
+    let pending = store
+        .load_epoch_intents_structural(SERVER, &logical)
+        .unwrap();
+    assert!(pending.pending().any(|(id, _)| *id == ordinary_id));
+    assert!(pending.pending().any(|(id, _)| *id == annotated_id));
+    assert!(pending.is_overlay(&annotated_id));
+    assert!(!pending.is_overlay(&ordinary_id));
+
+    // The production selection boundary.
+    let evidence = server
+        .studio_replay_evidence(&mut store, SERVER, target, epoch)
+        .unwrap()
+        .expect("an Open successor must produce replay evidence");
+    assert!(
+        evidence.own.contains_key(&ordinary_id),
+        "an ordinary unannotated own intent must remain selectable"
+    );
+    assert!(
+        !evidence.own.contains_key(&annotated_id),
+        "an accepted overlay id reached ordinary replay selection"
+    );
+}

@@ -6,6 +6,9 @@ use catcoms_replication::studio::{
 };
 use catcoms_replication::{CloseRecord, DomainOp};
 
+mod admission;
+pub(crate) use admission::{OverlayAdmission, OverlayOwnership};
+
 impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
     /// Explicit internal handoff. Caller owns exclusive store/runtime custody; no actor or
     /// native command schedules this batch. Live tenure comes only from this sync instance.

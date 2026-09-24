@@ -31,8 +31,7 @@ impl ServerStore {
             clock,
             rng,
             budget,
-            &mut |_, path, bytes| atomic_write(path, bytes),
-            &mut super::super::epoch_intents::sync_intent,
+            &mut WriteHooks::None,
         )
     }
 
@@ -48,8 +47,7 @@ impl ServerStore {
         clock: &dyn catcoms_rt::Clock,
         rng: &mut impl CryptoRngCore,
         budget: &mut EpochStudioBudget,
-        write: &mut impl FnMut(bool, &Path, &[u8]) -> Result<(), AppError>,
-        sync: &mut impl FnMut(&Path, u64) -> Result<(), AppError>,
+        hooks: &mut WriteHooks<'_>,
     ) -> Result<usize, AppError> {
         current_member(group, device)?;
         self.enter_studio_budget(server, group, budget)?;
@@ -63,7 +61,7 @@ impl ServerStore {
             .chain(recovery.staged())
             .map(|s| StudioRecovery::from_snapshot(s, &logical, target.channel()).map_err(invalid))
             .collect::<Result<Vec<_>, _>>()?;
-        let pending = self.load_epoch_intents(server, &logical)?;
+        let pending = self.load_epoch_intents_structural(server, &logical)?;
         let mut selected = BTreeMap::<[u8; 32], LocalIntent>::new();
         for (id, intent) in pending.pending().filter(|(id, _)| ids.contains(*id)) {
             if intent.author != device.device_id() {
@@ -113,8 +111,7 @@ impl ServerStore {
                 rng,
                 &mut budget.storage,
                 &mut budget.intents,
-                |p, b| write(false, p, b),
-                sync,
+                hooks,
             )?;
             return Ok(0);
         }
@@ -134,7 +131,7 @@ impl ServerStore {
             clock,
             rng,
             &mut budget.storage,
-            |p, b| write(true, p, b),
+            hooks,
         )?;
         self.write_studio_manual_recovery_disposition_with_io(
             server,
@@ -143,8 +140,7 @@ impl ServerStore {
             rng,
             &mut budget.storage,
             &mut budget.intents,
-            |p, b| write(false, p, b),
-            sync,
+            hooks,
         )?;
         Ok(selected.len())
     }

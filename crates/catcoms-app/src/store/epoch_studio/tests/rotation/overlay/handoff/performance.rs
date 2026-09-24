@@ -133,8 +133,8 @@ pub(super) fn fixture(
             &mut rng(),
             &mut b.storage,
             &mut b.intents,
-            atomic_write,
-            sync_intent,
+            WriteStep::new(WriteTag::Intents),
+            &mut WriteHooks::None,
         )
         .unwrap();
     let next = install(f, store, &close);

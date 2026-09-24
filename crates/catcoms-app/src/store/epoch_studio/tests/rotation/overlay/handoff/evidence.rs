@@ -6,7 +6,7 @@ fn studio_overlay_handoff_candidate_requires_the_private_store_capability() {
     let f = Fixture::new(true);
     let mut store = open(root.path());
     let (_, basis, _) = prepare(&f, &mut store);
-    super::fences::interrupt(&f, &mut store, basis, HandoffWrite::Source);
+    super::fences::interrupt(&f, &mut store, basis, WriteTag::Source);
     let state = store.load_epoch_intents(SERVER, &f.logical).unwrap();
     let mut source = f.load(&store).unwrap();
     let before = source.unit.snapshot().unwrap();
@@ -34,11 +34,17 @@ fn studio_overlay_handoff_candidate_requires_the_private_store_capability() {
         WritePurpose::Ordinary,
         &mut rng(),
         &mut b.storage,
-        |p, bytes| {
-            wrote = true;
-            atomic_write(p, bytes)
+        WriteStep::new(WriteTag::Source),
+        // Records whether a replacement was attempted at all.
+        &mut WriteHooks::Hooked {
+            before: Some(&mut |_: WriteTag, _: &Path, _: &[u8]| {
+                wrote = true;
+                Intercept::Continue
+            }),
+            before_sync: None,
+            before_unlink: None,
+            after: None,
         },
-        sync_studio,
     );
     assert!(
         matches!(result,Err(AppError::Invalid(ref s)) if s.contains("prepared handoff blocks source replacement")),
@@ -118,7 +124,8 @@ fn studio_overlay_handoff_full_signed_digest_prevents_false_completion() {
         let (substitute, projection) = substituted(&f, &store, true);
         assert_eq!(projection, expected);
         let mut b = budget(&mut store, &f);
-        let mut hit = false;
+        // Both decisions below observe it, so it cannot be held mutably by either alone.
+        let hit = std::cell::Cell::new(false);
         let error = store
             .handoff_studio_overlay_with_io(
                 SERVER,
@@ -129,18 +136,29 @@ fn studio_overlay_handoff_full_signed_digest_prevents_false_completion() {
                 Some(0),
                 &mut rng(),
                 &mut b,
-                &mut |step, p, bytes| {
-                    if step == HandoffWrite::Source {
-                        hit = true;
-                        atomic_write(p, &substitute)?;
-                        return Err(invalid("substituted signed source"));
-                    }
-                    atomic_write(p, bytes)
+                // Substitute different bytes for the source record, then fail: the record on
+                // disk is not the one this transaction signed. Replacing the bytes is what the
+                // before decision is for; the write itself stays the capability's.
+                &mut WriteHooks::Hooked {
+                    before: Some(&mut |step: WriteTag, _: &Path, _: &[u8]| {
+                        if step == WriteTag::Source {
+                            hit.set(true);
+                            return Intercept::Replace(substitute.clone());
+                        }
+                        Intercept::Continue
+                    }),
+                    before_sync: None,
+                    before_unlink: None,
+                    after: Some(&mut |op: CompletedOperation, step: WriteTag, _: &Path| {
+                        if op == CompletedOperation::Write && step == WriteTag::Source {
+                            return AfterIntercept::Fail(invalid("substituted signed source"));
+                        }
+                        AfterIntercept::Continue
+                    }),
                 },
-                &mut flush,
             )
             .unwrap_err();
-        assert!(hit && error.to_string().contains("substituted signed source"));
+        assert!(hit.get() && error.to_string().contains("substituted signed source"));
         drop(store);
         let mut store = open(root.path());
         let state = store.load_epoch_intents(SERVER, &f.logical).unwrap();
@@ -192,14 +210,22 @@ fn studio_overlay_handoff_partial_manifest_keeps_the_entire_branch() {
             Some(0),
             &mut rng(),
             &mut b,
-            &mut |step, p, bytes| {
-                if step == HandoffWrite::Source {
-                    atomic_write(p, &substitute)?;
-                    return Err(invalid("partial signed source"));
-                }
-                atomic_write(p, bytes)
+            &mut WriteHooks::Hooked {
+                before: Some(&mut |step: WriteTag, _: &Path, _: &[u8]| {
+                    if step == WriteTag::Source {
+                        return Intercept::Replace(substitute.clone());
+                    }
+                    Intercept::Continue
+                }),
+                before_sync: None,
+                before_unlink: None,
+                after: Some(&mut |op: CompletedOperation, step: WriteTag, _: &Path| {
+                    if op == CompletedOperation::Write && step == WriteTag::Source {
+                        return AfterIntercept::Fail(invalid("partial signed source"));
+                    }
+                    AfterIntercept::Continue
+                }),
             },
-            &mut flush,
         )
         .unwrap_err();
     assert!(error.to_string().contains("partial signed source"));
@@ -256,15 +282,20 @@ fn studio_overlay_handoff_rechecks_source_after_prepared_before_candidate_write(
         Some(0),
         &mut rng(),
         &mut b,
-        &mut |step, p, bytes| {
-            atomic_write(p, bytes)?;
-            if step == HandoffWrite::Prepared {
-                hit = true;
-                atomic_write(&source_path, &changed)?;
-            }
-            Ok(())
+        // Once the Prepared record is durable, change the source underneath it. The write
+        // itself is the transaction's; this only disturbs a different file afterwards.
+        &mut WriteHooks::Hooked {
+            before: None,
+            before_sync: None,
+            before_unlink: None,
+            after: Some(&mut |op: CompletedOperation, step: WriteTag, _: &Path| {
+                if op == CompletedOperation::Write && step == WriteTag::Prepared {
+                    hit = true;
+                    write_for_test(&source_path, &changed).unwrap();
+                }
+                AfterIntercept::Continue
+            }),
         },
-        &mut flush,
     );
     assert!(hit);
     assert!(

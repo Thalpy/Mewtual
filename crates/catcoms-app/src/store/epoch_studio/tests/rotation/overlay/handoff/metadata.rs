@@ -110,8 +110,8 @@ fn studio_overlay_handoff_rollover_floor_rejects_forgotten_retry_after_rewind() 
             WritePurpose::Ordinary,
             &mut rng(),
             &mut b.storage,
-            atomic_write,
-            sync_studio,
+            WriteStep::new(WriteTag::Source),
+            &mut WriteHooks::None,
         )
         .unwrap();
     drop(store);
@@ -184,11 +184,16 @@ fn studio_overlay_handoff_capacity_preflight_and_full_cap_completed_sync_retry()
         Some(0),
         &mut rng(),
         &mut b,
-        &mut |_, p, bytes| {
-            wrote = true;
-            atomic_write(p, bytes)
+        // Records whether any replacement was reached; the transaction still performs it.
+        &mut WriteHooks::Hooked {
+            before: Some(&mut |_: WriteTag, _: &Path, _: &[u8]| {
+                wrote = true;
+                Intercept::Continue
+            }),
+            before_sync: None,
+            before_unlink: None,
+            after: None,
         },
-        &mut flush,
     );
     assert!(
         matches!(result,Err(AppError::Invalid(ref s)) if s.contains("vault intent limit reached")),
@@ -225,8 +230,17 @@ fn studio_overlay_handoff_capacity_preflight_and_full_cap_completed_sync_retry()
         999,
         &mut rng(),
         &mut b,
-        |_, _| panic!("completed retry allocated replacement"),
-        |_, _| Err(invalid("injected completed retry sync")),
+        // A completed retry must reach the flush, never a replacement.
+        &mut WriteHooks::Hooked {
+            before: Some(&mut |_: WriteTag, _: &Path, _: &[u8]| {
+                panic!("completed retry allocated replacement")
+            }),
+            before_sync: Some(&mut |_: WriteTag, _: &Path, _: u64| {
+                AfterIntercept::Fail(invalid("injected completed retry sync"))
+            }),
+            before_unlink: None,
+            after: None,
+        },
     );
     assert!(
         matches!(result,Err(AppError::Invalid(ref s)) if s.contains("injected completed retry sync"))
@@ -247,10 +261,17 @@ fn studio_overlay_handoff_capacity_preflight_and_full_cap_completed_sync_retry()
             999,
             &mut rng(),
             &mut b,
-            |_, _| panic!("completed retry allocated replacement"),
-            |p, bytes| {
-                synced = true;
-                sync_intent(p, bytes)
+            // The flush still happens; this only records that the transaction reached it.
+            &mut WriteHooks::Hooked {
+                before: Some(&mut |_: WriteTag, _: &Path, _: &[u8]| {
+                    panic!("completed retry allocated replacement")
+                }),
+                before_sync: Some(&mut |_: WriteTag, _: &Path, _: u64| {
+                    synced = true;
+                    AfterIntercept::Continue
+                }),
+                before_unlink: None,
+                after: None,
             },
         )
         .unwrap();
@@ -327,11 +348,16 @@ fn studio_overlay_handoff_preflights_later_source_peak_before_prepared_write() {
         Some(0),
         &mut rng(),
         &mut b,
-        &mut |_, p, bytes| {
-            wrote = true;
-            atomic_write(p, bytes)
+        // Records whether any replacement was reached; the transaction still performs it.
+        &mut WriteHooks::Hooked {
+            before: Some(&mut |_: WriteTag, _: &Path, _: &[u8]| {
+                wrote = true;
+                Intercept::Continue
+            }),
+            before_sync: None,
+            before_unlink: None,
+            after: None,
         },
-        &mut flush,
     );
     assert!(result.is_err());
     assert!(

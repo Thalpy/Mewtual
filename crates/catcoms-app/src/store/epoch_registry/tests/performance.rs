@@ -227,7 +227,9 @@ pub(crate) fn save_inventory_fixture(store: &mut ServerStore) -> PathBuf {
     save_inventory_fixture_ops(store, 2)
 }
 
-pub(super) fn save_inventory_fixture_ops(store: &mut ServerStore, count: usize) -> PathBuf {
+/// `pub(crate)` so design 13.7's C-3 profile can vary the Registry record's operation count;
+/// Registry is one of the two families whose expensive typed reconstruction motivated C-3.
+pub(crate) fn save_inventory_fixture_ops(store: &mut ServerStore, count: usize) -> PathBuf {
     let mut source = Source::new();
     source.fill(count, 160_000, false);
     let path = source.f.path(store);
@@ -246,8 +248,8 @@ pub(super) fn save_inventory_fixture_ops(store: &mut ServerStore, count: usize) 
                 *unit = source.f.source;
                 Ok(())
             },
-            atomic_write,
-            sync_registry,
+            WriteStep::new(WriteTag::Epoch),
+            &mut WriteHooks::None,
         )
         .unwrap();
     assert!(fs::metadata(&path).unwrap().len() > 256 * 1024);
@@ -300,8 +302,8 @@ fn measure(case: &str, build: impl FnOnce(&mut Source), clock: &dyn Clock, max_p
                     *unit = source.f.source;
                     Ok(())
                 },
-                atomic_write,
-                sync_registry,
+                WriteStep::new(WriteTag::Epoch),
+                &mut WriteHooks::None,
             )
             .unwrap()
     });

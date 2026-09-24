@@ -189,11 +189,14 @@ fn registry_owner_rotation_combined_journal_write_is_atomic_and_uncertain_io_nee
                 0,
                 &mut rng(),
                 &mut s.budget,
-                |path, bytes| {
-                    if after_write {
-                        atomic_write(path, bytes)?;
-                    }
-                    Err(invalid("injected combined journal write/flush failure"))
+                &mut if after_write {
+                    WriteHooks::fail_after_write(FailError::Invalid(
+                        "injected combined journal write/flush failure",
+                    ))
+                } else {
+                    WriteHooks::fail_before_write(FailError::Invalid(
+                        "injected combined journal write/flush failure",
+                    ))
                 }
             )
             .is_err());

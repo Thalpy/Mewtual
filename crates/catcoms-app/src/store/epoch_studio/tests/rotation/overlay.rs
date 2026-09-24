@@ -1,9 +1,9 @@
 use super::*;
-use crate::store::epoch_intents::sync_intent;
 use catcoms_replication::studio::{StudioClosingOverlayBasis, StudioLocalDraft};
 use catcoms_replication::CloseRecord;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
+mod archive;
 mod handoff;
 mod source_version;
 
@@ -88,6 +88,17 @@ fn save(
             .unwrap(),
     )
 }
+/// Publish a real PIX and return the reference a frame operation must carry. A local acceptance
+/// may not name pixels the vault does not hold, so frame fixtures publish genuine bytes rather
+/// than synthetic addresses.
+fn published_pix(store: &ServerStore, f: &Fixture, tint: u8) -> ([u8; 32], u64) {
+    let mut bytes = pix();
+    bytes[8] = tint; // vary one palette channel so each fixture frame has a distinct CID
+    let mut blobs = store.blob_store(&hex::encode(f.group.group_id())).unwrap();
+    let cid = blobs.put(&bytes).unwrap();
+    (*cid.as_bytes(), bytes.len() as u64)
+}
+
 fn canonical(store: &ServerStore) -> BTreeMap<String, Vec<u8>> {
     fs::read_dir(store.dir.join("servers"))
         .unwrap()
@@ -113,8 +124,7 @@ fn install(f: &Fixture, store: &mut ServerStore, close: &CloseRecord) -> EpochSt
             &mut rng(),
             &mut b.storage,
             &mut b.intents,
-            atomic_write,
-            sync_intent,
+            &mut WriteHooks::None,
         )
         .unwrap();
     let observed = state.source.as_ref().map(SourceVersion::record);
@@ -129,8 +139,8 @@ fn install(f: &Fixture, store: &mut ServerStore, close: &CloseRecord) -> EpochSt
             WritePurpose::Settlement,
             &mut rng(),
             &mut b.storage,
-            atomic_write,
-            sync_studio,
+            WriteStep::new(WriteTag::Source),
+            &mut WriteHooks::None,
         )
         .unwrap()
 }
@@ -179,23 +189,26 @@ fn studio_overlay_store_reversed_hash_order_reconstructs_full_frame_history() {
     let f = Fixture::new(true);
     let mut store = open(root.path());
     let (close, basis) = closing(&f, &mut store);
+    let (insert_cid, insert_bytes) = published_pix(&store, &f, 0x41);
+    let (replace_cid, replace_bytes) = published_pix(&store, &f, 0x42);
+    let (second_cid, second_bytes) = published_pix(&store, &f, 0x43);
     let bodies = [
         FlipnoteOp::InsertFrame {
             frame: [2; 16],
             after: Some([1; 16]),
-            cid: [4; 32],
-            bytes: 12,
+            cid: insert_cid,
+            bytes: insert_bytes,
         },
         FlipnoteOp::ReplaceFrame {
             frame: [2; 16],
-            cid: [5; 32],
-            bytes: 13,
+            cid: replace_cid,
+            bytes: replace_bytes,
         },
         FlipnoteOp::InsertFrame {
             frame: [6; 16],
             after: Some([2; 16]),
-            cid: [6; 32],
-            bytes: 14,
+            cid: second_cid,
+            bytes: second_bytes,
         },
         FlipnoteOp::RemoveFrame { frame: [2; 16] },
     ];
@@ -227,7 +240,7 @@ fn studio_overlay_store_reversed_hash_order_reconstructs_full_frame_history() {
     assert!(p.tombstones.contains_key(&[2; 16]));
     assert!(p.frames.contains_key(&[6; 16]));
     let pins = store.creative_pinned_cids().unwrap();
-    for cid in [[3; 32], [4; 32], [5; 32], [6; 32]] {
+    for cid in [[3; 32], insert_cid, replace_cid, second_cid] {
         assert!(pins
             .for_group(&f.group.group_id())
             .any(|held| *held == catcoms_storage::Cid::from_bytes(cid)));
@@ -243,7 +256,7 @@ fn studio_overlay_store_reversed_hash_order_reconstructs_full_frame_history() {
     assert_eq!(actual.projection(), expected.projection());
     assert_eq!(actual.accepted(), 4);
     let pins = store.creative_pinned_cids().unwrap();
-    for cid in [[3; 32], [4; 32], [5; 32], [6; 32]] {
+    for cid in [[3; 32], insert_cid, replace_cid, second_cid] {
         assert!(pins
             .for_group(&f.group.group_id())
             .any(|held| *held == catcoms_storage::Cid::from_bytes(cid)));
@@ -272,8 +285,7 @@ fn studio_overlay_store_uncertain_writes_and_changed_source_retry_at_physical_ca
                 123,
                 &mut rng(),
                 &mut b,
-                |_, _| Err(AppError::Io("before overlay write".into())),
-                sync_intent,
+                &mut WriteHooks::fail_before_write(FailError::Io("before overlay write")),
             )
             .unwrap_err();
         assert!(error.to_string().contains("before overlay write"));
@@ -299,11 +311,7 @@ fn studio_overlay_store_uncertain_writes_and_changed_source_retry_at_physical_ca
                 123,
                 &mut rng(),
                 &mut b,
-                |p, bytes| {
-                    atomic_write(p, bytes)?;
-                    Err(AppError::Io("after overlay rename".into()))
-                },
-                sync_intent,
+                &mut WriteHooks::fail_after_write(FailError::Io("after overlay rename")),
             )
             .unwrap_err();
         assert!(error.to_string().contains("after overlay rename"));
@@ -349,8 +357,16 @@ fn studio_overlay_store_uncertain_writes_and_changed_source_retry_at_physical_ca
                 999,
                 &mut rng(),
                 &mut b,
-                |_, _| panic!("exact retry allocated replacement"),
-                |_, _| Err(AppError::Io("retry sync failed".into())),
+                &mut WriteHooks::Hooked {
+                    before: Some(&mut |_: WriteTag, _: &Path, _: &[u8]| {
+                        panic!("exact retry allocated replacement")
+                    }),
+                    before_sync: Some(&mut |_: WriteTag, _: &Path, _: u64| {
+                        AfterIntercept::Fail(AppError::Io("retry sync failed".into()))
+                    }),
+                    before_unlink: None,
+                    after: None,
+                },
             )
             .unwrap_err();
         assert!(error.to_string().contains("retry sync failed"));
@@ -369,8 +385,7 @@ fn studio_overlay_store_uncertain_writes_and_changed_source_retry_at_physical_ca
                 999,
                 &mut rng(),
                 &mut b,
-                |_, _| panic!("exact retry allocated replacement"),
-                sync_intent,
+                &mut WriteHooks::MustNotWrite("exact retry allocated replacement"),
             )
             .unwrap();
         assert_eq!(local(retry).projection(), expected.projection());
@@ -420,10 +435,10 @@ fn studio_overlay_store_failed_ordinary_intent_is_not_acceptance_and_ordinary_ap
                 100,
                 &mut rng(),
                 &mut b,
-                atomic_write,
-                sync_intent,
-                |_, _| Err(AppError::Io("ordinary source save failed".into())),
-                sync_studio,
+                WriteStep::new(WriteTag::Intents),
+                // Only the source half fails; the intent half must still be written first.
+                &mut WriteHooks::fail_before_write(FailError::Io("ordinary source save failed"))
+                    .at(WriteTag::Epoch),
             )
             .unwrap_err();
         assert!(error.to_string().contains("ordinary source save failed"));
@@ -991,4 +1006,845 @@ fn studio_overlay_store_replacement_counts_base_and_orphans_without_refunding_ol
         .unwrap();
     let accepted = save(&f, &mut store, &close, basis.fingerprint(), op, 124);
     assert_eq!(accepted.accepted(), 2);
+}
+
+/// I-3. A complete reference scan derives its pin set from durable state, so it cannot know a
+/// pixel reference that only an in-flight acceptance names. The job-owned transient hold covers
+/// that window, but a durable write does NOT repair a set the scan already installed: the
+/// acceptance path must transfer protection to the ordinary conservative holds before its write,
+/// while the transient owner is still alive. These cases exercise the transfer, not the window.
+#[test]
+fn studio_overlay_acceptance_transfers_pixel_protection_before_its_write() {
+    let root = tempfile::tempdir().unwrap();
+    let mut store = open(root.path());
+    let f = Fixture::new(true);
+    let (close, basis) = closing(&f, &mut store);
+    let group = hex::encode(f.group.group_id());
+
+    let mut blobs = store.blob_store(&group).unwrap();
+    let payload = pix();
+    let pixels = payload.len() as u64;
+    let cid = blobs.put(&payload).unwrap();
+    let orphan = blobs.put(b"nothing will ever name this").unwrap();
+
+    // Establish a KNOWN pin set that predates the acceptance and excludes both CIDs, so the
+    // assertions below cannot pass merely because protection is fail-closed unknown.
+    store.creative_pinned_cids().unwrap();
+    assert!(store.creative_references_known());
+
+    let op = f.domain(
+        FlipnoteOp::InsertFrame {
+            frame: [9; 16],
+            after: None,
+            cid: *cid.as_bytes(),
+            bytes: pixels,
+        }
+        .encode()
+        .unwrap(),
+        7,
+    );
+    let draft = save(&f, &mut store, &close, basis.fingerprint(), op, 300);
+    assert_eq!(draft.accepted(), 1);
+
+    // Every transient and result owner is gone, and no scan has run since. Only the ordinary
+    // holds installed during the acceptance can be protecting these bytes now.
+    let mut blobs = store.blob_store(&group).unwrap();
+    assert!(
+        !blobs.delete(&cid).unwrap(),
+        "an accepted operation's pixels were reclaimable before the next scan"
+    );
+    assert!(blobs.get_bounded(&cid, 100_000).unwrap().is_some());
+    // The control: protection is genuinely known and still reclaims an unreferenced CID, so the
+    // assertion above is not an unknown-protection refusal.
+    assert!(store.creative_references_known());
+    assert!(blobs.delete(&orphan).unwrap());
+}
+
+/// I-3 under uncertain persistence. A write that may have landed, and a write that fails leaving
+/// its temporary sibling, must both leave the new references protected: the transfer runs before
+/// the write attempt precisely so its outcome does not decide whether the pixels survive.
+#[test]
+fn studio_overlay_uncertain_acceptance_still_protects_its_pixels() {
+    for after_rename in [false, true] {
+        let root = tempfile::tempdir().unwrap();
+        let mut store = open(root.path());
+        let f = Fixture::new(true);
+        let (close, basis) = closing(&f, &mut store);
+        let group = hex::encode(f.group.group_id());
+        let mut blobs = store.blob_store(&group).unwrap();
+        let payload = pix();
+        let pixels = payload.len() as u64;
+        let cid = blobs.put(&payload).unwrap();
+        store.creative_pinned_cids().unwrap();
+        assert!(store.creative_references_known());
+
+        let op = f.domain(
+            FlipnoteOp::InsertFrame {
+                frame: [9; 16],
+                after: None,
+                cid: *cid.as_bytes(),
+                bytes: pixels,
+            }
+            .encode()
+            .unwrap(),
+            7,
+        );
+        let mut b = budget(&mut store, &f);
+        // Before the rename, leaving behind the temporary sibling a real interrupted write
+        // would have left. Planting it is fixture work, not the write: the record itself is
+        // never created on this path.
+        let mut plant_sibling = |_: WriteTag, path: &Path, bytes: &[u8]| {
+            let mut staged = path.to_path_buf();
+            staged.set_extension("intents.mewtual-stage-1-1.tmp");
+            std::fs::write(&staged, bytes).unwrap();
+            Intercept::Fail(AppError::Io("interrupted".into()))
+        };
+        let mut hooks = if after_rename {
+            // The record really lands; only the caller's result is lost.
+            WriteHooks::fail_after_write(FailError::Io("interrupted"))
+        } else {
+            WriteHooks::Hooked {
+                before: Some(&mut plant_sibling),
+                before_sync: None,
+                before_unlink: None,
+                after: None,
+            }
+        };
+        let failed = store.save_studio_closing_overlay_with_io(
+            SERVER,
+            &f.group,
+            f.target,
+            &f.device,
+            &close,
+            Some(0),
+            basis.fingerprint(),
+            op,
+            300,
+            &mut rng(),
+            &mut b,
+            &mut hooks,
+        );
+        assert!(failed.is_err(), "the injected writer must fail the save");
+
+        let mut blobs = store.blob_store(&group).unwrap();
+        assert!(
+            !blobs.delete(&cid).unwrap(),
+            "an uncertain acceptance left its pixels reclaimable"
+        );
+        assert!(blobs.get_bounded(&cid, 100_000).unwrap().is_some());
+    }
+}
+
+/// I3-001. An already accepted request must be classified before any media admission. The pixel
+/// hold is new-authoring work: a retry adds no reference and needs no possession, so it must not
+/// be able to fail because the shared reference rails are full. This is the AG1-001 boundary
+/// applied to I-3's first half.
+#[test]
+fn studio_overlay_exact_retry_is_acknowledged_without_media_admission() {
+    let root = tempfile::tempdir().unwrap();
+    let mut store = open(root.path());
+    let f = Fixture::new(true);
+    let (close, basis) = closing(&f, &mut store);
+    let group = hex::encode(f.group.group_id());
+    let mut blobs = store.blob_store(&group).unwrap();
+    let payload = pix();
+    let pixels = payload.len() as u64;
+    let cid = blobs.put(&payload).unwrap();
+
+    let op = f.domain(
+        FlipnoteOp::InsertFrame {
+            frame: [9; 16],
+            after: None,
+            cid: *cid.as_bytes(),
+            bytes: pixels,
+        }
+        .encode()
+        .unwrap(),
+        7,
+    );
+    let first = save(&f, &mut store, &close, basis.fingerprint(), op.clone(), 300);
+    assert_eq!(first.accepted(), 1);
+    let records = canonical(&store);
+
+    // Occupy every job-owned hold slot with unrelated legitimate work, so any attempt at media
+    // admission on the retry path must fail rather than silently succeed.
+    let occupied: Vec<_> = (0..crate::store::creative_references::MAX_TRANSIENT_HOLD_OWNERS)
+        .map(|n| {
+            store
+                .hold_creative_transient(&f.group.group_id(), BTreeSet::from([[n as u8; 32]]))
+                .expect("the rail admits its stated number of owners")
+        })
+        .collect();
+    assert!(store
+        .hold_creative_transient(&f.group.group_id(), BTreeSet::from([[200u8; 32]]))
+        .is_err());
+    let live = store.live_transient_holds_for_test();
+
+    // The exact accepted request must still be acknowledged. Call the store directly rather than
+    // through the fixture helper, so the failure names this boundary instead of unwrapping.
+    let mut b = budget(&mut store, &f);
+    let retried = store.save_studio_closing_overlay(
+        SERVER,
+        &f.group,
+        f.target,
+        &f.device,
+        &close,
+        Some(0),
+        basis.fingerprint(),
+        op,
+        301,
+        &mut rng(),
+        &mut b,
+    );
+    let retried = match retried {
+        Ok(saved) => local(saved),
+        Err(error) => panic!("an accepted retry was refused by media admission: {error}"),
+    };
+    assert_eq!(retried.accepted(), 1);
+    assert_eq!(
+        retried.projection(),
+        first.projection(),
+        "an exact retry must return the same accepted draft"
+    );
+    assert_eq!(
+        store.live_transient_holds_for_test(),
+        live,
+        "an accepted retry performed media admission"
+    );
+    assert_eq!(
+        canonical(&store),
+        records,
+        "an exact retry changed durable records"
+    );
+    drop(occupied);
+}
+
+/// N12(a). The window C-4 exists for, exercised for the first time on the real staged path: a
+/// complete reference scan installs a known set while an acceptance is detached between capture
+/// and commit. Only the job-owned hold can protect the new pixels there, because nothing durable
+/// names them yet and the scan derives its set from durable state alone.
+#[test]
+fn studio_overlay_detached_acceptance_survives_a_complete_scan_between_capture_and_commit() {
+    let root = tempfile::tempdir().unwrap();
+    let mut store = open(root.path());
+    let f = Fixture::new(true);
+    let (close, basis) = closing(&f, &mut store);
+    let group = hex::encode(f.group.group_id());
+    let mut blobs = store.blob_store(&group).unwrap();
+    let payload = pix();
+    let pixel_bytes = payload.len() as u64;
+    let cid = blobs.put(&payload).unwrap();
+    let orphan = blobs.put(b"unreferenced throughout").unwrap();
+
+    // A known pin set that predates the acceptance and excludes the new CID, so nothing below
+    // can pass through fail-closed unknown protection.
+    store.creative_pinned_cids().unwrap();
+    assert!(store.creative_references_known());
+
+    let op = f.domain(
+        FlipnoteOp::InsertFrame {
+            frame: [9; 16],
+            after: None,
+            cid: *cid.as_bytes(),
+            bytes: pixel_bytes,
+        }
+        .encode()
+        .unwrap(),
+        7,
+    );
+    let authoring = store
+        .admit_studio_overlay_authoring(f.target, &f.logical, &f.device, op)
+        .unwrap();
+    let capture = store
+        .capture_studio_overlay_save(SERVER, &f.group, f.target, &f.device, basis, authoring, 300)
+        .unwrap();
+
+    // The detached stage. Custody is genuinely released here: `plan` owns authenticated plaintext
+    // and the hold, and touches no store. While it is outstanding, another operation completes a
+    // full reference scan and attempts protected deletion.
+    let plan = capture.plan().unwrap();
+    store.creative_pinned_cids().unwrap();
+    let mut blobs = store.blob_store(&group).unwrap();
+    assert!(
+        !blobs.delete(&cid).unwrap(),
+        "a complete scan reclaimed pixels held by a detached acceptance"
+    );
+    assert!(blobs.get_bounded(&cid, 100_000).unwrap().is_some());
+    // The scan is genuinely complete and usable: an unreferenced CID still reclaims.
+    assert!(store.creative_references_known());
+    assert!(blobs.delete(&orphan).unwrap());
+
+    // Commit under reacquired custody. The transfer runs before the write and the hold is
+    // released only when this returns.
+    let mut b = budget(&mut store, &f);
+    let draft = store
+        .commit_studio_overlay_save(
+            SERVER,
+            &f.group,
+            f.target,
+            &f.device,
+            &close,
+            Some(0),
+            plan,
+            &mut rng(),
+            &mut b,
+            &mut WriteHooks::None,
+        )
+        .unwrap();
+    assert_eq!(draft.accepted(), 1);
+    assert_eq!(store.live_transient_holds_for_test(), 0);
+
+    // After the commit, with every owner gone and before any further scan, the ordinary holds
+    // installed during the transfer are what keep the pixels.
+    let mut blobs = store.blob_store(&group).unwrap();
+    assert!(
+        !blobs.delete(&cid).unwrap(),
+        "the committed acceptance left its pixels reclaimable"
+    );
+    assert!(blobs.get_bounded(&cid, 100_000).unwrap().is_some());
+}
+
+/// The staged commit must refuse a plan whose record changed while it was detached, rather than
+/// writing a state derived from bytes that are no longer current.
+#[test]
+fn studio_overlay_detached_plan_is_refused_when_the_record_changed() {
+    let root = tempfile::tempdir().unwrap();
+    let mut store = open(root.path());
+    let f = Fixture::new(false);
+    let (close, basis) = closing(&f, &mut store);
+    let basis_fingerprint = basis.fingerprint();
+    let authoring = store
+        .admit_studio_overlay_authoring(f.target, &f.logical, &f.device, f.title())
+        .unwrap();
+    let capture = store
+        .capture_studio_overlay_save(SERVER, &f.group, f.target, &f.device, basis, authoring, 300)
+        .unwrap();
+    let plan = capture.plan().unwrap();
+
+    // A different acceptance lands while the first plan is detached.
+    let other = f.domain(
+        IndexOp::SetTitle {
+            object: [1; 16],
+            title: "a different accepted title".into(),
+        }
+        .encode()
+        .unwrap(),
+        8,
+    );
+    let landed = save(&f, &mut store, &close, basis_fingerprint, other, 301);
+    assert_eq!(landed.accepted(), 1);
+    let records = canonical(&store);
+
+    let mut b = budget(&mut store, &f);
+    let refused = store.commit_studio_overlay_save(
+        SERVER,
+        &f.group,
+        f.target,
+        &f.device,
+        &close,
+        Some(0),
+        plan,
+        &mut rng(),
+        &mut b,
+        &mut WriteHooks::None,
+    );
+    assert!(
+        refused.is_err(),
+        "a plan derived from superseded bytes was committed"
+    );
+    assert_eq!(canonical(&store), records, "the refusal changed records");
+    assert_eq!(
+        store
+            .load_epoch_intents(SERVER, &f.logical)
+            .unwrap()
+            .local_draft()
+            .unwrap()
+            .unwrap()
+            .accepted(),
+        1,
+        "the refusal disturbed the accepted branch"
+    );
+}
+
+/// FS-001 / N12(d). A new acceptance may not name pixels the vault does not hold. The reference
+/// extractor only reads an address and the typed layer only checks declared sizes, so possession
+/// is a separate obligation: once at S1b, and again at S3 because the bytes can disappear while
+/// the append is detached.
+#[test]
+fn studio_overlay_new_acceptance_requires_pixels_at_admission_and_again_before_the_barrier() {
+    // A CID that was never published must be refused before anything is accepted.
+    let root = tempfile::tempdir().unwrap();
+    let mut store = open(root.path());
+    let f = Fixture::new(true);
+    let (close, basis) = closing(&f, &mut store);
+    let records = canonical(&store);
+    let absent = f.domain(
+        FlipnoteOp::InsertFrame {
+            frame: [9; 16],
+            after: None,
+            cid: [0xee; 32],
+            bytes: 39,
+        }
+        .encode()
+        .unwrap(),
+        7,
+    );
+    let mut b = budget(&mut store, &f);
+    let refused = store.save_studio_closing_overlay(
+        SERVER,
+        &f.group,
+        f.target,
+        &f.device,
+        &close,
+        Some(0),
+        basis.fingerprint(),
+        absent,
+        300,
+        &mut rng(),
+        &mut b,
+    );
+    assert!(
+        refused.is_err(),
+        "an operation naming absent pixels was accepted"
+    );
+    assert_eq!(canonical(&store), records, "the refusal changed records");
+    assert!(store
+        .load_epoch_intents(SERVER, &f.logical)
+        .unwrap()
+        .local_draft()
+        .unwrap()
+        .is_none());
+
+    // Now the S3 case: admission succeeds, then the bytes are removed while the append is
+    // detached. Every stamp and basis check still passes, so the refusal must come from the
+    // possession recheck and not from an earlier stale-plan guard.
+    let root = tempfile::tempdir().unwrap();
+    let mut store = open(root.path());
+    let f = Fixture::new(true);
+    let (close, basis) = closing(&f, &mut store);
+    let group = hex::encode(f.group.group_id());
+    let mut blobs = store.blob_store(&group).unwrap();
+    let cid = blobs.put(&pix()).unwrap();
+    let records = canonical(&store);
+
+    let op = f.domain(
+        FlipnoteOp::InsertFrame {
+            frame: [9; 16],
+            after: None,
+            cid: *cid.as_bytes(),
+            bytes: pix().len() as u64,
+        }
+        .encode()
+        .unwrap(),
+        7,
+    );
+    let authoring = store
+        .admit_studio_overlay_authoring(f.target, &f.logical, &f.device, op)
+        .unwrap();
+    let capture = store
+        .capture_studio_overlay_save(SERVER, &f.group, f.target, &f.device, basis, authoring, 300)
+        .unwrap();
+    let plan = capture.plan().unwrap();
+
+    // Remove the bytes underneath the detached job, as external deletion or storage damage would.
+    let path = store.dir.join("blobs").join(&group);
+    for entry in fs::read_dir(&path).unwrap().flatten() {
+        if entry.path().is_file() {
+            fs::remove_file(entry.path()).unwrap();
+        }
+    }
+    assert!(store
+        .blob_store(&group)
+        .unwrap()
+        .get_bounded(&cid, 100_000)
+        .unwrap()
+        .is_none());
+
+    let mut b = budget(&mut store, &f);
+    let refused = store.commit_studio_overlay_save(
+        SERVER,
+        &f.group,
+        f.target,
+        &f.device,
+        &close,
+        Some(0),
+        plan,
+        &mut rng(),
+        &mut b,
+        &mut WriteHooks::None,
+    );
+    match refused {
+        Err(error) => assert!(
+            error.to_string().contains("no longer held"),
+            "a new acceptance named absent pixels: {error}"
+        ),
+        Ok(_) => panic!("a new acceptance named absent pixels"),
+    }
+    assert_eq!(canonical(&store), records, "the refusal changed records");
+    assert!(store
+        .load_epoch_intents(SERVER, &f.logical)
+        .unwrap()
+        .local_draft()
+        .unwrap()
+        .is_none());
+}
+
+/// A-001. The media facts and the operation that consumes them must be one value. Pairing media
+/// admitted for operation A with an intent carrying operation B would make the detached plan append
+/// B while S3 rechecked, and the job-owned hold protected, A's pixels: a durable acceptance naming
+/// pixels nothing verified, and unprotected pixels for the ones it does name.
+///
+/// Production cannot express that pairing at all, because `AdmittedOverlayAuthoring` has private
+/// fields and `admit_studio_overlay_authoring` is its only constructor. That is a type-level fact
+/// and nothing can execute it, so the binding is also rechecked at capture and at commit, and this
+/// test forces the mismatch through a test-only constructor to prove those rechecks fire.
+#[test]
+fn admitted_media_cannot_be_paired_with_another_operation() {
+    let root = tempfile::tempdir().unwrap();
+    let mut store = open(root.path());
+    let f = Fixture::new(true);
+    let (close, basis) = closing(&f, &mut store);
+    let (first_cid, first_bytes) = published_pix(&store, &f, 11);
+    let (second_cid, second_bytes) = published_pix(&store, &f, 12);
+    assert_ne!(first_cid, second_cid, "the fixture frames share pixels");
+    // A second basis for the positive control, derived from the same unchanged Closing source.
+    let control_basis = {
+        let mut b = budget(&mut store, &f);
+        store
+            .prepare_studio_closing_overlay(
+                SERVER,
+                &f.group,
+                f.target,
+                &f.device,
+                &close,
+                Some(0),
+                &mut b,
+            )
+            .unwrap()
+    };
+    assert_eq!(control_basis.fingerprint(), basis.fingerprint());
+    let records = canonical(&store);
+
+    let frame = |frame: [u8; 16], cid: [u8; 32], bytes: u64, nonce: u8| {
+        f.domain(
+            FlipnoteOp::InsertFrame {
+                frame,
+                after: None,
+                cid,
+                bytes,
+            }
+            .encode()
+            .unwrap(),
+            nonce,
+        )
+    };
+    // Two legitimately admitted requests, each naming its own published pixels.
+    let a = store
+        .admit_studio_overlay_authoring(
+            f.target,
+            &f.logical,
+            &f.device,
+            frame([9; 16], first_cid, first_bytes, 7),
+        )
+        .unwrap();
+    let b = store
+        .admit_studio_overlay_authoring(
+            f.target,
+            &f.logical,
+            &f.device,
+            frame([10; 16], second_cid, second_bytes, 8),
+        )
+        .unwrap();
+    let live = store.live_transient_holds_for_test();
+    assert_eq!(live, 2, "each admitted request takes its own hold");
+
+    // B's intent with A's media. Capture must refuse before any custody is released, so no plan
+    // and no detached stage ever exists for the mismatched pair.
+    let intent = catcoms_replication::LocalIntent {
+        author: f.device.device_id(),
+        operation: frame([10; 16], second_cid, second_bytes, 8),
+    };
+    let swapped =
+        crate::store::epoch_studio::overlay_capture::AdmittedOverlayAuthoring::mismatched_for_test(
+            intent, a,
+        );
+    let refused = store
+        .capture_studio_overlay_save(SERVER, &f.group, f.target, &f.device, basis, swapped, 300);
+    match refused {
+        Err(error) => assert!(
+            error
+                .to_string()
+                .contains("admitted media does not belong to this authoring request"),
+            "the mismatch was refused for an unrelated reason: {error}"
+        ),
+        Ok(_) => panic!("media admitted for one operation was captured against another"),
+    }
+    assert_eq!(
+        canonical(&store),
+        records,
+        "a refused capture changed durable records"
+    );
+
+    // Positive control: the same capture with B's own admitted authoring is accepted and reaches a
+    // plan, so the refusal above is the binding and not the fixture.
+    let capture = store
+        .capture_studio_overlay_save(SERVER, &f.group, f.target, &f.device, control_basis, b, 300)
+        .expect("a correctly paired request was refused");
+    let plan = capture.plan().unwrap();
+    let mut budget = budget(&mut store, &f);
+    let draft = store
+        .commit_studio_overlay_save(
+            SERVER,
+            &f.group,
+            f.target,
+            &f.device,
+            &close,
+            Some(0),
+            plan,
+            &mut rng(),
+            &mut budget,
+            &mut WriteHooks::None,
+        )
+        .unwrap();
+    assert_eq!(draft.accepted(), 1);
+    // A's hold died with the refused capture; B's died with its commit.
+    assert_eq!(store.live_transient_holds_for_test(), 0);
+}
+
+/// Every file this group's blob namespace holds, staging included, by path and exact bytes. Used
+/// to prove a refused request neither promoted anything nor left a staged sibling behind.
+fn blob_namespace(store: &ServerStore, f: &Fixture) -> BTreeMap<String, Vec<u8>> {
+    let root = store
+        .dir
+        .join("blobs")
+        .join(hex::encode(f.group.group_id()));
+    let mut out = BTreeMap::new();
+    let mut stack = vec![root.clone()];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+            } else {
+                let name = path
+                    .strip_prefix(&root)
+                    .unwrap()
+                    .to_string_lossy()
+                    .replace('\\', "/");
+                out.insert(name, fs::read(&path).unwrap());
+            }
+        }
+    }
+    out
+}
+
+/// FS-002. Classification answers "has this already been accepted"; it does not answer "may this
+/// be authored now". A request carrying a basis the document has legitimately moved past is
+/// neither an accepted retry nor authorized, so it must be refused as stale before any pixel is
+/// read, promoted or held and before the shared reference rails are consulted. Otherwise a stale
+/// editor is told its artwork is missing, or a request destined for refusal promotes a blob and
+/// takes a rail slot on its way out.
+///
+/// Both hazards the reviewer named are exercised against the same advanced state, each with a
+/// positive control proving media admission was genuinely reachable and would have refused.
+#[test]
+fn studio_overlay_stale_basis_is_refused_before_any_media_admission() {
+    let root = tempfile::tempdir().unwrap();
+    let f = Fixture::new(true);
+    let mut store = open(root.path());
+    eligible(&f, &mut store);
+
+    // A separate sender's valid signed edit, withheld until the receiver has sealed. Ingesting it
+    // afterwards advances the persisted Closing source, which is what makes the first basis stale:
+    // no gate field, snapshot or stamp is edited by the fixture.
+    let mut sender = f.load(&store).unwrap();
+    let mut late = f.title();
+    late.nonce = [76; 16];
+    let packet = sender
+        .unit
+        .edit_or_reseal(&f.device, &f.group, &mut rng(), &late, 100)
+        .unwrap();
+    let (close, stale) = seal_source(&f, &mut store);
+
+    warm(&f, &mut store);
+    let mut b = budget(&mut store, &f);
+    let (admitted, _) = store
+        .ingest_studio_epoch_reusing(
+            SERVER,
+            &f.group,
+            f.target,
+            &f.device,
+            &packet,
+            &mut rng(),
+            &mut b,
+        )
+        .unwrap();
+    assert_eq!(admitted, Admission::Quarantined);
+    drop(store);
+
+    // Reopen so a cached source cannot stand in for the changed persisted one.
+    let mut store = open(root.path());
+    let mut b = budget(&mut store, &f);
+    let fresh = store
+        .prepare_studio_closing_overlay(
+            SERVER,
+            &f.group,
+            f.target,
+            &f.device,
+            &close,
+            Some(0),
+            &mut b,
+        )
+        .unwrap();
+    assert_ne!(
+        fresh.fingerprint(),
+        stale.fingerprint(),
+        "the Closing source did not actually advance"
+    );
+    let scope = crate::store::epoch_intents::scope_bytes(SERVER, &f.logical).unwrap();
+    let intent_path = store
+        .dir
+        .join("servers")
+        .join(format!("{}.intents", blake3::hash(&scope).to_hex()));
+    let intents_before = fs::read(&intent_path).ok();
+
+    let attempt = |store: &mut ServerStore, basis: [u8; 32], op: DomainOp| {
+        let mut b = budget(store, &f);
+        store
+            .save_studio_closing_overlay(
+                SERVER,
+                &f.group,
+                f.target,
+                &f.device,
+                &close,
+                Some(0),
+                basis,
+                op,
+                456,
+                &mut rng(),
+                &mut b,
+            )
+            .map(|_| ())
+            .unwrap_err()
+            .to_string()
+    };
+
+    // Hazard 1: the pixels this new frame names were never published. A stale request must not
+    // reach the possession check at all, so the editor learns its basis moved rather than being
+    // told, wrongly, that its artwork is missing.
+    let absent = f.domain(
+        FlipnoteOp::InsertFrame {
+            frame: [9; 16],
+            after: None,
+            cid: [0xAB; 32],
+            bytes: pix().len() as u64,
+        }
+        .encode()
+        .unwrap(),
+        7,
+    );
+    let live = store.live_transient_holds_for_test();
+    let blobs_before = blob_namespace(&store, &f);
+    assert_eq!(
+        attempt(&mut store, stale.fingerprint(), absent.clone()),
+        invalid("Closing overlay basis changed").to_string(),
+        "a stale request was classified by its media instead of its basis"
+    );
+    assert_eq!(
+        store.live_transient_holds_for_test(),
+        live,
+        "a stale request took a job-owned hold"
+    );
+    assert_eq!(
+        blob_namespace(&store, &f),
+        blobs_before,
+        "a stale request changed the blob namespace"
+    );
+    assert_eq!(fs::read(&intent_path).ok(), intents_before);
+    // Positive control: with the current basis this identical request does reach media admission,
+    // and is refused there. The stale refusal above was ordering, not an inert request.
+    assert!(
+        attempt(&mut store, fresh.fingerprint(), absent).contains("publish the frame PIX"),
+        "the absent-pixel hazard was not reachable, so the stale case proves nothing"
+    );
+
+    // Hazard 2: the pixels exist, but every job-owned hold slot is legitimately occupied. A stale
+    // request must not consume rail capacity, nor be refused for a rail it had no business
+    // consulting.
+    let (cid, bytes) = published_pix(&store, &f, 3);
+    let held = f.domain(
+        FlipnoteOp::InsertFrame {
+            frame: [10; 16],
+            after: None,
+            cid,
+            bytes,
+        }
+        .encode()
+        .unwrap(),
+        8,
+    );
+    let occupied: Vec<_> = (0..crate::store::creative_references::MAX_TRANSIENT_HOLD_OWNERS)
+        .map(|n| {
+            store
+                .hold_creative_transient(&f.group.group_id(), BTreeSet::from([[n as u8; 32]]))
+                .expect("the rail admits its stated number of owners")
+        })
+        .collect();
+    let live = store.live_transient_holds_for_test();
+    let blobs_before = blob_namespace(&store, &f);
+    assert_eq!(
+        attempt(&mut store, stale.fingerprint(), held.clone()),
+        invalid("Closing overlay basis changed").to_string(),
+        "a stale request consulted the reference rails before its basis"
+    );
+    assert_eq!(
+        store.live_transient_holds_for_test(),
+        live,
+        "a stale request disturbed the job-owned hold rail"
+    );
+    assert_eq!(
+        blob_namespace(&store, &f),
+        blobs_before,
+        "a stale request promoted a blob on its way to refusal"
+    );
+    assert_eq!(fs::read(&intent_path).ok(), intents_before);
+    // Positive control: the saturated rail does refuse this request once its basis is current.
+    assert_eq!(
+        attempt(&mut store, fresh.fingerprint(), held),
+        AppError::Invalid("creative reference scan incomplete, unsupported or over bound".into())
+            .to_string(),
+        "the saturated-rail hazard was not reachable, so the stale case proves nothing"
+    );
+    drop(occupied);
+
+    // Nothing durable was accepted by any of the four attempts.
+    assert_eq!(fs::read(&intent_path).ok(), intents_before);
+    assert!(store
+        .load_epoch_intents(SERVER, &f.logical)
+        .unwrap()
+        .overlay()
+        .is_none());
+}
+
+/// A valid PIX payload at the 192x144 the Flipnote frame rules require: a four-entry palette and
+/// 108 maximal runs, which is exactly 27,648 pixels. Consecutive equal indices are legal here
+/// because a maximal run clears the non-maximal-run rule.
+fn pix() -> Vec<u8> {
+    let mut bytes = vec![0x50, 0x49, 0x58, 0x31, 191, 143, 3];
+    for entry in [
+        [1, 0x13, 0x12, 0x18],
+        [2, 0xe8, 0xe6, 0xf0],
+        [3, 0x97, 0x7d, 0xf2],
+        [0, 0xe0, 0x7a, 0xb8],
+    ] {
+        bytes.extend(entry);
+    }
+    for _ in 0..108 {
+        bytes.extend([255, 0]);
+    }
+    crate::creative::validate_pix(&bytes).expect("the fixture must be a valid PIX");
+    bytes
 }

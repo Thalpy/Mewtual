@@ -29,6 +29,7 @@ use zeroize::{Zeroize, Zeroizing};
 use crate::AppError;
 
 mod creative_references;
+mod epoch_draft_archive;
 mod epoch_intents;
 mod epoch_owner;
 mod epoch_recovery;
@@ -50,11 +51,15 @@ pub use epoch_recovery::cleanup::{
     EpochStorageCleanupProgress as RecoveryCleanupProgress,
 };
 pub use epoch_recovery::inventory::{
-    EpochInventoryCoverage, EpochRecordKind, EpochStorageInventory,
+    EpochInventoryCoverage, EpochRecordKind, EpochStorageCursor, EpochStorageInventory,
     EpochStorageInventory as EpochRecoveryInventory, EpochStorageInventoryEntry,
     EpochStorageInventoryEntry as RecoveryInventoryEntry, EpochStorageOrphan,
     EpochStorageOrphan as RecoveryOrphan, EpochStorageScan, EpochStorageScan as EpochRecoveryScan,
     EpochStorageScanProgress, EpochStorageScanProgress as RecoveryScanProgress,
+};
+pub use epoch_recovery::inventory::{
+    EpochInventoryJob, EpochInventoryOutcome, EpochInventoryStep, ParkedEpochRecord,
+    ValidatedEpochRecord, MAX_INVENTORY_RESTARTS,
 };
 pub use epoch_recovery::{EpochRecoveryAction, EpochRecoveryState, EpochRecoveryUpdate};
 pub use epoch_registry::{
@@ -66,7 +71,8 @@ pub use epoch_registry::{
 pub(crate) use epoch_studio::source::studio_full_restores_for_test;
 #[cfg(test)]
 pub(crate) use epoch_studio::tests::performance::{
-    fill_studio_epoch_fixture, save_studio_source_fixture, studio_owner_decision_fixture,
+    fill_studio_epoch_fixture, save_studio_source_fixture, studio_closing_capture_fixture,
+    studio_handoff_ready_fixture, studio_owner_decision_fixture,
 };
 #[cfg(test)]
 pub(crate) use epoch_studio::StudioRotationBoundary;
@@ -74,7 +80,11 @@ pub use epoch_studio::{
     EpochStudioBudget, EpochStudioState, StudioAdoptionOutcome, StudioPageAdmission,
     StudioRotationOutcome,
 };
-pub(crate) use epoch_studio::{PreparedStudioSource, StudioSourceCapture};
+pub(crate) use epoch_studio::{
+    PreparedStudioSource, SigningSlice, StudioHandoffCapture, StudioHandoffCommit,
+    StudioHandoffPlan, StudioHandoffStart, StudioOverlayCapture, StudioOverlayPlan,
+    StudioOverlayStart, StudioSourceCapture, MAX_SIGNING_TURNS_PER_VISIT, SIGNING_SLICE_BUDGET_MS,
+};
 pub mod epoch_budget;
 
 /// One persisted server in the registry: enough to relist it in the UI and reload its
@@ -406,6 +416,823 @@ fn decode_server_net(bytes: &[u8]) -> Result<ServerNet, AppError> {
     })
 }
 
+/// Every physical persistence write lives here, and nothing else does.
+///
+/// This module exists for one reason: Rust privacy cannot express "visible to `store` but not
+/// to `store::epoch_*`", because a descendant always sees an ancestor's private items. So a raw
+/// writer sitting in `store.rs` is reachable from every epoch module no matter how it is marked,
+/// and a private marker type fails the same way since descendants can construct it. The epoch
+/// modules are **siblings** of this one rather than descendants, so items private here are
+/// genuinely out of their reach.
+///
+/// What escapes is therefore deliberate and small: the [`EpochMutation`] capability, which only
+/// rotation hands out, and a fixed set of **path-specific** savers for the records that are not
+/// inventoried. There is no path-generic writer anywhere outside this module, so an inventoried
+/// bare write is not merely forbidden by audit, it cannot be spelled.
+mod persistence {
+    use super::*;
+
+    fn staging_candidate(path: &Path, id: u64) -> PathBuf {
+        let parent = path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        let mut name = OsString::from(".");
+        name.push(path.file_name().unwrap_or_else(|| OsStr::new("record")));
+        name.push(format!(".mewtual-stage-{}-{id}.tmp", std::process::id()));
+        parent.join(name)
+    }
+
+    fn open_staging_candidate(path: &Path) -> std::io::Result<File> {
+        OpenOptions::new().write(true).create_new(true).open(path)
+    }
+
+    fn create_staging_file(path: &Path) -> Result<(File, StagingPath), AppError> {
+        for _ in 0..MAX_STAGING_ATTEMPTS {
+            let id = NEXT_STAGING_ID.fetch_add(1, Ordering::Relaxed);
+            let candidate = staging_candidate(path, id);
+            match open_staging_candidate(&candidate) {
+                Ok(file) => {
+                    return Ok((
+                        file,
+                        StagingPath {
+                            path: candidate,
+                            remove_on_drop: true,
+                        },
+                    ));
+                }
+                // `create_new` rejects regular files and symlinks alike. A stale file can therefore
+                // cause a bounded retry, but can never redirect or truncate the staged write.
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(error) => return Err(AppError::Io(error.to_string())),
+            }
+        }
+        Err(AppError::Io(
+            "could not create a collision-free persistence staging file".into(),
+        ))
+    }
+
+    /// Write `bytes` to `path` atomically and durably.
+    ///
+    /// The staged file is flushed before rename, so termination before the rename leaves the previous
+    /// authenticated record intact. On Unix the containing directory is flushed after rename as well,
+    /// making the name replacement durable across power loss rather than merely atomic to readers.
+    /// Each invocation uses a destination-specific, securely-created sibling. Concurrent writers and
+    /// the `.bin`/`.net`/`.cache` records for one server therefore cannot overwrite each other's staged
+    /// bytes, and a pre-planted symlink is rejected rather than followed.
+    /// It deliberately does **not** take the capability. The same primitive writes `ui_state`,
+    /// `server_net`, `address_cache`, the pairing ledger and the server record, none of which
+    /// belong to an inventoried family, and forcing rotation for those would invalidate a captured
+    /// inventory every time the UI saved a preference. Inventoried writes reach it only through
+    /// `EpochMutation::write`.
+    ///
+    /// **This is the remaining gap against the design's stated property.** Section 9.2 asks that
+    /// the bare helpers stop being reachable *for five-family paths*, and one guard parameter
+    /// cannot express that when the primitive serves both path classes. Closing it needs the path
+    /// class in the type: separate primitives, or a newtype for an inventoried path.
+    fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), AppError> {
+        atomic_write_with_hook(path, bytes, |_, _| {})
+    }
+
+    /// The hook exists to place Linux subprocess-abort tests on the two sides of the rename. It has no
+    /// production side effects, and keeping it inside the primitive ensures the test exercises the
+    /// same write/flush/rename sequence as every sealed persistence record.
+    fn atomic_write_with_hook(
+        path: &Path,
+        bytes: &[u8],
+        mut phase: impl FnMut(AtomicWritePhase, &Path),
+    ) -> Result<(), AppError> {
+        atomic_write_with_hook_and_sync(path, bytes, &mut phase, sync_directory)
+    }
+
+    fn atomic_write_with_hook_and_sync(
+        path: &Path,
+        bytes: &[u8],
+        mut phase: impl FnMut(AtomicWritePhase, &Path),
+        sync_parent: impl FnOnce(&Path) -> std::io::Result<()>,
+    ) -> Result<(), AppError> {
+        let (mut staged, mut staging) = create_staging_file(path)?;
+        staged
+            .write_all(bytes)
+            .map_err(|error| AppError::Io(error.to_string()))?;
+        staged
+            .sync_all()
+            .map_err(|error| AppError::Io(error.to_string()))?;
+        drop(staged);
+        phase(AtomicWritePhase::TempSynced, &staging.path);
+        fs::rename(&staging.path, path).map_err(|e| AppError::Io(e.to_string()))?;
+        staging.remove_on_drop = false;
+        phase(AtomicWritePhase::Renamed, &staging.path);
+        if let Some(parent) = path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+        {
+            sync_parent(parent)
+                .map_err(|error| AppError::CommittedButNotDurable(error.to_string()))?;
+        }
+        Ok(())
+    }
+
+    /// I-4's guard. Obtainable only from [`ServerStore::epoch_mutation_guard`], which rotates
+    /// `inventory_generation` **before** handing one out.
+    ///
+    /// The point is that this is a type-level prerequisite rather than a helper callers are
+    /// encouraged to invoke. A convention that writers must remember to call is a convention writers
+    /// will eventually forget, and the failure is silent: a captured inventory stays valid across a
+    /// mutation it never saw. Routing the inventoried-family mutation primitives through a value that
+    /// cannot be constructed without rotating first makes a bypass a compile error instead.
+    ///
+    /// Rotation is **not** undone when this drops, and is not conditional on the operation
+    /// succeeding. A failed or panicking write still leaves the token moved, because an operation
+    /// that may have touched a file must invalidate a scan whether or not it finished.
+    pub(crate) struct EpochMutation<'a> {
+        // Borrows the store exclusively for the life of the guard. That is what makes a batch under
+        // one guard sound: no scan of this store can be captured between the first and last write,
+        // because starting one would need the store back. The phantom names the real relationship
+        // rather than an anonymous lifetime, so the exclusion cannot be weakened by accident later.
+        _store: std::marker::PhantomData<&'a mut ServerStore>,
+    }
+
+    impl EpochMutation<'_> {
+        /// Atomically replace an inventoried record.
+        pub(in crate::store) fn write(&self, path: &Path, bytes: &[u8]) -> Result<(), AppError> {
+            atomic_write(path, bytes)
+        }
+
+        /// Unlink, in the `io::Result` shape cleanup's batch uses. The physical removal lives here
+        /// rather than in a caller-supplied closure, so a production path cannot own the syscall.
+        pub(in crate::store) fn remove_io(&self, path: &Path) -> std::io::Result<()> {
+            fs::remove_file(path)
+        }
+
+        /// Flush the inventoried directory after a removal batch, same reasoning.
+        pub(in crate::store) fn sync_parent_io(&self, parent: &Path) -> std::io::Result<()> {
+            sync_directory(parent)
+        }
+
+        /// Flush an inventoried record, per family.
+        ///
+        /// Separate methods rather than one generic `sync`, because `sync_intent`, `sync_registry` and
+        /// `sync_studio` carry different checks and different error messages. Collapsing them would
+        /// smuggle a behavioural change inside a refactor; keeping them separate costs three methods
+        /// and preserves every existing refusal exactly.
+        ///
+        /// A sync repair is a mutation for I-4's purposes even though it changes no bytes: the
+        /// existing code already treats an unchanged-file flush attempt as invalidating a captured
+        /// inventory, and over-rotation is the safe direction.
+        pub(in crate::store) fn sync_intent(
+            &self,
+            path: &Path,
+            bytes: u64,
+        ) -> Result<(), AppError> {
+            epoch_intents::sync_intent(self, path, bytes)
+        }
+
+        pub(in crate::store) fn sync_registry(
+            &self,
+            path: &Path,
+            bytes: u64,
+        ) -> Result<(), AppError> {
+            epoch_registry::sync_registry(self, path, bytes)
+        }
+    }
+
+    impl ServerStore {
+        /// Rotate `inventory_generation` and hand out the capability to mutate inventoried records.
+        ///
+        /// Rotation happens here, before the caller can perform any I/O, rather than after a
+        /// successful write. That ordering is I-4: a scan captured before this call must be refused
+        /// even if the write it was racing went on to fail.
+        pub(in crate::store) fn epoch_mutation_guard(&mut self) -> EpochMutation<'_> {
+            self.inventory_generation = std::sync::Arc::new(());
+            EpochMutation {
+                _store: std::marker::PhantomData,
+            }
+        }
+
+        /// The token a cursor captures. Cloning it is how a scan remembers what it began under.
+        //
+        // Read by the I-4 tests today; its production consumer is C-3's `EpochStorageCursor`, which
+        // captures it at `begin` and rechecks it before resuming work and before issuing an
+        // inventory. Delete this marker with that commit.
+        #[allow(dead_code)]
+        pub(in crate::store) fn inventory_generation(&self) -> std::sync::Arc<()> {
+            self.inventory_generation.clone()
+        }
+    }
+
+    /// Plant arbitrary bytes at an arbitrary path. **Test only**, and deliberately so: tests
+    /// need to create orphaned siblings and corrupt records that no production path would ever
+    /// write. Because it is `cfg(test)`, it cannot weaken the production property that no
+    /// path-generic writer exists outside this module.
+    #[cfg(test)]
+    pub(super) fn write_for_test(path: &Path, bytes: &[u8]) -> Result<(), AppError> {
+        atomic_write(path, bytes)
+    }
+
+    /// What a test hook decides at one point in a mutation.
+    ///
+    /// The hook chooses *behaviour*; [`EpochMutation`] still performs the syscall. That is the
+    /// whole distinction: previously a caller supplied a closure that owned the physical write,
+    /// which meant the type permitted a closure that cloned the path and bytes, spawned, and
+    /// returned `Ok` — rotating the token, dropping the guard, and then mutating after a cursor
+    /// had captured the new generation. No production caller did that; the type allowed it.
+    /// What an after hook may decide. Deliberately **no replacement variant**.
+    ///
+    /// The first version reused `Intercept` here and treated `Replace` as success, silently
+    /// discarding the bytes. A fault-injection test moved from a writer callback to an after hook
+    /// would then have run, substituted nothing, and reported nothing: the injection doing no work
+    /// while looking as though it had. Given how many assertions in this work have proved less
+    /// than they claimed, that is the wrong foundation for a fault-injection suite. Making the
+    /// mistake unrepresentable beats rejecting it at runtime.
+    #[derive(Debug)]
+    #[allow(dead_code)]
+    pub(in crate::store) enum AfterIntercept {
+        Continue,
+        Fail(AppError),
+    }
+
+    #[derive(Debug)]
+    #[allow(dead_code)]
+    pub(in crate::store) enum Intercept {
+        /// Proceed with the operation as the coordinator intended.
+        Continue,
+        /// Proceed, but persist these bytes instead.
+        Replace(Vec<u8>),
+        /// Refuse, without performing the operation.
+        Fail(AppError),
+    }
+
+    /// Which write within a multi-write transaction this is.
+    ///
+    /// One store-wide tag rather than a type parameter. The eight per-transaction enums it
+    /// replaces were a union of these variants, and making the hooks generic over them meant
+    /// every forwarding site had to reconcile two tag types — which is what made the first
+    /// attempt at this conversion cascade instead of converge.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub(in crate::store) enum WriteTag {
+        Source,
+        Recovery,
+        Successor,
+        Intents,
+        Epoch,
+        Journal,
+        Prepared,
+        Completed,
+        Active,
+        /// The draft archive record, both its first preservation and the exact-retry sync.
+        /// Agent 2's release transaction, which unlinks one, will carry this tag too.
+        Archive,
+        /// A temporary staging sibling, which is removed rather than replaced. Cleanup reports
+        /// its whole destructive batch under this tag: the siblings it removes may belong to
+        /// several families, and what they have in common is being staging, not being any one
+        /// family's record.
+        Staging,
+    }
+
+    /// One write's identity within the caller's transaction: which step it is, and whether it
+    /// may replace the record at all.
+    ///
+    /// The second half exists because several transactions are read-and-flush by construction -
+    /// a replay assessment, a source preparation, a handoff resolution - and reaching a
+    /// replacement there means a caller mis-routed rather than that a write failed. The old
+    /// seam said this by handing in a writer that always returned an error. That is an
+    /// assertion, not an implementation, and replacing such a seam with a permissive default
+    /// would delete a production guard while looking like a mechanical conversion.
+    ///
+    /// Both halves are plain values. Naming a write, or forbidding one, is not the authority to
+    /// perform one.
+    #[derive(Clone, Copy)]
+    pub(in crate::store) struct WriteStep {
+        tag: WriteTag,
+        refusal: Option<&'static str>,
+    }
+
+    impl WriteStep {
+        /// An ordinary step, free to replace or to flush.
+        pub(in crate::store) fn new(tag: WriteTag) -> Self {
+            Self { tag, refusal: None }
+        }
+
+        /// A step that may only flush a record already in place. `why` is reported if a
+        /// replacement is ever reached, and should say what the caller got wrong.
+        pub(in crate::store) fn flush_only(tag: WriteTag, why: &'static str) -> Self {
+            Self {
+                tag,
+                refusal: Some(why),
+            }
+        }
+
+        pub(in crate::store) fn tag(self) -> WriteTag {
+            self.tag
+        }
+
+        /// Refuse here if this step was never allowed to replace anything. Called at the
+        /// physical site, before the guard and before any decision.
+        pub(in crate::store) fn permit_replacement(self) -> Result<(), AppError> {
+            match self.refusal {
+                None => Ok(()),
+                Some(why) => Err(AppError::Invalid(format!("epoch storage: {why}"))),
+            }
+        }
+    }
+
+    /// Where a [`WriteHooks::Fail`] fires.
+    #[cfg(test)]
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub(in crate::store) enum FailPoint {
+        /// Nothing is written.
+        BeforeWrite,
+        /// The bytes are in place and the transaction still fails: visible, not accounted.
+        AfterWrite,
+        /// The record stays exactly as it was; its durability is simply not confirmed.
+        BeforeSync,
+    }
+
+    /// The error a [`WriteHooks::Fail`] produces. Spelled out rather than held as an `AppError`
+    /// because `AppError` is not `Clone`, and an injection that fires once and then silently
+    /// stops would be a different test from the one its author wrote.
+    #[cfg(test)]
+    #[derive(Clone, Copy, Debug)]
+    pub(in crate::store) enum FailError {
+        Io(&'static str),
+        Invalid(&'static str),
+        NotDurable(&'static str),
+    }
+
+    #[cfg(test)]
+    impl FailError {
+        fn build(self) -> AppError {
+            match self {
+                Self::Io(message) => AppError::Io(message.into()),
+                Self::Invalid(message) => AppError::Invalid(format!("epoch storage: {message}")),
+                Self::NotDurable(message) => AppError::CommittedButNotDurable(message.into()),
+            }
+        }
+    }
+
+    /// Which physical operation just completed.
+    ///
+    /// The after decision needs this because **a tag and a path cannot distinguish the
+    /// operations**: a transaction routinely flushes a record and then, later in the same
+    /// transaction, replaces that same record. Both events carry the same tag and the same path.
+    /// A hook told only "something finished on this record" fires on whichever comes first,
+    /// which is how two rotation crash matrices came to test the initial Source flush while
+    /// claiming to test the Source replacement.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    #[allow(dead_code)]
+    pub(in crate::store) enum CompletedOperation {
+        Write,
+        Sync,
+        Unlink,
+    }
+
+    #[cfg(test)]
+    type BeforeHook<'h> = &'h mut dyn FnMut(WriteTag, &Path, &[u8]) -> Intercept;
+    #[cfg(test)]
+    type AfterHook<'h> = &'h mut dyn FnMut(CompletedOperation, WriteTag, &Path) -> AfterIntercept;
+    /// Decides before an unlink. Like the after decision it carries only the record it concerns:
+    /// a removal has no payload that could be substituted for another.
+    #[cfg(test)]
+    type UnlinkHook<'h> = &'h mut dyn FnMut(WriteTag, &Path) -> AfterIntercept;
+    /// Decides before a durability sync of a record that is already in place. It is given the
+    /// size the record is expected to have rather than its bytes, and has no replacement arm:
+    /// there is nothing to substitute when the content is already on disk.
+    #[cfg(test)]
+    type SyncHook<'h> = &'h mut dyn FnMut(WriteTag, &Path, u64) -> AfterIntercept;
+
+    /// Test-only perturbation and observation around a transaction's own physical operations.
+    ///
+    /// Every transaction in the crate now performs its own write, sync and unlink; no caller
+    /// supplies an implementation of any of them. A hook may refuse on either side of an
+    /// operation, or substitute the bytes of a replacement, and that is all.
+    ///
+    /// **In a non-test build this has exactly one inhabitant, `None`.** There is no variant a
+    /// production caller could construct that carries an implementation, so "production supplies
+    /// no write implementation" is a property of the type rather than of the current call sites,
+    /// which is what requirement 3 asks for. Whether a transaction may replace its record at all
+    /// is a separate question, carried by [`WriteStep`] rather than by a decision.
+    #[allow(dead_code)]
+    pub(in crate::store) enum WriteHooks<'h> {
+        None,
+        /// Refuse at one fixed point, which is what most injected-failure tests want. The
+        /// closure form below is for the rest: counting, capturing, or deciding per call.
+        #[cfg(test)]
+        Fail {
+            at: FailPoint,
+            /// Restrict to one step of a multi-write transaction; `None` fires at the first.
+            only: Option<WriteTag>,
+            error: FailError,
+        },
+        /// Assert that no replacement is attempted, panicking if one is. Distinct from `Fail`:
+        /// the test wants to report the unexpected write itself, not whatever the transaction
+        /// decides to do with an error.
+        #[cfg(test)]
+        MustNotWrite(&'static str),
+        #[cfg(test)]
+        Hooked {
+            before: Option<BeforeHook<'h>>,
+            before_sync: Option<SyncHook<'h>>,
+            before_unlink: Option<UnlinkHook<'h>>,
+            after: Option<AfterHook<'h>>,
+        },
+        #[allow(dead_code)]
+        Never(std::convert::Infallible, std::marker::PhantomData<&'h ()>),
+    }
+
+    #[cfg(test)]
+    impl WriteHooks<'_> {
+        /// Refuse before the replacement: nothing reaches disk.
+        pub(in crate::store) fn fail_before_write(error: FailError) -> Self {
+            Self::Fail {
+                at: FailPoint::BeforeWrite,
+                only: None,
+                error,
+            }
+        }
+
+        /// Fail once the bytes are in place, leaving a durable but unaccounted record.
+        pub(in crate::store) fn fail_after_write(error: FailError) -> Self {
+            Self::Fail {
+                at: FailPoint::AfterWrite,
+                only: None,
+                error,
+            }
+        }
+
+        /// Refuse the durability flush of a record that is already in place.
+        pub(in crate::store) fn fail_before_sync(error: FailError) -> Self {
+            Self::Fail {
+                at: FailPoint::BeforeSync,
+                only: None,
+                error,
+            }
+        }
+
+        /// Restrict an injection to one step of a multi-write transaction.
+        pub(in crate::store) fn at(self, tag: WriteTag) -> Self {
+            match self {
+                Self::Fail { at, error, .. } => Self::Fail {
+                    at,
+                    only: Some(tag),
+                    error,
+                },
+                other => other,
+            }
+        }
+
+        /// Whether a `Fail` aimed at `point` should fire for this write.
+        fn fires(at: FailPoint, only: Option<WriteTag>, point: FailPoint, tag: WriteTag) -> bool {
+            at == point && only.is_none_or(|wanted| wanted == tag)
+        }
+    }
+
+    #[allow(dead_code)]
+    impl WriteHooks<'_> {
+        /// Decide before the operation, yielding the bytes to persist.
+        pub(in crate::store) fn before<'b>(
+            &mut self,
+            #[cfg_attr(not(test), allow(unused_variables))] tag: WriteTag,
+            #[cfg_attr(not(test), allow(unused_variables))] path: &Path,
+            bytes: &'b [u8],
+        ) -> Result<std::borrow::Cow<'b, [u8]>, AppError> {
+            match self {
+                Self::None => Ok(std::borrow::Cow::Borrowed(bytes)),
+                #[cfg(test)]
+                Self::Fail { at, only, error }
+                    if Self::fires(*at, *only, FailPoint::BeforeWrite, tag) =>
+                {
+                    Err(error.build())
+                }
+                #[cfg(test)]
+                Self::Fail { .. } => Ok(std::borrow::Cow::Borrowed(bytes)),
+                #[cfg(test)]
+                Self::MustNotWrite(why) => panic!("{why}"),
+                #[cfg(test)]
+                Self::Hooked { before, .. } => match before.as_mut().map(|h| h(tag, path, bytes)) {
+                    None | Some(Intercept::Continue) => Ok(std::borrow::Cow::Borrowed(bytes)),
+                    Some(Intercept::Replace(replacement)) => {
+                        Ok(std::borrow::Cow::Owned(replacement))
+                    }
+                    Some(Intercept::Fail(error)) => Err(error),
+                },
+                Self::Never(never, _) => match *never {},
+            }
+        }
+
+        /// Decide before a durability sync of a record already in place, yielding nothing: the
+        /// operation the transaction then performs is fixed, and so are its bytes.
+        pub(in crate::store) fn before_sync(
+            &mut self,
+            #[cfg_attr(not(test), allow(unused_variables))] tag: WriteTag,
+            #[cfg_attr(not(test), allow(unused_variables))] path: &Path,
+            #[cfg_attr(not(test), allow(unused_variables))] len: u64,
+        ) -> Result<(), AppError> {
+            match self {
+                Self::None => Ok(()),
+                #[cfg(test)]
+                Self::Fail { at, only, error }
+                    if Self::fires(*at, *only, FailPoint::BeforeSync, tag) =>
+                {
+                    Err(error.build())
+                }
+                #[cfg(test)]
+                Self::Fail { .. } => Ok(()),
+                // A sync, an unlink and an after decision are all allowed: the assertion is
+                // about replacement only.
+                #[cfg(test)]
+                Self::MustNotWrite(_) => Ok(()),
+                #[cfg(test)]
+                Self::Hooked { before_sync, .. } => {
+                    match before_sync.as_mut().map(|h| h(tag, path, len)) {
+                        None | Some(AfterIntercept::Continue) => Ok(()),
+                        Some(AfterIntercept::Fail(error)) => Err(error),
+                    }
+                }
+                Self::Never(never, _) => match *never {},
+            }
+        }
+
+        /// Decide before removing a record, yielding nothing for the same reason as a sync.
+        pub(in crate::store) fn before_unlink(
+            &mut self,
+            #[cfg_attr(not(test), allow(unused_variables))] tag: WriteTag,
+            #[cfg_attr(not(test), allow(unused_variables))] path: &Path,
+        ) -> Result<(), AppError> {
+            match self {
+                Self::None => Ok(()),
+                // No `Fail` point names an unlink: the batch that removes records builds its
+                // decisions explicitly, because what it needs is per-entry, not fixed.
+                #[cfg(test)]
+                Self::Fail { .. } => Ok(()),
+                // A sync, an unlink and an after decision are all allowed: the assertion is
+                // about replacement only.
+                #[cfg(test)]
+                Self::MustNotWrite(_) => Ok(()),
+                #[cfg(test)]
+                Self::Hooked { before_unlink, .. } => {
+                    match before_unlink.as_mut().map(|h| h(tag, path)) {
+                        None | Some(AfterIntercept::Continue) => Ok(()),
+                        Some(AfterIntercept::Fail(error)) => Err(error),
+                    }
+                }
+                Self::Never(never, _) => match *never {},
+            }
+        }
+
+        /// Decide after a replacement has physically completed: the bytes are in place and the
+        /// transaction has not yet published its accounting.
+        pub(in crate::store) fn after_write(
+            &mut self,
+            tag: WriteTag,
+            path: &Path,
+        ) -> Result<(), AppError> {
+            match self {
+                #[cfg(test)]
+                Self::Fail { at, only, error }
+                    if Self::fires(*at, *only, FailPoint::AfterWrite, tag) =>
+                {
+                    Err(error.build())
+                }
+                other => other.after_completed(CompletedOperation::Write, tag, path),
+            }
+        }
+
+        /// Decide after a durability sync has completed.
+        ///
+        /// Separate from [`Self::after_write`] because a `Fail` aimed at "after the write" must
+        /// not fire here. A multi-write transaction commonly flushes one record before replacing
+        /// another, and an injection that fired on the first flush would test a different
+        /// failure from the one it names - which is exactly how the first conversion of the
+        /// replay-pass tests went wrong.
+        pub(in crate::store) fn after_sync(
+            &mut self,
+            tag: WriteTag,
+            path: &Path,
+        ) -> Result<(), AppError> {
+            self.after_completed(CompletedOperation::Sync, tag, path)
+        }
+
+        /// Decide after one removal out of a batch. A batch consults this once per completed
+        /// removal rather than once for the batch.
+        pub(in crate::store) fn after_unlink(
+            &mut self,
+            tag: WriteTag,
+            path: &Path,
+        ) -> Result<(), AppError> {
+            self.after_completed(CompletedOperation::Unlink, tag, path)
+        }
+
+        /// The closure-hook half, shared by all three.
+        ///
+        /// `op` is passed explicitly rather than left for the hook to infer. A hook cannot work
+        /// it out from the tag and the path, because the same record is commonly flushed and
+        /// then replaced within one transaction, and both events carry the same pair. Hooks
+        /// that deliberately observe syncs keep working; hooks that mean "after the write" can
+        /// now say so.
+        fn after_completed(
+            &mut self,
+            #[cfg_attr(not(test), allow(unused_variables))] op: CompletedOperation,
+            #[cfg_attr(not(test), allow(unused_variables))] tag: WriteTag,
+            #[cfg_attr(not(test), allow(unused_variables))] path: &Path,
+        ) -> Result<(), AppError> {
+            match self {
+                Self::None => Ok(()),
+                #[cfg(test)]
+                Self::Fail { .. } => Ok(()),
+                // The assertion is about replacement only, and one already happened or did not.
+                #[cfg(test)]
+                Self::MustNotWrite(_) => Ok(()),
+                #[cfg(test)]
+                Self::Hooked { after, .. } => match after.as_mut().map(|h| h(op, tag, path)) {
+                    None | Some(AfterIntercept::Continue) => Ok(()),
+                    Some(AfterIntercept::Fail(error)) => Err(error),
+                },
+                Self::Never(never, _) => match *never {},
+            }
+        }
+    }
+
+    // Unix-gated with the module, not just the test: its only contents are the symlink
+    // regression, so on Windows the import would be unused and `-D warnings` would fail. That
+    // asymmetry is exactly what hid the original break.
+    #[cfg(all(test, unix))]
+    mod tests {
+        use super::*;
+
+        /// Lives inside `persistence` because it exercises the private primitives directly.
+        ///
+        /// It used to sit in the parent test module and call `staging_candidate` and
+        /// `open_staging_candidate` by name. Hiding those broke this test on Unix only, and the
+        /// break was invisible to a Windows run: `#[cfg(unix)]` meant the local suite never
+        /// compiled it. Rehoming it here keeps the regression exercising the real primitives
+        /// rather than making either of them `pub(super)` again.
+        #[test]
+        fn a_preplanted_staging_symlink_is_never_followed() {
+            use std::os::unix::fs::symlink;
+
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("state.bin");
+            let victim = dir.path().join("victim");
+            fs::write(&victim, b"must stay intact").unwrap();
+            let planted = staging_candidate(&path, u64::MAX);
+            symlink(&victim, &planted).unwrap();
+
+            // The planted symlink must be refused, not followed. Replacing this with a write to
+            // some other generated name would test nothing.
+            let error = open_staging_candidate(&planted).unwrap_err();
+            assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
+            atomic_write(&path, b"authenticated state").unwrap();
+            assert_eq!(fs::read(&victim).unwrap(), b"must stay intact");
+            assert_eq!(fs::read(&path).unwrap(), b"authenticated state");
+        }
+    }
+
+    /// Test-only wrappers. These are the **only** way anything outside this module reaches a
+    /// path-generic physical operation, and they do not exist in a non-test build. The functions
+    /// they wrap are private, so `pub(super)` on the wrapper cannot widen them: previously the
+    /// primitives themselves were `pub(super)`, which made them visible in `store` and therefore
+    /// to every sibling epoch module — the relocation's whole point, undone by its own test
+    /// visibility.
+    #[cfg(test)]
+    pub(super) fn staging_candidate_for_test(path: &Path, id: u64) -> PathBuf {
+        staging_candidate(path, id)
+    }
+
+    #[cfg(test)]
+    pub(super) fn create_staging_file_for_test(
+        path: &Path,
+    ) -> Result<(File, StagingPath), AppError> {
+        create_staging_file(path)
+    }
+
+    #[cfg(test)]
+    pub(super) fn atomic_write_with_hook_for_test(
+        path: &Path,
+        bytes: &[u8],
+        phase: impl FnMut(AtomicWritePhase, &Path),
+    ) -> Result<(), AppError> {
+        atomic_write_with_hook(path, bytes, phase)
+    }
+
+    #[cfg(test)]
+    pub(super) fn atomic_write_with_hook_and_sync_for_test(
+        path: &Path,
+        bytes: &[u8],
+        phase: &mut impl FnMut(AtomicWritePhase, &Path),
+        sync_parent: impl FnOnce(&Path) -> std::io::Result<()>,
+    ) -> Result<(), AppError> {
+        atomic_write_with_hook_and_sync(path, bytes, phase, sync_parent)
+    }
+
+    impl ServerStore {
+        /// Flush this store's own vault root, once, when it is first created.
+        ///
+        /// **Destination-bound, not merely named.** The first version took a `&Path`, so a
+        /// sibling could have passed `dir.join("servers")` and flushed the inventoried directory
+        /// with no capability — a path-generic directory sync wearing a specific name. The
+        /// implementation now derives the root from `self`, so the legitimate exception cannot be
+        /// redirected. `self.dir` is the vault root; the inventoried records live one level down
+        /// in `servers`, which this never touches.
+        pub(super) fn sync_own_vault_root(&self) -> std::io::Result<()> {
+            sync_directory(&self.dir)
+        }
+    }
+
+    impl ServerStore {
+        /// The non-inventoried records, each addressed by name rather than by a caller-supplied
+        /// path. That is what keeps them from being a bypass: they can only ever write their own
+        /// record, so none of them can be pointed at an inventoried family.
+        ///
+        /// These deliberately do **not** rotate `inventory_generation`. None of them belongs to an
+        /// inventoried family, and rotating for them would invalidate a captured inventory every
+        /// time the UI saved a preference.
+        pub(super) fn write_ui_state_record(&self, bytes: &[u8]) -> Result<(), AppError> {
+            atomic_write(&self.ui_state_path(), bytes)
+        }
+        pub(super) fn write_server_net_record(
+            &self,
+            id: u64,
+            bytes: &[u8],
+        ) -> Result<(), AppError> {
+            atomic_write(&self.server_net_path(id), bytes)
+        }
+        pub(super) fn write_address_cache_record(
+            &self,
+            id: u64,
+            bytes: &[u8],
+        ) -> Result<(), AppError> {
+            atomic_write(&self.address_cache_path(id), bytes)
+        }
+        pub(super) fn write_pairing_ledger_record(&self, bytes: &[u8]) -> Result<(), AppError> {
+            atomic_write(&self.pairing_ledger_path(), bytes)
+        }
+        pub(super) fn write_server_record(&self, id: u64, bytes: &[u8]) -> Result<(), AppError> {
+            atomic_write(&self.server_path(id), bytes)
+        }
+        pub(super) fn write_registry_record(&self, bytes: &[u8]) -> Result<(), AppError> {
+            atomic_write(&self.registry_path(), bytes)
+        }
+    }
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    #[cfg_attr(test, allow(dead_code))]
+    pub(super) enum AtomicWritePhase {
+        TempSynced,
+        Renamed,
+    }
+
+    /// Separates concurrent writers without ambient randomness. The process id separates live desktop
+    /// processes, while this counter separates threads and repeated writes inside one process. A stale
+    /// collision is harmless because the file is opened with `create_new`; we simply try the next id.
+    static NEXT_STAGING_ID: AtomicU64 = AtomicU64::new(0);
+    const MAX_STAGING_ATTEMPTS: usize = 1_024;
+
+    pub(super) struct StagingPath {
+        path: PathBuf,
+        remove_on_drop: bool,
+    }
+
+    #[cfg(test)]
+    impl StagingPath {
+        /// Tests plant an orphan and then keep it; production never needs this.
+        pub(super) fn keep_for_test(&mut self) {
+            self.remove_on_drop = false;
+        }
+    }
+
+    impl Drop for StagingPath {
+        fn drop(&mut self) {
+            if self.remove_on_drop {
+                // Cleanup is best effort: preserving the original write error matters more, and a
+                // crash can leave the same kind of harmless unreferenced sibling behind anyway.
+                let _ = fs::remove_file(&self.path);
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    fn sync_directory(path: &Path) -> std::io::Result<()> {
+        File::open(path).and_then(|directory| directory.sync_all())
+    }
+
+    #[cfg(not(unix))]
+    fn sync_directory(_path: &Path) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+pub(crate) use persistence::EpochMutation;
+#[cfg(test)]
+pub(in crate::store) use persistence::{AfterIntercept, CompletedOperation, FailError, Intercept};
+pub(in crate::store) use persistence::{WriteHooks, WriteStep, WriteTag};
+// Only the test wrappers leave the module. In a non-test build this import does not exist, so
+// nothing outside `persistence` can name a path-generic physical operation at all.
+#[cfg(test)]
+pub(in crate::store) use persistence::{
+    atomic_write_with_hook_and_sync_for_test, atomic_write_with_hook_for_test,
+    create_staging_file_for_test, staging_candidate_for_test, write_for_test,
+};
+
 /// A passphrase-gated, on-disk store for a member's servers.
 pub struct ServerStore {
     dir: PathBuf,
@@ -416,6 +1243,18 @@ pub struct ServerStore {
     // Studio budget minting/write attempts and five-family cleanup invalidate captured scans.
     // Other raw P1 adapters still require the same sole coordinator/exclusive accounting owner.
     studio_generation: std::sync::Arc<()>,
+    // I-4. Rotated before the first possible I/O of ANY operation that can change, create,
+    // replace, rename, unlink or leave a temporary sibling of an inventoried record, and never
+    // restored. A resumable cross-visit scan is sound only because of this: the cursor captures
+    // the token and refuses if it has moved, so over-rotation costs a rescan and under-rotation
+    // is the only unsafe direction.
+    //
+    // Deliberately **not** `studio_generation`, for two independent reasons. That one rotates on
+    // every Studio budget entry, which would make a parked cursor die on unrelated Studio
+    // activity; and it is not rotated by the accounted recovery and owner writers, which would
+    // make it unsound. A budget mint or entry alone must not rotate this, which is what keeps
+    // I-4 separate from budget ownership.
+    inventory_generation: std::sync::Arc<()>,
     // Pure validation metadata; every reuse requires freshly authenticated identical bytes.
     // Never substitutes for an inventory, generation check, source load or write budget.
     inventory_cache: epoch_recovery::inventory::cache::RecordCache,
@@ -455,22 +1294,27 @@ impl ServerStore {
         let session = acquire_vault_session(&dir)?;
         let keys = open_or_create_vault(&dir, passphrase, rng)?;
         fs::create_dir_all(dir.join("servers")).map_err(|e| AppError::Io(e.to_string()))?;
-        // Persist the `servers` directory entry as well as later contents. Without this flush, a
-        // first-launch power loss could retain a synced record but forget the newly created parent.
-        sync_directory(&dir).map_err(|error| AppError::Io(error.to_string()))?;
-        Ok(Self {
+        let store = Self {
             creative_protection: creative_references::Protection::new(&dir.join("servers")),
             dir,
             keys,
             intent_generation: std::sync::Arc::new(()),
             studio_generation: std::sync::Arc::new(()),
+            inventory_generation: std::sync::Arc::new(()),
             inventory_cache: Default::default(),
             studio_source: None,
             #[cfg(test)]
             studio_rotation_interruption: None,
             replay_mount: std::sync::Arc::new(()),
             _session: session,
-        })
+        };
+        // Persist the `servers` directory entry as well as later contents. Without this flush, a
+        // first-launch power loss could retain a synced record but forget the newly created
+        // parent. It runs through the store so the destination cannot be supplied by a caller.
+        store
+            .sync_own_vault_root()
+            .map_err(|error| AppError::Io(error.to_string()))?;
+        Ok(store)
     }
 
     /// Authenticate a secret against the already-mounted vault without trying to acquire a
@@ -540,7 +1384,7 @@ impl ServerStore {
             return Err(AppError::Invalid("UI state is too large".into()));
         }
         let sealed = seal(&self.keys.db_key()?, bytes, rng)?;
-        atomic_write(&self.ui_state_path(), &frame(&sealed))
+        self.write_ui_state_record(&frame(&sealed))
     }
 
     /// Load and authenticate frontend continuity state. An absent file is an empty first-run
@@ -567,7 +1411,7 @@ impl ServerStore {
     ) -> Result<(), AppError> {
         let plain = Zeroizing::new(encode_server_net(net));
         let sealed = seal(&self.keys.db_key()?, &plain, rng)?;
-        atomic_write(&self.server_net_path(id), &frame(&sealed))
+        self.write_server_net_record(id, &frame(&sealed))
     }
 
     /// Read + unseal a server's [`ServerNet`]. `None` when the server predates this record (it
@@ -610,7 +1454,7 @@ impl ServerStore {
         rng: &mut impl CryptoRngCore,
     ) -> Result<(), AppError> {
         let sealed = seal(&self.keys.db_key()?, bytes, rng)?;
-        atomic_write(&self.address_cache_path(id), &frame(&sealed))
+        self.write_address_cache_record(id, &frame(&sealed))
     }
 
     /// Read + unseal a server's address cache (empty if none yet). The caller still verifies the
@@ -639,7 +1483,7 @@ impl ServerStore {
         rng: &mut impl CryptoRngCore,
     ) -> Result<(), AppError> {
         let sealed = seal(&self.keys.db_key()?, snapshot, rng)?;
-        atomic_write(&self.pairing_ledger_path(), &frame(&sealed))
+        self.write_pairing_ledger_record(&frame(&sealed))
     }
 
     /// Read + unseal the pairing-ledger snapshot (empty if none yet).
@@ -661,7 +1505,7 @@ impl ServerStore {
         rng: &mut impl CryptoRngCore,
     ) -> Result<(), AppError> {
         let sealed = seal(&self.keys.db_key()?, snapshot, rng)?;
-        atomic_write(&self.server_path(id), &frame(&sealed))
+        self.write_server_record(id, &frame(&sealed))
     }
 
     /// Read + unseal a server's snapshot (feed it to [`crate::Server::restore`]).
@@ -694,7 +1538,7 @@ impl ServerStore {
         rng: &mut impl CryptoRngCore,
     ) -> Result<(), AppError> {
         let sealed = seal(&self.keys.db_key()?, &encode_registry(records), rng)?;
-        atomic_write(&self.registry_path(), &frame(&sealed))
+        self.write_registry_record(&frame(&sealed))
     }
 
     /// A persistent, sealing blob store for a server (Phase 9h) at `<dir>/blobs/<key>`, where
@@ -836,133 +1680,6 @@ fn decode_registry(bytes: &[u8]) -> Result<Vec<ServerRecord>, AppError> {
     Ok(out)
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum AtomicWritePhase {
-    TempSynced,
-    Renamed,
-}
-
-/// Separates concurrent writers without ambient randomness. The process id separates live desktop
-/// processes, while this counter separates threads and repeated writes inside one process. A stale
-/// collision is harmless because the file is opened with `create_new`; we simply try the next id.
-static NEXT_STAGING_ID: AtomicU64 = AtomicU64::new(0);
-const MAX_STAGING_ATTEMPTS: usize = 1_024;
-
-struct StagingPath {
-    path: PathBuf,
-    remove_on_drop: bool,
-}
-
-impl Drop for StagingPath {
-    fn drop(&mut self) {
-        if self.remove_on_drop {
-            // Cleanup is best effort: preserving the original write error matters more, and a
-            // crash can leave the same kind of harmless unreferenced sibling behind anyway.
-            let _ = fs::remove_file(&self.path);
-        }
-    }
-}
-
-fn staging_candidate(path: &Path, id: u64) -> PathBuf {
-    let parent = path
-        .parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-        .unwrap_or_else(|| Path::new("."));
-    let mut name = OsString::from(".");
-    name.push(path.file_name().unwrap_or_else(|| OsStr::new("record")));
-    name.push(format!(".mewtual-stage-{}-{id}.tmp", std::process::id()));
-    parent.join(name)
-}
-
-fn open_staging_candidate(path: &Path) -> std::io::Result<File> {
-    OpenOptions::new().write(true).create_new(true).open(path)
-}
-
-fn create_staging_file(path: &Path) -> Result<(File, StagingPath), AppError> {
-    for _ in 0..MAX_STAGING_ATTEMPTS {
-        let id = NEXT_STAGING_ID.fetch_add(1, Ordering::Relaxed);
-        let candidate = staging_candidate(path, id);
-        match open_staging_candidate(&candidate) {
-            Ok(file) => {
-                return Ok((
-                    file,
-                    StagingPath {
-                        path: candidate,
-                        remove_on_drop: true,
-                    },
-                ));
-            }
-            // `create_new` rejects regular files and symlinks alike. A stale file can therefore
-            // cause a bounded retry, but can never redirect or truncate the staged write.
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
-            Err(error) => return Err(AppError::Io(error.to_string())),
-        }
-    }
-    Err(AppError::Io(
-        "could not create a collision-free persistence staging file".into(),
-    ))
-}
-
-#[cfg(unix)]
-fn sync_directory(path: &Path) -> std::io::Result<()> {
-    File::open(path).and_then(|directory| directory.sync_all())
-}
-
-#[cfg(not(unix))]
-fn sync_directory(_path: &Path) -> std::io::Result<()> {
-    Ok(())
-}
-
-/// Write `bytes` to `path` atomically and durably.
-///
-/// The staged file is flushed before rename, so termination before the rename leaves the previous
-/// authenticated record intact. On Unix the containing directory is flushed after rename as well,
-/// making the name replacement durable across power loss rather than merely atomic to readers.
-/// Each invocation uses a destination-specific, securely-created sibling. Concurrent writers and
-/// the `.bin`/`.net`/`.cache` records for one server therefore cannot overwrite each other's staged
-/// bytes, and a pre-planted symlink is rejected rather than followed.
-fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), AppError> {
-    atomic_write_with_hook(path, bytes, |_, _| {})
-}
-
-/// The hook exists to place Linux subprocess-abort tests on the two sides of the rename. It has no
-/// production side effects, and keeping it inside the primitive ensures the test exercises the
-/// same write/flush/rename sequence as every sealed persistence record.
-fn atomic_write_with_hook(
-    path: &Path,
-    bytes: &[u8],
-    mut phase: impl FnMut(AtomicWritePhase, &Path),
-) -> Result<(), AppError> {
-    atomic_write_with_hook_and_sync(path, bytes, &mut phase, sync_directory)
-}
-
-fn atomic_write_with_hook_and_sync(
-    path: &Path,
-    bytes: &[u8],
-    mut phase: impl FnMut(AtomicWritePhase, &Path),
-    sync_parent: impl FnOnce(&Path) -> std::io::Result<()>,
-) -> Result<(), AppError> {
-    let (mut staged, mut staging) = create_staging_file(path)?;
-    staged
-        .write_all(bytes)
-        .map_err(|error| AppError::Io(error.to_string()))?;
-    staged
-        .sync_all()
-        .map_err(|error| AppError::Io(error.to_string()))?;
-    drop(staged);
-    phase(AtomicWritePhase::TempSynced, &staging.path);
-    fs::rename(&staging.path, path).map_err(|e| AppError::Io(e.to_string()))?;
-    staging.remove_on_drop = false;
-    phase(AtomicWritePhase::Renamed, &staging.path);
-    if let Some(parent) = path
-        .parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-    {
-        sync_parent(parent).map_err(|error| AppError::CommittedButNotDurable(error.to_string()))?;
-    }
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1096,8 +1813,8 @@ mod tests {
             let path = snapshot.clone();
             let barrier = Arc::clone(&barrier);
             std::thread::spawn(move || {
-                atomic_write_with_hook(&path, b"sealed snapshot", |phase, _| {
-                    if phase == AtomicWritePhase::TempSynced {
+                atomic_write_with_hook_for_test(&path, b"sealed snapshot", |phase, _| {
+                    if phase == persistence::AtomicWritePhase::TempSynced {
                         barrier.wait();
                     }
                 })
@@ -1107,8 +1824,8 @@ mod tests {
             let path = network.clone();
             let barrier = Arc::clone(&barrier);
             std::thread::spawn(move || {
-                atomic_write_with_hook(&path, b"sealed network record", |phase, _| {
-                    if phase == AtomicWritePhase::TempSynced {
+                atomic_write_with_hook_for_test(&path, b"sealed network record", |phase, _| {
+                    if phase == persistence::AtomicWritePhase::TempSynced {
                         barrier.wait();
                     }
                 })
@@ -1132,8 +1849,8 @@ mod tests {
             let path = shared.clone();
             let barrier = Arc::clone(&barrier);
             std::thread::spawn(move || {
-                atomic_write_with_hook(&path, bytes, |phase, _| {
-                    if phase == AtomicWritePhase::TempSynced {
+                atomic_write_with_hook_for_test(&path, bytes, |phase, _| {
+                    if phase == persistence::AtomicWritePhase::TempSynced {
                         barrier.wait();
                     }
                 })
@@ -1156,10 +1873,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("state.bin");
         fs::write(&path, b"previous record").unwrap();
-        let result = atomic_write_with_hook_and_sync(
+        let result = atomic_write_with_hook_and_sync_for_test(
             &path,
             b"complete replacement",
-            |_, _| {},
+            &mut |_, _| {},
             |_| Err(std::io::Error::other("injected directory sync failure")),
         );
         assert!(matches!(
@@ -1182,25 +1899,6 @@ mod tests {
         ));
     }
 
-    #[cfg(unix)]
-    #[test]
-    fn a_preplanted_staging_symlink_is_never_followed() {
-        use std::os::unix::fs::symlink;
-
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("state.bin");
-        let victim = dir.path().join("victim");
-        fs::write(&victim, b"must stay intact").unwrap();
-        let planted = staging_candidate(&path, u64::MAX);
-        symlink(&victim, &planted).unwrap();
-
-        let error = open_staging_candidate(&planted).unwrap_err();
-        assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
-        atomic_write(&path, b"authenticated state").unwrap();
-        assert_eq!(fs::read(&victim).unwrap(), b"must stay intact");
-        assert_eq!(fs::read(&path).unwrap(), b"authenticated state");
-    }
-
     #[cfg(target_os = "linux")]
     #[test]
     fn abrupt_process_termination_cannot_publish_a_partial_sealed_record() {
@@ -1208,7 +1906,7 @@ mod tests {
 
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("state.bin");
-        atomic_write(&path, b"old authenticated record").unwrap();
+        write_for_test(&path, b"old authenticated record").unwrap();
 
         let before = abort_child_at(&path, "temp-synced");
         assert_eq!(
@@ -1238,7 +1936,7 @@ mod tests {
         assert!(staging_files_for(&path).is_empty());
 
         // A later normal save continues to replace the destination after either crash boundary.
-        atomic_write(&path, b"newest authenticated record").unwrap();
+        write_for_test(&path, b"newest authenticated record").unwrap();
         assert_eq!(fs::read(path).unwrap(), b"newest authenticated record");
     }
 
@@ -1248,10 +1946,10 @@ mod tests {
     fn atomic_write_abort_child() {
         let wanted = std::env::var(ATOMIC_CHILD_PHASE).expect("abort phase");
         let path = PathBuf::from(std::env::var_os(ATOMIC_CHILD_PATH).expect("abort path"));
-        atomic_write_with_hook(&path, b"new authenticated record", |phase, _| {
+        atomic_write_with_hook_for_test(&path, b"new authenticated record", |phase, _| {
             let reached = match phase {
-                AtomicWritePhase::TempSynced => "temp-synced",
-                AtomicWritePhase::Renamed => "renamed",
+                persistence::AtomicWritePhase::TempSynced => "temp-synced",
+                persistence::AtomicWritePhase::Renamed => "renamed",
             };
             if reached == wanted {
                 std::process::abort();

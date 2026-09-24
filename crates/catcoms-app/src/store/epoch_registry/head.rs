@@ -23,7 +23,7 @@ impl ServerStore {
             durable_tenure,
             rng,
             budget,
-            sync_registry,
+            &mut WriteHooks::None,
         )
     }
 
@@ -37,7 +37,7 @@ impl ServerStore {
         durable_tenure: Option<u64>,
         rng: &mut impl CryptoRngCore,
         budget: &mut EpochStorageBudget,
-        sync: impl FnOnce(&Path, u64) -> Result<(), AppError>,
+        hooks: &mut WriteHooks<'_>,
     ) -> Result<ReceiptHeadSelection, AppError> {
         if group.member_signature_key(&device.device_id()).as_deref()
             != Some(device.public_key_bytes().as_slice())
@@ -101,7 +101,7 @@ impl ServerStore {
             budget,
             held,
             record,
-            sync,
+            hooks,
         )
     }
 
@@ -117,7 +117,7 @@ impl ServerStore {
         budget: &mut EpochStorageBudget,
         held: Option<Receipt>,
         record: Option<StorageRecord>,
-        sync: impl FnOnce(&Path, u64) -> Result<(), AppError>,
+        hooks: &mut WriteHooks<'_>,
     ) -> Result<ReceiptHeadSelection, AppError> {
         let document = registry_document(&group.group_id(), bucket).map_err(invalid)?;
         let scope = scope_bytes(server, &document)?;
@@ -162,10 +162,13 @@ impl ServerStore {
             let reservation = budget
                 .reserve_sync(&storage_scope, record)
                 .map_err(invalid)?;
-            sync(
-                &self.registry_epoch_path(&scope),
-                record.footprint.total().map_err(invalid)?,
-            )?;
+            // I-4: an unchanged-file flush is a mutation for inventory purposes.
+            let path = self.registry_epoch_path(&scope);
+            let bytes = record.footprint.total().map_err(invalid)?;
+            let mutation = self.epoch_mutation_guard();
+            hooks.before_sync(WriteTag::Source, &path, bytes)?;
+            sync_registry(&mutation, &path, bytes)?;
+            hooks.after_sync(WriteTag::Source, &path)?;
             reservation.commit();
             // Re-save even an exact published retry: a previously visible rename is not itself
             // evidence of a successful parent flush. No mark-published or receipt issuance here.
@@ -210,7 +213,7 @@ impl ServerStore {
             budget,
             head,
             record,
-            sync_registry,
+            &mut WriteHooks::None,
         )
     }
 }

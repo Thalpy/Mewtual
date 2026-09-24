@@ -222,8 +222,9 @@ fn legacy_recovery_coverage_ignores_owner_finals_temporaries_and_owner_only_alia
     recovery(&mut store, 7, &doc, 0);
     let owner_path = store.epoch_owner_path(&scope_bytes(7, &doc).unwrap());
     let saved = fs::read(&owner_path).unwrap();
-    let owner_temp = staging_candidate(&owner_path, 900);
-    let recovery_temp = staging_candidate(&recovery_path(root.path(), &store, 7, &doc), 901);
+    let owner_temp = staging_candidate_for_test(&owner_path, 900);
+    let recovery_temp =
+        staging_candidate_for_test(&recovery_path(root.path(), &store, 7, &doc), 901);
     let alias = root
         .path()
         .join("servers")
@@ -275,7 +276,7 @@ fn identical_digest_text_in_the_other_namespace_cannot_assign_orphan_ownership()
             .path()
             .join("servers")
             .join(format!("{}.{suffix}", hex::encode(id)));
-        fs::write(staging_candidate(&fake_destination, 900), []).unwrap();
+        fs::write(staging_candidate_for_test(&fake_destination, 900), []).unwrap();
     }
     let inventory = collect(store.scan_epoch_storage().unwrap()).unwrap();
     assert_eq!(inventory.unresolved_orphans(), 2);
@@ -305,7 +306,7 @@ fn failed_journal_write_restarts_cleans_both_families_reconciles_and_retries() {
     let owner_before = fs::read(&owner_path).unwrap();
     let recovery_before = fs::read(&recovery_path).unwrap();
     let mut accounted = budget(&mut store, 7, &doc);
-    let orphan = staging_candidate(&owner_path, 900);
+    let orphan = staging_candidate_for_test(&owner_path, 900);
     assert!(store
         .update_epoch_owner_with_writer(
             7,
@@ -313,14 +314,23 @@ fn failed_journal_write_restarts_cleans_both_families_reconciles_and_retries() {
             &mut rng(),
             &mut accounted,
             |journal| journal.mark_published(signed.hash()).map_err(invalid),
-            |_, bytes| {
-                fs::write(&orphan, bytes).unwrap();
-                Err(AppError::Io("before rename".into()))
+            &mut WriteHooks::Hooked {
+                before: Some(&mut |_: WriteTag, _: &Path, bytes: &[u8]| {
+                    fs::write(&orphan, bytes).unwrap();
+                    Intercept::Fail(AppError::Io("before rename".into()))
+                }),
+                before_sync: None,
+                before_unlink: None,
+                after: None,
             }
         )
         .is_err());
     assert!(accounted.requires_reconciliation());
-    fs::write(staging_candidate(&recovery_path, 901), b"partial recovery").unwrap();
+    fs::write(
+        staging_candidate_for_test(&recovery_path, 901),
+        b"partial recovery",
+    )
+    .unwrap();
     drop(store);
     let mut store = open(root.path());
     let inventory = collect(store.scan_epoch_storage().unwrap()).unwrap();
@@ -385,7 +395,7 @@ fn a_first_write_orphan_never_becomes_a_published_owner_decision() {
     .unwrap();
     let mut accounted = budget(&mut store, 7, &doc);
     let path = store.epoch_owner_path(&scope_bytes(7, &doc).unwrap());
-    let orphan = staging_candidate(&path, 900);
+    let orphan = staging_candidate_for_test(&path, 900);
     assert!(store
         .prepare_epoch_owner_with_writer(
             7,
@@ -394,9 +404,14 @@ fn a_first_write_orphan_never_becomes_a_published_owner_decision() {
             group.epoch(),
             &mut rng(),
             &mut accounted,
-            |_, bytes| {
-                fs::write(&orphan, bytes).unwrap();
-                Err(AppError::Io("first write interrupted".into()))
+            &mut WriteHooks::Hooked {
+                before: Some(&mut |_: WriteTag, _: &Path, bytes: &[u8]| {
+                    fs::write(&orphan, bytes).unwrap();
+                    Intercept::Fail(AppError::Io("first write interrupted".into()))
+                }),
+                before_sync: None,
+                before_unlink: None,
+                after: None,
             }
         )
         .is_err());
@@ -496,4 +511,51 @@ fn owner_family_caps_scope_domains_and_canonical_names_are_not_weakened_by_union
             "{mode}"
         );
     }
+}
+
+/// N17, owner-journal family: a cursor parked across a real owner-decision write refuses.
+///
+/// The guard test in `inventory.rs` proves the mechanism and the writer-conversion tests prove
+/// this path takes the guard. Neither proves a cursor actually consults the token, and a
+/// rotating token nobody reads would satisfy both while protecting nothing. This closes that
+/// gap for the family whose record the journal is.
+#[test]
+fn a_cursor_parked_across_an_owner_journal_write_refuses_to_resume_or_finish() {
+    let root = tempfile::tempdir().unwrap();
+    let (owner, group, doc) = fixture();
+    let mut store = open(root.path());
+    // An existing journal, so the write under test replaces a record the cursor has already
+    // begun accounting rather than creating one it never saw.
+    let signed = prepare(&mut store, 7, &owner, &group, &doc);
+    // Taken before parking, as a real caller's would be.
+    let mut budget = budget(&mut store, 7, &doc);
+
+    let mut cursor = store
+        .begin_epoch_storage_scan(EpochInventoryCoverage::RecoveryAndOwnerReceipts)
+        .unwrap();
+    let progress = store.step_epoch_storage_scan(&mut cursor, 1, None).unwrap();
+    assert!(
+        !progress.complete,
+        "the fixture must leave the cursor mid-traversal for this to be a spanning scan"
+    );
+
+    let before = store.inventory_generation();
+    // Completing the held decision is an ordinary owner-journal replacement; a second prepare
+    // would be refused as a conflicting decision and would test the refusal, not the write.
+    store
+        .mark_epoch_owner_receipt_published(7, &doc, signed.hash(), &mut rng(), &mut budget)
+        .unwrap();
+    assert!(
+        !std::sync::Arc::ptr_eq(&before, &store.inventory_generation()),
+        "the owner-journal writer did not rotate the inventory generation"
+    );
+
+    assert!(
+        store.step_epoch_storage_scan(&mut cursor, 1, None).is_err(),
+        "a cursor parked across an owner-journal write resumed anyway"
+    );
+    assert!(
+        store.finish_epoch_storage_scan(cursor).is_err(),
+        "a cursor parked across an owner-journal write still issued an inventory"
+    );
 }

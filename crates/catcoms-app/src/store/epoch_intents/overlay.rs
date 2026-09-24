@@ -20,8 +20,7 @@ impl ServerStore {
         rng: &mut impl CryptoRngCore,
         budget: &mut EpochStorageBudget,
         intents: &mut EpochIntentBudget,
-        writer: impl FnOnce(&Path, &[u8]) -> Result<(), AppError>,
-        sync: impl FnOnce(&Path, u64) -> Result<(), AppError>,
+        hooks: &mut WriteHooks<'_>,
     ) -> Result<StudioLocalDraft, AppError> {
         if document.server_id != group.group_id()
             || group.member_signature_key(&device.device_id()).as_deref()
@@ -31,7 +30,10 @@ impl ServerStore {
         }
         let scope = scope_bytes(server, document)?;
         let mut state = self.checked_epoch_replay_state(server, document, budget, intents)?;
-        let (_, old) = self.read_epoch_intent_record(&scope, document)?;
+        // Physical size only; the record was authenticated above.
+        let old = self
+            .read_scoped_intent_plain(&scope)?
+            .map(|record| record.physical_bytes);
         let intent = LocalIntent {
             author: device.device_id(),
             operation,
@@ -46,7 +48,16 @@ impl ServerStore {
             if overlay.exact_retry(expected, &intent).map_err(invalid)? {
                 let view = overlay.read(&state.ledger).map_err(invalid)?;
                 self.write_prepared_intents(
-                    server, document, state, old, true, rng, budget, intents, writer, sync,
+                    server,
+                    document,
+                    state,
+                    old,
+                    true,
+                    rng,
+                    budget,
+                    intents,
+                    WriteStep::new(WriteTag::Intents),
+                    hooks,
                 )?;
                 return Ok(view);
             }
@@ -70,7 +81,13 @@ impl ServerStore {
         let view = overlay
             .append(basis, &state.ledger, op_id, ts)
             .map_err(invalid)?;
-        // Conservatively hold base-only and superseded references before any possible write.
+        // I-3, second half: the protection transfer. These two holds must run BEFORE the write
+        // attempt and while the caller's job-owned transient hold is still alive. Each rotates
+        // `Protection.generation` first, so a reference scan already in progress cannot install a
+        // set that omits these CIDs, and each either adds them to the known set or leaves
+        // protection fail-closed unknown. Only that makes it safe for the caller to drop its
+        // transient owner once the write attempt returns: a durable record alone does not repair
+        // a reference set that a scan installed while the operation was still in flight.
         self.hold_creative(
             &document.server_id,
             overlay
@@ -82,7 +99,16 @@ impl ServerStore {
         self.hold_creative_operation(document, &intent.operation);
         state.overlay = Some(overlay);
         self.write_prepared_intents(
-            server, document, state, old, false, rng, budget, intents, writer, sync,
+            server,
+            document,
+            state,
+            old,
+            false,
+            rng,
+            budget,
+            intents,
+            WriteStep::new(WriteTag::Intents),
+            hooks,
         )?;
         Ok(view)
     }

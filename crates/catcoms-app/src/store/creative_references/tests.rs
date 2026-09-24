@@ -375,7 +375,11 @@ fn unknown_recovery_and_partial_temporary_never_enable_reclamation() {
         .path()
         .join("servers")
         .join(format!("{}.studio-epoch", "aa".repeat(32)));
-    fs::write(super::super::staging_candidate(&final_path, 1), b"partial").unwrap();
+    fs::write(
+        super::super::staging_candidate_for_test(&final_path, 1),
+        b"partial",
+    )
+    .unwrap();
     assert!(clean.creative_pinned_cids().is_err());
 }
 
@@ -457,4 +461,81 @@ async fn fileshare_unlisting_and_upload_cleanup_consult_actual_saved_studio_refe
         .seal_upload_chunk(b"unpublished", "application/octet-stream")
         .unwrap();
     server.discard_upload_chunks(&[staged]); // staging cleanup remains independent of holds
+}
+
+/// C-4 / AG1-003. A reference that no durable record names yet is reclaimable the moment a
+/// complete scan installs, which is exactly what happens while a detached Save stage runs. A
+/// job-owned hold must survive that scan, and must stop protecting as soon as its owner drops,
+/// so the commit path has to transfer protection to the ordinary conservative holds (I-3) before
+/// releasing it rather than relying on the durable write alone.
+#[test]
+fn job_owned_transient_holds_survive_a_complete_scan_and_release_with_their_owner() {
+    let root = tempfile::tempdir().unwrap();
+    let mut store = open(root.path());
+    let group = b"group";
+    let mut blobs = store.blob_store(&hex::encode(group)).unwrap();
+    let cid = blobs.put(b"pixels for an in-flight save").unwrap();
+    let held = store
+        .hold_creative_transient(group, BTreeSet::from([*cid.as_bytes()]))
+        .unwrap();
+
+    // A complete reference scan derives its set from durable state alone, so it cannot know this
+    // CID. Without the job-owned hold this is precisely where the bytes would be reclaimed.
+    store.creative_pinned_cids().unwrap();
+    assert!(
+        !blobs.delete(&cid).unwrap(),
+        "a live job-owned hold did not protect its reference"
+    );
+    assert!(blobs.get_bounded(&cid, 100).unwrap().is_some());
+
+    // Ordinary protection is unaffected: an unreferenced CID with no hold still deletes, so the
+    // new table cannot be mistaken for a blanket refusal.
+    let orphan = blobs.put(b"nothing claims this").unwrap();
+    store.creative_pinned_cids().unwrap();
+    assert!(!blobs.delete(&cid).unwrap(), "hold outlives a second scan");
+    assert!(blobs.delete(&orphan).unwrap());
+
+    // Dropping the owner releases it. This is why I-3 requires the ordinary holds to be installed
+    // BEFORE the owner can disappear: at this point nothing durable names the CID either.
+    drop(held);
+    assert!(
+        blobs.delete(&cid).unwrap(),
+        "the hold outlived its owner and would leak protection"
+    );
+}
+
+/// C-4 bounds are checked before anything is installed, and exhaustion refuses the caller instead
+/// of marking the whole store unknown. A caller must not be able to disable unrelated reclamation.
+#[test]
+fn transient_hold_exhaustion_refuses_admission_without_disturbing_existing_protection() {
+    let root = tempfile::tempdir().unwrap();
+    let mut store = open(root.path());
+    let group = b"group";
+    let mut blobs = store.blob_store(&hex::encode(group)).unwrap();
+    let orphan = blobs.put(b"unreferenced").unwrap();
+    store.creative_pinned_cids().unwrap();
+    assert!(store.creative_references_known());
+
+    let mut owners = Vec::new();
+    for n in 0..MAX_TRANSIENT_HOLD_OWNERS {
+        owners.push(
+            store
+                .hold_creative_transient(group, BTreeSet::from([[n as u8; 32]]))
+                .expect("owners up to the rail are admitted"),
+        );
+    }
+    assert!(
+        store
+            .hold_creative_transient(group, BTreeSet::from([[200u8; 32]]))
+            .is_err(),
+        "the owner rail admitted one too many"
+    );
+    // Refusal is not an unknown-protection event: durable reclamation still works.
+    assert!(store.creative_references_known());
+    assert!(blobs.delete(&orphan).unwrap());
+
+    // Releasing one owner readmits exactly one, and the refused reference was never installed.
+    owners.pop();
+    let readmitted = store.hold_creative_transient(group, BTreeSet::from([[200u8; 32]]));
+    assert!(readmitted.is_ok(), "a released owner did not free its slot");
 }

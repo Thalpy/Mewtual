@@ -237,13 +237,25 @@ fn registry_store_failed_write_and_post_rename_failure_require_reconciliation_an
             &mut rng(),
             &mut budget,
             |unit, _| unit.ingest(&op, &f.group, &f.device).map_err(invalid),
-            |path, bytes| {
-                if committed {
-                    atomic_write(path, bytes)?;
-                }
-                Err(AppError::Io("injected write/durability failure".into()))
+            WriteStep::new(WriteTag::Epoch),
+            &mut WriteHooks::Hooked {
+                before: Some(&mut |_: WriteTag, _: &Path, _: &[u8]| {
+                    if committed {
+                        return Intercept::Continue;
+                    }
+                    Intercept::Fail(AppError::Io("injected write/durability failure".into()))
+                }),
+                before_sync: Some(&mut |_: WriteTag, _: &Path, _: u64| {
+                    panic!("first write cannot sync-only")
+                }),
+                before_unlink: None,
+                after: Some(&mut |op: CompletedOperation, _: WriteTag, _: &Path| {
+                    if op != CompletedOperation::Write {
+                        return AfterIntercept::Continue;
+                    }
+                    AfterIntercept::Fail(AppError::Io("injected write/durability failure".into()))
+                }),
             },
-            |_, _| panic!("first write cannot sync-only"),
         );
         assert!(result.is_err());
         assert!(budget.requires_reconciliation());
@@ -264,13 +276,18 @@ fn registry_store_failed_write_and_post_rename_failure_require_reconciliation_an
                 &mut rng(),
                 &mut budget,
                 |unit, _| unit.ingest(&op, &f.group, &f.device).map_err(invalid),
-                |path, bytes| {
-                    assert!(!committed);
-                    atomic_write(path, bytes)
-                },
-                |path, size| {
-                    synced = true;
-                    sync_registry(path, size)
+                WriteStep::new(WriteTag::Epoch),
+                &mut WriteHooks::Hooked {
+                    before: Some(&mut |_: WriteTag, _: &Path, _: &[u8]| {
+                        assert!(!committed);
+                        Intercept::Continue
+                    }),
+                    before_sync: Some(&mut |_: WriteTag, _: &Path, _: u64| {
+                        synced = true;
+                        AfterIntercept::Continue
+                    }),
+                    before_unlink: None,
+                    after: None,
                 },
             )
             .unwrap();
@@ -307,8 +324,17 @@ fn registry_store_failed_duplicate_sync_or_writer_panic_cannot_acknowledge() {
             &mut rng(),
             &mut budget,
             |unit, _| unit.ingest(&op, &f.group, &f.device).map_err(invalid),
-            |_, _| panic!("duplicate must not replace"),
-            |_, _| Err(AppError::Io("injected sync failure".into()))
+            WriteStep::new(WriteTag::Epoch),
+            &mut WriteHooks::Hooked {
+                before: Some(&mut |_: WriteTag, _: &Path, _: &[u8]| {
+                    panic!("duplicate must not replace")
+                }),
+                before_sync: Some(&mut |_: WriteTag, _: &Path, _: u64| {
+                    AfterIntercept::Fail(AppError::Io("injected sync failure".into()))
+                }),
+                before_unlink: None,
+                after: None,
+            }
         )
         .is_err());
     assert!(budget.requires_reconciliation());
@@ -326,8 +352,8 @@ fn registry_store_failed_duplicate_sync_or_writer_panic_cannot_acknowledge() {
             &mut rng(),
             &mut budget,
             |unit, _| unit.ingest(&next, &f.group, &f.device).map_err(invalid),
-            |_, _| panic!("injected writer panic"),
-            sync_registry,
+            WriteStep::new(WriteTag::Epoch),
+            &mut WriteHooks::MustNotWrite("injected writer panic"),
         )
     }));
     assert!(caught.is_err());
@@ -659,7 +685,7 @@ fn registry_store_cleanup_removes_only_unpublished_attempts_and_rescans_ownershi
             f.ingest(&mut store, &op, &mut budget).unwrap();
         }
         let path = f.path(&store);
-        let orphan = staging_candidate(&path, 901);
+        let orphan = staging_candidate_for_test(&path, 901);
         fs::write(&orphan, b"partial opaque bytes").unwrap();
         let saved = fs::read(&path).ok();
         let inv = inventory(&mut store);
@@ -735,11 +761,8 @@ fn registry_store_receipt_retry_after_failed_flush_and_removed_owner_inventory()
         &mut rng(),
         &mut budget,
         |unit, _| unit.seal(receipt.clone(), &f.group, 0).map_err(invalid),
-        |path, bytes| {
-            atomic_write(path, bytes)?;
-            Err(AppError::Io("post-rename failure".into()))
-        },
-        sync_registry,
+        WriteStep::new(WriteTag::Epoch),
+        &mut WriteHooks::fail_after_write(FailError::Io("post-rename failure")),
     );
     assert!(result.is_err());
     assert!(budget.requires_reconciliation());
@@ -787,4 +810,209 @@ fn registry_store_receipt_retry_after_failed_flush_and_removed_owner_inventory()
             .phase(),
         EpochPhase::Closing
     );
+}
+
+/// The Registry consumer of `WriteStep::flush_only`.
+///
+/// Three production callers rely on this leaf refusing a replacement: installation's source
+/// preparation, owner rotation's source preparation, and replay's assessment. None of them
+/// reaches a replacement in practice, so none covers the refusal. See the Intents counterpart
+/// for why both controls are needed.
+#[test]
+fn a_flush_only_step_refuses_a_registry_replacement_but_still_reaches_the_flush() {
+    let root = tempfile::tempdir().unwrap();
+    let mut f = Fixture::new();
+    let op = f.op(1);
+    let mut store = open(root.path());
+    let mut budget = budget(&mut store, &f);
+    f.ingest(&mut store, &op, &mut budget).unwrap();
+    let held = fs::read(f.path(&store)).unwrap();
+
+    // An otherwise-valid replacement: ingest one more operation into the saved epoch.
+    let next = f.op(2);
+    let mut budget = self::budget(&mut store, &f);
+    let reached = std::cell::Cell::new(false);
+    let refused = store.update_registry_with_io(
+        SERVER,
+        &f.group,
+        f.key.bucket(),
+        &f.device,
+        true,
+        WritePurpose::Ordinary,
+        &mut rng(),
+        &mut budget,
+        |unit, _| unit.ingest(&next, &f.group, &f.device).map_err(invalid),
+        WriteStep::flush_only(WriteTag::Source, "this path must not rewrite the epoch"),
+        &mut WriteHooks::Hooked {
+            before: Some(&mut |_: WriteTag, _: &Path, _: &[u8]| {
+                reached.set(true);
+                Intercept::Continue
+            }),
+            before_sync: None,
+            before_unlink: None,
+            after: None,
+        },
+    );
+    assert!(
+        refused
+            .unwrap_err()
+            .to_string()
+            .contains("this path must not rewrite the epoch"),
+        "the flush-only step did not refuse the replacement"
+    );
+    assert!(
+        !reached.get(),
+        "the transaction reached its replacement despite a flush-only step"
+    );
+    assert_eq!(fs::read(f.path(&store)).unwrap(), held, "the epoch changed");
+
+    // Control one: the same replacement is accepted under an ordinary step.
+    let mut budget = self::budget(&mut store, &f);
+    store
+        .update_registry_with_io(
+            SERVER,
+            &f.group,
+            f.key.bucket(),
+            &f.device,
+            true,
+            WritePurpose::Ordinary,
+            &mut rng(),
+            &mut budget,
+            |unit, _| unit.ingest(&next, &f.group, &f.device).map_err(invalid),
+            WriteStep::new(WriteTag::Source),
+            &mut WriteHooks::None,
+        )
+        .expect("an ordinary step must accept the same replacement");
+    assert_ne!(
+        fs::read(f.path(&store)).unwrap(),
+        held,
+        "the control did not actually replace anything"
+    );
+
+    // Control two: an unchanged epoch under the same flush-only step reaches its sync.
+    let mut budget = self::budget(&mut store, &f);
+    let synced = std::cell::Cell::new(false);
+    store
+        .update_registry_with_io(
+            SERVER,
+            &f.group,
+            f.key.bucket(),
+            &f.device,
+            true,
+            WritePurpose::Ordinary,
+            &mut rng(),
+            &mut budget,
+            |_, _| Ok(()),
+            WriteStep::flush_only(WriteTag::Source, "this path must not rewrite the epoch"),
+            &mut WriteHooks::Hooked {
+                before: None,
+                before_sync: Some(&mut |_: WriteTag, _: &Path, _: u64| {
+                    synced.set(true);
+                    AfterIntercept::Continue
+                }),
+                before_unlink: None,
+                after: None,
+            },
+        )
+        .expect("a flush-only step must still permit the flush");
+    assert!(
+        synced.get(),
+        "the flush-only step returned success without reaching a sync"
+    );
+}
+
+/// N17, Registry family, plus the two shapes the matrix calls out separately.
+///
+/// The unchanged exact-retry flush matters because it changes no bytes at all: an inventory
+/// captured before it still describes the right content, and it must invalidate anyway, because
+/// the operation changes the record's durability. A failed write matters because rotation is
+/// required before the *first possible* I/O, not on success: a cursor that survived a failed
+/// attempt would miss whatever that attempt left behind.
+///
+/// Neither of these is the design's "same-size authenticated replacement" - a *different* record
+/// that happens to seal to the same physical length. That case is not covered here.
+#[test]
+fn a_cursor_parked_across_registry_writes_refuses_including_retry_flush_and_failed_attempts() {
+    let park = |store: &mut ServerStore| {
+        let mut cursor = store
+            .begin_epoch_storage_scan(
+                EpochInventoryCoverage::RecoveryOwnerReceiptsIntentsAndRegistry,
+            )
+            .unwrap();
+        store.step_epoch_storage_scan(&mut cursor, 1, None).unwrap();
+        cursor
+    };
+    let refused = |store: &ServerStore, mut cursor: EpochStorageCursor, what: &str| {
+        // `step` needs &mut; take it separately so the closure stays shared over the store.
+        let _ = &mut cursor;
+        assert!(
+            store.finish_epoch_storage_scan(cursor).is_err(),
+            "a cursor parked across {what} still issued an inventory"
+        );
+    };
+
+    // 1. An ordinary accounted Registry replacement.
+    let root = tempfile::tempdir().unwrap();
+    let mut f = Fixture::new();
+    let op = f.op(1);
+    let mut store = open(root.path());
+    let mut budget = budget(&mut store, &f);
+    f.ingest(&mut store, &op, &mut budget).unwrap();
+
+    let next = f.op(2);
+    let mut budget = self::budget(&mut store, &f);
+    let mut cursor = park(&mut store);
+    f.ingest(&mut store, &next, &mut budget).unwrap();
+    assert!(
+        store.step_epoch_storage_scan(&mut cursor, 1, None).is_err(),
+        "a cursor parked across a Registry write resumed anyway"
+    );
+    refused(&store, cursor, "a Registry write");
+
+    // 2. The exact-retry flush of an unchanged record, which changes no bytes at all and must
+    //    still invalidate.
+    let held = fs::read(f.path(&store)).unwrap();
+    let mut budget = self::budget(&mut store, &f);
+    let mut cursor = park(&mut store);
+    assert_eq!(
+        f.ingest(&mut store, &next, &mut budget).unwrap().0,
+        Admission::Duplicate
+    );
+    assert_eq!(
+        fs::read(f.path(&store)).unwrap(),
+        held,
+        "the control is broken: this retry rewrote the record, so it is not the unchanged case"
+    );
+    assert!(
+        store.step_epoch_storage_scan(&mut cursor, 1, None).is_err(),
+        "a cursor survived an unchanged-record flush, which is still a durability-changing \
+         operation on an inventoried file"
+    );
+    refused(&store, cursor, "an unchanged-record flush");
+
+    // 3. A failed write. Rotation happens before the first possible I/O, so a cursor must not
+    //    survive an attempt merely because the attempt returned an error.
+    let mut budget = self::budget(&mut store, &f);
+    let mut cursor = park(&mut store);
+    let third = f.op(3);
+    assert!(store
+        .update_registry_with_io(
+            SERVER,
+            &f.group,
+            f.key.bucket(),
+            &f.device,
+            true,
+            WritePurpose::Ordinary,
+            &mut rng(),
+            &mut budget,
+            |unit, _| unit.ingest(&third, &f.group, &f.device).map_err(invalid),
+            WriteStep::new(WriteTag::Epoch),
+            &mut WriteHooks::fail_after_write(FailError::Io("injected, leaving an attempt behind")),
+        )
+        .is_err());
+    assert!(
+        store.step_epoch_storage_scan(&mut cursor, 1, None).is_err(),
+        "a cursor survived a failed write attempt, so it would miss whatever that attempt left"
+    );
+    refused(&store, cursor, "a failed write attempt");
 }
