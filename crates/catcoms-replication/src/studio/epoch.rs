@@ -50,9 +50,9 @@ pub struct StudioEpoch {
     gate: EpochGate,
     receipts: ReceiptBook,
     opening: Option<Receipt>,
-    // Version 2 is used ONLY while accepting a discovered checkpoint without its predecessor
-    // closure. Ordinary restart bytes stay v1. Its receipt-book/gate validation must use the
-    // existing P1 adoption mode or a crash after sealing would strand the whole source.
+    // Without repair provenance, ordinary/adopting restart bytes remain v1/v2. Bound repair
+    // snapshots use v3 with this mode explicit. Adoption without a held predecessor closure
+    // requires P1 book/gate validation or a crash after sealing would strand the whole source.
     adopting: bool,
     // Exact signed-repair binding and original action; copied alongside the book on successors.
     repair_binding: Option<RepairBinding>,

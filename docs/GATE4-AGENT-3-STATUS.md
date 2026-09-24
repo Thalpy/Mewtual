@@ -18,10 +18,17 @@ Implementation review found two HIGH issues (covered live roles accepted by v3 r
 ordinary adoption bypassing pending repair) and one MEDIUM (39-byte Registry protocol undercount).
 All are fixed with regressions; the two HIGH tests failed before the fixes. A LOW coverage gap is
 closed by re-admitting the same real quarantined envelope after Open repair and restart.
-Final bounded re-review found no remaining BLOCKER/HIGH/MEDIUM. Full suites are in progress.
-Focused repair tests: 50 unit + 1
-integration PASS; frontend: 1,229 PASS; formatting PASS. Six new mutation guards bring the harness
-to 20; execution is pending. Existing ambient failures (seven untouched calls) and cargo-deny
+Final bounded re-review found no remaining BLOCKER/HIGH/MEDIUM. Code checkpoint: `27bab16`.
+Core CI `36005323406`: **273 library tests and all 20 mutations, exact restorations and restored
+controls PASS on Linux and Windows**. Local focused repair tests: 50 unit + 1 integration PASS.
+Full native suite: 261 unit + 5 ACL PASS; frontend: 1,229 PASS; formatting and strict workspace
+Clippy PASS. Full root tests were run, then retried outside the sandbox with two test threads and
+`--no-fail-fast`: app and replication unit processes exited abnormally (`0xffffffff`) without an
+assertion report; remaining targets completed, including all 47 replication integration tests.
+A separate full replication run also exited abnormally; an isolated app diagnostic passed.
+The local exit cause is unresolved; independent complete core CI is green, not a full-workspace
+PASS. Full CI `36005323438` remains running; its completed native job fails untouched unused-code
+diagnostics under `-D warnings`. Existing ambient failures (seven untouched calls) and cargo-deny
 rustls 0.23.40 / RUSTSEC-2026-0285 remain. Startup/flow gates are not applicable to this core change.
 
 The C-2 table and C-5 predicate now state the tested edge cases precisely: covered opening takes
