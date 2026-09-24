@@ -1628,10 +1628,17 @@ Two consecutive full `--lib` runs at the same tree, default thread count, `-j 2`
 | 2 | 707 passed, 4 failed, 11 ignored (613 s) | the three `studio_actor_owner_return_...` cases and `succession::joining::studio_actor_post_succession_joiner_reads_open_history_provisionally` |
 
 **A different subset each run, and all four pass serially in 35 s at that same tree.** The
-failure text is the diagnosis: `passes=160/160, injected=40000/40000 ms`, against a budget whose
-own comment records a healthy run as 91 to 132 passes. That is the scheduled actor starving for
-wall clock, not a wrong result - it matches the already-tracked `studio_actor_owner_return`
-Linux CI failure and the known `studio_exchange::tests::unopened` behaviour.
+failures report `passes=160/160, injected=40000/40000 ms`, against a budget whose own comment
+records a healthy run as 91 to 132 passes: the loop was exhausted.
+
+**That is an observation, not a diagnosis, and an earlier version of this section wrongly stated
+it as one** - "the scheduled actor starving for wall clock" - which is exactly the inference
+already withdrawn under SCHED-DIAG-001. Exhausting the pass loop is consistent with several
+causes. A varying failure set under parallelism together with a serial pass establishes
+**sensitivity to execution conditions**; it does not identify which resource or which transition
+was responsible. It is consistent with the already-tracked `studio_actor_owner_return` Linux CI
+failure and the known `studio_exchange::tests::unopened` behaviour, and the owner-return
+investigation remains open and is not settled by anything here.
 
 This work cannot be the cause, and that is checkable rather than asserted: the uncommitted
 production delta is one doc comment plus `collect_cursor_creative_references` and
@@ -1650,66 +1657,206 @@ Until now every measurement obligation in design 13 was outstanding and the ledg
 is the first one with numbers behind it. It is **partial**, and the boundaries are stated below
 rather than left to be discovered.
 
-### The result that changes something
+### The result established so far, stated at its actual width
 
-9.2's premise is that detaching a validation bounds custody. **It bounds about half of it.**
+**For these Recovery accounting fixtures, the measured read-and-park phase and the repeatedly
+measured validation phase are of comparable magnitude at megabyte scale. Changing
+`validation_fits` affects only the latter.**
 
-A visit does two kinds of per-record work, and `validation_fits` is in a position to move only
-the second:
+That is narrower than the first version of this section, which said detachment "bounds about
+half" of custody. It does not, and the measurement never showed that: see "Three measurement
+boundaries, corrected" below for what the harness was and was not timing.
 
-1. Open, read, authenticate, decode the scope, check the filename against the authenticated
-   scope, digest the plaintext, consult the cache. This *must* precede classification, because
-   the classifier's inputs are the family and the authenticated size and neither is known until
-   the body is authenticated. No threshold can defer it.
-2. `validate_record_body`. This is the entirety of what parking moves out of the visit.
+Release build, `SystemClock`, 8 trials, 64 validation repetitions per record per trial, warm
+page cache, zero validation-cache hits. Means per record per trial.
 
-Measured on staged Recovery records, release build, `SystemClock`:
+**Accounting only** (`RecoveryOnly` coverage, opaque projections - the control):
 
-| authenticated bytes | deferrable (term 2) | unavoidable visit (term 1) | deferrable share |
-|---|---|---|---|
-| 1 195 | below resolution | below resolution | unresolved |
-| 16 555 | 31 us | below resolution | unresolved |
-| 262 315 | 828 us | 1 ms | 45% |
-| 1 048 747 | 2 953 us | 2 ms | 59% |
-| 4 194 475 | 12 593 us | 10 ms | 55% |
+| authenticated bytes | read-and-park | validation | install | fraction of the two |
+|---|---|---|---|---|
+| 1 195 | 125 us | 3 us | below resolution | 2% |
+| 16 555 | 500 us | 17 us | below resolution | 3% |
+| 262 315 | 750 us | 355 us | below resolution | 32% |
+| 1 048 747 | 2 375 us | 2 830 us | below resolution | 54% |
+| 4 194 475 | 9 000 us | 11 009 us | below resolution | 55% |
 
-Above a quarter-megabyte the deferrable term is roughly linear at **2.5 to 3 us per KiB**. Below
-about a megabyte, term 1 does not resolve against a millisecond clock, so those rows report
-`unresolved` rather than a ratio - a `visit_ms` of 0 would otherwise print as "100% deferrable",
-which is the opposite of what it means.
+**Reference collecting** (five-family coverage, canonical projections, distinct CIDs):
 
-**What follows for the threshold.** A perfectly tuned `validation_fits` cannot bring a visit's
-custody below term 1. Parking is worth roughly a halving at megabyte scale, not an order of
-magnitude, and the remaining half scales with bytes just as the deferred half does. If a visit
-needs a hard custody ceiling, the threshold cannot deliver it alone; bounding `steps` and the
-per-record byte ceiling are the levers that can.
+| frames = CIDs | authenticated bytes | read-and-park | validation | install | fraction |
+|---|---|---|---|---|---|
+| 1 | 574 | 875 us | 7 us | below resolution | 0% |
+| 16 | 4 834 | 750 us | 50 us | below resolution | 6% |
+| 128 | 36 642 | 875 us | 480 us | below resolution | 35% |
+| 512 | 145 698 | 1 375 us | 2 228 us | below resolution | 61% |
+
+**The two read-and-park columns are not comparable.** The accounting scan is `RecoveryOnly`; the
+reference scan is necessarily five-family, so its step traverses more of the directory. That is
+a coverage difference, not a size effect, and it is why the reference table's read-and-park
+barely moves with record size.
+
+**Three things this says that the first profile could not.**
+
+1. **Reference collection is the expensive validator, by roughly an order of magnitude per
+   byte.** Accounting runs about 1.4 to 2.6 us per KiB; reference collection about 13 to 15.
+   The design's expensive case is the one that was previously unmeasured.
+2. **Reference-collection cost tracks the reference count, near-linearly**: about 3.1, 3.8 and
+   4.4 us per reference at 16, 128 and 512. That is a structural axis, not a byte axis, and it
+   is the shape a threshold for this mode would have to be written against.
+3. **The installation term is small at these reference counts.** This was the open question
+   about the missing phase, and the answer is concrete: `install_validated_record` stayed below
+   millisecond resolution even summed over eight trials, including the 512-CID merge. It is
+   *not* established for larger reference sets, and the phase is now timed so that will show.
+
+The fraction column converges to 55 to 61% at the large end of both modes. It is still a
+fraction of two measured components, not a share of total custody and not a speedup.
+
+**What follows for the threshold, corrected.** The classifier alone cannot meet a custody target
+below the current read/authentication cost. The earlier claim that "bounding `steps` and the
+per-record byte ceiling are the levers that can" was wrong: entry limits and byte limits bound
+**how much work is admitted**, not elapsed time, and this implementation explicitly describes
+individual entry work as non-preemptible with a one-entry minimum. Entry limits, byte limits and
+these measurements have to be considered together, and a strict latency guarantee would need a
+stronger execution model than any of them. **No accepted record-size limit should be changed on
+the strength of this first profile.**
+
+### Three measurement boundaries, corrected
+
+**1. The harness was not timing the whole custody path.** It timed one unbatched
+`step_epoch_storage_scan` sample and a batched `revalidate`. It did **not** time
+`install_validated_record`, `finish_epoch_storage_scan` or `begin`. The displayed percentage was
+therefore `V / (R + V)` over two measured components - not a measured share of total scan
+custody and not a before/after speedup. The omission matters most for **reference** scans, where
+installation merges CID sets and dependency metadata rather than inserting an accounting record,
+which is precisely the case the extension below adds. The phases are now named and reported
+separately: `read_and_park`, `validation_batch` / `validation_mean`, `install`, `finish`, `begin`.
+
+The module comment also said term 1 was "the visit's measured custody minus" validation. Nothing
+was ever subtracted - the step is timed directly. Corrected.
+
+The harness holds `&mut ServerStore` for the whole profiling run. These are timings of
+prospective stage bodies, **not** observed actor custody releases.
+
+**2. "Neither family nor size is known before authentication" was wrong about this code.** The
+scanner takes a candidate family from the **filename**, an untrusted size from
+`symlink_metadata`, and already applies that family's `sealed_cap`, the aggregate byte precheck
+and `check_cold_bytes` - all before any body is read or authenticated. Using an untrusted size to
+*limit* work is not the same as using it to *accept* a record as authentic, but it is a
+scheduling decision that does precede authentication.
+
+So the correct statement is: `validation_fits` is *currently called* after read/authentication,
+and moving its threshold cannot move that preceding work. The term is **retained by the current
+read/authentication boundary**, not "unavoidable" - the earlier wording turned an implementation
+boundary into a claimed impossibility. Nothing here proposes moving authentication; that would
+be a separate design question about key custody, input binding and lifecycle fences.
+
+**3. The sampling was asymmetric and the conditions were unstated.** Validation was repeated 64x
+on one **resident** plaintext; read-and-park was sampled **once** per record; the files were
+written immediately before the scan, so the page cache was warm. This is a component-cost
+experiment, not a cold-storage or worst-case benchmark. "Cold" in `uncached_bytes` and
+`check_cold_bytes` means the **validation cache**, which is a different thing from a cold
+filesystem cache and must not be reported as one. And `revalidate` times `run(&self)` plus the
+drop of its temporary result; it does **not** time the consuming `validate(self)` lifecycle
+including release of the parked plaintext. Sharing `run` prevents validator drift - it does not
+make the two lifecycles identical.
+
+The harness now repeats `TRIALS = 8` complete scans on fresh cursors, sums the single-sample
+phases, and prints the build profile, repetition count, trial count, cache-hit count and page
+cache condition on every result line.
+
+### The canonical reference fixture, and one contract it made explicit
+
+The with-references half needs a Recovery record whose projection the inspector will actually
+decode: `StudioRecovery::decode_snapshot` parses the projection as a versioned sequence of
+`DomainOp`s and validates each one, so the opaque filler the accounting control stages is
+refused outright. The fixture therefore builds a real `StudioEpoch`, inserts `frames` frames
+each naming a real blob CID, and takes its canonical projection through
+`StudioRecovery::snapshot` - the same constructor production uses.
+
+It returns the CIDs it planted, and the measurement **asserts the collected set equals them**
+before reporting any timing. A reference scan that returned an empty or short set quickly would
+otherwise look like a cheap one, which is the failure mode that makes a reference benchmark
+worthless.
+
+**The accounting-only fixture is kept, clearly labelled, not replaced.** Its numbers stay
+comparable with the first profile.
+
+**A defect in that fixture, found by its own output.** The first canonical run printed
+`frames=512 cids_collected=251`. The blob content was `[(n % 251) as u8; 10]`, so past 251
+frames the CIDs repeated: the fixture planted 512 frames but only 251 distinct references. The
+set comparison still passed, because both sides are sets - so the *correctness* assertion was
+blind to it, and only the printed count gave it away. A reference-count axis built on that would
+have been fiction above 251. Content is now `(n as u64).to_be_bytes()`, and both the fixture and
+the measurement assert the distinct-CID count equals the frame count, so it cannot recur
+silently.
+
+Building it surfaced a contract worth recording: **reference collection is full-coverage only.**
+`collect_creative_references` refuses any coverage narrower than the five-family one, because a
+partial inventory must not be allowed to replace a transient pre-publication hold. The first
+version of this harness asked for a reference scan at `RecoveryOnly` and was correctly refused
+with "reference scan requires fresh full inventory". That also means nothing is cacheable during
+a reference scan - `cacheable` requires `references.is_none()` - so in that mode every record
+parks on every trial, which the fixture now asserts rather than assumes.
+
+### A stale build fingerprint silently invalidated a build during this work
+
+Worth recording, because it is the kind of thing that makes every other number on this page
+suspect if it is not caught.
+
+After rewriting the profiling module, `cargo test --lib --no-run` reported `Finished` in 0.6 s
+and named an executable **thirteen minutes older than the source file**. Nothing had been
+recompiled. The test list had 700 entries where the tree should have produced 724, and the new
+module was absent - so the run that appeared to pass was the *previous* binary. Touching the
+source, touching the parent module and touching `lib.rs` all failed to trigger a rebuild.
+
+`cargo clean -p catcoms-app` then surfaced **19 compile errors that had been invisible**: one of
+mine, and eighteen `no method named archive_id` in Agent 2's draft-archive code. Those eighteen
+were not a defect in their work - `archive_id` exists in
+`catcoms-replication/src/studio/overlay/archive.rs` - but `catcoms-app` was linking a **stale
+`catcoms-replication` rlib** predating it. `cargo clean -p catcoms-replication` was needed as
+well.
+
+This machine has another agent's git worktree under `.claude/worktrees/`, which is the known
+shared-target-directory hazard.
+
+**Consequence for this ledger:** "it compiled" and "the tests passed" are only evidence here if
+something actually rebuilt. A `Finished` line with no compilation and an executable older than
+the sources is not a pass. Where a result matters, check that the build did work, or clean the
+package first.
 
 ### What is measured, and what is extrapolation
 
-Measured: Recovery, without reference collection, from 1 KiB to 4 MiB.
+Measured: Recovery, accounting-only, 1 KiB to 4 MiB; and Recovery with reference collection over
+a canonical fixture (below).
 
 **Extrapolated, and labelled as such:** `MAX_RECOVERY_SLOTS_BYTES` is `3 * 6 MiB + 1024`, about
-18 MiB, which is 4.5x beyond the largest measured point. Carrying the observed rates out to it
-gives roughly 45 ms deferrable and 40 ms unavoidable. That is an extrapolation from a linear fit
-over a range that does not include the ceiling, not a measurement of the ceiling, and it should
-not be quoted as one.
+18 MiB, which is 4.5x beyond the largest measured point. Carrying the observed rates out gives
+order-of-tens-of-milliseconds for both phases. That is an extrapolation from a linear fit over a
+range that does not include the ceiling, not a measurement of the ceiling. It is not refined
+further here; measuring valid near-ceiling records is the way to replace it, not arithmetic.
 
 Run-to-run variance on the identical 4 MiB record was about 20% across two runs, so no figure
 here is better than one significant digit.
 
 ### Not covered
 
-- **Reference collection, for Recovery.** The inspector decodes and validates every operation in
-  the projection, so it needs a canonically valid one; the opaque projections this harness
-  stages would be refused. 13.7's "with and without reference collection" is therefore half
-  done. The with-references path is exercised for correctness by
-  `a_budgeted_reference_scan_collects_the_same_cids_as_an_unbudgeted_one`, but not timed.
-- **The other five families.** OwnerReceipts, Intents, Registry, Studio and DraftArchive are
-  unmeasured. Per-family figures are what 13.7 actually asks for; one family establishes the
-  method and the shape of the answer, not the answer.
+- **Registry and Studio**, which are the families whose expensive typed reconstruction motivated
+  this design in the first place, and are therefore the next thing to measure - before any more
+  effort goes into the small-record end of the Recovery curve. Both accounting-only and
+  reference-collecting, over real histories at their largest accepted shapes.
+- **OwnerReceipts, Intents and DraftArchive**, after those.
+- **Structure as well as encoded size.** A byte-linear curve for an opaque Recovery projection
+  establishes nothing about validators that walk operation counts, retained history, reference
+  counts, metadata, or conflict and tombstone shape. Each family needs its own structural axis,
+  not just a size axis.
 - **Restart rate under concurrent writes**, and visits per full scan on a realistic multi-family
-  vault. The `visits=6 records=5` figure here is an artifact of parking every record in a
-  five-record fixture, not a scan-shape measurement.
+  vault. The visits figure here is an artifact of parking every record in a tiny fixture, not a
+  scan-shape measurement. This comes **after** the single-record numbers are interpretable,
+  otherwise a slow full scan cannot be attributed between validation, reference merging,
+  rescans and scheduling.
+- **Near-ceiling records.** Everything above the largest measured point is extrapolation.
+
+Retained-input accounting and cancelled-worker ownership are **not** in this scope. They belong
+to the runtime adoption checkpoint, and storage-only timing does not evidence them.
 
 `validation_fits` is therefore **unchanged** and still returns false for everything. One family's
 curve without its reference-collection half is not enough to set a threshold, and 9.2's rule for
@@ -1725,11 +1872,23 @@ would say so. The batching exists because `scripts/check-no-ambient.sh` forbids 
 everywhere under `crates/`, test code included, so the finest available clock is
 `catcoms_rt::Clock` at milliseconds and one record's validation can round to zero against it.
 
-Two tests, following the existing `studio_source_profile_smoke` / `profile_studio_source_operations`
-pattern: `c3_visit_profile_smoke` runs in the ordinary suite on a `ManualClock` and asserts only
-structure - every record parks, a parked record ends its visit, `largest()` selects the largest -
-and deliberately asserts nothing about duration, since a timing assertion in CI is a machine-speed
-assertion in disguise. `profile_c3_visit_cost` is `#[ignore]`d and prints.
+Three tests, following the existing `studio_source_profile_smoke` /
+`profile_studio_source_operations` pattern. `c3_visit_profile_smoke` and
+`c3_canonical_reference_fixture_collects_its_planted_cids` run in the ordinary suite on a
+`ManualClock` and assert only structure, never duration - a timing assertion in CI is a
+machine-speed assertion in disguise. `profile_c3_visit_cost` is `#[ignore]`d and prints.
+
+**The smoke test's assertions are scoped to exactly what they prove.** Making `validation_fits`
+return true fails it at "a record did not park, so the classifier is no longer detaching
+everything and this measurement no longer isolates the validation phase". That proves the
+profile's structural precondition and nothing else: it does **not** show that the timers cover
+the intended phases, that installation is cheap, or that the fraction estimates a speedup. The
+phase-coverage claims need their own deterministic observations, so the smoke test now also
+requires every trial to complete, every record to contribute a sample in **every** trial (or the
+per-phase means divide by the wrong count), zero validation-cache hits in an accounting Recovery
+scan (a cache hit is never parked, so a record would silently stop contributing a validation
+sample), and no fraction at all from a frozen clock. The canonical fixture separately asserts
+the collected CID set equals the planted one.
 
 ## Requirement 3: COMPLETE
 
@@ -2486,8 +2645,9 @@ under "Executed evidence for C-1" above; every run there used `-j 1` with the pe
 debug override and no concurrent Cargo work, as the shared machine requires.
 
 **One of design 13's eight measurements now has numbers: 13.7, partially** - Recovery only,
-without reference collection, 1 KiB to 4 MiB. See "Design 13.7, partially delivered" above for
-what it found, what is extrapolation and what is still uncovered. The other seven are
+accounting-only from 1 KiB to 4 MiB plus a canonical reference-collecting case. See "Design
+13.7, partially delivered" above for what it found, what is extrapolation, what the three
+corrected measurement boundaries were, and what is still uncovered. The other seven are
 outstanding, including the C-1 before-and-after comparison that would quantify what the
 structural decode actually saves: the code is in, the number is not. Performance numbers quoted
 elsewhere in this ledger still come from the existing
@@ -2563,11 +2723,14 @@ Accompanying prose:
 2. Then **Flow R**, which needs no media and is independent. It was deliberately sequenced after
    this boundary so it is not built on the unbounded inventory path and then split again.
 3. Produce design 13's eight measurements as each item lands; C-1's before-and-after is cheap,
-   since the opt-in profile already exists. **13.7 is partially done** - Recovery only, without
-   reference collection - and found that the classifier can defer only about half a record's
-   cost at megabyte scale. Finishing it needs the other five families, the with-references half
-   (which needs canonically valid projections, not opaque filler), and the restart rate under
-   concurrent writes. The remaining seven measurements have no numbers.
+   since the opt-in profile already exists. **13.7 is partially done** - Recovery, accounting
+   and reference-collecting - and found that for these fixtures the read-and-park and validation
+   phases are of comparable magnitude at megabyte scale, with `validation_fits` able to move
+   only the latter. **Next, in this order: Registry and Studio** (the families whose expensive
+   typed reconstruction motivated the design, both scan modes, real histories at their largest
+   accepted shapes), then OwnerReceipts, Intents and DraftArchive, varying structure and not
+   only encoded size; then realistic full scans and the restart rate under concurrent writes.
+   The remaining seven measurements have no numbers.
 4. R4-TEST-001 stays open until the reviewer can inspect `079e59a` on GitHub. C-1's call-site table
    in design 5.1 still has no test asserting that no moved call site needs a projection.
 5. Track the Linux ordinary two-process smoke failure observed on `7b9cf3e` in the integration
