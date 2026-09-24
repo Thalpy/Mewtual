@@ -114,7 +114,24 @@ pub(crate) fn save_studio_source_fixture(
     device: &MlsDevice,
     target: StudioTarget,
 ) -> Vec<SealedOp> {
-    let (unit, _, operations) = build(group, device, target, 3, 160_000);
+    save_studio_source_fixture_ops(store, server, group, device, target, 3, 160_000)
+}
+
+/// `save_studio_source_fixture` with the shape exposed.
+///
+/// `pub(crate)` for design 13.7's C-3 profile: Studio is one of the two families whose expensive
+/// typed reconstruction motivated C-3, and measuring it needs an operation-count axis rather
+/// than the single fixed shape the wrapper above pins.
+pub(crate) fn save_studio_source_fixture_ops(
+    store: &mut ServerStore,
+    server: u64,
+    group: &ServerGroup,
+    device: &MlsDevice,
+    target: StudioTarget,
+    count: usize,
+    message: usize,
+) -> Vec<SealedOp> {
+    let (unit, _, operations) = build(group, device, target, count, message);
     let inv = inventory(store);
     let mut b = store.studio_storage_budget(server, group, &inv).unwrap();
     store

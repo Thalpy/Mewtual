@@ -1659,13 +1659,17 @@ rather than left to be discovered.
 
 ### The result established so far, stated at its actual width
 
-**For these Recovery accounting fixtures, the measured read-and-park phase and the repeatedly
-measured validation phase are of comparable magnitude at megabyte scale. Changing
-`validation_fits` affects only the latter.**
+**On Registry and Studio - the families C-3 was designed for - validation is 2.4x to 4x the
+read-and-park phase, a 60 to 80% share, and it scales with operation count. On Recovery the two
+are merely comparable. Changing `validation_fits` affects only the validation term, in every
+case.**
 
-That is narrower than the first version of this section, which said detachment "bounds about
-half" of custody. It does not, and the measurement never showed that: see "Three measurement
-boundaries, corrected" below for what the harness was and was not timing.
+Two earlier versions of this statement were wrong in opposite directions. The first said
+detachment "bounds about half" of custody - it does not, and the harness was not measuring total
+custody at all (see "Three measurement boundaries, corrected"). The second, after that
+correction, said the two phases are "of comparable magnitude", which was true of the only family
+then measured and **not** true of the two that motivated the design. Recovery was the
+unrepresentative case.
 
 Release build, `SystemClock`, 8 trials, 64 validation repetitions per record per trial, warm
 page cache, zero validation-cache hits. Means per record per trial.
@@ -1699,9 +1703,10 @@ barely moves with record size.
 1. **Reference collection is the expensive validator, by roughly an order of magnitude per
    byte.** Accounting runs about 1.4 to 2.6 us per KiB; reference collection about 13 to 15.
    The design's expensive case is the one that was previously unmeasured.
-2. **Reference-collection cost tracks the reference count, near-linearly**: about 3.1, 3.8 and
-   4.4 us per reference at 16, 128 and 512. That is a structural axis, not a byte axis, and it
-   is the shape a threshold for this mode would have to be written against.
+2. **Reference-collection cost tracks the reference count rather than bytes** - about 3.1, 3.8
+   and 4.4 us per reference at 16, 128 and 512 in this run. A structural axis, not a byte axis.
+   **See the variance section below before using these numbers**: a second run of the identical
+   fixtures gave 4.8, 6.5 and 8.1, so the direction holds and the rate does not.
 3. **The installation term is small at these reference counts.** This was the open question
    about the missing phase, and the answer is concrete: `install_validated_record` stayed below
    millisecond resolution even summed over eight trials, including the 512-CID merge. It is
@@ -1797,6 +1802,116 @@ with "reference scan requires fresh full inventory". That also means nothing is 
 a reference scan - `cacheable` requires `references.is_none()` - so in that mode every record
 parks on every trial, which the fixture now asserts rather than assumes.
 
+### Registry and Studio measured, and they invert the Recovery conclusion
+
+These are the families whose expensive typed reconstruction motivated C-3, so they are the ones
+whose numbers matter. Release, 8 trials, fresh cache, means per record per trial.
+
+| family | ops | authenticated bytes | read-and-park | validation | fraction of the two |
+|---|---|---|---|---|---|
+| Registry | 2 | 321 650 | 2 125 us | 3 425 us | 61% |
+| Registry | 8 | 1 285 460 | 5 125 us | 13 421 us | 72% |
+| Registry | 24 | 3 855 634 | 13 750 us | 39 056 us | 73% |
+| Studio | 3 | 322 505 | 3 500 us | 5 453 us | 60% |
+| Studio | 12 | 1 768 854 | 6 250 us | 23 218 us | 78% |
+| Studio | 32 | 4 179 459 | 14 750 us | 59 099 us | 80% |
+
+**The Recovery figure was not representative, and this is the correction.** At comparable size -
+about 4 MB - Recovery's validation was 11 ms against 9 ms of read-and-park, a 55% share.
+Studio's is **59 ms against 15 ms, an 80% share**: five times Recovery's validation cost for the
+same bytes, with read-and-park barely different. Registry sits between them at 73%. So on the
+families C-3 exists for, validation is 2.4x to 4x the read-and-park term rather than comparable
+to it, and `validation_fits` has correspondingly more to move than the first profile implied.
+
+**Validation is near-perfectly linear in operation count**, which is the structural axis and not
+a byte axis:
+
+- Registry: 1 712, 1 678, 1 627 us per operation at 2, 8 and 24.
+- Studio: 1 818, 1 935, 1 847 us per operation at 3, 12 and 32.
+
+Flat within 5% across a 12x and 11x operation range, and that flatness is a **within-run**
+comparison, which the variance section below explains is the kind that survives. A threshold for
+these families should be written against operation count; authenticated size is a proxy for it
+only while the per-operation payload stays constant. The absolute constants - roughly 1.65 ms
+and 1.85 ms per operation - are **shape, not calibration**, and each table is a single run.
+
+**Reference collection is free for Registry and Studio, and expensive for Recovery.** That looked
+contradictory until the reason was checked, and the reason is structural:
+
+| family | accounting validator | what reference collection adds |
+|---|---|---|
+| Recovery | treats the projection as **opaque bytes** - decode plus footprint | a full canonical decode and per-operation validation the accounting path never does |
+| Studio | already a full typed reconstruction | `blob_cids()` on the unit it has already restored |
+| Registry | no CID collection at all for `DocRegistry` | nothing |
+
+Measured: Studio at 32 ops was 59 099 us accounting against 55 994 us reference-collecting, and
+Registry at 24 ops 39 056 against 36 775 - both differences inside the established run-to-run
+variance. Recovery's reference collection, by contrast, ran roughly ten times its accounting
+validator per byte. **So "does this scan collect references" is a first-order input to the
+classifier for Recovery and very nearly irrelevant for Registry and Studio.** It is already a
+`validation_fits` parameter; this says what it is worth per family.
+
+**Installation stayed below resolution in every one of these cases**, including the 3.8 MB
+Registry and 4.2 MB Studio records.
+
+### The warm-cache comparison, and why it must not be read as "the cache is slow"
+
+Per-trial step totals, fresh against warm:
+
+| case | fresh | warm |
+|---|---|---|
+| Registry 2 ops | 2 125 us | 1 500 us |
+| Registry 8 ops | 5 375 us | 6 375 us |
+| Registry 24 ops | 13 750 us | 17 000 us |
+| Studio 3 ops | 3 500 us | 1 625 us |
+| Studio 12 ops | 6 375 us | 7 250 us |
+| Studio 32 ops | 14 875 us | 19 500 us |
+
+At the larger sizes the warm scan's steps were **not** faster, and at 24 and 32 ops they were
+somewhat slower. That is not evidence that the cache costs anything, and it should not be
+reported as such. The comparison is confounded by construction: in the fresh runs the record
+**parks**, so the validation is outside the step entirely; in the warm runs there is a cache
+hit, so the validation does not happen at all. **Both step figures therefore exclude validation,
+and what they actually measure in both cases is read, authenticate and digest** - the term
+neither the cache nor the classifier removes. The residual spread is inside the run-to-run
+variance already recorded and is not interpreted here.
+
+The useful distinction the two modes do establish is not about speed:
+
+- a **cache hit** means the validation never happens;
+- **parking** means it happens later.
+
+Both leave read-and-park in the visit. That is the same boundary this whole measurement keeps
+arriving at, from a third direction.
+
+### Registry and Studio: three modes, not one, because they are the cacheable families
+
+Registry and Studio are the families whose expensive typed reconstruction motivated C-3, and
+they are also the only two the validation cache covers: `cacheable` is
+`matches!(family, Registry | Studio) && references.is_none()`. That makes them structurally
+different from Recovery to measure, in a way that would have corrupted the means silently.
+
+**A cache hit is never parked** - by design, because the expensive thing is exactly what the
+cache avoided. So a repeated-trial profile of a cacheable family performs **one** fresh
+validation and then seven cache hits, and those seven trials contribute no validation sample at
+all while the mean divides by whatever count happened to accumulate. Measuring these families
+needs the modes separated:
+
+| mode | cache | what it measures |
+|---|---|---|
+| accounting, fresh | cleared between trials | a fresh typed reconstruction, repeatably |
+| accounting, warm | carried across trials | the cache-hit path |
+| reference collecting | bypassed entirely | the expensive validator, never cached |
+
+`RecordCache::clear_for_test` exists for the first of those and nothing else.
+
+This is **pinned by a test on a frozen clock**, not discovered in a timing run:
+`c3_cacheable_family_parks_when_fresh_and_hits_cache_when_warm` requires that a cleared cache
+parks the Registry record in every trial and reports zero hits, that a warm cache produces hits
+and stops parking in every trial, and that a reference scan reports zero hits and parks in every
+trial regardless of cache state. If any of those three stops holding, the profile's arithmetic
+is wrong and a test says so rather than a number quietly shifting.
+
 ### A stale build fingerprint silently invalidated a build during this work
 
 Worth recording, because it is the kind of thing that makes every other number on this page
@@ -1834,16 +1949,45 @@ order-of-tens-of-milliseconds for both phases. That is an extrapolation from a l
 range that does not include the ceiling, not a measurement of the ceiling. It is not refined
 further here; measuring valid near-ceiling records is the way to replace it, not arithmetic.
 
-Run-to-run variance on the identical 4 MiB record was about 20% across two runs, so no figure
-here is better than one significant digit.
+### Run-to-run variance is large enough to bound what any of this can be used for
+
+The Registry/Studio run re-measured the identical Recovery fixtures. Same tree, same build, same
+machine, nothing changed but what else ran in the process beforehand:
+
+| Recovery case | run A | run B | spread |
+|---|---|---|---|
+| 4 MiB accounting, read-and-park | 9 000 us | 12 250 us | +36% |
+| 4 MiB accounting, validation | 11 009 us | 15 294 us | +39% |
+| 512-reference, validation | 2 228 us | 4 144 us | **+86%** |
+
+**This is bigger than the 20% recorded after the first profile, and that figure is withdrawn.**
+
+What survives it and what does not:
+
+- **Within-run comparisons survive.** The Registry and Studio per-operation constants are flat
+  across a 12x and 11x range *inside one run*, and the Studio-versus-Recovery ratio at equal
+  bytes is a 5x gap measured in the same process. A 40% drift does not explain a 5x gap.
+- **Absolute constants do not survive.** "1.65 ms per Registry operation" is a shape, not a
+  calibration constant, and must not be used as one.
+- **The Recovery reference-count curve is weaker than first stated.** Per-reference cost was
+  7.0 / 3.1 / 3.8 / 4.4 us in run A and 11.0 / 4.8 / 6.5 / 8.1 us in run B at 1 / 16 / 128 /
+  512. Both rise with count; neither is flat, and they disagree by up to 1.9x. The claim that
+  cost tracks reference count "near-linearly" is retained only as a direction, not a rate.
+- The Registry and Studio tables above are from **one run each**. They have not been repeated.
+
+The measurement discipline that would fix this - repeat whole profiles, interleave cases, report
+distribution rather than mean - is not in place yet and is the next thing this harness needs if
+these numbers are ever to calibrate anything. Reported here rather than quietly averaged away.
 
 ### Not covered
 
-- **Registry and Studio**, which are the families whose expensive typed reconstruction motivated
-  this design in the first place, and are therefore the next thing to measure - before any more
-  effort goes into the small-record end of the Recovery curve. Both accounting-only and
-  reference-collecting, over real histories at their largest accepted shapes.
-- **OwnerReceipts, Intents and DraftArchive**, after those.
+- **Repetition discipline.** The single most valuable next step, ahead of more families: repeat
+  whole profiles, interleave cases rather than running them in blocks, and report a
+  distribution instead of a mean. The variance section above is why. Every table here is one
+  run.
+- **Near-ceiling shapes for Registry and Studio.** Measured to 24 and 32 operations; neither is
+  at its largest accepted shape, and the per-operation constant is what would be extrapolated.
+- **OwnerReceipts, Intents and DraftArchive**, which are unmeasured.
 - **Structure as well as encoded size.** A byte-linear curve for an opaque Recovery projection
   establishes nothing about validators that walk operation counts, retained history, reference
   counts, metadata, or conflict and tombstone shape. Each family needs its own structural axis,

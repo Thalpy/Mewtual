@@ -124,6 +124,22 @@ impl RecordCost {
     }
 }
 
+/// Whether the validation cache is allowed to carry across trials.
+///
+/// Only Registry and Studio are cacheable, and only in accounting mode (`cacheable` requires
+/// `references.is_none()`). The distinction is load-bearing for them and irrelevant for the
+/// rest, so it is an explicit parameter rather than a property of the fixture.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CachePolicy {
+    /// Clear between trials. Every trial performs a fresh validation, so `TRIALS` batches
+    /// actually happen and the mean divides by the right count.
+    Fresh,
+    /// Leave it warm. After the first trial the record is a cache hit - and a cache hit is
+    /// *never parked*, by design, because the expensive thing is exactly what the cache
+    /// avoided. So this measures the hit path, and contributes no validation samples at all.
+    Warm,
+}
+
 /// Whole-scan figures, kept per trial rather than averaged.
 #[derive(Debug, Default)]
 struct ScanCost {
@@ -131,6 +147,10 @@ struct ScanCost {
     visits: usize,
     finish_ms: u64,
     begin_ms: u64,
+    /// Every `step_epoch_storage_scan` sample summed, parking or not. This is the figure that
+    /// compares a warm-cache scan against a fresh one, since a warm scan parks nothing and so
+    /// has no per-record rows.
+    step_total_ms: u64,
     /// `reused_records` from the final progress of each trial: validation-cache hits, which are
     /// never parked and so never contribute a validation sample.
     reused: usize,
@@ -179,10 +199,14 @@ fn profile_scan(
     store: &mut ServerStore,
     coverage: EpochInventoryCoverage,
     references: bool,
+    cache: CachePolicy,
     clock: &dyn catcoms_rt::Clock,
 ) -> ScanCost {
     let mut out = ScanCost::default();
     for _ in 0..TRIALS {
+        if cache == CachePolicy::Fresh {
+            store.inventory_cache.clear_for_test();
+        }
         out.trials += 1;
         let t = clock.monotonic_ms();
         let mut cursor = store.begin_epoch_storage_scan(coverage).unwrap();
@@ -200,6 +224,7 @@ fn profile_scan(
                 .unwrap();
             let read_and_park_ms = clock.monotonic_ms().saturating_sub(t);
             out.visits += 1;
+            out.step_total_ms += read_and_park_ms;
             last = progress;
             if let Some(parked) = store.take_parked_record(&mut cursor) {
                 let (family, size, refs) = parked.classification();
@@ -384,12 +409,19 @@ fn report(label: &str, cost: &ScanCost, profile: &str) {
     }
     println!(
         "C3_PROFILE scan={label} trials={} visits={} records={} begin_ms={} finish_ms={} \
-         cache_hits={} repetitions={} build={profile} page_cache=warm_written_immediately_before",
+         step_total_ms={} step_per_trial_us={} cache_hits_last_trial={} repetitions={} \
+         build={profile} page_cache=warm_written_immediately_before",
         cost.trials,
         cost.visits,
         cost.records.len(),
         cost.begin_ms,
         cost.finish_ms,
+        cost.step_total_ms,
+        if cost.trials == 0 {
+            0
+        } else {
+            cost.step_total_ms as u128 * 1_000 / cost.trials as u128
+        },
         cost.reused,
         REPETITIONS,
     );
@@ -403,10 +435,13 @@ fn measure_recovery_accounting(sizes: &[usize], clock: &dyn catcoms_rt::Clock, p
         let key = format!("recovery-{n}");
         stage_sized(&mut store, 7, &document(b"group", key.as_bytes()), *size);
     }
+    // Recovery is not a cacheable family, so the policy is immaterial here; `Fresh` states the
+    // intent rather than relying on that.
     let cost = profile_scan(
         &mut store,
         EpochInventoryCoverage::RecoveryOnly,
         false,
+        CachePolicy::Fresh,
         clock,
     );
     assert_eq!(
@@ -436,7 +471,13 @@ fn measure_recovery_references(frames: &[usize], clock: &dyn catcoms_rt::Clock, 
         // Reference collection is contractually full-coverage: `collect_creative_references`
         // refuses anything narrower, because a partial inventory cannot be allowed to replace a
         // transient pre-publication hold.
-        let cost = profile_scan(&mut store, REFERENCE_COVERAGE, true, clock);
+        let cost = profile_scan(
+            &mut store,
+            REFERENCE_COVERAGE,
+            true,
+            CachePolicy::Warm,
+            clock,
+        );
         let recovery: Vec<_> = cost
             .records
             .iter()
@@ -496,6 +537,142 @@ fn measure_recovery_references(frames: &[usize], clock: &dyn catcoms_rt::Clock, 
     }
 }
 
+/// Registry: one of the two families whose expensive typed reconstruction motivated C-3.
+///
+/// The axis is **operation count**, not bytes: `save_inventory_fixture_ops` builds a real signed
+/// registry log of `ops` operations at 160 KiB per message, and the reconstruction walks them.
+/// A byte axis alone would not distinguish a large record from a structurally deep one.
+///
+/// Measured in all three modes, because Registry is cacheable and the modes are not variations
+/// of one number: fresh accounting validation, the accounting cache-hit path, and reference
+/// collection (in which nothing is cacheable at all).
+fn measure_registry(op_counts: &[usize], clock: &dyn catcoms_rt::Clock, profile: &str) {
+    for ops in op_counts {
+        let root = tempfile::tempdir().unwrap();
+        let mut store = open(root.path());
+        let path = crate::store::epoch_registry::tests::performance::save_inventory_fixture_ops(
+            &mut store, *ops,
+        );
+        let bytes = fs::metadata(&path).unwrap().len();
+        println!("C3_PROFILE scan=registry ops={ops} physical_bytes={bytes}");
+
+        let fresh = profile_scan(
+            &mut store,
+            REFERENCE_COVERAGE,
+            false,
+            CachePolicy::Fresh,
+            clock,
+        );
+        assert!(
+            fresh
+                .records
+                .iter()
+                .any(|r| r.family == EpochRecordKind::Registry),
+            "no Registry record was parked, so nothing about Registry was measured"
+        );
+        report(
+            &format!("registry_accounting_fresh_ops{ops}"),
+            &fresh,
+            profile,
+        );
+
+        let warm = profile_scan(
+            &mut store,
+            REFERENCE_COVERAGE,
+            false,
+            CachePolicy::Warm,
+            clock,
+        );
+        assert!(
+            warm.reused > 0,
+            "a warm-cache accounting scan of a cacheable family reported no cache hits, so it \
+             is not measuring the hit path"
+        );
+        report(
+            &format!("registry_accounting_warm_ops{ops}"),
+            &warm,
+            profile,
+        );
+
+        let refs = profile_scan(
+            &mut store,
+            REFERENCE_COVERAGE,
+            true,
+            CachePolicy::Warm,
+            clock,
+        );
+        assert_eq!(
+            refs.reused, 0,
+            "a reference scan reported cache hits, but nothing is cacheable when collecting \
+             references"
+        );
+        report(&format!("registry_references_ops{ops}"), &refs, profile);
+    }
+}
+
+/// Studio: the other family C-3 was designed for.
+///
+/// Same three modes, same reasoning. The axis is operation count at a fixed large message size.
+fn measure_studio(op_counts: &[usize], clock: &dyn catcoms_rt::Clock, profile: &str) {
+    for ops in op_counts {
+        let root = tempfile::tempdir().unwrap();
+        let mut store = open(root.path());
+        let device = catcoms_mls::MlsDevice::generate().unwrap();
+        let group = catcoms_mls::ServerGroup::create(&device).unwrap();
+        let target = StudioTarget::Flipnote {
+            channel: [7; 16],
+            object: [9; 16],
+        };
+        crate::store::epoch_studio::tests::performance::save_studio_source_fixture_ops(
+            &mut store, 7, &group, &device, target, *ops, 160_000,
+        );
+        println!("C3_PROFILE scan=studio ops={ops}");
+
+        let fresh = profile_scan(
+            &mut store,
+            REFERENCE_COVERAGE,
+            false,
+            CachePolicy::Fresh,
+            clock,
+        );
+        assert!(
+            fresh
+                .records
+                .iter()
+                .any(|r| r.family == EpochRecordKind::Studio),
+            "no Studio record was parked, so nothing about Studio was measured"
+        );
+        report(
+            &format!("studio_accounting_fresh_ops{ops}"),
+            &fresh,
+            profile,
+        );
+
+        let warm = profile_scan(
+            &mut store,
+            REFERENCE_COVERAGE,
+            false,
+            CachePolicy::Warm,
+            clock,
+        );
+        assert!(
+            warm.reused > 0,
+            "a warm-cache accounting scan of a cacheable family reported no cache hits"
+        );
+        report(&format!("studio_accounting_warm_ops{ops}"), &warm, profile);
+
+        let refs = profile_scan(
+            &mut store,
+            REFERENCE_COVERAGE,
+            true,
+            CachePolicy::Warm,
+            clock,
+        );
+        assert_eq!(refs.reused, 0, "a reference scan reported cache hits");
+        report(&format!("studio_references_ops{ops}"), &refs, profile);
+    }
+}
+
 /// The harness itself, on a `ManualClock` that never advances.
 ///
 /// Asserts the structure every reported figure depends on, and deliberately asserts nothing
@@ -515,6 +692,7 @@ fn c3_visit_profile_smoke() {
         &mut store,
         EpochInventoryCoverage::RecoveryOnly,
         false,
+        CachePolicy::Fresh,
         &clock,
     );
 
@@ -578,7 +756,19 @@ fn c3_canonical_reference_fixture_collects_its_planted_cids() {
     assert_eq!(planted.len(), 4, "the fixture planted no CIDs to find");
 
     let clock = ManualClock::new(0);
-    let cost = profile_scan(&mut store, REFERENCE_COVERAGE, true, &clock);
+    // `Warm` is deliberate: in a reference scan nothing is cacheable, so a warm cache must make
+    // no difference. If that ever changes, the trials assertion below fails.
+    let cost = profile_scan(
+        &mut store,
+        REFERENCE_COVERAGE,
+        true,
+        CachePolicy::Warm,
+        &clock,
+    );
+    assert_eq!(
+        cost.reused, 0,
+        "a reference scan reported validation-cache hits, but nothing is cacheable in that mode"
+    );
     assert_eq!(
         cost.records
             .iter()
@@ -598,6 +788,82 @@ fn c3_canonical_reference_fixture_collects_its_planted_cids() {
     );
 }
 
+/// The cacheable families behave differently across trials, and the profile depends on exactly
+/// how. Pin it on a frozen clock rather than discovering it in a timing run.
+///
+/// Registry stands for both: `cacheable` is `matches!(family, Registry | Studio) &&
+/// references.is_none()`, so the three modes are structurally distinct and a profile that
+/// conflated them would divide its means by the wrong count without saying so.
+#[test]
+fn c3_cacheable_family_parks_when_fresh_and_hits_cache_when_warm() {
+    let root = tempfile::tempdir().unwrap();
+    let mut store = open(root.path());
+    crate::store::epoch_registry::tests::performance::save_inventory_fixture_ops(&mut store, 2);
+    let clock = ManualClock::new(0);
+
+    let fresh = profile_scan(
+        &mut store,
+        REFERENCE_COVERAGE,
+        false,
+        CachePolicy::Fresh,
+        &clock,
+    );
+    let registry: Vec<_> = fresh
+        .records
+        .iter()
+        .filter(|r| r.family == EpochRecordKind::Registry)
+        .collect();
+    assert_eq!(registry.len(), 1, "the Registry fixture did not park");
+    assert_eq!(
+        registry[0].trials, TRIALS,
+        "clearing the cache between trials must make every trial a fresh validation, or the \
+         per-phase means divide by the wrong count"
+    );
+    assert_eq!(
+        fresh.reused, 0,
+        "a cleared cache still reported hits, so clear_for_test is not clearing"
+    );
+
+    let warm = profile_scan(
+        &mut store,
+        REFERENCE_COVERAGE,
+        false,
+        CachePolicy::Warm,
+        &clock,
+    );
+    assert!(
+        warm.reused > 0,
+        "a warm cache produced no hits for a cacheable family, so the hit path is unmeasured"
+    );
+    assert!(
+        !warm
+            .records
+            .iter()
+            .any(|r| r.family == EpochRecordKind::Registry && r.trials == TRIALS),
+        "a cache hit is never parked by design, so a warm scan cannot park the Registry record \
+         in every trial"
+    );
+
+    // And in reference mode the cache is bypassed entirely, warm or not.
+    let refs = profile_scan(
+        &mut store,
+        REFERENCE_COVERAGE,
+        true,
+        CachePolicy::Warm,
+        &clock,
+    );
+    assert_eq!(
+        refs.reused, 0,
+        "nothing is cacheable while collecting references"
+    );
+    assert!(
+        refs.records
+            .iter()
+            .any(|r| r.family == EpochRecordKind::Registry && r.trials == TRIALS),
+        "a reference scan must park the Registry record in every trial"
+    );
+}
+
 /// Opt-in, real clock, real sizes. Prints; asserts correctness, never machine speed.
 #[test]
 #[ignore = "opt-in design 13.7 profiling of C-3 scan phases; no machine-speed assertion"]
@@ -613,4 +879,6 @@ fn profile_c3_visit_cost() {
         profile,
     );
     measure_recovery_references(&[1, 16, 128, 512], &SystemClock, profile);
+    measure_registry(&[2, 8, 24], &SystemClock, profile);
+    measure_studio(&[3, 12, 32], &SystemClock, profile);
 }
