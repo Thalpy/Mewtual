@@ -1,11 +1,14 @@
 # Gate 4 Agent 3: runtime signed fault repair
 
-Status: **revision 14, design PASS at `d48280012cc653b458b1e3ce00b49f6ae2f23c0e`. No production code
-is written.**
+Status: **revision 16 independently PASS at `2b741e7`**. CORE-006/007 and TEST-014's
+design plan are closed; C-7 implementation is authorized. C-3/C-4/C-8, C-5's sequence accessor
+and the C-7 journal leaf exist. Runtime/store integration and integrated regressions remain
+pending. See [current implementation and verification](GATE4-AGENT-3-STATUS.md).
 
-The bounded repair design is accepted. Implementation, integration, mutation execution, CI evidence,
-Agent 2's unimplemented tenure seam, Agent 1's remaining I-4 and C-3 work, and full Gate 4
-acceptance all remain separate and unaccepted. A design PASS is not permission to start Gate 5.
+The accepted [authority/journal contract](GATE4-AGENT-3-AUTHORITY-FOLLOWUP.md) and bounded
+liveness/history limitations remain unchanged. Agent 2's tenure seam, Agent 1's runtime fences
+and full Gate 4 acceptance remain separate. Gate 5 stays closed. Older revision histories below
+describe prior dispositions.
 
 
 
@@ -118,7 +121,20 @@ this scope needs and what it does without each.
 No Cargo command was executed for this pass either. Every number is a source constant read at the
 base or an explicitly labelled estimate.
 
-## 0. Disposition of the revision-13 findings
+## 0. Current disposition: revision-15 findings
+
+| Finding | Revision-16 response |
+|---|---|
+| IMP-001 | **PASS/CLOSED** by the independent review of `a751369`; code unchanged here |
+| CORE-005 | **Bounded design PASS**, including finite-history/convergence tradeoffs; Agent 2 seam and N49/N50 implementation remain prerequisites |
+| CORE-006 / CORE-004 | Two independent source/journal effects with a joint authority/evidence compatibility check; effect or head equality is not required |
+| CORE-007 / CORE-004 | Proposed turnover hold starts at durable B1, before B2, and may last until durable terminal/recycling; no cancellation is introduced |
+| TEST-014 | Integrated N3b/journal asymmetry and pre-B2/post-B2 churn matrix added; tests remain planned, not executed |
+
+The last three rows require independent re-review before C-7 implementation. Earlier disposition
+tables below are historical and do not reopen accepted CORE-001/002/003 or CORE-005.
+
+## 0. Historical disposition of the revision-13 findings
 
 | Finding | Disposition in revision 14 | Where |
 |---|---|---|
@@ -685,7 +701,10 @@ Invariants, each with a mutant in 15.2:
 
 ## 5. Concrete APIs
 
-None of these exist. A proposed name is not an implementation.
+This section carries the revision-14 plan with the explicitly identified revision-15/16 corrections.
+C-3/C-4/C-8 and C-5's sequence getter exist; the remaining proposed APIs do not. CORE-001/002/003
+and CORE-005 are accepted design corrections; CORE-004's CORE-006/007 corrections await review.
+A proposed name is not an implementation or runtime acceptance.
 
 ### 5.1 Core additions, `catcoms-replication`
 
@@ -694,11 +713,11 @@ already uses (`epoch.rs:2522-2563`):
 
 ```rust
 /// Leave the read-only Fault phase under the same lock that swaps the receipt book. The caller
-/// supplies a COMPLETE validated transition; this only checks that the current phase is the one
-/// the plan was computed against and that the target shape is coherent, then commits both.
+/// supplies a COMPLETE validated transition; recheck the exact planned gate/book state and
+/// coherent target shape before committing both. A phase-only match is insufficient.
 pub(crate) fn commit_repair<F>(
     &self,
-    expected: EpochPhase,
+    expected: RepairStateStamp,
     next_phase: EpochPhase,
     next_receipt_hash: Option<Hash32>,
     commit_book: F,
@@ -707,10 +726,12 @@ where
     F: FnOnce();
 ```
 
-It refuses unless the observed phase equals `expected`, unless `next_phase` is `Open` with no
-receipt hash or `Closing` with one, and unless the phase is not `Settled`. Accepted operations,
-per-device accounting and the bounded quarantine are untouched: a repair changes admission
-authority, not the admitted set. On any refusal neither the gate nor the book changes.
+The private stamp binds the exact expected gate phase/receipt hash and relevant book head,
+fault pair and repair state. It refuses a stale stamp, any target other than `Open` with no
+receipt hash or `Closing` with one, and `Settled`. Accepted operations, domain IDs, signed log
+and byte/per-device accounting remain unchanged. **CORE-001:** an Open target clears only the
+rejected-hash quarantine under this lock so the result is restorable and re-admission remains
+valid; a Closing target preserves quarantine. On refusal neither gate nor book changes.
 
 **C-2. One validated candidate transition.** On `ReceiptBook`, computed against an explicit source
 context so the correction lives in shared core (U-2):
@@ -720,6 +741,8 @@ pub(crate) struct RepairSource<'a> {
     pub opening: Option<&'a Receipt>,
     pub gate_epoch: u64,
     pub phase: EpochPhase,
+    /// Private snapshot binding used again under the commit lock (CORE-002).
+    pub expected: RepairStateStamp,
     pub adopting: bool,
 }
 
@@ -818,13 +841,13 @@ reshaped by a repair **unless it is itself sitting on the repudiated branch** (c
 |---|---|---|---|---|---|
 | 6a | **not faulted**, same-tenure, `O == Some(L)` | `Closing` | `S.hash()` | `true` | `Some(S)` |
 | 6c | **not faulted**, same-tenure, an own anchor is covered by the repair (below) | `Closing` | `S.hash()` | `true` | `Some(S)` |
-| 6b | **not faulted**, no own anchor covered: screening only | unchanged | unchanged | unchanged | none |
+| 6b | **not faulted**, cross-tenure or no own anchor covered: screening only | unchanged | unchanged | unchanged | none |
 | 6d | **faulted on a different pair**: screening only | unchanged | unchanged | unchanged | none |
 | 1a | faulted on the pair, same-tenure, `O == Some(S)`, `H` qualifies (below) | `Closing` | `H.hash()` | `false` | none |
 | 1b | faulted on the pair, same-tenure, `O == Some(S)`, `H` does not qualify | `Open` | none | `false` | none |
-| 2a | faulted on the pair, same-tenure, `S.closed_epoch == E`, `!source.adopting` | `Closing` | `S.hash()` | `false` | none |
+| 2a | faulted on the pair, same-tenure, `S.closed_epoch == E`, `!source.adopting`, opening not covered | `Closing` | `S.hash()` | `false` | none |
 | 2b | faulted on the pair, same-tenure, `S.closed_epoch == E`, `source.adopting` | `Closing` | `S.hash()` | `true` | `Some(S)` |
-| 3 | faulted on the pair, same-tenure, `O == Some(L)` | `Closing` | `S.hash()` | `true` | `Some(S)` |
+| 3 | faulted on the pair, same-tenure, opening covered (exact loser or losing baseline); takes precedence over 2a/2b | `Closing` | `S.hash()` | `true` | `Some(S)` |
 | 4 | faulted on the pair, same-tenure, `source.adopting`, none of the above | `Closing` | `S.hash()` | `true` | `Some(S)` |
 | 5 | **faulted on the pair**, cross-tenure: `Unblocked` | `Open` | none | `false` | none |
 | 8 | otherwise | refuse: `Held(UnsupportedShape)` | | | |
@@ -851,7 +874,7 @@ shown to descend from either side. Such a head falls to case 6b and is left alon
 invents no ancestry for it; 15.1 N32 asserts that explicitly so the limitation is visible rather
 than accidental.
 
-Case 6b is now the outcome only for a source with **no** covered anchor: it records
+For a same-tenure repair, case 6b is the outcome only with **no** covered anchor: it records
 `resolved_repair` and `repair_sequence` so the loser and its baseline descendants are screened from
 then on, and touches no gate, head, adoption mode or retained progress. Case 6a keeps the
 descendant-convergence path, but only same-tenure, because a cross-tenure selected receipt cannot be
@@ -867,7 +890,8 @@ decided next. The source's own fault is retained untouched. `Held(PairMismatch)`
 removed as an outcome; a genuinely malformed pair is still caught by `check_evidence`.
 
 `H` qualifies in case 1a only under a **positive** justification, never merely the absence of a
-conflict: `H.closed_epoch == E`, `H.tenure_id == S.tenure_id`, `H != L`, and `O == Some(S)`, so the
+conflict: `H.closed_epoch == E`, `TenureSelection::from(H) == TenureSelection::from(S)`,
+`H` is not covered by the repair, and `O == Some(S)`, so the
 epoch `H` seals is the one the selected checkpoint opened. That is the only lineage statement
 receipts support; they carry no ancestry chain. In every other same-tenure case the head is `S`.
 This resolves AG3-DES-003: in the reviewer's counterexample `O == Some(L)`, which is case 3, so the
@@ -899,7 +923,7 @@ that rewinds this branch, stages an ordinary `Rewound` snapshot. A same-tenure h
 with the tenure that is over, which is safe precisely because this case requires the source to have
 been faulted: an unfaulted source keeps everything through case 6b.
 
-`RepairHold` distinguishes `SequenceNotNewer`, `RepairInProgress`, `ScopeMismatch`, `Settled` and
+`RepairHold` distinguishes `SequenceNotNewer`, `RepairInProgress`, `Settled` and
 `UnsupportedShape`. `PairMismatch` and `NoFault` are gone: both of those shapes are now the
 screening cases 6d and 6b, which is what removes the AG3-DES-019 deadlock. A `Held` result is a successful observation the caller reports,
 never an error that discards evidence, exactly as `StudioAdoptionOutcome::Fault` is handled at
@@ -918,16 +942,24 @@ pub fn apply_receipt_repair(
 ) -> Result<StudioRepairExit, ReplError>;
 ```
 
-It builds `RepairSource` from itself, calls `plan_repair`, and on `Transition` calls
-`commit_repair`, whose closure swaps the book **and** `self.adopting` in the same critical section.
-Any error returns before that closure runs, so the live unit is unchanged (I-1, P4).
+It builds `RepairSource` from itself and calls `plan_repair`. Ordinary exits use `commit_repair`,
+whose closure swaps the book **and** `self.adopting` in the same critical section. **CORE-002:**
+case 6d uses a distinct private unchanged-gate screening commit. Under the lock it rechecks the
+exact planned stamp, including the unrelated fault's full pair and relevant receipt hash; it
+preserves Fault(B) and its evidence byte-for-byte while recording screened repair A and its typed
+provenance. A mere `Fault` phase match is insufficient. This is not a general Fault-to-Fault
+mutation API; only the validated screening planner can produce its candidate. Settled refuses.
+Any error precedes the commit closure, so the live unit is unchanged (I-1, P4).
 
 **C-8. A repair-bearing book is restorable without a current head** (AG3-DES-014, R17).
 `decode_mode` derives its document from `latest` alone, so case 5's epoch-zero shape fails. The
 derivation becomes: the document is `latest`'s when present, and otherwise, **only in the
 repair-bearing versions 4 and 5**, the resolved repair's. Every retained receipt is then checked
 against that document independently, exactly as today, and the existing
-`tenure.is_some() == latest.is_some()` rule is preserved. Versions 1 to 3 are unchanged, so a book
+`tenure.is_some() == latest.is_some()` rule is preserved. **IMP-001:** no version may carry
+`previous_until_installed` without `latest`, even when that predecessor is signed for the same
+document. Both repair-bearing versions have an isolated negative regression. Legacy framing
+and valid versions 1 to 3 are unchanged, so a book
 with no head and no repair still decodes to the empty book and nothing else gains a new
 representation.
 
@@ -951,8 +983,8 @@ and still faults (I-9, M10, M11).
 
 ```rust
 /// Repair-independent: are these two canonical signed receipts a genuine conflicting pair for
-/// this logical document? Signature and shape only. It asserts nothing about present membership
-/// or ownership, needs no repair to exist, and mints no capability.
+/// this logical document? Self-signature and shape only. It establishes neither present nor
+/// historical membership/ownership, needs no repair to exist, and mints no capability.
 pub fn conflicting_receipt_pair(
     document: &LogicalDocument,
     a: &Receipt,
@@ -967,6 +999,11 @@ impl ReceiptRepair {
 
 The split is required by AG3-DES-001: the fault-report path validates a pair *before* any repair
 exists, so it cannot call a method on `ReceiptRepair`. Contents are section 6.2.
+
+**CORE-005:** a signer may never have been owner. This checker is deliberately retained as a
+narrow primitive. Report admission must separately establish local Observed historical/current
+authority before any durable reservation, slot, source, overflow or proof mutation (6.5 and the
+authority follow-up). Authenticating the reporter does not establish the receipts' owner history.
 
 `ResolvedRepair::verify` is rewritten to call `check_evidence` and **keeps its own additional
 checks**: the repair's historical signature, the selected-versus-losing role assignment, the
@@ -1017,8 +1054,10 @@ impl ReceiptBook { pub fn repair_sequence(&self) -> u64; }
 
 `installed` is `self.opened_by(&selected)`, matching the existing adoption test
 (`store/epoch_studio/adoption.rs:89`). `install_pending` is
-`resolved_repair.is_some() && self.adopting && self.phase() == Closing && latest == selected &&
-!installed`. It is the single eligibility predicate both runtime steps use (10.3).
+`exact_repair_binding && disposition != Screened && self.adopting && self.phase() == Closing &&
+latest == selected && !installed`. Screening does not take ownership of ordinary adoption.
+The implemented shared result/state types are `SourceRepairOutcome` and `SourceRepairState`;
+scope mismatches return `ReplError::EpochScope`. These APIs perform no durable transaction.
 
 **Where the disposition tag lives.** In the **Studio restart unit's own snapshot**, not in core's
 `ResolvedRepair` encoding, because book versions 4 and 5 are existing, accepted and tested code and
@@ -1034,7 +1073,7 @@ is:
 
 ```text
 v1 / v2 : <1|2> | channel | ...            unchanged, byte compatible
-v3      : 3 | u8 adopting | u8 disposition | u8 repair_bound | repair_hash[32] | channel | ...
+v3      : 3 | u8 adopting | u8 disposition | u8 repair_bound=1 | u32(32) | repair_hash[32] | channel | ...
 ```
 
 `repair_bound` and `repair_hash` bind the disposition to the **exact** resolved repair, by its
@@ -1060,6 +1099,12 @@ Because case 5 sets neither `adopting` nor an install, a cross-tenure repair can
 source claimed by `repair_install_pending()` for a checkpoint that `select_repaired_checkpoint` is
 forbidden to install.
 
+The implemented leaf also fences competing ordinary begin/seal calls while `install_pending`:
+exact selected retries are `Duplicate`, covered losers are `Stale`, and other receipts refuse
+without mutation. This preserves the local continuation; the broader durable B1-through-recycling
+claim fence remains mandatory store integration work. Legacy v1/v2 resolved books remain readable
+without inventing an action; an unbound exact repair retry holds `UnsupportedShape`.
+
 **C-6. Recovery reason.** `prepare_checkpoint_adoption` gains a private reason parameter and a
 public `prepare_repair_adoption(receipt, raw_seed, group, tenure)` wrapper passing
 `RecoveryReason::Repair`. The reason is a property of the transaction that performs the
@@ -1075,96 +1120,70 @@ clones three things together: the book, the matching `RepairDisposition`, and it
 and sequence binding. A successor carrying a resolved repair with no disposition, or with one whose
 binding names a different repair, is rejected on restore.
 
-**C-7. Repair-authorized journal reconciliation.** This answers AG3-DES-006 and R13:
+**C-7. Repair-authorized journal reconciliation (CORE-003 accepted; CORE-004 proposed).**
+The complete proposed authority, byte-bound and lifecycle contract is in
+[CORE-004's follow-up](GATE4-AGENT-3-AUTHORITY-FOLLOWUP.md#core-004-publication-facts-obligations-and-canonical-decisions).
+This replaces revision 14's rules that dropped a losing high_water, treated any historical match
+as canonical authority and required numeric epoch monotonicity across repaired baselines.
 
 ```rust
 impl OwnerReceiptJournal {
-    /// The ONLY way an irrevocable decision is replaced. Requires a live-verified repair that
-    /// names the journal's current preferred decision as its loser. It never creates a new
-    /// publication obligation and never invents a decision the owner did not sign.
+    /// Live authority and full evidence checked before any no-op. Replaces only an exact or
+    /// provable losing effective choice; historical matches alone cannot override a new head.
     pub fn resolve_repair(
         &mut self,
         repair: &ReceiptRepair,
-        selected: &Receipt,
+        a: &Receipt,
+        b: &Receipt,
+        retiring_pending_close: Option<&CloseRecord>,
         group: &ServerGroup,
         issuer_tenure_start: u64,
-    ) -> Result<bool, ReplError>;
+    ) -> Result<JournalRepairEffect, ReplError>;
+
+    /// Adjacency base; effective publication choice is in_flight().or(canonical_head()).
+    pub fn canonical_head(&self) -> Option<&Receipt>;
 }
 ```
 
-Rules: `repair.verify_current_owner(group, issuer_tenure_start)`;
-`selected.hash() == repair.selected_receipt_hash`; `selected.document` matches the journal's
-document. If neither `in_flight` nor `high_water` hashes appear in `repair.receipt_hashes`, return
-`Ok(false)` and change nothing. If the loser is `in_flight`, clear it. If the loser is
-`high_water`, drop it. In **both** cases the winner becomes the journal's canonical decision. It
-never sets `in_flight`: reconciliation records what the owner already decided, it does not create a
-new thing to publish. The losing receipt's bytes are retained by the caller's record (5.2), so
-nothing irrevocable is erased (I-11).
+Version 2 separates journal identity `(document, full owner key, start, tenure ID)` from each
+receipt's inherited selection. `high_water` records actual publication, `in_flight` its sole
+pending obligation, and `reconciled` the canonical repair decision. `canonical_head()` is
+`reconciled.or(high_water)`. Historical high_water does not override another canonical choice.
+The full pair and live repair are verified first; an unrelated historical-tenure pair screens
+without mutation instead of being rejected for differing from the healthy journal's current tenure.
 
-**The canonical decision is a distinct field, not the publication bit** (AG3-DES-011). Revision 2
-only cleared a losing `in_flight`, which R15 shows is not enough: with `high_water = R(e-1)` and a
-losing `in_flight = L(e)`, the owner falls back to `R(e-1)` for both head selection and
-`prepare_verified`'s adjacency, so it serves the wrong receipt and reads the next receipt at `e+1`
-as a gap. The journal therefore gains:
+The effective reconciled choice can itself be repaired before publication (CORE-003). An exact
+or provable differing-baseline losing pending decision is retired only with its complete signed
+receipt and bound CloseRecord atomically retained at B1. Unknown same-baseline ancestry gives no
+permission to discard pending work. **CORE-006:** source effects (`Transitioned`, `Retargeted`,
+`Screened`) and journal effects (`Replace`, `RetirePendingAndReplace`, `Normalize`, `NoChange`)
+are independent. Before B1, the joint planner validates their resulting authority/evidence roles,
+not equality of tags or receipt heads. Case 1a may transition the source while journal H remains
+byte-identical in high_water or in_flight; conversely a source may screen while its journal
+replaces a losing effective choice. A covered receipt cannot remain publishable or eligible for
+settlement/installation, but guarded historical/recovery evidence is retained. The follow-up
+specifies the full postconditions, B1-to-B2 custody fence and unchanged three-way proof check.
 
-```rust
-pub struct OwnerReceiptJournal {
-    document, tenure, high_water, in_flight,
-    /// Set only by `resolve_repair`. The canonical decision after a signed repair. It may never
-    /// have been published by this device, so it is deliberately NOT `high_water` and
-    /// `published()` keeps its exact meaning.
-    reconciled: Option<Receipt>,
-}
+Published R(4,A) plus reconciled S(2,B) is valid. R stays the published fact until S actually
+publishes, then S becomes high_water even though its epoch is lower. Stale callbacks cannot revive
+retired pending decisions. Selecting an already-published exact receipt normalizes without a
+phantom unpublished reconciliation. Repeated repairs retain bounded latest provenance rather
+than an unbounded audit chain, with source recovery/finalization barriers specified in the follow-up.
 
-/// Effective head for selection and for the next decision's adjacency.
-pub fn canonical_head(&self) -> Option<&Receipt>;   // reconciled.as_ref().or(high_water.as_ref())
-```
-
-`canonical_head()` replaces `high_water` in `prepare_verified`'s same-tenure adjacency rule and in
-the head selector's `own_choice` (`in_flight().or(canonical_head())`), and is restored across
-restart. `published()` still answers only "what did this device finish publishing", so nothing
-falsely implies a completed publication.
-
-**The full lifecycle, not just creation** (AG3-DES-015, R18). Revision 3 defined only how
-`reconciled` appears, which leaves two live defects: `mark_published` accepts only an exact
-`high_water` match or the current `in_flight`, so completing a proof of the reconciled winner has
-no valid path at all; and a stale `reconciled` keeps overriding a newer high water forever. So:
-
-1. **Promotion.** `mark_published(h)` additionally accepts `h == reconciled.hash()`: it moves that
-   receipt into `high_water` and clears `reconciled`. This claims nothing that did not happen; it
-   records the completion of a publication this device actually performed.
-2. **Retirement on supersession.** Whenever `high_water` is set, a `reconciled` whose
-   `closed_epoch <= high_water.closed_epoch` is cleared, so a newer decision always wins and
-   `canonical_head()` can never regress.
-3. **Tenure change.** `prepare_verified`'s `changes_tenure` branch, which already drops
-   `high_water`, also drops `reconciled`: an old tenure's canonical decision is not this tenure's.
-4. **Stale retries are inert.** The early `high_water` match returns `Ok(())` without touching
-   `reconciled`, and a hash matching neither `in_flight`, `high_water` nor `reconciled` is still
-   `ReceiptConflict`, so an old completion retry can never erase a newer reconciled decision.
-5. **Decode constraints.** Version 2 rejects a `reconciled` that is not same-tenure, or whose
-   `closed_epoch` is not strictly greater than `high_water`'s, and expresses the existing
-   `in_flight` adjacency invariant against `canonical_head()` rather than `high_water`.
-6. **Identity derivation** (AG3-DES-021, R23). `decode` currently derives its document from
-   `high_water.as_ref().or(in_flight.as_ref())` and then requires document presence to agree with
-   tenure presence, so the shape this section permits and N7 requires, both absent with only
-   `reconciled` present, would fail. Version 2 derives document and tenure identity from the
-   **effective retained set**, including `reconciled` when the other two are absent, and validates
-   every retained receipt against that identity. Version 1 is unchanged. This is the journal
-   analogue of C-8, and it makes the codec contract match the test rather than the other way round.
-
-15.1 N28 follows this through: prove `S(e)`, complete it, restart, publish `e+1`, then prepare
-`e+2`. Revision 3 stopped at "can issue at e+1", which is exactly where the missing lifecycle
-would not yet have shown.
-
-The journal's wire format gains version 2 with the extra receipt slot, keeping the existing
-`tenure`-consistency and adjacency invariants expressed against the canonical head. Encoded size
-grows from at most two retained receipts plus a tenure to three plus a tenure: roughly 3.2 KiB
-against the existing `MAX_OWNER_RECEIPT_JOURNAL_BYTES` of 3,328 bytes. That fits, but with only
-about 128 bytes of headroom at maximal receipt sizes, so this design raises the constant to
-`4 * MAX_RECEIPT_BYTES + 256` rather than relying on the margin. That widens the owner namespace's
-pre-parse cap by 1 KiB and is carried into 5.2's record bound.
+Version 1's valid encodings remain unchanged. Version 2 validates every retained role and its
+identity, with pending adjacency against the canonical head. It must retain and strictly validate
+repair provenance across restart. The proposed journal bound is 12 KiB, including a retired
+pending receipt/close; 5.2 carries this into the owner-record bound. N7/N28 and the follow-up's
+expanded matrix cover every publication ordering and restart. No version-2 codec exists yet.
 
 ### 5.2 Store: durable owner issuance and reconciliation
+
+**CORE-005 accepted bounded-design admission boundary (unimplemented):** each `FaultPair`
+includes a private receiver-local authority attestation binding its exact full pair and record
+scope. Self-signature alone cannot
+mint it. Its current/archived Observed-witness construction, legacy refusal, exact retry and
+reserved-first source staging are specified in the authority follow-up. These requirements
+also apply to inline source-bound evidence and precede every capacity/overflow/proof mutation.
 
 `design-epoch-close.md` section 12 already budgets "fault evidence of 2 receipts and the latest
 repair" as owner state per logical document, so the decision extends the existing per-document
@@ -1174,7 +1193,8 @@ repair" as owner state per logical document, so the decision extends the existin
 pub struct EpochFaultRecord {
     /// EXTERNAL unresolved pairs only: pairs this document's own source is not faulted on.
     /// Each is canonical ascending by hash and validated by the repair-INDEPENDENT
-    /// `conflicting_receipt_pair`, because a slot is written before any repair exists.
+    /// `conflicting_receipt_pair`, PLUS private historical/current authority attestation
+    /// under CORE-005, because a slot is written before any repair exists.
     /// At most two. The source's own pair is never stored here (AG3-DES-022).
     pairs: Vec<FaultPair>,          // 0..=2, ordered by pair id
     /// The reserved slot of 5.2 below. Holds at most one pair deferred behind a nonterminal
@@ -1199,12 +1219,14 @@ Splitting the pair from the repair is what makes AG3-DES-009 solvable. `apply_re
 a peer has nowhere to live. This slot is that home: it is the issuance input, it is written by the
 report path before any decision exists, and it survives independently of the source.
 
-Encoding appends, after the existing optional `2 | hash | close`, an optional section for **one or
-two pairs plus at most one repair** (AG3-DES-018; revision 4 left the singular form here while the
-prose had already moved to two pairs):
+The proposed encoding appends an optional tag-3 section after `2 | hash | close`. Revision 15
+adds private admission attestations to every pair. The inert structural decoder is now implemented;
+contextual admission and production writes remain unimplemented.
+An old un-attested tag-3 payload is not accepted as the new format; add an explicit section
+format-version byte (value 1) so no legacy pair can acquire authority by reinterpretation:
 
 ```text
-3 | u8 external_count (0..=2) | external_count * pair
+3 | u8 fault_format_version (1) | u8 external_count (0..=2) | external_count * pair
   | u8 has_reserved (0 or 1) | reserved_pair?
   | u8 has_overflow (0 or 1) | overflow?
   | u8 repair_kind | repair_binding | repair? | u8 applied
@@ -1212,7 +1234,12 @@ prose had already moved to two pairs):
 overflow        = tenure_id[32] | u8 fingerprint_count (0..=4) | count * fingerprint[32] | u8 unknown
 fingerprint     = H("catcoms-fault-pair:v1", lower receipt hash, higher receipt hash)
 
-pair            = two canonical Receipts, ascending by hash
+pair            = two canonical Receipts, ascending by hash | bounded private admission_attestation
+admission_attestation = version 1 | observer[32] | owner_key[32] | start:u64 | tenure_id[32]
+                     | sorted_pair_hashes[64] | admission_epoch:u64 | origin:u8 | retired_at?:u64
+origin          = 0 (current Observed, no retirement) or 1 (archived Observed, retirement required)
+all integers use the enclosing canonical codec; unknown versions/origins/trailing bytes reject
+scope is supplied by the authenticated enclosing owner record, never a network-carried assertion
 pair id         = the smaller receipt hash
 externals are ordered by ascending pair id; equal pair ids are rejected, and two externals
 sharing any receipt hash are rejected
@@ -1228,7 +1255,11 @@ pair is never stored and then left a codec that demanded `pair_count` of 1 or 2 
 matching a retained pair, so the one path that correction existed to unblock, an owner faulted on
 `C` with zero or two externals, could not be written at all. Inlining is the right shape rather than
 a lazy source lookup, because R26 shows `decode` and `check_scope` see only the logical document:
-with the pair inline the record stays self-validating and fails closed on restart.
+the inline pair permits structural self-validation. CORE-005 adds a separate contextual restore
+boundary: parsed bytes are inert until authenticated full store scope, expected local observer
+device/custody and the matching durable server snapshot/epoch validate the attestation. The
+private decoder context must carry those inputs before yielding any authority-bearing capability.
+A generic structural `check_scope(LogicalDocument)` alone cannot mint restored admission authority.
 
 **Binding the inline pair to the source is two-phase** (AG3-DES-030, R29). Revision 7 said the
 inline hashes must match the authenticated source's `ReceiptBook::fault`, which is right only before
@@ -1250,8 +1281,8 @@ the state is closed at the legal maximum: revision 7 allowed two externals plus 
 source-bound repair, and a current-tenure report arriving then could neither fault the source, nor
 enter the record, nor displace frozen evidence. That was not merely a liveness gap, because 6.6's
 refusal named only the same-exchange pair and a faulted source, so nothing durable kept proofs
-suppressed after the response or across a restart. The slot holds at most one pair and is filled
-only by the deferral in 6.5.
+suppressed after the response or across a restart. The slot holds at most one pair with its private attestation. Under CORE-005 every new live
+report stages here before source mutation, including an immediately materialisable pair.
 
 **Liveness is derived, never stored** (AG3-DES-037). Revision 8 called the slot `live_conflict` and
 treated that classification as a durable fact, but "live" was only a judgement made against the
@@ -1259,7 +1290,7 @@ tenure current *at admission*. If ownership changed before the drain, nothing re
 it would either be sealed into the current source under an owner it does not dispute, or block
 `authoritative_proof_allowed` forever even though it disputes an old tenure, contradicting the
 adjacent rule that historical externals do not suppress the current owner's proof. So the record
-stores only the pair, and
+stores the pair and its admission attestation, with liveness still derived, and
 
 ```text
 reserved_is_live(record, expected_tenure_id)      // defined precisely below
@@ -1441,20 +1472,25 @@ and its eventual fault lives in the source: two durable objects with no atomic t
 revision 9 gave no order between them. Clearing the slot first would, on a crash or a failed source
 write, leave a healthy source, no evidence and no proof suppression. So the order is fixed:
 
-1. write the exact source fault and **wait for its durability to return**;
-2. only then clear `reserved`.
+1. the complete pair and its CORE-005 admission attestation must already be durably staged in
+   `reserved`, including for a new live report whose source could be sealed immediately;
+2. write the exact source fault and **wait for its durability to return**;
+3. retain `reserved` until the atomic B1 owner-record write moves the pair **and attestation**
+   into inline source-bound evidence. Do not clear the only attestation as duplicate cleanup.
 
-A crash between leaves the pair in both places, which is valid: the existing rule that a record slot
-duplicating the source's current fault pair is ignored for derivation and dropped at the next write
-cleans it idempotently. An uncertain or failed source write leaves the slot untouched and proof
-suppressed, and the drain is retried.
+A crash between leaves the pair in both places and one attestation in the owner record. The
+source pair wins derivation, but a slot duplicating it cannot be dropped before this atomic
+transfer. This supersedes revision 14's post-drain clearing rule: a source snapshot alone does
+not carry historical admission provenance. An uncertain source/B1 write leaves the slot intact;
+archive turnover therefore cannot erase the eligibility of an unresolved admitted pair.
 
 **Validation** (AG3-DES-035). Revision 8 put `has_live_conflict` on the wire and read
 `record.live_conflict` in the proof gate while the struct and `check_scope` knew nothing about it,
 which left an implementation free either to lose durable proof suppression or to admit unvalidated
 evidence into a slot that gates proof service. The reserved pair is validated exactly like an
 external: byte-exact receipt decode, both documents equal this document, canonical ascending
-ordering, and `conflicting_receipt_pair` passing. `has_reserved` is canonically 0 or 1. Corruption
+ordering, `conflicting_receipt_pair` passing and a valid scoped admission attestation.
+`has_reserved` is canonically 0 or 1. Corruption
 rejects the whole record and never resets it.
 
 Its alias rule is deliberately **weaker** than the external-external one: the reserved pair must not
@@ -1468,7 +1504,8 @@ Sections appear in ascending tag order with no duplicates. Old readers already r
 than 2 (`epoch_owner.rs:141-143`), which is the stated intent of the v2 extension.
 
 `check_scope` gains: every retained receipt re-decodes byte-exactly; every document equals this
-document; `conflicting_receipt_pair(document, &a, &b)` passes for each pair, external or inline; the
+document; `conflicting_receipt_pair(document, &a, &b)` and the private scoped admission-attestation
+checks pass for each pair, external, reserved or inline; the
 externals are distinct and share no receipt hash, so an aliased or half-duplicated pair is rejected;
 a repair, if present, has `repair.document` equal to this document and passes `check_evidence`
 against **the pair its `repair_kind` binds it to**. All four bindings are enumerated, since
@@ -1500,8 +1537,11 @@ Corruption is an error, never a silent reset.
 **Bound, stated once and nowhere else.** The maximal state is **nine** receipt-sized values: two
 external pairs (four receipts), the reserved pair (two), a source-bound repair's inline pair
 (two) and the repair itself. So `MAX_RECORD_BYTES` becomes
-`MAX_OWNER_RECEIPT_JOURNAL_BYTES + MAX_CLOSE_RECORD_BYTES + 9 * MAX_RECEIPT_BYTES + 1280`, which
-with C-7's raised journal constant is about 18.5 KiB, and `MAX_SEALED_BYTES` follows. This matters
+`MAX_OWNER_RECEIPT_JOURNAL_BYTES + MAX_CLOSE_RECORD_BYTES + 9 * MAX_RECEIPT_BYTES + 1280
+ + 4 * MAX_FAULT_ADMISSION_ATTESTATION_BYTES`. The proposed CORE-004 journal bound and accepted
+CORE-005 attestation bound make the journal
+12 KiB and each of at most four attestations 256 bytes, for a **27.25 KiB** owner-record cap;
+`MAX_SEALED_BYTES` and accounting follow. These bounds now apply to the inert store codec. This matters
 beyond accounting: `read_epoch_owner_plain` caps the file before unsealing, so an under-sized
 contract would make the maximal valid state that N31 and N36 exercise impossible to write or reopen.
 Revision 5 carried three contradictory figures, revision 6 fixed them at five and revision 7 raised
@@ -1530,18 +1570,17 @@ over the **current** source could be postponed for the whole length of that tran
 forbids reusing the repair field for an external while a live reserved pair waits, which is what
 makes the postponement unreachable rather than merely unlikely.
 
-**The source's pair is never a record slot** (AG3-DES-022, R25). Revision 5 required it to be
-"retained here" before rule 2 could fire, which left a reachable dead end: with two unresolved
-historical pairs already retained, a local source fault on a third pair could neither be selected
-nor be given a repair, because the single repair field had to validate against a retained pair and
-both slots were full. Since `ReceiptBook.fault` is itself durable and holds exactly one pair, the
-record never needed a copy. Rule 2 now always fires when the source is faulted, whatever the record
-holds, and the repair field may name that pair directly. The combined state is therefore closed: at
-most two external pairs, plus whatever single pair the source itself is blocked on, plus one repair.
+**The source's pair needs no external slot** (AG3-DES-022, revised by CORE-005). Rule 2 derives
+the source's active pair even with two historical external slots full. This does not itself
+establish admission authority or guarantee issuance. A directly observed current pair must obtain
+a fresh authority capability before B1; historical source evidence needs a retained attestation
+or available archived witness. An unprovable source pair is a visible hold. For reported pairs,
+reserved-first staging preserves the attestation until B1 moves it inline. None of these paths
+occupies or evicts one of the two external slots merely because the source is faulted.
 
-A record slot that duplicates the source's current fault pair is redundant; on load it is ignored
-for derivation and dropped at the next write, so a pair that was external when reported and later
-became the source's own does not consume capacity twice.
+A record pair duplicating the source fault is ignored for active derivation but retained while
+it carries the only admission attestation. B1 atomically transfers that pair and attestation to
+inline source-bound evidence. Source receipts alone never justify dropping this authority record.
 
 **Terminal-pair recycling** (AG3-DES-022, second hole). Revision 5 said the other retained pair
 "becomes active" when a repair becomes terminal, but never removed the pair that just terminated,
@@ -1554,15 +1593,15 @@ become active again:
 | `repair_kind` | Removes |
 |---|---|
 | 1, external | the indexed entry in `pairs` |
-| 2, source-bound | nothing in the record; the pair lives in the source |
+| 2, source-bound | clears inline pair and its attestation together with the repair |
 | 3, reserved | clears `reserved` exactly |
 
-Its evidence is not lost, because the book's
-`resolved_repair` now holds both receipts and `is_repaired_loser` screens them. The transition is
-idempotent: re-reporting the **exact** pair this repair named is a no-op (6.5 rule 6, as narrowed by
-AG3-DES-029, which deliberately does not extend to a distinct pair merely containing its loser), and
-an exact retry after a crash re-performs the same removal. Only after it completes may the repair field be used for
-another pair, which is what stops a single field silently changing owners.
+The book retains the resolved receipts for ordinary screening, but that is not an admission
+attestation. CORE-005 terminal recycling removes the pair's attestation too; the local cleanup
+retry is idempotent. An exact later report must reacquire current/archived provenance if its
+attestation has been recycled, and may refuse after archive turnover. This explicitly narrows
+the former unconditional no-op guarantee; completed pairs do not form an unbounded authority
+cache. Only after cleanup completes may the repair field be used for another pair.
 
 Crash at any point leaves at most two external pairs and one repair on disk, and the derivation is
 a pure function of what survived plus the source's own book.
@@ -1618,6 +1657,7 @@ inventory verification, reservation, seal, atomic write and commit order:
 pub fn prepare_epoch_repair(
     &mut self, server: u64, repair: ReceiptRepair, a: Receipt, b: Receipt, selected: &Receipt,
     group: &ServerGroup, issuer_tenure_start: u64,
+    admission: &ValidatedFaultAdmission,
     rng: &mut impl CryptoRngCore, budget: &mut EpochStorageBudget,
 ) -> Result<EpochOwnerReceiptState, AppError>;
 
@@ -1628,14 +1668,20 @@ pub fn mark_epoch_repair_applied(
 ```
 
 `prepare_epoch_repair` performs **three things in one write** (barrier B1): it stores the repair
-section with `applied: false`; it calls `journal.resolve_repair(...)`; and it drops
-`decision_close` if that close bound the losing receipt, since `close_for` must never bind a
-retired decision. Doing the reconciliation here, not after installation, means the owner never
-serves the loser as a hint after deciding: the worst intermediate state is that it offers the
-winner as an unproven hint until the source agrees, which is strictly better.
+section with `applied: false`; it calls `journal.resolve_repair(...)`; and it removes the live
+`decision_close` binding for an exact/provable losing pending decision only after retaining that
+decision's full receipt and exact CloseRecord in the same candidate provenance. The retired
+pending receipt may be outside the repair pair. Missing or mismatched close evidence refuses
+before mutation; `close_for` must never return a retired decision's evidence as publishable.
+The candidate's effective owner choice is never a covered loser after B1. A replacement may
+offer the winner as an unproven hint while the source still differs; a NoChange can retain
+unrelated or positively preserved H. Neither equality of heads nor completed publication is
+invented. The persisted repair claim owns the pre-B2 source interval in both cases.
 
-It refuses unless `verify_current_owner` and `check_evidence` pass and the sequence rule of 6.4
-holds. An exact retry re-saves and succeeds. A different repair while one is held unapplied is
+It requires the private `ValidatedFaultAdmission` from a retained context-validated attestation
+or fresh current/archived admission, bound to the exact pair and current custody. No caller boolean
+or raw pair can substitute. It also refuses unless `verify_current_owner` and `check_evidence` pass
+and the sequence rule of 6.4 holds. An exact retry re-saves and succeeds. A different repair while one is held unapplied is
 refused; the held decision must be resumed.
 
 `mark_epoch_repair_applied` (barrier B3) sets `applied` and refuses a hash that is not the held
@@ -1671,7 +1717,9 @@ pub enum StudioRepairOutcome {
 
 **S-1 issuance.** `issue_studio_repair(...)` reads the frozen pair from **either** the source's
 `fault_evidence()` or the record's `EpochFaultRecord`, which is what lets an owner repair a
-historical fault it never observed itself (AG3-DES-009). It refuses unless the device is the
+historical fault it never observed itself (AG3-DES-009). Before signing or B1 it must obtain the
+same scoped validated admission capability, including when reading a source-bound pair. Its own
+current signature is not proof of the pair signer's historical ownership. It refuses unless the device is the
 designated committer with an observed tenure, refuses unless the supplied pair equals the held
 pair's hashes and the selection is one of them, derives the sequence per 6.4, signs with
 `sign_in_tenure` using the **fault** tenure id from the pair and the **issuer** tenure start from
@@ -1747,10 +1795,12 @@ fn servable_repair(record: &EpochOwnerReceiptState, unit: &StudioEpoch) -> Optio
 populated only after the same `reserve_sync` and `sync` flush the `prove` branch already performs
 (`store/epoch_studio/discovery.rs:244-255`). A B1-only decision is never served (I-6).
 
-Because `prepare_epoch_repair` reconciles the journal at B1, the selector's existing
-`own_choice`/`held`/`prove` three-way equality now converges on the selected receipt once the
-source agrees, instead of being wedged on the loser (R13). No change to that rule is needed beyond
-the reconciliation and the new field.
+`prepare_epoch_repair` removes covered effective owner choices when reconciliation is needed,
+but can also preserve H under NoChange. The selector's existing three-way equality compares
+`own_choice`, the held source receipt and the **head selector's** chosen receipt, not necessarily
+the repair winner. Case 1a can therefore prove H once its ordinary durability/authority guards
+pass. Compatible differing heads remain unproven until that equality holds. CORE-006 changes
+neither the proof guard nor the source's independent C-2 classification.
 
 ### 5.6 Sync: distribution and the report direction
 
@@ -2017,18 +2067,23 @@ and the per-requester rail (5.6 W-1 step 4), and **before the response is decide
    `authenticate_request` and `head_request_current`.
 2. Complete target check: numeric server, group id, doc type, logical key and, for a Flipnote, the
    channel (6.2's scope qualification).
-3. Both reported receipts decode byte-exactly; `conflicting_receipt_pair(document, a, b)` passes.
-   This is **historical** validation only: signature and shape, never `verify_current_owner`,
-   because the signer of a historical pair is by definition no longer the committer.
-4. **Admissibility is by document scope and genuine conflict, not by tenure.** Revision 2 refused
-   anything but the current owner's tenure, on the premise that an older fault would heal through
-   the new owner's first receipt. R14 shows that premise is false, so that rule would have made
-   cross-tenure repair permanently unreachable (AG3-DES-009). A historical pair is admissible; the
-   **repair** it enables still needs live current-owner authority, which is where the authority
-   question belongs.
+3. Bound and canonically decode both receipts; `conflicting_receipt_pair(document, a, b)` passes.
+   This proves self-signature and shape only, **not historical or current ownership**.
+4. **CORE-005 authority precedes durable admission.** Establish the provider's durable current
+   Observed-owner capability. Read only the bounded addressed owner record. For an exact
+   previously admitted pair, validate its retained private scoped attestation; otherwise both
+   receipts must match the full current Observed tuple or the one local archived Observed-tenure
+   witness. Current pairs additionally pass live receipt verification. An old signer need not
+   still be a member, but must have this independently established local owner history. An
+   unprovable pair refuses before reservation/write, slot, source, overflow or proof-suppression
+   mutation. Reporter authentication is insufficient. The authority follow-up specifies the
+   snapshot seam, attestation, retry ordering and bounded-history liveness limits; arbitrary
+   historical self-signed pairs are no longer admissible. A new repair still needs live authority.
 5. **Two disjoint recording paths**, chosen by whether the pair is the current owner's tenure:
    - **Same tenure as the current owner** (the rollback case): the reported receipt genuinely is a
-     current-owner receipt, so the existing typed seal is a legitimate admission and the provider's
+     current-owner receipt. First stage the full pair and attestation durably in `reserved`;
+     an occupied slot takes the authority-checked overflow/refusal path, without claiming that
+     a full pair was admitted. The existing typed seal is then a legitimate admission and the provider's
      own source durably enters Fault through the common source fences, stopping its head service
      and rotation for that document. **Unless a repair transaction owns this source**
      (AG3-DES-027, AG3-DES-031): `transition_verified_receipt` permits `Closing -> Fault` and clears
@@ -2062,21 +2117,23 @@ and the per-requester rail (5.6 W-1 step 4), and **before the response is decide
      under the proof gate, and it is repairable directly through `repair_kind 3` without ever passing
      through `ReceiptBook::fault`. This is what actually lets the three-receipt case converge: N39
      asserts the owner's durable evidence is exactly `{R1,R3}`, not merely that some fault occurred.
-   - **Any earlier tenure** (the historical case): **nothing is passed through the live seal.**
+   - **An authority-proven earlier tenure**: **nothing is passed through the live seal.**
      `StudioEpoch::seal` ends in current-owner verification and only handles its own gate epoch,
      opening and adoption shapes, so feeding it an old receipt would be exactly the confusion of
      historical authenticity with live authority that the review warned against. The pair is
      written only into the owner record's `EpochFaultRecord` (5.2). The provider's source is not
      touched and does not fault: its own head under the current tenure is not in dispute.
 6. **No-ops, the frozen pair and the deferred slot.** A report is a no-op when **this exact pair**
-   is already recorded, or when the resolved repair's own named pair **is** this pair. It is
+   is already recorded with its valid retained private admission attestation, including after
+   archive turnover. A resolved repair alone is not an attestation for report admission. It is
    **not** a no-op merely because one of its members is `is_repaired_loser` (AG3-DES-029, R28).
    That predicate answers "should this arriving receipt be screened", not "has this peer's frozen
    pair been resolved": with three genuine conflicting receipts, repairing `{R1,R2}` makes `R1` a
    repaired loser while saying nothing about a peer frozen on `{R1,R3}`, whose `apply_repair` still
    demands its own exact pair. Treating that as covered would strand it permanently, since neither
    the `{R1,R2}` repair nor any ordinary receipt can clear its fault. Such a pair stays admissible
-   and needs its own higher-sequence repair, which is exactly the third-conflict behaviour U-5
+   and needs its own higher-sequence repair if CORE-005 authority remains provable, which is the
+   admitted third-conflict behaviour U-5
    preserved.
    A report naming a **different** pair while an unresolved one is held never replaces it (I-10):
    it goes to the record's `deferred` slot if that is free, and is otherwise refused with a defer
@@ -2149,20 +2206,22 @@ disputed receipt.
 
 ### 6.7 Owner journal reconciliation
 
-Performed inside B1 by `prepare_epoch_repair` (5.2), using `resolve_repair` (5.1 C-7). It is the
-only way an irrevocable decision is replaced, it requires a live-verified repair naming that
-decision as the loser, it never creates a new publication obligation, and the losing receipt and
-its close remain in the record as historical evidence. Without it the journal is wedged (R13): the
-owner keeps preferring the loser, can never prove, and cannot prepare the winner at the same
-closed epoch.
+Performed atomically inside B1 by `prepare_epoch_repair` using C-7. It requires complete
+admitted pair evidence and a live current-owner repair. Only an effective choice that is the
+exact loser or a provable differing-baseline descendant is replaced. Retain a retired pending
+receipt and its exact close even when that receipt is outside the pair. Historical publication
+matches alone cannot replace unrelated canonical/pending work.
 
-Clearing the loser is necessary but not sufficient (AG3-DES-011, R15). Both the head selector's
-`own_choice` and `prepare_verified`'s same-tenure adjacency read the retained **high water**, so
-the shape `high_water = R(e-1)`, `in_flight = L(e)`, winner `S(e)` would fall back to `R(e-1)`:
-the owner would serve the wrong receipt, fail the three-way equality that gates a proof, and read
-its next receipt at `e+1` as a gap. `resolve_repair` therefore also establishes `S(e)` as the
-journal's `reconciled` canonical decision, and `canonical_head()` is what both consumers use.
-`published()` is untouched, so nothing claims a publication that did not happen.
+The adjacency base is `canonical_head() = reconciled.or(high_water)`; head selection is
+`in_flight.or(canonical_head())`. These are deliberately different consumers. Unknown
+same-baseline pending ancestry is preserved. The joint planner holds before B1 only for an
+incompatible candidate under CORE-006's explicit postconditions. Distinct source/journal effects
+or different non-losing heads are not themselves a refusal. In particular `(Transitioned,
+NoChange)` preserves case 1a's H, and `(Screened, Replace)` can repair a separate journal loser.
+`NoChange` concerns the journal only: the owner repair record still persists and owns the target.
+Actual publication keeps its meaning through cross-baseline rewinds: historical high_water
+stays until the selected decision really publishes. Bounded provenance, immediate-successor
+checks, publication/cleanup holds and owner-turnover limitations follow CORE-004's proposal.
 
 ## 7. The pipelines
 
@@ -2172,11 +2231,13 @@ receiver notes `RefreshRequired` then `Fault`. Head service, seed service and ro
 that document only.
 
 **Flow R, reporting (new).** A peer that detects a conflict with a provider head attaches its
-receipt to its next query; the owner admits it under 6.5 and gains a durable Fault. This is the
+complete frozen pair to its next query; the owner establishes historical/current authority and
+durably stages it under 6.5 before any applicable live source seal. This is the
 route that makes issuance reachable after an owner-side rollback.
 
 **Flow I, issuance (owner).** Read evidence, user chooses, `issue_studio_repair` verifies, derives
-the sequence, signs, and writes **B1** (repair pending plus journal reconciliation). Flow A then
+the sequence, signs, and writes **B1** (repair pending plus its compatible journal effect, including
+NoChange). Flow A then
 runs on the owner's own source with the fresh record; **B3** records `applied` immediately after
 B2 returns.
 
@@ -2205,8 +2266,8 @@ candidates.
 
 | Barrier | Written | Crash immediately before | Crash immediately after |
 |---|---|---|---|
-| B0 | owner record or source: the reported frozen pair (6.5 rule 5) | no evidence; the reporter retries; no proof was served for a disputed receipt because admission precedes the response | the pair is frozen and cannot be replaced by a third receipt; the owner can decide |
-| B1 | owner record: repair signed, journal reconciled to the canonical winner, stale close binding dropped | no repair exists; the fault is unchanged; the owner may decide again, possibly differently | the exact decision resumes; a different selection is refused; the owner offers the winner as an unproven hint |
+| B0 | owner record: full pair plus private admission attestation first; applicable live source seal follows (6.5 rule 5) | no evidence; the reporter retries; no proof was served for a disputed receipt because admission precedes the response | the pair is frozen and cannot be replaced by a third receipt; the owner can decide |
+| B1 | owner record: signed repair and compatible journal effect, including NoChange; any retired decision/close evidence preserved before dropping its live binding | no repair exists; source unchanged; owner may choose a valid repair | exact decision owns the target; different selection is refused; effective non-losing choice may be offered only under ordinary hint/proof guards; turnover before B2 may strand this state (CORE-007) |
 | B2 | source: resolved repair in book, and for a transitioning case the fault cleared and adoption mode set | source unchanged; re-apply from the pending record or a re-fetched repair; identical result | the disposition is durable. For cases 1 to 5 this document's fault has ended and, if `install_pending`, the state is the accepted adoption "Closing, awaiting seed" shape carrying the repair. For the screening cases 6b and 6d the source's own phase is untouched and any different fault still stands (AG3-DES-025) |
 | B3 | owner record: `applied` | serving falls back to the source book, which already carries the repair, so eligibility is unchanged | record and book agree |
 | B4 | recovery eviction promotion | warning still pending; the hold is re-reported | staging proceeds |
@@ -2278,16 +2339,16 @@ conservative holds that run before either barrier.
 
 | Write | Purpose | Pool | Peak |
 |---|---|---|---|
-| owner record (B1, B3) | `Settlement` | protocol allowance, 16 MiB per server | old plus new, about 18.5 KiB each at maximum (5.2's single canonical bound) |
+| owner record (B1, B3) | `Settlement` | protocol allowance, 16 MiB per server | old plus new, proposed 27.25 KiB each at maximum (5.2's single canonical bound) |
 | recovery stage (B4, B5) | `Settlement` | settlement reserve, 48 MiB, staged slot | up to 6 MiB plus the existing replacement peak |
 | source transition (B2) and successor (B6) | `Settlement` | settlement reserve | old plus new source |
 | report fault write (Flow R) | `Settlement` | settlement reserve | old plus new source |
 
 No planned deletion is credited before its IO commits. A reservation dropped without commit
 requires full reconciliation. The resolved repair adds roughly 3 KiB per repaired document to
-`storage_protocol_bytes` (`studio/epoch.rs:504-518` counts the book delta); against the 16 MiB
-allowance that is roughly 3,300 repaired documents per server, an arithmetic estimate, not a
-measurement.
+`storage_protocol_bytes` (`studio/epoch.rs:504-518` counts the book delta). This is only the book
+delta, not a document-capacity estimate: owner records, other protocol state and replacement
+write peaks share the 16 MiB allowance and must all be admitted together.
 
 ### 10.2 Publication ordering
 
@@ -2499,8 +2560,10 @@ progress; 15.1 N14 and N15 demonstrate progress with legitimate evidence.
 **Consumed from Agent 2 at `705d44b`:** the `EpochRecordKind::DraftArchive` seam. This scope takes
 the variant rather than adding one, handles it explicitly in any match it introduces, adds no writer
 to the family, and treats an archive as a preserved local draft rather than repairable history. The
-contract is section 12.1, the invariant is I-12 and the regression is N40. No other Agent 2 contract
-is needed here beyond the tenure seam T1 to T5.
+contract is section 12.1, the invariant is I-12 and the regression is N40. **Revision 15 adds a
+proposed dependency beyond T1-T5:** the archived Observed-tenure witness and its matching durable
+snapshot capability described in CORE-005. The independent review accepted this bounded contract;
+Agent 2 agreement/implementation remain required, and the current tenure accessor cannot substitute.
 
 ### 13.3 Agent 4: integration contract
 
@@ -2520,9 +2583,17 @@ repair producer are connected. **This design edits no shared contract document.*
   ordinary discovery of the current owner's checkpoint, which is possible **only** because the
   fault is gone (6.3, R14).
 - A newcomer with unknown tenure applies no repair and converges through the owner's proof.
-- A historical pair is admissible as a report and lands in the owner record, not through the live
-  seal (6.5 rule 5). Revision 2's tenure restriction here was withdrawn: R14 means it would have
-  made cross-tenure repair permanently unreachable.
+- A historical pair is admissible only with the available archived Observed witness or a retained
+  exact-pair admission attestation (CORE-005); it then lands owner-side, not through the live seal.
+  Imported/newcomer history, evicted unadmitted history and recycled completed pairs can remain
+  unavailable. No permanent historical authority cache or unconditional convergence is claimed.
+- **CORE-007:** an owner change at any time after durable B1 and before durable terminal/recycling
+  may strand the repair indefinitely. Before B2 the source is unchanged, but the owner record
+  already owns it and may have reconciled the journal/retired a pending obligation. After B2,
+  source/recovery work may also be committed. The live retry guard and nonterminal fence remain
+  enforced, including for a journal `NoChange`; ordinary newer-tenure prepare/reset/publication
+  cannot bypass the record's hold. Recovery/cancellation needs a separately reviewed contract.
+  Evidence is retained and full Gate 4 liveness remains incomplete.
 - A replacement whose whole-version snapshot exceeds 6 MiB is a visible `StorageRefused` hold.
 - Older peers never receive reports, by version compatibility; this only slows discovery of an
   owner-side rollback.
@@ -2537,9 +2608,13 @@ repair producer are connected. **This design edits no shared contract document.*
 Core:
 
 - **N1** `commit_repair` accepts each coherent target and refuses each incoherent one, leaving gate
-  and book byte-identical on refusal.
+  and book byte-identical on refusal. Rebind the exact planned receipt/fault/book state under lock;
+  changing any part without changing phase must refuse. Open exits clear rejected quarantine
+  only, Closing exits retain it, and accepted work/accounting remain byte-identical. Both typed
+  APIs must snapshot/reopen and re-admit a formerly quarantined envelope ordinarily.
 - **N2** A repaired source persisted at B2 round-trips through `snapshot`/`restore` for every C-2
-  case, and `receipt_head()` stops erroring.
+  case. Real Fault exits make `receipt_head()` available; screening that preserves unrelated
+  Fault(B) must continue reporting Fault and retain B byte-for-byte (CORE-002).
 - **N2b** AG3-DES-014, at the core boundary and before any Studio or Registry round-trip depends on
   it: a `ReceiptBook` with a resolved repair, no `latest` and no `tenure` encodes at version 4 and
   decodes back equal, with its document derived from the resolved repair and every retained receipt
@@ -2552,7 +2627,12 @@ Core:
 - **N3b** AG3-DES-003 counterexample: installed opening L, retained newer sealing receipt H, late
   conflicting opening W with the same `TenureSelection`. Selecting W gives case 3 with head W, and
   `prepare_repair_adoption` succeeds. Selecting L gives case 1a with head H preserved, including
-  `previous_until_installed`. Both winners asserted.
+  `previous_until_installed`. Both winners asserted. **CORE-006 / TEST-014:** extend the latter
+  through the owner transaction with `{S,L} -> S`, O=S and positively justified H. Run first
+  with journal H in high_water, then H in_flight. B1 must accept `(Transitioned, NoChange)` with
+  journal bytes/H role/close binding unchanged; B2 exits Fault preserving source H. Crash/reopen
+  at both barriers. No phantom S publication or retirement of H; an effect-equality mutant must
+  fail the positive. Repeat for Studio and Registry.
 - **N4** AG3-DES-002 path B: an epoch-zero source mid-adoption of a receipt closing epoch five,
   faulted by a conflicting receipt for that checkpoint, repairs into case 4 and restores.
 - **N5** AG3-DES-010: a fault whose pair closes the gate epoch, built **both** ways. In ordinary
@@ -2636,8 +2716,8 @@ Core:
   refused as stale or stranded behind a `Settled` hold.
   (i) **AG3-DES-044, failure during the drain**: inject a failing and then an uncertain source-fault
   write mid-drain. Assert the slot and proof suppression survive both, that a crash between the
-  source write and the slot clear leaves valid duplicate evidence, and that reopening cleans the
-  duplicate idempotently without a second fault.
+  source write and B1 leaves valid duplicate receipts with the attestation retained, and that
+  reopening resumes the atomic B1 transfer without a second fault or loss of pair authority.
 - **N42** AG3-DES-040, the tenure states, for issuance, application, drain and proof in turn:
   `Observed` permits, `Unknown` holds, and **`Imported(S)` holds for authoring while remaining
   `Some(S)` for verification**. Assert an `Imported` server never drains a reserved pair, never
@@ -2769,15 +2849,14 @@ Store:
   acknowledgement it completes with the original deadline.
 - **N16** Newcomer with `Unknown` tenure receives the repair, applies none, stays provisional, keeps
   its local work, and converges on the owner's fresh proof.
-- **N17** AG3-DES-009's full historical path, with **no injected local state on B**: owner A
-  equivocates with valid A1 and A2 and faults peer P only; ownership moves to B; B holds **neither**
-  member; P transfers the exact pair over the v2 query; B's record freezes it while B's own source
-  stays healthy and untouched by any seal; B explicitly chooses and signs v2 using its
-  independently observed B tenure; P applies it, leaves Fault through case 5, and then converges by
-  ordinary discovery of B's checkpoint. Also assert that before the repair, B's legitimate first
-  B-tenure receipt does **not** clear P's fault (R14), which is the fact that makes this path
-  mandatory. Separately: a v2 record signed in A's first tenure is refused after A returns; a v1
-  record is always refused.
+- **N17** Historical repair now requires CORE-005's actual locally Observed owner history.
+  A newcomer that knew A only through genesis/Welcome/Imported tenure must refuse an unprovable
+  A pair; no unconditional two-peer convergence is claimed. N50 supplies the positive real MLS
+  path without injected witnesses: observer sees X -> A activation, A's conflicting signatures,
+  then A -> B retirement; persist/reopen, authenticate P and admit its full pair using the archived
+  Observed witness. B's source stays healthy, B explicitly signs using independently Observed
+  current authority, P leaves Fault and discovers B's checkpoint. Before repair, B's first
+  ordinary receipt still does not clear P's fault. Returning-key old-tenure repair and v1 refuse.
 - **N18** Split per AG3-TEST-004, since `PairMismatch` no longer exists. (a) **Malformed or wrong
   evidence** (a pair that fails `conflicting_receipt_pair`, a repair whose `receipt_hashes` do not
   match the supplied pair, a wrong document or channel) must refuse and change nothing. (b) A
@@ -2824,9 +2903,11 @@ Sync, app and native:
   `in_flight = L(e)` and the winner held only by a peer: assert the **actual served receipt and
   proof** are `S(e)` and not `R(e-1)`; complete that proof through `complete_studio_head`, which
   revision 3 left with no valid path, and assert `S(e)` becomes `high_water` with `reconciled`
-  cleared; restart; publish `e+1` and assert `canonical_head()` does not regress to `S(e)`;
+  cleared; finalize required source recovery/provenance cleanup; restart; publish `e+1` and
+  assert `canonical_head()` does not regress to `S(e)`;
   then prepare `e+2`. Also assert a stale completion retry for `R(e-1)` is inert, and that a tenure
-  change clears a reconciled head. Repeat for Registry.
+  change clears a reconciled head only after required source-terminal/provenance-cleanup
+  barriers. Mid-replacement owner turnover instead preserves the documented hold. Repeat for Registry.
 - **N29** Two real peers enter Fault from two valid conflicting receipts, the owner repairs, both
   converge, a third peer joins after the repair, and every peer's installed state, receipt evidence,
   recovery contents and native events agree. `settlement-changed` carries `fault`, then `repairing`,
@@ -2852,18 +2933,46 @@ Sync, app and native:
   `EpochRecordKind` handles `DraftArchive` explicitly rather than by a catch-all arm.
 - **N31b** AG3-DES-022's closure, the state revision 5 could not represent: two unresolved
   historical pairs are already retained **and** the local source then faults on a third,
-  current-tenure pair. Assert the source's pair is selected as active without occupying a record
-  slot, that a repair for it can be issued and applied, and that after restart all three are
+  current-tenure pair. Assert the source's pair is selected as active without occupying an external
+  slot, gains a fresh current-Observed admission capability before inline B1, and that a repair
+  for it can be issued and applied. After restart all three are
   repaired sequentially with no evidence lost.
 - **N31c** Terminal-pair recycling: repair A becomes terminal, its pair is removed and the repair
-  field cleared, repair B is then issued for the remaining pair, and after restart **A never becomes
-  decidable again**. Assert the removal is idempotent on an exact retry and that re-reporting A is a
-  no-op because the book already screens it.
+  field cleared, repair B is then issued for the remaining pair, and after restart **A does not
+  become decidable automatically from retained source receipts**. Cleanup is idempotent.
+  Explicit re-reporting is fresh admission subject to CORE-005: after archive turnover it refuses
+  without durable mutation; with valid current/archived authority it can be admitted anew.
 - **N30** Custody and fairness: pause a real repair reconstruction in S2 while authoritative
   discovery, page receive and a second server complete; assert the permit is still owned, that
   cancellation does not refund it, that a dropped native handle releases it, and that after all
   transient and result owners drop, a fresh scan sees the expected reference lifetime with
   job-owned protection already transferred to the conservative set.
+
+- **N49 / AG3-TEST-013(a)** Actual Studio and Registry report admission: authenticated current
+  non-owner submits a canonical self-signed conflicting pair for the correct target. C-4 passes,
+  authority admission refuses before any reservation/write/slot/source/overflow/proof change.
+  Assert exact durable bytes and writer counters. The primitive limitation test does not satisfy this.
+- **N50** Real removed-owner provenance and all refusal/turnover/recycling cases from the authority
+  follow-up, including Imported absence, failed snapshot flush, scope/device substitution and
+  staged pair -> source seal -> B1 crashes. These production-consumer tests are not implemented.
+- **N51 / CORE-006 / TEST-014** Reverse asymmetry: a valid source with no covered usable anchor
+  screens while its journal replaces an effective loser, including a pending-retirement variant.
+  Apply/reopen both typed sources; assert role-specific compatibility rather than equal effects
+  or heads. Preserve the existing three-way proof equality when heads differ. Negative cases
+  retain a covered installer/proof target or omit the retired pending close: hold before B1
+  with source, journal and durable writer counts unchanged. Same-baseline unknown ancestry
+  cannot turn an unrelated H into a losing descendant.
+- **N52 / CORE-007 / TEST-014** Real observed MLS owner turnover after B1 **before B2**. Cover
+  journal Replace, retired-pending and NoChange variants; crash/reopen. Old owner repair cannot
+  apply, new owner cannot replace the persisted nonterminal repair, and ordinary newer-tenure
+  prepare/reset, proof service and publication callbacks cannot bypass it. Exact source and
+  owner evidence/retired close remain durable; source is still pre-application. Repeat after B2
+  before B6 as a distinct variant retaining committed source/recovery/continuation. Require the
+  intended authority/nonterminal hold, not a coincidental scope failure. Both typed sources;
+  no cancellation or eventual recovery is claimed. These integrated tests are planned only.
+- **IMP-001 / AG3-TEST-013(b)** Direct v4/v5 codec test refuses a same-document predecessor
+  without latest. A separate headed positive/foreign-document negative keeps scope validation
+  independent of that guard. Both are implemented; execution evidence is in status.
 
 ### 15.2 Isolated mutations
 
@@ -2944,9 +3053,11 @@ equivocation without installing either side cannot forward it, which keeps the d
 member-controlled evidence surface exactly as narrow as U-9 decided. U-10's no-expiry rule still
 applies once a report has been accepted.
 
-No new questions are opened by this revision. Every U-question is now decided.
+Revision 14 closed these U-questions. CORE-005's bounded design and finite-history limits were
+accepted at revision 15. Revision 16 requests re-review only of CORE-004's CORE-006/007 corrections
+and TEST-014, including the accurately broadened B1-to-terminal owner-turnover limitation.
 
-## 17. Re-review request
+## 17. Historical revision-14 re-review request
 
 Copyable, with the common contract from
 [GATE4-REVIEW-PREAMBLES](GATE4-REVIEW-PREAMBLES.md#common-contract-for-the-four-subsequent-reviews)
@@ -3221,4 +3332,3 @@ No U-questions remain open.
 Return a design verdict for this bounded repair scope, or numbered findings with concrete failure
 paths and required corrections. Implementation, integration and full Gate 4 remain separate.
 ```
-

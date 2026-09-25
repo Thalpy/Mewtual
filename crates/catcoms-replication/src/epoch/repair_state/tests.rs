@@ -108,6 +108,382 @@ fn baseline(epoch: u64) -> InheritedCheckpoint {
 }
 
 #[test]
+fn repair_evidence_checks_canonical_signed_conflict_without_live_authority() {
+    let f = Fixture::new(false);
+    conflicting_receipt_pair(&f.document, &f.selected, &f.losing).unwrap();
+    conflicting_receipt_pair(&f.document, &f.losing, &f.selected).unwrap();
+    f.repair.check_evidence(&f.selected, &f.losing).unwrap();
+
+    // These are valid signatures over genuinely different inheritance at different epochs.
+    // A checker restricted to equal closed epochs would strand a real historical fault.
+    let different_baseline = f.sign(3, baseline(1), 4);
+    conflicting_receipt_pair(&f.document, &f.selected, &different_baseline).unwrap();
+
+    // The historical pair remains authentic after removal of its author. No group or current
+    // membership is an input to the evidence checker, and no verified capability is returned.
+    let successor = MlsDevice::generate().unwrap();
+    let mut old_group = f.group;
+    let welcome = old_group
+        .add_member(&f.owner, successor.key_package().unwrap())
+        .unwrap()
+        .welcome;
+    let mut new_group = ServerGroup::join(&successor, &welcome).unwrap();
+    new_group
+        .remove_member(&successor, &f.owner.device_id())
+        .unwrap();
+    assert!(f.selected.verify_current_owner(&new_group, 0).is_err());
+    conflicting_receipt_pair(&f.document, &f.selected, &f.losing).unwrap();
+
+    for bad_side in [false, true] {
+        let (mut a, mut b) = (f.selected.clone(), f.losing.clone());
+        let bad = if bad_side { &mut a } else { &mut b };
+        bad.signature[0] ^= 1;
+        assert!(matches!(
+            conflicting_receipt_pair(&f.document, &a, &b),
+            Err(ReplError::EpochAuthority)
+        ));
+    }
+}
+
+#[test]
+fn repair_self_signed_member_pair_does_not_prove_owner_authority() {
+    let mut f = Fixture::new(false);
+    let member = MlsDevice::generate().unwrap();
+    f.group
+        .add_member(&f.owner, member.key_package().unwrap())
+        .unwrap();
+    assert!(f.group.member_device_ids().contains(&member.device_id()));
+    assert_eq!(f.group.designated_committer(), Some(f.owner.device_id()));
+    let sign = |close| {
+        Receipt::sign(
+            f.document.clone(),
+            2,
+            [close; 32],
+            [9; 32],
+            0,
+            InheritedCheckpoint::EpochZero,
+            &member,
+        )
+        .unwrap()
+    };
+    let (a, b) = (sign(6), sign(7));
+    // A malicious authenticated member can create canonical, correctly signed equivocation.
+    // The primitive deliberately accepts it: no membership/owner history is an input. This is
+    // a limitation test, NOT the future report-admission/no-write security regression.
+    conflicting_receipt_pair(&f.document, &a, &b).unwrap();
+    assert!(a.verify_current_owner(&f.group, 0).is_err());
+    assert!(b.verify_current_owner(&f.group, 0).is_err());
+}
+
+#[test]
+fn repair_evidence_rejects_shape_scope_tenure_duplicates_and_consistent_progress() {
+    let f = Fixture::new(false);
+    let mut malformed = f.losing.clone();
+    // A signature alone is insufficient: an empty key is encodable and signable through public
+    // fields, but LogicalDocument's decoder refuses it. Keep the signature valid to isolate shape.
+    malformed.document.logical_key.clear();
+    malformed.signature = f.owner.sign(&malformed.signature_hash()).unwrap();
+    assert!(Receipt::decode(&malformed.encode()).is_err());
+    assert!(conflicting_receipt_pair(&f.document, &f.selected, &malformed).is_err());
+
+    let mut foreign_document = f.document.clone();
+    foreign_document.logical_key[0] ^= 1;
+    let foreign = Receipt::sign(
+        foreign_document.clone(),
+        2,
+        [3; 32],
+        [9; 32],
+        0,
+        InheritedCheckpoint::EpochZero,
+        &f.owner,
+    )
+    .unwrap();
+    foreign.verify_signature_only().unwrap();
+    assert!(matches!(
+        conflicting_receipt_pair(&f.document, &f.selected, &foreign),
+        Err(ReplError::EpochScope)
+    ));
+    // Even two matching, valid receipts cannot be rebound by the enclosing target.
+    assert!(matches!(
+        conflicting_receipt_pair(&foreign_document, &f.selected, &f.losing),
+        Err(ReplError::EpochScope)
+    ));
+    let other_tenure = Receipt::sign(
+        f.document.clone(),
+        2,
+        [3; 32],
+        [9; 32],
+        1,
+        InheritedCheckpoint::EpochZero,
+        &f.owner,
+    )
+    .unwrap();
+    other_tenure.verify_signature_only().unwrap();
+    for receipt in [
+        other_tenure,
+        f.selected.clone(),
+        f.sign(3, InheritedCheckpoint::EpochZero, 4),
+    ] {
+        assert!(matches!(
+            conflicting_receipt_pair(&f.document, &f.selected, &receipt),
+            Err(ReplError::ReceiptConflict)
+        ));
+    }
+    let mut oversized = f.losing.clone();
+    oversized.document.logical_key = vec![0; MAX_LOGICAL_KEY_BYTES + 1];
+    assert!(matches!(
+        conflicting_receipt_pair(&f.document, &f.selected, &oversized),
+        Err(ReplError::EpochBound)
+    ));
+}
+
+#[test]
+fn repair_evidence_binds_the_exact_pair_even_when_it_shares_the_winner() {
+    let f = Fixture::new(false);
+    let third = f.sign(2, InheritedCheckpoint::EpochZero, 4);
+    conflicting_receipt_pair(&f.document, &f.selected, &third).unwrap();
+    assert!(f.repair.receipt_hashes.contains(&f.selected.hash()));
+    // M5: only pair equality can reject this second genuine pair with the same selected receipt.
+    assert!(
+        matches!(
+            f.repair.check_evidence(&f.selected, &third),
+            Err(ReplError::ReceiptConflict)
+        ),
+        "repair evidence accepted a different pair sharing the winner"
+    );
+    f.repair.check_evidence(&f.selected, &f.losing).unwrap();
+    f.repair.check_evidence(&f.losing, &f.selected).unwrap();
+}
+
+#[test]
+fn repair_evidence_checks_decision_bindings_but_does_not_assert_its_authority() {
+    let f = Fixture::new(false);
+    for mutation in 0..5 {
+        let mut repair = f.repair.clone();
+        match mutation {
+            0 => repair.tenure_id[0] ^= 1,
+            1 => repair.receipt_hashes.swap(0, 1),
+            2 => repair.selected_receipt_hash = [0; 32],
+            3 => repair.issuer_tenure_start_group_epoch = None,
+            4 => repair.repair_sequence = 0,
+            _ => unreachable!(),
+        }
+        // All receipts are still canonical, authentic, and conflicting for each negative.
+        conflicting_receipt_pair(&f.document, &f.selected, &f.losing).unwrap();
+        assert!(
+            matches!(
+                repair.check_evidence(&f.selected, &f.losing),
+                Err(ReplError::ReceiptConflict)
+            ),
+            "mutation {mutation}"
+        );
+    }
+    let mut unsigned = f.repair.clone();
+    unsigned.signature[0] ^= 1;
+    unsigned.check_evidence(&f.selected, &f.losing).unwrap();
+    assert!(unsigned.verify_current_owner(&f.group, 0).is_err());
+    let resolved = ResolvedRepair {
+        repair: unsigned,
+        selected: f.selected.clone(),
+        losing: f.losing.clone(),
+    };
+    assert!(resolved.verify(Some(&f.document), 1).is_err());
+}
+
+#[test]
+fn repair_headless_book_roundtrips_and_retains_its_evidence_identity() {
+    let mut f = Fixture::new(false);
+    f.apply();
+    // C-8 / N2b: the cross-tenure planner will use this epoch-zero shape. Exercising the
+    // book codec directly isolates its identity derivation from later typed source validation.
+    f.book.latest = None;
+    f.book.tenure = None;
+    for adoption in [false, true] {
+        let bytes = f.book.encode_mode(adoption).unwrap();
+        assert_eq!(bytes[0], if adoption { 5 } else { 4 });
+        let restored =
+            ReceiptBook::decode_mode(&bytes, adoption).expect("headless repair book must restore");
+        assert_eq!(restored.encode_mode(adoption).unwrap(), bytes);
+        assert_eq!(restored.document.as_ref(), Some(&f.document));
+        assert!(restored.latest().is_none());
+        assert!(restored.tenure.is_none());
+        assert_eq!(restored.repair_sequence(), 1);
+        assert_eq!(restored.latest_repair(), Some(&f.repair));
+        assert!(restored.is_repaired_loser(&f.losing));
+    }
+}
+
+#[test]
+fn repair_headless_book_rejects_a_same_document_predecessor() {
+    let mut f = Fixture::new(false);
+    f.apply();
+    f.book.latest = None;
+    f.book.tenure = None;
+    for adoption in [false, true] {
+        // The headless repair evidence is otherwise valid, including its document and stored
+        // sequence. A fully signed SAME-document receipt isolates predecessor presence from
+        // the existing foreign-document rejection and from typed gate/opening validation.
+        assert!(ReceiptBook::decode_mode(&f.book.encode_mode(adoption).unwrap(), adoption).is_ok());
+        f.selected.verify_signature_only().unwrap();
+        assert_eq!(f.selected.document, f.document);
+        f.book.previous_until_installed = Some(f.selected.clone());
+        let bytes = f.book.encode_mode(adoption).unwrap();
+        assert_eq!(bytes[0], if adoption { 5 } else { 4 });
+        assert!(
+            matches!(
+                ReceiptBook::decode_mode(&bytes, adoption),
+                Err(ReplError::Malformed)
+            ),
+            "a headless repaired book must reject a same-document predecessor"
+        );
+        f.book.previous_until_installed = None;
+        assert!(ReceiptBook::decode_mode(&f.book.encode_mode(adoption).unwrap(), adoption).is_ok());
+    }
+}
+
+#[test]
+fn repair_headless_decode_keeps_scope_sequence_and_legacy_constraints() {
+    let mut f = Fixture::new(false);
+    f.apply();
+    f.book.latest = None;
+    f.book.tenure = None;
+    for mutation in 0..3 {
+        let mut book = f.book.clone();
+        match mutation {
+            0 => book.tenure = Some(TenureSelection::from(&f.selected)),
+            1 => book.repair_sequence = 2,
+            2 => book.resolved_repair.as_mut().unwrap().selected = f.losing.clone(),
+            _ => unreachable!(),
+        }
+        assert!(
+            ReceiptBook::decode(&book.encode().unwrap()).is_err(),
+            "mutation {mutation}"
+        );
+    }
+    // Old tags still cannot carry repair bytes, and an empty legacy book gains no identity.
+    for version in [1, 2, 3] {
+        let mut bytes = f.book.encode().unwrap();
+        bytes[0] = version;
+        assert!(ReceiptBook::decode_mode(&bytes, version == 3).is_err());
+    }
+    let empty = ReceiptBook::default();
+    for adoption in [false, true] {
+        let bytes = empty.encode_mode(adoption).unwrap();
+        assert_eq!(bytes[0], if adoption { 3 } else { 1 });
+        let restored = ReceiptBook::decode_mode(&bytes, adoption).unwrap();
+        assert!(restored.document.is_none());
+        assert_eq!(restored.encode_mode(adoption).unwrap(), bytes);
+    }
+}
+
+#[test]
+fn repair_headed_book_checks_retained_predecessor_document() {
+    let mut f = Fixture::new(false);
+    f.apply();
+    let predecessor = f.sign(1, InheritedCheckpoint::EpochZero, 5);
+    let mut foreign = predecessor.clone();
+    foreign.document.logical_key[0] ^= 1;
+    foreign.signature = f.owner.sign(&foreign.signature_hash()).unwrap();
+    foreign.verify_signature_only().unwrap();
+    for adoption in [false, true] {
+        // Keep a valid latest receipt and tenure so the independent headless-predecessor
+        // guard cannot mask the document-scope check on this retained receipt.
+        assert!(f.book.latest().is_some());
+        f.book.previous_until_installed = Some(predecessor.clone());
+        let valid = f.book.encode_mode(adoption).unwrap();
+        let restored = ReceiptBook::decode_mode(&valid, adoption).unwrap();
+        assert_eq!(restored.encode_mode(adoption).unwrap(), valid);
+
+        f.book.previous_until_installed = Some(foreign.clone());
+        assert!(
+            matches!(
+                ReceiptBook::decode_mode(&f.book.encode_mode(adoption).unwrap(), adoption),
+                Err(ReplError::Malformed)
+            ),
+            "a headed repaired book must reject a foreign-document predecessor"
+        );
+    }
+}
+
+#[test]
+fn repair_losing_adoption_anchors_do_not_recreate_a_resolved_fault() {
+    for different_baseline in [false, true] {
+        for retained_as_opening in [false, true] {
+            for descendant in [false, true] {
+                // A same-baseline repair identifies only the exact loser: its subsequent
+                // ancestry is unknown. Different inheritance also proves its branch lost.
+                if descendant && !different_baseline {
+                    continue;
+                }
+                let mut f = Fixture::new(different_baseline);
+                f.apply();
+                // Both anchors are independently checked by admission and restart. Exercise each
+                // alone so exempting only the opening or only the previous target cannot pass.
+                let anchor = if descendant {
+                    f.sign(9, f.losing.inherited.clone(), 8)
+                } else {
+                    f.losing.clone()
+                };
+                let opening = retained_as_opening.then_some(&anchor);
+                if !retained_as_opening {
+                    f.book.previous_until_installed = Some(anchor.clone());
+                }
+                let gate = EpochGate::new(f.document.clone(), 43, 3, f.owner.device_id());
+                assert_eq!(
+                    f.book
+                        .ingest_adoption(f.selected.clone(), &f.group, 0, &gate, opening)
+                        .unwrap(),
+                    ReceiptIngest::Duplicate,
+                    "the retained loser must not re-fault the selected checkpoint"
+                );
+                assert_eq!(gate.phase(), EpochPhase::Closing);
+                assert!(!f.book.is_faulted());
+                let bytes = f.book.encode_adoption().unwrap();
+                let restored = ReceiptBook::decode_adoption(&bytes).unwrap();
+                restored
+                    .verify_adoption_state(&f.document, &gate.inner.lock().unwrap(), opening)
+                    .expect("a repaired losing anchor must remain restorable");
+                assert_eq!(restored.encode_adoption().unwrap(), bytes);
+            }
+        }
+    }
+}
+
+#[test]
+fn repair_anchor_exemption_does_not_hide_a_third_baseline_or_unrepaired_rollback() {
+    let mut f = Fixture::new(true);
+    f.apply();
+    let gate = EpochGate::new(f.document.clone(), 43, 3, f.owner.device_id());
+    let third = f.sign(3, baseline(2), 5);
+    assert_eq!(
+        f.book
+            .ingest_adoption(third, &f.group, 0, &gate, Some(&f.selected))
+            .unwrap(),
+        ReceiptIngest::Fault
+    );
+    assert_eq!(gate.phase(), EpochPhase::Fault);
+
+    // An unrepaired newer anchor still prevents an older target from being restorable.
+    let mut f = Fixture::new(false);
+    f.apply();
+    f.book.previous_until_installed = Some(f.sign(3, InheritedCheckpoint::EpochZero, 6));
+    let gate = EpochGate::new(f.document.clone(), 42, 2, f.owner.device_id());
+    let mut inner = gate.inner.lock().unwrap();
+    inner.phase = EpochPhase::Closing;
+    inner.receipt_hash = Some(f.selected.hash());
+    assert!(f
+        .book
+        .verify_adoption_state(&f.document, &inner, None)
+        .is_err());
+    f.book.previous_until_installed = None;
+    let newer_opening = f.sign(3, InheritedCheckpoint::EpochZero, 6);
+    assert!(f
+        .book
+        .verify_adoption_state(&f.document, &inner, Some(&newer_opening))
+        .is_err());
+}
+
+#[test]
 fn repair_replay_cannot_restore_resolved_fault_across_all_ingest_paths_and_restart() {
     for different_baseline in [false, true] {
         let mut f = Fixture::new(different_baseline);

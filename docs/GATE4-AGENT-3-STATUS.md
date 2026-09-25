@@ -1,8 +1,349 @@
 # Gate 4 Agent 3 status: runtime signed fault repair
 
 Owner: Agent 3 ([assignment](GATE4-AGENT-HANDOFFS.md#agent-3-runtime-signed-fault-repair)).
-Proposal: [GATE4-AGENT-3-DESIGN](GATE4-AGENT-3-DESIGN.md), currently revision 14.
+Proposal: [GATE4-AGENT-3-DESIGN](GATE4-AGENT-3-DESIGN.md), revision 16 follow-up.
 Review preamble: 3. Current entries override older ones.
+
+## Owner fault-record checkpoint, 2026-09-25
+
+Implemented strict inert tag-3 decoding in `store/epoch_owner/fault_record.rs`: canonical bounded
+pairs, local attestation framing, overflow, exact repair bindings and historical signatures.
+Inventory/reopen accepts and accounts these bytes under the shared 27,904-byte plaintext /
+27,944-byte physical cap. Legacy live owner reads and all ordinary writers refuse tag 3 or retained
+journal reconciliation/proof before mutation; cleaned v2 journals remain compatible. Active close
+binding now follows the effective journal choice, including reconciliation. Legacy bytes are unchanged.
+
+This is persistence groundwork, not report admission: no production constructor, B1 write, observer/
+durable-snapshot/custody capability or runtime repair endpoint is enabled. Agent 2's archived Observed
+witness remains absent. No native/UI-hook change is proposed. Shared integration remains Agent 4-owned.
+Read-only design and actual-diff implementation reviews found no remaining findings; 27 focused owner
+tests pass, including maximal combined records above the old cap and refusal without byte/budget/RNG
+changes. All five store mutations fail at their intended assertions, restore exact bytes, and pass
+their restored controls (`python scripts/check-agent3-store-mutations.py`). Script/test re-review
+also has no findings. Required full-suite validation is in progress; an initial app test rebuild
+exhausted memory, so the focused/mutation runs use `profile.test.package.catcoms-app.debug=0`.
+
+## CORE-006 implementation checkpoint, 2026-09-24
+
+Code: `35492b116a94abeaedb6e06d47934b7df086f89c`. Added immutable joint repair plans for Registry,
+Studio Index and Flipnote. Source/journal effects are independently derived; covered live choices,
+unfinalized earlier journal repairs (including NoChange), stale versions and owner turnover refuse.
+Preparation preserves both inputs. An original-journal comparison supports B1 preflight; application
+rechecks the exact candidate journal, whole source and final locked gate stamp, including exact retry.
+These remain core APIs: historical admission, custody, global sequence and the durable transaction
+claim/B1-B6 writes are still integration work. A plan does not certify a store write or grant custody.
+
+Read-only design/implementation review and final re-review: no BLOCKER/HIGH/MEDIUM remains; the
+LOW negative-test isolation gaps were fixed. All 22 focused joint tests pass. All five new mutation
+guards fail at their intended assertions, restore byte-exactly and pass their restored controls.
+[Core CI 36056471336](https://github.com/Thalpy/Mewtual/actions/runs/36056471336) passes on Linux and
+Windows: **295 library tests and all 25 mutation/restoration/control checks on each platform**.
+Actual CI merge checkout: `580c1b0a1aea93502506cd42b5eb4b217ac6ebaf` (Agent 1 base `48f9069`).
+
+Required local validation is complete:
+`cargo test -j 1 --all --all-features --no-fail-fast -- --test-threads=2` PASS
+(1,846 passed, 13 existing ignored; includes replication 295 + 47 integration);
+`cargo test -j 1 --manifest-path apps/desktop/src-tauri/Cargo.toml` PASS (261 unit + 5 ACL);
+`npm.cmd --prefix apps/desktop test` PASS (1,229). `cargo fmt --all -- --check`, explicit rustfmt checks
+for both included test files, and `cargo clippy -j 1 --all-targets --all-features -- -D warnings` PASS.
+`bash scripts/check-no-ambient.sh` still fails the seven untouched calls listed below;
+`cargo deny check` still fails unchanged rustls 0.23.40 / RUSTSEC-2026-0285. Broader CI `36056471088` also has
+completed failures in native unused-code checks and cargo-deny. No integrated Gate 4 PASS is claimed.
+Startup/flow gates do not apply to this core-only change. Shared integration remains Agent 4-owned.
+
+## C-1/C-2/C-5/C-6 implementation checkpoint, 2026-09-24
+
+Implemented the shared atomic gate/book repair transition and typed Studio/Registry adapters,
+strict v3 action provenance, successor propagation, and whole-source Repair adoption/recovery.
+Accepted operations remain intact; only an Open repair clears rejected quarantine. Current
+authority precedes retry, screening preserves unrelated faults, and cross-tenure choices never
+authorize installing the old owner's seed. Ordinary adoption cannot erase a pending continuation.
+No runtime/store caller uses these new APIs yet; historical admission, custody, joint journal/source
+compatibility and the B1-through-recycling durable claim remain integration work.
+
+Implementation review found two HIGH issues (covered live roles accepted by v3 restore and
+ordinary adoption bypassing pending repair) and one MEDIUM (39-byte Registry protocol undercount).
+All are fixed with regressions; the two HIGH tests failed before the fixes. A LOW coverage gap is
+closed by re-admitting the same real quarantined envelope after Open repair and restart.
+Final bounded re-review found no remaining BLOCKER/HIGH/MEDIUM. Code checkpoint: `27bab16`.
+Core CI `36005323406`: **273 library tests and all 20 mutations, exact restorations and restored
+controls PASS on Linux and Windows**. Local focused repair tests: 50 unit + 1 integration PASS.
+Full native suite: 261 unit + 5 ACL PASS; frontend: 1,229 PASS; formatting and strict workspace
+Clippy PASS. Full root tests were run, then retried outside the sandbox with two test threads and
+`--no-fail-fast`: app and replication unit processes exited abnormally (`0xffffffff`) without an
+assertion report; remaining targets completed, including all 47 replication integration tests.
+A separate full replication run also exited abnormally; an isolated app diagnostic passed.
+The local exit cause is unresolved; independent complete core CI is green, not a full-workspace
+PASS. Full CI `36005323438` failed the unchanged owner-return scheduling test on both platforms,
+native unused-code diagnostics under `-D warnings`, and cargo-deny. Existing ambient failures (seven untouched calls) and cargo-deny
+rustls 0.23.40 / RUSTSEC-2026-0285 remain. Startup/flow gates are not applicable to this core change.
+
+The C-2 table and C-5 predicate now state the tested edge cases precisely: covered opening takes
+precedence over ordinary settlement; a retained seal must match inheritance and not be covered;
+Screened never owns installation; healthy cross-tenure sources preserve their roles. Shared
+architecture/interface/threat/handover integration remains Agent 4-owned, as below.
+
+Prior C-7 verification is now complete: native 261 unit + 5 ACL tests PASS; strict workspace
+Clippy PASS; core CI run `35859493103` passed on Linux and Windows (243 tests and all 14 then-current
+mutations). Full CI `35859493193` failed unchanged Studio exchange scheduling tests, native unused
+code under `-D warnings`, and the rustls advisory. It was not a full-suite PASS.
+
+## C-7 implementation checkpoint, 2026-09-23
+
+The user's independent revision-16 verdict is **PASS** at `2b741e7`: CORE-006/007 and the
+TEST-014 design plan are closed; C-7 implementation is authorized. Earlier entries below are
+historical. The accepted bounded limitations remain; integrated TEST-014 execution is pending.
+
+Implemented `epoch/owner_journal.rs`: distinct publication/pending/reconciled roles, full retired
+receipt/close retention, bounded provenance, repeated repair, both finalization orders, strict
+v2 restore and exact v1 compatibility. No store/runtime caller uses the new repair APIs yet.
+Historical admission, global sequence, B1-B6/source compatibility and custody remain integration work.
+
+Read-only adversarial implementation review and re-review found and closed one HIGH: an active
+pending receipt could equal historical high-water after two repairs and never complete. Its test
+failed before the fix and passes afterward in both finalization orders. No blocker/high/medium
+remains in this leaf review. The mutation harness now pins that defect plus four other C-7 guards.
+
+Verification: 15 focused journal tests PASS; the full replication library passed 242 tests before
+that final regression/fix; frontend 1,229 tests PASS; replication strict Clippy PASS. All **14
+mutations, byte-exact restorations and restored controls PASS**, including five C-7 guards.
+The required ambient check fails on the same seven untouched calls recorded below; cargo-deny
+fails on unchanged rustls 0.23.40 / RUSTSEC-2026-0285 (bans/licenses/sources pass). Native tests
+and final full CI remain in progress; no full-suite or integrated repair PASS is claimed.
+
+Agent 4 integration note (shared documents are left to their owner): the journal cap is now
+**12,288 bytes**, propagating to **17,448 sealed owner-record bytes**. Update THREAT-MODEL's
+8,488-byte figure and no-journal-rebase statement, and INTERFACES' no-rebase-API statement when
+integrating this core. The leaf exists; durable runtime repair does not. Startup/flow gates are
+not applicable to this core-only change.
+
+## Independent review response, 2026-09-23: revision 16
+
+Latest user-supplied review base: **`a7513697fb482abc235cadb8414d491f7851b6ce`**.
+The [finding ledger](GATE4-AGENT-3-CORE-REVIEW.md) records the split disposition:
+
+- **IMP-001 PASS/CLOSED.** The implementation and independent v4/v5 regressions are accepted;
+  final core CI is green on Linux and Windows. No further codec change is made here.
+- **CORE-005 bounded design PASS**, including the finite-history, late-reporter and device-local
+  authority limits. Universal peer convergence is not a claim. Agent 2 must still agree/implement
+  the archived Observed witness and matching durable capability; N49/N50 production-consumer
+  tests and Agent 4's snapshot integration remain required.
+- **CORE-001/002/003 remain accepted.** No new approval is requested for them.
+- **CORE-004 REQUEST CHANGES:** CORE-006 (P1) replaces effect equality with joint compatibility;
+  CORE-007 (P1) moves the earliest possible owner-turnover hold to B1, before B2.
+- **TEST-014 (P2):** N3b now includes source Transitioned/journal NoChange with H as published
+  and pending; N51 adds the reverse Screened/Replace and negative authority/evidence cases;
+  N52 covers observed owner turnover after B1 before B2 and separately after B2 before B6,
+  including a journal NoChange. These integrated tests are planned, not implemented or executed.
+
+The [revised journal contract](GATE4-AGENT-3-AUTHORITY-FOLLOWUP.md#core-006-compatible-independent-source-and-journal-effects)
+checks independently computed source and journal candidates. No proven losing decision may
+remain usable for proof, settlement or installation; guarded losing recovery/history is retained.
+Different non-losing heads are compatible without weakening the existing three-way proof check.
+A journal NoChange still persists the owner repair and its target claim.
+
+The proposed turnover limitation covers **any time after B1 until durable terminal/recycling**.
+Pre-B2, the source is unchanged but the owner record may already have reconciled the journal or
+retired pending evidence. Post-B2, committed source/recovery work may also be stranded. Every
+ordinary prepare/reset/proof/publication path must respect the persisted repair claim, even
+without journal provenance. Old issuer authority is never renewed by restart. No cancellation is
+introduced; same-transaction authorized progress and already-terminal cleanup retain their rules.
+
+**Scope:** four Agent 3 documentation files only. No code, schema, native registration, shared
+workflow/lockfile, Agent 1/2 files or refs changed. C-7 remains unimplemented pending independent
+re-review of these corrections. There is still no runtime report-admission/no-write regression;
+the C-4 member-forgery primitive test does not substitute for N49.
+
+**Internal review complete:** the read-only reviewer inspected the actual four-document diff
+against `a751369` and neighboring enforcement paths. No BLOCKER/HIGH/MEDIUM remains preventing
+independent re-review. One LOW accepted/proposed label mismatch was corrected and re-reviewed.
+The review confirms the independent effects, B1/NoChange fence and test matrix; no Cargo was run.
+It cannot substitute for the user's verdict. Only CORE-006/007 and TEST-014 are the new
+independent review request; accepted CORE-005 is preserved.
+
+### Verification
+
+No backend/frontend suites are rerun for this documentation-only revision: it changes no runtime
+or build behavior. Diff whitespace and contract-reference checks pass; read-only adversarial
+design review/re-review completed as above.
+The previous implementation's final execution evidence is now complete for the focused boundary:
+
+- Local `cargo test --locked -j 1 -p catcoms-replication --lib epoch::repair_state::tests::`:
+  **20/20 PASS** at `27e1b9998022c1dcaa9e3c411909467d4fbeb383`.
+- [Final core/mutation CI](https://github.com/Thalpy/Mewtual/actions/runs/35811047096):
+  **Linux and Windows each PASS 228/228 tests and all nine intended mutations, exact restorations
+  and nine restored controls.** Both actual merge checkouts are
+  `0651da0ac579168938005b0cbbe161e3ca86b1c2`, into base
+  `28bb73d2e29ee03841ebe053afad203602df872e`. Both logs were inspected; ignored local copies
+  are `logs/agent3-core-27e-linux.log` and `logs/agent3-core-27e-windows.log`.
+- [Full required CI](https://github.com/Thalpy/Mewtual/actions/runs/35811047134) at that code:
+  frontend **1,229/1,229**, frontend check/build and Linux/Windows formatting/strict Clippy pass.
+  Native full tests fail during compilation on unchanged unused-code diagnostics under
+  `-D warnings`; the later native check is not reached. Cargo-deny fails on unchanged
+  rustls 0.23.40 / RUSTSEC-2026-0285 (bans/licenses/sources pass).
+- Root full suites remain **in progress**, so their subsequent ambient gates have not run.
+  The local ambient gate was run and failed on the seven untouched calls recorded below.
+  No full-suite, integration or Gate 4 PASS is claimed. Startup/flow gates do not apply to this
+  documentation revision or the unchanged core decoder/test scope.
+
+## Implementation restart, 2026-09-23
+
+Agent 3 now works in **`gate4-agent3-repair`**, at
+`M:\Git (local)\CatComs\target\gate4-agent3-repair`, isolated from the mutable Agent 1/2
+checkout. Base: **`918ffb9b3034c43ed33574225e04f1be2e87090d`**. No shared branch is switched,
+reset, rebased or force-pushed. Commits use explicit Agent 3 pathspecs; mutation scripts run
+only on this worktree. The older shared-checkout description below is historical.
+
+**First implementation checkpoint: C-3, C-4, C-8 and the C-5 sequence accessor only.**
+This is not the complete core repair transition, a store transaction, runtime repair, native
+exposure, or Gate 4 acceptance. No current source can leave Fault through this checkpoint.
+
+- C-4: `conflicting_receipt_pair` checks bounded canonical full receipts, historical signatures,
+  full logical scope and genuine same-tenure conflict, without returning authority.
+  `ReceiptRepair::check_evidence` adds the exact pair, selection, fault tenure, v2 and sequence
+  bindings. `ResolvedRepair::verify` reuses it while retaining signature, role, enclosing-document
+  and stored-sequence checks. The live authority guard and `apply_repair` retry ordering remain.
+- C-3: verified losing receipts remain preserved evidence but cease to be adoption anchors,
+  both during admission and restart. Unrepaired newer anchors and genuine third baselines refuse.
+- C-8: only repair-bearing book versions 4/5 can derive identity from resolved evidence when
+  there is no current head. Latest/tenure consistency, retained scope and legacy framing remain.
+- Eight new core regressions exercise these leaves. `scripts/check-agent3-core-mutations.py`
+  covers eight mutations: M5; admission and both restart-anchor checks; exact-hash-only
+  narrowing of each of those three checks; and headless identity. Each mutation requires
+  exact restoration and a passing control. Descendants on the provably losing inheritance
+  baseline are exercised as both retained anchor kinds; unknown same-baseline ancestry
+  still cannot authorize rollback.
+
+**Verification is recorded below.** Local compiled checks wait for the other agents' Cargo
+commands to finish; no separate large target directory or competing build is created.
+
+**Dependency refresh against the base:** Agent 1's `EpochMutation` capability exists in
+`store.rs`; all future repair writes must use it, including retry/sync and failed-I/O paths.
+C-3's storage scanner exists; runtime adoption remains Agent 1's checkpoint. Agent 2's
+`verification_owner_tenure_start` / `authoring_owner_tenure_start` split still does not exist.
+Agent 3 accepts T1-T5 as written and will not substitute the single current accessor, a carried
+receipt field or the current MLS epoch for authoring evidence. This leaf checkpoint consumes
+neither runtime dependency. Agent 4 continues to own shared registrations, workflows and docs.
+
+**Read-only preimplementation review found four confirmed design/source mismatches** in
+the remaining C-1/C-2/C-7 work: Open quarantine restoration, screening while retaining a
+different Fault, consecutive unpublished reconciliations, and differing-baseline journal
+publication evidence. They are recorded in
+[the core follow-up review](GATE4-AGENT-3-CORE-REVIEW.md). Those transitions are not implemented
+by this checkpoint; the revision-14 PASS is not claimed to settle these newly demonstrated paths.
+The second design audit confirmed CORE-001/002 and the direct canonical-head correction in
+CORE-003, but found three remaining journal decisions in CORE-004. That document labels them
+explicit open questions, not an accepted or total contract.
+
+The read-only implementation review found no BLOCKER/HIGH/MEDIUM defect in the leaf checkpoint.
+Its one LOW gap (retained losing-baseline descendant tests) was fixed and statically re-reviewed,
+including the three added isolating mutations. The review executed no Cargo commands and does
+not replace the user's independent review or execution evidence.
+
+Proposed shared documentation/UI update for Agent 4: document the evidence-checking APIs and
+headless book restore as core prerequisites; keep the current unavailable-native-repair row
+unchanged. In particular, do not claim `Repairing`, an owner choice, recovery-before-replacement,
+or peer convergence from these unit tests.
+
+### Current checkpoint and follow-up verification
+
+Implementation: `66933c96a27ab76bac48f9bf0f540a8317ea9158`.
+Reviewed regression expansion: `703c84d86dab41c3dc4e885835ad3eb1300bffd5`.
+Separate branch-local verification wiring: `1a2ec4dfd7d848bf3a59d6fff6e12e24ee3bdcdc`.
+Only tests/docs/mutation controls changed after the first implementation commit; the wiring
+commit changes only its new workflow and this status. No existing common workflow was edited.
+
+[Expanded-regression CI on the original base](https://github.com/Thalpy/Mewtual/actions/runs/35803402782)
+uses head `703c84d` and actual merge checkout **`182b48212768a52aa0e73c3c61f5e508bc622d85`**,
+confirmed in its desktop checkout log. Frontend tests (1,229/1,229), check and build passed again;
+native full tests again stopped during compilation on the same untouched unused-code diagnostics.
+Formatting and strict Clippy also passed on both platforms with the expanded regressions.
+Root full suites are still running at this entry. The branch sources differ from `1a2ec4d`
+only in its new test workflow/status, but their **PR merge bases differ**: Agent 1 advanced
+`gate4-agent1-runtime` from `918ffb9` to `397f6895166ccabb95056396ff373199f0076f87` while
+verification was in flight. The later full run `35804059956` was initially cancelled as a
+duplicate; the checkout audit caught this distinction and it was **restarted as attempt 2**:
+[newer-base full CI](https://github.com/Thalpy/Mewtual/actions/runs/35804059956/attempts/2).
+It is running, not a PASS; record its actual checkout and results on completion. The older
+`66933c9` full run `35802458116` stays cancelled after retaining its partial logs. A cancellation
+is not verification evidence. No local rebase/merge or Agent 1/2 ref mutation was performed.
+
+[Dedicated repair-core run](https://github.com/Thalpy/Mewtual/actions/runs/35804060155)
+at `1a2ec4d` **PASSED on Windows and Linux**, each with **225 passed, zero failed/ignored**
+in the complete replication library. Both checkout logs confirm actual PR merge
+**`dda15bdcefb0cf43299a8f106ac0a360c489715d`**, merging `1a2ec4d` into the newer `397f689` base.
+On each platform all eight mutants failed at the intended named assertion, every source was
+restored byte-for-byte, and each of the eight restored exact controls passed. Both sets of raw
+logs were downloaded and checked: eight mutant logs and eight passing controls per platform.
+Artifacts: [Linux](https://github.com/Thalpy/Mewtual/actions/runs/35804060155/artifacts/10727522307),
+[Windows](https://github.com/Thalpy/Mewtual/actions/runs/35804060155/artifacts/10728035646).
+Local copies are under ignored `logs/agent3-core-ci-linux/` and `logs/agent3-core-ci-windows/`.
+
+The new workflow received a read-only static review with no findings. It has read-only permissions,
+serial locked builds and always-attempted evidence upload. The review did not execute its commands.
+No root-workspace, native, runtime, transport or full-Gate-4 PASS is inferred from this library run.
+
+The user has been asked for the independent CORE-001--004 design review required by the common
+handoff before those new gate/journal boundaries are implemented. No verdict is inferred from
+silence, routine implementation authorization, the internal static review, or these leaf tests.
+
+### Verification evidence, initial leaf checkpoint
+
+Draft PR: [#28](https://github.com/Thalpy/Mewtual/pull/28), base `gate4-agent1-runtime`,
+head `66933c96a27ab76bac48f9bf0f540a8317ea9158`. No merges or shared-ref changes were made.
+[Initial required CI](https://github.com/Thalpy/Mewtual/actions/runs/35802458116)
+checked out PR merge **`2e9721fa2d6072e2f42c8d69dec4ec39907d4d7c`** (desktop job checkout log).
+The subsequent test-only descendant expansion does not change production code, but still
+needs execution at its own head. Current observations:
+
+| Check | Result |
+|---|---|
+| Local `cargo fmt --all -- --check` and `git diff --check` | PASS, including descendant expansion |
+| Python script parse and unique anchors for all eight mutations | PASS; this is not mutation execution |
+| CI root formatting and strict Clippy, Linux and Windows | PASS on initial leaf checkpoint |
+| CI `cargo test --all --all-features`, Linux and Windows | Running at this entry; not yet a PASS |
+| CI `npm --prefix apps/desktop test` | PASS: 1,229 passed, zero failed |
+| CI frontend `check` and `build` | PASS: zero check errors/warnings; Vite build completed |
+| CI native `cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml` | Attempted; compilation blocked by existing unused-code diagnostics under `RUSTFLAGS=-D warnings`, before tests |
+| CI native `cargo check` | Not reached after native compilation failure |
+| CI ambient-dependency gate | Pending behind root suite at this entry |
+| CI `cargo deny check` | FAIL: existing `rustls 0.23.40`, `RUSTSEC-2026-0285`; bans/licenses/sources passed |
+| Agent 3 focused mutations | Prepared; not yet executed |
+
+This table is the initial-run record; the later dedicated mutation PASS above supersedes its last
+row. The final evidence update changes documentation only, so it does not rerun or queue another
+copy of the expensive suites. Existing complete-suite runs continue and remain explicitly pending.
+
+Native diagnostics are `SourceFormat::as_mime` (`src/media_decode.rs:109`) and unused
+security-intent APIs/fields (`src/security_intent.rs`, including `PendingApproval` fields at
+line 155). Those files and both lockfiles are unchanged by Agent 3. The supply-chain log
+recommends rustls >=0.23.45. Agent 4 owns the dependency/native integration disposition;
+this checkpoint adds no advisory ignore, warning suppression or unfinished native registration.
+Failure logs: [native/frontend](https://github.com/Thalpy/Mewtual/actions/runs/35802458116/job/106995653398),
+[supply chain](https://github.com/Thalpy/Mewtual/actions/runs/35802458116/job/106995653449).
+
+No startup, frontend-flow or visual gate is claimed: these leaves change no setup, process,
+UI, send/friend flow or native command. The separate
+`.github/workflows/agent3-repair-core.yml` is branch-local verification wiring, added in its own
+identifiable commit so the complete replication suite and eight mutations can execute without
+waiting on the shared local build target. It changes no existing common workflow. Agent 4 owns
+integration and required-check configuration; the exact patch is also supplied as
+[GATE4-AGENT-3-CI.patch](GATE4-AGENT-3-CI.patch). Its presence is not execution evidence.
+
+**Local focused execution at `703c84d86dab41c3dc4e885835ad3eb1300bffd5`:**
+`cargo test --locked -j 1 -p catcoms-replication --lib epoch::repair_state::tests::` passed:
+17 passed, zero failed/ignored (includes the eight new regressions). It started only after
+the other agents' Cargo work became idle and reused the existing target directory.
+The eight-mutation local runner waited up to 15 minutes for their next full app suite to finish,
+then exited `NO_LOCAL_SLOT` without invoking Cargo or touching source. No local mutation evidence
+is claimed; its execution moved to the dedicated hosted workflow. No local Agent 3 process remains.
+
+The local ambient-dependency script was also executed and **failed** on seven existing calls:
+`Instant::now` in native `media_decode.rs` lines 333/426/444/504, and `tokio::time::sleep` in
+`studio/receiver/catchup/tests.rs:1848`, `studio_exchange/tests/scheduling.rs:150`, and
+`tests/support/studio_preview.rs:329` under `catcoms-app`. All four files are byte-identical
+to the base; Agent 1's existing status already records the ambient gate as red. This failure
+is retained explicitly for Agent 4 and is not suppressed by the new focused workflow.
 
 ## Checkpoints
 
