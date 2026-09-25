@@ -1220,7 +1220,8 @@ a peer has nowhere to live. This slot is that home: it is the issuance input, it
 report path before any decision exists, and it survives independently of the source.
 
 The proposed encoding appends an optional tag-3 section after `2 | hash | close`. Revision 15
-adds private admission attestations to every pair in this **not-yet-implemented** section.
+adds private admission attestations to every pair. The inert structural decoder is now implemented;
+contextual admission and production writes remain unimplemented.
 An old un-attested tag-3 payload is not accepted as the new format; add an explicit section
 format-version byte (value 1) so no legacy pair can acquire authority by reinterpretation:
 
@@ -1540,7 +1541,7 @@ external pairs (four receipts), the reserved pair (two), a source-bound repair's
  + 4 * MAX_FAULT_ADMISSION_ATTESTATION_BYTES`. The proposed CORE-004 journal bound and accepted
 CORE-005 attestation bound make the journal
 12 KiB and each of at most four attestations 256 bytes, for a **27.25 KiB** owner-record cap;
-`MAX_SEALED_BYTES` and accounting follow. These are proposed, not today's codec constants. This matters
+`MAX_SEALED_BYTES` and accounting follow. These bounds now apply to the inert store codec. This matters
 beyond accounting: `read_epoch_owner_plain` caps the file before unsealing, so an under-sized
 contract would make the maximal valid state that N31 and N36 exercise impossible to write or reopen.
 Revision 5 carried three contradictory figures, revision 6 fixed them at five and revision 7 raised

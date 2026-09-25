@@ -43,6 +43,14 @@ pub fn conflicting_receipt_pair(
 }
 
 impl ReceiptRepair {
+    /// Check canonical shape and the historical self-signature without granting authority.
+    /// This is for sealed evidence restore. It does not prove the signer was an owner, admit
+    /// a reported pair, or replace `verify_current_owner` at any live transition.
+    pub fn verify_signature_only(&self) -> Result<(), ReplError> {
+        self.verify_historical()?;
+        Self::decode(&self.encode()).map(|_| ())
+    }
+
     /// Bind this v2 decision to both complete conflicting receipts and a nonzero sequence.
     ///
     /// This checks evidence, NOT this repair's signature or present authority. Live callers must

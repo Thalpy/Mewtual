@@ -4,6 +4,25 @@ Owner: Agent 3 ([assignment](GATE4-AGENT-HANDOFFS.md#agent-3-runtime-signed-faul
 Proposal: [GATE4-AGENT-3-DESIGN](GATE4-AGENT-3-DESIGN.md), revision 16 follow-up.
 Review preamble: 3. Current entries override older ones.
 
+## Owner fault-record checkpoint, 2026-09-25
+
+Implemented strict inert tag-3 decoding in `store/epoch_owner/fault_record.rs`: canonical bounded
+pairs, local attestation framing, overflow, exact repair bindings and historical signatures.
+Inventory/reopen accepts and accounts these bytes under the shared 27,904-byte plaintext /
+27,944-byte physical cap. Legacy live owner reads and all ordinary writers refuse tag 3 or retained
+journal reconciliation/proof before mutation; cleaned v2 journals remain compatible. Active close
+binding now follows the effective journal choice, including reconciliation. Legacy bytes are unchanged.
+
+This is persistence groundwork, not report admission: no production constructor, B1 write, observer/
+durable-snapshot/custody capability or runtime repair endpoint is enabled. Agent 2's archived Observed
+witness remains absent. No native/UI-hook change is proposed. Shared integration remains Agent 4-owned.
+Read-only design and actual-diff implementation reviews found no remaining findings; 27 focused owner
+tests pass, including maximal combined records above the old cap and refusal without byte/budget/RNG
+changes. All five store mutations fail at their intended assertions, restore exact bytes, and pass
+their restored controls (`python scripts/check-agent3-store-mutations.py`). Script/test re-review
+also has no findings. Required full-suite validation is in progress; an initial app test rebuild
+exhausted memory, so the focused/mutation runs use `profile.test.package.catcoms-app.debug=0`.
+
 ## CORE-006 implementation checkpoint, 2026-09-24
 
 Code: `35492b116a94abeaedb6e06d47934b7df086f89c`. Added immutable joint repair plans for Registry,

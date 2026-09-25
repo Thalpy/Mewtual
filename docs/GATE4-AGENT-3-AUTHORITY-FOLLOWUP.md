@@ -105,7 +105,8 @@ pair with a **still-retained** attestation may use it for acknowledgment/reflush
 That attestation is **not** a witness for a new pair sharing one receipt or the same signer.
 No raw legacy fault section is silently stamped as admitted. It must acquire a valid current/
 archived witness through this admission path, or remain explicitly unavailable for report issuance.
-The new fault section is not implemented yet; implementation must use an unambiguous version/tag.
+The inert structural decoder now uses tag 3 / format 1; contextual admission and production writes
+remain unimplemented.
 
 The attestation follows its exact pair through external/reserved/source-bound moves. Inserting
 a source-bound pair into an owner record also needs this authority check: finding it in a legacy

@@ -209,10 +209,10 @@ def run(test):
     )
 
 
-def main():
+def main(log_name="agent3-core-mutations"):
     if not (ROOT / ".git").is_file() and os.environ.get("GITHUB_ACTIONS") != "true":
         raise RuntimeError("mutations require an isolated worktree or disposable Actions checkout")
-    log_dir = ROOT / "logs" / "agent3-core-mutations"
+    log_dir = ROOT / "logs" / log_name
     log_dir.mkdir(parents=True, exist_ok=True)
     for name, path, before, after, test, assertion in MUTATIONS:
         source = ROOT / path

@@ -18,9 +18,18 @@ use super::epoch_recovery::inventory::{is_link, regular_file};
 use super::epoch_recovery::AuthenticatedEpochFileBytes;
 use super::*;
 
+mod fault_record;
+use fault_record::{InertFaultRecord, MAX_FAULT_ADMISSION_ATTESTATION_BYTES};
+
 pub(super) const RECORD_DOMAIN: &[u8] = b"catcoms/epoch-owner-store/v1";
 // Full framed local/group/type/key scope plus length framing, separate from the signed wire.
-const MAX_RECORD_BYTES: usize = MAX_OWNER_RECEIPT_JOURNAL_BYTES + MAX_CLOSE_RECORD_BYTES + 1024;
+// Two external pairs, one reserved pair, one inline pair and the signed repair, plus at most
+// four local attestations. The pre-unseal reader and inventory share this same physical cap.
+const MAX_RECORD_BYTES: usize = MAX_OWNER_RECEIPT_JOURNAL_BYTES
+    + MAX_CLOSE_RECORD_BYTES
+    + 9 * MAX_RECEIPT_BYTES
+    + 1280
+    + 4 * MAX_FAULT_ADMISSION_ATTESTATION_BYTES;
 pub(super) const MAX_SEALED_BYTES: usize = MAX_RECORD_BYTES + 40;
 
 /// Historical, authenticated journal view. It is not a publication permit or pruning authority.
@@ -31,6 +40,9 @@ pub struct EpochOwnerReceiptState {
     // One exact close for the pending-preferred decision. Retained across publication completion
     // so a crash before source installation never needs to reconstruct lost close heads.
     decision_close: Option<([u8; 32], CloseRecord)>,
+    // Structural decoding is useful for inventory, but cannot establish the observer, matching
+    // durable MLS snapshot or custody. No production writer can create or consume this yet.
+    fault_record: Option<InertFaultRecord>,
 }
 
 impl std::fmt::Debug for EpochOwnerReceiptState {
@@ -43,6 +55,20 @@ impl std::fmt::Debug for EpochOwnerReceiptState {
 }
 
 impl EpochOwnerReceiptState {
+    /// The legacy owner driver cannot resume a repair transaction. In particular, a NoChange
+    /// journal still has a claim in tag 3, and a journal-only repair can retain an unpublished
+    /// canonical choice or evidence. Refuse all three before exposing a legacy view or writing.
+    /// A fully cleaned v2 journal remains compatible; its version alone is not a hold.
+    fn require_ordinary(&self) -> Result<(), AppError> {
+        if self.fault_record.is_some()
+            || self.journal.reconciled().is_some()
+            || self.journal.retained_repair().is_some()
+        {
+            return Err(invalid("repair record requires contextual recovery"));
+        }
+        Ok(())
+    }
+
     /// Exact pending signed decision. After restart, re-prepare this before republication;
     /// merely reading visible bytes does not repair an earlier directory-sync failure.
     pub fn pending(&self) -> Option<&Receipt> {
@@ -68,14 +94,15 @@ impl EpochOwnerReceiptState {
             .pending()
             .into_iter()
             .chain(self.published())
+            .chain(self.journal.reconciled())
             .any(|r| &r.document != document)
         {
             return Err(invalid("journal belongs to another logical document"));
         }
         if let Some((hash, close)) = &self.decision_close {
             let receipt = self
-                .pending()
-                .or_else(|| self.published())
+                .journal
+                .effective_choice()
                 .ok_or_else(|| invalid("close without a decision"))?;
             if close.server_id.len() > 256
                 || close.author_public_key.len() != 32
@@ -118,7 +145,14 @@ impl EpochOwnerReceiptState {
             e.put_bytes(hash).map_err(invalid)?;
             e.put_bytes(&close.encode()).map_err(invalid)?;
         }
-        Ok(Zeroizing::new(e.finish()))
+        let mut bytes = Zeroizing::new(e.finish());
+        if let Some(fault) = &self.fault_record {
+            bytes.extend_from_slice(fault.as_bytes());
+        }
+        if bytes.len() > MAX_RECORD_BYTES {
+            return Err(invalid("record exceeds its bound"));
+        }
+        Ok(bytes)
     }
 
     pub(super) fn decode(
@@ -135,24 +169,34 @@ impl EpochOwnerReceiptState {
         }
         let journal =
             OwnerReceiptJournal::decode(d.get_bytes().map_err(invalid)?).map_err(invalid)?;
-        let decision_close = if d.is_empty() {
-            None
-        } else {
-            if d.get_u8().map_err(invalid)? != 2 {
-                return Err(invalid("unsupported owner decision extension"));
+        let mut decision_close = None;
+        let mut fault_record = None;
+        while !d.is_empty() {
+            let start = bytes.len() - d.remaining();
+            match d.get_u8().map_err(invalid)? {
+                2 if decision_close.is_none() => {
+                    let hash = d
+                        .get_bytes()
+                        .map_err(invalid)?
+                        .try_into()
+                        .map_err(invalid)?;
+                    let close =
+                        CloseRecord::decode(d.get_bytes().map_err(invalid)?).map_err(invalid)?;
+                    decision_close = Some((hash, close));
+                }
+                3 => {
+                    // Tag 3 is last: its decoder consumes the exact suffix and rejects trailing
+                    // bytes, duplicate/reordered sections and legacy unattested payloads.
+                    fault_record = Some(InertFaultRecord::decode(&bytes[start..], document)?);
+                    break;
+                }
+                _ => return Err(invalid("unsupported or repeated owner decision extension")),
             }
-            let hash = d
-                .get_bytes()
-                .map_err(invalid)?
-                .try_into()
-                .map_err(invalid)?;
-            let close = CloseRecord::decode(d.get_bytes().map_err(invalid)?).map_err(invalid)?;
-            Some((hash, close))
-        };
-        d.finish().map_err(invalid)?;
+        }
         let state = Self {
             journal,
             decision_close,
+            fault_record,
         };
         state.check_scope(document)?;
         Ok(state)
@@ -161,15 +205,18 @@ impl EpochOwnerReceiptState {
 
 impl ServerStore {
     /// Load historical owner state, bounded before decrypting. Only absence is empty; corruption
-    /// never resets an irrevocable choice. This does not re-authorize old signatures for sending.
+    /// never resets an irrevocable choice. Repair-bearing records refuse until the contextual
+    /// repair coordinator is available; inventory still accounts their structurally valid bytes.
+    /// This does not re-authorize old signatures for sending.
     pub fn load_epoch_owner_receipts(
         &self,
         server: u64,
         document: &LogicalDocument,
     ) -> Result<EpochOwnerReceiptState, AppError> {
         let scope = scope_bytes(server, document)?;
-        self.read_epoch_owner_record(&scope, document)
-            .map(|(state, _)| state)
+        let (state, _) = self.read_epoch_owner_record(&scope, document)?;
+        state.require_ordinary()?;
+        Ok(state)
     }
 
     /// One authenticated final-file accounting input, NOT a full inventory. The future exclusive
@@ -338,8 +385,8 @@ impl ServerStore {
                 // close only for the still-selected receipt; never attach old heads to a new choice.
                 if state.decision_close.as_ref().is_some_and(|(hash, _)| {
                     state
-                        .pending()
-                        .or_else(|| state.published())
+                        .journal
+                        .effective_choice()
                         .is_none_or(|r| r.hash() != *hash)
                 }) {
                     state.decision_close = None;
@@ -468,6 +515,9 @@ impl ServerStore {
                 return Err(error);
             }
         };
+        // Before the mutation closure, budget verification/reservation, RNG or writer hooks.
+        // Neither an exact publication callback nor a legacy prepare may bypass a repair hold.
+        state.require_ordinary()?;
         let observed = size
             .map(|size| storage_record(server, document, &scope, size))
             .transpose()?;
@@ -475,6 +525,7 @@ impl ServerStore {
             .verify_record(&storage_scope, *blake3::hash(&scope).as_bytes(), observed)
             .map_err(invalid)?;
         apply(&mut state)?;
+        state.require_ordinary()?;
         let plain = state.encode(&scope, document)?;
         let record = storage_record(server, document, &scope, plain.len() as u64 + 40)?;
         let reservation = budget
