@@ -119,6 +119,23 @@ test("composer never restores an accepted message when its refresh fails", async
   assert.match(app.state().error, /conversation could not refresh/);
 });
 
+test("superseded pending send warns that automatic retry is paused and the actual retry path skips it", async () => {
+  let attempts = 0;
+  const app = composer(async () => {
+    attempts++;
+    return { accepted: false, persistence: { status: "superseded" } };
+  });
+  await app.send();
+  const [intent] = Object.values(app.state().pendingSends) as Array<{ retryBlock?: string }>;
+  assert.equal(intent.retryBlock, "context_changed");
+  assert.equal(app.state().warnings.length, 1);
+  assert.match(app.state().warnings[0], /Automatic retry is paused/);
+  assert.match(app.state().warnings[0], /move it to a draft/);
+  assert.doesNotMatch(app.state().warnings[0], /will retry automatically/);
+  await app.retryPendingSends(true);
+  assert.equal(attempts, 1, "warning agrees with the production automatic retry predicate");
+});
+
 test("a stale authoring context requires an explicit new-send decision", async () => {
   const tokens: unknown[] = [];
   const app = composer(async args => {
