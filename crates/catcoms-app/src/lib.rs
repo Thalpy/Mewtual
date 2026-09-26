@@ -3631,6 +3631,7 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
         // inviter happens to send it something first. Candidate pool only; the inviter still has
         // to serve a roster-verified signed catch-up to become a trusted source.
         sync.note_candidate_peer(inviter);
+        sync.note_member_finalization_candidate(inviter, invite.inviter_device_id);
         Ok(Self {
             sync,
             display_name: display_name.into(),
@@ -3757,6 +3758,9 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
         sync.adopt_pre_owner_connections(connection_handoff);
         sync.note_candidate_peer(inviter);
         sync.note_candidate_peer(contact);
+        if contact == inviter {
+            sync.note_member_finalization_candidate(contact, invite.inviter_device_id);
+        }
         Ok((
             Self {
                 sync,
@@ -3808,6 +3812,9 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
         sync.adopt_pre_owner_connections(connection_handoff);
         sync.note_candidate_peer(inviter);
         sync.note_candidate_peer(contact);
+        if contact == inviter {
+            sync.note_member_finalization_candidate(contact, invite.inviter_device_id);
+        }
         Ok((
             Self {
                 sync,
