@@ -12745,6 +12745,20 @@ fn backup_destination(downloads: &Path, stamp: u64) -> Result<PathBuf, String> {
     Err("too many Mewtual backups with this name already exist in Downloads".into())
 }
 
+async fn save_backup_servers(
+    state: &AppState,
+    servers: &[(u64, u64, ServerActor)],
+) -> Result<(), String> {
+    for (id, instance, actor) in servers {
+        if persist_server_instance(state, *id, *instance, actor.clone()).await
+            != PersistOutcome::Durable
+        {
+            return Err("A group could not finish saving; retry the backup.".into());
+        }
+    }
+    Ok(())
+}
+
 /// Export an offline copy of the entire sealed vault. It remains protected by the current vault
 /// secret; no plaintext snapshots, drafts, identities or attachments are written to Downloads.
 /// Restore is intentionally a locked-screen operation and is not performed by this command.
@@ -12764,39 +12778,21 @@ async fn create_backup(
         None,
         None,
     );
-    require_unlocked_session(&state)
+    let generation = unlocked_ui_session_generation(&state)
         .await
         .map_err(|e| op.fail(codes::SESSION_LOCKED, e))?;
-    // Capture every actor first, without holding either state lock across its round trip.
-    let servers: Vec<(u64, ServerActor, ServerRecord)> = {
-        let servers = state.servers.lock().await;
-        servers
-            .iter()
-            .map(|(id, entry)| {
-                (
-                    *id,
-                    op.bind_actor(entry.actor.clone()),
-                    ServerRecord {
-                        id: *id,
-                        display_name: entry.name.clone(),
-                        invite: entry.invite.clone().unwrap_or_default(),
-                        is_dm: entry.is_dm,
-                    },
-                )
-            })
-            .collect()
-    };
-    let mut snapshots = Vec::with_capacity(servers.len());
-    for (id, actor, _) in &servers {
-        snapshots.push((
-            *id,
-            actor
-                .snapshot()
-                .await
-                .map_err(|e| op.fail(codes::VAULT_BACKUP_FAILED, e))?,
-        ));
-    }
-    let records: Vec<ServerRecord> = servers.into_iter().map(|(_, _, record)| record).collect();
+    let servers: Vec<_> = state
+        .servers
+        .lock()
+        .await
+        .iter()
+        .map(|(id, entry)| (*id, entry.instance, op.bind_actor(entry.actor.clone())))
+        .collect();
+    // Share ordinary snapshot ordering. A backup must never capture an old snapshot and later
+    // overwrite a newer send/shutdown write outside the numeric-server persistence boundary.
+    save_backup_servers(&state, &servers)
+        .await
+        .map_err(|e| op.fail(codes::VAULT_BACKUP_FAILED, e))?;
     op.stage("VAULT.BACKUP.SNAPSHOTTED");
 
     let downloads = app
@@ -12806,21 +12802,38 @@ async fn create_backup(
     let destination = backup_destination(&downloads, SystemClock.now_ms())
         .map_err(|e| op.fail(codes::VAULT_BACKUP_FAILED, e))?;
     let (files, bytes) = {
-        // Serialize persistence and the filesystem copy with every other vault write so the
-        // exported registry and snapshots form one coherent point-in-time image.
+        // No actor await under these guards. A stale account/group capture cannot write a
+        // registry or copy another session's vault after a lock, leave or replacement.
+        let _session = require_ui_session_generation(&state, generation)
+            .await
+            .map_err(|e| op.fail(codes::SESSION_LOCKED, e))?;
         let guard = state.store.lock().await;
-        let store = guard.as_ref().ok_or_else(|| {
-            op.fail(
+        let store = guard
+            .as_ref()
+            .ok_or_else(|| op.fail(codes::VAULT_BACKUP_FAILED, "The vault is not mounted."))?;
+        let registry = state.servers.lock().await;
+        if registry.len() != servers.len()
+            || servers.iter().any(|(id, instance, _)| {
+                registry
+                    .get(id)
+                    .is_none_or(|entry| entry.instance != *instance)
+            })
+        {
+            return Err(op.fail(
                 codes::VAULT_BACKUP_FAILED,
-                "unlock the vault before creating a backup",
-            )
-        })?;
-        let mut rng = OsCryptoRng;
-        for (id, snapshot) in snapshots {
-            store
-                .save_server(id, &snapshot, &mut rng)
-                .map_err(|error| op.fail(codes::VAULT_BACKUP_FAILED, error.to_string()))?;
+                "The group list changed; retry the backup.",
+            ));
         }
+        let records: Vec<_> = registry
+            .iter()
+            .map(|(id, entry)| ServerRecord {
+                id: *id,
+                display_name: entry.name.clone(),
+                invite: entry.invite.clone().unwrap_or_default(),
+                is_dm: entry.is_dm,
+            })
+            .collect();
+        let mut rng = OsCryptoRng;
         store
             .save_registry(&records, &mut rng)
             .map_err(|error| op.fail(codes::VAULT_BACKUP_FAILED, error.to_string()))?;
@@ -19928,6 +19941,88 @@ mod tests {
             .unwrap();
             assert_eq!(restored.messages(channel).len(), 2);
         }
+    }
+
+    #[tokio::test]
+    async fn backup_snapshot_cannot_overwrite_a_later_shutdown_save() {
+        use catcoms_rt::Hub;
+        use rand_chacha::ChaCha20Rng;
+        use rand_core::SeedableRng;
+        let root = tempfile::tempdir().unwrap();
+        let state = Arc::new(AppState::default());
+        *state.store.lock().await =
+            Some(ServerStore::open(root.path(), b"test", &mut OsCryptoRng).unwrap());
+        let server = Server::found(
+            Hub::new().join(PeerId::from_u64(71)),
+            MlsDevice::generate().unwrap(),
+            ChaCha20Rng::seed_from_u64(71),
+            Box::new(ManualClock::new(1000)),
+            "member",
+        )
+        .unwrap();
+        let group = server.group_id();
+        let device = server.device_id();
+        let (actor, mut events, task) = spawn(server);
+        let drain = tokio::spawn(async move { while events.recv().await.is_some() {} });
+        let channel = channel_id("general");
+        actor.open_channel(channel).await;
+        actor
+            .send_reply(channel, "before backup", "")
+            .await
+            .unwrap();
+        state
+            .servers
+            .lock()
+            .await
+            .insert(1, snapshot_test_entry(71, actor.clone(), group, device));
+        let store = state.store.lock().await;
+        let backup_state = state.clone();
+        let backup_actor = actor.clone();
+        let backup = tokio::spawn(async move {
+            save_backup_servers(&backup_state, &[(1, 71, backup_actor)]).await
+        });
+        timeout(Duration::from_secs(2), async {
+            loop {
+                if persist_lock_for(&state, 1).try_lock().is_err() {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        actor.snapshot().await.unwrap();
+        actor
+            .send_reply(channel, "after the backup captured history", "")
+            .await
+            .unwrap();
+        state.session_lock_requested.store(true, Ordering::Release);
+        assert!(
+            shutdown::freeze_servers(&state).await.is_err(),
+            "close must observe the outstanding backup writer"
+        );
+        drop(store);
+        backup.await.unwrap().unwrap();
+        shutdown::freeze_servers(&state).await.unwrap().stop();
+        task.await.unwrap();
+        drain.await.unwrap();
+        let saved = state
+            .store
+            .lock()
+            .await
+            .as_ref()
+            .unwrap()
+            .load_server(1)
+            .unwrap();
+        let restored = Server::restore(
+            &saved,
+            Hub::new().join(PeerId::from_u64(72)),
+            ChaCha20Rng::seed_from_u64(72),
+            Box::new(ManualClock::new(2000)),
+            "member",
+        )
+        .unwrap();
+        assert_eq!(restored.messages(channel).len(), 2);
     }
 
     async fn wait_for_clean_snapshot(state: &AppState, server: u64) {
