@@ -19822,7 +19822,10 @@
           // destroy failure) and native locking is confirmed, so frontend teardown is now safe.
           lockScreen(true);
           windowCloseInFlight = false;
-          if (result.deferred) {
+          if (result.history_error) {
+            closeAfterContinuityError = false;
+            error = `The vault is locked, but message history has not finished saving. ${result.history_error}`;
+          } else if (result.deferred) {
             closeAfterContinuityError = true;
             error = `The vault is locked, but Mewtual could not save the latest screen state: ${result.continuity_error}. Close the window again to exit without that latest screen state.`;
           } else if (result.destroy_error) {

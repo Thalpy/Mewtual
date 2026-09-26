@@ -61,6 +61,7 @@ pub mod registry_head;
 pub mod registry_ingress;
 pub mod registry_replay;
 pub mod registry_seed;
+pub mod shutdown;
 pub mod store;
 pub mod studio;
 pub mod studio_exchange;

@@ -939,6 +939,10 @@ pub enum AppCommand {
         integrity_key: [u8; 32],
         reply: oneshot::Sender<Vec<u8>>,
     },
+    /// Pause at an actor boundary, then save under native custody before orderly shutdown.
+    PrepareShutdown {
+        ready: oneshot::Sender<crate::shutdown::ShutdownReady>,
+    },
     /// Stop the actor.
     Shutdown,
 }
@@ -3283,6 +3287,17 @@ impl ServerActor {
         let _ = self.cmd_tx.send(AppCommand::Shutdown).await;
     }
 
+    pub async fn prepare_shutdown(&self) -> Result<crate::shutdown::ShutdownReady, String> {
+        let (ready, result) = oneshot::channel();
+        self.cmd_tx
+            .send(AppCommand::PrepareShutdown { ready })
+            .await
+            .map_err(|_| "server stopped before shutdown".to_string())?;
+        result
+            .await
+            .map_err(|_| "server stopped before shutdown".to_string())
+    }
+
     /// Drive one steady-state rendezvous-discovery pass. Fire-and-forget; the bridge calls this on
     /// a timer. Returns `Err` once the actor has stopped (so the bridge's timer task can exit).
     pub async fn drive_discovery(&self) -> Result<(), ()> {
@@ -4868,6 +4883,12 @@ where
                             .issue_device_certificate(new_device_id, &device_name)
                             .map_err(|e| e.to_string());
                         let _ = reply.send(res);
+                    }
+                    Some(AppCommand::PrepareShutdown { ready }) => {
+                        if crate::shutdown::save_and_freeze(&mut server, ready).await {
+                            let _ = event_tx.send(AppEvent::Closed).await;
+                            break;
+                        }
                     }
                     Some(AppCommand::Shutdown) | None => {
                         let _ = event_tx.send(AppEvent::Closed).await;

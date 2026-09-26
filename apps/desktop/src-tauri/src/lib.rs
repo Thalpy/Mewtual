@@ -57,6 +57,7 @@ mod creative_blobs;
 mod errors;
 mod media_decode;
 mod security_intent;
+mod shutdown;
 mod studio;
 mod tasks;
 use errors::{codes, AppError, ErrorCode};
@@ -13916,6 +13917,7 @@ async fn lock_session_outcome_inner(
 #[derive(Debug, Serialize, PartialEq, Eq)]
 struct CloseVaultWindowOutcome {
     continuity_error: Option<String>,
+    history_error: Option<String>,
     deferred: bool,
     destroy_error: Option<String>,
 }
@@ -14002,17 +14004,34 @@ async fn close_vault_window(
     if !may_destroy {
         return Ok(CloseVaultWindowOutcome {
             continuity_error: lock.continuity_error,
+            history_error: None,
             deferred: true,
             destroy_error: None,
         });
     }
 
+    let _closing = state.vault_window_close.lock().await;
+    let history = match shutdown::freeze_servers(&state).await {
+        Ok(barrier) => barrier,
+        Err(error) => {
+            return Ok(CloseVaultWindowOutcome {
+                continuity_error: lock.continuity_error,
+                history_error: Some(error),
+                deferred: true,
+                destroy_error: None,
+            })
+        }
+    };
     let destroy_error = match app.get_webview_window("main") {
         Some(window) => window.destroy().err().map(|error| error.to_string()),
         None => Some("the main window no longer exists".to_string()),
     };
+    if destroy_error.is_none() {
+        history.stop();
+    }
     Ok(CloseVaultWindowOutcome {
         continuity_error: lock.continuity_error,
+        history_error: None,
         deferred: false,
         destroy_error,
     })
@@ -19831,6 +19850,83 @@ mod tests {
             switchboard: false,
             record_seq: 0,
             persist: PersistCounters::default(),
+        }
+    }
+
+    #[tokio::test]
+    async fn shutdown_barrier_resumes_all_groups_when_one_save_is_busy() {
+        use catcoms_rt::Hub;
+        use rand_chacha::ChaCha20Rng;
+        use rand_core::SeedableRng;
+        let root = tempfile::tempdir().unwrap();
+        let state = AppState::default();
+        *state.store.lock().await =
+            Some(ServerStore::open(root.path(), b"test", &mut OsCryptoRng).unwrap());
+        state.session_lock_requested.store(true, Ordering::Release);
+        let channel = channel_id("general");
+        let mut running = Vec::new();
+        for id in 1..=2 {
+            let server = Server::found(
+                Hub::new().join(PeerId::from_u64(id)),
+                MlsDevice::generate().unwrap(),
+                ChaCha20Rng::seed_from_u64(id),
+                Box::new(ManualClock::new(1000)),
+                "member",
+            )
+            .unwrap();
+            let group = server.group_id();
+            let device = server.device_id();
+            let (actor, mut events, task) = spawn(server);
+            let drain = tokio::spawn(async move { while events.recv().await.is_some() {} });
+            actor.open_channel(channel).await;
+            actor
+                .send_reply(channel, "retained before close", "")
+                .await
+                .unwrap();
+            state
+                .servers
+                .lock()
+                .await
+                .insert(id, snapshot_test_entry(id, actor.clone(), group, device));
+            running.push((actor, task, drain));
+        }
+        // First actor has frozen by the time the second actor cannot acquire its save lease.
+        let busy = persist_lock_for(&state, 2).lock_owned().await;
+        assert!(shutdown::freeze_servers(&state).await.is_err());
+        for (actor, _, _) in &running {
+            assert!(timeout(Duration::from_secs(2), actor.snapshot())
+                .await
+                .unwrap()
+                .is_ok());
+        }
+        drop(busy);
+        // Successful saves are still abortable until native destruction succeeds.
+        let barrier = shutdown::freeze_servers(&state).await.unwrap();
+        drop(barrier);
+        for (actor, _, _) in &running {
+            actor
+                .send_reply(channel, "after cancelled close", "")
+                .await
+                .unwrap();
+        }
+        shutdown::freeze_servers(&state).await.unwrap().stop();
+        for (_, task, drain) in running {
+            task.await.unwrap();
+            drain.await.unwrap();
+        }
+        drop(state.store.lock().await.take());
+        let reopened = ServerStore::open(root.path(), b"test", &mut OsCryptoRng).unwrap();
+        for id in 1..=2 {
+            let saved = reopened.load_server(id).unwrap();
+            let restored = Server::restore(
+                &saved,
+                Hub::new().join(PeerId::from_u64(id + 10)),
+                ChaCha20Rng::seed_from_u64(id + 10),
+                Box::new(ManualClock::new(2000)),
+                "member",
+            )
+            .unwrap();
+            assert_eq!(restored.messages(channel).len(), 2);
         }
     }
 
