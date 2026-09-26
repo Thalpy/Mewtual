@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { readFileSync } from "node:fs";
 import ts from "typescript";
-import { addPendingSend, matchingPendingSend } from "./pending-sends.ts";
+import { addPendingSend, matchingPendingSend, pendingSendRetryBlock } from "./pending-sends.ts";
 import { persistenceWarning, sendAndRefresh } from "./message-send.ts";
 import { planLegacyReadMarkMigration, sanitizeUiContinuity } from "./ui-continuity.ts";
 
@@ -16,7 +16,7 @@ const transpile = (start: string, end: string) => {
 
 test("retry refuses IPC until the caller identity survives an actual successful continuity save", async () => {
   const body = transpile("  async function submitPendingSend(", "  // Inline edit of one of your own messages.");
-  const app = new Function("addPendingSend", "matchingPendingSend", "sendAndRefresh", "persistenceWarning", `
+  const app = new Function("addPendingSend", "matchingPendingSend", "sendAndRefresh", "persistenceWarning", "pendingSendRetryBlock", `
     let draft = "retain this identity", cur = { active: "1" }, activeServerId = 1, sending = false;
     let locked = false, uiStateLoadGeneration = 0, replyingTo = "", mentionQuery = null;
     let drafts = { room: draft }, draftRevisions = {}, pendingSendNonce = 0, chatStickToBottom = false;
@@ -44,7 +44,7 @@ test("retry refuses IPC until the caller identity survives an actual successful 
       allowSave() { savesFail = false; },
       state() { return { draft, pendingSends, submissions, sealed }; }
     };
-  `)(addPendingSend, matchingPendingSend, sendAndRefresh, persistenceWarning);
+  `)(addPendingSend, matchingPendingSend, sendAndRefresh, persistenceWarning, pendingSendRetryBlock);
 
   await app.send();
   const [token] = Object.keys(app.state().pendingSends);

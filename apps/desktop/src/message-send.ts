@@ -24,7 +24,7 @@ export async function sendAndRefresh(
 }
 
 export function persistenceWarning(result: SendMessageResult): string | null {
-  if (!result.accepted) return "Message saved as a pending request in this vault. Its history save has not completed; use Retry pending messages to try again safely.";
+  if (!result.accepted) return "Message saved as a pending request in this vault. Its history save has not completed; it will retry automatically while unlocked.";
   switch (result.persistence.status) {
     case "durable": return null;
     case "pending":

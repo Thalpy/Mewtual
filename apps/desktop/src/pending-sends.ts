@@ -6,7 +6,10 @@ export type PendingSend = {
   expectedContext: string;
   text: string;
   replyTo: string;
+  /** A permanent refusal requires a user decision, including after the vault reopens. */
+  retryBlock?: PendingSendRetryBlock;
 };
+export type PendingSendRetryBlock = "invalid" | "conflict" | "context_changed";
 export type PendingSends = Record<string, PendingSend>;
 export const MAX_PENDING_SENDS = 32;
 export const MAX_PENDING_SEND_BYTES = 256 * 1024;
@@ -28,8 +31,14 @@ export function sanitizePendingSends(value: unknown): PendingSends {
       || typeof entry.replyTo !== "string" || entry.replyTo.length > 128) continue;
     const intent: PendingSend = { token, server: entry.server!, channel: entry.channel,
       expectedContext: entry.expectedContext, text: entry.text, replyTo: entry.replyTo };
+    // Retry disposition is separately bounded to one fixed enum per retained entry. Recording
+    // a refusal must not push an existing payload over the hydration budget and lose its token.
     used += bytes(intent);
     if (used > MAX_PENDING_SEND_BYTES) break;
+    if (entry.retryBlock !== undefined) {
+      intent.retryBlock = ["invalid", "conflict", "context_changed"].includes(entry.retryBlock)
+        ? entry.retryBlock : "invalid";
+    }
     result[token] = intent;
   }
   return result;
@@ -50,4 +59,12 @@ export function matchingPendingSend(current: PendingSends, server: number, chann
   text: string, replyTo: string): PendingSend | undefined {
   return Object.values(current).find(entry => entry.server === server && entry.channel === channel
     && entry.text === text && entry.replyTo === replyTo);
+}
+
+/** Native CHAT.SEND.REJECTED also wraps temporary storage refusals; classify the inner reason. */
+export function pendingSendRetryBlock(message: string): PendingSendRetryBlock | undefined {
+  if (/\bCHAT_SEND_CONTEXT_CHANGED\b|The conversation changed before this message could be saved/.test(message)) return "context_changed";
+  if (/\bCHAT_SEND_TOKEN_CONFLICT\b/.test(message)) return "conflict";
+  if (/\bCHAT_SEND_INVALID\b|\bCHANNEL\.ID\.INVALID\b|Invalid message retry identity|A retry requires both its identity/.test(message)) return "invalid";
+  return undefined;
 }

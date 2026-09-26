@@ -38,7 +38,8 @@
     type MessagePage, type PageAnchor, type PageRequest, type PagedRowContext, type UnreadSummary,
   } from "./message-paging";
   import { persistenceWarning, sendAndRefresh, type SendMessageResult } from "./message-send";
-  import { addPendingSend, matchingPendingSend, type PendingSend, type PendingSends } from "./pending-sends";
+  import { addPendingSend, matchingPendingSend, pendingSendRetryBlock, type PendingSend, type PendingSends } from "./pending-sends";
+  import { PendingSendRetry } from "./pending-send-retry";
   import { ImageSrcCache } from "./image-src";
   import { pastedMedia, pastedName } from "./clipboard-media";
   import {
@@ -3458,6 +3459,17 @@
   let uiStateSaveFailed = $state(false);
   let uiStateFailureToast = 0;
   let uiStateLoadGeneration = 0;
+  const pendingSendRetry = new PendingSendRetry(async (session) => {
+    if (!locked && uiStateReady && session === uiStateLoadGeneration) await retryPendingSends(true);
+  });
+  $effect(() => {
+    pendingSendRetry.update(
+      !locked && uiStateReady ? uiStateLoadGeneration : null,
+      Object.values(pendingSends).some(intent => !intent.retryBlock),
+      sending || retryingPendingSends,
+    );
+  });
+  onMount(() => () => pendingSendRetry.cancel());
   function queueUiStateSave(json: string): Promise<void> {
     // Native lock/generation checks order this queue against a final lock snapshot. This local
     // chain additionally prevents two ordinary same-session saves from overtaking one another.
@@ -6213,7 +6225,7 @@
       // activity head against the read marks that just loaded. Without this pass, a message
       // received during a lock or across a restart is silently lost from the indicators.
       rebuildAllUnread();
-      void retryPendingSends();
+      void retryPendingSends(true);
       // The announcement indicators are the same rebuild, for the same reason: posts made while
       // this device was closed or locked raised no event anyone was awake to hear, so the counts
       // come from the feeds themselves rather than from what this session witnessed. It waits on
@@ -6274,6 +6286,7 @@
   // passphrase again. Re-entering calls `unlock`, which no-ops on an already-open vault and hands
   // back the registered servers, so no actor or transport is duplicated.
   function lockScreen(nativeAlreadyLocked = false) {
+    pendingSendRetry.cancel();
     // Lock also cancels calls still waiting on a native permission prompt; those have not yet set
     // `inCall`, so the ordinary leave path alone cannot see or invalidate them.
     callLifecycleSession.invalidate();
@@ -18510,8 +18523,23 @@
         retryToken: intent.token, expectedContext: intent.expectedContext,
       })).value;
     } catch (failure) {
-      if (!locked && session === uiStateLoadGeneration) pendingSendErrors[intent.token] = errorText(failure);
+      if (!locked && session === uiStateLoadGeneration) {
+        pendingSendErrors[intent.token] = errorText(failure);
+        const block = pendingSendRetryBlock(errorText(failure));
+        const current = pendingSends[intent.token];
+        if (current && current.retryBlock !== block) {
+          pendingSends[intent.token] = { ...current, retryBlock: block };
+          await saveUiStateImmediately();
+        }
+      }
       throw failure;
+    }
+    if (!locked && session === uiStateLoadGeneration && result.persistence.status === "superseded") {
+      pendingSends[intent.token] = { ...intent, retryBlock: "context_changed" };
+      await saveUiStateImmediately();
+    } else if (!locked && session === uiStateLoadGeneration && result.persistence.status !== "durable" && pendingSends[intent.token]?.retryBlock) {
+      pendingSends[intent.token] = { ...intent, retryBlock: undefined };
+      await saveUiStateImmediately();
     }
     if (!locked && session === uiStateLoadGeneration && result.accepted && result.persistence.status === "durable") {
       delete pendingSends[intent.token];
@@ -18533,7 +18561,7 @@
     const intent = pendingSends[token];
     if (!intent || locked || sending || retryingPendingSends || intent.server !== activeServerId
       || intent.channel !== cur?.active || (draft.trim() && draft.trim() !== intent.text)
-      || !pendingSendErrors[token]?.includes("CHAT_SEND_CONTEXT_CHANGED")) return;
+      || (intent.retryBlock !== "context_changed" && !pendingSendErrors[token]?.includes("CHAT_SEND_CONTEXT_CHANGED"))) return;
     const session = uiStateLoadGeneration;
     // Only an explicit user decision can turn refused old-authority work into a new send.
     // Persist the recovered draft in the same continuity replacement that retires its intent.
@@ -18546,13 +18574,14 @@
     }
   }
 
-  async function retryPendingSends() {
+  async function retryPendingSends(automatic = false) {
     if (locked || !uiStateReady || retryingPendingSends || sending) return;
     const session = uiStateLoadGeneration;
     retryingPendingSends = true;
     try {
       for (const intent of Object.values(pendingSends)) {
         if (locked || session !== uiStateLoadGeneration) return;
+        if (automatic && intent.retryBlock) continue;
         try {
           const result = await submitPendingSend(intent, session);
           if (locked || session !== uiStateLoadGeneration) return;
@@ -25712,14 +25741,15 @@
             {#if Object.keys(pendingSends).length}
               <details class="muted small">
                 <summary>{Object.keys(pendingSends).length} message(s) awaiting save confirmation</summary>
-                <p>These messages are retained in this vault. Retrying uses the same message identity.</p>
+                <p>Pending messages keep their original identity. Temporary save failures retry automatically while unlocked.</p>
                 {#each Object.values(pendingSends).filter((item) => item.server === activeServerId) as item (item.token)}
                   <p>{item.text}</p>
+                  {#if item.retryBlock}<p>Automatic retry paused. Review this message before retrying.</p>{/if}
                   {#if pendingSendErrors[item.token]}
                     <p>{pendingSendErrors[item.token]}</p>
-                    {#if pendingSendErrors[item.token].includes("CHAT_SEND_CONTEXT_CHANGED") && item.channel === cur?.active}
-                      <button type="button" disabled={sending || retryingPendingSends || (!!draft.trim() && draft.trim() !== item.text)} onclick={() => movePendingToDraft(item.token)}>Move to draft for a new send</button>
-                    {/if}
+                  {/if}
+                  {#if (item.retryBlock === "context_changed" || pendingSendErrors[item.token]?.includes("CHAT_SEND_CONTEXT_CHANGED")) && item.channel === cur?.active}
+                    <button type="button" disabled={sending || retryingPendingSends || (!!draft.trim() && draft.trim() !== item.text)} onclick={() => movePendingToDraft(item.token)}>Move to draft for a new send</button>
                   {/if}
                 {/each}
                 <button type="button" disabled={sending || retryingPendingSends} onclick={() => retryPendingSends()}>Retry pending messages</button>
