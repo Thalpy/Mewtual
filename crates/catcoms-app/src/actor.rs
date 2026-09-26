@@ -268,7 +268,9 @@ pub enum AppCommand {
         reply: oneshot::Sender<Vec<ChannelInfo>>,
     },
     /// Pull the channel directory from the join contact, then subscribe/catch up every entry.
-    CatchUpChannelIndex { peer: PeerId },
+    CatchUpChannelIndex {
+        peer: PeerId,
+    },
     /// Open a channel (subscribe + create locally). Acked once subscribed, so a caller
     /// can avoid racing a subsequent publish ahead of the subscription.
     OpenChannel {
@@ -356,9 +358,14 @@ pub enum AppCommand {
         reply: oneshot::Sender<Vec<JukeEntry>>,
     },
     /// Pull a channel's history from `peer` (e.g. right after joining).
-    CatchUp { peer: PeerId, channel: u128 },
+    CatchUp {
+        peer: PeerId,
+        channel: u128,
+    },
     /// Pull a channel's history from the best known peer (no peer named).
-    CatchUpAny { channel: u128 },
+    CatchUpAny {
+        channel: u128,
+    },
     /// Query a channel's current materialized messages.
     Messages {
         channel: u128,
@@ -404,7 +411,9 @@ pub enum AppCommand {
         reply: oneshot::Sender<Vec<InboxItem>>,
     },
     /// Query the current member count.
-    MemberCount { reply: oneshot::Sender<usize> },
+    MemberCount {
+        reply: oneshot::Sender<usize>,
+    },
     /// Query the roster (member fingerprints + which one is self).
     Members {
         reply: oneshot::Sender<Vec<MemberView>>,
@@ -435,15 +444,21 @@ pub enum AppCommand {
     },
     /// Enable/disable the local standing protocol gate; persistence and record publication are
     /// coordinated by the bridge.
-    SetSwitchboardOffered { offered: bool },
+    SetSwitchboardOffered {
+        offered: bool,
+    },
     /// Query only fresh, connected and record-bound standing offers.
     SwitchboardOffers {
         reply: oneshot::Sender<Vec<SwitchboardOffer>>,
     },
     /// Set this member's own profile (name + styling).
-    SetProfile { profile: Profile },
+    SetProfile {
+        profile: Profile,
+    },
     /// Pull the profile document from `peer` (e.g. right after joining).
-    CatchUpProfiles { peer: PeerId },
+    CatchUpProfiles {
+        peer: PeerId,
+    },
     /// Query all known member profiles, keyed by fingerprint.
     Profiles {
         reply: oneshot::Sender<HashMap<String, Profile>>,
@@ -474,9 +489,13 @@ pub enum AppCommand {
         reply: oneshot::Sender<Result<(), String>>,
     },
     /// Query the server's published livery.
-    Livery { reply: oneshot::Sender<Livery> },
+    Livery {
+        reply: oneshot::Sender<Livery>,
+    },
     /// Pull the livery document from `peer` (e.g. right after joining).
-    CatchUpLivery { peer: PeerId },
+    CatchUpLivery {
+        peer: PeerId,
+    },
     /// Assign (or clear, with an empty label) a member's custom badge (owner/admin only).
     SetMemberBadge {
         fp: String,
@@ -489,13 +508,17 @@ pub enum AppCommand {
         reply: oneshot::Sender<HashMap<String, MemberBadge>>,
     },
     /// Pull the badge document from `peer` (e.g. right after joining).
-    CatchUpBadges { peer: PeerId },
+    CatchUpBadges {
+        peer: PeerId,
+    },
     /// Query the companion-device registry (multi-device M3), keyed by companion fingerprint.
     Devices {
         reply: oneshot::Sender<HashMap<String, DeviceEntry>>,
     },
     /// Pull the companion-device registry from `peer` (e.g. right after joining).
-    CatchUpDevices { peer: PeerId },
+    CatchUpDevices {
+        peer: PeerId,
+    },
     /// Share a file under folder `path`; replies with its content-address hex, or an error.
     AddFile {
         name: String,
@@ -532,7 +555,9 @@ pub enum AppCommand {
         reply: oneshot::Sender<Vec<FileEntry>>,
     },
     /// Query the shared file list with per-file local-availability counts + a reachable-peer flag.
-    FilesView { reply: oneshot::Sender<FilesView> },
+    FilesView {
+        reply: oneshot::Sender<FilesView>,
+    },
     /// Verify every file chunk referenced by this server without network traffic.
     StorageHealth {
         reply: oneshot::Sender<StorageHealth>,
@@ -546,7 +571,9 @@ pub enum AppCommand {
         reply: oneshot::Sender<Result<StorageRepair, String>>,
     },
     /// Query the fingerprints of members reachable right now (presence).
-    OnlineMembers { reply: oneshot::Sender<Vec<String>> },
+    OnlineMembers {
+        reply: oneshot::Sender<Vec<String>>,
+    },
     /// Query what this node knows about reaching each member (the debug console's network view).
     MemberRoutes {
         reply: oneshot::Sender<Vec<catcoms_sync::MemberRoute>>,
@@ -580,7 +607,9 @@ pub enum AppCommand {
         reply: oneshot::Sender<Vec<(String, String, Vec<u8>)>>,
     },
     /// Dismiss a pending DM request by the sender's fingerprint (accepted or declined).
-    DismissDmRequest { from_fp: String },
+    DismissDmRequest {
+        from_fp: String,
+    },
     /// Deliver a DM (friend) invite to a member over this group ("Add friend"); `true` if reached.
     SendDmInvite {
         target_fp: String,
@@ -663,9 +692,13 @@ pub enum AppCommand {
         reply: oneshot::Sender<FileUsage>,
     },
     /// The wiki-pinned content addresses (lowercase hex); files that must never decay.
-    WikiPinnedCids { reply: oneshot::Sender<Vec<String>> },
+    WikiPinnedCids {
+        reply: oneshot::Sender<Vec<String>>,
+    },
     /// Pull the file index from `peer` (e.g. right after joining).
-    CatchUpFiles { peer: PeerId },
+    CatchUpFiles {
+        peer: PeerId,
+    },
     /// Post to the server status feed (owner/admin, or anyone once the feed is opened to members).
     PostStatus {
         text: String,
@@ -699,14 +732,18 @@ pub enum AppCommand {
         reply: oneshot::Sender<Result<(), String>>,
     },
     /// Query whether plain members may post to the status feed.
-    StatusMembersMayPost { reply: oneshot::Sender<bool> },
+    StatusMembersMayPost {
+        reply: oneshot::Sender<bool>,
+    },
     /// Open or close the status feed to plain members (owner/admin only).
     SetStatusMembersMayPost {
         allow: bool,
         reply: oneshot::Sender<Result<(), String>>,
     },
     /// Pull the status feed from `peer` (e.g. right after joining).
-    CatchUpStatus { peer: PeerId },
+    CatchUpStatus {
+        peer: PeerId,
+    },
     /// Create a server event (any member); replies with its id, or a validation error.
     CreateEvent {
         title: String,
@@ -726,9 +763,13 @@ pub enum AppCommand {
         reply: oneshot::Sender<Vec<ServerEvent>>,
     },
     /// Pull the calendar document from `peer` (e.g. right after joining).
-    CatchUpCalendar { peer: PeerId },
+    CatchUpCalendar {
+        peer: PeerId,
+    },
     /// Query the wiki page names (sorted).
-    WikiPages { reply: oneshot::Sender<Vec<String>> },
+    WikiPages {
+        reply: oneshot::Sender<Vec<String>>,
+    },
     /// Query the whole wiki as a name -> body map (for backlinks / link existence).
     WikiMap {
         reply: oneshot::Sender<HashMap<String, String>>,
@@ -755,14 +796,18 @@ pub enum AppCommand {
         reply: oneshot::Sender<Vec<WikiPendingEdit>>,
     },
     /// Query the largest file this server accepts, in bytes.
-    FileSizeLimit { reply: oneshot::Sender<u64> },
+    FileSizeLimit {
+        reply: oneshot::Sender<u64>,
+    },
     /// Set the largest file this server accepts, in bytes (owner/admin only).
     SetFileSizeLimit {
         bytes: u64,
         reply: oneshot::Sender<Result<(), String>>,
     },
     /// Query the wiki review window in days (0 = off).
-    WikiReviewDays { reply: oneshot::Sender<u32> },
+    WikiReviewDays {
+        reply: oneshot::Sender<u32>,
+    },
     /// Set the wiki review window in days, 0..=30 (owner/admin only).
     SetWikiReviewDays {
         days: u32,
@@ -807,7 +852,9 @@ pub enum AppCommand {
         reply: oneshot::Sender<Result<(), String>>,
     },
     /// Pull the wiki from `peer` (e.g. right after joining).
-    CatchUpWiki { peer: PeerId },
+    CatchUpWiki {
+        peer: PeerId,
+    },
     /// Query every member's role, keyed by fingerprint (owner/admin/member).
     Roles {
         reply: oneshot::Sender<HashMap<String, String>>,
@@ -819,7 +866,9 @@ pub enum AppCommand {
         reply: oneshot::Sender<Result<(), String>>,
     },
     /// Pull the roles document from `peer` (e.g. right after joining).
-    CatchUpRoles { peer: PeerId },
+    CatchUpRoles {
+        peer: PeerId,
+    },
     /// Query the public signed moderation history and advisory votes.
     ModerationState {
         reply: oneshot::Sender<ModerationState>,
@@ -851,7 +900,9 @@ pub enum AppCommand {
         reply: oneshot::Sender<Result<(), String>>,
     },
     /// Pull moderation history from `peer` after joining.
-    CatchUpModeration { peer: PeerId },
+    CatchUpModeration {
+        peer: PeerId,
+    },
     /// Remove a member by fingerprint (owner only).
     RemoveMember {
         fp: String,
@@ -936,7 +987,9 @@ pub enum AppCommand {
     DriveDiscovery,
     /// Replace the transient local-only reconnect hints after the bridge observes a currently
     /// live outbound member route. Validation and membership checks remain inside `ChannelSync`.
-    SetLocalReconnectRoutes { routes: Vec<(PeerId, String)> },
+    SetLocalReconnectRoutes {
+        routes: Vec<(PeerId, String)>,
+    },
     /// Mint a short-lived, member-signed recovery code containing only safe direct listener
     /// routes. The code is intended for an already-authorized group member over an out-of-band
     /// channel; it is not an invitation and cannot add a device to the roster.
@@ -964,7 +1017,10 @@ pub enum AppCommand {
     /// (Re)publish this device's own signed peer record with `addresses` at `seq`. Sent by the
     /// bridge when this node's reachability changes (a UPnP mapping arriving, say), so members
     /// learn the new address instead of holding a dead one.
-    PublishSelfRecord { addresses: Vec<String>, seq: u64 },
+    PublishSelfRecord {
+        addresses: Vec<String>,
+        seq: u64,
+    },
     /// Serialize the cross-session address cache for sealing beside the snapshot (Phase 9f).
     AddressCacheBytes {
         integrity_key: [u8; 32],
@@ -977,7 +1033,9 @@ pub enum AppCommand {
     /// Stop the actor.
     Shutdown,
     /// Acknowledged terminal boundary. No actor command/network turn follows acknowledgement.
-    StopAndWait { stopped: oneshot::Sender<()> },
+    StopAndWait {
+        stopped: oneshot::Sender<()>,
+    },
 }
 
 /// Which part of a channel document moved, carried by [`AppEvent::ChannelUpdated`].
@@ -3390,7 +3448,12 @@ impl ServerActor {
     /// so a timed-out caller must keep local state and may retry this idempotent operation.
     pub async fn stop_and_wait(&self) -> Result<(), String> {
         let (stopped, result) = oneshot::channel();
-        if self.cmd_tx.send(AppCommand::StopAndWait { stopped }).await.is_err() {
+        if self
+            .cmd_tx
+            .send(AppCommand::StopAndWait { stopped })
+            .await
+            .is_err()
+        {
             return Ok(());
         }
         match result.await {
@@ -3432,14 +3495,18 @@ impl ServerActor {
 
     pub async fn member_mesh_allowed(&self) -> Result<bool, String> {
         let (reply, result) = oneshot::channel();
-        self.cmd_tx.send(AppCommand::MemberMeshAllowed { reply }).await
+        self.cmd_tx
+            .send(AppCommand::MemberMeshAllowed { reply })
+            .await
             .map_err(|_| "server stopped".to_string())?;
         result.await.map_err(|_| "server stopped".to_string())
     }
 
     pub async fn member_finalization_candidates(&self) -> Result<Vec<PeerId>, String> {
         let (reply, result) = oneshot::channel();
-        self.cmd_tx.send(AppCommand::MemberFinalizationCandidates { reply }).await
+        self.cmd_tx
+            .send(AppCommand::MemberFinalizationCandidates { reply })
+            .await
             .map_err(|_| "server stopped".to_string())?;
         result.await.map_err(|_| "server stopped".to_string())
     }

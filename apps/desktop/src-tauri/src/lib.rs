@@ -2056,7 +2056,9 @@ fn spawn_reconnect_capture_worker(
     let task = tokio::spawn(async move {
         loop {
             persist_live_local_reconnect_routes(&app, server, instance, &actor).await;
-            if wake.changed().await.is_err() { break; }
+            if wake.changed().await.is_err() {
+                break;
+            }
         }
     });
     supervise("reconnect_capture", server, task);
@@ -2074,7 +2076,12 @@ fn replace_reconnect_capture_signal(
 /// Install the single bounded recovery-capture wakeup for a registry entry. Replacing the sender
 /// closes any prior worker after its current capture, which matters when an on-disk id is restored
 /// into a process that previously held a transient entry with the same id.
-fn install_reconnect_capture_worker(app: &AppHandle, server: u64, instance: u64, actor: ServerActor) {
+fn install_reconnect_capture_worker(
+    app: &AppHandle,
+    server: u64,
+    instance: u64,
+    actor: ServerActor,
+) {
     let Some(capture_wake) = replace_reconnect_capture_signal(
         &app.state::<AppState>().reconnect_capture_signals,
         server,
@@ -3582,15 +3589,35 @@ async fn persist_address_cache(app: &AppHandle, server: u64) {
 /// remain disabled without authenticated P2P policy, so an empty route list is never migration consent. An
 /// empty observation never erases the last sealed hint: the normal reason for seeing no live route
 /// is precisely that the remote app is closed, when the hint is needed most.
-async fn persist_live_local_reconnect_routes(app: &AppHandle, server: u64, instance: u64, actor: &ServerActor) {
+async fn persist_live_local_reconnect_routes(
+    app: &AppHandle,
+    server: u64,
+    instance: u64,
+    actor: &ServerActor,
+) {
     let state = app.state::<AppState>();
     let state = state.inner();
-    let mesh = state.servers.lock().await.get(&server)
-        .filter(|entry| entry.instance == instance).and_then(|entry| entry.mesh.clone());
-    let Some(mesh) = mesh else { return; };
-    match member_reconnect::persist(state, server, instance, actor, mesh.authenticated_dial_route_evidence()).await {
+    let mesh = state
+        .servers
+        .lock()
+        .await
+        .get(&server)
+        .filter(|entry| entry.instance == instance)
+        .and_then(|entry| entry.mesh.clone());
+    let Some(mesh) = mesh else {
+        return;
+    };
+    match member_reconnect::persist(
+        state,
+        server,
+        instance,
+        actor,
+        mesh.authenticated_dial_route_evidence(),
+    )
+    .await
+    {
         Ok(true) => return,
-        Ok(false) => {},
+        Ok(false) => {}
         Err(error) => {
             tracing::warn!(target: "catcoms_app", server, %error, "VAULT.MEMBER_RECONNECT.PENDING");
             return;
@@ -3694,7 +3721,12 @@ async fn persist_live_local_reconnect_routes(app: &AppHandle, server: u64, insta
     // authority boundary used by the atomic merge and durable save.
     let final_now_ms = SystemClock.now_ms();
     let registry = state.servers.lock().await;
-    if registry.get(&server).is_none_or(|entry| entry.instance != instance) { return; }
+    if registry
+        .get(&server)
+        .is_none_or(|entry| entry.instance != instance)
+    {
+        return;
+    }
     let Some(changed) = merge_live_reconnect_capture(
         &mut current,
         selected_from_pending,
@@ -4243,7 +4275,13 @@ fn new_server_net(advertise: &str, relay: &str, rendezvous: &str) -> ServerNet {
 /// Seal the current actor's transport identity, retaining a failed write for the ordinary
 /// persistence/discovery cadence. The outcome describes storage, not admission acceptance.
 async fn persist_server_net(state: &AppState, server: u64, net: &ServerNet) -> PersistOutcome {
-    let Some(instance) = state.servers.lock().await.get(&server).map(|entry| entry.instance) else {
+    let Some(instance) = state
+        .servers
+        .lock()
+        .await
+        .get(&server)
+        .map(|entry| entry.instance)
+    else {
         return PersistOutcome::Superseded;
     };
     admission_storage::persist_server_net(state, server, instance, net).await
@@ -5888,12 +5926,24 @@ async fn found_server_inner(
     let membership_save = persist_server(state, server_id).await;
     let network_save = persist_server_net(state, server_id, &net).await;
     let registry_save = persist_registry(state).await;
-    let mut storage_warning = admission_storage_warning([membership_save, network_save, registry_save]);
-    let registered = state.servers.lock().await.get(&server_id)
+    let mut storage_warning =
+        admission_storage_warning([membership_save, network_save, registry_save]);
+    let registered = state
+        .servers
+        .lock()
+        .await
+        .get(&server_id)
         .map(|entry| (entry.instance, entry.actor.clone(), entry.mesh.clone()));
     if let Some((instance, actor, Some(mesh))) = registered {
-        if let Err(error) = member_reconnect::persist(state, server_id, instance, &actor,
-            mesh.authenticated_dial_route_evidence()).await {
+        if let Err(error) = member_reconnect::persist(
+            state,
+            server_id,
+            instance,
+            &actor,
+            mesh.authenticated_dial_route_evidence(),
+        )
+        .await
+        {
             tracing::warn!(target: "catcoms_app", server = server_id, %error, "VAULT.ADMISSION_RECONNECT.PENDING");
             storage_warning.get_or_insert_with(|| "This group is available, but reconnect setup is still pending. Keep Mewtual open while it retries.".into());
         }
@@ -6668,12 +6718,24 @@ async fn join_server_inner(
     let membership_save = persist_server(state, server_id).await;
     let network_save = persist_server_net(state, server_id, &net).await;
     let registry_save = persist_registry(state).await;
-    let mut storage_warning = admission_storage_warning([membership_save, network_save, registry_save]);
-    let registered = state.servers.lock().await.get(&server_id)
+    let mut storage_warning =
+        admission_storage_warning([membership_save, network_save, registry_save]);
+    let registered = state
+        .servers
+        .lock()
+        .await
+        .get(&server_id)
         .map(|entry| (entry.instance, entry.actor.clone(), entry.mesh.clone()));
     if let Some((instance, actor, Some(mesh))) = registered {
-        if let Err(error) = member_reconnect::persist(state, server_id, instance, &actor,
-            mesh.authenticated_dial_route_evidence()).await {
+        if let Err(error) = member_reconnect::persist(
+            state,
+            server_id,
+            instance,
+            &actor,
+            mesh.authenticated_dial_route_evidence(),
+        )
+        .await
+        {
             tracing::warn!(target: "catcoms_app", server = server_id, %error, "VAULT.ADMISSION_RECONNECT.PENDING");
             storage_warning.get_or_insert_with(|| "This group is available, but reconnect setup is still pending. Keep Mewtual open while it retries.".into());
         }
