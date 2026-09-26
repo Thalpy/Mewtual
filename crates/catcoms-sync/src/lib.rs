@@ -60,11 +60,11 @@ use thiserror::Error;
 use zeroize::Zeroizing;
 
 mod blob_fetch;
-pub mod durable_chat;
 pub mod checkpoint_exchange;
+pub mod durable_chat;
 pub mod epoch_service;
-mod owner_tenure;
 mod group_policy;
+mod owner_tenure;
 pub use catcoms_mls::{GroupMode, GroupPolicy, PolicyError};
 pub mod receipt_head;
 #[cfg(test)]
@@ -1546,13 +1546,16 @@ fn encode_join_transfer(
     e.put_bytes(file_wrap_key).expect("32 fits");
     // Preserve legacy routing-transfer bytes when the invite itself had no policy.
     if policy.is_some() {
-        e.put_bytes(&group_policy::encode_pin(policy)).expect("policy fits");
+        e.put_bytes(&group_policy::encode_pin(policy))
+            .expect("policy fits");
     }
     e.finish()
 }
 
 #[allow(clippy::type_complexity)]
-fn decode_join_transfer(bytes: &[u8]) -> Result<(u64, Vec<(u64, [u8; 32])>, [u8; 32], Option<GroupPolicy>), SyncError> {
+fn decode_join_transfer(
+    bytes: &[u8],
+) -> Result<(u64, Vec<(u64, [u8; 32])>, [u8; 32], Option<GroupPolicy>), SyncError> {
     let mut d = Decoder::new(bytes);
     let routing = d.get_bytes().map_err(|_| SyncError::Malformed)?;
     let (label, secrets) = decode_routing_state(routing)?;
@@ -4635,7 +4638,8 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             .map_err(|_| oversize())?;
         e.put_bytes(&group_policy::encode_pin(self.group_policy.as_ref()))
             .map_err(|_| oversize())?;
-        e.put_bytes(&self.durable_chat.encode()?).map_err(|_| oversize())?;
+        e.put_bytes(&self.durable_chat.encode()?)
+            .map_err(|_| oversize())?;
         Ok(Zeroizing::new(e.finish()))
     }
 
@@ -5162,7 +5166,8 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         F: FnOnce(&mut AutoCommit) -> Result<(), AutomergeError>,
     {
         let current_context = self.durable_send_context();
-        self.durable_chat.stop_obsolete(current_context.as_ref().ok());
+        self.durable_chat
+            .stop_obsolete(current_context.as_ref().ok());
         if self.durable_chat.blocks(doc_type, doc_id) {
             return Err(SyncError::ChatPreparationPending);
         }
@@ -5682,8 +5687,13 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             return Ok(true);
         }
 
-        let retry_delay = [self.next_catchup_retry_delay(), self.next_durable_chat_retry_delay()]
-            .into_iter().flatten().min();
+        let retry_delay = [
+            self.next_catchup_retry_delay(),
+            self.next_durable_chat_retry_delay(),
+        ]
+        .into_iter()
+        .flatten()
+        .min();
         let event = if let Some(delay_ms) = retry_delay {
             let next_event = self.transport.next_event();
             let retry = self.clock.sleep(std::time::Duration::from_millis(delay_ms));
@@ -13013,7 +13023,8 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             ));
             return Ok((JoinOutcome::Admitted, response));
         }
-        self.policy_admission_ready().map_err(|_| JoinOutcome::NotAuthorized)?;
+        self.policy_admission_ready()
+            .map_err(|_| JoinOutcome::NotAuthorized)?;
         let now = self.clock.now_ms();
         // The ledger's own reason is kept rather than flattened: "already used" and "expired"
         // lead the operator to completely different actions (mint a second invite vs mint a

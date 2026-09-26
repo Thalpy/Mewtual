@@ -454,9 +454,18 @@ async fn two_members_found_invite_join_and_talk_both_ways() {
 
     assert_eq!(alice.actor.member_count().await, 2, "the roster grew");
     assert_eq!(bob.actor.member_count().await, 2);
-    assert_eq!(alice.actor.group_mode().await.unwrap(), catcoms_app::GroupMode::PeerToPeer);
-    assert_eq!(bob.actor.group_mode().await.unwrap(), catcoms_app::GroupMode::PeerToPeer);
-    assert_eq!(invite.policy.as_ref().unwrap().mode(), catcoms_app::GroupMode::PeerToPeer);
+    assert_eq!(
+        alice.actor.group_mode().await.unwrap(),
+        catcoms_app::GroupMode::PeerToPeer
+    );
+    assert_eq!(
+        bob.actor.group_mode().await.unwrap(),
+        catcoms_app::GroupMode::PeerToPeer
+    );
+    assert_eq!(
+        invite.policy.as_ref().unwrap().mode(),
+        catcoms_app::GroupMode::PeerToPeer
+    );
 
     // Founder to joiner, live over the channel topic the joiner subscribed on open.
     alice.actor.send_message(general(), "welcome bob").await;

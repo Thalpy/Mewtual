@@ -77,7 +77,7 @@ export const TAURI_COMMAND_GROUPS = {
   authenticated_server_reads: {
     boundary: "Read projections from a registered per-server actor; never bypass MLS/CRDT validation.",
     commands: [
-      "get_channels", "get_members", "get_profiles", "get_livery", "get_badges", "get_devices",
+      "get_channels", "durable_send_context", "get_members", "get_profiles", "get_livery", "get_badges", "get_devices",
       "get_files", "get_storage_health", "get_online_members", "get_delivery", "dm_stats",
       "get_dm_requests", "file_available", "get_kept_files", "get_file_usage", "get_wiki_pinned_cids", "get_statuses",
       "get_events", "get_wiki_pages", "get_wiki_map", "get_wiki_page", "get_wiki_meta",

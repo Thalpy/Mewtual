@@ -38,6 +38,7 @@
     type MessagePage, type PageAnchor, type PageRequest, type PagedRowContext, type UnreadSummary,
   } from "./message-paging";
   import { persistenceWarning, sendAndRefresh, type SendMessageResult } from "./message-send";
+  import { addPendingSend, matchingPendingSend, type PendingSend, type PendingSends } from "./pending-sends";
   import { ImageSrcCache } from "./image-src";
   import { pastedMedia, pastedName } from "./clipboard-media";
   import {
@@ -3427,6 +3428,9 @@
   // file-trust policy) has been restored. This must be reactive: the load
   // completes asynchronously after unlock.
   let uiStateReady = $state(false);
+  let pendingSends = $state<PendingSends>({});
+  let pendingSendErrors = $state<Record<string, string>>({});
+  let retryingPendingSends = $state(false);
   let uiStateSaveFailed = $state(false);
   let uiStateFailureToast = 0;
   let uiStateLoadGeneration = 0;
@@ -3444,7 +3448,7 @@
     return save;
   }
   function continuityJson(): string {
-    return JSON.stringify({ version: 1, drafts, readMarks, statusCursors, fileTrustPolicies, latePast, embedAutoLoad });
+    return JSON.stringify({ version: 1, drafts, readMarks, statusCursors, fileTrustPolicies, latePast, embedAutoLoad, pendingSends });
   }
   /**
    * Seal the current continuity snapshot without the ordinary typing/read-position debounce.
@@ -3479,6 +3483,7 @@
     }, 250);
   }
   async function loadUiContinuity(generation: number) {
+    let loaded = false;
     try {
       let next = sanitizeUiContinuity(JSON.parse(await invoke<string>("get_ui_state")));
       if (generation !== uiStateLoadGeneration || locked) return;
@@ -3498,28 +3503,27 @@
         console.warn("Legacy read-mark migration failed", migrationError);
       }
       if (generation !== uiStateLoadGeneration || locked) return;
+      pendingSends = next.pendingSends;
       drafts = next.drafts;
       readMarks = next.readMarks;
       statusCursors = next.statusCursors;
       fileTrustPolicies = next.fileTrustPolicies;
       latePast = next.latePast;
       embedAutoLoad = next.embedAutoLoad;
+      loaded = true;
     } catch (e) {
       if (generation !== uiStateLoadGeneration || locked) return;
       console.warn("UI continuity load failed", e);
-      drafts = {};
-      readMarks = {};
-      statusCursors = {};
-      fileTrustPolicies = {};
-      latePast = {};
+      // Preserve the last sealed record and block replacements until a successful load.
+      // An unreadable record may contain the only retry identity for an accepted message.
       embedAutoLoad = false; // an unreadable record is not permission to start contacting anyone
       error = `Durable history could not be authenticated and was not loaded: ${e}`;
     } finally {
       if (generation === uiStateLoadGeneration && !locked) {
-        uiStateReady = true;
+        uiStateReady = loaded;
         // Anything marked read while this was in flight was held rather than written, because the
         // assignments above would have overwritten it. Replay it now, against what actually loaded.
-        flushPendingStatusMarks();
+        if (loaded) flushPendingStatusMarks();
       }
     }
   }
@@ -3893,7 +3897,7 @@
     return evBody;
   }
   function setTextEffectValue(target: TextEffectTarget, value: string) {
-    if (target === "chat") draft = value;
+    if (target === "chat") { draft = value; saveDraftFor(chanKey()); }
     else if (target === "chat-edit") editDraft = value;
     else if (target === "announcement") statusDraft = value;
     else if (target === "wiki") { wikiBody = value; wikiDirty = true; }
@@ -6138,6 +6142,7 @@
   }
   function insertEmoji(code: string) {
     draft = draft ? `${draft} :${code}:` : `:${code}:`;
+    saveDraftFor(chanKey());
     showEmoji = false;
   }
 
@@ -6153,6 +6158,7 @@
   ];
   function insertUnicodeEmoji(e: string) {
     draft = draft + e;
+    saveDraftFor(chanKey());
     showEmoji = false;
   }
 
@@ -6183,6 +6189,7 @@
       // activity head against the read marks that just loaded. Without this pass, a message
       // received during a lock or across a restart is silently lost from the indicators.
       rebuildAllUnread();
+      void retryPendingSends();
       // The announcement indicators are the same rebuild, for the same reason: posts made while
       // this device was closed or locked raised no event anyone was awake to hear, so the counts
       // come from the feeds themselves rather than from what this session witnessed. It waits on
@@ -6337,6 +6344,9 @@
     deliverySnapshot = { revision: 0, reports: {} };
     draft = "";
     drafts = {};
+    pendingSends = {};
+    pendingSendErrors = {};
+    retryingPendingSends = false;
     sending = false;
     pendingSendNonce += 1;
     readMarks = {};
@@ -9023,6 +9033,7 @@
   // the composer is mounted before focusing (these can fire from the wiki/files tab).
   async function appendToDraft(text: string) {
     draft = draft ? `${draft} ${text}` : text;
+    saveDraftFor(chanKey());
     view = "chat";
     await tick();
     composerEl?.focus();
@@ -10439,7 +10450,7 @@
           // Brackets in the alt would break the `![alt](cid:…)` marker parse: strip them.
           const alt = name.replace(/[[\]]/g, " ");
           const marker = `![${alt}](cid:${cid})`;
-          if (target === "chat") draft = draft ? `${draft} ${marker}` : marker;
+          if (target === "chat") { draft = draft ? `${draft} ${marker}` : marker; saveDraftFor(chanKey()); }
           else statusDraft = statusDraft ? `${statusDraft} ${marker}` : marker;
           updateToast(tid, `Attached ${name}`, "ok");
         } catch (e) {
@@ -11777,6 +11788,7 @@
     const end = composerEl?.selectionEnd ?? draft.length;
     const { text, caret } = insertInto(draft, start, end, insert);
     draft = text;
+    saveDraftFor(chanKey());
     queueMicrotask(() => {
       if (composerEl) {
         composerEl.focus();
@@ -11887,6 +11899,7 @@
     const before = draft.slice(0, mentionStart);
     const insert = `@[${mentionName(c.name)}] `;
     draft = before + insert + draft.slice(caret);
+    saveDraftFor(chanKey());
     mentionQuery = null;
     const pos = before.length + insert.length;
     queueMicrotask(() => {
@@ -18421,8 +18434,10 @@
   // Per-channel composer drafts: switching channels/servers preserves what you typed, and the
   // bounded map is vault-sealed through scheduleUiStateSave for restart durability.
   let drafts = $state<Record<string, string>>({});
+  const draftRevisions: Record<string, number> = {};
   function saveDraftFor(key: string | null) {
     if (!key) return;
+    draftRevisions[key] = (draftRevisions[key] ?? 0) + 1;
     if (draft.trim()) drafts[key] = draft;
     else delete drafts[key];
     scheduleUiStateSave();
@@ -18439,6 +18454,7 @@
     const end = ta?.selectionEnd ?? start;
     const sel = draft.slice(start, end);
     draft = draft.slice(0, start) + before + sel + after + draft.slice(end);
+    saveDraftFor(chanKey());
     const a = start + before.length;
     queueMicrotask(() => {
       if (composerEl) {
@@ -18449,64 +18465,137 @@
     });
   }
 
+  async function submitPendingSend(intent: PendingSend, session: number, originalDraftRevision: number | undefined = undefined): Promise<SendMessageResult> {
+    const draftKey = chatScopeKey(intent.server, intent.channel);
+    const draftRevision = originalDraftRevision ?? draftRevisions[draftKey] ?? 0;
+    let result: SendMessageResult;
+    try {
+      // Also covers retry after an earlier continuity-write failure. No native authoring
+      // request may outlive the only copy of its caller identity.
+      if (locked || !uiStateReady || session !== uiStateLoadGeneration
+        || !(await saveUiStateImmediately()) || locked || session !== uiStateLoadGeneration) {
+        throw new Error("Save the pending message in this vault before retrying it.");
+      }
+      result = (await invokeDebugged<SendMessageResult>("send_message", {
+        server: intent.server, channel: intent.channel, text: intent.text, replyTo: intent.replyTo,
+        retryToken: intent.token, expectedContext: intent.expectedContext,
+      })).value;
+    } catch (failure) {
+      if (!locked && session === uiStateLoadGeneration) pendingSendErrors[intent.token] = errorText(failure);
+      throw failure;
+    }
+    if (!locked && session === uiStateLoadGeneration && result.accepted && result.persistence.status === "durable") {
+      delete pendingSends[intent.token];
+      delete pendingSendErrors[intent.token];
+      const key = chatScopeKey(intent.server, intent.channel);
+      const sameDraft = (draftRevisions[key] ?? 0) === draftRevision;
+      if (sameDraft && drafts[key]?.trim() === intent.text) delete drafts[key];
+      if (sameDraft && activeServerId === intent.server && cur?.active === intent.channel && draft.trim() === intent.text) {
+        draft = "";
+        replyingTo = "";
+      }
+      // If cleanup cannot persist, replaying the still-sealed token is safe on next unlock.
+      await saveUiStateImmediately();
+    }
+    return result;
+  }
+
+  async function movePendingToDraft(token: string) {
+    const intent = pendingSends[token];
+    if (!intent || locked || sending || retryingPendingSends || intent.server !== activeServerId
+      || intent.channel !== cur?.active || (draft.trim() && draft.trim() !== intent.text)
+      || !pendingSendErrors[token]?.includes("CHAT_SEND_CONTEXT_CHANGED")) return;
+    const session = uiStateLoadGeneration;
+    // Only an explicit user decision can turn refused old-authority work into a new send.
+    // Persist the recovered draft in the same continuity replacement that retires its intent.
+    draft = intent.text;
+    replyingTo = intent.replyTo;
+    drafts[chatScopeKey(intent.server, intent.channel)] = intent.text;
+    delete pendingSends[token];
+    if (!(await saveUiStateImmediately()) && !locked && session === uiStateLoadGeneration) {
+      pendingSends[token] = intent;
+    }
+  }
+
+  async function retryPendingSends() {
+    if (locked || !uiStateReady || retryingPendingSends || sending) return;
+    const session = uiStateLoadGeneration;
+    retryingPendingSends = true;
+    try {
+      for (const intent of Object.values(pendingSends)) {
+        if (locked || session !== uiStateLoadGeneration) return;
+        try {
+          const result = await submitPendingSend(intent, session);
+          if (locked || session !== uiStateLoadGeneration) return;
+          const warning = persistenceWarning(result);
+          if (warning) error = warning;
+        } catch (failure) {
+          if (locked || session !== uiStateLoadGeneration) return;
+          error = `A pending message needs attention: ${errorText(failure)}`;
+        }
+      }
+      if (!locked && session === uiStateLoadGeneration && cur?.active) await refresh();
+    } finally {
+      if (session === uiStateLoadGeneration) retryingPendingSends = false;
+    }
+  }
+
   async function send() {
     const text = draft.trim();
-    if (!text || !cur || !cur.active || activeServerId === null || sending || locked) return;
+    if (!text || !cur?.active || activeServerId === null || sending || retryingPendingSends || locked || !uiStateReady) return;
     const server = activeServerId;
     const channel = cur.active;
     const session = uiStateLoadGeneration;
     const sessionCurrent = () => !locked && session === uiStateLoadGeneration;
     const reply_to = replyingTo;
     const key = chanKey();
-    draft = "";
-    replyingTo = "";
-    mentionQuery = null;
-    if (key) delete drafts[key];
-    scheduleUiStateSave();
+    const draftRevision = key ? draftRevisions[key] ?? 0 : 0;
     sending = true;
     const operation = ++pendingSendNonce;
-    const pendingId = `pending:${Date.now()}:${operation}`;
-    const nextScope = chatScopeKey(server, channel);
-    chatStickToBottom = true;
-    // The optimistic row belongs at the end of the log, which is only where the slice ends when
-    // the tail is loaded. Away from the tail the acknowledgement refresh lands there instead.
-    if (tailLoaded && messageWindowScope === nextScope) {
-      const parent = replyTarget;
-      messages = [...messages, {
-        id: pendingId,
-        author: myFp,
-        text,
-        ts: Date.now(),
-        edited: 0,
-        reactions: [],
-        reply_to,
-        pinned: false,
-        targets_me: false,
-        reply_count: 0,
-        reply_to_preview: parent ? { id: reply_to, author: parent.author, text: parent.text } : null,
-      }];
-      pageTotal += 1;
-      markMessageArrivals([pendingId]);
-    }
-    replyingToRow = undefined;
+    const pendingId = `pending:${operation}`;
     try {
-      // Submit before yielding. A lock between clearing the composer and IPC would otherwise
-      // capture an empty draft and cancel work that had never even reached the native side.
-      // The one path instrumented end to end, and the pattern the rest adopt. The trace is
-      // allocated here, travels with the command, and stamps every native stage, so a send that
-      // goes nowhere can be read as one story rather than two halves lined up by timestamp.
-      // Nothing about the message itself is recorded: not its text, not its length.
+      let intent = matchingPendingSend(pendingSends, server, channel, text, reply_to);
+      if (!intent) {
+        const expectedContext = await invoke<string>("durable_send_context", { server });
+        if (!sessionCurrent()) return;
+        intent = { token: crypto.randomUUID().replaceAll("-", ""), server, channel,
+          text, replyTo: reply_to, expectedContext };
+        pendingSends = addPendingSend(pendingSends, intent);
+      }
+      // Keep the composer intact until its retry identity and payload have crossed the vault
+      // barrier. A lock at either await captures the draft or this resumable intent.
+      clearTimeout(uiStateSaveTimer);
+      await queueUiStateSave(continuityJson());
+      if (!sessionCurrent()) return;
+      const sameDraft = !key || (draftRevisions[key] ?? 0) === draftRevision;
+      if (sameDraft && activeServerId === server && cur?.active === channel && draft.trim() === text) {
+        draft = "";
+        replyingTo = "";
+        mentionQuery = null;
+      }
+      if (sameDraft && key && drafts[key]?.trim() === text) delete drafts[key];
+      scheduleUiStateSave();
+      const nextScope = chatScopeKey(server, channel);
+      chatStickToBottom = true;
+      if (tailLoaded && messageWindowScope === nextScope) {
+        const parent = replyTarget;
+        messages = [...messages, { id: pendingId, author: myFp, text, ts: Date.now(), edited: 0,
+          reactions: [], reply_to, pinned: false, targets_me: false, reply_count: 0,
+          reply_to_preview: parent ? { id: reply_to, author: parent.author, text: parent.text } : null }];
+        pageTotal += 1;
+        markMessageArrivals([pendingId]);
+      }
+      replyingToRow = undefined;
       const { result, refreshError } = await sendAndRefresh(
-        async () => (await invokeDebugged<SendMessageResult>("send_message", { server, channel, text, replyTo: reply_to })).value,
+        () => submitPendingSend(intent!, session, draftRevision),
         async () => {
-          // A failed acknowledgement refresh cannot undo the accepted send or restore its draft.
           if (sessionCurrent() && activeServerId === server && cur?.active === channel) await refresh();
         },
       );
       if (!sessionCurrent()) return;
       const warning = persistenceWarning(result);
       if (warning) toast(warning, "warn", 12000);
-      if (refreshError) error = `Message accepted, but the conversation could not refresh: ${errorText(refreshError)}`;
+      if (refreshError) error = `Message result saved, but the conversation could not refresh: ${errorText(refreshError)}`;
     } catch (e) {
       if (!sessionCurrent()) return;
       error = String(e);
@@ -18514,8 +18603,7 @@
         messages = messages.filter((m) => m.id !== pendingId);
         pageTotal = Math.max(0, pageTotal - 1);
       }
-      // Put the message back only if the user has not already started another one while the send
-      // was in flight. A failed send should never silently eat their text.
+      // A retry of this unchanged composer reuses the sealed intent's token.
       if (activeServerId === server && cur?.active === channel && !draft.trim()) {
         draft = text;
         if (key) drafts[key] = text;
@@ -25621,6 +25709,22 @@
                 {/each}
               </div>
             {/if}
+            {#if Object.keys(pendingSends).length}
+              <details class="muted small">
+                <summary>{Object.keys(pendingSends).length} message(s) awaiting save confirmation</summary>
+                <p>These messages are retained in this vault. Retrying uses the same message identity.</p>
+                {#each Object.values(pendingSends).filter((item) => item.server === activeServerId) as item (item.token)}
+                  <p>{item.text}</p>
+                  {#if pendingSendErrors[item.token]}
+                    <p>{pendingSendErrors[item.token]}</p>
+                    {#if pendingSendErrors[item.token].includes("CHAT_SEND_CONTEXT_CHANGED") && item.channel === cur?.active}
+                      <button type="button" disabled={sending || retryingPendingSends || (!!draft.trim() && draft.trim() !== item.text)} onclick={() => movePendingToDraft(item.token)}>Move to draft for a new send</button>
+                    {/if}
+                  {/if}
+                {/each}
+                <button type="button" disabled={sending || retryingPendingSends} onclick={() => retryPendingSends()}>Retry pending messages</button>
+              </details>
+            {/if}
             <!-- svelte-ignore a11y_no_static_element_interactions -->
             <form
               class="composer"
@@ -25666,7 +25770,7 @@
               </div>
               {@render textEffectButton("chat", "Message text effects")}
               <button type="button" class="attach" title="Emoji" onclick={() => (showEmoji = !showEmoji)}>{@render icoCat()}</button>
-              <button type="submit" disabled={uploading || sending}>Send</button>
+              <button type="submit" disabled={uploading || sending || retryingPendingSends}>Send</button>
             </form>
           </div>
         {:else if view === "moderation" && canModerate}

@@ -54,6 +54,7 @@ use tokio::time::timeout;
 use zeroize::Zeroizing;
 
 mod creative_blobs;
+mod durable_chat;
 mod errors;
 mod media_decode;
 mod security_intent;
@@ -11283,20 +11284,8 @@ async fn channel_target(
 struct SendMessageResult {
     accepted: bool,
     persistence: PersistOutcome,
-}
-
-impl SendMessageResult {
-    fn accepted(persistence: PersistOutcome, op: &Operation) -> Self {
-        op.succeeded(match persistence {
-            PersistOutcome::Durable => "CHANNEL.SEND.PERSISTED",
-            PersistOutcome::Pending { .. } => "CHANNEL.SEND.PERSIST_PENDING",
-            PersistOutcome::Superseded => "CHANNEL.SEND.PERSIST_SUPERSEDED",
-        });
-        Self {
-            accepted: true,
-            persistence,
-        }
-    }
+    message_id: Option<String>,
+    replayed: bool,
 }
 
 /// Send a chat message to a channel (by id).
@@ -11316,6 +11305,8 @@ async fn send_message(
     channel: String,
     text: String,
     reply_to: Option<String>,
+    retry_token: Option<String>,
+    expected_context: Option<String>,
     trace: Option<String>,
 ) -> Result<SendMessageResult, AppError> {
     let op = Operation::start(
@@ -11325,34 +11316,20 @@ async fn send_message(
         server,
         Some(&channel),
     );
-    send_message_inner(&state, &op, server, &channel, text, reply_to).await
-}
-
-async fn send_message_inner(
-    state: &AppState,
-    op: &Operation,
-    server: u64,
-    channel: &str,
-    text: String,
-    reply_to: Option<String>,
-) -> Result<SendMessageResult, AppError> {
-    let id: u128 = channel
-        .parse()
-        .map_err(|_| op.fail(codes::CHANNEL_BAD_ID, "bad channel id"))?;
-    let (actor, instance) = actor_instance_of(state, server)
+    require_unlocked_session(&state)
         .await
-        .map_err(|failure| op.fail(failure.code(), failure.message()))?;
-    let actor = op.bind_actor(actor);
-    op.stage("CHANNEL.SEND.ENQUEUED");
-    actor
-        .send_reply(id, text, reply_to.unwrap_or_default())
-        .await
-        .map_err(|e| op.fail(codes::CHAT_SEND_REJECTED, e))?;
-    op.stage("CHANNEL.SEND.ACCEPTED");
-    let persistence = persist_server_instance(state, server, instance, actor).await;
-    // Actor acceptance is irreversible. A disk error must not invite the caller to send a second
-    // copy; keep it an accepted result, with durability and diagnostics stated separately.
-    Ok(SendMessageResult::accepted(persistence, op))
+        .map_err(|e| op.fail(codes::SESSION_LOCKED, e))?;
+    durable_chat::send(
+        &state,
+        &op,
+        server,
+        &channel,
+        text,
+        reply_to,
+        retry_token,
+        expected_context,
+    )
+    .await
 }
 
 /// Edit one of your own messages (by message id) in a channel.
@@ -16394,6 +16371,7 @@ pub fn run() {
             remove_member,
             revoke_device,
             send_message,
+            durable_chat::durable_send_context,
             edit_message,
             delete_message,
             toggle_reaction,
@@ -20333,7 +20311,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn accepted_send_keeps_failed_save_dirty_and_retries_without_reauthoring() {
+    async fn legacy_actor_work_keeps_failed_save_dirty_and_retries_without_reauthoring() {
         use catcoms_rt::Hub;
         use rand_chacha::ChaCha20Rng;
         use rand_core::SeedableRng;
@@ -20388,29 +20366,16 @@ mod tests {
             SERVER,
             Some("1"),
         );
-        let result = send_message_inner(
-            &state,
-            &op,
-            SERVER,
-            "1",
-            "one accepted message".into(),
-            None,
-        )
-        .await
-        .unwrap();
-        assert!(
-            result.accepted,
-            "disk failure must not become a retryable send rejection"
-        );
+        actor
+            .send_reply(1, "one accepted message", "")
+            .await
+            .unwrap();
         let pending = PersistOutcome::Pending {
             reason: PersistFailure::WriteFailed,
         };
-        assert_eq!(result.persistence, pending);
         assert_eq!(
-            serde_json::to_value(&result).unwrap(),
-            serde_json::json!({
-                "accepted": true, "persistence": {"status": "pending", "reason": "write_failed"}
-            })
+            persist_server_instance(&state, SERVER, INSTANCE, op.bind_actor(actor.clone())).await,
+            pending
         );
         assert_eq!(actor.messages(1).await.len(), 1);
         assert_eq!(

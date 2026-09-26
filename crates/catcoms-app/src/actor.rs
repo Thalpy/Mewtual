@@ -1262,16 +1262,23 @@ impl ServerActor {
     /// Send a chat message replying to `reply_to` (the parent message's id).
     pub async fn durable_send_context(&self) -> Result<[u8; 32], String> {
         let (reply, rx) = oneshot::channel();
-        self.cmd_tx.send(AppCommand::DurableSendContext { reply }).await
+        self.cmd_tx
+            .send(AppCommand::DurableSendContext { reply })
+            .await
             .map_err(|_| "server stopped".to_string())?;
         rx.await.map_err(|_| "server stopped".to_string())?
     }
 
     /// Obtain Ready before acquiring native custody; commit with a lease to cross the barrier.
-    pub async fn prepare_durable_send(&self, request: crate::durable_chat::DurableSendRequest) -> Result<crate::durable_chat::DurableSendReady, String> {
+    pub async fn prepare_durable_send(
+        &self,
+        request: crate::durable_chat::DurableSendRequest,
+    ) -> Result<crate::durable_chat::DurableSendReady, String> {
         request.validate()?;
         let (ready, rx) = oneshot::channel();
-        self.cmd_tx.send(AppCommand::DurableSend { request, ready }).await
+        self.cmd_tx
+            .send(AppCommand::DurableSend { request, ready })
+            .await
             .map_err(|_| "server stopped".to_string())?;
         rx.await.map_err(|_| "server stopped".to_string())
     }
@@ -1676,7 +1683,9 @@ impl ServerActor {
     /// fabricated legacy mode.
     pub async fn group_mode(&self) -> Result<crate::GroupMode, String> {
         let (reply, rx) = oneshot::channel();
-        self.cmd_tx.send(AppCommand::GroupMode { reply }).await
+        self.cmd_tx
+            .send(AppCommand::GroupMode { reply })
+            .await
             .map_err(|_| "server actor stopped".to_string())?;
         rx.await.map_err(|_| "server actor dropped".to_string())
     }
@@ -1684,14 +1693,18 @@ impl ServerActor {
     /// Initialize a legacy group's owner-authorized pin. The caller must persist before publish.
     pub async fn initialize_group_policy(&self, mode: crate::GroupMode) -> Result<(), String> {
         let (reply, rx) = oneshot::channel();
-        self.cmd_tx.send(AppCommand::InitializeGroupPolicy { mode, reply }).await
+        self.cmd_tx
+            .send(AppCommand::InitializeGroupPolicy { mode, reply })
+            .await
             .map_err(|_| "server actor stopped".to_string())?;
         rx.await.map_err(|_| "server actor dropped".to_string())?
     }
 
     pub async fn publish_group_policy(&self) -> Result<(), String> {
         let (reply, rx) = oneshot::channel();
-        self.cmd_tx.send(AppCommand::PublishGroupPolicy { reply }).await
+        self.cmd_tx
+            .send(AppCommand::PublishGroupPolicy { reply })
+            .await
             .map_err(|_| "server actor stopped".to_string())?;
         rx.await.map_err(|_| "server actor dropped".to_string())?
     }
@@ -6014,17 +6027,32 @@ mod tests {
         // Exact pre-policy snapshot fixture: retain the preceding observed-tenure extension.
         let policy_tail = fresh.sync().group_policy().unwrap().encode().len() + 9;
         let snapshot = fresh.snapshot().unwrap();
-        let legacy = snapshot[..snapshot.len() - policy_tail].to_vec();
+        // The unused durable-chat extension is a framed v1, zero-record payload.
+        let empty_chat_tail = [0, 0, 0, 5, 1, 0, 0, 0, 0];
+        assert!(snapshot.ends_with(&empty_chat_tail));
+        let legacy = snapshot[..snapshot.len() - empty_chat_tail.len() - policy_tail].to_vec();
         drop(fresh);
-        let mut alice = Server::restore(&legacy, hub.join(alice_peer),
-            ChaCha20Rng::seed_from_u64(1), Box::new(ManualClock::new(1_000)), "alice").unwrap();
+        let mut alice = Server::restore(
+            &legacy,
+            hub.join(alice_peer),
+            ChaCha20Rng::seed_from_u64(1),
+            Box::new(ManualClock::new(1_000)),
+            "alice",
+        )
+        .unwrap();
         alice.subscribe_control().await.unwrap();
         let invite = alice.mint_invite([90; 16], 60_000, vec![]).unwrap();
         assert!(invite.policy.is_none());
         let (joined, _) = tokio::join!(
-            Server::join(hub.join(PeerId::from_u64(2)), MlsDevice::generate().unwrap(),
-                ChaCha20Rng::seed_from_u64(2), Box::new(ManualClock::new(1_000)),
-                "bob", alice_peer, &invite),
+            Server::join(
+                hub.join(PeerId::from_u64(2)),
+                MlsDevice::generate().unwrap(),
+                ChaCha20Rng::seed_from_u64(2),
+                Box::new(ManualClock::new(1_000)),
+                "bob",
+                alice_peer,
+                &invite
+            ),
             alice.sync_once(),
         );
         let mut bob = joined.unwrap();
@@ -6032,25 +6060,44 @@ mod tests {
         let epoch = bob.epoch();
         let (alice, _alice_events, alice_task) = spawn(alice);
         let (bob, mut events, bob_task) = spawn(bob);
-        assert_eq!(bob.group_mode().await.unwrap(), crate::GroupMode::LegacyUnverified);
+        assert_eq!(
+            bob.group_mode().await.unwrap(),
+            crate::GroupMode::LegacyUnverified
+        );
         while events.try_recv().is_ok() {}
-        alice.initialize_group_policy(crate::GroupMode::PeerToPeer).await.unwrap();
+        alice
+            .initialize_group_policy(crate::GroupMode::PeerToPeer)
+            .await
+            .unwrap();
         let owner_snapshot = alice.snapshot().await.unwrap();
         assert!(!owner_snapshot.is_empty());
         alice.publish_group_policy().await.unwrap();
         timeout(Duration::from_secs(3), async {
             loop {
                 if matches!(events.recv().await.unwrap().event, AppEvent::SnapshotNeeded)
-                    && bob.group_mode().await.unwrap() == crate::GroupMode::PeerToPeer {
+                    && bob.group_mode().await.unwrap() == crate::GroupMode::PeerToPeer
+                {
                     break;
                 }
             }
-        }).await.expect("received policy must request persistence without a rendered change");
+        })
+        .await
+        .expect("received policy must request persistence without a rendered change");
         let saved = bob.snapshot().await.unwrap();
-        let restored = Server::restore(&saved, Hub::new().join(PeerId::from_u64(3)),
-            ChaCha20Rng::seed_from_u64(3), Box::new(ManualClock::new(1_000)), "bob").unwrap();
+        let restored = Server::restore(
+            &saved,
+            Hub::new().join(PeerId::from_u64(3)),
+            ChaCha20Rng::seed_from_u64(3),
+            Box::new(ManualClock::new(1_000)),
+            "bob",
+        )
+        .unwrap();
         assert_eq!(restored.group_mode(), crate::GroupMode::PeerToPeer);
-        assert_eq!(restored.epoch(), epoch, "policy migration did not fake an MLS transition");
+        assert_eq!(
+            restored.epoch(),
+            epoch,
+            "policy migration did not fake an MLS transition"
+        );
         alice.shutdown().await;
         bob.shutdown().await;
         alice_task.await.unwrap();

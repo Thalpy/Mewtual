@@ -80,6 +80,15 @@ mod tests {
         ) -> Result<Bytes, TransportError> {
             Err(TransportError::Closed)
         }
+        async fn request_cancellable(
+            &self,
+            peer: PeerId,
+            protocol: ProtocolId,
+            bytes: Bytes,
+            _: catcoms_rt::RequestCancellation,
+        ) -> Result<Bytes, TransportError> {
+            self.request(peer, protocol, bytes).await
+        }
         async fn next_event(&self) -> Option<TransportEvent> {
             std::future::pending().await
         }
@@ -235,9 +244,11 @@ mod tests {
         n.commit_durable_chat([1; 16], |_, _| Ok(())).unwrap();
         prepare(&mut n, 2, 6);
         let peer = MlsDevice::generate().unwrap();
-        n.group
-            .add_member(&n.device, peer.key_package().unwrap())
-            .unwrap();
+        n.with_observed_mls_transition(|node| {
+            node.group
+                .add_member(&node.device, peer.key_package().unwrap())
+        })
+        .unwrap();
         assert_ne!(context, n.durable_send_context().unwrap());
         let replay = n
             .prepare_durable_chat([1; 16], [1; 32], context, 5, "ignored".into(), |_| panic!())

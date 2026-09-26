@@ -29,8 +29,8 @@ pub use catcoms_crypto::DeviceId;
 // The companion-device statements the `Devices` registry stores + verifies (multi-device M3).
 use catcoms_crypto::verify_with_public_bytes;
 pub use catcoms_crypto::{DeviceCertificate, DeviceRevocation};
-use catcoms_mls::{InviteToken, MlsDevice, MlsError, ServerGroup};
 pub use catcoms_mls::GroupMode;
+use catcoms_mls::{InviteToken, MlsDevice, MlsError, ServerGroup};
 use catcoms_rt::{
     Clock, CryptoRngCore, DiscoveredPeer, MeshTransport, PeerId, RequestCancellation,
 };

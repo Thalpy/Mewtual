@@ -90,6 +90,7 @@ fn group_policy_legacy_snapshot_and_invite_are_explicitly_unresolved() {
         .policy
         .is_none());
     let snapshot = bob.snapshot().unwrap();
+    let snapshot = &snapshot[..snapshot.len() - bob.durable_chat.encode().unwrap().len() - 4];
     let extension = encode_pin(None).len() + 4;
     let old = &snapshot[..snapshot.len() - extension];
     assert_eq!(

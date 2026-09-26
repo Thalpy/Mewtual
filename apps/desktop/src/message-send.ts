@@ -1,6 +1,8 @@
 /** Acceptance and local durability are separate from peer delivery receipts. */
 export type SendMessageResult = {
-  accepted: true;
+  accepted: boolean;
+  message_id?: string;
+  replayed?: boolean;
   persistence:
     | { status: "durable" }
     | { status: "pending"; reason: "snapshot_failed" | "store_unavailable" | "write_failed" }
@@ -22,6 +24,7 @@ export async function sendAndRefresh(
 }
 
 export function persistenceWarning(result: SendMessageResult): string | null {
+  if (!result.accepted) return "Message saved as a pending request in this vault. Its history save has not completed; use Retry pending messages to try again safely.";
   switch (result.persistence.status) {
     case "durable": return null;
     case "pending":

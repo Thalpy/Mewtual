@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import ts from "typescript";
+import { addPendingSend, matchingPendingSend } from "./pending-sends.ts";
 import { readFileSync } from "node:fs";
 import { persistenceWarning, sendAndRefresh, type SendMessageResult } from "./message-send.ts";
 
@@ -37,48 +39,74 @@ test("a replaced conversation cannot claim persistence or suggest ordinary retry
   assert.match(persistenceWarning(result)!, /could create a duplicate/);
 });
 
-// Exercise the actual composer function with its surrounding state replaced by a small harness.
-// This pins await ordering and lock fences, which a test of sendAndRefresh alone cannot observe.
-function composer(submit: () => Promise<SendMessageResult>, refresh = async () => {}) {
+// Execute the actual composer and pending-send functions, with only their I/O replaced.
+function composer(submit: (args: Record<string, unknown>) => Promise<SendMessageResult>,
+  refresh = async () => {}, context = async () => "a".repeat(64)) {
   const source = readFileSync(new URL("./App.svelte", import.meta.url), "utf8");
-  const body = source.slice(source.indexOf("  async function send() {"), source.indexOf("  // Inline edit of one of your own messages."))
-    .replace("invokeDebugged<SendMessageResult>", "invokeDebugged");
-  return new Function("submit", "refresh", "sendAndRefresh", "persistenceWarning", `
+  const body = ts.transpile(source.slice(source.indexOf("  async function submitPendingSend("),
+    source.indexOf("  // Inline edit of one of your own messages.")), { target: ts.ScriptTarget.ES2022 });
+  return new Function("submit", "refresh", "context", "sendAndRefresh", "persistenceWarning", "addPendingSend", "matchingPendingSend", `
     let draft = "one message", cur = { active: "1" }, activeServerId = 1, sending = false;
     let locked = false, uiStateLoadGeneration = 0, replyingTo = "", mentionQuery = null;
-    let drafts = { room: draft }, pendingSendNonce = 0, chatStickToBottom = false;
+    let drafts = { room: draft }, draftRevisions = {}, pendingSendNonce = 0, chatStickToBottom = false;
+    let pendingSends = {}, pendingSendErrors = {}, retryingPendingSends = false, uiStateReady = true, uiStateSaveTimer;
     let tailLoaded = false, messageWindowScope = "", messages = [], pageTotal = 0;
-    let replyingToRow, error = "", warnings = [];
+    let replyingToRow, error = "", warnings = [], sealed = null;
     const chanKey = () => "room", scheduleUiStateSave = () => {}, chatScopeKey = () => "room";
     const toast = text => warnings.push(text), errorText = String;
-    const invokeDebugged = () => submit().then(value => ({ value }));
+    const invoke = () => context();
+    const continuityJson = () => JSON.stringify({drafts,pendingSends});
+    const queueUiStateSave = async json => { sealed = JSON.parse(json); };
+    const saveUiStateImmediately = async () => { await queueUiStateSave(continuityJson()); return true; };
+    const invokeDebugged = (_, args) => submit(args).then(value => ({ value }));
     ${body}
     return {
-      send,
-      lock() { locked = true; uiStateLoadGeneration++; draft = ""; drafts = {}; sending = false; pendingSendNonce++; },
-      state() { return { draft, drafts, warnings, error, sending }; }
+      send, retryPendingSends, movePendingToDraft,
+      type(text) { draft = text; drafts.room = text; draftRevisions.room = (draftRevisions.room ?? 0) + 1; },
+      lock() { sealed = JSON.parse(continuityJson()); locked = true; uiStateLoadGeneration++; draft = ""; drafts = {}; pendingSends = {}; sending = false; pendingSendNonce++; },
+      state() { return { draft, drafts, pendingSends, sealed, warnings, error, sending }; }
     };
-  `)(submit, refresh, sendAndRefresh, persistenceWarning);
+  `)(submit, refresh, context, sendAndRefresh, persistenceWarning, addPendingSend, matchingPendingSend);
 }
 
-test("composer submits before yielding so an immediate lock cannot cancel an unsubmitted draft", async () => {
+test("composer keeps the draft until its retry identity can be sealed", async () => {
+  let finishContext!: (value: string) => void;
   let submissions = 0;
-  let complete!: (value: SendMessageResult) => void;
-  const pending = new Promise<SendMessageResult>(resolve => { complete = resolve; });
-  const app = composer(() => { submissions++; return pending; });
+  const app = composer(async () => { submissions++; return { accepted: true, persistence: { status: "durable" } }; },
+    async () => {}, () => new Promise(resolve => { finishContext = resolve; }));
   const sending = app.send();
-  assert.equal(submissions, 1, "IPC starts before the caller can lock");
+  assert.equal(app.state().draft, "one message");
   app.lock();
-  complete({ accepted: true, persistence: { status: "pending", reason: "write_failed" } });
+  finishContext("a".repeat(64));
   await sending;
-  assert.deepEqual(app.state(), { draft: "", drafts: {}, warnings: [], error: "", sending: false });
+  assert.equal(submissions, 0);
+  assert.deepEqual(app.state().sealed.drafts, { room: "one message" });
+  assert.deepEqual(app.state().pendingSends, {});
 });
 
-test("composer restores a rejected send while the original session remains active", async () => {
-  const app = composer(async () => { throw new Error("not accepted"); });
+test("composer retries an ambiguous submission with the same sealed token", async () => {
+  const tokens: unknown[] = [];
+  const app = composer(async args => { tokens.push(args.retryToken); throw new Error("response lost"); });
   await app.send();
   assert.equal(app.state().draft, "one message");
-  assert.deepEqual(app.state().drafts, { room: "one message" });
+  assert.equal(Object.keys(app.state().sealed.pendingSends).length, 1);
+  await app.send();
+  assert.equal(tokens.length, 2);
+  assert.equal(tokens[0], tokens[1]);
+});
+
+test("an unsaved preparation stays retryable without restoring another identity", async () => {
+  const tokens: unknown[] = [];
+  const app = composer(async args => {
+    tokens.push(args.retryToken);
+    return tokens.length === 1 ? { accepted: false, persistence: { status: "pending", reason: "write_failed" } }
+      : { accepted: true, persistence: { status: "durable" } };
+  });
+  await app.send();
+  assert.equal(Object.keys(app.state().pendingSends).length, 1);
+  await app.retryPendingSends();
+  assert.equal(tokens[0], tokens[1]);
+  assert.deepEqual(app.state().pendingSends, {});
 });
 
 test("composer never restores an accepted message when its refresh fails", async () => {
@@ -87,5 +115,37 @@ test("composer never restores an accepted message when its refresh fails", async
   await app.send();
   assert.equal(app.state().draft, "");
   assert.deepEqual(app.state().drafts, {});
-  assert.match(app.state().error, /Message accepted.*refresh failed/);
+  assert.deepEqual(app.state().pendingSends, {});
+  assert.match(app.state().error, /conversation could not refresh/);
+});
+
+test("a stale authoring context requires an explicit new-send decision", async () => {
+  const tokens: unknown[] = [];
+  const app = composer(async args => {
+    tokens.push(args.retryToken);
+    if (tokens.length <= 2) throw new Error("CHAT_SEND_CONTEXT_CHANGED: review old work");
+    return { accepted: true, persistence: { status: "durable" } };
+  });
+  await app.send();
+  await app.retryPendingSends();
+  assert.equal(tokens[0], tokens[1]);
+  const token = Object.keys(app.state().pendingSends)[0];
+  await app.movePendingToDraft(token);
+  assert.deepEqual(app.state().pendingSends, {});
+  assert.equal(app.state().draft, "one message");
+  await app.send();
+  assert.notEqual(tokens[2], tokens[0]);
+});
+
+test("a new identical draft survives the preceding send's acknowledgement", async () => {
+  let finish!: (result: SendMessageResult) => void;
+  const app = composer(() => new Promise(resolve => { finish = resolve; }));
+  const pending = app.send();
+  for (let n = 0; n < 20 && !finish; n++) await Promise.resolve();
+  assert.ok(finish);
+  app.type("one message");
+  finish({ accepted: true, persistence: { status: "durable" } });
+  await pending;
+  assert.equal(app.state().draft, "one message");
+  assert.deepEqual(app.state().drafts, { room: "one message" });
 });

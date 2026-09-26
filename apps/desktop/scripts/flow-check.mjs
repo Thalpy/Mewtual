@@ -199,6 +199,7 @@ const SEND_SCENARIO = `(async () => {
   const base = internals.invoke.bind(internals);
   const sent = [];
   internals.invoke = async (cmd, payload, opts) => {
+    if (cmd === "durable_send_context") return "a".repeat(64);
     if (cmd === "send_message") {
       sent.push({
         id: "sent-" + sent.length,

@@ -19,7 +19,7 @@ test("retry refuses IPC until the caller identity survives an actual successful 
   const app = new Function("addPendingSend", "matchingPendingSend", "sendAndRefresh", "persistenceWarning", `
     let draft = "retain this identity", cur = { active: "1" }, activeServerId = 1, sending = false;
     let locked = false, uiStateLoadGeneration = 0, replyingTo = "", mentionQuery = null;
-    let drafts = { room: draft }, pendingSendNonce = 0, chatStickToBottom = false;
+    let drafts = { room: draft }, draftRevisions = {}, pendingSendNonce = 0, chatStickToBottom = false;
     let pendingSends = {}, pendingSendErrors = {}, retryingPendingSends = false, uiStateReady = true, uiStateSaveTimer;
     let tailLoaded = false, messageWindowScope = "", messages = [], pageTotal = 0;
     let replyingToRow, error = "", sealed = null, savesFail = true, submissions = [];
