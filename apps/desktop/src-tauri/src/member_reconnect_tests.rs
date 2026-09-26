@@ -83,7 +83,7 @@ mod member_reconnect_regressions {
         drop(running.mesh);
     }
 
-    async fn restore(state: &AppState, listen: bool) -> Running {
+    async fn restore(state: &AppState, listen: bool, clock: &ManualClock) -> Running {
         let net = load_or_init_server_net(state, 1, "").await.unwrap();
         let snapshot = state
             .store
@@ -123,7 +123,7 @@ mod member_reconnect_regressions {
             &record,
             transport,
             ChaCha20Rng::seed_from_u64(19),
-            Box::new(catcoms_rt::SystemClock),
+            Box::new(clock.clone()),
             &[],
             net.record_seq,
             net.reconnect_policy,
@@ -217,7 +217,17 @@ mod member_reconnect_regressions {
             peer_id: *joiner_peer.as_bytes(),
             address: evidence.address.clone(),
         }];
-        persist_server_net(&state, 1, &saved).await;
+        // Build a prior sealed checkpoint directly: admission network persistence deliberately
+        // preserves already-stored route authority instead of replacing it from a stale copy.
+        state
+            .store
+            .lock()
+            .await
+            .as_ref()
+            .unwrap()
+            .save_server_net(1, &saved, &mut OsCryptoRng)
+            .unwrap();
+        assert_eq!(net(&state).await.reconnect_routes, saved.reconnect_routes);
         assert!(
             member_reconnect::persist(&state, 1, 1, &running.actor, vec![evidence])
                 .await
@@ -552,7 +562,7 @@ mod member_reconnect_regressions {
 
     #[tokio::test]
     async fn reply_callback_restart_uses_proven_outbound_listener_in_both_start_orders() {
-        timeout(Duration::from_secs(45), async {
+        timeout(Duration::from_secs(60), async {
             for listener_first in [true, false] {
                 let a_dir = tempfile::tempdir().unwrap();
                 let b_dir = tempfile::tempdir().unwrap();
@@ -708,45 +718,68 @@ mod member_reconnect_regressions {
                 *b_state.store.lock().await = None;
                 let a_state = mount(a_dir.path()).await;
                 let b_state = mount(b_dir.path()).await;
-                let (a, b) = if listener_first {
-                    let b = restore(&b_state, true).await;
-                    (restore(&a_state, false).await, b)
-                } else {
-                    let a = restore(&a_state, false).await;
-                    catcoms_rt::SystemClock
-                        .sleep(Duration::from_millis(100))
-                        .await;
-                    let b = restore(&b_state, true).await;
-                    a.actor.drive_discovery().await.unwrap();
-                    (a, b)
-                };
-                timeout(Duration::from_secs(10), async {
-                    loop {
-                        if a.mesh
-                            .authenticated_dial_routes()
-                            .iter()
-                            .any(|r| r.peer == b_peer)
-                        {
-                            break;
+                let recovery_clock = ManualClock::new(SystemClock.now_ms());
+                // Advance the injected recovery deadlines while exercising real TCP and actor
+                // loops. The 30/31-second reciprocal backoffs must progress on a quiet network;
+                // wall-clock service windows still allow the request/response owners to run.
+                tokio::select! {
+                    _ = async {
+                        loop {
+                            SystemClock.sleep(Duration::from_millis(100)).await;
+                            recovery_clock.advance_ms(500);
                         }
-                        catcoms_rt::SystemClock
-                            .sleep(Duration::from_millis(20))
-                            .await;
-                    }
-                })
-                .await
-                .expect("saved outbound callback direction reconnects without another invitation");
-                assert!(b.mesh.authenticated_dial_route_evidence().is_empty());
-                b.actor.catch_up(a_peer, channel).await;
-                assert!(b
-                    .actor
-                    .messages(channel)
-                    .await
-                    .iter()
-                    .any(|m| m.text == "retained while B was offline"));
-                assert!(net(&a_state).await.record_seq > saved_a.record_seq);
-                stop(&a_state, a).await;
-                stop(&b_state, b).await;
+                    } => unreachable!(),
+                    _ = async {
+                        let (a, b) = if listener_first {
+                            let b = restore(&b_state, true, &recovery_clock).await;
+                            (restore(&a_state, false, &recovery_clock).await, b)
+                        } else {
+                            let a = restore(&a_state, false, &recovery_clock).await;
+                            catcoms_rt::SystemClock
+                                .sleep(Duration::from_millis(100))
+                                .await;
+                            let b = restore(&b_state, true, &recovery_clock).await;
+                            a.actor.drive_discovery().await.unwrap();
+                            (a, b)
+                        };
+                        timeout(Duration::from_secs(10), async {
+                            loop {
+                                if a.mesh
+                                    .authenticated_dial_routes()
+                                    .iter()
+                                    .any(|r| r.peer == b_peer)
+                                {
+                                    break;
+                                }
+                                catcoms_rt::SystemClock
+                                    .sleep(Duration::from_millis(20))
+                                    .await;
+                            }
+                        })
+                        .await
+                        .expect("saved outbound callback direction reconnects without another invitation");
+                        assert!(b.mesh.authenticated_dial_route_evidence().is_empty());
+                        b.actor.catch_up(a_peer, channel).await;
+                        // CatchUp enqueues a request; an overlapping reciprocal request can defer it
+                        // to the normal recovery queue. Let both sole owners serve between queries.
+                        timeout(Duration::from_secs(20), async {
+                            loop {
+                                SystemClock.sleep(Duration::from_millis(300)).await;
+                                if b.actor.messages(channel).await.iter().any(|m| {
+                                    m.text == "retained while B was offline"
+                                }) {
+                                    break;
+                                }
+                            }
+                        })
+                        .await
+                        .expect("the restored peers recover the original signed offline history");
+                        assert!(net(&a_state).await.record_seq > saved_a.record_seq);
+                        stop(&a_state, a).await;
+                        stop(&b_state, b).await;
+                    } => {}
+                }
+
             }
         })
         .await
