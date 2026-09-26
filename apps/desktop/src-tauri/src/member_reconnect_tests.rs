@@ -123,6 +123,210 @@ mod member_reconnect_regressions {
     }
 
     #[tokio::test]
+    async fn unfinalized_outbound_evidence_stays_pending_unless_a_saved_current_member_route_covers_it(
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let state = mount(dir.path()).await;
+        let (mut inviter, mut joiner, inviter_peer, joiner_peer) =
+            admitted_reply_pair(Vec::new()).await;
+        // Learn both signed descriptors through the actual finalization protocol, then throw
+        // away the live proof. The restored actor knows a current member but has no connection.
+        tokio::select! {
+            outcome = finalize_admission_discovery(&mut joiner, inviter_peer, Vec::new(), 65_536, Duration::from_secs(1)) => { outcome.unwrap(); },
+            _ = async { loop { inviter.sync_once().await.unwrap(); } } => unreachable!(),
+        }
+        let snapshot = inviter.snapshot().unwrap();
+        drop(inviter);
+        drop(joiner);
+        let mut network = new_server_net("", "", "");
+        network.key_seed = [21; 32];
+        network.key_seed[0] = 111;
+        let (transport, _, _) =
+            MeshService::new_tcp_with_key(keypair_from_seed(network.key_seed).unwrap(), &[], &[])
+                .unwrap();
+        assert_eq!(transport.handle().local_peer(), inviter_peer);
+        let server = Server::restore(
+            &snapshot,
+            catcoms_rt::Hub::new().join(inviter_peer),
+            ChaCha20Rng::seed_from_u64(41),
+            Box::new(ManualClock::new(2_000)),
+            "inviter",
+        )
+        .unwrap();
+        let group = server.group_id();
+        let device = server.device_id();
+        let (actor, events, task) = spawn(server);
+        let running = register(
+            &state,
+            actor,
+            transport.handle(),
+            events,
+            task,
+            group,
+            device,
+        )
+        .await;
+        persist_server_net(&state, 1, &network).await;
+        let evidence = AuthenticatedDialRoute {
+            peer: joiner_peer,
+            address: format!("/ip4/127.0.0.1/tcp/9412/p2p/{}", test_libp2p_peer(112)),
+        };
+        assert!(
+            member_reconnect::persist(&state, 1, 1, &running.actor, vec![evidence.clone()])
+                .await
+                .is_err()
+        );
+        let mut saved = net(&state).await;
+        assert!(
+            saved.reconnect_routes.is_empty(),
+            "an unbound observation never becomes a sealed listener"
+        );
+        assert_eq!(
+            saved.reconnect_policy,
+            ReconnectPolicy::MemberMesh,
+            "the durable policy pin still saves despite unfinished reachability"
+        );
+        // A route sealed during a prior authenticated overlap remains a valid candidate. An
+        // unavailable member must not prevent close once that exact direction is already durable.
+        saved.reconnect_routes = vec![ReconnectRoute {
+            peer_id: *joiner_peer.as_bytes(),
+            address: evidence.address.clone(),
+        }];
+        persist_server_net(&state, 1, &saved).await;
+        assert!(
+            member_reconnect::persist(&state, 1, 1, &running.actor, vec![evidence])
+                .await
+                .unwrap()
+        );
+        assert_eq!(net(&state).await.reconnect_routes, saved.reconnect_routes);
+        // A sealed route without its current roster descriptor is insufficient: the predicate
+        // above consumes actor member_routes, not only a byte match in a network record.
+        assert!(running
+            .actor
+            .member_routes()
+            .await
+            .iter()
+            .any(|route| route.peer_id == Some(*joiner_peer.as_bytes())));
+        stop(&state, running).await;
+    }
+
+    #[tokio::test]
+    async fn only_an_admitted_observed_callback_can_hold_close_pending_before_its_descriptor() {
+        timeout(Duration::from_secs(20), async {
+            let a_dir = tempfile::tempdir().unwrap();
+            let b_dir = tempfile::tempdir().unwrap();
+            let a_state = mount(a_dir.path()).await;
+            let b_state = mount(b_dir.path()).await;
+            let a_net = new_server_net("", "", "");
+            let b_net = new_server_net("", "", "");
+            let (a_transport, _, _) =
+                MeshService::new_tcp_with_key(keypair_from_seed(a_net.key_seed).unwrap(), &[], &[])
+                    .unwrap();
+            let (b_transport, b_id, _) =
+                MeshService::new_tcp_with_key(keypair_from_seed(b_net.key_seed).unwrap(), &[], &[])
+                    .unwrap();
+            let a_peer = a_transport.handle().local_peer();
+            let b_peer = b_transport.handle().local_peer();
+            let hub = catcoms_rt::Hub::new();
+            let mut a = Server::found(
+                hub.join(a_peer),
+                MlsDevice::generate().unwrap(),
+                ChaCha20Rng::seed_from_u64(51),
+                Box::new(catcoms_rt::SystemClock),
+                "a",
+            )
+            .unwrap();
+            a.subscribe_control().await.unwrap();
+            a.publish_self_record(Vec::new(), a_net.record_seq).unwrap();
+            let invite = a
+                .mint_invite([0x71; 16], SystemClock.now_ms() + 60_000, vec![])
+                .unwrap();
+            let (joined, served) = tokio::join!(
+                Server::join_from_reply(
+                    hub.join(b_peer),
+                    MlsDevice::generate().unwrap(),
+                    ChaCha20Rng::seed_from_u64(52),
+                    Box::new(catcoms_rt::SystemClock),
+                    "b",
+                    a_peer,
+                    a_peer,
+                    &invite,
+                    [0x72; 16],
+                    b"proven",
+                    SystemClock.now_ms() + 60_000
+                ),
+                a.sync_once(),
+            );
+            served.unwrap();
+            let (mut b, _) = joined.unwrap();
+            b.publish_self_record(Vec::new(), b_net.record_seq).unwrap();
+            assert!(a
+                .member_routes()
+                .iter()
+                .all(|route| route.peer_id.is_none()));
+            let group = a.group_id();
+            let device = a.device_id();
+            let (actor, events, task) = spawn(a);
+            let a = register(
+                &a_state,
+                actor,
+                a_transport.handle(),
+                events,
+                task,
+                group,
+                device,
+            )
+            .await;
+            persist_server_net(&a_state, 1, &a_net).await;
+            let stranger = test_libp2p_peer(99);
+            let unknown = AuthenticatedDialRoute {
+                peer: phase0_peer_id(&stranger),
+                address: format!("/ip4/127.0.0.1/tcp/9499/p2p/{stranger}"),
+            };
+            assert!(
+                member_reconnect::persist(&a_state, 1, 1, &a.actor, vec![unknown])
+                    .await
+                    .unwrap(),
+                "a Noise-only infrastructure/helper endpoint cannot hold close pending"
+            );
+            let evidence = AuthenticatedDialRoute {
+                peer: b_peer,
+                address: format!("/ip4/127.0.0.1/tcp/9452/p2p/{b_id}"),
+            };
+            // B accepted membership but its actor is deliberately not serving the new exchange.
+            assert!(
+                member_reconnect::persist(&a_state, 1, 1, &a.actor, vec![evidence.clone()])
+                    .await
+                    .is_err()
+            );
+            assert!(net(&a_state).await.reconnect_routes.is_empty());
+            let group = b.group_id();
+            let device = b.device_id();
+            let (actor, events, task) = spawn(b);
+            let b = register(
+                &b_state,
+                actor,
+                b_transport.handle(),
+                events,
+                task,
+                group,
+                device,
+            )
+            .await;
+            assert!(
+                member_reconnect::persist(&a_state, 1, 1, &a.actor, vec![evidence])
+                    .await
+                    .unwrap()
+            );
+            assert_eq!(net(&a_state).await.reconnect_routes.len(), 1);
+            stop(&a_state, a).await;
+            stop(&b_state, b).await;
+        })
+        .await
+        .expect("an admitted candidate must either finalize or keep close pending");
+    }
+
+    #[tokio::test]
     async fn standing_reconnect_authority_requires_saved_current_core_instance() {
         let dir = tempfile::tempdir().unwrap();
         let state = mount(dir.path()).await;

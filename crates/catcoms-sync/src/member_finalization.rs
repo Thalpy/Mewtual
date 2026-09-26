@@ -46,6 +46,67 @@ fn descriptor(
 }
 
 impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
+    fn prune_member_finalization_candidates(&mut self) {
+        let local = self.transport.local_peer();
+        self.member_finalization_pending.retain(|device, peer| {
+            self.group.contains_device(device)
+                && *peer != local
+                && !self.peer_records.contains_key(device)
+                && !self
+                    .peer_records
+                    .values()
+                    .any(|record| record.peer_id == *peer.as_bytes())
+        });
+    }
+
+    /// Remember the endpoint of an actually accepted MLS admission. This is retry metadata,
+    /// never endpoint proof or permission to dial. A descriptor supersedes it, and replaying a
+    /// cached Welcome from another endpoint cannot replace the original pending correlation.
+    pub(super) fn note_member_finalization_candidate(&mut self, peer: PeerId, device: DeviceId) {
+        self.prune_member_finalization_candidates();
+        if !self.policy_allows_member_mesh()
+            || !self.group.contains_device(&device)
+            || device == self.device.device_id()
+            || peer == self.transport.local_peer()
+            || self.peer_records.contains_key(&device)
+            || self
+                .peer_records
+                .values()
+                .any(|record| record.peer_id == *peer.as_bytes())
+            || self
+                .member_finalization_pending
+                .iter()
+                .any(|(other, candidate)| *other != device && *candidate == peer)
+            || self.member_finalization_pending.len() >= MAX_PEER_RECORDS
+        {
+            return;
+        }
+        self.member_finalization_pending
+            .entry(device)
+            .or_insert(peer);
+    }
+
+    /// Current member claims and admitted endpoints eligible for connected-only finalization.
+    /// Unknown Noise peers (including infrastructure) are deliberately absent.
+    pub fn member_finalization_candidates(&mut self) -> Vec<PeerId> {
+        self.prune_member_finalization_candidates();
+        if !self.policy_allows_member_mesh() {
+            return Vec::new();
+        }
+        let mut peers: Vec<_> = self
+            .peer_records
+            .iter()
+            .filter(|(device, _)| {
+                **device != self.device.device_id() && self.group.contains_device(device)
+            })
+            .map(|(_, record)| PeerId::new(record.peer_id))
+            .chain(self.member_finalization_pending.values().copied())
+            .collect();
+        peers.sort();
+        peers.dedup();
+        peers
+    }
+
     /// Current dual-key bindings suitable for retaining LOCAL outbound listener observations.
     /// Sealed hints remain candidates on restart and are roster/descriptor checked at each dial.
     pub fn finalized_member_peers(&self) -> Vec<PeerId> {
@@ -363,5 +424,68 @@ mod tests {
         assert!(!bob.finalize_member_connection(alice_peer).await.unwrap());
         assert_eq!(bob.dial_local_reconnect_routes().await, 0);
         assert!(bob.serve_member_finalization(alice_peer, &[]).is_none());
+    }
+
+    #[tokio::test]
+    async fn admission_candidates_do_not_become_proof_and_retire_on_descriptor_or_removal() {
+        let (mut alice, bob) = pair(true);
+        let peer = bob.local_peer();
+        assert_eq!(alice.member_finalization_candidates(), vec![peer]);
+        assert!(alice.finalized_member_peers().is_empty());
+        let outsider = PeerId::from_u64(99);
+        alice.note_member_finalization_candidate(outsider, DeviceId::from_bytes([99; 32]));
+        assert_eq!(alice.member_finalization_candidates(), vec![peer]);
+        let mut descriptor = bob.self_record().unwrap().clone();
+        descriptor.peer_id = *outsider.as_bytes();
+        descriptor.signature = bob
+            .device
+            .sign(&peer_record_signing_payload(
+                &descriptor.device_pubkey,
+                &descriptor.peer_id,
+                &descriptor.addresses,
+                descriptor.seq,
+            ))
+            .unwrap();
+        assert!(alice.ingest_peer_record(descriptor));
+        assert_eq!(alice.member_finalization_candidates(), vec![outsider]);
+        assert!(
+            alice.member_finalization_pending.is_empty(),
+            "contradictory signed descriptor retires the admission candidate"
+        );
+        alice.request_remove(&bob.device.device_id()).await.unwrap();
+        assert!(alice.member_finalization_candidates().is_empty());
+        alice.note_member_finalization_candidate(peer, bob.device.device_id());
+        assert!(alice.member_finalization_pending.is_empty());
+    }
+
+    #[test]
+    fn full_descriptor_shape_fits_both_authenticated_finalization_frames() {
+        let (alice, mut bob) = pair(true);
+        let mut largest = bob.self_record().unwrap().clone();
+        // This intentionally overestimates real valid public multiaddrs: test the full codec
+        // limit, rather than assuming typical addresses stay short. Signing keys are Ed25519.
+        assert_eq!(largest.device_pubkey.len(), 32);
+        largest.addresses = vec!["x".repeat(MAX_PEX_ADDR_LEN); MAX_PEX_ADDRESSES];
+        assert_eq!(largest.encode().len(), 2_232);
+        let inner = body(
+            bob.group_policy_digest().unwrap(),
+            bob.local_peer(),
+            alice.local_peer(),
+            &largest,
+        );
+        let (request, _) = bob
+            .build_authed_request(KIND_MEMBER_FINALIZE, &inner)
+            .unwrap();
+        let mut answer = blake3::hash(&inner).as_bytes().to_vec();
+        answer.extend_from_slice(&inner);
+        let response = encode_signed_commit_resp(&bob.device.public_key_bytes(), &[0; 64], &answer);
+        assert_eq!(request.len(), 2_490);
+        assert_eq!(response.len(), 2_485);
+        assert!(request.len() <= MAX_FRAME, "max request: {}", request.len());
+        assert!(
+            response.len() <= MAX_FRAME,
+            "max response: {}",
+            response.len()
+        );
     }
 }

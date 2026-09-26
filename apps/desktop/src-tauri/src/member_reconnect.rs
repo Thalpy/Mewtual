@@ -24,6 +24,11 @@ pub(super) async fn persist(
         return Ok(true);
     }
     let mut peers: HashSet<_> = actor.finalized_member_peers().await?.into_iter().collect();
+    let candidates: HashSet<_> = actor
+        .member_finalization_candidates()
+        .await?
+        .into_iter()
+        .collect();
     let local = state
         .servers
         .lock()
@@ -37,6 +42,7 @@ pub(super) async fn persist(
     let targets: std::collections::BTreeSet<_> = evidence
         .iter()
         .map(|route| route.peer)
+        .filter(|peer| candidates.contains(peer))
         .take(MAX_RECONNECT_ROUTES)
         .collect();
     for peer in targets
@@ -53,7 +59,15 @@ pub(super) async fn persist(
                 continue;
             }
         }
-        for _ in 0..2 {
+        for attempt in 0..2 {
+            if attempt == 1 && local.is_some_and(|local| local > peer) {
+                // A slow network can exceed the initial stagger. Leave this actor available
+                // for the opposite request's entire two-second deadline before retrying.
+                SystemClock.sleep(Duration::from_millis(2_250)).await;
+                if actor.finalized_member_peers().await?.contains(&peer) {
+                    break;
+                }
+            }
             if matches!(actor.finalize_member_connection(peer).await, Ok(true)) {
                 break;
             }
@@ -83,6 +97,13 @@ pub(super) async fn persist(
             .map_err(|_| "server stopped".to_string())?;
         return Ok(true);
     }
+    let claims = uniquely_claimed_member_peers(
+        actor
+            .member_routes()
+            .await
+            .into_iter()
+            .filter_map(|route| route.peer_id.map(PeerId::new)),
+    );
     let guard = state.store.lock().await;
     let store = guard
         .as_ref()
@@ -126,6 +147,15 @@ pub(super) async fn persist(
             .save_server_net(server, &net, &mut OsCryptoRng)
             .map_err(|e| e.to_string())?;
     }
+    let pending = targets.iter().any(|target| {
+        !peers.contains(target)
+            && !(claims.contains(target)
+                && (old.reconnect_policy == ReconnectPolicy::MemberMesh
+                    || old.reconnect_policy == ReconnectPolicy::AuthorizedPeer(*target.as_bytes()))
+                && net.reconnect_routes.iter().any(|route| {
+                    route.peer_id == *target.as_bytes() && old.reconnect_routes.contains(route)
+                }))
+    });
     let routes = net
         .reconnect_routes
         .iter()
@@ -137,7 +167,11 @@ pub(super) async fn persist(
         .set_local_reconnect_routes(routes)
         .await
         .map_err(|_| "server stopped".to_string())?;
-    Ok(true)
+    if pending {
+        Err("member reconnect finalization is still pending; keep the conversation open to finish saving its proven route".into())
+    } else {
+        Ok(true)
+    }
 }
 
 /// Complete every available outbound observation before any actor is frozen for orderly close.

@@ -4105,6 +4105,7 @@ pub struct ChannelSync<T: MeshTransport, R: CryptoRngCore> {
     /// state changed. Session-only and allowed to wrap.
     member_route_revision: u64,
     member_finalization_served_at: HashMap<DeviceId, u64>,
+    member_finalization_pending: HashMap<DeviceId, PeerId>,
     /// Recovery work to perform on the next async drain.
     catchup_queue: Vec<CatchupTask>,
     /// Periodic neighbour reconciliation is paced and rotates through open documents when the
@@ -4490,6 +4491,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             manual_redial_last_ms: None,
             member_route_revision: 0,
             member_finalization_served_at: HashMap::new(),
+            member_finalization_pending: HashMap::new(),
             catchup_queue: Vec::new(),
             reconciliation_next_ms: 0,
             reconciliation_cursor: 0,
@@ -12523,6 +12525,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
                 self.forwarded_joins.remove(&target);
                 return Vec::new();
             }
+            self.note_member_finalization_candidate(from, joiner_device);
             self.forwarded_joins.remove(&target);
         } else if response.first() != Some(&JOIN_PENDING) {
             self.forwarded_joins.remove(&target);
@@ -12573,6 +12576,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         {
             return;
         }
+        self.note_member_finalization_candidate(pending.joiner, pending.joiner_device);
         let mut request = vec![KIND_WELCOME];
         request.extend_from_slice(payload);
         // A disconnected or hostile pre-member cannot monopolize the group actor. The joiner can
@@ -12991,6 +12995,14 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             Err(outcome) => (outcome, None),
         };
         self.record_join_attempt(&from, nonce.as_ref(), outcome);
+        if outcome == JoinOutcome::Admitted {
+            if let Ok((_, key_package)) = decode_join_req(data) {
+                if let Ok(package) = self.device.parse_key_package(&key_package) {
+                    self.note_member_finalization_candidate(from,
+                        DeviceId::from_public_key_bytes(&key_package_signature_key(&package)));
+                }
+            }
+        }
         resp
     }
 

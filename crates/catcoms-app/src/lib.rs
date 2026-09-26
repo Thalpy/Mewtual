@@ -5603,6 +5603,10 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
         self.sync.policy_allows_member_mesh()
     }
 
+    pub fn member_finalization_candidates(&mut self) -> Vec<PeerId> {
+        self.sync.member_finalization_candidates()
+    }
+
     /// Cheap session-local invalidation epoch for [`Self::member_routes`].
     pub fn member_route_revision(&self) -> u64 {
         self.sync.member_route_revision()
