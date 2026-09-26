@@ -60,6 +60,8 @@ use thiserror::Error;
 use zeroize::Zeroizing;
 
 mod blob_fetch;
+mod member_finalization;
+use member_finalization::KIND_MEMBER_FINALIZE;
 pub mod checkpoint_exchange;
 pub mod durable_chat;
 pub mod epoch_service;
@@ -1207,6 +1209,7 @@ fn kind_binds_requester_peer(kind: u8) -> bool {
             | KIND_STUDIO_PAGE
             | KIND_STUDIO_HEAD
             | KIND_STUDIO_SEED
+            | KIND_MEMBER_FINALIZE
     )
 }
 
@@ -4101,6 +4104,7 @@ pub struct ChannelSync<T: MeshTransport, R: CryptoRngCore> {
     /// addresses), so ordinary message traffic must not rebuild it merely to discover no route
     /// state changed. Session-only and allowed to wrap.
     member_route_revision: u64,
+    member_finalization_served_at: HashMap<DeviceId, u64>,
     /// Recovery work to perform on the next async drain.
     catchup_queue: Vec<CatchupTask>,
     /// Periodic neighbour reconciliation is paced and rotates through open documents when the
@@ -4485,6 +4489,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             peer_record_sources: HashMap::new(),
             manual_redial_last_ms: None,
             member_route_revision: 0,
+            member_finalization_served_at: HashMap::new(),
             catchup_queue: Vec::new(),
             reconciliation_next_ms: 0,
             reconciliation_cursor: 0,
@@ -12603,6 +12608,9 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
                 self.serve_commit_catchup(from, rest).unwrap_or_default()
             }
             Some((&KIND_PEX, rest)) => self.serve_pex(from, rest).unwrap_or_default(),
+            Some((&KIND_MEMBER_FINALIZE, rest)) => {
+                self.serve_member_finalization(from, rest).unwrap_or_default()
+            }
             Some((&KIND_SWITCHBOARD_OFFER, rest)) => {
                 self.serve_switchboard_offer(from, rest).unwrap_or_default()
             }

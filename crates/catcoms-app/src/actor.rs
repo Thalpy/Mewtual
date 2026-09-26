@@ -551,6 +551,13 @@ pub enum AppCommand {
     MemberRoutes {
         reply: oneshot::Sender<Vec<catcoms_sync::MemberRoute>>,
     },
+    FinalizedMemberPeers {
+        reply: oneshot::Sender<Vec<PeerId>>,
+    },
+    FinalizeMemberConnection {
+        peer: PeerId,
+        reply: oneshot::Sender<Result<bool, String>>,
+    },
     /// Query the recent inbound join attempts this node served, newest first (operator
     /// diagnostics; see `Server::join_attempts`).
     JoinAttempts {
@@ -3408,6 +3415,24 @@ impl ServerActor {
             .map_err(|_| ())
     }
 
+    pub async fn finalized_member_peers(&self) -> Result<Vec<PeerId>, String> {
+        let (reply, result) = oneshot::channel();
+        self.cmd_tx
+            .send(AppCommand::FinalizedMemberPeers { reply })
+            .await
+            .map_err(|_| "server stopped".to_string())?;
+        result.await.map_err(|_| "server stopped".to_string())
+    }
+
+    pub async fn finalize_member_connection(&self, peer: PeerId) -> Result<bool, String> {
+        let (reply, result) = oneshot::channel();
+        self.cmd_tx
+            .send(AppCommand::FinalizeMemberConnection { peer, reply })
+            .await
+            .map_err(|_| "server stopped".to_string())?;
+        result.await.map_err(|_| "server stopped".to_string())?
+    }
+
     /// Create an out-of-band recovery code for a member that has lost every usable route to this
     /// server. Candidate filtering and signing happen inside the server actor, where the current
     /// roster, transport identity and deterministic clock are authoritative.
@@ -4322,6 +4347,13 @@ where
                     Some(AppCommand::MemberRoutes { reply }) => {
                         let _ = reply.send(server.member_routes());
                     }
+                    Some(AppCommand::FinalizedMemberPeers { reply }) => {
+                        let _ = reply.send(server.finalized_member_peers());
+                    }
+                    Some(AppCommand::FinalizeMemberConnection { peer, reply }) => {
+                        let result = server.finalize_member_connection(peer).await.map_err(|e| e.to_string());
+                        let _ = reply.send(result);
+                    }
                     Some(AppCommand::JoinAttempts { reply }) => {
                         let _ = reply.send(server.join_attempts());
                     }
@@ -4856,6 +4888,10 @@ where
                             .await
                             {
                                 Ok(Ok(_)) => {
+                                    // PEX pulls descriptors in only one direction. This additive,
+                                    // connected-only exchange confirms both member endpoints so
+                                    // a reply callback can become a permitted restart route.
+                                    let _ = server.finalize_member_connection(peer).await;
                                     // The role offer uses its own additive request kind so old
                                     // peers remain PEX-compatible. It is best-effort and bounded
                                     // by the same per-peer deadline as PEX.
