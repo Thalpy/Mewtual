@@ -53,6 +53,7 @@ use tokio::sync::{mpsc, watch, Mutex};
 use tokio::time::timeout;
 use zeroize::Zeroizing;
 
+mod admission_storage;
 mod creative_blobs;
 mod durable_chat;
 mod errors;
@@ -377,6 +378,11 @@ struct AppState {
     /// One coalesced snapshot writer per installed server. The incarnation in each slot prevents
     /// a departed actor's event/close from waking or removing the replacement's writer.
     persistence_signals: StdMutex<HashMap<u64, (u64, watch::Sender<u64>)>>,
+    /// At most one retained admission identity per current live server. Failed writes must not
+    /// discard the only copy of a transport seed; replacement/leave retire the exact old slot.
+    pending_server_nets: StdMutex<HashMap<u64, admission_storage::PendingServerNet>>,
+    /// Failed registry writes retry the latest guarded roster, never a retained stale list.
+    registry_persist: StdMutex<PersistCounters>,
     /// The last few decrypted media chunks. Small and deliberately not an LRU: playback is
     /// sequential, so "the current chunk and the one before it" covers the straddle at a chunk
     /// boundary and a short seek backwards, which is all the locality there is to exploit.
@@ -3348,6 +3354,7 @@ async fn register_server(
             persist: PersistCounters::default(),
         },
     );
+    admission_storage::prune_stale_pending(state).await;
     install_persistence_worker(app, id, instance).await;
     forward_events(app.clone(), id, instance, events);
     install_reconnect_capture_worker(app, id, instance, timer_actor.clone());
@@ -3386,6 +3393,8 @@ async fn persist_server(state: &AppState, server: u64) -> PersistOutcome {
     }) else {
         return PersistOutcome::Superseded;
     };
+    let _ = admission_storage::retry_server_net(state, server, instance).await;
+    let _ = admission_storage::retry_registry(state).await;
     persist_captured(state, server, instance, ticket, actor).await
 }
 
@@ -3407,6 +3416,8 @@ async fn persist_server_instance(
         };
         entry.persist.request()
     };
+    let _ = admission_storage::retry_server_net(state, server, instance).await;
+    let _ = admission_storage::retry_registry(state).await;
     persist_captured(state, server, instance, ticket, actor).await
 }
 
@@ -3415,17 +3426,22 @@ async fn retry_pending_persistence(
     server: u64,
     instance: u64,
 ) -> Option<PersistOutcome> {
+    let net = admission_storage::retry_server_net(state, server, instance).await;
+    let registry = admission_storage::retry_registry(state).await;
     let (instance, ticket, actor) = {
         let servers = state.servers.lock().await;
         let entry = servers
             .get(&server)
             .filter(|entry| entry.instance == instance)?;
         if !entry.persist.needs_write(entry.persist.requested) {
-            return None;
+            return admission_storage::combine_retries(net, registry);
         }
         (entry.instance, entry.persist.requested, entry.actor.clone())
     };
-    Some(persist_captured(state, server, instance, ticket, actor).await)
+    admission_storage::combine_retries(
+        Some(persist_captured(state, server, instance, ticket, actor).await),
+        admission_storage::combine_retries(net, registry),
+    )
 }
 
 /// [`persist_server`] once its request has been recorded: everything from waiting for the id's
@@ -3702,26 +3718,8 @@ async fn persist_live_local_reconnect_routes(app: &AppHandle, server: u64, insta
 }
 
 /// Re-seal the registry (the set of servers + their names/invites) to disk.
-async fn persist_registry(state: &AppState) {
-    let records: Vec<ServerRecord> = {
-        let servers = state.servers.lock().await;
-        servers
-            .iter()
-            .map(|(id, e)| ServerRecord {
-                id: *id,
-                display_name: e.name.clone(),
-                invite: e.invite.clone().unwrap_or_default(),
-                is_dm: e.is_dm,
-            })
-            .collect()
-    };
-    let guard = state.store.lock().await;
-    if let Some(store) = guard.as_ref() {
-        let mut rng = OsCryptoRng;
-        if let Err(e) = store.save_registry(&records, &mut rng) {
-            tracing::error!(target: "catcoms_app", error = %e, "VAULT.REGISTRY.SEAL_FAILED");
-        }
-    }
+async fn persist_registry(state: &AppState) -> PersistOutcome {
+    admission_storage::persist_registry(state).await
 }
 
 /// Attach the per-server sealing blob store (Phase 9h) if the vault is unlocked, so files +
@@ -4235,17 +4233,13 @@ fn new_server_net(advertise: &str, relay: &str, rendezvous: &str) -> ServerNet {
     net
 }
 
-/// Seal a server's network record to disk (best-effort, like [`persist_server`]): a locked vault
-/// or an I/O error costs a stable identity on the *next* launch, which is worth a log line but not
-/// worth failing the operation the user actually asked for.
-async fn persist_server_net(state: &AppState, server: u64, net: &ServerNet) {
-    let guard = state.store.lock().await;
-    if let Some(store) = guard.as_ref() {
-        let mut rng = OsCryptoRng;
-        if let Err(e) = store.save_server_net(server, net, &mut rng) {
-            tracing::error!(target: "catcoms_app", server, error = %e, "VAULT.NET_IDENTITY.SEAL_FAILED");
-        }
-    }
+/// Seal the current actor's transport identity, retaining a failed write for the ordinary
+/// persistence/discovery cadence. The outcome describes storage, not admission acceptance.
+async fn persist_server_net(state: &AppState, server: u64, net: &ServerNet) -> PersistOutcome {
+    let Some(instance) = state.servers.lock().await.get(&server).map(|entry| entry.instance) else {
+        return PersistOutcome::Superseded;
+    };
+    admission_storage::persist_server_net(state, server, instance, net).await
 }
 
 /// Load a server's persisted network record, or mint one when the server predates it, and
@@ -4265,24 +4259,8 @@ async fn load_or_init_server_net(
     state: &AppState,
     server: u64,
     fallback_rendezvous: &str,
-) -> ServerNet {
-    let stored = {
-        let guard = state.store.lock().await;
-        match guard.as_ref() {
-            Some(store) => match store.load_server_net(server) {
-                Ok(net) => net,
-                Err(e) => {
-                    tracing::warn!(target: "catcoms_app", server, error = %e, "VAULT.NET_IDENTITY.LOAD_FAILED");
-                    None
-                }
-            },
-            None => None,
-        }
-    };
-    let mut net = stored.unwrap_or_else(|| new_server_net("", "", fallback_rendezvous));
-    net.reserve_record_seq_block();
-    persist_server_net(state, server, &net).await;
-    net
+) -> Result<ServerNet, String> {
+    admission_storage::load_or_init_server_net(state, server, fallback_rendezvous).await
 }
 
 /// Deterministically summarize the live router mappings for the Connectivity assistant. Failed
@@ -7000,6 +6978,7 @@ async fn leave_server(state: State<'_, AppState>, server: u64) -> Result<(), Str
     let _persist = persist_lock_for(&state, server).lock_owned().await;
     let _session = require_ui_session_generation(&state, generation).await?;
     let removed = stopped.remove(&mut *state.servers.lock().await)?;
+    admission_storage::remove_pending_net(&state, server, removed.instance);
     remove_persistence_signal(&state, server, removed.instance);
     state.storage_health.lock().await.remove(&server);
     if let Ok(mut signals) = state.reconnect_capture_signals.lock() {
@@ -12157,7 +12136,7 @@ async fn reload_one(
     // Rebuild on the SAME libp2p identity and the SAME port as last launch. Both are what keep an
     // already-issued invite redeemable: the invite names `/p2p/<id>` at a fixed port, and a
     // regenerated pair is exactly what made a remote joiner time out.
-    let mut net = load_or_init_server_net(state, record.id, &invite_rendezvous).await;
+    let mut net = load_or_init_server_net(state, record.id, &invite_rendezvous).await?;
     let saved_port = net.port;
     let relay_dial: Vec<Multiaddr> = net.relay.parse().into_iter().collect();
     let (mesh, libp2p_id, port, bound) = build_transport(&net, &relay_dial)?;
@@ -12265,6 +12244,7 @@ async fn reload_one(
             persist: PersistCounters::default(),
         },
     );
+    admission_storage::prune_stale_pending(state).await;
     install_persistence_worker(app, record.id, instance).await;
     forward_events(app.clone(), record.id, instance, events);
     install_reconnect_capture_worker(app, record.id, instance, timer_actor.clone());

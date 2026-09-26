@@ -59,7 +59,7 @@ mod member_reconnect_regressions {
     }
 
     async fn restore(state: &AppState, listen: bool) -> Running {
-        let net = load_or_init_server_net(state, 1, "").await;
+        let net = load_or_init_server_net(state, 1, "").await.unwrap();
         let snapshot = state
             .store
             .lock()
