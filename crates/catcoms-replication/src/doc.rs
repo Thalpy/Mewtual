@@ -78,6 +78,11 @@ type SnapshotKey = (Vec<ChangeHash>, usize);
 /// worth a second copy of the document in memory; a busy channel re-encodes as it always did.
 pub const MAX_CACHED_SNAPSHOT_BYTES: usize = 1 << 20;
 
+/// Work limits for a cursor-capable history page. Truncating the known closure can only
+/// resend duplicates; the provider cursor still traverses every retained operation.
+pub const MAX_CATCHUP_PAGE_SCANNED_OPS: usize = 256;
+pub const MAX_CATCHUP_PAGE_CLOSURE_STEPS: usize = 2_048;
+
 impl EncryptedDoc {
     /// Create an empty document. `actor` (this device) becomes the automerge
     /// actor id, so changes are deterministically attributed.
@@ -1070,11 +1075,50 @@ impl EncryptedDoc {
         device: &MlsDevice,
         rng: &mut impl CryptoRngCore,
     ) -> Result<(Vec<SealedOp>, Option<usize>), ReplError> {
-        let have = self.held_closure(have_heads);
+        self.export_catchup_page_inner(have_heads, from, budget, group, device, rng, true)
+    }
+
+    /// Compatibility for peers without provider cursors. They cannot resume after a page
+    /// containing only already-held operations, so retain the prior scan behavior for them.
+    /// This legacy path does not provide the current protocol's scan-work bound.
+    pub fn export_legacy_catchup_page(
+        &mut self,
+        have_heads: &[[u8; 32]],
+        budget: usize,
+        group: &ServerGroup,
+        device: &MlsDevice,
+        rng: &mut impl CryptoRngCore,
+    ) -> Result<(Vec<SealedOp>, Option<usize>), ReplError> {
+        self.export_catchup_page_inner(have_heads, 0, budget, group, device, rng, false)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn export_catchup_page_inner(
+        &mut self,
+        have_heads: &[[u8; 32]],
+        from: usize,
+        budget: usize,
+        group: &ServerGroup,
+        device: &MlsDevice,
+        rng: &mut impl CryptoRngCore,
+        bounded: bool,
+    ) -> Result<(Vec<SealedOp>, Option<usize>), ReplError> {
+        let have = if bounded {
+            self.held_closure_bounded(have_heads)
+        } else {
+            self.held_closure(have_heads)
+        };
         let mut position = from.min(self.log.len());
+        let end = if bounded {
+            position
+                .saturating_add(MAX_CATCHUP_PAGE_SCANNED_OPS)
+                .min(self.log.len())
+        } else {
+            self.log.len()
+        };
         let mut out = Vec::new();
         let mut used = 0usize;
-        while position < self.log.len() {
+        while position < end {
             let op = &self.log[position];
             let carried = Change::from_bytes(op.delta.clone()).ok().map(|c| c.hash());
             if carried.is_some_and(|hash| have.contains(&hash)) {
@@ -1096,6 +1140,34 @@ impl EncryptedDoc {
         }
         let next = (position < self.log.len()).then_some(position);
         Ok((out, next))
+    }
+
+    /// A conservative subset of the requester's known closure. Charge both popped hashes and
+    /// scheduled dependency edges, including duplicates and unknown hashes, so a wide DAG
+    /// cannot hide unbounded traversal or temporary storage behind a tiny response.
+    fn held_closure_bounded(&self, have_heads: &[[u8; 32]]) -> HashSet<ChangeHash> {
+        let mut have = HashSet::new();
+        let mut stack: Vec<_> = have_heads
+            .iter()
+            .take(MAX_CATCHUP_PAGE_CLOSURE_STEPS)
+            .copied()
+            .map(ChangeHash)
+            .collect();
+        let mut remaining_edges = MAX_CATCHUP_PAGE_CLOSURE_STEPS.saturating_sub(stack.len());
+        for _ in 0..MAX_CATCHUP_PAGE_CLOSURE_STEPS {
+            let Some(hash) = stack.pop() else { break };
+            if have.contains(&hash) {
+                continue;
+            }
+            let Some(change) = self.doc.get_change_by_hash(&hash) else {
+                continue;
+            };
+            have.insert(hash);
+            let take = change.deps().len().min(remaining_edges);
+            stack.extend(change.deps().iter().take(take).copied());
+            remaining_edges -= take;
+        }
+        have
     }
 
     /// Every change at or behind `heads` that this node can actually resolve.
@@ -1813,5 +1885,90 @@ mod tests {
             "one round per operation offered: sixteen duplicates, then the one that matters, \
              whose page also reports the end because it exhausts the log"
         );
+    }
+}
+
+#[cfg(test)]
+mod page_work_tests {
+    use super::*;
+    use rand_chacha::ChaCha20Rng;
+    use rand_core::SeedableRng;
+
+    #[test]
+    fn bounded_pages_yield_after_a_duplicate_prefix_and_reach_missing_history() {
+        let author = MlsDevice::generate().unwrap();
+        let group = ServerGroup::create(&author).unwrap();
+        let mut rng = ChaCha20Rng::seed_from_u64(901);
+        let mut provider = EncryptedDoc::new(DocType::Channel, 901, &author.device_id());
+        let mut requester = EncryptedDoc::new(DocType::Channel, 901, &author.device_id());
+        let duplicates = MAX_CATCHUP_PAGE_SCANNED_OPS * 2;
+        for n in 0..duplicates {
+            let op = provider
+                .edit(&author, &group, &mut rng, |doc| {
+                    doc.put(ROOT, "count", n as u64)
+                })
+                .unwrap();
+            requester.ingest(&op, &group, &author).unwrap();
+        }
+        provider
+            .edit(&author, &group, &mut rng, |doc| {
+                doc.put(ROOT, "missing", "retained")
+            })
+            .unwrap();
+        let heads = requester.heads();
+        let mut position = 0;
+        let mut pages = 0;
+        loop {
+            let (page, next) = provider
+                .export_catchup_page(&heads, position, usize::MAX, &group, &author, &mut rng)
+                .unwrap();
+            pages += 1;
+            if pages <= 2 {
+                assert!(page.is_empty());
+                assert_eq!(next, Some(position + MAX_CATCHUP_PAGE_SCANNED_OPS));
+            }
+            requester.import_catchup(&page, &group, &author).unwrap();
+            match next {
+                Some(next) => {
+                    assert!(next > position);
+                    position = next;
+                }
+                None => break,
+            }
+        }
+        assert_eq!(pages, 3);
+        assert_eq!(requester.heads(), provider.heads());
+        // The old no-cursor grammar must still get past this prefix in one response.
+        let (legacy, next) = provider
+            .export_legacy_catchup_page(&heads, usize::MAX, &group, &author, &mut rng)
+            .unwrap();
+        assert_eq!(legacy.len(), 1);
+        assert_eq!(next, None);
+    }
+
+    #[test]
+    fn bounded_closure_is_conservative_and_unknown_heads_consume_its_budget() {
+        let author = MlsDevice::generate().unwrap();
+        let group = ServerGroup::create(&author).unwrap();
+        let mut rng = ChaCha20Rng::seed_from_u64(902);
+        let mut doc = EncryptedDoc::new(DocType::Channel, 902, &author.device_id());
+        for n in 0..MAX_CATCHUP_PAGE_CLOSURE_STEPS + 2 {
+            doc.edit(&author, &group, &mut rng, |doc| {
+                doc.put(ROOT, "count", n as u64)
+            })
+            .unwrap();
+        }
+        let heads = doc.heads();
+        let known = doc.held_closure_bounded(&heads);
+        assert_eq!(known.len(), MAX_CATCHUP_PAGE_CLOSURE_STEPS);
+        assert!(known.is_subset(&doc.held_closure(&heads)));
+        let mut untrusted = vec![[0xff; 32]; MAX_CATCHUP_PAGE_CLOSURE_STEPS];
+        untrusted.extend(heads);
+        assert!(doc.held_closure_bounded(&untrusted).is_empty());
+        let (page, next) = doc
+            .export_catchup_page(&untrusted, 0, usize::MAX, &group, &author, &mut rng)
+            .unwrap();
+        assert_eq!(page.len(), MAX_CATCHUP_PAGE_SCANNED_OPS);
+        assert_eq!(next, Some(MAX_CATCHUP_PAGE_SCANNED_OPS));
     }
 }

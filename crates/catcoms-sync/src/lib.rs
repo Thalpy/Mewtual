@@ -66,6 +66,9 @@ mod owner_tenure;
 pub mod receipt_head;
 #[cfg(test)]
 mod reconciliation_tests;
+
+#[cfg(test)]
+mod catchup_page_tests;
 pub mod registry_catchup;
 mod registry_ingress;
 mod registry_publication;
@@ -235,6 +238,14 @@ const CATCHUP_SINCE_ABSENT: u8 = 3;
 /// an authenticated peer can repeat forever to keep us asking. A bounded run absorbs the honest
 /// case; past it the peer has told us nothing usable enough times to prefer somebody else.
 const MAX_NONPROGRESSING_CATCHUP_ROUNDS: u8 = 8;
+/// A bounded provider can skip its conservative known closure across empty pages. Permit one
+/// such walk without treating those pages as stalls, but never grant an unlimited stream of
+/// empty positions the authority to keep issuing requests.
+const MAX_EMPTY_CATCHUP_PAGE_GRACE: usize =
+    (catcoms_replication::doc::MAX_CATCHUP_PAGE_CLOSURE_STEPS
+        + catcoms_replication::doc::MAX_CATCHUP_PAGE_SCANNED_OPS
+        - 1)
+        / catcoms_replication::doc::MAX_CATCHUP_PAGE_SCANNED_OPS;
 /// Ceiling on the non-progress ledger. Its keys are all this node's own (documents it has open,
 /// peers it chose to ask), so it cannot be grown from outside; the cap is belt and braces.
 const MAX_CATCHUP_STALL_ENTRIES: usize = 256;
@@ -4094,6 +4105,9 @@ pub struct ChannelSync<T: MeshTransport, R: CryptoRngCore> {
     /// moving nothing. Reset the moment that peer applies anything, so only an unbroken run
     /// counts. See [`MAX_NONPROGRESSING_CATCHUP_ROUNDS`].
     catchup_stalls: HashMap<(DocType, u128, PeerId), u8>,
+    /// Empty advancing pages admitted without a stall. Unlike the stall counter, this budget
+    /// survives cooldown and provider changes; only applied history or completion resets it.
+    catchup_empty_page_grace: HashMap<(DocType, u128, PeerId), usize>,
     /// The task whose request is in flight right now, held here rather than on the stack so that
     /// cancelling the tick cannot lose it. Restored to the queue by the next drain.
     catchup_inflight: Option<(CatchupTask, Option<PeerId>)>,
@@ -4437,6 +4451,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             delivery_receipt_revision: 0,
             failed_catchup_peers: VecDeque::new(),
             catchup_stalls: HashMap::new(),
+            catchup_empty_page_grace: HashMap::new(),
             catchup_inflight: None,
             catchup_cooldowns: HashMap::new(),
             catchup_continuations: HashMap::new(),
@@ -6483,6 +6498,24 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     /// it was finished. Only an unbroken run is evidence of anything.
     fn clear_catchup_stall(&mut self, peer: PeerId, doc_type: DocType, doc_id: u128) {
         self.catchup_stalls.remove(&(doc_type, doc_id, peer));
+        self.catchup_empty_page_grace
+            .remove(&(doc_type, doc_id, peer));
+    }
+
+    fn allow_empty_catchup_page(&mut self, peer: PeerId, doc_type: DocType, doc_id: u128) -> bool {
+        let key = (doc_type, doc_id, peer);
+        // Fail closed at the bound. Clearing this map would renew every hostile peer's grace.
+        if !self.catchup_empty_page_grace.contains_key(&key)
+            && self.catchup_empty_page_grace.len() >= MAX_CATCHUP_STALL_ENTRIES
+        {
+            return false;
+        }
+        let used = self.catchup_empty_page_grace.entry(key).or_default();
+        if *used >= MAX_EMPTY_CATCHUP_PAGE_GRACE {
+            return false;
+        }
+        *used += 1;
+        true
     }
 
     /// Queue a membership-commit catch-up from `from_epoch` (deduped: at most one
@@ -11293,7 +11326,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             // older shape, which recomputes from the frontier every time and so can repeat itself
             // indefinitely; that is the behaviour the non-progress bound exists for.
             Some((marker @ (&CATCHUP_SINCE_MORE | &CATCHUP_SINCE_PAGE), rest)) => {
-                let (advanced, bundle) = if *marker == CATCHUP_SINCE_PAGE {
+                let (cursor_advanced, bundle) = if *marker == CATCHUP_SINCE_PAGE {
                     let Some(cursor) =
                         CatchupCursor::decode(rest.get(..CATCHUP_CURSOR_BYTES).unwrap_or_default())
                     else {
@@ -11304,19 +11337,21 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
                     let previous = self
                         .catchup_cursors
                         .insert((doc_type, doc_id, peer), cursor);
-                    // Progress means the walk moved AND the peer paid for it. A conforming pager
-                    // cannot produce an empty page alongside "there is more", because it only
-                    // stops early when the budget is full: a run of operations this node already
-                    // holds is skipped inside one page, not spread over empty ones. So an empty
-                    // page here is a peer minting positions for nothing, which is precisely what
-                    // the non-progress bound is for and must keep counting.
-                    let advanced = bundle.len() > 4
-                        && previous.is_none_or(|old| cursor.position > old.position);
+                    // A position moves only within the same provider's walk. A peer changing its
+                    // stamp cannot manufacture progress by comparing unrelated log positions.
+                    let advanced = previous.map_or(cursor.position > 0, |old| {
+                        cursor.provider == old.provider && cursor.position > old.position
+                    });
                     (advanced, bundle)
                 } else {
                     (false, rest)
                 };
                 let applied = self.apply_catchup_response(doc_type, doc_id, bundle)?;
+                // A bounded scan can legitimately stop in a prefix the requester already holds.
+                // Grant only a finite empty-page allowance; advancing an invented cursor must
+                // still reach the existing non-progress cooldown even without network traffic.
+                let advanced = cursor_advanced
+                    && (bundle.len() > 4 || self.allow_empty_catchup_page(peer, doc_type, doc_id));
                 // The peer said it withheld some, so ask again whatever this round applied. A
                 // chunk can legitimately apply nothing (ops already held, or one op too large to
                 // share the budget) and the gap still be real.
@@ -11337,11 +11372,9 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
                     // last answer was about a frontier this node has now passed.
                     self.clear_sources_checked(doc_type, doc_id);
                 } else if advanced {
-                    // Nothing landed, and the round was still real work: a page of operations this
-                    // node already holds but could not name, which is what a frontier wider than
-                    // its cap produces. Counting these was the defect. The walk is consuming the
-                    // peer's log and will reach the end of it, so an unbroken run of them is
-                    // finite where the recomputing path's was not.
+                    // Nothing landed, but the walk advanced through duplicate operations or
+                    // spent one of its bounded empty-page allowances. Neither should punish an
+                    // honest provider for scanning past history the requester already holds.
                     //
                     // Deliberately not cleared, and deliberately not treated as a continuation
                     // claim: the peer chooses its own positions, so this is progress worth not
@@ -12642,14 +12675,20 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         };
         let provider = self.catchup_provider;
         let doc = self.docs.get_mut(&(doc_type, doc_id))?;
-        match doc.export_catchup_page(
-            &heads,
-            resume,
-            MAX_CATCHUP_CHUNK.min(MAX_SIGNED_CATCHUP_BUNDLE),
-            &self.group,
-            &self.device,
-            &mut self.rng,
-        ) {
+        let budget = MAX_CATCHUP_CHUNK.min(MAX_SIGNED_CATCHUP_BUNDLE);
+        let page = if cursor.is_some() {
+            doc.export_catchup_page(
+                &heads,
+                resume,
+                budget,
+                &self.group,
+                &self.device,
+                &mut self.rng,
+            )
+        } else {
+            doc.export_legacy_catchup_page(&heads, budget, &self.group, &self.device, &mut self.rng)
+        };
+        match page {
             Ok((page, next)) => {
                 let (prefix, served) =
                     match size_capped_ops(&page, MAX_CATCHUP_CHUNK, MAX_SIGNED_CATCHUP_BUNDLE) {
