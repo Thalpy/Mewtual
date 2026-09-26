@@ -57,6 +57,7 @@ mod creative_blobs;
 mod durable_chat;
 mod errors;
 mod group_policy;
+mod leaving;
 mod media_decode;
 mod security_intent;
 mod shutdown;
@@ -6948,13 +6949,17 @@ fn effective_join_reply_expiry(encoded_expires_at_ms: u64, received_at_ms: u64) 
 #[tauri::command]
 async fn leave_server(state: State<'_, AppState>, server: u64) -> Result<(), String> {
     require_unlocked_session(&state).await?;
-    // Remove the registry row first. Cache publication holds that same registry lock through its
-    // insertion: either publication wins and this subsequent remove clears it, or removal wins
-    // and the old actor incarnation can no longer publish at all.
-    let removed = state.servers.lock().await.remove(&server);
-    if let Some(entry) = removed.as_ref() {
-        remove_persistence_signal(&state, server, entry.instance);
-    }
+    let generation = unlocked_ui_session_generation(&state).await?;
+    // Stop application publication/authoring before native retirement. Keeping the row while
+    // waiting also lets an in-flight Ready/save finish without confusing its incarnation fence.
+    let Some(stopped) = leaving::stop_server(&state, server, &SystemClock).await? else {
+        return Ok(());
+    };
+    // Drain older captured writes before deleting the file; none can recreate it after leave.
+    let _persist = persist_lock_for(&state, server).lock_owned().await;
+    let _session = require_ui_session_generation(&state, generation).await?;
+    let removed = stopped.remove(&mut *state.servers.lock().await)?;
+    remove_persistence_signal(&state, server, removed.instance);
     state.storage_health.lock().await.remove(&server);
     if let Ok(mut signals) = state.reconnect_capture_signals.lock() {
         signals.remove(&server);
@@ -6967,9 +6972,6 @@ async fn leave_server(state: State<'_, AppState>, server: u64) -> Result<(), Str
         .lock()
         .await
         .retain(|(candidate_server, _), _| *candidate_server != server);
-    if let Some(entry) = removed {
-        entry.actor.shutdown().await;
-    }
     // Drop the sealed snapshot + re-seal the (now smaller) registry.
     {
         let guard = state.store.lock().await;

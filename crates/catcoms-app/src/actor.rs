@@ -963,6 +963,8 @@ pub enum AppCommand {
     },
     /// Stop the actor.
     Shutdown,
+    /// Acknowledged terminal boundary. No actor command/network turn follows acknowledgement.
+    StopAndWait { stopped: oneshot::Sender<()> },
 }
 
 /// Which part of a channel document moved, carried by [`AppEvent::ChannelUpdated`].
@@ -3370,6 +3372,21 @@ impl ServerActor {
             .map_err(|_| "server stopped before shutdown".to_string())
     }
 
+    /// Stop before retiring a native incarnation. Already closed actors are safely stopped.
+    /// Dropping a queued request cancels it; a concurrent acknowledgement can still complete,
+    /// so a timed-out caller must keep local state and may retry this idempotent operation.
+    pub async fn stop_and_wait(&self) -> Result<(), String> {
+        let (stopped, result) = oneshot::channel();
+        if self.cmd_tx.send(AppCommand::StopAndWait { stopped }).await.is_err() {
+            return Ok(());
+        }
+        match result.await {
+            Ok(()) => Ok(()),
+            Err(_) if self.cmd_tx.tx.is_closed() => Ok(()),
+            Err(_) => Err("server stop was not acknowledged".into()),
+        }
+    }
+
     /// Drive one steady-state rendezvous-discovery pass. Fire-and-forget; the bridge calls this on
     /// a timer. Returns `Err` once the actor has stopped (so the bridge's timer task can exit).
     pub async fn drive_discovery(&self) -> Result<(), ()> {
@@ -4984,6 +5001,16 @@ where
                             break;
                         }
                     }
+                    Some(AppCommand::StopAndWait { stopped }) => {
+                        // A timed-out request which is still queued must not later stop a live
+                        // group unexpectedly. Once acknowledged this branch is terminal; close
+                        // the command receiver before awaiting the UI event consumer.
+                        if stopped.send(()).is_ok() {
+                            cmd_rx.close();
+                            let _ = event_tx.send(AppEvent::Closed).await;
+                            break;
+                        }
+                    }
                     Some(AppCommand::Shutdown) | None => {
                         let _ = event_tx.send(AppEvent::Closed).await;
                         break;
@@ -5743,6 +5770,9 @@ async fn sync_profiles<T, R>(
         _ => {}
     }
 }
+
+#[cfg(test)]
+mod stop_tests;
 
 #[cfg(test)]
 mod tests {
