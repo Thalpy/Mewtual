@@ -535,6 +535,11 @@ impl ServerGroup {
     pub fn contains_device(&self, id: &DeviceId) -> bool {
         self.member_device_ids().contains(id)
     }
+
+    /// Whether this local MLS instance still belongs to the group after applied removals.
+    pub fn is_active(&self) -> bool {
+        self.group.is_active()
+    }
 }
 
 impl fmt::Debug for ServerGroup {

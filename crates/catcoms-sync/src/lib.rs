@@ -7576,6 +7576,9 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     /// Retry the prior authenticated same-LAN route under the current roster and process-wide
     /// egress limits. Returns the number of peer batches that entered the transport dial path.
     pub async fn dial_local_reconnect_routes(&mut self) -> usize {
+        if !self.group.is_active() || !self.group.contains_device(&self.device.device_id()) {
+            return 0;
+        }
         let mut by_peer: BTreeMap<PeerId, Vec<(String, DialEndpoint)>> = BTreeMap::new();
         for (peer, address) in self.local_reconnect_routes.clone() {
             if peer == self.transport.local_peer()

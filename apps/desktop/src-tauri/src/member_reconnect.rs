@@ -14,6 +14,15 @@ pub(super) async fn persist(
     if actor.group_mode().await? != catcoms_app::GroupMode::PeerToPeer {
         return Ok(false);
     }
+    if !actor.member_mesh_allowed().await? {
+        // The immutable mode remains P2P after this device is removed. That historical pin
+        // grants no standing authority to the now-inactive local MLS instance.
+        actor
+            .set_local_reconnect_routes(Vec::new())
+            .await
+            .map_err(|_| "server stopped".to_string())?;
+        return Ok(true);
+    }
     let mut peers: HashSet<_> = actor.finalized_member_peers().await?.into_iter().collect();
     let local = state
         .servers
@@ -39,7 +48,7 @@ pub(super) async fn persist(
         // Opposite owners must not occupy both sole actor loops with reciprocal requests. Wait
         // outside the actor on one deterministic side, where it can serve the other's request.
         if local.is_some_and(|local| local > peer) {
-            tokio::time::sleep(Duration::from_millis(250)).await;
+            SystemClock.sleep(Duration::from_millis(250)).await;
             if actor.finalized_member_peers().await?.contains(&peer) {
                 continue;
             }
@@ -58,6 +67,15 @@ pub(super) async fn persist(
         != PersistOutcome::Durable
     {
         return Err("member reconnect authority could not finish saving".into());
+    }
+    if !actor.member_mesh_allowed().await? {
+        // Removal can race the first permission read or finalization. The core also checks
+        // active local membership at each actual dial, including after this final query.
+        actor
+            .set_local_reconnect_routes(Vec::new())
+            .await
+            .map_err(|_| "server stopped".to_string())?;
+        return Ok(true);
     }
     let guard = state.store.lock().await;
     let store = guard

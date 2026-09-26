@@ -63,6 +63,8 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     /// is not evidence of permission for new durable route or serving capabilities.
     pub fn policy_allows_member_mesh(&self) -> bool {
         self.group_mode() == GroupMode::PeerToPeer
+            && self.group.is_active()
+            && self.group.contains_device(&self.device.device_id())
     }
 
     pub fn policy_allows_service(&self) -> bool {
