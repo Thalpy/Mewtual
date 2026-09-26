@@ -202,6 +202,12 @@ mod tests {
         recovered.transport.refuse.store(true, Ordering::SeqCst);
         recovered.drain_durable_chat().await;
         assert_eq!(recovered.durable_chat.records[&[2; 16]].sealed, sealed);
+        clock.set_wall_ms(1);
+        assert_eq!(
+            recovered.next_durable_chat_retry_delay(),
+            Some(PUBLICATION_RETRY_MS),
+            "wall-clock correction must not defer the process-local retry"
+        );
         recovered.transport.refuse.store(false, Ordering::SeqCst);
         clock.advance_ms(PUBLICATION_RETRY_MS);
         recovered.transport.duplicate.store(true, Ordering::SeqCst);
@@ -632,7 +638,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         let Ok(context) = current_context else {
             return;
         };
-        let now = self.clock.now_ms();
+        let now = self.clock.monotonic_ms();
         let pending: Vec<_> = self
             .durable_chat
             .active
@@ -671,7 +677,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     }
 
     pub(crate) fn next_durable_chat_retry_delay(&self) -> Option<u64> {
-        let now = self.clock.now_ms();
+        let now = self.clock.monotonic_ms();
         self.durable_chat
             .active
             .iter()
