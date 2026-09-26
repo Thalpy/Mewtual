@@ -1131,6 +1131,13 @@ struct FoundResult {
     channel: String,
     channels: Vec<UiChannel>,
     is_dm: bool,
+    /// Membership can be useful in memory while a failed durable finalization is retrying.
+    storage_warning: Option<String>,
+}
+
+fn admission_storage_warning(outcomes: [PersistOutcome; 3]) -> Option<String> {
+    outcomes.iter().any(|outcome| *outcome != PersistOutcome::Durable).then(||
+        "This group is available, but saving its restart state has not completed. Keep Mewtual open while it retries.".to_string())
 }
 
 #[derive(Serialize, Clone)]
@@ -5878,15 +5885,17 @@ async fn found_server_inner(
     // Seal the new server, its network identity and the registry to disk (if the store is
     // unlocked). The identity has to land before the first restart or the invite just minted dies
     // with the process that made it.
-    persist_server(state, server_id).await;
-    persist_server_net(state, server_id, &net).await;
-    persist_registry(state).await;
+    let membership_save = persist_server(state, server_id).await;
+    let network_save = persist_server_net(state, server_id, &net).await;
+    let registry_save = persist_registry(state).await;
+    let mut storage_warning = admission_storage_warning([membership_save, network_save, registry_save]);
     let registered = state.servers.lock().await.get(&server_id)
         .map(|entry| (entry.instance, entry.actor.clone(), entry.mesh.clone()));
     if let Some((instance, actor, Some(mesh))) = registered {
         if let Err(error) = member_reconnect::persist(state, server_id, instance, &actor,
             mesh.authenticated_dial_route_evidence()).await {
             tracing::warn!(target: "catcoms_app", server = server_id, %error, "VAULT.ADMISSION_RECONNECT.PENDING");
+            storage_warning.get_or_insert_with(|| "This group is available, but reconnect setup is still pending. Keep Mewtual open while it retries.".into());
         }
     }
     drop(session_commit);
@@ -5930,6 +5939,7 @@ async fn found_server_inner(
         channel: general.to_string(),
         channels,
         is_dm,
+        storage_warning,
     })
 }
 
@@ -6655,15 +6665,17 @@ async fn join_server_inner(
     )
     .await;
     // Seal the joined server, its network identity and the registry to disk (if unlocked).
-    persist_server(state, server_id).await;
-    persist_server_net(state, server_id, &net).await;
-    persist_registry(state).await;
+    let membership_save = persist_server(state, server_id).await;
+    let network_save = persist_server_net(state, server_id, &net).await;
+    let registry_save = persist_registry(state).await;
+    let mut storage_warning = admission_storage_warning([membership_save, network_save, registry_save]);
     let registered = state.servers.lock().await.get(&server_id)
         .map(|entry| (entry.instance, entry.actor.clone(), entry.mesh.clone()));
     if let Some((instance, actor, Some(mesh))) = registered {
         if let Err(error) = member_reconnect::persist(state, server_id, instance, &actor,
             mesh.authenticated_dial_route_evidence()).await {
             tracing::warn!(target: "catcoms_app", server = server_id, %error, "VAULT.ADMISSION_RECONNECT.PENDING");
+            storage_warning.get_or_insert_with(|| "This group is available, but reconnect setup is still pending. Keep Mewtual open while it retries.".into());
         }
     }
     drop(session_commit);
@@ -6697,6 +6709,7 @@ async fn join_server_inner(
         channel: general.to_string(),
         channels,
         is_dm,
+        storage_warning,
     })
 }
 
