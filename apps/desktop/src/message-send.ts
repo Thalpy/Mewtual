@@ -24,6 +24,9 @@ export async function sendAndRefresh(
 }
 
 export function persistenceWarning(result: SendMessageResult): string | null {
+  if (!result.accepted && result.persistence.status === "superseded") {
+    return "This pending message needs review because the conversation changed. Automatic retry is paused; move it to a draft to start a new send.";
+  }
   if (!result.accepted) return "Message saved as a pending request in this vault. Its history save has not completed; it will retry automatically while unlocked.";
   switch (result.persistence.status) {
     case "durable": return null;
