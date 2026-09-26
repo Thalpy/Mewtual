@@ -60,6 +60,7 @@ use thiserror::Error;
 use zeroize::Zeroizing;
 
 mod blob_fetch;
+pub mod durable_chat;
 pub mod checkpoint_exchange;
 pub mod epoch_service;
 mod owner_tenure;
@@ -1967,6 +1968,9 @@ pub enum SyncError {
     /// The requested document is not open here.
     #[error("document not open")]
     NoSuchDoc,
+    /// A prepared chat owns this document's next local actor sequence until it is committed.
+    #[error("CHAT_SEND_DOCUMENT_PENDING: retry the outstanding send for this channel first")]
+    ChatPreparationPending,
     /// A join request was rejected by the inviter.
     #[error("join request rejected")]
     JoinRejected,
@@ -3978,6 +3982,7 @@ pub struct ChannelSync<T: MeshTransport, R: CryptoRngCore> {
     clock: Arc<dyn Clock + Send>,
     ledger: InviteLedger,
     docs: HashMap<(DocType, u128), EncryptedDoc>,
+    durable_chat: durable_chat::DurableChatState,
     /// The **current** routing label's control topic (where this node publishes
     /// commits). Recomputed whenever the routing label changes.
     control_topic: Topic,
@@ -4442,6 +4447,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             file_wrap_key,
             ledger: InviteLedger::new(),
             docs: HashMap::new(),
+            durable_chat: durable_chat::DurableChatState::default(),
             // Placeholder; set from `ns_secret_L` by `capture_routing_secret` below.
             control_topic: Topic::new(Vec::<u8>::new()),
             control_topics: HashSet::new(),
@@ -4629,6 +4635,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             .map_err(|_| oversize())?;
         e.put_bytes(&group_policy::encode_pin(self.group_policy.as_ref()))
             .map_err(|_| oversize())?;
+        e.put_bytes(&self.durable_chat.encode()?).map_err(|_| oversize())?;
         Ok(Zeroizing::new(e.finish()))
     }
 
@@ -4740,6 +4747,11 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         } else {
             group_policy::decode_pin(d.get_bytes().map_err(|_| bad())?)?
         };
+        let durable_chat = if d.is_empty() {
+            durable_chat::DurableChatState::default()
+        } else {
+            durable_chat::DurableChatState::decode(d.get_bytes().map_err(|_| bad())?)?
+        };
         d.finish().map_err(|_| bad())?;
 
         // Reconstruct the MLS device + group, then build a base synchronizer and override its
@@ -4758,6 +4770,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         };
         let mut this = Self::new(transport, group, device, rng, clock);
         this.owner_tenure = tenure;
+        this.durable_chat = durable_chat;
         let (label, secrets) = decode_routing_state(&routing_bytes)?;
         this.adopt_routing_state(RoutingState {
             label,
@@ -5148,6 +5161,11 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     where
         F: FnOnce(&mut AutoCommit) -> Result<(), AutomergeError>,
     {
+        let current_context = self.durable_send_context();
+        self.durable_chat.stop_obsolete(current_context.as_ref().ok());
+        if self.durable_chat.blocks(doc_type, doc_id) {
+            return Err(SyncError::ChatPreparationPending);
+        }
         let key = (doc_type, doc_id);
         let doc = self.docs.get_mut(&key).ok_or(SyncError::NoSuchDoc)?;
         let (sealed, change) = doc.edit_tracked(&self.device, &self.group, &mut self.rng, edit)?;
@@ -5618,6 +5636,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     }
 
     pub async fn run_once(&mut self) -> Result<bool, SyncError> {
+        self.drain_durable_chat().await;
         // Admin invites (Option C): re-broadcast any pending Add-request whose retry elapsed
         // (caught up by the owner on its reconnect), then flush the Welcome a result produced;
         // the admin relays it to the joiner here (in single-committer mode the contest path that
@@ -5663,7 +5682,9 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             return Ok(true);
         }
 
-        let event = if let Some(delay_ms) = self.next_catchup_retry_delay() {
+        let retry_delay = [self.next_catchup_retry_delay(), self.next_durable_chat_retry_delay()]
+            .into_iter().flatten().min();
+        let event = if let Some(delay_ms) = retry_delay {
             let next_event = self.transport.next_event();
             let retry = self.clock.sleep(std::time::Duration::from_millis(delay_ms));
             futures::pin_mut!(next_event, retry);

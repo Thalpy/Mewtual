@@ -54,6 +54,7 @@ use thiserror::Error;
 
 mod actor;
 pub mod creative;
+pub mod durable_chat;
 mod file_resolution;
 mod moderation;
 pub mod pairing;

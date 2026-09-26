@@ -282,6 +282,14 @@ pub enum AppCommand {
         reply_to: String,
         reply: oneshot::Sender<Result<(), String>>,
     },
+    /// Durable caller-token send. No native/store guard is queued with this command.
+    DurableSend {
+        request: crate::durable_chat::DurableSendRequest,
+        ready: oneshot::Sender<crate::durable_chat::DurableSendReady>,
+    },
+    DurableSendContext {
+        reply: oneshot::Sender<Result<[u8; 32], String>>,
+    },
     /// Edit the text of one of your own messages (by id) in a channel.
     EditMessage {
         channel: u128,
@@ -1252,6 +1260,23 @@ impl ServerActor {
     }
 
     /// Send a chat message replying to `reply_to` (the parent message's id).
+    pub async fn durable_send_context(&self) -> Result<[u8; 32], String> {
+        let (reply, rx) = oneshot::channel();
+        self.cmd_tx.send(AppCommand::DurableSendContext { reply }).await
+            .map_err(|_| "server stopped".to_string())?;
+        rx.await.map_err(|_| "server stopped".to_string())?
+    }
+
+    /// Obtain Ready before acquiring native custody; commit with a lease to cross the barrier.
+    pub async fn prepare_durable_send(&self, request: crate::durable_chat::DurableSendRequest) -> Result<crate::durable_chat::DurableSendReady, String> {
+        request.validate()?;
+        let (ready, rx) = oneshot::channel();
+        self.cmd_tx.send(AppCommand::DurableSend { request, ready }).await
+            .map_err(|_| "server stopped".to_string())?;
+        rx.await.map_err(|_| "server stopped".to_string())
+    }
+
+    /// Send a chat message replying to `reply_to` without a storage barrier (non-desktop callers).
     pub async fn send_reply(
         &self,
         channel: u128,
@@ -3717,6 +3742,18 @@ where
                         // nothing on first sight for exactly this reason.
                         channel_delta_if_moved(&server, channel, &mut counts, &mut versions);
                         let _ = ack.send(());
+                    }
+                    Some(AppCommand::DurableSendContext { reply }) => {
+                        let _ = reply.send(server.sync.durable_send_context());
+                    }
+                    Some(AppCommand::DurableSend { request, ready }) => {
+                        let channel = request.channel;
+                        if crate::durable_chat::execute(&mut server, request, ready).await {
+                            let _ = event_tx.send(AppEvent::SnapshotNeeded).await;
+                            if let Some(change) = channel_delta_if_moved(&server, channel, &mut counts, &mut versions) {
+                                let _ = event_tx.send(AppEvent::ChannelUpdated { channel, change }).await;
+                            }
+                        }
                     }
                     Some(AppCommand::SendMessage {
                         channel,
