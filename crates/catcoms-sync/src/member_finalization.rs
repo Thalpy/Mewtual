@@ -143,10 +143,10 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             return false;
         }
         self.ingest_peer_record(record);
-        if !self
+        if self
             .peer_records
             .get(&device)
-            .is_some_and(|record| record.peer_id == *peer.as_bytes())
+            .is_none_or(|record| record.peer_id != *peer.as_bytes())
             || !self.peer_uniquely_claimed_by_current_member(peer)
         {
             return false;
