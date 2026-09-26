@@ -44,3 +44,10 @@ destroyed before recovery; the restored B can read history before C exists; C is
 empty before its actor starts; and the request trace admits only chain edges. Snapshot
 bytes never move from one device to another. Expected message projections remain solely
 assertion values and are never supplied to a receiving actor or store.
+
+The integrated fixture passed on Windows with one selected test. Both new members use the
+production connected member-finalization exchange. Observations leave a 300-ms service window
+between actor queries; tight 20-ms polling repeatedly cancelled background recovery in the
+initial fixture and is not claimed as a passing cancellation-stress case. The outer wall-clock
+watchdog remains 30 seconds. The successful run completed in 13.88 seconds; this is fixture
+evidence, not a network performance guarantee. Raw output: `logs/cr-temporal-bridge.log`.
