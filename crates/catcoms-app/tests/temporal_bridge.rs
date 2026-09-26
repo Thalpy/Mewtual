@@ -262,12 +262,18 @@ async fn bounded<T>(
     label: &str,
     work: impl std::future::Future<Output = T>,
 ) -> T {
+    eprintln!("temporal phase: {label}");
     tokio::pin!(work);
     tokio::time::timeout(WAIT, async {
         loop {
             match tokio::time::timeout(Duration::from_millis(20), &mut work).await {
-                Ok(value) => return value,
-                Err(_) => clock.advance_ms(100),
+                Ok(value) => {
+                    eprintln!("temporal complete: {label}");
+                    return value;
+                }
+                Err(_) => {
+                    clock.advance_ms(100);
+                }
             }
         }
     })
@@ -280,9 +286,19 @@ async fn await_history(node: &Node, clock: &ManualClock, channel: u128, expected
         clock,
         "automatic directory and retained history reconciliation",
         async {
+            let mut previous = (usize::MAX, usize::MAX);
             loop {
                 let channels = node.actor.channels().await;
                 let messages = node.actor.messages(channel).await;
+                if previous != (channels.len(), messages.len()) {
+                    eprintln!(
+                        "temporal inventory: {} channels, {} messages, target present={}",
+                        channels.len(),
+                        messages.len(),
+                        channels.iter().any(|entry| entry.id == channel)
+                    );
+                    previous = (channels.len(), messages.len());
+                }
                 if channels.iter().any(|entry| entry.id == channel)
                     && messages
                         .iter()
@@ -293,10 +309,12 @@ async fn await_history(node: &Node, clock: &ManualClock, channel: u128, expected
                 }
                 // The product's periodic discovery command schedules reconciliation. It does not
                 // name the new channel, transfer operations, or open that channel on the receiver.
-                node.actor.drive_discovery().await;
-                // Yield with time passing rather than continuously filling the biased command arm.
+                node.actor.drive_discovery().await.unwrap();
+                // Leave a service window between observations: the actor cancels its sync future
+                // for each command, so tight polling would repeatedly interrupt recovery.
+                // The outer clock driver still advances request/retry deadlines while idle.
                 let _ =
-                    tokio::time::timeout(Duration::from_millis(20), std::future::pending::<()>())
+                    tokio::time::timeout(Duration::from_millis(300), std::future::pending::<()>())
                         .await;
                 clock.advance_ms(1_000);
             }
@@ -359,10 +377,20 @@ async fn temporal_bridge(clock: &ManualClock) {
     b_server.publish_self_record(Vec::new(), 1).unwrap();
     // The production eager admission exchange supplies the inviter descriptor required by the
     // explicit helper gate. It neither bypasses the roster nor grants a general proxy route.
-    b_server
-        .request_pex_connected(PeerId::from_u64(A))
-        .await
-        .unwrap();
+    bounded(
+        clock,
+        "B connected descriptor exchange",
+        b_server.request_pex_connected(PeerId::from_u64(A)),
+    )
+    .await
+    .unwrap();
+    assert!(bounded(
+        clock,
+        "B admission finalization",
+        b_server.finalize_member_connection(PeerId::from_u64(A))
+    )
+    .await
+    .unwrap());
     let mut b = Node::start(b_server).await;
     let invite_c = mint(&a.actor, 2).await;
     assert!(
@@ -396,10 +424,20 @@ async fn temporal_bridge(clock: &ManualClock) {
     .await
     .unwrap();
     c_server.publish_self_record(Vec::new(), 1).unwrap();
-    c_server
-        .request_pex_connected(PeerId::from_u64(B))
-        .await
-        .unwrap();
+    bounded(
+        clock,
+        "C connected descriptor exchange",
+        c_server.request_pex_connected(PeerId::from_u64(B)),
+    )
+    .await
+    .unwrap();
+    assert!(bounded(
+        clock,
+        "C admission finalization",
+        c_server.finalize_member_connection(PeerId::from_u64(B))
+    )
+    .await
+    .unwrap());
     let mut c = Node::start(c_server).await;
     assert_eq!(c.actor.member_count().await, 3);
     assert_eq!(b.actor.member_count().await, 3);
