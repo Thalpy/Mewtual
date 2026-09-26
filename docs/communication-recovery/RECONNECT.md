@@ -84,10 +84,18 @@ reported as complete, and unknown infrastructure being mistaken for mandatory me
 The candidate map and cached-route exception remain bounded and roster checked. Existing helpers
 and a code-holder's temporary reply record alone cannot grant continuing member authority.
 
-## Required integrated verification
+## Integrated verification
 
-These commands are verification requirements, not a claim that this document's revision has run
-them. Final native TCP verification is pending root integration.
+At integration code checkpoint `45ac997`, the complete native suite passed: 285 tests,
+including all six member-reconnect regressions and seven admission-storage regressions.
+The real TCP callback case passed in both restart orders, with A still unable to listen.
+The five core member-finalization tests passed in the 295-test sync run before the final
+equivalent lint cleanup; strict core Clippy and native callback tests passed after that cleanup.
+The network v5 fixture passed with one selected test.
+
+Raw outputs: `logs/cr-final-native-tests.log`, `logs/cr-final-sync-tests.log`,
+`logs/cr-member-net-store-final.log`, and `logs/cr-final-core-clippy.log`.
+Reproduction commands (add the recorded locked/offline/serial settings for this machine):
 
 ```text
 cargo test -p catcoms-sync member_finalization::tests
@@ -102,3 +110,11 @@ exclusion, unfinished admission proof, prior durable-route coverage and concurre
 The TCP reproduction gives A no listener, admits B through A's outbound callback, closes both,
 reopens separate vaults and transports in both start orders, and retrieves signed history retained
 while B was offline. Its assertions reject B acquiring an inbound ephemeral listener hint.
+
+The initial native fixture run had two failures: it tried to overwrite a prior-route fixture
+through the admission writer, which now preserves existing route metadata, and it assumed
+history was available immediately after an asynchronous catch-up request. The corrected
+fixtures verify the sealed predecessor directly and advance injected retry deadlines while
+real TCP actors recover history. All authority and direction assertions remain; no history
+is injected. The final complete native suite passes. This is loopback TCP and independently
+reopened stores, not physical NAT or OS process-kill acceptance.
