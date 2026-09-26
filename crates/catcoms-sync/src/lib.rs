@@ -5208,27 +5208,50 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         let mut docs: Vec<_> = self.docs.keys().copied().collect();
         docs.sort_unstable_by_key(|(kind, id)| (*kind as u8, *id));
         let mut queued = 0;
+        // One reserved turn when the queue is full prevents permanently unavailable histories
+        // from occupying every slot forever. The open-document inventory owns parked work;
+        // provider cursors, continuation claims and cooldowns remain attached to that document.
+        let admission_budget = self
+            .config
+            .max_catchup_queue
+            .saturating_sub(self.catchup_queue.len())
+            .max(1);
         for _ in 0..docs.len() {
             self.reconciliation_cursor %= docs.len();
             let (doc_type, doc_id) = docs[self.reconciliation_cursor];
             let task = CatchupTask::Doc { doc_type, doc_id };
             let already_queued = self.catchup_queue.contains(&task);
             if !already_queued && self.catchup_queue.len() >= self.config.max_catchup_queue {
-                break;
+                if self.config.max_catchup_queue == 0 {
+                    break;
+                }
+                let parked = self.catchup_queue.iter().position(|pending| {
+                    matches!(pending, CatchupTask::Doc { doc_type, doc_id }
+                        if self.docs.contains_key(&(*doc_type, *doc_id)))
+                        && !self
+                            .catchup_inflight
+                            .is_some_and(|(active, _)| active == *pending)
+                });
+                let Some(parked) = parked else { break };
+                self.catchup_queue.remove(parked);
             }
             self.reconciliation_cursor += 1;
             if self
                 .catchup_inflight
                 .is_some_and(|(pending, _)| pending == task)
-                || (already_queued
-                    && (self.unchecked_source_exists(doc_type, doc_id)
-                        || self.catchup_continuation_source(doc_type, doc_id).is_some()))
             {
                 continue;
             }
-            self.clear_sources_checked(doc_type, doc_id);
+            if !self.unchecked_source_exists(doc_type, doc_id)
+                && self.catchup_continuation_source(doc_type, doc_id).is_none()
+            {
+                self.clear_sources_checked(doc_type, doc_id);
+            }
             self.enqueue_doc_catchup(doc_type, doc_id);
             queued += usize::from(!already_queued);
+            if queued >= admission_budget {
+                break;
+            }
         }
         queued
     }

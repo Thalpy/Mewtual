@@ -572,3 +572,47 @@ async fn an_expired_live_retry_is_not_shadowed_by_a_stale_connected_source() {
     assert!(attempted, "a zero-delay wake must reach the live source");
     assert_eq!(bob.doc(DocType::Channel, CHANNEL).unwrap().op_count(), 1);
 }
+
+#[tokio::test]
+async fn a_full_stalled_queue_rotates_documents_without_forgetting_provider_progress() {
+    let (_hub, mut members, ids) = tests::build_members(2).await;
+    tests::converge_and_publish_test_routes(&mut members);
+    let peer = members[1].local_peer();
+    let member = &mut members[0];
+    let clock = ManualClock::new(1000);
+    member.clock = Arc::new(clock.clone());
+    member.note_peer_connected(peer);
+    member.promote_member_peer_bound(peer, ids[1], true);
+    for id in 1..=5 {
+        member.open_channel(DocType::Channel, id).await.unwrap();
+    }
+    member.config.max_catchup_queue = 2;
+    member.catchup_queue.clear();
+    member.enqueue_doc_catchup(DocType::Channel, 1);
+    member.enqueue_doc_catchup(DocType::Channel, 2);
+    let cursor = CatchupCursor {
+        provider: [9; 16],
+        position: 256,
+    };
+    member
+        .catchup_cursors
+        .insert((DocType::Channel, 1, peer), cursor);
+    member.note_catchup_continuation(peer, DocType::Channel, 1);
+    let mut visited = HashSet::new();
+    for _ in 0..10 {
+        for task in &member.catchup_queue {
+            if let CatchupTask::Doc { doc_id, .. } = task {
+                visited.insert(*doc_id);
+            }
+        }
+        clock.advance_ms(CATCHUP_PEER_COOLDOWN_MS);
+        member.schedule_reconciliation();
+        assert!(member.catchup_queue.len() <= 2);
+        // Deliberately never drain or complete a queued task.
+    }
+    assert_eq!(visited.len(), 5);
+    assert_eq!(
+        member.catchup_cursors.get(&(DocType::Channel, 1, peer)),
+        Some(&cursor)
+    );
+}
