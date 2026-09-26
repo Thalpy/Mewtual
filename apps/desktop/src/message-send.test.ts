@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import ts from "typescript";
-import { addPendingSend, matchingPendingSend } from "./pending-sends.ts";
+import { addPendingSend, matchingPendingSend, pendingSendRetryBlock } from "./pending-sends.ts";
 import { readFileSync } from "node:fs";
 import { persistenceWarning, sendAndRefresh, type SendMessageResult } from "./message-send.ts";
 
@@ -45,7 +45,7 @@ function composer(submit: (args: Record<string, unknown>) => Promise<SendMessage
   const source = readFileSync(new URL("./App.svelte", import.meta.url), "utf8");
   const body = ts.transpile(source.slice(source.indexOf("  async function submitPendingSend("),
     source.indexOf("  // Inline edit of one of your own messages.")), { target: ts.ScriptTarget.ES2022 });
-  return new Function("submit", "refresh", "context", "sendAndRefresh", "persistenceWarning", "addPendingSend", "matchingPendingSend", `
+  return new Function("submit", "refresh", "context", "sendAndRefresh", "persistenceWarning", "addPendingSend", "matchingPendingSend", "pendingSendRetryBlock", `
     let draft = "one message", cur = { active: "1" }, activeServerId = 1, sending = false;
     let locked = false, uiStateLoadGeneration = 0, replyingTo = "", mentionQuery = null;
     let drafts = { room: draft }, draftRevisions = {}, pendingSendNonce = 0, chatStickToBottom = false;
@@ -66,7 +66,7 @@ function composer(submit: (args: Record<string, unknown>) => Promise<SendMessage
       lock() { sealed = JSON.parse(continuityJson()); locked = true; uiStateLoadGeneration++; draft = ""; drafts = {}; pendingSends = {}; sending = false; pendingSendNonce++; },
       state() { return { draft, drafts, pendingSends, sealed, warnings, error, sending }; }
     };
-  `)(submit, refresh, context, sendAndRefresh, persistenceWarning, addPendingSend, matchingPendingSend);
+  `)(submit, refresh, context, sendAndRefresh, persistenceWarning, addPendingSend, matchingPendingSend, pendingSendRetryBlock);
 }
 
 test("composer keeps the draft until its retry identity can be sealed", async () => {
