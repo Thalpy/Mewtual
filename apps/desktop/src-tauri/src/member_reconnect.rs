@@ -61,6 +61,12 @@ pub(super) async fn persist(
     }
     peers = actor.finalized_member_peers().await?.into_iter().collect();
     let observed = select_authenticated_reconnect_routes(evidence, &peers, false);
+    if admission_storage::retry_server_net(state, server, instance)
+        .await
+        .is_some_and(|outcome| outcome != PersistOutcome::Durable)
+    {
+        return Err("network identity could not finish saving".into());
+    }
     // The signed policy and member descriptors must reach disk before the route record can grant
     // restart permission. A failed write keeps the periodic/event obligation outstanding.
     if persist_server_instance(state, server, instance, actor.clone()).await
