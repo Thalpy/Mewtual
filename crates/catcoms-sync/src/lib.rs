@@ -247,10 +247,8 @@ const MAX_NONPROGRESSING_CATCHUP_ROUNDS: u8 = 8;
 /// such walk without treating those pages as stalls, but never grant an unlimited stream of
 /// empty positions the authority to keep issuing requests.
 const MAX_EMPTY_CATCHUP_PAGE_GRACE: usize =
-    (catcoms_replication::doc::MAX_CATCHUP_PAGE_CLOSURE_STEPS
-        + catcoms_replication::doc::MAX_CATCHUP_PAGE_SCANNED_OPS
-        - 1)
-        / catcoms_replication::doc::MAX_CATCHUP_PAGE_SCANNED_OPS;
+    catcoms_replication::doc::MAX_CATCHUP_PAGE_CLOSURE_STEPS
+        .div_ceil(catcoms_replication::doc::MAX_CATCHUP_PAGE_SCANNED_OPS);
 /// Ceiling on the non-progress ledger. Its keys are all this node's own (documents it has open,
 /// peers it chose to ask), so it cannot be grown from outside; the cap is belt and braces.
 const MAX_CATCHUP_STALL_ENTRIES: usize = 256;
@@ -14173,7 +14171,7 @@ pub async fn request_join_via_helper_tracking<T: MeshTransport>(
 }
 
 enum ReplyJoinStart {
-    Ready(Box<ServerGroup>, RoutingState),
+    Ready(Box<ServerGroup>, Box<RoutingState>),
     Pending,
     Rejected,
 }
@@ -14217,7 +14215,7 @@ async fn start_reply_join<T: MeshTransport>(
                 return ReplyJoinStart::Rejected;
             };
             match finish_join(device, invite, &welcome, &signature, &sealed_routing) {
-                Ok((group, routing)) => ReplyJoinStart::Ready(Box::new(group), routing),
+                Ok((group, routing)) => ReplyJoinStart::Ready(Box::new(group), Box::new(routing)),
                 Err(_) => ReplyJoinStart::Rejected,
             }
         }
@@ -14324,7 +14322,7 @@ pub async fn request_join_from_reply_tracking<T: MeshTransport>(
             .await
             {
                 ReplyJoinStart::Ready(group, routing) => {
-                    return Ok((*group, routing, contact));
+                    return Ok((*group, *routing, contact));
                 }
                 ReplyJoinStart::Pending => {
                     pending.insert(contact);
@@ -14575,7 +14573,7 @@ pub async fn request_join_from_switchboards_tracking<T: MeshTransport>(
                                 },
                             ) {
                                 Ok((group, routing)) => {
-                                    ReplyJoinStart::Ready(Box::new(group), routing)
+                                    ReplyJoinStart::Ready(Box::new(group), Box::new(routing))
                                 }
                                 Err(_) => ReplyJoinStart::Rejected,
                             }
@@ -14588,7 +14586,7 @@ pub async fn request_join_from_switchboards_tracking<T: MeshTransport>(
             };
             match start {
                 ReplyJoinStart::Ready(group, routing) => {
-                    return Ok((*group, routing, contact));
+                    return Ok((*group, *routing, contact));
                 }
                 ReplyJoinStart::Pending => {
                     pending.insert(contact, contact_expires);
