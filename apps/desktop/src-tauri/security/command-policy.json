@@ -12,6 +12,7 @@
   { "command": "open_channel", "risk": "account-write", "surfaces": ["main"] },
   { "command": "get_channels", "risk": "account-read", "surfaces": ["main"] },
   { "command": "durable_send_context", "risk": "account-read", "surfaces": ["main"] },
+  { "command": "group_communication_mode", "risk": "account-read", "surfaces": ["main"] },
   { "command": "get_invite", "risk": "membership-admin", "surfaces": ["main"] },
   { "command": "mint_invite_fresh", "risk": "membership-admin", "surfaces": ["main"] },
   { "command": "check_invite_routes", "risk": "account-read", "surfaces": ["main"] },

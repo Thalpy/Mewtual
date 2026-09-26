@@ -45,6 +45,7 @@
 
     "allow-get-channels",
     "allow-durable-send-context",
+    "allow-group-communication-mode",
     "allow-check-invite-routes",
     "allow-get-members",
     "allow-get-profiles",
