@@ -51,3 +51,7 @@ between actor queries; tight 20-ms polling repeatedly cancelled background recov
 initial fixture and is not claimed as a passing cancellation-stress case. The outer wall-clock
 watchdog remains 30 seconds. The successful run completed in 13.88 seconds; this is fixture
 evidence, not a network performance guarantee. Raw output: `logs/cr-temporal-bridge.log`.
+
+The final integrated rerun also passed (1 selected test, 12.87 seconds). Its output is
+`logs/cr-temporal-bridge-final.log`. The initial and final passing runs use the same assertions;
+this records repeatability across integration, not a timing target.
