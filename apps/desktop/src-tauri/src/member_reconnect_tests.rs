@@ -3,6 +3,31 @@ mod member_reconnect_regressions {
     use rand_chacha::ChaCha20Rng;
     use rand_core::SeedableRng;
 
+    #[test]
+    fn duplicate_address_families_do_not_hide_another_member_finalization_target() {
+        let first = PeerId::from_u64(1);
+        let second = PeerId::from_u64(2);
+        let candidates = HashSet::from([first, second]);
+        let evidence = vec![
+            AuthenticatedDialRoute {
+                peer: first,
+                address: "ipv4 observation".into(),
+            },
+            AuthenticatedDialRoute {
+                peer: first,
+                address: "ipv6 observation".into(),
+            },
+            AuthenticatedDialRoute {
+                peer: second,
+                address: "other member observation".into(),
+            },
+        ];
+        assert_eq!(
+            member_reconnect::finalization_targets(&evidence, &candidates),
+            std::collections::BTreeSet::from([first, second])
+        );
+    }
+
     struct Running {
         actor: ServerActor,
         mesh: MeshHandle,

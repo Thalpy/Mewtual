@@ -1,6 +1,20 @@
 //! Durable continuing member reachability after authenticated P2P admission.
 use super::*;
 
+pub(super) fn finalization_targets(
+    evidence: &[AuthenticatedDialRoute],
+    candidates: &HashSet<PeerId>,
+) -> std::collections::BTreeSet<PeerId> {
+    evidence
+        .iter()
+        .map(|route| route.peer)
+        .filter(|peer| candidates.contains(peer))
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .take(MAX_RECONNECT_ROUTES)
+        .collect()
+}
+
 /// Capture only the local transport's successful outbound Noise listener evidence. The sealed
 /// P2P policy is a standing retry obligation, including when this launch sees no usable route.
 /// Returns false for legacy/dedicated groups, which retain their prior admission restrictions.
@@ -39,12 +53,7 @@ pub(super) async fn persist(
     // A close can race the post-admission worker before either side pulled a descriptor. Give
     // this already-proven outbound direction two bounded connected-only opportunities. This
     // also lets an actor leave an earlier reciprocal catch-up wait before the second request.
-    let targets: std::collections::BTreeSet<_> = evidence
-        .iter()
-        .map(|route| route.peer)
-        .filter(|peer| candidates.contains(peer))
-        .take(MAX_RECONNECT_ROUTES)
-        .collect();
+    let targets = finalization_targets(&evidence, &candidates);
     for peer in targets
         .iter()
         .filter(|peer| !peers.contains(peer))
