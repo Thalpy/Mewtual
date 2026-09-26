@@ -63,6 +63,8 @@ mod blob_fetch;
 pub mod checkpoint_exchange;
 pub mod epoch_service;
 mod owner_tenure;
+mod group_policy;
+pub use catcoms_mls::{GroupMode, GroupPolicy, PolicyError};
 pub mod receipt_head;
 #[cfg(test)]
 mod reconciliation_tests;
@@ -1535,16 +1537,21 @@ fn encode_join_transfer(
     label: u64,
     secrets: &[(u64, [u8; 32])],
     file_wrap_key: &[u8; 32],
+    policy: Option<&GroupPolicy>,
 ) -> Vec<u8> {
     let mut e = Encoder::new();
     e.put_bytes(&encode_routing_state(label, secrets))
         .expect("routing fits");
     e.put_bytes(file_wrap_key).expect("32 fits");
+    // Preserve legacy routing-transfer bytes when the invite itself had no policy.
+    if policy.is_some() {
+        e.put_bytes(&group_policy::encode_pin(policy)).expect("policy fits");
+    }
     e.finish()
 }
 
 #[allow(clippy::type_complexity)]
-fn decode_join_transfer(bytes: &[u8]) -> Result<(u64, Vec<(u64, [u8; 32])>, [u8; 32]), SyncError> {
+fn decode_join_transfer(bytes: &[u8]) -> Result<(u64, Vec<(u64, [u8; 32])>, [u8; 32], Option<GroupPolicy>), SyncError> {
     let mut d = Decoder::new(bytes);
     let routing = d.get_bytes().map_err(|_| SyncError::Malformed)?;
     let (label, secrets) = decode_routing_state(routing)?;
@@ -1553,8 +1560,13 @@ fn decode_join_transfer(bytes: &[u8]) -> Result<(u64, Vec<(u64, [u8; 32])>, [u8;
         .map_err(|_| SyncError::Malformed)?
         .try_into()
         .map_err(|_| SyncError::Malformed)?;
+    let policy = if d.is_empty() {
+        None
+    } else {
+        group_policy::decode_pin(d.get_bytes().map_err(|_| SyncError::Malformed)?)?
+    };
     d.finish().map_err(|_| SyncError::Malformed)?;
-    Ok((label, secrets, fwk))
+    Ok((label, secrets, fwk, policy))
 }
 
 /// The routing state (`L` + the retained `ns_secret_L` history) transferred from an
@@ -1572,6 +1584,8 @@ pub struct RoutingState {
     /// routing secrets. `None` for an absent/empty transfer (the joiner then cannot open
     /// group files until it obtains the key).
     file_wrap_key: Option<[u8; 32]>,
+    /// Verified against the joined MLS owner before this opaque transfer can be constructed.
+    policy: Option<GroupPolicy>,
     /// Transient lifecycle state consumed while waiting for a staged Welcome. Never encoded,
     /// sealed, persisted, or sent on the wire; `new_joined` drains it exactly once.
     connection_handoff: PreOwnerConnectionHandoff,
@@ -1615,7 +1629,11 @@ fn open_routing_transfer(
         tracing::warn!("authenticated routing transfer failed to unseal; rejecting join");
         SyncError::JoinRejected
     })?;
-    let (label, secrets, file_wrap_key) = decode_join_transfer(&plaintext)?;
+    let (label, secrets, file_wrap_key, policy) = decode_join_transfer(&plaintext)?;
+    if let Some(policy) = &policy {
+        group_policy::require_supported(policy)?;
+        policy.verify_current_owner(group)?;
+    }
     Ok(RoutingState {
         label,
         secrets: secrets
@@ -1623,6 +1641,7 @@ fn open_routing_transfer(
             .map(|(slot, s)| (slot, Zeroizing::new(s)))
             .collect(),
         file_wrap_key: Some(file_wrap_key),
+        policy,
         connection_handoff: PreOwnerConnectionHandoff::default(),
     })
 }
@@ -1939,6 +1958,9 @@ pub enum SyncError {
     /// An MLS-layer error.
     #[error(transparent)]
     Mls(#[from] catcoms_mls::MlsError),
+    /// Invalid, conflicting, or unsupported authenticated communication policy.
+    #[error(transparent)]
+    Policy(#[from] PolicyError),
     /// A blob-store error (content-addressed storage).
     #[error(transparent)]
     Storage(#[from] StorageError),
@@ -3391,6 +3413,8 @@ const CTRL_ADD_REQUEST: u8 = 2;
 /// only the owner runs the MLS Add, so no fork; but the validity condition is a certificate
 /// signed by an admitted member's *origin* device rather than an invite-ledger entry.
 const CTRL_DEVICE_ADD: u8 = 3;
+/// Immutable owner-signed group policy; older peers ignore this additive tag.
+const CTRL_GROUP_POLICY: u8 = 4;
 
 /// Domain separator for the committer's per-commit authorization signature.
 const COMMIT_AUTH_DOMAIN: &str = "catcoms/commit-auth/v1";
@@ -3944,6 +3968,11 @@ pub struct ChannelSync<T: MeshTransport, R: CryptoRngCore> {
     group: ServerGroup,
     /// Saved with this exact MLS group; never inferred from a received receipt or Welcome.
     owner_tenure: owner_tenure::OwnerTenure,
+    group_policy: Option<GroupPolicy>,
+    group_policy_active: bool,
+    group_policy_revision: u64,
+    /// Only an explicit post-save publication or restoring a sealed pin arms retries.
+    group_policy_publish_ready: bool,
     device: MlsDevice,
     rng: R,
     clock: Arc<dyn Clock + Send>,
@@ -4402,6 +4431,10 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             epoch_service: epoch_service::EpochService::default(),
             routing_subscription_pending: None,
             owner_tenure: owner_tenure::OwnerTenure::new(&group),
+            group_policy: None,
+            group_policy_active: false,
+            group_policy_revision: 0,
+            group_policy_publish_ready: false,
             group,
             device,
             rng,
@@ -4594,6 +4627,8 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         // after a crash or A -> B -> A. Unknown is encoded explicitly on every new snapshot.
         e.put_bytes(&self.owner_tenure.encode(&self.group)?)
             .map_err(|_| oversize())?;
+        e.put_bytes(&group_policy::encode_pin(self.group_policy.as_ref()))
+            .map_err(|_| oversize())?;
         Ok(Zeroizing::new(e.finish()))
     }
 
@@ -4700,6 +4735,11 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         } else {
             Some(d.get_bytes().map_err(|_| bad())?)
         };
+        let policy = if d.is_empty() {
+            None
+        } else {
+            group_policy::decode_pin(d.get_bytes().map_err(|_| bad())?)?
+        };
         d.finish().map_err(|_| bad())?;
 
         // Reconstruct the MLS device + group, then build a base synchronizer and override its
@@ -4708,6 +4748,10 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         // file-wrap key is persisted separately (appended last), so the routing struct here
         // carries `None` for it.
         let (device, group) = restore_server(&mls)?;
+        if let Some(policy) = &policy {
+            group_policy::require_supported(policy)?;
+            policy.verify_pin(&group)?;
+        }
         let tenure = match tenure_bytes {
             Some(bytes) => owner_tenure::OwnerTenure::decode(bytes, &group)?,
             None => owner_tenure::OwnerTenure::unknown(&group),
@@ -4722,8 +4766,10 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
                 .map(|(l, s)| (l, Zeroizing::new(s)))
                 .collect(),
             file_wrap_key: None,
+            policy,
             connection_handoff: PreOwnerConnectionHandoff::default(),
         });
+        this.group_policy_publish_ready = this.group_policy.is_some();
         this.file_wrap_key = Zeroizing::new(file_wrap_key);
         this.ledger = InviteLedger::restore(&ledger_bytes).map_err(|_| SyncError::Malformed)?;
         for snap in &doc_snaps {
@@ -5031,9 +5077,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         expires_at_ms: u64,
         bootstrap: Vec<String>,
     ) -> Result<InviteToken, SyncError> {
-        Ok(self
-            .group
-            .mint_invite(&self.device, invite_nonce, expires_at_ms, bootstrap)?)
+        self.mint_invite_with_rendezvous(invite_nonce, expires_at_ms, bootstrap, Vec::new())
     }
 
     /// Mint an invite that also carries zero-knowledge **rendezvous** infra addresses
@@ -5047,13 +5091,18 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         bootstrap: Vec<String>,
         rendezvous: Vec<String>,
     ) -> Result<InviteToken, SyncError> {
-        Ok(self.group.mint_invite_with_rendezvous(
+        self.policy_admission_ready()?;
+        let mut invite = self.group.mint_invite_with_rendezvous(
             &self.device,
             invite_nonce,
             expires_at_ms,
             bootstrap,
             rendezvous,
-        )?)
+        )?;
+        if let Some(policy) = self.admission_policy()? {
+            invite.bind_policy(&self.device, policy)?;
+        }
+        Ok(invite)
     }
 
     /// Open a document: create it locally (if absent) and subscribe to its topic.
@@ -10461,6 +10510,13 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     /// the joiner then keeps its local `L = 0` (correct only for the founder).
     /// Call at the post-merge epoch the joiner's Welcome lands them on.
     fn seal_routing_state(&mut self) -> Vec<u8> {
+        let policy = match self.admission_policy() {
+            Ok(policy) => policy,
+            Err(error) => {
+                tracing::warn!(%error, "cannot attest group policy for admission");
+                return Vec::new();
+            }
+        };
         let key = match self.group.routing_transfer_key(&self.device) {
             Ok(k) => k,
             Err(e) => {
@@ -10477,6 +10533,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             self.routing_label,
             &secrets,
             &self.file_wrap_key,
+            policy.as_ref(),
         ));
         match seal(&key, &plaintext, &mut self.rng) {
             Ok(blob) => encode_sealed(&blob),
@@ -10491,6 +10548,11 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     /// `L = 0`), so this joiner derives the same topics and namespaces as the group.
     /// A no-op for an empty transfer (keeps the local baseline).
     fn adopt_routing_state(&mut self, routing: RoutingState) {
+        if self.group_policy != routing.policy {
+            self.group_policy_revision = self.group_policy_revision.wrapping_add(1);
+        }
+        self.group_policy = routing.policy;
+        self.group_policy_active = self.group_policy.is_some();
         // Adopt the transferred file-wrap key first (Phase 9h); independent of the routing
         // secrets, so the joiner shares the group's file key even at the L=0 baseline.
         if let Some(k) = routing.file_wrap_key {
@@ -11042,6 +11104,10 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             Some((&CTRL_DEVICE_ADD, rest)) => {
                 // `from` is the relaying member's peer; where the owner returns the result.
                 self.on_device_add_request(from, rest);
+                return;
+            }
+            Some((&CTRL_GROUP_POLICY, rest)) => {
+                self.on_group_policy(rest);
                 return;
             }
             _ => {
@@ -12909,6 +12975,9 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             tracing::warn!("join request with an inauthentic invite");
             return Err(JoinOutcome::BadSignature);
         }
+        if !self.invite_policy_matches(&invite) {
+            return Err(JoinOutcome::NotAuthorized);
+        }
         let kp_hash = *Cid::of(&kp_bytes).as_bytes();
         if let Some(cached) = self.direct_admit_results.get(&invite.invite_nonce) {
             if cached.kp_hash != Some(kp_hash) {
@@ -12923,6 +12992,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             ));
             return Ok((JoinOutcome::Admitted, response));
         }
+        self.policy_admission_ready().map_err(|_| JoinOutcome::NotAuthorized)?;
         let now = self.clock.now_ms();
         // The ledger's own reason is kept rather than flattened: "already used" and "expired"
         // lead the operator to completely different actions (mint a second invite vs mint a
@@ -13054,6 +13124,10 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         kp_bytes: &[u8],
         now: u64,
     ) -> Option<(Vec<u8>, Vec<u8>, [u8; 64])> {
+        self.policy_admission_ready().ok()?;
+        if !self.invite_policy_matches(invite) {
+            return None;
+        }
         let key_package = self.device.parse_key_package(kp_bytes).ok()?;
         let base_authenticator = self.group.epoch_authenticator_id();
         self.snapshot_epoch_keys();
@@ -13230,6 +13304,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             || !self.inviter_is_authorized(&invite.inviter_device_id)
             || invite.group_id != self.group.group_id()
             || !invite.verify_self()
+            || !self.invite_policy_matches(&invite)
         {
             self.stats.requests_rejected += 1;
             return;
@@ -13612,6 +13687,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         cert: &DeviceCertificate,
         kp_bytes: &[u8],
     ) -> Option<(Vec<u8>, Vec<u8>, [u8; 64])> {
+        self.policy_admission_ready().ok()?;
         let key_package = self.device.parse_key_package(kp_bytes).ok()?;
         let bind = device_bind_nonce(cert);
         // Re-check the leaf binding at the moment of the Add (a queued request may have waited).
@@ -14551,6 +14627,15 @@ fn finish_join(
     // so we can open it and adopt the group's routing label/secrets. A present but
     // unopenable transfer (signature already verified) is a hard error.
     let routing = open_routing_transfer(&group, device, sealed_routing)?;
+    match (&invite.policy, &routing.policy) {
+        (None, None) => {}
+        (Some(expected), Some(actual)) if expected.digest() == actual.digest() => {
+            // The current owner's signed transfer attests the immutable body even if the
+            // invite was minted before an ownership transfer. Its issuer alone is insufficient.
+            expected.verify_pin(&group)?;
+        }
+        _ => return Err(SyncError::JoinRejected),
+    }
     tracing::info!(epoch = group.epoch(), "joined server via invite");
     Ok((group, routing))
 }
@@ -16102,8 +16187,9 @@ mod tests {
         // 9h: the transfer plaintext bundles the routing state AND the group file-wrap key.
         let secrets = vec![(0u64, [3u8; 32])];
         let fwk = [7u8; 32];
-        let (label, got_secrets, got_fwk) =
-            decode_join_transfer(&encode_join_transfer(5, &secrets, &fwk)).unwrap();
+        let (label, got_secrets, got_fwk, policy) =
+            decode_join_transfer(&encode_join_transfer(5, &secrets, &fwk, None)).unwrap();
+        assert!(policy.is_none());
         assert_eq!(label, 5);
         assert_eq!(got_secrets, secrets);
         assert_eq!(got_fwk, fwk);
@@ -16155,6 +16241,7 @@ mod tests {
             label: 0,
             secrets: Vec::new(), // even with no routing secrets, the key is installed
             file_wrap_key: Some(founder_key),
+            policy: None,
             connection_handoff: PreOwnerConnectionHandoff::default(),
         });
         assert_eq!(

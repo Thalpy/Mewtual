@@ -30,6 +30,7 @@ pub use catcoms_crypto::DeviceId;
 use catcoms_crypto::verify_with_public_bytes;
 pub use catcoms_crypto::{DeviceCertificate, DeviceRevocation};
 use catcoms_mls::{InviteToken, MlsDevice, MlsError, ServerGroup};
+pub use catcoms_mls::GroupMode;
 use catcoms_rt::{
     Clock, CryptoRngCore, DiscoveredPeer, MeshTransport, PeerId, RequestCancellation,
 };
@@ -3566,8 +3567,10 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
     ) -> Result<Self, AppError> {
         let device_id = device.device_id();
         let group = ServerGroup::create(&device)?;
+        let mut sync = ChannelSync::new(transport, group, device, rng, clock);
+        sync.initialize_new_group_policy()?;
         Ok(Self {
-            sync: ChannelSync::new(transport, group, device, rng, clock),
+            sync,
             display_name: display_name.into(),
             device_id,
             own_message_changes: HashMap::new(),
@@ -3575,6 +3578,20 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
             delivery_snapshot_revision: 0,
             devices_sig: None,
         })
+    }
+
+    /// Authenticated immutable communication mode; old snapshots/invites remain unresolved.
+    pub fn group_mode(&self) -> GroupMode {
+        self.sync.group_mode()
+    }
+
+    /// Owner-authorized legacy migration. Persist the resulting snapshot before publication.
+    pub fn initialize_group_policy(&mut self, mode: GroupMode) -> Result<(), AppError> {
+        Ok(self.sync.initialize_group_policy(mode)?)
+    }
+
+    pub fn publish_group_policy(&mut self) -> Result<(), AppError> {
+        Ok(self.sync.publish_group_policy()?)
     }
 
     /// Join an existing server from a pasted invite (the caller must already be

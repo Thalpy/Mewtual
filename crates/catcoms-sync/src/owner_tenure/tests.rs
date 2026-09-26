@@ -27,9 +27,10 @@ async fn owner_tenure_founder_joiner_and_legacy_snapshot_have_distinct_evidence(
         let snap = node.snapshot().unwrap();
         let mut reopened = restore(&snap).unwrap();
         assert_eq!(reopened.observed_owner_tenure_start(), before);
-        // Remove only the new length-framed tail to produce the exact previous snapshot format.
+        // Remove the policy extension and tenure tail to produce the pre-tenure format.
+        let policy_tail = crate::group_policy::encode_pin(node.group_policy.as_ref()).len() + 4;
         let tail = node.owner_tenure.encode(&node.group).unwrap().len() + 4;
-        let legacy = &snap[..snap.len() - tail];
+        let legacy = &snap[..snap.len() - policy_tail - tail];
         let mut upgraded = restore(legacy).unwrap();
         assert_eq!(upgraded.observed_owner_tenure_start(), None);
         let saved = upgraded.snapshot().unwrap();
@@ -46,7 +47,8 @@ async fn owner_tenure_founder_joiner_and_legacy_snapshot_have_distinct_evidence(
 async fn owner_tenure_unknown_owner_stays_unknown_after_valid_same_owner_adds() {
     let (_, mut nodes, _) = build_members(1).await;
     let snap = nodes[0].snapshot().unwrap();
-    let tail = nodes[0].owner_tenure.encode(&nodes[0].group).unwrap().len() + 4;
+    let tail = nodes[0].owner_tenure.encode(&nodes[0].group).unwrap().len() + 4
+        + crate::group_policy::encode_pin(nodes[0].group_policy.as_ref()).len() + 4;
     let mut owner = restore(&snap[..snap.len() - tail]).unwrap();
     assert!(owner.is_designated_committer());
     assert_eq!(owner.observed_owner_tenure_start(), None);

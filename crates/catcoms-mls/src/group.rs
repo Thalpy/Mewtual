@@ -237,6 +237,7 @@ impl ServerGroup {
             expires_at_ms,
             bootstrap,
             rendezvous,
+            policy: None,
             signature,
         })
     }

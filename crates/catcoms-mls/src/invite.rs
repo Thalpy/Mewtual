@@ -19,6 +19,7 @@
 
 use std::collections::HashSet;
 
+use crate::{GroupPolicy, MlsDevice, MlsError};
 use catcoms_crypto::{verify_with_public_bytes, DeviceId};
 use catcoms_wire::{Decoder, Encoder};
 use openmls::prelude::*;
@@ -28,6 +29,7 @@ use thiserror::Error;
 // `rendezvous` vector: the signed payload shape changed, so a v1 token never verifies
 // against v2 and vice versa.
 const INVITE_DOMAIN: &str = "catcoms/invite/v2";
+const POLICY_INVITE_DOMAIN: &str = "catcoms/invite/v3";
 const MEMBERSHIP_DOMAIN: &str = "catcoms/membership/v1";
 /// Defensive cap on each of the two invite address vectors (bootstrap, rendezvous).
 const MAX_INVITE_ADDRS: u32 = 64;
@@ -144,6 +146,8 @@ pub struct InviteToken {
     /// (the distinct-PeerId check is misconfig defence, not anti-collusion). Validation
     /// (reject circuit, distinct PeerIds) lives in `catcoms-net` where multiaddrs parse.
     pub rendezvous: Vec<String>,
+    /// Authenticated immutable communication policy. Missing means unresolved legacy policy.
+    pub policy: Option<GroupPolicy>,
     /// Inviter's Ed25519 signature over the canonical unsigned encoding.
     pub signature: [u8; 64],
 }
@@ -158,8 +162,14 @@ fn write_unsigned(
     expires_at_ms: u64,
     bootstrap: &[String],
     rendezvous: &[String],
+    policy: Option<&GroupPolicy>,
 ) {
-    e.put_str(INVITE_DOMAIN).expect("label fits");
+    e.put_str(if policy.is_some() {
+        POLICY_INVITE_DOMAIN
+    } else {
+        INVITE_DOMAIN
+    })
+    .expect("label fits");
     e.put_bytes(group_id).expect("group id fits");
     e.put_bytes(inviter_device_id.as_bytes()).expect("32 fits");
     e.put_bytes(inviter_public_key).expect("pubkey fits");
@@ -174,6 +184,9 @@ fn write_unsigned(
     e.put_u32(rendezvous.len() as u32);
     for addr in rendezvous {
         e.put_str(addr).expect("addr fits");
+    }
+    if let Some(policy) = policy {
+        e.put_bytes(&policy.encode()).expect("policy fits");
     }
 }
 
@@ -199,6 +212,7 @@ impl InviteToken {
             expires_at_ms,
             bootstrap,
             rendezvous,
+            None,
         );
         e.finish()
     }
@@ -206,15 +220,7 @@ impl InviteToken {
     /// Verify the token signature under an externally-supplied inviter public key
     /// (e.g. one looked up from the group roster on the admitter side).
     pub fn verify(&self, inviter_public_key: &[u8]) -> bool {
-        let payload = Self::signing_payload(
-            &self.group_id,
-            &self.inviter_device_id,
-            &self.inviter_public_key,
-            &self.invite_nonce,
-            self.expires_at_ms,
-            &self.bootstrap,
-            &self.rendezvous,
-        );
+        let payload = self.unsigned_bytes();
         verify_with_public_bytes(inviter_public_key, &payload, &self.signature)
     }
 
@@ -225,7 +231,10 @@ impl InviteToken {
         if DeviceId::from_public_key_bytes(&self.inviter_public_key) != self.inviter_device_id {
             return false;
         }
-        self.verify(&self.inviter_public_key)
+        self.policy
+            .as_ref()
+            .is_none_or(|policy| policy.group_id() == self.group_id && policy.verify_self())
+            && self.verify(&self.inviter_public_key)
     }
 
     /// Verify a signature made by the inviter (the embedded public key) over
@@ -235,8 +244,7 @@ impl InviteToken {
         verify_with_public_bytes(&self.inviter_public_key, message, signature)
     }
 
-    /// Serialize the full token (including signature) for pasting/transport.
-    pub fn encode(&self) -> Vec<u8> {
+    fn unsigned_bytes(&self) -> Vec<u8> {
         let mut e = Encoder::new();
         write_unsigned(
             &mut e,
@@ -247,6 +255,43 @@ impl InviteToken {
             self.expires_at_ms,
             &self.bootstrap,
             &self.rendezvous,
+            self.policy.as_ref(),
+        );
+        e.finish()
+    }
+
+    /// Bind a policy into this inviter's signature. Governance is verified against MLS at join;
+    /// possession of an inviter key alone cannot authorize a policy body.
+    pub fn bind_policy(
+        &mut self,
+        inviter: &MlsDevice,
+        policy: GroupPolicy,
+    ) -> Result<(), MlsError> {
+        if inviter.device_id() != self.inviter_device_id
+            || policy.group_id() != self.group_id
+            || !policy.verify_self()
+        {
+            return Err(InviteError::BadSignature.into());
+        }
+        self.policy = Some(policy);
+        self.signature = inviter.sign_raw(&self.unsigned_bytes())?;
+        Ok(())
+    }
+
+    /// Serialize the full token (including signature) for pasting/transport.
+    pub fn encode(&self) -> Vec<u8> {
+        let mut e = Encoder::new();
+        // Use the same framing as unsigned_bytes without adding an outer length prefix.
+        write_unsigned(
+            &mut e,
+            &self.group_id,
+            &self.inviter_device_id,
+            &self.inviter_public_key,
+            &self.invite_nonce,
+            self.expires_at_ms,
+            &self.bootstrap,
+            &self.rendezvous,
+            self.policy.as_ref(),
         );
         e.put_bytes(&self.signature).expect("64 fits");
         e.finish()
@@ -256,7 +301,7 @@ impl InviteToken {
     pub fn decode(bytes: &[u8]) -> Result<Self, InviteError> {
         let mut d = Decoder::new(bytes);
         let domain = d.get_str().map_err(|_| InviteError::Malformed)?;
-        if domain != INVITE_DOMAIN {
+        if domain != INVITE_DOMAIN && domain != POLICY_INVITE_DOMAIN {
             return Err(InviteError::Malformed);
         }
         let group_id = d.get_bytes().map_err(|_| InviteError::Malformed)?.to_vec();
@@ -291,6 +336,14 @@ impl InviteToken {
         for _ in 0..rz_count {
             rendezvous.push(d.get_str().map_err(|_| InviteError::Malformed)?.to_string());
         }
+        let policy = if domain == POLICY_INVITE_DOMAIN {
+            Some(
+                GroupPolicy::decode(d.get_bytes().map_err(|_| InviteError::Malformed)?)
+                    .map_err(|_| InviteError::Malformed)?,
+            )
+        } else {
+            None
+        };
         let signature: [u8; 64] = d
             .get_bytes()
             .map_err(|_| InviteError::Malformed)?
@@ -305,6 +358,7 @@ impl InviteToken {
             expires_at_ms,
             bootstrap,
             rendezvous,
+            policy,
             signature,
         })
     }
@@ -463,6 +517,7 @@ mod tests {
             expires_at_ms: 1000,
             bootstrap: vec![],
             rendezvous: vec![],
+            policy: None,
             signature: [0u8; 64],
         };
         assert_eq!(ledger.check(&token, 500), Ok(()));

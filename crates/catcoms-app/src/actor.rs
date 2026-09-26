@@ -896,6 +896,16 @@ pub enum AppCommand {
     Snapshot {
         reply: oneshot::Sender<Result<Vec<u8>, String>>,
     },
+    GroupMode {
+        reply: oneshot::Sender<crate::GroupMode>,
+    },
+    InitializeGroupPolicy {
+        mode: crate::GroupMode,
+        reply: oneshot::Sender<Result<(), String>>,
+    },
+    PublishGroupPolicy {
+        reply: oneshot::Sender<Result<(), String>>,
+    },
     /// Drive one steady-state rendezvous-discovery pass (re-register + re-discover + dial newly
     /// found members), then one member-PEX pass and a refresh of the cross-session address cache.
     /// Fire-and-forget; sent periodically by the bridge's per-server timer (the real-time interval
@@ -1635,6 +1645,30 @@ impl ServerActor {
         }
         rx.await
             .unwrap_or_else(|_| Err("server actor dropped".into()))
+    }
+
+    /// Authenticated mode, queried from actor-owned state. A stopped actor is an error, not a
+    /// fabricated legacy mode.
+    pub async fn group_mode(&self) -> Result<crate::GroupMode, String> {
+        let (reply, rx) = oneshot::channel();
+        self.cmd_tx.send(AppCommand::GroupMode { reply }).await
+            .map_err(|_| "server actor stopped".to_string())?;
+        rx.await.map_err(|_| "server actor dropped".to_string())
+    }
+
+    /// Initialize a legacy group's owner-authorized pin. The caller must persist before publish.
+    pub async fn initialize_group_policy(&self, mode: crate::GroupMode) -> Result<(), String> {
+        let (reply, rx) = oneshot::channel();
+        self.cmd_tx.send(AppCommand::InitializeGroupPolicy { mode, reply }).await
+            .map_err(|_| "server actor stopped".to_string())?;
+        rx.await.map_err(|_| "server actor dropped".to_string())?
+    }
+
+    pub async fn publish_group_policy(&self) -> Result<(), String> {
+        let (reply, rx) = oneshot::channel();
+        self.cmd_tx.send(AppCommand::PublishGroupPolicy { reply }).await
+            .map_err(|_| "server actor stopped".to_string())?;
+        rx.await.map_err(|_| "server actor dropped".to_string())?
     }
 
     /// Mint a fresh single-use invite (owner/admin only) carrying `bootstrap`; returns the
@@ -4685,11 +4719,21 @@ where
                     Some(AppCommand::Snapshot { reply }) => {
                         let _ = reply.send(server.snapshot().map(|z| z.to_vec()).map_err(|e| e.to_string()));
                     }
+                    Some(AppCommand::GroupMode { reply }) => {
+                        let _ = reply.send(server.group_mode());
+                    }
+                    Some(AppCommand::InitializeGroupPolicy { mode, reply }) => {
+                        let _ = reply.send(server.initialize_group_policy(mode).map_err(|e| e.to_string()));
+                    }
+                    Some(AppCommand::PublishGroupPolicy { reply }) => {
+                        let _ = reply.send(server.publish_group_policy().map_err(|e| e.to_string()));
+                    }
                     // Steady-state rendezvous discovery: re-register + re-discover at the rendezvous,
                     // then drain the records that arrive in a bounded window and dial each
                     // (policy-gated). Driven by a periodic command from the bridge (the real-time
                     // timer lives there, off the deterministic-time seam). A no-op without rendezvous.
                     Some(AppCommand::DriveDiscovery) => {
+                        server.sync.republish_group_policy_if_ready();
                         // Re-evaluate the advisory eclipse verdict each pass; surface a change.
                         let caution = server.observe_eclipse();
                         if caution != last_eclipse {
@@ -5204,6 +5248,7 @@ async fn sync_channels<T, R>(
 /// per owner turn, with no body scan; replacing the map also forgets documents no longer held.
 struct SnapshotVersions {
     epoch: u64,
+    group_policy_revision: u64,
     documents: HashMap<(crate::DocType, u128), u64>,
 }
 
@@ -5211,13 +5256,16 @@ impl SnapshotVersions {
     fn capture<T: MeshTransport, R: CryptoRngCore>(server: &Server<T, R>) -> Self {
         Self {
             epoch: server.epoch(),
+            group_policy_revision: server.sync().group_policy_revision(),
             documents: server.sync().document_versions().collect(),
         }
     }
 
     fn update<T: MeshTransport, R: CryptoRngCore>(&mut self, server: &Server<T, R>) -> bool {
         let next = Self::capture(server);
-        let changed = self.epoch != next.epoch || self.documents != next.documents;
+        let changed = self.epoch != next.epoch
+            || self.group_policy_revision != next.group_policy_revision
+            || self.documents != next.documents;
         *self = next;
         changed
     }
@@ -5919,6 +5967,57 @@ mod tests {
             name,
         )
         .unwrap()
+    }
+
+    #[tokio::test]
+    async fn group_policy_migration_reaches_the_actor_and_requests_received_persistence() {
+        let hub = Hub::new();
+        let alice_peer = PeerId::from_u64(1);
+        let mut fresh = founder(&hub, alice_peer, "alice", 1);
+        // Exact pre-policy snapshot fixture: retain the preceding observed-tenure extension.
+        let policy_tail = fresh.sync().group_policy().unwrap().encode().len() + 9;
+        let snapshot = fresh.snapshot().unwrap();
+        let legacy = snapshot[..snapshot.len() - policy_tail].to_vec();
+        drop(fresh);
+        let mut alice = Server::restore(&legacy, hub.join(alice_peer),
+            ChaCha20Rng::seed_from_u64(1), Box::new(ManualClock::new(1_000)), "alice").unwrap();
+        alice.subscribe_control().await.unwrap();
+        let invite = alice.mint_invite([90; 16], 60_000, vec![]).unwrap();
+        assert!(invite.policy.is_none());
+        let (joined, _) = tokio::join!(
+            Server::join(hub.join(PeerId::from_u64(2)), MlsDevice::generate().unwrap(),
+                ChaCha20Rng::seed_from_u64(2), Box::new(ManualClock::new(1_000)),
+                "bob", alice_peer, &invite),
+            alice.sync_once(),
+        );
+        let mut bob = joined.unwrap();
+        bob.subscribe_control().await.unwrap();
+        let epoch = bob.epoch();
+        let (alice, _alice_events, alice_task) = spawn(alice);
+        let (bob, mut events, bob_task) = spawn(bob);
+        assert_eq!(bob.group_mode().await.unwrap(), crate::GroupMode::LegacyUnverified);
+        while events.try_recv().is_ok() {}
+        alice.initialize_group_policy(crate::GroupMode::PeerToPeer).await.unwrap();
+        let owner_snapshot = alice.snapshot().await.unwrap();
+        assert!(!owner_snapshot.is_empty());
+        alice.publish_group_policy().await.unwrap();
+        timeout(Duration::from_secs(3), async {
+            loop {
+                if matches!(events.recv().await.unwrap().event, AppEvent::SnapshotNeeded)
+                    && bob.group_mode().await.unwrap() == crate::GroupMode::PeerToPeer {
+                    break;
+                }
+            }
+        }).await.expect("received policy must request persistence without a rendered change");
+        let saved = bob.snapshot().await.unwrap();
+        let restored = Server::restore(&saved, Hub::new().join(PeerId::from_u64(3)),
+            ChaCha20Rng::seed_from_u64(3), Box::new(ManualClock::new(1_000)), "bob").unwrap();
+        assert_eq!(restored.group_mode(), crate::GroupMode::PeerToPeer);
+        assert_eq!(restored.epoch(), epoch, "policy migration did not fake an MLS transition");
+        alice.shutdown().await;
+        bob.shutdown().await;
+        alice_task.await.unwrap();
+        bob_task.await.unwrap();
     }
 
     #[tokio::test]
