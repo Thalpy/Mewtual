@@ -557,6 +557,9 @@ pub enum AppCommand {
     MemberMeshAllowed {
         reply: oneshot::Sender<bool>,
     },
+    MemberFinalizationCandidates {
+        reply: oneshot::Sender<Vec<PeerId>>,
+    },
     FinalizeMemberConnection {
         peer: PeerId,
         reply: oneshot::Sender<Result<bool, String>>,
@@ -3434,6 +3437,13 @@ impl ServerActor {
         result.await.map_err(|_| "server stopped".to_string())
     }
 
+    pub async fn member_finalization_candidates(&self) -> Result<Vec<PeerId>, String> {
+        let (reply, result) = oneshot::channel();
+        self.cmd_tx.send(AppCommand::MemberFinalizationCandidates { reply }).await
+            .map_err(|_| "server stopped".to_string())?;
+        result.await.map_err(|_| "server stopped".to_string())
+    }
+
     pub async fn finalize_member_connection(&self, peer: PeerId) -> Result<bool, String> {
         let (reply, result) = oneshot::channel();
         self.cmd_tx
@@ -4362,6 +4372,9 @@ where
                     }
                     Some(AppCommand::MemberMeshAllowed { reply }) => {
                         let _ = reply.send(server.member_mesh_allowed());
+                    }
+                    Some(AppCommand::MemberFinalizationCandidates { reply }) => {
+                        let _ = reply.send(server.member_finalization_candidates());
                     }
                     Some(AppCommand::FinalizeMemberConnection { peer, reply }) => {
                         let result = server.finalize_member_connection(peer).await.map_err(|e| e.to_string());
