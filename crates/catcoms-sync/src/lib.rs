@@ -12615,9 +12615,9 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
                 self.serve_commit_catchup(from, rest).unwrap_or_default()
             }
             Some((&KIND_PEX, rest)) => self.serve_pex(from, rest).unwrap_or_default(),
-            Some((&KIND_MEMBER_FINALIZE, rest)) => {
-                self.serve_member_finalization(from, rest).unwrap_or_default()
-            }
+            Some((&KIND_MEMBER_FINALIZE, rest)) => self
+                .serve_member_finalization(from, rest)
+                .unwrap_or_default(),
             Some((&KIND_SWITCHBOARD_OFFER, rest)) => {
                 self.serve_switchboard_offer(from, rest).unwrap_or_default()
             }
@@ -12998,8 +12998,10 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         if outcome == JoinOutcome::Admitted {
             if let Ok((_, key_package)) = decode_join_req(data) {
                 if let Ok(package) = self.device.parse_key_package(&key_package) {
-                    self.note_member_finalization_candidate(from,
-                        DeviceId::from_public_key_bytes(&key_package_signature_key(&package)));
+                    self.note_member_finalization_candidate(
+                        from,
+                        DeviceId::from_public_key_bytes(&key_package_signature_key(&package)),
+                    );
                 }
             }
         }
