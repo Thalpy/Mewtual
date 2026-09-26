@@ -332,4 +332,36 @@ mod tests {
             .serve_member_finalization(bob.local_peer(), &request[1..])
             .is_none());
     }
+
+    #[tokio::test]
+    async fn locally_removed_member_keeps_mode_but_loses_reconnect_and_serving_authority() {
+        let (mut alice, mut bob) = pair(true);
+        let alice_peer = alice.local_peer();
+        let alice_id = alice.device.device_id();
+        let bob_id = bob.device.device_id();
+        bob.ingest_peer_record(alice.self_record().unwrap().clone());
+        bob.promote_member_peer_bound(alice_peer, alice_id, true);
+        assert!(bob.policy_allows_member_mesh());
+        assert_eq!(bob.finalized_member_peers(), vec![alice_peer]);
+        alice.request_remove(&bob_id).await.unwrap();
+        let removed = alice.commit_log.back().unwrap();
+        let mut control = vec![CTRL_COMMIT];
+        control.extend_from_slice(&removed.encode());
+        bob.on_control(alice_peer, &control);
+        assert!(
+            !bob.group.is_active(),
+            "actual signed local removal reached MLS"
+        );
+        assert_eq!(
+            bob.group_mode(),
+            GroupMode::PeerToPeer,
+            "mode is historical policy, not current permission"
+        );
+        assert!(!bob.policy_allows_member_mesh());
+        assert!(!bob.policy_allows_service());
+        assert!(bob.finalized_member_peers().is_empty());
+        assert!(!bob.finalize_member_connection(alice_peer).await.unwrap());
+        assert_eq!(bob.dial_local_reconnect_routes().await, 0);
+        assert!(bob.serve_member_finalization(alice_peer, &[]).is_none());
+    }
 }

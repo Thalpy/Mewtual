@@ -12017,7 +12017,7 @@ where
     server.set_endpoint_dial_scheduler(state.endpoint_dials.clone());
     // A newer network record can outlive a failed/older core snapshot. Its enum is provenance,
     // never a substitute for the authenticated group policy pin inside that snapshot.
-    if reconnect_policy != ReconnectPolicy::MemberMesh || server.group_mode() == catcoms_app::GroupMode::PeerToPeer {
+    if reconnect_policy != ReconnectPolicy::MemberMesh || server.member_mesh_allowed() {
         server.set_local_reconnect_routes(reconnect_routes);
     }
     server

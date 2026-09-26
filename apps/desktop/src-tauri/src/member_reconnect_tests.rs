@@ -464,7 +464,9 @@ mod member_reconnect_regressions {
                         {
                             break;
                         }
-                        tokio::time::sleep(Duration::from_millis(10)).await;
+                        catcoms_rt::SystemClock
+                            .sleep(Duration::from_millis(10))
+                            .await;
                     }
                 })
                 .await
@@ -479,7 +481,9 @@ mod member_reconnect_regressions {
                     (restore(&a_state, false).await, b)
                 } else {
                     let a = restore(&a_state, false).await;
-                    tokio::time::sleep(Duration::from_millis(100)).await;
+                    catcoms_rt::SystemClock
+                        .sleep(Duration::from_millis(100))
+                        .await;
                     let b = restore(&b_state, true).await;
                     a.actor.drive_discovery().await.unwrap();
                     (a, b)
@@ -493,7 +497,9 @@ mod member_reconnect_regressions {
                         {
                             break;
                         }
-                        tokio::time::sleep(Duration::from_millis(20)).await;
+                        catcoms_rt::SystemClock
+                            .sleep(Duration::from_millis(20))
+                            .await;
                     }
                 })
                 .await
