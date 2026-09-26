@@ -3980,6 +3980,7 @@ pub struct ChannelSync<T: MeshTransport, R: CryptoRngCore> {
     group_policy_revision: u64,
     /// Only an explicit post-save publication or restoring a sealed pin arms retries.
     group_policy_publish_ready: bool,
+    group_policy_last_topic: Option<Topic>,
     device: MlsDevice,
     rng: R,
     clock: Arc<dyn Clock + Send>,
@@ -4443,6 +4444,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             group_policy_active: false,
             group_policy_revision: 0,
             group_policy_publish_ready: false,
+            group_policy_last_topic: None,
             group,
             device,
             rng,

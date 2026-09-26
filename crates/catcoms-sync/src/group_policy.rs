@@ -156,10 +156,19 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         let policy = self.admission_policy()?.ok_or(PolicyError::Invalid)?;
         let mut frame = vec![CTRL_GROUP_POLICY];
         frame.extend_from_slice(&policy.encode());
-        // Repeated publication retries replace the pending policy frame instead of growing it.
-        self.outbox
-            .retain(|(_, bytes)| bytes.first() != Some(&CTRL_GROUP_POLICY));
-        self.outbox.push((self.control_topic.clone(), frame));
+        // The outbox also carries document operations, whose first byte is not a control tag.
+        // Remove only our previous control-topic frame, including after that topic rotated out
+        // of the accepted window. One remembered topic suffices because we enqueue at most one.
+        let previous_topic = self.group_policy_last_topic.as_ref();
+        self.outbox.retain(|(topic, bytes)| {
+            !(Some(topic) == previous_topic && bytes.first() == Some(&CTRL_GROUP_POLICY))
+        });
+        // A policy retry must not evict locally accepted chat or bypass the shared queue bound.
+        // The armed discovery retry will submit it after the queue has room again.
+        if self.outbox.len() < self.config.max_outbox {
+            self.outbox.push((self.control_topic.clone(), frame));
+            self.group_policy_last_topic = Some(self.control_topic.clone());
+        }
         self.group_policy_publish_ready = true;
         self.group_policy_active = true;
         Ok(())

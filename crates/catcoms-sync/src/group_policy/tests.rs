@@ -266,3 +266,34 @@ fn group_policy_owner_transfer_preserves_pin_but_unprovable_admission_fails_befo
     assert_eq!(restored.epoch(), before);
     assert!(!restored.ledger.is_consumed(&invite.invite_nonce));
 }
+
+#[test]
+fn group_policy_retries_preserve_document_outbox_and_shared_capacity() {
+    let mut alice = owner();
+    alice
+        .initialize_group_policy(GroupMode::PeerToPeer)
+        .unwrap();
+    alice.config.max_outbox = 1;
+    let document_topic = Topic::new(b"document-op-topic".to_vec());
+    let document_bytes = vec![CTRL_GROUP_POLICY, 99, 100];
+    alice
+        .outbox
+        .push((document_topic.clone(), document_bytes.clone()));
+    alice.publish_group_policy().unwrap();
+    assert_eq!(
+        alice.outbox,
+        vec![(document_topic, document_bytes)],
+        "policy coalescing cannot interpret a document's first byte as a control tag"
+    );
+    assert!(alice.group_policy_publish_ready);
+    alice.outbox.clear();
+    alice.republish_group_policy_if_ready();
+    assert_eq!(alice.outbox.len(), 1);
+    // Even a topic beyond the grandfather window is removed by its exact remembered identity.
+    let old_topic = alice.control_topic.clone();
+    alice.control_topic = Topic::new(b"rotated-control-topic".to_vec());
+    alice.control_topics.remove(&old_topic);
+    alice.republish_group_policy_if_ready();
+    assert_eq!(alice.outbox.len(), 1);
+    assert_eq!(alice.outbox[0].0, alice.control_topic);
+}
