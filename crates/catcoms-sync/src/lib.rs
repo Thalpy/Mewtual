@@ -64,6 +64,8 @@ pub mod checkpoint_exchange;
 pub mod epoch_service;
 mod owner_tenure;
 pub mod receipt_head;
+#[cfg(test)]
+mod reconciliation_tests;
 pub mod registry_catchup;
 mod registry_ingress;
 mod registry_publication;
@@ -4052,6 +4054,10 @@ pub struct ChannelSync<T: MeshTransport, R: CryptoRngCore> {
     member_route_revision: u64,
     /// Recovery work to perform on the next async drain.
     catchup_queue: Vec<CatchupTask>,
+    /// Periodic neighbour reconciliation is paced and rotates through open documents when the
+    /// bounded catch-up queue cannot hold them all. Neither field carries protocol authority.
+    reconciliation_next_ms: u64,
+    reconciliation_cursor: usize,
     /// Whether this process still owes its restored documents one whole-node catch-up sweep.
     ///
     /// Set by [`ChannelSync::restore`] when a snapshot brought documents back, and cleared by the
@@ -4422,6 +4428,8 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             manual_redial_last_ms: None,
             member_route_revision: 0,
             catchup_queue: Vec::new(),
+            reconciliation_next_ms: 0,
+            reconciliation_cursor: 0,
             first_proof_sweep_owed: false,
             delivery_receipt_outbox: VecDeque::new(),
             delivery_receipt_targets: VecDeque::new(),
@@ -5162,6 +5170,76 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         );
     }
 
+    /// Revisit completed neighbour exchanges even when no socket or local document changed.
+    /// A neighbour can acquire history from another member after its previous empty answer;
+    /// that answer is not a permanent completeness certificate. Each member runs this pass,
+    /// allowing both directions to converge through retained, originally signed operations.
+    ///
+    /// Only live, current, endpoint-bound members justify this background sweep. Existing work,
+    /// source cooldowns, paging cursors and continuation obligations are left intact. Repeated
+    /// local wakeups are coalesced, and a rotating cursor shares the existing queue capacity.
+    pub fn schedule_reconciliation(&mut self) -> usize {
+        let now = self.clock.monotonic_ms();
+        if now < self.reconciliation_next_ms
+            || !self.member_peers.iter().any(|proof| {
+                proof.bound
+                    && self.group.contains_device(&proof.device)
+                    && self.peer_is_connected(proof.peer)
+            })
+        {
+            return 0;
+        }
+        self.reconciliation_next_ms = now.saturating_add(CATCHUP_PEER_COOLDOWN_MS);
+        let mut docs: Vec<_> = self.docs.keys().copied().collect();
+        docs.sort_unstable_by_key(|(kind, id)| (*kind as u8, *id));
+        let mut queued = 0;
+        for _ in 0..docs.len() {
+            self.reconciliation_cursor %= docs.len();
+            let (doc_type, doc_id) = docs[self.reconciliation_cursor];
+            let task = CatchupTask::Doc { doc_type, doc_id };
+            let already_queued = self.catchup_queue.contains(&task);
+            if !already_queued && self.catchup_queue.len() >= self.config.max_catchup_queue {
+                break;
+            }
+            self.reconciliation_cursor += 1;
+            if self
+                .catchup_inflight
+                .is_some_and(|(pending, _)| pending == task)
+                || (already_queued
+                    && (self.unchecked_source_exists(doc_type, doc_id)
+                        || self.catchup_continuation_source(doc_type, doc_id).is_some()))
+            {
+                continue;
+            }
+            self.clear_sources_checked(doc_type, doc_id);
+            self.enqueue_doc_catchup(doc_type, doc_id);
+            queued += usize::from(!already_queued);
+        }
+        queued
+    }
+
+    /// Wake a quiet owner when a queued document has an eligible source again. Checked sources
+    /// and globally failed sources cannot make progress on this deadline, so do not spin on
+    /// their expired cooldown entries. A zero delay covers expiry between the drain and here.
+    fn next_catchup_retry_delay(&self) -> Option<u64> {
+        let now = self.clock.monotonic_ms();
+        self.catchup_cooldowns
+            .iter()
+            .filter(|((doc_type, doc_id, peer), _)| {
+                self.catchup_queue.contains(&CatchupTask::Doc {
+                    doc_type: *doc_type,
+                    doc_id: *doc_id,
+                }) && self.connected_peers.contains(peer)
+                    && self.peer_is_connected(*peer)
+                    && !self.failed_catchup_peers.contains(peer)
+                    && (self.known_peers.contains(peer)
+                        || self.member_peers.iter().any(|proof| proof.peer == *peer))
+                    && !self.sources_checked(*doc_type, *doc_id).contains(peer)
+            })
+            .map(|(_, until)| until.saturating_sub(now))
+            .min()
+    }
+
     fn touch_member_routes(&mut self) {
         self.member_route_revision = self.member_route_revision.wrapping_add(1);
     }
@@ -5498,7 +5576,17 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             return Ok(true);
         }
 
-        let event = self.transport.next_event().await;
+        let event = if let Some(delay_ms) = self.next_catchup_retry_delay() {
+            let next_event = self.transport.next_event();
+            let retry = self.clock.sleep(std::time::Duration::from_millis(delay_ms));
+            futures::pin_mut!(next_event, retry);
+            match futures::future::select(next_event, retry).await {
+                futures::future::Either::Left((event, _)) => event,
+                futures::future::Either::Right(((), _)) => return Ok(true),
+            }
+        } else {
+            self.transport.next_event().await
+        };
         match event {
             None => Ok(false),
             Some(TransportEvent::Gossip { topic, from, data }) => {
@@ -5940,10 +6028,15 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
                 self.catchup_cooldowns.clear();
             }
         }
+        // Reciprocal requests can time out together because each sync owner was waiting rather
+        // than serving. Give opposite directions different retry times so the earlier requester
+        // finds the other owner listening. Preserve the full minimum backoff on both sides.
+        let reciprocal_stagger_ms = if self.local_peer() < peer { 1_000 } else { 0 };
         let until = self
             .clock
             .monotonic_ms()
-            .saturating_add(CATCHUP_PEER_COOLDOWN_MS);
+            .saturating_add(CATCHUP_PEER_COOLDOWN_MS)
+            .saturating_add(reciprocal_stagger_ms);
         self.catchup_cooldowns
             .insert((doc_type, doc_id, peer), until);
     }
@@ -6182,7 +6275,15 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         let eligible = |p: &PeerId| {
             !self.failed_catchup_peers.contains(p) && Some(*p) != avoid && !cooling.contains(p)
         };
-        let live = |p: &PeerId| eligible(p) && self.connected_peers.contains(p);
+        // The transport publishes its snapshot before the ordered disconnect event reaches us.
+        // A stale event-table entry must not outrank a currently reachable alternative, or an
+        // expired retry timer can keep waking work that always defers on the departed peer.
+        let current = self.transport.connection_snapshot();
+        let live = |p: &PeerId| {
+            eligible(p)
+                && self.connected_peers.contains(p)
+                && current.iter().any(|row| row.peer == *p)
+        };
         let mut proven = self.member_peers.iter().rev().map(|proof| proof.peer);
         proven
             .clone()
@@ -8787,11 +8888,31 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     /// by [`Self::ingest_peer_record`]. Returns the number of *newly-known* members
     /// learned. A non-member / unsigned / replayed response yields `0`.
     pub async fn request_pex(&mut self, peer: PeerId) -> Result<usize, SyncError> {
+        self.request_pex_with_route_policy(peer, false).await
+    }
+
+    /// Exchange signed member records over an existing connection without consulting the
+    /// transport's recent-peer redial cache. Admission callbacks and helpers grant bounded
+    /// socket authority, so their eager post-admission PEX must fail if that connection ends.
+    pub async fn request_pex_connected(&mut self, peer: PeerId) -> Result<usize, SyncError> {
+        self.request_pex_with_route_policy(peer, true).await
+    }
+
+    async fn request_pex_with_route_policy(
+        &mut self,
+        peer: PeerId,
+        connected_only: bool,
+    ) -> Result<usize, SyncError> {
         let (req, req_auth) = self.build_authed_request(KIND_PEX, &[])?;
-        let resp = self
-            .transport
-            .request(peer, ProtocolId(RR_PROTOCOL), Bytes::from(req))
-            .await?;
+        let resp = if connected_only {
+            self.transport
+                .request_connected(peer, ProtocolId(RR_PROTOCOL), Bytes::from(req))
+                .await?
+        } else {
+            self.transport
+                .request(peer, ProtocolId(RR_PROTOCOL), Bytes::from(req))
+                .await?
+        };
         if resp.is_empty() {
             return Ok(0);
         }
@@ -11864,6 +11985,14 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     /// Read a document's materialized state.
     pub fn doc(&self, doc_type: DocType, doc_id: u128) -> Option<&EncryptedDoc> {
         self.docs.get(&(doc_type, doc_id))
+    }
+
+    /// Raw versions of every open legacy document, including changes invisible to rendered
+    /// projections. Reading counts does not serialize documents or inspect message bodies.
+    pub fn document_versions(&self) -> impl Iterator<Item = ((DocType, u128), u64)> + '_ {
+        self.docs
+            .iter()
+            .map(|(key, doc)| (*key, doc.op_count() as u64))
     }
 
     /// The ids of every open chat-channel document (excludes profile/roles/status/etc.); lets the
@@ -21875,6 +22004,44 @@ mod tests {
         // Addressing a member we hold no record for is a no-op (not delivered).
         let stranger = roles::fingerprint(&DeviceId::from_public_key_bytes(&[9u8; 32]));
         assert!(!alice.send_dm_invite(&stranger, &invite).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn connected_admission_pex_cannot_fall_back_to_an_ordinary_request() {
+        let hub = Hub::new();
+        let local = PeerId::from_u64(71);
+        let remote = PeerId::from_u64(72);
+        let remote_transport = hub.join(remote);
+        let device = MlsDevice::generate().unwrap();
+        let group = ServerGroup::create(&device).unwrap();
+        // This transport supports ordinary requests through its inner hub, but does not claim
+        // a currently connected route. Its connected-only default must fail closed, even when
+        // an ordinary request could reach the target (as a recent-address redial could).
+        let mut node = ChannelSync::new(
+            RecordingNet::new(hub.join(local)),
+            group,
+            device,
+            ChaCha20Rng::seed_from_u64(71),
+            Box::new(ManualClock::new(1_000)),
+        );
+        tokio::select! {
+            result = node.request_pex_connected(remote) => {
+                assert!(matches!(result, Err(SyncError::Transport(TransportError::Unreachable(peer))) if peer == remote));
+            }
+            _ = remote_transport.next_event() => panic!("connected-only PEX submitted an ordinary request"),
+        }
+        assert!(node.transport.dialed.lock().unwrap().is_empty());
+        let (ordinary, ()) = tokio::join!(node.request_pex(remote), async {
+            match remote_transport.next_event().await {
+                Some(TransportEvent::Request { responder, .. }) => responder.respond(Bytes::new()),
+                event => panic!("expected the ordinary request, got {event:?}"),
+            }
+        });
+        assert_eq!(
+            ordinary.unwrap(),
+            0,
+            "the ordinary request path really is usable"
+        );
     }
 
     #[tokio::test]

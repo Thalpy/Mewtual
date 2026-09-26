@@ -69,7 +69,11 @@ an append-only `Vec<SignedOp>` of the inner-signed changes that built it
 **The acceptance point is the local edit, not the broadcast.** This is stated explicitly in
 `post`'s own comment, immediately above its signature. Everything that can
 legitimately refuse a write (unopened document, missing routing secret, seal or Automerge failure)
-happens before the op exists; past that the message is real, durable and servable.
+happens before the op exists; past that the message is accepted in memory and servable. Local
+disk durability is a separate boundary: the desktop send result reports `durable` only after a
+covering snapshot write succeeds. A failed write returns an accepted `pending` outcome, retains
+the dirty snapshot ticket, and retries through the existing discovery worker. Neither that
+failure nor a later UI refresh failure should invite authoring the same message again.
 
 **There is no application-level resend.** A message is authored exactly once. It is not re-sent on
 timeout, so there is no duplicate-message hazard from retries, and no `client_message_id`
@@ -105,6 +109,20 @@ All three converge on
 - and pushes the op into `self.log` regardless of who authored it.
 
 That last point is the property the whole micelle story rests on. See section 4.
+
+Received history also needs a local snapshot before it survives a restart. At each actor owner
+turn, an independent `SnapshotVersions` tracker compares the current open-document identities and
+operation counts plus the MLS epoch. It emits native-only `SnapshotNeeded` even when a valid
+signed operation leaves displayed rows unchanged or membership changes leave the same roster
+count. The tracker replaces its map, costs O(open documents), and does not serialize message bodies.
+
+The native event consumer marks the exact server incarnation dirty before the UI lock gate and
+wakes a separate, coalescing persistence worker. That worker requests an initial save and batches
+later wakes in fixed 250-ms windows using the same snapshot tickets/write locks as local sends.
+It can write to the mounted encrypted store while the UI is locked. Failures stay dirty for a
+later wake or discovery retry. The consumer never waits on the actor for snapshot I/O, avoiding a
+cycle with the actor's bounded event channel. A marker is not a completed-save acknowledgement;
+received work can still be lost if the actor or process stops before a covering write completes.
 
 ---
 
@@ -214,7 +232,8 @@ every earlier answer described a state this node has now passed.
 
 Abuse bounds: a peer claiming `MORE` while moving the frontier nowhere is tolerated for
 `MAX_NONPROGRESSING_CATCHUP_ROUNDS` (8) rounds and then deprioritised; a source that fails a
-document is cooled for 30s for that document only; a `MORE` claim can only be discharged by its
+document is cooled for at least 30s for that document only (opposite request directions use
+30s/31s to break simultaneous timeout retries); a `MORE` claim can only be discharged by its
 claimant or by real progress, so one member cannot end another's continuation by answering.
 
 ### 4.4 What triggers a sweep
@@ -231,6 +250,17 @@ claimant or by real progress, so one member cannot end another's continuation by
   up ([actor.rs:5056-5070](../crates/catcoms-app/src/actor.rs#L5056-L5070)).
 - **The UI opens a channel.** `request_catchup_best`, which queues on failure rather than
   giving the channel one chance.
+- **The discovery cadence or successful unlock wakes the actor.** `schedule_reconciliation`
+  revisits completed exchanges with current connected members. A neighbor may have acquired
+  older history from another member while our local document and their socket stayed unchanged.
+  The sweep rotates through open documents within the existing queue limit and preserves active
+  transfers and source cooldowns. Cooling queued work can also wake on the injected clock;
+  another live message is not required to resume it. Rotation can admit further documents when
+  queue capacity returns; a queue entirely occupied by unresolved obligations still blocks
+  admission of additional documents. Opposite peer-order directions use 30- and 31-second minimum
+  retry delays to break simultaneous reciprocal timeout cycles. The source picker's live tier
+  also checks a current transport snapshot so a delayed disconnect event cannot make a departed
+  source outrank a live alternative. This does not detach outbound waits from the sole actor.
 
 ### 4.5 Coverage
 

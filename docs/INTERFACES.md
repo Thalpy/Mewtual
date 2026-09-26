@@ -4,6 +4,27 @@ A reference for the **seams** (dependency-injection hooks) and the key public AP
 Signatures are abbreviated; see the source for exact generics/lifetimes. This is the
 contract a new contributor (or agent) builds against.
 
+The native `send_message` command returns `{ accepted: true, persistence }` after actor acceptance.
+`persistence.status` is `durable`, `pending` (with `snapshot_failed`, `store_unavailable`, or
+`write_failed` reason), or `superseded` for a replaced server incarnation. Only `durable` confirms
+a covering local snapshot; none asserts remote custody or delivery. Pending writes keep their
+dirty ticket for the existing discovery worker to retry. The frontend must not resubmit an
+accepted message because persistence or a later view refresh failed. Successful warm unlock
+wakes that same coalescing worker; duplicate already-open unlocks do not create a new actor.
+
+`AppEvent::SnapshotNeeded` is a native persistence request with no renderer payload. An independent
+actor tracker compares the MLS epoch and current open legacy-document identities/operation counts
+at owner-turn boundaries, including after a partially applied sync tick is cancelled by a command.
+It costs O(open documents), reads no message bodies, and replaces the tracked map so removed ids
+are released. Reads and snapshot commands alone do not produce another invalidation.
+
+The native event consumer marks the exact server incarnation dirty before the UI lock gate and
+wakes one separate snapshot worker; it never awaits the actor for a snapshot itself. The worker
+requests an initial save, then coalesces subsequent wakes in fixed 250-ms windows through the same
+ticket/write locks. Discovery also retries failed writes. Neither a marker nor the batching window
+confirms a completed save: an abrupt stop before the write remains nondurable. This supplements
+existing persistence triggers and leaves Studio's separate persistence barriers intact.
+
 ---
 
 ## 1. The seams (the load-bearing hooks)
@@ -1322,6 +1343,7 @@ pub struct ChannelSync<T: MeshTransport, R: CryptoRngCore>;
   mint_invite(nonce:[u8;16], expires_at_ms, bootstrap) -> Result<InviteToken>;
   mint_invite_with_rendezvous(nonce, expires_at_ms, bootstrap, rendezvous:Vec<String>) -> Result<InviteToken>;  // 6e-3d-9
   async open_channel(DocType, doc_id) -> Result<()>;       // create doc + subscribe its ns_secret_L-keyed topic
+  document_versions() -> impl Iterator<Item = ((DocType, u128), u64)>; // raw open-document op counts for snapshot invalidation
   async post(DocType, doc_id, FnOnce(&mut AutoCommit)->Result<(),AutomergeError>) -> Result<()>;  // edit, then gossip; Ok once the EDIT applied
   async run_once() -> Result<bool>;                        // drain outbox + recovery + sub-resync; then handle ONE event
   async request_catchup(peer:PeerId, DocType, doc_id) -> Result<usize>;        // incremental where possible; see KIND_CATCHUP_SINCE
@@ -1332,6 +1354,8 @@ pub struct ChannelSync<T: MeshTransport, R: CryptoRngCore>;
   // 6e-3d-7 member PEX: members supply each other dialable, self-signed peer records.
   publish_self_record(addresses:Vec<String>, seq:u64) -> Result<()>;  ingest_peer_record(PeerDescriptor) -> bool;
   async request_pex(peer:PeerId) -> Result<usize>;  known_peer_records() -> Vec<PeerDescriptor>;  peer_record(&DeviceId) -> Option<&PeerDescriptor>;
+  async request_pex_connected(peer:PeerId) -> Result<usize>; // same verification; never implicitly redial a temporary admission contact
+  schedule_reconciliation() -> usize; // paced, bounded sweep of open docs; preserves pending cursors/cooldowns
   // Cross-session redial: newest roster-checked cached records are policy-ranked. Equal address
   // epochs retry with bounded monotonic exponential backoff+jitter; a newer signed seq or a live
   // connect/disconnect lifecycle resets the delay. Old public IPs are not unioned indefinitely.
@@ -2833,8 +2857,9 @@ them into `ChannelSync`, which reparses the canonical terminal peer binding, per
 TCP/QUIC (including private/loopback) but rejects DNS, relay, WebSocket, link-local, multicast,
 unspecified and IPv4 0/8 or 240/4 hosts, requires exactly one current roster record to claim that
 transport peer, skips live/self peers, and spends the same process-wide endpoint scheduler as other
-untrusted recovery dials. Direct admission makes one bounded best-effort PEX request before the
-first post-join snapshot so the inviter's signed descriptor normally accompanies the sealed socket.
+untrusted recovery dials. Every completed admission makes one bounded connected-only PEX request
+before the first post-join snapshot. Direct admission can thereby retain the descriptor needed
+by its sealed route; reply/helper admission learns records without acquiring route authority.
 On the discovery cadence, an authorized record may refresh only that inviter. `LegacyPending` may
 promote once only when the group has exactly one other member and exactly one unique live member
 claim; its captured route must additionally be private/loopback. A non-empty observation replaces
@@ -2949,7 +2974,11 @@ pub struct ChannelChange {          // WHAT moved, carried by every ChannelUpdat
     topic: bool,
     jukebox: bool,
 }
-pub enum AppEvent { ChannelUpdated { channel: u128, change: ChannelChange }, /* … */ }
+pub enum AppEvent {
+    SnapshotNeeded,                 // native snapshot request; no rendered change or completed-save claim
+    ChannelUpdated { channel: u128, change: ChannelChange },
+    /* … */
+}
 
 pub struct ChannelHead {            // one per directory channel; no message text
     channel: u128, count: u64, latest_ts: u64,

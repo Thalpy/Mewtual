@@ -134,8 +134,8 @@ struct ServerEntry {
 /// Persistence runs after every message, and a snapshot serializes the whole server, so a burst
 /// of sends used to perform one full write each: the cost of the Nth message in a session grew
 /// with N. These two counters collapse a burst into the writes actually needed without weakening
-/// the contract the callers rely on, which is that a command reports success only after a write
-/// that includes its own change reached the disk.
+/// the durability contract: only a completed write that includes a caller's change may be
+/// reported as durable. An accepted mutation can remain pending when persistence fails.
 #[derive(Default, Clone, Copy, Debug, PartialEq, Eq)]
 struct PersistCounters {
     /// Incremented by every request, before anything is written.
@@ -162,6 +162,25 @@ impl PersistCounters {
     fn completed_through(&mut self, covering: u64) {
         self.completed = self.completed.max(covering);
     }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+enum PersistOutcome {
+    Durable,
+    Pending {
+        reason: PersistFailure,
+    },
+    /// This operation belongs to a server incarnation that has left the registry.
+    Superseded,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+enum PersistFailure {
+    SnapshotFailed,
+    StoreUnavailable,
+    WriteFailed,
 }
 
 /// One decrypted chunk, kept so a player reading a track sequentially does not re-fetch and
@@ -237,7 +256,7 @@ fn media_cache_put(cache: &mut Vec<MediaChunk>, chunk: MediaChunk) {
     }
 }
 
-/// Process-wide, coalesced notification that the operating system's interfaces or routes changed.
+/// Process-wide, coalesced request to refresh connectivity after an interface change or unlock.
 /// A `watch` generation is deliberately used instead of a queued broadcast: every running server
 /// needs to refresh once, but retaining one item per noisy DHCP/route callback would be both
 /// wasteful and unbounded. A server created after a generation uses a fresh route sample during
@@ -350,6 +369,9 @@ struct AppState {
     /// This uses a synchronous mutex only to clone/notify a `watch::Sender`; no actor/store await
     /// may ever run in the event consumer, or the bounded actor event channel can deadlock.
     reconnect_capture_signals: StdMutex<HashMap<u64, watch::Sender<u64>>>,
+    /// One coalesced snapshot writer per installed server. The incarnation in each slot prevents
+    /// a departed actor's event/close from waking or removing the replacement's writer.
+    persistence_signals: StdMutex<HashMap<u64, (u64, watch::Sender<u64>)>>,
     /// The last few decrypted media chunks. Small and deliberately not an LRU: playback is
     /// sequential, so "the current chunk and the one before it" covers the straddle at a chunk
     /// boundary and a short seek backwards, which is all the locality there is to exploit.
@@ -1792,10 +1814,10 @@ const DISCOVERY_JITTER_MS: u64 = 15_000;
 /// a freshly-founded server looking dead for up to a minute. A few seconds is enough to stop the
 /// servers in one process from ticking in unison.
 const DISCOVERY_START_SPREAD_MS: u64 = 5_000;
-/// One best-effort PEX request immediately after direct admission. This is what persists the
-/// inviter's signed device-to-transport claim before an immediate close/reopen; failure does not
-/// roll back an otherwise valid MLS join.
-const DIRECT_JOIN_PEX_MS: u64 = 3_000;
+/// One best-effort PEX request after any completed admission, over its existing connection.
+/// Signed member records survive an immediate close/reopen; a discovery failure does not roll
+/// back an otherwise valid MLS join or grant authority to redial a temporary callback.
+const ADMISSION_PEX_MS: u64 = 3_000;
 /// Extra quiet window above the platform monitor's own short coalescing delay. DHCP, route and
 /// IPv6 privacy-address changes commonly arrive as a burst; publishing a signed peer-record epoch
 /// for every callback would waste sequence numbers and make members redial transient routes.
@@ -1939,7 +1961,7 @@ async fn refresh_interface_routes(app: &AppHandle, server: u64) -> bool {
 /// Spawn a per-server timer that periodically drives steady-state discovery, so the group
 /// re-finds itself after a restart and members keep exchanging peer records. Exits once the actor
 /// stops (`drive_discovery` errors).
-fn spawn_discovery_timer(app: AppHandle, server: u64, actor: ServerActor) {
+fn spawn_discovery_timer(app: AppHandle, server: u64, instance: u64, actor: ServerActor) {
     // Subscribe before spawning so a network change between server registration and the task's
     // first poll cannot be lost. The current startup sample is already authoritative; only future
     // generations wake this server early.
@@ -1973,6 +1995,9 @@ fn spawn_discovery_timer(app: AppHandle, server: u64, actor: ServerActor) {
             if actor.drive_discovery().await.is_err() {
                 break; // the actor stopped
             }
+            // Failed local saves remain dirty even on a quiet channel. Retry the existing ticket
+            // on this bounded cadence rather than creating one worker or ticket per failed send.
+            retry_pending_persistence(app.state::<AppState>().inner(), server, instance).await;
             // The pass just refreshed the member records; seal the cache on the same cadence, so
             // the next launch starts from the members this one actually proved.
             persist_address_cache(&app, server).await;
@@ -2037,6 +2062,129 @@ fn install_reconnect_capture_worker(app: &AppHandle, server: u64, actor: ServerA
     spawn_reconnect_capture_worker(app.clone(), server, actor, capture_wake);
 }
 
+/// Persist document/control changes, including those received with the UI locked. Presence,
+/// receipts and diagnostics alone do not change the saved chat history and must not cause writes.
+fn event_needs_snapshot(event: &AppEvent) -> bool {
+    matches!(
+        event,
+        AppEvent::SnapshotNeeded
+            | AppEvent::ChannelsUpdated
+            | AppEvent::ChannelUpdated { .. }
+            | AppEvent::MembersChanged { .. }
+            | AppEvent::ProfilesUpdated
+            | AppEvent::LiveryUpdated
+            | AppEvent::BadgesUpdated
+            | AppEvent::DevicesUpdated
+            | AppEvent::FilesUpdated
+            | AppEvent::StatusUpdated
+            | AppEvent::EventsUpdated
+            | AppEvent::WikiUpdated
+            | AppEvent::RolesUpdated
+            | AppEvent::ModerationUpdated
+    )
+}
+
+async fn mark_server_dirty(state: &AppState, server: u64, instance: u64) -> bool {
+    let mut servers = state.servers.lock().await;
+    let Some(entry) = servers
+        .get_mut(&server)
+        .filter(|entry| entry.instance == instance)
+    else {
+        return false;
+    };
+    entry.persist.request();
+    true
+}
+
+fn remove_persistence_signal(state: &AppState, server: u64, instance: u64) {
+    let mut signals = state
+        .persistence_signals
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    if signals
+        .get(&server)
+        .is_some_and(|(current, _)| *current == instance)
+    {
+        signals.remove(&server);
+    }
+}
+
+/// Never await an actor from its event consumer: its bounded event channel can be full while the
+/// snapshot command waits behind that send. Only bookkeeping and a coalesced wake belong here.
+async fn note_event_for_persistence(
+    state: &AppState,
+    server: u64,
+    instance: u64,
+    event: &AppEvent,
+) {
+    if matches!(event, AppEvent::Closed) {
+        remove_persistence_signal(state, server, instance);
+    } else if event_needs_snapshot(event) && mark_server_dirty(state, server, instance).await {
+        let signals = state
+            .persistence_signals
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        if let Some((current, signal)) = signals.get(&server) {
+            if *current == instance {
+                signal.send_modify(|generation| *generation = generation.wrapping_add(1));
+            }
+        }
+    }
+}
+
+async fn install_persistence_signal(
+    state: &AppState,
+    server: u64,
+    instance: u64,
+) -> Option<watch::Receiver<u64>> {
+    let servers = state.servers.lock().await;
+    if servers.get(&server).map(|entry| entry.instance) != Some(instance) {
+        return None;
+    }
+    let (signal, wake) = watch::channel(0u64);
+    state
+        .persistence_signals
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .insert(server, (instance, signal));
+    Some(wake)
+}
+
+async fn run_persistence_worker(
+    state: &AppState,
+    server: u64,
+    instance: u64,
+    mut wake: watch::Receiver<u64>,
+) {
+    // Cover changes observed before registration/worker installation. A new incarnation must not
+    // inherit a prior installation's completed counters, even when both use the same disk id.
+    if !mark_server_dirty(state, server, instance).await {
+        return;
+    }
+    retry_pending_persistence(state, server, instance).await;
+    while wake.changed().await.is_ok() {
+        // A fixed short window batches receive bursts without postponing writes indefinitely.
+        // Consume all current notifications before the snapshot, so a mutation during the write
+        // stays pending for the next pass. Failures remain dirty for the discovery cadence too.
+        SystemClock.sleep(Duration::from_millis(250)).await;
+        wake.borrow_and_update();
+        retry_pending_persistence(state, server, instance).await;
+    }
+}
+
+async fn install_persistence_worker(app: &AppHandle, server: u64, instance: u64) {
+    let Some(wake) =
+        install_persistence_signal(app.state::<AppState>().inner(), server, instance).await
+    else {
+        return;
+    };
+    let app = app.clone();
+    let task = tokio::spawn(async move {
+        run_persistence_worker(app.state::<AppState>().inner(), server, instance, wake).await;
+    });
+    supervise("server_persistence", server, task);
+}
+
 fn forward_events(
     app: AppHandle,
     server: u64,
@@ -2045,6 +2193,13 @@ fn forward_events(
 ) {
     let task = tokio::spawn(async move {
         while let Some(ev) = events.recv().await {
+            note_event_for_persistence(
+                app.state::<AppState>().inner(),
+                server,
+                instance,
+                &ev.event,
+            )
+            .await;
             // The actor carries the boundary token rather than the normalized diagnostic id: its
             // `tracing` stages and this returned event both cross through native normalization.
             // Keeping that rule uniform means an arbitrary runtime `trace` field can never bypass
@@ -2091,6 +2246,9 @@ fn forward_events(
                 continue;
             }
             match ev.event {
+                // Internal durability work was queued before the UI gate. It carries no product
+                // projection and must never become a plaintext webview notification.
+                AppEvent::SnapshotNeeded => {}
                 event @ (AppEvent::StudioUpdated { .. }
                 | AppEvent::StudioReceivePaused
                 | AppEvent::SettlementChanged { .. }) => {
@@ -2217,6 +2375,9 @@ fn forward_events(
                 }
             }
         }
+        // A panicked actor can close its event channel without sending Closed. Retire only this
+        // incarnation's idle writer; its dirty counters still describe any unsaved state honestly.
+        remove_persistence_signal(app.state::<AppState>().inner(), server, instance);
     });
     // The task whose unobserved death this whole registry was written for. It can stop while the
     // server actor is perfectly healthy: the protocol keeps running, membership keeps changing,
@@ -3157,7 +3318,6 @@ async fn register_server(
     };
     let instance = state.next_server_instance.fetch_add(1, Ordering::Relaxed);
     supervise("server_actor", id, task);
-    forward_events(app.clone(), id, instance, events);
     let timer_actor = actor.clone();
     state.servers.lock().await.insert(
         id,
@@ -3179,11 +3339,13 @@ async fn register_server(
             persist: PersistCounters::default(),
         },
     );
+    install_persistence_worker(app, id, instance).await;
+    forward_events(app.clone(), id, instance, events);
     install_reconnect_capture_worker(app, id, timer_actor.clone());
     studio::spawn_receiver(app.clone(), id, instance, timer_actor.clone());
     // Start only after the entry exists. A zero-millisecond randomized first tick must not race
     // the registry insertion and silently skip the initial interface/discovery refresh.
-    spawn_discovery_timer(app.clone(), id, timer_actor);
+    spawn_discovery_timer(app.clone(), id, instance, timer_actor);
     id
 }
 
@@ -3197,15 +3359,12 @@ async fn next_record_seq(state: &AppState, server: u64) -> Option<u64> {
     Some(e.record_seq)
 }
 
-/// Snapshot a running server through its actor and seal it to disk (best-effort: a missing
-/// store, a stopped actor, or an I/O error is logged, not fatal; the app keeps running).
+/// Snapshot a running server through its actor and seal it to disk. Failure leaves its ticket
+/// dirty and returns a non-durable outcome; an accepted mutation is not a rejected send.
 ///
-/// Concurrent requests are coalesced, and the contract every caller depends on is unchanged: this
-/// returns only after a write whose snapshot was taken **after** the caller's own change. A burst
-/// of sends therefore costs the writes it needs rather than one whole-server write each; what it
-/// must never become is a debounce, which would let a command report success before its message
-/// was durable.
-async fn persist_server(state: &AppState, server: u64) {
+/// Concurrent requests are coalesced. `Durable` requires a write whose snapshot was taken after
+/// the caller's change; pending callers can be covered by a later successful write.
+async fn persist_server(state: &AppState, server: u64) -> PersistOutcome {
     // The ticket is taken before anything is written, and the caller's change is already applied,
     // so any snapshot taken after this point contains it. The incarnation is captured with it:
     // everything below belongs to *this* installation of the id, and a persisted id is reused
@@ -3216,9 +3375,48 @@ async fn persist_server(state: &AppState, server: u64) {
             .get_mut(&server)
             .map(|entry| (entry.persist.request(), entry.instance, entry.actor.clone()))
     }) else {
-        return;
+        return PersistOutcome::Superseded;
     };
-    persist_captured(state, server, instance, ticket, actor).await;
+    persist_captured(state, server, instance, ticket, actor).await
+}
+
+/// A send captures its actor before acceptance. Never let a reused numeric id provide a new
+/// actor or persistence ticket for that old operation after its actor round trip completes.
+async fn persist_server_instance(
+    state: &AppState,
+    server: u64,
+    instance: u64,
+    actor: ServerActor,
+) -> PersistOutcome {
+    let ticket = {
+        let mut servers = state.servers.lock().await;
+        let Some(entry) = servers
+            .get_mut(&server)
+            .filter(|entry| entry.instance == instance)
+        else {
+            return PersistOutcome::Superseded;
+        };
+        entry.persist.request()
+    };
+    persist_captured(state, server, instance, ticket, actor).await
+}
+
+async fn retry_pending_persistence(
+    state: &AppState,
+    server: u64,
+    instance: u64,
+) -> Option<PersistOutcome> {
+    let (instance, ticket, actor) = {
+        let servers = state.servers.lock().await;
+        let entry = servers
+            .get(&server)
+            .filter(|entry| entry.instance == instance)?;
+        if !entry.persist.needs_write(entry.persist.requested) {
+            return None;
+        }
+        (entry.instance, entry.persist.requested, entry.actor.clone())
+    };
+    Some(persist_captured(state, server, instance, ticket, actor).await)
 }
 
 /// [`persist_server`] once its request has been recorded: everything from waiting for the id's
@@ -3231,7 +3429,7 @@ async fn persist_captured(
     instance: u64,
     ticket: u64,
     actor: ServerActor,
-) {
+) -> PersistOutcome {
     let lock = persist_lock_for(state, server);
     let _writing = lock.lock().await;
     // Two questions, now that this writer holds the id's lock. Is the entry still the one this
@@ -3239,15 +3437,15 @@ async fn persist_captured(
     let covering = {
         let servers = state.servers.lock().await;
         let Some(entry) = servers.get(&server) else {
-            return;
+            return PersistOutcome::Superseded;
         };
         if entry.instance != instance {
             // The server was replaced while this write waited. Its bytes describe a group that no
             // longer holds this slot, and its ticket says nothing about the new one's mutations.
-            return;
+            return PersistOutcome::Superseded;
         }
         if !entry.persist.needs_write(ticket) {
-            return;
+            return PersistOutcome::Durable;
         }
         entry.persist.requested
     };
@@ -3255,12 +3453,16 @@ async fn persist_captured(
         Ok(b) => b,
         Err(e) => {
             tracing::error!(target: "catcoms_app", server, error = %e, "VAULT.SNAPSHOT.FAILED");
-            return;
+            return PersistOutcome::Pending {
+                reason: PersistFailure::SnapshotFailed,
+            };
         }
     };
     let guard = state.store.lock().await;
     let Some(store) = guard.as_ref() else {
-        return; // no store mounted: nothing was written, so nothing may be retired
+        return PersistOutcome::Pending {
+            reason: PersistFailure::StoreUnavailable,
+        };
     };
     // Re-checked immediately before the write, because the snapshot above is an await: a
     // replacement installed during it must not have this incarnation's bytes written over it.
@@ -3269,12 +3471,14 @@ async fn persist_captured(
     // registry guard below is held.
     let servers = state.servers.lock().await;
     if servers.get(&server).map(|entry| entry.instance) != Some(instance) {
-        return;
+        return PersistOutcome::Superseded;
     }
     let mut rng = OsCryptoRng;
     if let Err(e) = store.save_server(server, &bytes, &mut rng) {
         tracing::error!(target: "catcoms_app", server, error = %e, "VAULT.SEAL_SERVER.FAILED");
-        return;
+        return PersistOutcome::Pending {
+            reason: PersistFailure::WriteFailed,
+        };
     }
     drop(servers);
     drop(guard);
@@ -3285,6 +3489,7 @@ async fn persist_captured(
             entry.persist.completed_through(covering);
         }
     }
+    PersistOutcome::Durable
 }
 
 /// The persistence lock for a numeric server id, created on first use. See
@@ -4970,6 +5175,64 @@ fn reconnect_policy_after_admission(
     }
 }
 
+#[derive(Debug, PartialEq, Eq)]
+enum AdmissionDiscoveryOutcome {
+    Completed { learned_records: usize },
+    Failed,
+    TimedOut,
+}
+
+/// Complete the common member-discovery boundary after an inviter-authenticated Welcome.
+/// This is independent of the path's socket authority: signed public member records may be
+/// learned through a reply/helper without turning its temporary endpoint into a reconnect hint.
+async fn finalize_admission_discovery<T: MeshTransport, R: catcoms_rt::CryptoRngCore>(
+    server: &mut Server<T, R>,
+    join_contact: PeerId,
+    local_addresses: Vec<String>,
+    record_seq: u64,
+    within: Duration,
+) -> Result<AdmissionDiscoveryOutcome, String> {
+    // Subscribe before the bounded exchange so a membership commit during discovery is queued
+    // for the actor. Publishing first also lets the peer fetch our signed record as soon as the
+    // actor starts serving; PEX itself remains a pull, not a reciprocal-record acknowledgement.
+    server
+        .subscribe_control()
+        .await
+        .map_err(|e| e.to_string())?;
+    if let Err(error) = server.publish_self_record(local_addresses, record_seq) {
+        tracing::warn!(
+            target: "catcoms_app",
+            phase = "join",
+            error = %error,
+            "DISCOVERY.PEER_RECORD.PUBLISH_FAILED"
+        );
+    }
+    Ok(
+        match timeout(within, server.request_pex_connected(join_contact)).await {
+            Ok(Ok(learned_records)) => {
+                tracing::debug!(
+                    target: "catcoms_app",
+                    learned_records,
+                    "DISCOVERY.ADMISSION_PEX.COMPLETED"
+                );
+                AdmissionDiscoveryOutcome::Completed { learned_records }
+            }
+            Ok(Err(error)) => {
+                tracing::warn!(
+                    target: "catcoms_app",
+                    error = %error,
+                    "DISCOVERY.ADMISSION_PEX.FAILED"
+                );
+                AdmissionDiscoveryOutcome::Failed
+            }
+            Err(_) => {
+                tracing::warn!(target: "catcoms_app", "DISCOVERY.ADMISSION_PEX.TIMED_OUT");
+                AdmissionDiscoveryOutcome::TimedOut
+            }
+        },
+    )
+}
+
 /// A transport identity is a safe durable member target only while exactly one roster entry
 /// claims it. A duplicate claim is ambiguous even if the live Noise connection itself is valid:
 /// retaining that socket as either member's route would turn the shared transport key into a
@@ -6292,56 +6555,29 @@ async fn join_server_inner(
             .map(|route| (PeerId::new(route.peer_id), route.address.clone()))
             .collect(),
     );
-    if direct_reconnect_authorized {
-        // The sealed socket is useful after a restart only when the group snapshot also contains
-        // the inviter's independently signed PeerDescriptor. Admission itself seeds merely an
-        // untrusted transport candidate, so fetch the ordinary request-bound PEX record now rather
-        // than hoping the periodic timer wins a race against the user closing the app.
-        match timeout(
-            Duration::from_millis(DIRECT_JOIN_PEX_MS),
-            server.request_pex(join_contact),
-        )
-        .await
-        {
-            Ok(Ok(_)) => {}
-            Ok(Err(error)) => tracing::warn!(
-                target: "catcoms_app",
-                error = %error,
-                "DISCOVERY.DIRECT_JOIN_PEX.FAILED"
-            ),
-            Err(_) => tracing::warn!(
-                target: "catcoms_app",
-                "DISCOVERY.DIRECT_JOIN_PEX.TIMED_OUT"
-            ),
-        }
-    }
+    // Every successful admission needs signed member records before its first snapshot. Reply
+    // and helper paths have the same membership need, independently of their narrower socket
+    // authority. Never let this best-effort exchange reopen a contact that has disconnected.
+    finalize_admission_discovery(
+        &mut server,
+        join_contact,
+        joiner_addrs.clone(),
+        net.record_seq,
+        Duration::from_millis(ADMISSION_PEX_MS),
+    )
+    .await?;
     diag.steps
         .push(DiagStep::ok("join", "", "admitted to the group"));
     emit_join_progress(app, diag);
-    // A joiner has to subscribe the control topic like the founder does. Without this,
-    // `control_subscribed` stays false, `desired_routing_topics()` omits the control topics, and
-    // this member never receives another membership commit for as long as it runs: a third person
-    // joining is invisible to it, and every message that person sends is dropped, indefinitely.
-    // `found_server` and `reload_one` both did this; the two join paths did not.
-    server
-        .subscribe_control()
-        .await
-        .map_err(|e| e.to_string())?;
     attach_blob_store(state, &mut server).await;
     // Steady-state discovery: the joiner keeps the invite's rendezvous so the actor re-registers/
     // re-discovers there (re-finding the group after a restart, no fresh invite).
     if !rz_config.is_empty() {
         server.set_rendezvous_nodes(rz_config);
     }
-    // A joiner is a full member the moment the Welcome lands, so it publishes its own signed peer
-    // record exactly like the founder does (defect P1). `ServerEntry.bootstrap` is also the live
-    // source for later mapping/relay republication, so retain these base addresses even though a
-    // joiner cannot mint owner-scoped invites. Non-routable entries are stripped inside
-    // `publish_self_record`.
+    // The common admission finalizer already published this member's record. Keep its base
+    // addresses for later mapping/relay republication even though a joiner cannot mint invites.
     diag.advertised.clone_from(&joiner_addrs);
-    if let Err(e) = server.publish_self_record(joiner_addrs.clone(), net.record_seq) {
-        tracing::warn!(target: "catcoms_app", phase = "join", error = %e, "DISCOVERY.PEER_RECORD.PUBLISH_FAILED");
-    }
 
     let general = channel_id("general");
     let group_id = server.group_id();
@@ -6710,6 +6946,9 @@ async fn leave_server(state: State<'_, AppState>, server: u64) -> Result<(), Str
     // insertion: either publication wins and this subsequent remove clears it, or removal wins
     // and the old actor incarnation can no longer publish at all.
     let removed = state.servers.lock().await.remove(&server);
+    if let Some(entry) = removed.as_ref() {
+        remove_persistence_signal(&state, server, entry.instance);
+    }
     state.storage_health.lock().await.remove(&server);
     if let Ok(mut signals) = state.reconnect_capture_signals.lock() {
         signals.remove(&server);
@@ -11039,6 +11278,26 @@ async fn channel_target(
     Ok((id, op.bind_actor(actor)))
 }
 
+#[derive(Debug, serde::Serialize)]
+struct SendMessageResult {
+    accepted: bool,
+    persistence: PersistOutcome,
+}
+
+impl SendMessageResult {
+    fn accepted(persistence: PersistOutcome, op: &Operation) -> Self {
+        op.succeeded(match persistence {
+            PersistOutcome::Durable => "CHANNEL.SEND.PERSISTED",
+            PersistOutcome::Pending { .. } => "CHANNEL.SEND.PERSIST_PENDING",
+            PersistOutcome::Superseded => "CHANNEL.SEND.PERSIST_SUPERSEDED",
+        });
+        Self {
+            accepted: true,
+            persistence,
+        }
+    }
+}
+
 /// Send a chat message to a channel (by id).
 ///
 /// The first command instrumented end to end, and the pattern the others follow. What it records is
@@ -11057,7 +11316,7 @@ async fn send_message(
     text: String,
     reply_to: Option<String>,
     trace: Option<String>,
-) -> Result<(), AppError> {
+) -> Result<SendMessageResult, AppError> {
     let op = Operation::start(
         trace,
         catcoms_diagnostics::Section::Channels,
@@ -11065,18 +11324,34 @@ async fn send_message(
         server,
         Some(&channel),
     );
-    let (id, actor) = channel_target(&state, &op, server, &channel).await?;
+    send_message_inner(&state, &op, server, &channel, text, reply_to).await
+}
+
+async fn send_message_inner(
+    state: &AppState,
+    op: &Operation,
+    server: u64,
+    channel: &str,
+    text: String,
+    reply_to: Option<String>,
+) -> Result<SendMessageResult, AppError> {
+    let id: u128 = channel
+        .parse()
+        .map_err(|_| op.fail(codes::CHANNEL_BAD_ID, "bad channel id"))?;
+    let (actor, instance) = actor_instance_of(state, server)
+        .await
+        .map_err(|failure| op.fail(failure.code(), failure.message()))?;
+    let actor = op.bind_actor(actor);
     op.stage("CHANNEL.SEND.ENQUEUED");
     actor
         .send_reply(id, text, reply_to.unwrap_or_default())
         .await
         .map_err(|e| op.fail(codes::CHAT_SEND_REJECTED, e))?;
     op.stage("CHANNEL.SEND.ACCEPTED");
-    persist_server(&state, server).await;
-    // Deliberately after persistence. An operation reported as succeeding before its state reached
-    // the disk is the exact shape of "it worked and then it was gone after a restart".
-    op.succeeded("CHANNEL.SEND.PERSISTED");
-    Ok(())
+    let persistence = persist_server_instance(state, server, instance, actor).await;
+    // Actor acceptance is irreversible. A disk error must not invite the caller to send a second
+    // copy; keep it an accepted result, with durability and diagnostics stated separately.
+    Ok(SendMessageResult::accepted(persistence, op))
 }
 
 /// Edit one of your own messages (by message id) in a channel.
@@ -11935,7 +12210,6 @@ async fn reload_one(
     // Register under the SAME id as on disk (don't allocate a new one).
     supervise("server_actor", record.id, task);
     let instance = state.next_server_instance.fetch_add(1, Ordering::Relaxed);
-    forward_events(app.clone(), record.id, instance, events);
     let timer_actor = actor.clone();
     state.servers.lock().await.insert(
         record.id,
@@ -11960,9 +12234,11 @@ async fn reload_one(
             persist: PersistCounters::default(),
         },
     );
+    install_persistence_worker(app, record.id, instance).await;
+    forward_events(app.clone(), record.id, instance, events);
     install_reconnect_capture_worker(app, record.id, timer_actor.clone());
     studio::spawn_receiver(app.clone(), record.id, instance, timer_actor.clone());
-    spawn_discovery_timer(app.clone(), record.id, timer_actor);
+    spawn_discovery_timer(app.clone(), record.id, instance, timer_actor);
     // Re-seal if the port moved. (The reserved peer-record sequence block was already sealed by
     // `load_or_init_server_net`, before the transport came up.)
     if net.port != saved_port {
@@ -13401,6 +13677,7 @@ async fn finalize_unlock_session(
     }
 
     let mut resumable = state.session_resumable.lock().await;
+    let reopening = !*resumable || state.session_lock_requested.load(Ordering::Acquire);
     *resumable = true;
     state.session_lock_requested.store(false, Ordering::Release);
     if state.ui_session_generation.load(Ordering::Acquire) != expected_generation {
@@ -13409,6 +13686,13 @@ async fn finalize_unlock_session(
         *resumable = false;
         state.session_lock_requested.store(true, Ordering::Release);
         return Err("unlock was superseded by a newer lock request; try again".into());
+    }
+    if reopening {
+        // Reuse each running server's single discovery worker. A mounted unlock must not wait
+        // for another message or the next minute tick to recover a quiet, disconnected group.
+        // Duplicate already-open unlocks do not create more work; watch coalesces pending wakes.
+        // This requests recovery only: it is not evidence of connection or history completion.
+        state.network_changes.notify();
     }
     Ok(servers)
 }
@@ -19525,6 +19809,514 @@ mod tests {
         assert!(state.storage_health.lock().await.is_empty());
     }
 
+    fn snapshot_test_entry(
+        instance: u64,
+        actor: ServerActor,
+        group_id: Vec<u8>,
+        device_id: DeviceId,
+    ) -> ServerEntry {
+        ServerEntry {
+            actor,
+            instance,
+            group_id,
+            device_id,
+            invite: None,
+            name: "test".into(),
+            bootstrap: Vec::new(),
+            bootstrap_owners: HashMap::new(),
+            interface_routes: None,
+            rendezvous: Vec::new(),
+            mesh: None,
+            is_dm: false,
+            switchboard: false,
+            record_seq: 0,
+            persist: PersistCounters::default(),
+        }
+    }
+
+    async fn wait_for_clean_snapshot(state: &AppState, server: u64) {
+        timeout(Duration::from_secs(5), async {
+            loop {
+                let counters = state.servers.lock().await[&server].persist;
+                if counters.requested > 0 && counters.requested == counters.completed {
+                    return;
+                }
+                SystemClock.sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the background snapshot worker did not complete its dirty ticket");
+    }
+
+    #[tokio::test]
+    async fn received_chat_is_saved_by_the_event_worker_while_the_ui_is_locked() {
+        use catcoms_rt::Hub;
+        use rand_chacha::ChaCha20Rng;
+        use rand_core::SeedableRng;
+
+        const SERVER: u64 = 81;
+        const INSTANCE: u64 = 82;
+        // Use the same directory-listed channel identity as the production actor. Persistence
+        // below is observed on disk, independently of whether any UI projection event is emitted.
+        let channel = channel_id("general");
+        let root = tempfile::tempdir().unwrap();
+        let state = Arc::new(AppState::default());
+        *state.store.lock().await =
+            Some(ServerStore::open(root.path(), b"correct horse", &mut OsCryptoRng).unwrap());
+        // A mounted explicit UI lock permits sealed native persistence, but no frontend commands.
+        state.session_lock_requested.store(true, Ordering::Release);
+        assert!(require_unlocked_session(&state).await.is_err());
+
+        let hub = Hub::new();
+        let sender_peer = PeerId::from_u64(81);
+        let mut sender_server = Server::found(
+            hub.join(sender_peer),
+            MlsDevice::generate().unwrap(),
+            ChaCha20Rng::seed_from_u64(81),
+            Box::new(ManualClock::new(1_000)),
+            "sender",
+        )
+        .unwrap();
+        sender_server.subscribe_control().await.unwrap();
+        sender_server.open_channel(channel).await.unwrap();
+        let invite = sender_server
+            .mint_invite([81; 16], u64::MAX, vec![])
+            .unwrap();
+        let (sender, mut sender_events, sender_task) = spawn(sender_server);
+        let sender_drain =
+            tokio::spawn(async move { while sender_events.recv().await.is_some() {} });
+        let mut receiver_server = Server::join(
+            hub.join(PeerId::from_u64(82)),
+            MlsDevice::generate().unwrap(),
+            ChaCha20Rng::seed_from_u64(82),
+            Box::new(ManualClock::new(1_000)),
+            "receiver",
+            sender_peer,
+            &invite,
+        )
+        .await
+        .unwrap();
+        receiver_server.subscribe_control().await.unwrap();
+        receiver_server.open_channel(channel).await.unwrap();
+        let group_id = receiver_server.group_id();
+        let device_id = receiver_server.device_id();
+        let (receiver, mut events, receiver_task) = spawn(receiver_server);
+        state.servers.lock().await.insert(
+            SERVER,
+            snapshot_test_entry(INSTANCE, receiver.clone(), group_id, device_id),
+        );
+        let wake = install_persistence_signal(&state, SERVER, INSTANCE)
+            .await
+            .unwrap();
+        let worker_state = state.clone();
+        let worker = tokio::spawn(async move {
+            run_persistence_worker(&worker_state, SERVER, INSTANCE, wake).await;
+        });
+        let event_state = state.clone();
+        let forwarder = tokio::spawn(async move {
+            while let Some(event) = events.recv().await {
+                // This is the exact production event-consumer seam, before its UI lock gate.
+                note_event_for_persistence(&event_state, SERVER, INSTANCE, &event.event).await;
+            }
+        });
+        wait_for_clean_snapshot(&state, SERVER).await;
+        let baseline = state.servers.lock().await[&SERVER].persist.completed;
+        sender
+            .send_reply(channel, "retained without a local send", "")
+            .await
+            .unwrap();
+        timeout(Duration::from_secs(5), async {
+            loop {
+                let snapshot = state
+                    .store
+                    .lock()
+                    .await
+                    .as_ref()
+                    .unwrap()
+                    .load_server(SERVER)
+                    .unwrap();
+                let saved = Server::restore(
+                    &snapshot,
+                    Hub::new().join(PeerId::from_u64(83)),
+                    ChaCha20Rng::seed_from_u64(83),
+                    Box::new(ManualClock::new(2_000)),
+                    "receiver",
+                )
+                .unwrap();
+                if saved
+                    .messages(channel)
+                    .iter()
+                    .any(|message| message.text == "retained without a local send")
+                {
+                    break;
+                }
+                // Observe the real encrypted write, not a UI event (which may legitimately be
+                // absent for accepted history whose visible projection does not change).
+                SystemClock.sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the received message did not reach the encrypted background snapshot");
+        wait_for_clean_snapshot(&state, SERVER).await;
+        assert!(state.servers.lock().await[&SERVER].persist.completed > baseline);
+        assert!(require_unlocked_session(&state).await.is_err());
+
+        sender.shutdown().await;
+        sender_task.await.unwrap();
+        sender_drain.await.unwrap();
+        receiver.shutdown().await;
+        receiver_task.await.unwrap();
+        forwarder.await.unwrap();
+        worker.await.unwrap();
+        // Reopen the sealed store and restore with no surviving sender or transport contact.
+        drop(state.store.lock().await.take());
+        let reopened = ServerStore::open(root.path(), b"correct horse", &mut OsCryptoRng).unwrap();
+        let snapshot = reopened.load_server(SERVER).unwrap();
+        let restored = Server::restore(
+            &snapshot,
+            Hub::new().join(PeerId::from_u64(83)),
+            ChaCha20Rng::seed_from_u64(83),
+            Box::new(ManualClock::new(2_000)),
+            "receiver",
+        )
+        .unwrap();
+        assert_eq!(restored.messages(channel).len(), 1);
+        assert_eq!(
+            restored.messages(channel)[0].text,
+            "retained without a local send"
+        );
+    }
+
+    #[tokio::test]
+    async fn persistence_event_wakes_coalesce_and_stale_events_cannot_touch_replacements() {
+        use catcoms_rt::Hub;
+        use rand_chacha::ChaCha20Rng;
+        use rand_core::SeedableRng;
+
+        let state = AppState::default();
+        let server = Server::found(
+            Hub::new().join(PeerId::from_u64(91)),
+            MlsDevice::generate().unwrap(),
+            ChaCha20Rng::seed_from_u64(91),
+            Box::new(ManualClock::new(1_000)),
+            "alice",
+        )
+        .unwrap();
+        let group_id = server.group_id();
+        let device_id = server.device_id();
+        let (actor, events, task) = spawn(server);
+        state.servers.lock().await.insert(
+            1,
+            snapshot_test_entry(10, actor.clone(), group_id.clone(), device_id),
+        );
+        let mut old = install_persistence_signal(&state, 1, 10).await.unwrap();
+        for _ in 0..1_000 {
+            note_event_for_persistence(&state, 1, 10, &AppEvent::SnapshotNeeded).await;
+        }
+        old.changed().await.unwrap();
+        assert_eq!(*old.borrow_and_update(), 1_000);
+        assert!(
+            !old.has_changed().unwrap(),
+            "a burst retains a single latest notification"
+        );
+        assert_eq!(state.servers.lock().await[&1].persist.requested, 1_000);
+        note_event_for_persistence(
+            &state,
+            1,
+            10,
+            &AppEvent::ConnectivityChanged { online: vec![] },
+        )
+        .await;
+        note_event_for_persistence(&state, 1, 10, &AppEvent::MemberRoutesChanged).await;
+        assert!(
+            !old.has_changed().unwrap(),
+            "presence and route churn must not snapshot history"
+        );
+        state.servers.lock().await.insert(
+            1,
+            snapshot_test_entry(11, actor.clone(), group_id, device_id),
+        );
+        let mut replacement = install_persistence_signal(&state, 1, 11).await.unwrap();
+        assert!(old.changed().await.is_err());
+        note_event_for_persistence(&state, 1, 10, &AppEvent::SnapshotNeeded).await;
+        note_event_for_persistence(&state, 1, 10, &AppEvent::Closed).await;
+        assert!(!replacement.has_changed().unwrap());
+        assert_eq!(
+            state.servers.lock().await[&1].persist,
+            PersistCounters::default()
+        );
+        assert!(install_persistence_signal(&state, 1, 10).await.is_none());
+        note_event_for_persistence(&state, 1, 11, &AppEvent::Closed).await;
+        assert!(replacement.changed().await.is_err());
+        actor.shutdown().await;
+        task.await.unwrap();
+        drop(events);
+    }
+
+    #[tokio::test]
+    async fn snapshot_worker_keeps_failed_startup_dirty_until_a_later_wake_succeeds() {
+        use catcoms_rt::Hub;
+        use rand_chacha::ChaCha20Rng;
+        use rand_core::SeedableRng;
+
+        let root = tempfile::tempdir().unwrap();
+        let state = Arc::new(AppState::default());
+        let mut server = Server::found(
+            Hub::new().join(PeerId::from_u64(91)),
+            MlsDevice::generate().unwrap(),
+            ChaCha20Rng::seed_from_u64(91),
+            Box::new(ManualClock::new(1_000)),
+            "alice",
+        )
+        .unwrap();
+        server.open_channel(1).await.unwrap();
+        server
+            .send_message(1, "before worker installation")
+            .await
+            .unwrap();
+        let group_id = server.group_id();
+        let device_id = server.device_id();
+        let (actor, mut events, task) = spawn(server);
+        let drain = tokio::spawn(async move { while events.recv().await.is_some() {} });
+        state.servers.lock().await.insert(
+            1,
+            snapshot_test_entry(10, actor.clone(), group_id, device_id),
+        );
+        let wake = install_persistence_signal(&state, 1, 10).await.unwrap();
+        let worker_state = state.clone();
+        let worker = tokio::spawn(async move {
+            run_persistence_worker(&worker_state, 1, 10, wake).await;
+        });
+        timeout(Duration::from_secs(5), async {
+            while state.servers.lock().await[&1].persist.requested == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        // No store is mounted, so even a completed snapshot cannot retire the startup ticket.
+        actor.snapshot().await.unwrap();
+        let writing = persist_lock_for(&state, 1);
+        let idle = writing.lock().await;
+        assert_eq!(
+            state.servers.lock().await[&1].persist,
+            PersistCounters {
+                requested: 1,
+                completed: 0
+            }
+        );
+        drop(idle);
+        *state.store.lock().await =
+            Some(ServerStore::open(root.path(), b"correct horse", &mut OsCryptoRng).unwrap());
+        note_event_for_persistence(&state, 1, 10, &AppEvent::SnapshotNeeded).await;
+        wait_for_clean_snapshot(&state, 1).await;
+        assert_eq!(
+            state.servers.lock().await[&1].persist,
+            PersistCounters {
+                requested: 2,
+                completed: 2
+            }
+        );
+        let snapshot = state
+            .store
+            .lock()
+            .await
+            .as_ref()
+            .unwrap()
+            .load_server(1)
+            .unwrap();
+        let restored = Server::restore(
+            &snapshot,
+            Hub::new().join(PeerId::from_u64(92)),
+            ChaCha20Rng::seed_from_u64(92),
+            Box::new(ManualClock::new(2_000)),
+            "alice",
+        )
+        .unwrap();
+        assert_eq!(restored.messages(1)[0].text, "before worker installation");
+        note_event_for_persistence(&state, 1, 10, &AppEvent::Closed).await;
+        worker.await.unwrap();
+        actor.shutdown().await;
+        task.await.unwrap();
+        drain.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn accepted_send_keeps_failed_save_dirty_and_retries_without_reauthoring() {
+        use catcoms_rt::Hub;
+        use rand_chacha::ChaCha20Rng;
+        use rand_core::SeedableRng;
+
+        const SERVER: u64 = 12;
+        const INSTANCE: u64 = 40;
+        let root = tempfile::tempdir().unwrap();
+        let state = AppState::default();
+        *state.store.lock().await =
+            Some(ServerStore::open(root.path(), b"correct horse", &mut OsCryptoRng).unwrap());
+        *state.session_resumable.lock().await = true;
+        let mut server = Server::found(
+            Hub::new().join(PeerId::from_u64(91)),
+            MlsDevice::generate().unwrap(),
+            ChaCha20Rng::seed_from_u64(91),
+            Box::new(ManualClock::new(1_000)),
+            "alice",
+        )
+        .unwrap();
+        server.open_channel(1).await.unwrap();
+        let group_id = server.group_id();
+        let device_id = server.device_id();
+        let (actor, events, task) = spawn(server);
+        state.servers.lock().await.insert(
+            SERVER,
+            ServerEntry {
+                actor: actor.clone(),
+                instance: INSTANCE,
+                group_id,
+                device_id,
+                invite: None,
+                name: "test".into(),
+                bootstrap: Vec::new(),
+                bootstrap_owners: HashMap::new(),
+                interface_routes: None,
+                rendezvous: Vec::new(),
+                mesh: None,
+                is_dm: false,
+                switchboard: false,
+                record_seq: 0,
+                persist: PersistCounters::default(),
+            },
+        );
+
+        // A directory at the snapshot destination makes the real atomic write fail on every OS.
+        let blocked_snapshot = root.path().join("servers").join("12.bin");
+        std::fs::create_dir(&blocked_snapshot).unwrap();
+        let op = Operation::start(
+            None,
+            catcoms_diagnostics::Section::Channels,
+            "send_message",
+            SERVER,
+            Some("1"),
+        );
+        let result = send_message_inner(
+            &state,
+            &op,
+            SERVER,
+            "1",
+            "one accepted message".into(),
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(
+            result.accepted,
+            "disk failure must not become a retryable send rejection"
+        );
+        let pending = PersistOutcome::Pending {
+            reason: PersistFailure::WriteFailed,
+        };
+        assert_eq!(result.persistence, pending);
+        assert_eq!(
+            serde_json::to_value(&result).unwrap(),
+            serde_json::json!({
+                "accepted": true, "persistence": {"status": "pending", "reason": "write_failed"}
+            })
+        );
+        assert_eq!(actor.messages(1).await.len(), 1);
+        assert_eq!(
+            retry_pending_persistence(&state, SERVER, INSTANCE).await,
+            Some(pending)
+        );
+        assert_eq!(
+            state.servers.lock().await[&SERVER].persist,
+            PersistCounters {
+                requested: 1,
+                completed: 0
+            }
+        );
+
+        std::fs::remove_dir(&blocked_snapshot).unwrap();
+        // Quiet retry is sufficient: it does not need another chat message or a new ticket.
+        assert_eq!(
+            retry_pending_persistence(&state, SERVER, INSTANCE).await,
+            Some(PersistOutcome::Durable)
+        );
+        assert_eq!(
+            retry_pending_persistence(&state, SERVER, INSTANCE).await,
+            None
+        );
+        assert_eq!(
+            state.servers.lock().await[&SERVER].persist,
+            PersistCounters {
+                requested: 1,
+                completed: 1
+            }
+        );
+        let snapshot = state
+            .store
+            .lock()
+            .await
+            .as_ref()
+            .unwrap()
+            .load_server(SERVER)
+            .unwrap();
+        let restored = Server::restore(
+            &snapshot,
+            Hub::new().join(PeerId::from_u64(92)),
+            ChaCha20Rng::seed_from_u64(92),
+            Box::new(ManualClock::new(2_000)),
+            "alice",
+        )
+        .unwrap();
+        assert_eq!(restored.messages(1).len(), 1);
+        assert_eq!(restored.messages(1)[0].text, "one accepted message");
+
+        let mounted_store = state.store.lock().await.take();
+        // A covered caller remains durable without an additional write, even if the store leaves.
+        assert_eq!(
+            persist_captured(&state, SERVER, INSTANCE, 1, actor.clone()).await,
+            PersistOutcome::Durable
+        );
+        actor
+            .send_reply(1, "second accepted message", String::new())
+            .await
+            .unwrap();
+        assert_eq!(
+            persist_server_instance(&state, SERVER, INSTANCE, actor.clone()).await,
+            PersistOutcome::Pending {
+                reason: PersistFailure::StoreUnavailable
+            }
+        );
+        assert_eq!(
+            state.servers.lock().await[&SERVER].persist,
+            PersistCounters {
+                requested: 2,
+                completed: 1
+            }
+        );
+        *state.store.lock().await = mounted_store;
+        assert_eq!(
+            retry_pending_persistence(&state, SERVER, INSTANCE).await,
+            Some(PersistOutcome::Durable)
+        );
+
+        actor.shutdown().await;
+        task.await.unwrap();
+        drop(events);
+        assert_eq!(
+            persist_server_instance(&state, SERVER, INSTANCE, actor).await,
+            PersistOutcome::Pending {
+                reason: PersistFailure::SnapshotFailed
+            }
+        );
+        assert_eq!(
+            state.servers.lock().await[&SERVER].persist,
+            PersistCounters {
+                requested: 3,
+                completed: 2
+            }
+        );
+    }
+
     /// A persisted id is reused when a server is removed and reinstalled, and a write begun by the
     /// departing incarnation can still be in flight when the replacement arrives. It must not put
     /// its bytes in the replacement's slot, and it must not report the replacement's mutations as
@@ -19622,7 +20414,16 @@ mod tests {
         };
 
         // Now the departed writer resumes.
-        persist_captured(&state, SERVER, OLD, stale_ticket, old_actor.clone()).await;
+        assert_eq!(
+            persist_captured(&state, SERVER, OLD, stale_ticket, old_actor.clone()).await,
+            PersistOutcome::Superseded,
+        );
+        assert_eq!(
+            persist_server_instance(&state, SERVER, OLD, old_actor.clone()).await,
+            PersistOutcome::Superseded,
+            "an accepted old send must not take its first ticket from the replacement",
+        );
+        assert_eq!(retry_pending_persistence(&state, SERVER, OLD).await, None);
 
         let on_disk = {
             let guard = state.store.lock().await;
@@ -19750,6 +20551,7 @@ mod tests {
         let store = ServerStore::open(root.path(), b"correct horse", &mut OsCryptoRng).unwrap();
         *state.store.lock().await = Some(store);
         *state.session_resumable.lock().await = false;
+        let mut recovery = state.network_changes.subscribe();
 
         assert!(
             authenticate_mounted_store(&state, b"wrong horse")
@@ -19763,6 +20565,7 @@ mod tests {
             .await
             .is_err());
         assert!(!*state.session_resumable.lock().await);
+        assert!(!recovery.has_changed().unwrap());
 
         assert!(authenticate_mounted_store(&state, b"correct horse")
             .await
@@ -19774,6 +20577,15 @@ mod tests {
             .expect("the mounted path requests its current servers");
         assert!(running.is_empty());
         assert!(*state.session_resumable.lock().await);
+        assert!(recovery.has_changed().unwrap(), "unlock must wake recovery");
+        recovery.borrow_and_update();
+        finalize_unlock_session(&state, generation, true)
+            .await
+            .unwrap();
+        assert!(
+            !recovery.has_changed().unwrap(),
+            "an already-open unlock must not schedule duplicate recovery"
+        );
 
         // The successful path authenticated the existing mount; it did not release ownership or
         // create a second ServerStore just to verify the passphrase.
@@ -19831,6 +20643,7 @@ mod tests {
         *state.session_resumable.lock().await = false;
         state.session_lock_requested.store(true, Ordering::Release);
         let generation = state.ui_session_generation.load(Ordering::Acquire);
+        let recovery = state.network_changes.subscribe();
         let latest = r#"{"version":1,"drafts":{"room":"retry me"},"readMarks":{}}"#;
         *state.pending_ui_lock_snapshot.lock().await = Some(PendingUiLockSnapshot {
             generation,
@@ -19842,6 +20655,7 @@ mod tests {
             .err()
             .expect("persistence failure must refuse to unlock");
         assert!(error.contains("still locked"));
+        assert!(!recovery.has_changed().unwrap());
         assert_eq!(
             state
                 .pending_ui_lock_snapshot
@@ -19862,6 +20676,7 @@ mod tests {
         finalize_unlock_session(&state, generation, false)
             .await
             .expect("the retained exact snapshot should be retryable");
+        assert!(recovery.has_changed().unwrap());
         assert_eq!(
             state
                 .store
@@ -19898,6 +20713,7 @@ mod tests {
         let store = ServerStore::open(root.path(), b"correct horse", &mut OsCryptoRng).unwrap();
         *state.store.lock().await = Some(store);
         *state.session_resumable.lock().await = false;
+        let recovery = state.network_changes.subscribe();
 
         let stale_generation = state.ui_session_generation.load(Ordering::Acquire);
         assert!(
@@ -19926,6 +20742,10 @@ mod tests {
                 .await
                 .is_err(),
             "work authenticated before a newer lock must not reopen IPC"
+        );
+        assert!(
+            !recovery.has_changed().unwrap(),
+            "a superseded unlock must not request recovery"
         );
         assert_eq!(
             require_unlocked_session(&state).await.unwrap_err(),
@@ -21051,6 +21871,123 @@ mod tests {
             reconnect_policy_after_admission(helper, inviter, false, false),
             ReconnectPolicy::Disabled,
             "an authenticated non-inviter contact is never the recurring contact"
+        );
+    }
+
+    type AdmissionTestServer = Server<catcoms_rt::MemNetwork, rand_chacha::ChaCha20Rng>;
+
+    async fn admitted_reply_pair(
+        inviter_addresses: Vec<String>,
+    ) -> (AdmissionTestServer, AdmissionTestServer, PeerId, PeerId) {
+        use rand_core::SeedableRng;
+
+        let hub = catcoms_rt::Hub::new();
+        let inviter_peer = phase0_peer_id(&test_libp2p_peer(111));
+        let joiner_peer = phase0_peer_id(&test_libp2p_peer(112));
+        let mut inviter = Server::found(
+            hub.join(inviter_peer),
+            MlsDevice::generate().unwrap(),
+            rand_chacha::ChaCha20Rng::seed_from_u64(111),
+            Box::new(ManualClock::new(1_000)),
+            "inviter",
+        )
+        .unwrap();
+        inviter.subscribe_control().await.unwrap();
+        inviter
+            .publish_self_record(inviter_addresses, 65_536)
+            .unwrap();
+        let invite = inviter.mint_invite([0x71; 16], 60_000, vec![]).unwrap();
+        // The bridge's proof wait has already authenticated the first callback before this
+        // production reply-admission entry point. Exercise its actual Welcome path, not a
+        // direct join with a fabricated path flag.
+        let (joined, served) = tokio::join!(
+            Server::join_from_reply(
+                hub.join(joiner_peer),
+                MlsDevice::generate().unwrap(),
+                rand_chacha::ChaCha20Rng::seed_from_u64(112),
+                Box::new(ManualClock::new(1_000)),
+                "joiner",
+                inviter_peer,
+                inviter_peer,
+                &invite,
+                [0x72; 16],
+                b"proven-reply-joiner",
+                60_000,
+            ),
+            inviter.sync_once(),
+        );
+        served.unwrap();
+        let (joiner, contact) = joined.unwrap();
+        assert_eq!(contact, inviter_peer);
+        (inviter, joiner, inviter_peer, joiner_peer)
+    }
+
+    #[tokio::test]
+    async fn reply_admission_fetches_signed_records_before_its_first_snapshot() {
+        use rand_core::SeedableRng;
+
+        let public_route = format!("/ip4/203.0.113.111/tcp/22487/p2p/{}", test_libp2p_peer(111));
+        for addresses in [vec![public_route], Vec::new()] {
+            let (mut inviter, mut joiner, inviter_peer, joiner_peer) =
+                admitted_reply_pair(addresses.clone()).await;
+            assert_eq!(
+                reconnect_policy_after_admission(inviter_peer, inviter_peer, true, false),
+                ReconnectPolicy::Disabled,
+            );
+            assert!(joiner.member_routes()[0].peer_id.is_none());
+            let outcome = tokio::select! {
+                outcome = finalize_admission_discovery(
+                    &mut joiner,
+                    inviter_peer,
+                    Vec::new(),
+                    65_536,
+                    Duration::from_secs(1),
+                ) => outcome.unwrap(),
+                _ = async { loop { inviter.sync_once().await.unwrap(); } } => unreachable!(),
+            };
+            assert_eq!(
+                outcome,
+                AdmissionDiscoveryOutcome::Completed { learned_records: 1 }
+            );
+            let snapshot = joiner.snapshot().unwrap();
+            drop(joiner);
+            let restored = Server::restore(
+                &snapshot,
+                catcoms_rt::Hub::new().join(joiner_peer),
+                rand_chacha::ChaCha20Rng::seed_from_u64(113),
+                Box::new(ManualClock::new(2_000)),
+                "joiner",
+            )
+            .unwrap();
+            let routes = restored.member_routes();
+            assert_eq!(routes.len(), 1);
+            assert_eq!(routes[0].peer_id, Some(*inviter_peer.as_bytes()));
+            assert_eq!(routes[0].addresses, addresses);
+            assert_eq!(routes[0].seq, 65_536);
+            assert!(!routes[0].connected, "a saved record is not live presence");
+        }
+    }
+
+    #[tokio::test]
+    async fn admission_discovery_timeout_keeps_accepted_membership() {
+        let (_inviter, mut joiner, inviter_peer, _) = admitted_reply_pair(Vec::new()).await;
+        let group = joiner.group_id();
+        let outcome = finalize_admission_discovery(
+            &mut joiner,
+            inviter_peer,
+            Vec::new(),
+            65_536,
+            Duration::from_millis(1),
+        )
+        .await
+        .unwrap();
+        assert_eq!(outcome, AdmissionDiscoveryOutcome::TimedOut);
+        assert_eq!(joiner.group_id(), group);
+        assert_eq!(joiner.member_count(), 2);
+        assert!(joiner.member_routes()[0].peer_id.is_none());
+        assert!(
+            joiner.snapshot().is_ok(),
+            "the accepted join remains persistable"
         );
     }
 

@@ -8245,6 +8245,13 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
         Ok(self.sync.request_pex(peer).await?)
     }
 
+    /// Fetch signed member records using only a currently established connection. Unlike
+    /// ordinary discovery, post-admission exchange may not extend a temporary callback's
+    /// authority by letting the transport redial its remembered endpoint.
+    pub async fn request_pex_connected(&mut self, peer: PeerId) -> Result<usize, AppError> {
+        Ok(self.sync.request_pex_connected(peer).await?)
+    }
+
     /// Back a peer off after it failed to answer a PEX request within the caller's deadline.
     pub fn note_pex_failure(&mut self, peer: PeerId) {
         self.sync.note_pex_failure(peer);
@@ -8265,6 +8272,12 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
     /// Run one bounded SWIM/reciprocal/topology repair pass.
     pub async fn drive_mesh_repair(&mut self) -> usize {
         self.sync.drive_mesh_repair().await
+    }
+
+    /// Queue a paced reconciliation of open documents with currently proven neighbours.
+    /// The ordinary sync loop owns requests, continuation cursors and retries.
+    pub fn schedule_reconciliation(&mut self) -> usize {
+        self.sync.schedule_reconciliation()
     }
 
     pub fn has_pending_reciprocal(&self) -> bool {

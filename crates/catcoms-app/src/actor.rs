@@ -982,6 +982,10 @@ impl ChannelChange {
 /// An event from a running server actor to the UI.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AppEvent {
+    /// Open legacy document history or the MLS epoch changed. The host should schedule a
+    /// snapshot even when no rendered projection changed. This requests persistence; it does
+    /// not acknowledge a completed save and carries no UI content.
+    SnapshotNeeded,
     /// Invalidate settlement/recovery metadata for this Studio logical document. State is an
     /// observation, not a success/receipt assertion; phase and recovery observations can coexist.
     SettlementChanged {
@@ -3558,7 +3562,15 @@ where
         let mut delivery_dirty = HashSet::new();
         let mut file_transfers = file_transfers::FileTransfers::new();
         let mut studio_preview_resets_open = true;
+        // Startup persistence belongs to the host. Thereafter raw versions are independent of
+        // the UI's change detector: an accepted signed operation can leave its projection equal.
+        let mut snapshot_versions = SnapshotVersions::capture(&server);
         loop {
+            // Check at the owner boundary, including after a command cancelled a sync tick that
+            // already applied a valid prefix. No snapshot I/O belongs in this event channel.
+            if snapshot_versions.update(&server) {
+                let _ = event_tx.send(AppEvent::SnapshotNeeded).await;
+            }
             // One call, because "is there work now" and "when is there work next" have to come
             // from one clock read. Sampling them separately leaves a window where the deadline
             // passes between the two and neither answer schedules anything, which strands the
@@ -4747,6 +4759,10 @@ where
                         // resulting sockets remain behind the ordinary policy + endpoint budget.
                         server.drive_mesh_repair().await;
                         server.dial_cached_peers().await;
+                        // A connected neighbour may have learned older operations through a
+                        // different member since our last exchange. Re-open completed searches
+                        // without waiting for new gossip or a disconnect/reconnect edge.
+                        server.schedule_reconciliation();
                         // PEX can authenticate the signed descriptor for a transport identity
                         // that was already connected before this pass. In that ordering there is
                         // no later transport event to announce the now-resolved member as online,
@@ -5161,6 +5177,29 @@ async fn sync_channels<T, R>(
     }
     *last = next;
     let _ = event_tx.send(AppEvent::ChannelsUpdated).await;
+}
+
+/// Raw persisted content versions, independent of all rendered projections. O(open documents)
+/// per owner turn, with no body scan; replacing the map also forgets documents no longer held.
+struct SnapshotVersions {
+    epoch: u64,
+    documents: HashMap<(crate::DocType, u128), u64>,
+}
+
+impl SnapshotVersions {
+    fn capture<T: MeshTransport, R: CryptoRngCore>(server: &Server<T, R>) -> Self {
+        Self {
+            epoch: server.epoch(),
+            documents: server.sync().document_versions().collect(),
+        }
+    }
+
+    fn update<T: MeshTransport, R: CryptoRngCore>(&mut self, server: &Server<T, R>) -> bool {
+        let next = Self::capture(server);
+        let changed = self.epoch != next.epoch || self.documents != next.documents;
+        *self = next;
+        changed
+    }
 }
 
 /// The last-seen version of every document the actor projects (see [`Server::doc_version`]),
@@ -5859,6 +5898,142 @@ mod tests {
             name,
         )
         .unwrap()
+    }
+
+    #[tokio::test]
+    async fn snapshot_needed_tracks_a_projection_invisible_remote_change() {
+        use automerge::{transaction::Transactable, ReadDoc, ROOT};
+
+        let hub = Hub::new();
+        let alice_peer = PeerId::from_u64(1);
+        let mut alice = founder(&hub, alice_peer, "alice", 1);
+        alice.open_channel(GENERAL).await.unwrap();
+        let invite = alice.mint_invite([91; 16], 60_000, vec![]).unwrap();
+        let (joined, _) = tokio::join!(
+            Server::join(
+                hub.join(PeerId::from_u64(2)),
+                MlsDevice::generate().unwrap(),
+                ChaCha20Rng::seed_from_u64(2),
+                Box::new(ManualClock::new(1_000)),
+                "bob",
+                alice_peer,
+                &invite,
+            ),
+            alice.sync_once(),
+        );
+        let mut bob_server = joined.unwrap();
+        bob_server.open_channel(GENERAL).await.unwrap();
+        let (bob, mut events, task) = spawn(bob_server);
+        bob.open_channel(GENERAL).await; // include this document in the actor's UI projection
+        assert!(bob.messages(GENERAL).await.is_empty()); // actor startup is complete
+        while events.try_recv().is_ok() {}
+
+        alice
+            .sync
+            .post(crate::DocType::Channel, GENERAL, |doc| {
+                doc.put(ROOT, "unrendered-metadata", "valid retained history")
+            })
+            .await
+            .unwrap();
+        timeout(Duration::from_secs(5), async {
+            loop {
+                match events.recv().await.expect("receiver actor is live").event {
+                    AppEvent::SnapshotNeeded => break,
+                    AppEvent::ChannelUpdated {
+                        channel: GENERAL, ..
+                    } => {
+                        panic!("the hidden operation must not invent a rendered channel delta");
+                    }
+                    _ => {}
+                }
+            }
+        })
+        .await
+        .expect("accepted signed history must request a snapshot");
+        assert!(bob.messages(GENERAL).await.is_empty());
+        let bytes = bob.snapshot().await.unwrap();
+        let restored = Server::restore(
+            &bytes,
+            Hub::new().join(PeerId::from_u64(3)),
+            ChaCha20Rng::seed_from_u64(3),
+            Box::new(ManualClock::new(1_000)),
+            "bob",
+        )
+        .unwrap();
+        assert!(restored
+            .sync
+            .doc(crate::DocType::Channel, GENERAL)
+            .unwrap()
+            .doc()
+            .get(ROOT, "unrendered-metadata")
+            .unwrap()
+            .is_some());
+        for _ in 0..3 {
+            bob.snapshot().await.unwrap();
+            assert!(bob.messages(GENERAL).await.is_empty());
+        }
+        while let Ok(event) = events.try_recv() {
+            assert!(
+                !matches!(event.event, AppEvent::SnapshotNeeded),
+                "snapshot/read commands must not request another snapshot"
+            );
+            assert!(!matches!(
+                event.event,
+                AppEvent::ChannelUpdated {
+                    channel: GENERAL,
+                    ..
+                }
+            ));
+        }
+        bob.shutdown().await;
+        task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn snapshot_versions_track_epoch_changes_even_when_member_count_returns_to_equal() {
+        let hub = Hub::new();
+        let alice_peer = PeerId::from_u64(1);
+        let mut alice = founder(&hub, alice_peer, "alice", 1);
+        alice.open_channel(GENERAL).await.unwrap();
+        let mut versions = SnapshotVersions::capture(&alice);
+        let old_count = alice.member_count();
+        let old_documents = versions.documents.clone();
+        let invite = alice.mint_invite([92; 16], 60_000, vec![]).unwrap();
+        let (joined, _) = tokio::join!(
+            Server::join(
+                hub.join(PeerId::from_u64(2)),
+                MlsDevice::generate().unwrap(),
+                ChaCha20Rng::seed_from_u64(2),
+                Box::new(ManualClock::new(1_000)),
+                "bob",
+                alice_peer,
+                &invite,
+            ),
+            alice.sync_once(),
+        );
+        let bob = joined.unwrap();
+        alice.remove_member(&bob.my_fingerprint()).await.unwrap();
+        assert_eq!(alice.member_count(), old_count);
+        assert_eq!(SnapshotVersions::capture(&alice).documents, old_documents);
+        assert!(
+            versions.update(&alice),
+            "MLS state changed although the roster size did not"
+        );
+        assert!(
+            !versions.update(&alice),
+            "one mutation requests persistence once"
+        );
+
+        // A same-sized set with a different document identity is still a different snapshot,
+        // and replacing the exact map must release keys no longer present in the owner.
+        versions
+            .documents
+            .remove(&(crate::DocType::Channel, GENERAL));
+        versions
+            .documents
+            .insert((crate::DocType::Channel, GENERAL + 1), 0);
+        assert!(versions.update(&alice));
+        assert_eq!(versions.documents, old_documents);
     }
 
     /// The version gate must be exactly as sensitive as the delta it guards: a quiet tick costs
@@ -6786,15 +6961,8 @@ mod tests {
         actor.open_channel(GENERAL).await;
         actor.send_message(GENERAL, "hi there").await;
 
-        let ev = timeout(Duration::from_secs(5), events.recv())
-            .await
-            .expect("event timeout")
-            .expect("actor closed");
+        let (_, change) = next_traced_change(&mut events, GENERAL).await;
         // The delta names the row that arrived, whose id is generated, so it is compared by shape.
-        let AppEvent::ChannelUpdated { channel, change } = &ev.event else {
-            panic!("expected a channel update, got {:?}", ev.event);
-        };
-        assert_eq!(*channel, GENERAL);
         assert!(change.messages_appended);
         assert_eq!(change.arrivals.len(), 1, "the message that was just sent");
         assert!(!change.messages_changed && !change.topic && !change.jukebox);
@@ -6815,7 +6983,7 @@ mod tests {
 
         actor.open_channel(GENERAL).await;
         actor.send_message(GENERAL, "remember me").await;
-        let _ = timeout(Duration::from_secs(5), events.recv()).await; // drain the update
+        next_traced_change(&mut events, GENERAL).await; // drain the actual channel update
 
         let bytes = actor.snapshot().await.expect("snapshot");
         actor.shutdown().await;

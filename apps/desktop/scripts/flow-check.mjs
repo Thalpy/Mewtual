@@ -210,7 +210,7 @@ const SEND_SCENARIO = `(async () => {
         reply_to: payload.replyTo ?? "",
         pinned: false,
       });
-      return null;
+      return { accepted: true, persistence: { status: "durable" } };
     }
     if (cmd === "get_messages" && payload.server === 1 && payload.channel === "general") {
       const rows = await base(cmd, payload, opts);

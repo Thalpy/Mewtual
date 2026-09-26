@@ -37,6 +37,7 @@
     PageAdmission, planJump, planRefresh, planRevealNewer, planRevealOlder, reanchorByIndex,
     type MessagePage, type PageAnchor, type PageRequest, type PagedRowContext, type UnreadSummary,
   } from "./message-paging";
+  import { persistenceWarning, sendAndRefresh, type SendMessageResult } from "./message-send";
   import { ImageSrcCache } from "./image-src";
   import { pastedMedia, pastedName } from "./clipboard-media";
   import {
@@ -6336,6 +6337,8 @@
     deliverySnapshot = { revision: 0, reports: {} };
     draft = "";
     drafts = {};
+    sending = false;
+    pendingSendNonce += 1;
     readMarks = {};
     statusCursors = {}; // a reading habit, sealed beside the marks above and dropped with them
     fileTrustPolicies = {}; // member trust choices name relationships and leave the screen too
@@ -18448,9 +18451,11 @@
 
   async function send() {
     const text = draft.trim();
-    if (!text || !cur || !cur.active || activeServerId === null || sending) return;
+    if (!text || !cur || !cur.active || activeServerId === null || sending || locked) return;
     const server = activeServerId;
     const channel = cur.active;
+    const session = uiStateLoadGeneration;
+    const sessionCurrent = () => !locked && session === uiStateLoadGeneration;
     const reply_to = replyingTo;
     const key = chanKey();
     draft = "";
@@ -18459,7 +18464,8 @@
     if (key) delete drafts[key];
     scheduleUiStateSave();
     sending = true;
-    const pendingId = `pending:${Date.now()}:${pendingSendNonce++}`;
+    const operation = ++pendingSendNonce;
+    const pendingId = `pending:${Date.now()}:${operation}`;
     const nextScope = chatScopeKey(server, channel);
     chatStickToBottom = true;
     // The optimistic row belongs at the end of the log, which is only where the slice ends when
@@ -18483,19 +18489,26 @@
       markMessageArrivals([pendingId]);
     }
     replyingToRow = undefined;
-    await tick();
     try {
+      // Submit before yielding. A lock between clearing the composer and IPC would otherwise
+      // capture an empty draft and cancel work that had never even reached the native side.
       // The one path instrumented end to end, and the pattern the rest adopt. The trace is
       // allocated here, travels with the command, and stamps every native stage, so a send that
       // goes nowhere can be read as one story rather than two halves lined up by timestamp.
       // Nothing about the message itself is recorded: not its text, not its length.
-      await invokeDebugged("send_message", { server, channel, text, replyTo: reply_to });
-      sending = false;
-      // The channel-updated event normally refreshes this too, but the command acknowledgement is
-      // the deterministic local completion point. Do not leave the just-sent message dependent on
-      // event scheduling, and do not refresh a different conversation if the user switched away.
-      if (activeServerId === server && cur?.active === channel) await refresh();
+      const { result, refreshError } = await sendAndRefresh(
+        async () => (await invokeDebugged<SendMessageResult>("send_message", { server, channel, text, replyTo: reply_to })).value,
+        async () => {
+          // A failed acknowledgement refresh cannot undo the accepted send or restore its draft.
+          if (sessionCurrent() && activeServerId === server && cur?.active === channel) await refresh();
+        },
+      );
+      if (!sessionCurrent()) return;
+      const warning = persistenceWarning(result);
+      if (warning) toast(warning, "warn", 12000);
+      if (refreshError) error = `Message accepted, but the conversation could not refresh: ${errorText(refreshError)}`;
     } catch (e) {
+      if (!sessionCurrent()) return;
       error = String(e);
       if (activeServerId === server && cur?.active === channel && messages.some((m) => m.id === pendingId)) {
         messages = messages.filter((m) => m.id !== pendingId);
@@ -18510,7 +18523,7 @@
         replyingTo = reply_to;
       }
     } finally {
-      sending = false;
+      if (pendingSendNonce === operation) sending = false;
     }
   }
 
