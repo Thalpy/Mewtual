@@ -51,6 +51,10 @@ fn lease(
 pub(super) async fn freeze_servers(state: &AppState) -> Result<ShutdownBarrier, String> {
     let generation = state.ui_session_generation.load(Ordering::Acquire);
     let save = async {
+        // Admission may have completed just before close, ahead of the periodic route worker.
+        // Save the authenticated policy and actual outbound listener evidence while every actor
+        // can still serve its neighbour's connected-only proof request.
+        member_reconnect::before_shutdown(state).await?;
         let mut actors: Vec<_> = state
             .servers
             .lock()

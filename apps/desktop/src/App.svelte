@@ -303,7 +303,7 @@
   // Where a file is referenced across the server (Properties → "Used in"). `pinned` mirrors
   // `wiki_pages.length > 0`: a wiki-embedded file never drops out of circulation.
   type UiFileUsage = { wiki_pages: string[]; status_count: number; chat_count: number; event_count: number; pinned: boolean };
-  type Found = { server: number; channel: string; channels?: Channel[]; is_dm: boolean };
+  type Found = { server: number; channel: string; channels?: Channel[]; is_dm: boolean; storage_warning?: string | null };
   type Reloaded = { server: number; name: string; invite: string; channel: string; channels?: Channel[]; is_dm: boolean };
 
   // One server in the rail (each its own encrypted group). Per-server UI state lives here;
@@ -6622,6 +6622,7 @@
    * profile leaves it alone.
    */
   function addServer(r: Found, name: string, profileName: string = "") {
+    if (r.storage_warning) toast(r.storage_warning, "warn", 0);
     const channels = r.channels?.length ? r.channels : [{ id: r.channel, name: "general" }];
     if (!r.is_dm) {
       // A numeric native id can be reused after a leave + restart, so an override left behind by
