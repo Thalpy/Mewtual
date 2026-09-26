@@ -62,7 +62,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     /// Remember the endpoint of an actually accepted MLS admission. This is retry metadata,
     /// never endpoint proof or permission to dial. A descriptor supersedes it, and replaying a
     /// cached Welcome from another endpoint cannot replace the original pending correlation.
-    pub(super) fn note_member_finalization_candidate(&mut self, peer: PeerId, device: DeviceId) {
+    pub fn note_member_finalization_candidate(&mut self, peer: PeerId, device: DeviceId) {
         self.prune_member_finalization_candidates();
         if !self.policy_allows_member_mesh()
             || !self.group.contains_device(&device)

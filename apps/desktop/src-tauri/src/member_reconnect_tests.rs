@@ -73,7 +73,7 @@ mod member_reconnect_regressions {
         } else {
             Vec::new()
         };
-        let (mut transport, _, _) = MeshService::new_tcp_with_key(
+        let (transport, _, _) = MeshService::new_tcp_with_key(
             keypair_from_seed(net.key_seed).unwrap(),
             &listeners,
             &[],
@@ -313,6 +313,9 @@ mod member_reconnect_regressions {
                 device,
             )
             .await;
+            // The new owner first drains requests whose caller already timed out. Let the
+            // existing per-device serving interval expire before the next close attempt.
+            SystemClock.sleep(Duration::from_millis(1_100)).await;
             assert!(
                 member_reconnect::persist(&a_state, 1, 1, &a.actor, vec![evidence])
                     .await
@@ -541,7 +544,7 @@ mod member_reconnect_regressions {
                     &[],
                 )
                 .unwrap();
-                let (mut b_transport, b_id, _) = MeshService::new_tcp_with_key(
+                let (b_transport, b_id, _) = MeshService::new_tcp_with_key(
                     keypair_from_seed(b_net.key_seed).unwrap(),
                     &["/ip4/127.0.0.1/tcp/0".parse().unwrap()],
                     &[],
