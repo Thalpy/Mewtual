@@ -78,6 +78,32 @@ fn matches_live_identity(entry: &ServerEntry, net: &ServerNet) -> bool {
             .is_none_or(|route| route.peer_id == libp2p_peer.to_string())
 }
 
+fn retain_failed_net(
+    state: &AppState,
+    server: u64,
+    instance: u64,
+    net: &ServerNet,
+    observed: Option<ServerNet>,
+) {
+    state
+        .pending_server_nets
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .entry(server)
+        .and_modify(|retained| {
+            if retained.instance == instance && retained.net.key_seed == net.key_seed {
+                // Read failures do not permit newer route/consent adoption, but must not lose
+                // a higher reservation requested by the same transport while storage is down.
+                retained.net.record_seq = retained.net.record_seq.max(net.record_seq);
+            }
+        })
+        .or_insert_with(|| PendingServerNet {
+            instance,
+            net: net.clone(),
+            observed,
+        });
+}
+
 pub(super) async fn persist_server_net(
     state: &AppState,
     server: u64,
@@ -107,15 +133,7 @@ pub(super) async fn persist_server_net(
             tracing::error!(target: "catcoms_app", server, %error, "VAULT.NET_IDENTITY.LOAD_FAILED");
             // Retain the original seed even when the destination cannot be read. Never replace
             // a previously retained newer obligation with this older invocation.
-            let mut slots = state
-                .pending_server_nets
-                .lock()
-                .unwrap_or_else(|e| e.into_inner());
-            slots.entry(server).or_insert_with(|| PendingServerNet {
-                instance,
-                net: net.clone(),
-                observed: None,
-            });
+            retain_failed_net(state, server, instance, net, None);
             return pending(PersistFailure::WriteFailed);
         }
     };
@@ -123,16 +141,7 @@ pub(super) async fn persist_server_net(
     if let Some(current) = &observed {
         if current.key_seed != net.key_seed {
             // A conflicting record must not silently switch this running transport's identity.
-            state
-                .pending_server_nets
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .entry(server)
-                .or_insert_with(|| PendingServerNet {
-                    instance,
-                    net: net.clone(),
-                    observed: observed.clone(),
-                });
+            retain_failed_net(state, server, instance, net, observed.clone());
             return pending(PersistFailure::WriteFailed);
         }
         candidate = current.clone();
@@ -601,6 +610,46 @@ mod tests {
         assert!(state.pending_server_nets.lock().unwrap().is_empty());
         stop(old).await;
         stop(new).await;
+    }
+
+    #[tokio::test]
+    async fn repeated_unreadable_net_keeps_the_highest_same_instance_reservation() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = AppState::default();
+        let net = new_server_net("", "", "");
+        let running = install(&state, 17, &net).await;
+        assert_eq!(
+            persist_server_net(&state, 1, 17, &net).await,
+            pending(PersistFailure::StoreUnavailable)
+        );
+        mount(&state, dir.path()).await;
+        let path = dir.path().join("servers").join("1.net");
+        std::fs::write(&path, b"unreadable encrypted record").unwrap();
+        let mut later = net.clone();
+        later.reserve_record_seq_block();
+        later.reconnect_policy = ReconnectPolicy::MemberMesh;
+        assert_eq!(
+            persist_server_net(&state, 1, 17, &later).await,
+            pending(PersistFailure::WriteFailed)
+        );
+        // A second old invocation cannot lower it, and a read failure grants no new consent.
+        persist_server_net(&state, 1, 17, &net).await;
+        {
+            let retained = state.pending_server_nets.lock().unwrap();
+            assert_eq!(retained.len(), 1);
+            assert_eq!(retained[&1].net.record_seq, later.record_seq);
+            assert_eq!(retained[&1].net.reconnect_policy, net.reconnect_policy);
+        }
+        std::fs::remove_file(&path).unwrap();
+        assert_eq!(
+            retry_server_net(&state, 1, 17).await,
+            Some(PersistOutcome::Durable)
+        );
+        let saved = saved_net(&state).await;
+        assert_eq!(saved.key_seed, net.key_seed);
+        assert_eq!(saved.record_seq, later.record_seq);
+        assert_eq!(saved.reconnect_policy, net.reconnect_policy);
+        stop(running).await;
     }
 
     #[tokio::test]
