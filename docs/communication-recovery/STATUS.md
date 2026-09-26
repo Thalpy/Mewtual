@@ -5,7 +5,9 @@ Its proposed work packages and T01-T58 are acceptance requirements, not executed
 The [bounded patch design](../design-chat-recovery.md) describes the initial foundation.
 Subsequent features have their own contracts and evidence: [safe shutdown](SHUTDOWN.md),
 [bounded paging](PAGING.md), [queue fairness](QUEUE-FAIRNESS.md), [authenticated policy](POLICY.md),
-and [durable sends](DURABLE-SEND.md). Evidence below the feature ledger is historical foundation
+[durable sends](DURABLE-SEND.md), [quiet UI retry](PENDING-RETRY.md),
+and [temporal bridge recovery](TEMPORAL-BRIDGE.md). The final batch and its independent
+review branches are recorded in [REVIEW-PUSHES.md](REVIEW-PUSHES.md). Evidence below the feature ledger is historical foundation
 evidence, not a claim that later changes passed those same complete suites.
 
 ## Comparison with the supplied plan
@@ -13,23 +15,24 @@ evidence, not a claim that later changes passed those same complete suites.
 | Package | Current patch | Gap before package acceptance |
 | --- | --- | --- |
 | CR00 | Pinned source baseline, design review, signed protocol regression fixtures | No real two-device reproduction; complete limits inventory and authority ADRs remain |
-| CR01 | Owner-authenticated immutable P2P policy, signed invite and join binding, sealed pin, explicit legacy state and migration primitives | Dedicated service unsupported; UI projection in separate follow-up; vacant-leaf owner succession requires an authenticated transition proof |
+| CR01 | Owner-authenticated immutable P2P policy, signed invite and join binding, sealed pin, explicit legacy state and migration primitives | Dedicated service unsupported; settings and invite preview implemented; vacant-leaf owner succession requires an authenticated transition proof |
 | CR02 | New chat sends save operation/MLS state/token/publication obligation before exposure; sealed UI retries; failed-write, abrupt-reopen and context-change coverage; truthful background persistence | Other authoring paths, remote durable receipts and coordinated multi-file admission acceptance remain; bounded pending capacity is explicit |
 | CR03 | Coalesced warm-unlock wake, periodic neighbor sweep, quiet retry deadline and collision regression | General durable obligations, typed recovery status, detached outbound waits, account teardown/sleep matrix and load fairness remain |
-| CR04 | Every supported admission path publishes its record and attempts a bounded connected-only signed-record fetch | Reciprocal record acknowledgement, continuing direction-aware private-route permission and crash-recoverable finalization remain; original reply/restart incident is not claimed fixed |
+| CR04 | Authenticated reciprocal member finalization, actual outbound route retention, sealed MemberMesh permission, failed identity-write retry and close barrier | Forced-direction real TCP restart regression passes in both orders; abrupt crash before first successful admission write and physical NAT acceptance remain |
 | CR05 | Existing discovery, endpoint budgets and temporary capability boundaries retained | No new member-assistance protocol or relay-renewal acceptance |
 | CR06 | Revisit unchanged neighbors, bounded cursor page scans, advancing-empty-page grace with abuse cap, fair full-queue rotation and signed bidirectional fixture | Durable target/coverage summaries, bounded legacy no-cursor compatibility path, alternate source generations and full inventory acceptance remain |
-| CR07 | Signed history can be tested through a forced chain with no non-neighbor requests | Opaque forwarding, restart/temporal bridge stores and policy-controlled exposure remain |
+| CR07 | Signed history crosses a forced chain, including independently sealed bridge restart and a previously unknown channel | Opaque forwarding, alternate bridges, attachment custody and physical-device acceptance remain |
 | CR08 | Existing epoch/lifecycle authority unchanged | Long-absence control adapter, historical-author admission audit and rejoin integration remain |
 | CR09 | No dedicated guarantees exposed | Dedicated admission, persistent sustained-abuse controls and service failover remain |
-| CR10 | Sealed pending-message UI with original retry identity, explicit changed-context draft recovery, storage failures and late-completion fencing | Full recovery-state UI, remote custody/delivery distinctions and diagnostics matrix remain |
-| CR11 | Independent design and implementation reviews plus local checks | Pinned integrated commit, mutation evidence, real devices, supported platform CI and release acceptance remain |
+| CR10 | Sealed pending-message UI with original retry identity, coalesced quiet retries, explicit changed-context draft recovery, storage failures and late-completion fencing | Full recovery-state UI, remote custody/delivery distinctions and diagnostics matrix remain |
+| CR11 | Independent design and implementation reviews plus local checks | UI send-barrier mutation evidence recorded; pinned integrated checks, real devices, supported platform CI and release acceptance remain |
 
 No complete CR package or T01-T58 integration case is marked passed by these narrower tests.
 The patch has focused variants of T08, T13, T17-T18 and portions of T21, T28, T33 and T36.
-The admission helper test exercises reply admission and restored signed records; it is not T19/T20.
-The chain fixture exercises real signed request/response with denied non-neighbor edges; it is
-not a three-machine transport or independent-store restart test, and does not establish T37.
+The temporal bridge fixture now exercises production actors and independent sealed stores.
+Its successful run does not replace physical-network, OS process-kill or full T37 acceptance.
+The authenticated TCP reply/restart fixture passes in both orders in the 285-test native run.
+Earlier helper-only and chain-only evidence below remains historical.
 
 The durable-send feature supersedes the initial foundation's send ordering: the desktop chat
 command now uses a reviewed actor/store barrier and a persisted caller retry identity. Existing
@@ -47,11 +50,10 @@ Likewise, broad in-group forwarding permissions require CR01. The periodic sweep
 only reschedules already authorized catch-up through the existing verifier and resource limits;
 it adds no wire message, disclosure class, endpoint authority, relay role, or group-mode default.
 
-Current agents were started in one shared checkout before the later programme plan arrived.
+The initial foundation agents were started in one shared checkout before the later programme plan arrived.
 Edits to overlapping native sections were serialized after detecting an overwritten extraction;
 the final diff is checked for all intended boundaries. No reset, stash, commit, push, or mutation
-harness was run in another agent's checkout. Future independent packages should use the plan's
-separate-worktree lanes, with central dispatch and evidence owned by integration.
+harness was run in another agent's checkout. Later feature lanes used isolated worktrees, with central dispatch and evidence owned by integration.
 
 ## Independent review
 

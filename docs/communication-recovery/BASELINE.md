@@ -3,13 +3,17 @@
 Inspected commit: `48f906962b37ed71a967c04ef4978d019ff43586`.
 Local branch: `Chat-method-redesign`, clean before this work. The supplied plan names
 `gate4-agent1-runtime`; both refer to the inspected commit, but this work remains on the user's
-checked-out branch. Current changes are uncommitted for review.
+checked-out branch. This file records the original source baseline; subsequent independent
+feature pushes are tracked in [STATUS.md](STATUS.md) and the feature documents.
 
 Platform: Windows, PowerShell, repository Rust 1.89.0, existing desktop Node dependencies.
-No feature flag, wire tag, storage format, cryptographic primitive or network permission is added.
+The initial foundation added no feature flag, wire tag, storage format, cryptographic primitive
+or network permission. Later authenticated-policy and member-reconnect features have separately
+documented wire, storage and authority changes.
 The new native `send_message` return value requires the matching frontend from this patch.
 ServerNet writes version 4 and reads versions 1-4; request/response uses `/catcoms/rr/1`.
-Those versions remain unchanged. This is a focused baseline, not the complete CR00 inventory.
+These are baseline versions, not the final feature versions. This is a focused baseline,
+not the complete CR00 inventory.
 
 | Classification | Observation | Production seam |
 | --- | --- | --- |
