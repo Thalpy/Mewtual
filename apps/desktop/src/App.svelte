@@ -488,6 +488,28 @@
   // `setSearch` filters BOTH sidebars by label (cleared on open, "/" focuses it).
   let settingsPage = $state("appearance");
   let serverSettingsPage = $state("overview");
+  type CommunicationMode = "legacy_unverified" | "peer_to_peer" | "dedicated";
+  let communicationMode = $state<CommunicationMode | null>(null);
+  let communicationModeError = $state("");
+  function communicationModeLabel(mode: CommunicationMode): string {
+    return mode === "peer_to_peer" ? "Peer to peer" : mode === "dedicated" ? "Dedicated" : "Legacy · policy unverified";
+  }
+  $effect(() => {
+    const server = activeServerId;
+    const generation = viewGeneration;
+    if (locked || !showServerSettings || serverSettingsPage !== "overview" || server === null) return;
+    let cancelled = false;
+    communicationMode = null;
+    communicationModeError = "";
+    void invoke<string>("group_communication_mode", { server }).then((mode) => {
+      if (cancelled || !sessionContinuationCurrent(generation, viewGeneration, locked)) return;
+      if (mode === "peer_to_peer" || mode === "legacy_unverified" || mode === "dedicated") communicationMode = mode;
+      else communicationModeError = "This app cannot interpret the group's communication policy.";
+    }).catch((reason) => {
+      if (!cancelled && sessionContinuationCurrent(generation, viewGeneration, locked)) communicationModeError = errorText(reason);
+    });
+    return () => { cancelled = true; };
+  });
   let setSearch = $state("");
   let backupBusy = $state(false);
   let backupResult = $state<{ path: string; files: number; bytes: number; displayed: boolean; warning?: string } | null>(null);
@@ -655,6 +677,8 @@
   }
 
   function openServerSettings(id: number | null = null, page: string = serverSettingsPage) {
+    communicationMode = null;
+    communicationModeError = "";
     const targetServer = id ?? activeServerId;
     // switchServer runs synchronously as far as its first await, so `cur` below already names the
     // target. It also empties `livery` on the way past and refills it a round-trip later, which is
@@ -2463,7 +2487,6 @@
   // The create-server product question, in product terms (see docs/design-zeroconf-reachability
   // and the connectivity mockup): a friend circle connects members directly; a hosted community
   // runs through a node the founder operates. Hosted maps onto the relay field below.
-  let serverMode = $state<"friends" | "hosted">("friends");
   let advertise = $state(""); // optional reachable address (LAN/public IP) for the founder
   let relay = $state(""); // optional relay-node multiaddr (zero-config NAT traversal)
   // Optional rendezvous multiaddr: when set, the founder registers there so a joiner discovers
@@ -2478,6 +2501,7 @@
     rendezvous_routes: number;
     switchboards: number;
     expires_at_ms: number;
+    communication_mode: CommunicationMode;
   };
   let joinPreview = $state<InvitePreview | null>(null);
   let joinPreviewCode = $state("");
@@ -6367,10 +6391,6 @@
   }
 
   async function found() {
-    if (serverMode === "hosted" && !relay.trim()) {
-      error = "A hosted community runs through a node you operate: paste its address, or pick \"People I know\" instead.";
-      return;
-    }
     busy = true;
     error = "";
     const operationGeneration = viewGeneration;
@@ -6412,14 +6432,23 @@
     joinError = "";
     const operationGeneration = viewGeneration;
     try {
-      const { hex, turn } = unwrapInvite(joinInvite);
+      const enteredInvite = joinInvite;
+      const { hex, turn } = unwrapInvite(enteredInvite);
       const previewMatchesCode = joinPreviewCode === hex;
       if (!previewMatchesCode) {
-        joinPreview = await invoke<InvitePreview>("preview_invite", { inviteHex: hex });
+        const preview = await invoke<InvitePreview>("preview_invite", { inviteHex: hex });
         if (!sessionContinuationCurrent(operationGeneration, viewGeneration, locked)) return;
+        if (joinInvite !== enteredInvite) return;
+        joinPreview = preview;
         joinPreviewCode = hex;
         joinSwitchboardConsent = true;
       }
+      if (joinPreview?.communication_mode === "dedicated") {
+        joinError = "This invite declares a dedicated group, which this version cannot join.";
+        return;
+      }
+      // Mode and IP-disclosure consequences must be visible before the action contacts peers.
+      if (!previewMatchesCode) return;
       const assistedAction = assistedJoinAction(
         previewMatchesCode,
         joinPreview?.switchboards ?? 0,
@@ -24398,12 +24427,23 @@
               <div class="st-readout">
                 <span class="k">signature</span><span class="v ok">valid · signed by the inviter's device</span>
                 <span class="k">expires</span><span class="v">{fmtTime(joinPreview.expires_at_ms)}</span>
+                <span class="k">declared mode</span><span class="v">{communicationModeLabel(joinPreview.communication_mode)}</span>
                 <span class="k">routes</span>
                 <span class="v">
                   {joinPreview.direct_routes} direct · {joinPreview.rendezvous_routes} via an introducer ·
                   {joinPreview.switchboards} member switchboard{joinPreview.switchboards === 1 ? "" : "s"}
                 </span>
               </div>
+            {/if}
+            {#if joinPreview}
+              <p class="muted small">The inviter signed this mode declaration. The group's authority is checked when you join.</p>
+              {#if joinPreview.communication_mode === "peer_to_peer"}
+                <p class="muted small">Members can connect directly and exchange signed history they hold. Connected members may learn your IP address.</p>
+              {:else if joinPreview.communication_mode === "legacy_unverified"}
+                <p class="muted small">This older invitation has no authenticated communication policy. Joining does not enable new standing member-route permissions.</p>
+              {:else}
+                <p class="warnline">Dedicated groups are not supported by this version.</p>
+              {/if}
             {/if}
             {#if joinPreview?.switchboards}
               <section class="st-consent">
@@ -24423,10 +24463,12 @@
               </section>
             {/if}
             <div class="pc-actions">
-              <button onclick={join} disabled={busy || !joinInvite.trim()}>
+              <button onclick={join} disabled={busy || !joinInvite.trim() || joinPreview?.communication_mode === "dedicated"}>
                 {busy
                   ? "Dialling…"
-                  : joinPreview?.switchboards
+                  : !joinPreview
+                    ? "Review invite"
+                    : joinPreview.switchboards
                     ? joinSwitchboardConsent
                       ? "Join with fallback"
                       : "Join directly"
@@ -24558,10 +24600,10 @@
               {/if}
             </div>
             <div class="st-card">
-              <span class="k">What happens when I press Join</span>
+              <span class="k">Review, then join</span>
               <ol class="st-steps">
-                <li><b>Your app reads the invite</b> and checks its signature and which routes it offers.</li>
-                <li><b>It dials the inviter</b>, one route at a time. Most joins finish here in a few seconds.</li>
+                <li><b>Review invite</b> checks its signature and shows its declared mode and connection routes.</li>
+                <li><b>Join contacts the inviter</b>, one route at a time.</li>
                 <li><b>If nobody answers</b>, you get a 60-second reply code to send back, and a plain account of what failed.</li>
                 <li><b>The inviter's app admits you</b> under the group's rules. Refusals are logged on their side.</li>
               </ol>
@@ -24621,67 +24663,30 @@
           <section class="st-sect">
             <div class="st-sect-head">
               <span class="k">2 · how people connect</span>
-              <h2>Who carries the traffic?</h2>
-              <span class="why muted small">Neither is the safer one: they guard against different people.</span>
+              <h2>Members connect and share history</h2>
+              <span class="why muted small">New groups use an authenticated peer-to-peer policy that remains fixed for the group.</span>
             </div>
-            <div class="st-topo" role="radiogroup" aria-label="How people connect">
-              <label class="tcard" class:selected={serverMode === "friends"}>
-                <input type="radio" class="mc-radio" name="server-mode" value="friends" bind:group={serverMode} />
+            <div class="st-topo" style="grid-template-columns: minmax(0, 1fr)">
+              <article class="tcard selected">
                 <div class="tc-head">
-                  <div><span class="k">peer to peer · no server</span><h3>Friend mesh</h3></div>
-                  <span class="tc-pick" aria-hidden="true"></span>
+                  <div><span class="k">authenticated group policy</span><h3>Peer to peer</h3></div>
                 </div>
                 <div class="tc-diag">
                   <canvas use:topoDiagram={"mesh"}></canvas>
-                  <div class="tc-cap">no server exists · the group is the truth</div>
+                  <div class="tc-cap">members exchange signed history through available connections</div>
                 </div>
                 <div class="tc-body">
-                  <p>Everyone connects to everyone. Each member's device keeps the encrypted history, so any one of them can catch the others up.</p>
+                  <p>This group uses a fixed peer-to-peer policy. Members can connect directly and pass on the signed history they hold.</p>
                   <dl class="tc-facts">
-                    <dt>Requires</dt><dd><b>Nothing.</b> No machine to run, no address to paste.</dd>
-                    <dt>Who sees</dt><dd>Members may see each other's IP addresses.</dd>
-                    <dt>Removal</dt><dd><span class="m">Cooperative.</span> A ban depends on every member's app playing fair.</dd>
-                    <dt>Offline</dt><dd>Catch-up waits until another member is online. Works on a LAN with no internet.</dd>
-                    <dt>Files</dt><dd>Circulation dates are metadata. Files need a reachable holder; local kept copies are opt-in.</dd>
+                    <dt>Privacy</dt><dd>Connected members may learn your IP address and connection timing.</dd>
+                    <dt>Catch-up</dt><dd>A reachable member must hold the missing history. Another member can pass it on after reconnecting.</dd>
+                    <dt>Removal</dt><dd>Membership changes rotate the group keys. Previously received copies cannot be recalled.</dd>
+                    <dt>Files</dt><dd>Files need a reachable holder; keeping a local copy is optional.</dd>
+                    <dt>Relay</dt><dd>An optional relay carries encrypted traffic. It does not provide a dedicated group or promise to retain history.</dd>
                   </dl>
                 </div>
-                <div class="tc-foot"><span>best for</span><span class="who">friend circles · small crews</span></div>
-              </label>
-              <label class="tcard" class:selected={serverMode === "hosted"}>
-                <input type="radio" class="mc-radio" name="server-mode" value="hosted" bind:group={serverMode} />
-                <div class="tc-head">
-                  <div><span class="k">decentralised server · your node</span><h3>Community node</h3></div>
-                  <span class="tc-pick" aria-hidden="true"></span>
-                </div>
-                <div class="tc-diag">
-                  <canvas use:topoDiagram={"node"}></canvas>
-                  <div class="tc-cap">node forwards encrypted traffic · holds no group keys</div>
-                </div>
-                <div class="tc-body">
-                  <p>Everyone connects through an always-on machine you run. It relays traffic, keeps members' IP addresses from each other, and serves signed snapshots so catch-up works when nobody else is online.</p>
-                  <dl class="tc-facts">
-                    <dt>Requires</dt><dd><b>A node you operate.</b> A small always-on box running <span class="fp">catcomsctl relay</span>, and its address.</dd>
-                    <dt>Who sees</dt><dd>The operator sees who is a member, who talks to whom, when, and how much. Messages are encrypted before they reach the node.</dd>
-                    <dt>Removal</dt><dd><span class="y">Holds.</span> The group rotates keys and the node stops carrying the removed person's traffic.</dd>
-                    <dt>Offline</dt><dd>24/7 catch-up. Voice rooms larger than a mesh can carry.</dd>
-                    <dt>Lose it</dt><dd>Members still hold the history; the group keeps working between whoever is online.</dd>
-                  </dl>
-                </div>
-                <div class="tc-foot"><span>best for</span><span class="who">bigger communities · people you don't know</span></div>
-              </label>
+              </article>
             </div>
-            {#if serverMode === "hosted"}
-              <div class="st-node-req">
-                <label class="field">
-                  <span class="muted">Your node's address</span>
-                  <input bind:value={relay} placeholder="/dns4/your-host/udp/7220/quic-v1/p2p/12D3Koo…" />
-                  <small class="muted">
-                    Set a node up with <span class="fp">catcomsctl relay</span>; it prints this line.
-                    No node yet? Pick Friend mesh instead.
-                  </small>
-                </label>
-              </div>
-            {/if}
           </section>
           <details class="st-fold">
             <summary>Advanced: connectivity <span class="k">optional</span></summary>
@@ -24696,13 +24701,11 @@
                 <input bind:value={rendezvous} placeholder="/ip4/…/tcp/…/p2p/…" />
                 <small class="muted">Register at a rendezvous node so people can join with <em>just the invite</em>, no address needed. Saved as your default.</small>
               </label>
-              {#if serverMode === "friends"}
                 <label class="field">
                   <span class="muted">Relay node</span>
                   <input bind:value={relay} placeholder="/ip4/…/udp/…/quic-v1/p2p/…" />
-                  <small class="muted">A relay's address makes a mesh reachable over the internet with no port-forward. The relay carries encrypted traffic only.</small>
+                  <small class="muted">An optional relay can help members connect. It carries encrypted traffic and does not change the group's peer-to-peer policy.</small>
                 </label>
-              {/if}
             </div>
           </details>
           <div class="st-found-foot">
@@ -24715,12 +24718,9 @@
               <span class="chip">
                 {PRESETS.find((p) => p.id === liveryDraft.preset)?.name ?? "Nightshade"}{liveryDraft.accent ? " · custom accent" : ""}{foundIcon ? " · icon" : ""}{foundBanner ? " · banner" : ""}{foundCursor ? " · cursor" : ""}
               </span>
-              <span class="chip">{serverMode === "hosted" ? "community node" : "friend mesh"}</span>
-              {#if serverMode === "hosted" && !relay.trim()}
-                <span class="warnline">needs a node address before it can be founded</span>
-              {/if}
+              <span class="chip">peer to peer</span>
             </div>
-            <button onclick={found} disabled={busy || (serverMode === "hosted" && !relay.trim())}>
+            <button onclick={found} disabled={busy}>
               {busy ? "Working…" : "Found server"}
             </button>
           </div>
@@ -29191,6 +29191,23 @@
             {#if serverSettingsPage === "overview"}
               <div class="stx-crumb">SERVER // {cur?.name?.toUpperCase()} // OVERVIEW</div>
               <h1>Overview</h1>
+              <section class="set-section">
+                <h3>Communication policy</h3>
+                {#if communicationModeError}
+                  <p class="warnline">{communicationModeError}</p>
+                {:else if communicationMode === null}
+                  <p class="muted small">Reading this group's authenticated policy…</p>
+                {:else}
+                  <p><b>{communicationModeLabel(communicationMode)}</b></p>
+                  {#if communicationMode === "peer_to_peer"}
+                    <p class="muted small">The group has a fixed, owner-authenticated peer-to-peer policy. Members may connect directly and exchange signed history they hold. Connected members may learn your IP address. Catch-up needs a reachable copy of the missing history.</p>
+                  {:else if communicationMode === "legacy_unverified"}
+                    <p class="muted small">This older group has no active authenticated communication policy. Its existing messaging remains available; new standing member-route permissions stay disabled. No policy upgrade is offered in this version.</p>
+                  {:else}
+                    <p class="muted small">Dedicated groups are not supported by this version.</p>
+                  {/if}
+                {/if}
+              </section>
               <section class="set-section">
               <p>{cur ? serverLabel(cur) : ":"} <span class="role-badge {myRole}">{myRole}</span></p>
               {#if canModerate && !cur?.isDm}

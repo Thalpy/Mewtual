@@ -56,6 +56,7 @@ use zeroize::Zeroizing;
 mod creative_blobs;
 mod durable_chat;
 mod errors;
+mod group_policy;
 mod media_decode;
 mod security_intent;
 mod shutdown;
@@ -811,6 +812,8 @@ struct InvitePreview {
     rendezvous_routes: usize,
     switchboards: usize,
     expires_at_ms: u64,
+    /// Signed invitation declaration; governance is verified against MLS during admission.
+    communication_mode: &'static str,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -5079,6 +5082,7 @@ async fn preview_invite(
         rendezvous_routes: decoded.token.rendezvous.len(),
         switchboards: switchboards.len(),
         expires_at_ms: decoded.token.expires_at_ms,
+        communication_mode: group_policy::declared_mode(&decoded.token),
     })
 }
 
@@ -16238,6 +16242,7 @@ pub fn run() {
             unlock,
             found_server,
             preview_invite,
+            group_policy::group_communication_mode,
             join_server,
             apply_join_reply,
             leave_server,

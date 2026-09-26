@@ -53,3 +53,10 @@ over an offered body is not treated as proof that it matches the group's earlier
 Focused regression coverage lives in `catcoms-mls/tests/group_policy.rs`,
 `catcoms-sync/src/group_policy/tests.rs`, the app actor migration test and the existing product
 found/invite/join conversation test. Execution results belong in the feature integration report.
+
+The native read-only `group_communication_mode` command queries the exact actor incarnation and
+checks the unlocked UI generation again before returning. Settings shows that authenticated mode,
+including explicit unresolved legacy state. Invite preview shows only the signed declaration and
+explains that MLS governance is checked during admission; reviewing an invite sends no join request.
+The founding screen offers P2P with optional relay connectivity. The former local-only hosted-node
+selector and its unsupported privacy and history-retention promises are removed.
