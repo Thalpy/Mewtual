@@ -59,6 +59,7 @@ mod errors;
 mod group_policy;
 mod leaving;
 mod media_decode;
+mod member_reconnect;
 mod security_intent;
 mod shutdown;
 mod studio;
@@ -2010,7 +2011,7 @@ fn spawn_discovery_timer(app: AppHandle, server: u64, instance: u64, actor: Serv
             // Learn a currently connected member's private route as well. This upgrades pre-v3
             // records after one successful overlap and updates the running actor without ever
             // publishing the address to the group.
-            persist_live_local_reconnect_routes(&app, server, &actor).await;
+            persist_live_local_reconnect_routes(&app, server, instance, &actor).await;
             delay = jittered_delay(
                 DISCOVERY_INTERVAL_SECS * 1_000 - DISCOVERY_JITTER_MS,
                 DISCOVERY_JITTER_MS * 2,
@@ -2035,12 +2036,14 @@ fn notify_reconnect_capture(app: &AppHandle, server: u64) {
 fn spawn_reconnect_capture_worker(
     app: AppHandle,
     server: u64,
+    instance: u64,
     actor: ServerActor,
     mut wake: watch::Receiver<u64>,
 ) {
     let task = tokio::spawn(async move {
-        while wake.changed().await.is_ok() {
-            persist_live_local_reconnect_routes(&app, server, &actor).await;
+        loop {
+            persist_live_local_reconnect_routes(&app, server, instance, &actor).await;
+            if wake.changed().await.is_err() { break; }
         }
     });
     supervise("reconnect_capture", server, task);
@@ -2058,14 +2061,14 @@ fn replace_reconnect_capture_signal(
 /// Install the single bounded recovery-capture wakeup for a registry entry. Replacing the sender
 /// closes any prior worker after its current capture, which matters when an on-disk id is restored
 /// into a process that previously held a transient entry with the same id.
-fn install_reconnect_capture_worker(app: &AppHandle, server: u64, actor: ServerActor) {
+fn install_reconnect_capture_worker(app: &AppHandle, server: u64, instance: u64, actor: ServerActor) {
     let Some(capture_wake) = replace_reconnect_capture_signal(
         &app.state::<AppState>().reconnect_capture_signals,
         server,
     ) else {
         return;
     };
-    spawn_reconnect_capture_worker(app.clone(), server, actor, capture_wake);
+    spawn_reconnect_capture_worker(app.clone(), server, instance, actor, capture_wake);
 }
 
 /// Persist document/control changes, including those received with the UI locked. Presence,
@@ -3347,7 +3350,7 @@ async fn register_server(
     );
     install_persistence_worker(app, id, instance).await;
     forward_events(app.clone(), id, instance, events);
-    install_reconnect_capture_worker(app, id, timer_actor.clone());
+    install_reconnect_capture_worker(app, id, instance, timer_actor.clone());
     studio::spawn_receiver(app.clone(), id, instance, timer_actor.clone());
     // Start only after the entry exists. A zero-millisecond randomized first tick must not race
     // the registry insertion and silently skip the initial interface/discovery refresh.
@@ -3553,12 +3556,23 @@ async fn persist_address_cache(app: &AppHandle, server: u64) {
 ///
 /// Direct admission may refresh only its named inviter. A legacy v1/v2 record gets one migration
 /// opportunity only for an unambiguous two-member group; new helper/reply/switchboard admissions
-/// are durably disabled so an empty route list can never be mistaken for migration consent. An
+/// remain disabled without authenticated P2P policy, so an empty route list is never migration consent. An
 /// empty observation never erases the last sealed hint: the normal reason for seeing no live route
 /// is precisely that the remote app is closed, when the hint is needed most.
-async fn persist_live_local_reconnect_routes(app: &AppHandle, server: u64, actor: &ServerActor) {
+async fn persist_live_local_reconnect_routes(app: &AppHandle, server: u64, instance: u64, actor: &ServerActor) {
     let state = app.state::<AppState>();
     let state = state.inner();
+    let mesh = state.servers.lock().await.get(&server)
+        .filter(|entry| entry.instance == instance).and_then(|entry| entry.mesh.clone());
+    let Some(mesh) = mesh else { return; };
+    match member_reconnect::persist(state, server, instance, actor, mesh.authenticated_dial_route_evidence()).await {
+        Ok(true) => return,
+        Ok(false) => {},
+        Err(error) => {
+            tracing::warn!(target: "catcoms_app", server, %error, "VAULT.MEMBER_RECONNECT.PENDING");
+            return;
+        }
+    }
     let now_ms = SystemClock.now_ms();
     let net = {
         let guard = state.store.lock().await;
@@ -3594,13 +3608,6 @@ async fn persist_live_local_reconnect_routes(app: &AppHandle, server: u64, actor
                 return;
             }
         }
-    };
-    let mesh = {
-        let servers = state.servers.lock().await;
-        servers.get(&server).and_then(|entry| entry.mesh.clone())
-    };
-    let Some(mesh) = mesh else {
-        return;
     };
     let member_routes = actor.member_routes().await;
     let claimed_peers: Vec<_> = member_routes
@@ -3663,6 +3670,8 @@ async fn persist_live_local_reconnect_routes(app: &AppHandle, server: u64, actor
     // The vault lock itself may have crossed the signed deadline. This final sample is the
     // authority boundary used by the atomic merge and durable save.
     let final_now_ms = SystemClock.now_ms();
+    let registry = state.servers.lock().await;
+    if registry.get(&server).is_none_or(|entry| entry.instance != instance) { return; }
     let Some(changed) = merge_live_reconnect_capture(
         &mut current,
         selected_from_pending,
@@ -3685,6 +3694,7 @@ async fn persist_live_local_reconnect_routes(app: &AppHandle, server: u64, actor
             return;
         }
     }
+    drop(registry);
     drop(guard);
     // The durable write is the safety boundary. Updating the live actor afterwards avoids holding
     // the vault lock across an actor await; a failure costs only this session's proactive redial.
@@ -5214,9 +5224,16 @@ async fn finalize_admission_discovery<T: MeshTransport, R: catcoms_rt::CryptoRng
             "DISCOVERY.PEER_RECORD.PUBLISH_FAILED"
         );
     }
+    // PEX only pulls the other side's record. Confirm both endpoint bindings before the first
+    // snapshot, so the member that dialled this reply callback can retain its proven listener.
+    let finalized = matches!(
+        timeout(within, server.finalize_member_connection(join_contact)).await,
+        Ok(Ok(true))
+    );
     Ok(
         match timeout(within, server.request_pex_connected(join_contact)).await {
             Ok(Ok(learned_records)) => {
+                let learned_records = learned_records + usize::from(finalized);
                 tracing::debug!(
                     target: "catcoms_app",
                     learned_records,
@@ -5230,11 +5247,19 @@ async fn finalize_admission_discovery<T: MeshTransport, R: catcoms_rt::CryptoRng
                     error = %error,
                     "DISCOVERY.ADMISSION_PEX.FAILED"
                 );
-                AdmissionDiscoveryOutcome::Failed
+                if finalized {
+                    AdmissionDiscoveryOutcome::Completed { learned_records: 1 }
+                } else {
+                    AdmissionDiscoveryOutcome::Failed
+                }
             }
             Err(_) => {
                 tracing::warn!(target: "catcoms_app", "DISCOVERY.ADMISSION_PEX.TIMED_OUT");
-                AdmissionDiscoveryOutcome::TimedOut
+                if finalized {
+                    AdmissionDiscoveryOutcome::Completed { learned_records: 1 }
+                } else {
+                    AdmissionDiscoveryOutcome::TimedOut
+                }
             }
         },
     )
@@ -5269,7 +5294,7 @@ fn reconnect_capture_peer(
 ) -> Option<PeerId> {
     let unique = uniquely_claimed_member_peers(claimed_peers);
     match policy {
-        ReconnectPolicy::Disabled => None,
+        ReconnectPolicy::Disabled | ReconnectPolicy::MemberMesh => None,
         ReconnectPolicy::AuthorizedPeer(peer) => {
             let peer = PeerId::new(peer);
             unique.contains(&peer).then_some(peer)
@@ -5878,6 +5903,14 @@ async fn found_server_inner(
     persist_server(state, server_id).await;
     persist_server_net(state, server_id, &net).await;
     persist_registry(state).await;
+    let registered = state.servers.lock().await.get(&server_id)
+        .map(|entry| (entry.instance, entry.actor.clone(), entry.mesh.clone()));
+    if let Some((instance, actor, Some(mesh))) = registered {
+        if let Err(error) = member_reconnect::persist(state, server_id, instance, &actor,
+            mesh.authenticated_dial_route_evidence()).await {
+            tracing::warn!(target: "catcoms_app", server = server_id, %error, "VAULT.ADMISSION_RECONNECT.PENDING");
+        }
+    }
     drop(session_commit);
     diag.server = server_id;
     diag.advertised.clone_from(&invite.bootstrap);
@@ -6647,6 +6680,14 @@ async fn join_server_inner(
     persist_server(state, server_id).await;
     persist_server_net(state, server_id, &net).await;
     persist_registry(state).await;
+    let registered = state.servers.lock().await.get(&server_id)
+        .map(|entry| (entry.instance, entry.actor.clone(), entry.mesh.clone()));
+    if let Some((instance, actor, Some(mesh))) = registered {
+        if let Err(error) = member_reconnect::persist(state, server_id, instance, &actor,
+            mesh.authenticated_dial_route_evidence()).await {
+            tracing::warn!(target: "catcoms_app", server = server_id, %error, "VAULT.ADMISSION_RECONNECT.PENDING");
+        }
+    }
     drop(session_commit);
     diag.server = server_id;
     if let Some(rx) = port_mapping_rx {
@@ -11963,6 +12004,7 @@ async fn restore_server_actor<T, R>(
     clock: Box<dyn Clock + Send>,
     bootstrap: &[String],
     record_seq: u64,
+    reconnect_policy: ReconnectPolicy,
     reconnect_routes: Vec<(PeerId, String)>,
     switchboard: bool,
 ) -> Result<RestoredActor, String>
@@ -11973,7 +12015,11 @@ where
     let mut server = Server::restore(snapshot, transport, rng, clock, &record.display_name)
         .map_err(|error| error.to_string())?;
     server.set_endpoint_dial_scheduler(state.endpoint_dials.clone());
-    server.set_local_reconnect_routes(reconnect_routes);
+    // A newer network record can outlive a failed/older core snapshot. Its enum is provenance,
+    // never a substitute for the authenticated group policy pin inside that snapshot.
+    if reconnect_policy != ReconnectPolicy::MemberMesh || server.group_mode() == catcoms_app::GroupMode::PeerToPeer {
+        server.set_local_reconnect_routes(reconnect_routes);
+    }
     server
         .subscribe_control()
         .await
@@ -12170,6 +12216,7 @@ async fn reload_one(
         Box::new(SystemClock),
         &bootstrap,
         net.record_seq,
+        net.reconnect_policy,
         net.reconnect_routes
             .iter()
             .map(|route| (PeerId::new(route.peer_id), route.address.clone()))
@@ -12220,7 +12267,7 @@ async fn reload_one(
     );
     install_persistence_worker(app, record.id, instance).await;
     forward_events(app.clone(), record.id, instance, events);
-    install_reconnect_capture_worker(app, record.id, timer_actor.clone());
+    install_reconnect_capture_worker(app, record.id, instance, timer_actor.clone());
     studio::spawn_receiver(app.clone(), record.id, instance, timer_actor.clone());
     spawn_discovery_timer(app.clone(), record.id, instance, timer_actor);
     // Re-seal if the port moved. (The reserved peer-record sequence block was already sealed by
@@ -16417,6 +16464,7 @@ pub fn run() {
 mod tests {
     use super::*;
     use catcoms_rt::ManualClock;
+    include!("member_reconnect_tests.rs");
 
     #[test]
     fn kept_inventory_exposes_no_wrapped_manifest_or_keys() {
@@ -21133,6 +21181,7 @@ mod tests {
                 Box::new(ManualClock::new(2_000 + peer)),
                 &[],
                 network.record_seq,
+                network.reconnect_policy,
                 network
                     .reconnect_routes
                     .iter()

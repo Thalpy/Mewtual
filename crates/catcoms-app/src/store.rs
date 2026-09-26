@@ -171,12 +171,15 @@ pub struct ReconnectRoute {
 /// Durable authority for local reconnect-route capture.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReconnectPolicy {
-    /// No route may be captured. Used for new founders and helper/reply/switchboard admission.
+    /// No route may be captured without separate authenticated continuing group permission.
     Disabled,
     /// Direct admission authenticated this exact named inviter as the recurring contact.
     AuthorizedPeer([u8; 32]),
     /// A v1/v2 record may migrate once under the narrow two-member overlap rule.
     LegacyPending,
+    /// The authenticated P2P group policy permits continuing member connections. Only locally
+    /// proven outbound listener observations may populate these bounded private route hints.
+    MemberMesh,
 }
 
 /// A join races at most two useful direct transports (normally TCP and QUIC) for one peer.
@@ -254,10 +257,11 @@ const SERVER_NET_V1: u8 = 1;
 const SERVER_NET_V2: u8 = 2;
 const SERVER_NET_V3: u8 = 3;
 const SERVER_NET_V4: u8 = 4;
+const SERVER_NET_V5: u8 = 5;
 
 fn encode_server_net(net: &ServerNet) -> Vec<u8> {
     let mut e = Encoder::new();
-    e.put_u8(SERVER_NET_V4);
+    e.put_u8(SERVER_NET_V5);
     e.put_bytes(&net.key_seed).expect("seed fits");
     e.put_u16(net.port);
     e.put_str(&net.advertise).expect("advertise fits");
@@ -276,19 +280,25 @@ fn encode_server_net(net: &ServerNet) -> Vec<u8> {
         ReconnectPolicy::LegacyPending => {
             e.put_u8(2);
         }
+        ReconnectPolicy::MemberMesh => {
+            e.put_u8(3);
+        }
     }
     // Keep the encoder's output inside the decoder's own bounds even if a future caller builds a
     // `ServerNet` directly. Desktop-created routes have already passed this cap, but producing a
     // record we would refuse on the next launch is a particularly bad failure mode here.
     let authorized_peer = match net.reconnect_policy {
         ReconnectPolicy::AuthorizedPeer(peer) => Some(peer),
-        ReconnectPolicy::Disabled | ReconnectPolicy::LegacyPending => None,
+        ReconnectPolicy::Disabled
+        | ReconnectPolicy::LegacyPending
+        | ReconnectPolicy::MemberMesh => None,
     };
     let routes: Vec<_> = net
         .reconnect_routes
         .iter()
         .filter(|route| {
-            authorized_peer == Some(route.peer_id)
+            (authorized_peer == Some(route.peer_id)
+                || net.reconnect_policy == ReconnectPolicy::MemberMesh)
                 && route.address.len() <= MAX_RECONNECT_ROUTE_BYTES
         })
         .take(MAX_RECONNECT_ROUTES)
@@ -319,6 +329,7 @@ fn decode_server_net(bytes: &[u8]) -> Result<ServerNet, AppError> {
         && version != SERVER_NET_V2
         && version != SERVER_NET_V3
         && version != SERVER_NET_V4
+        && version != SERVER_NET_V5
     {
         return Err(AppError::Io("unknown server net record version".into()));
     }
@@ -348,6 +359,7 @@ fn decode_server_net(bytes: &[u8]) -> Result<ServerNet, AppError> {
                     .map_err(|_| bad())?,
             ),
             2 => ReconnectPolicy::LegacyPending,
+            3 if version >= SERVER_NET_V5 => ReconnectPolicy::MemberMesh,
             _ => return Err(bad()),
         }
     } else {
@@ -376,10 +388,11 @@ fn decode_server_net(bytes: &[u8]) -> Result<ServerNet, AppError> {
         }
     }
     if reconnect_routes.iter().any(|route| {
-        !matches!(
-            reconnect_policy,
-            ReconnectPolicy::AuthorizedPeer(peer) if peer == route.peer_id
-        )
+        reconnect_policy != ReconnectPolicy::MemberMesh
+            && !matches!(
+                reconnect_policy,
+                ReconnectPolicy::AuthorizedPeer(peer) if peer == route.peer_id
+            )
     }) {
         return Err(bad());
     }
@@ -2367,6 +2380,50 @@ mod tests {
             .unwrap()
             .reconnect_routes
             .is_empty());
+    }
+
+    #[test]
+    fn member_mesh_net_v5_retains_two_directions_without_promoting_old_disabled_records() {
+        let mut net = ServerNet {
+            key_seed: [7; 32],
+            port: 22487,
+            advertise: String::new(),
+            relay: String::new(),
+            rendezvous: String::new(),
+            switchboard: false,
+            record_seq: 65_536,
+            reconnect_policy: ReconnectPolicy::MemberMesh,
+            reconnect_routes: (1..=3)
+                .map(|id| ReconnectRoute {
+                    peer_id: [id; 32],
+                    address: format!("/ip4/192.168.1.{id}/tcp/22487"),
+                })
+                .collect(),
+            pending_recovery_peer: None,
+            pending_recovery_expires_at_ms: 0,
+        };
+        let saved = decode_server_net(&encode_server_net(&net)).unwrap();
+        assert_eq!(saved.reconnect_policy, ReconnectPolicy::MemberMesh);
+        assert_eq!(
+            saved.reconnect_routes,
+            net.reconnect_routes[..MAX_RECONNECT_ROUTES]
+        );
+        assert_eq!(saved.key_seed, net.key_seed);
+        assert_eq!(saved.record_seq, net.record_seq);
+        let mut unsupported = encode_server_net(&net);
+        unsupported[0] = SERVER_NET_V4;
+        assert!(
+            decode_server_net(&unsupported).is_err(),
+            "v4 has no standing member authority tag"
+        );
+        net.reconnect_policy = ReconnectPolicy::Disabled;
+        net.reconnect_routes.clear();
+        let mut old_disabled = encode_server_net(&net);
+        old_disabled[0] = SERVER_NET_V4;
+        assert_eq!(
+            decode_server_net(&old_disabled).unwrap().reconnect_policy,
+            ReconnectPolicy::Disabled
+        );
     }
 
     #[test]

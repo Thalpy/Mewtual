@@ -5595,6 +5595,10 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
         self.sync.member_routes()
     }
 
+    pub fn finalized_member_peers(&self) -> Vec<PeerId> {
+        self.sync.finalized_member_peers()
+    }
+
     /// Cheap session-local invalidation epoch for [`Self::member_routes`].
     pub fn member_route_revision(&self) -> u64 {
         self.sync.member_route_revision()
@@ -8269,6 +8273,11 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
     /// authority by letting the transport redial its remembered endpoint.
     pub async fn request_pex_connected(&mut self, peer: PeerId) -> Result<usize, AppError> {
         Ok(self.sync.request_pex_connected(peer).await?)
+    }
+
+    /// Exchange both self-signed member/transport bindings under the authenticated P2P policy.
+    pub async fn finalize_member_connection(&mut self, peer: PeerId) -> Result<bool, AppError> {
+        Ok(self.sync.finalize_member_connection(peer).await?)
     }
 
     /// Back a peer off after it failed to answer a PEX request within the caller's deadline.
