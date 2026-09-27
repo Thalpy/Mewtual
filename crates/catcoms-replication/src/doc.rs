@@ -20,6 +20,7 @@ use catcoms_rt::CryptoRngCore;
 use catcoms_storage::pad;
 use catcoms_wire::{Decoder, DocType, Encoder};
 
+use crate::catchup_index::{merge_ranges, AncestryIndex, LogRange};
 use crate::epoch::{
     Admission, AdmittedOperation, DomainOp, EpochGate, LogicalDocument, MAX_SIGNED_EPOCH_OP_BYTES,
 };
@@ -69,6 +70,9 @@ pub struct EncryptedDoc {
     /// Receipt-authorized seed identity; absent for epoch zero and legacy documents. Its raw
     /// change is in Automerge, not the signed user-op log, and must survive vault restore.
     checkpoint: Option<CheckpointOrigin>,
+    /// Bounded local certificates of ancestor log positions. Built while accepting/restoring
+    /// canonical changes, never by scanning the archive in a network request. Not persisted.
+    catchup_index: AncestryIndex,
 }
 
 /// What a serialization of a document depends on: its automerge heads and its op-log length.
@@ -78,10 +82,14 @@ type SnapshotKey = (Vec<ChangeHash>, usize);
 /// worth a second copy of the document in memory; a busy channel re-encodes as it always did.
 pub const MAX_CACHED_SNAPSHOT_BYTES: usize = 1 << 20;
 
-/// Work limits for a cursor-capable history page. Truncating the known closure can only
-/// resend duplicates; the provider cursor still traverses every retained operation.
+/// Work limits for a cursor-capable history page. Locally certified ancestor intervals may be
+/// skipped without inspecting their operations. Truncated proofs can only resend duplicates.
 pub const MAX_CATCHUP_PAGE_SCANNED_OPS: usize = 256;
 pub const MAX_CATCHUP_PAGE_CLOSURE_STEPS: usize = 2_048;
+
+#[cfg(test)]
+#[path = "doc_catchup_index_tests.rs"]
+mod catchup_index_tests;
 
 impl EncryptedDoc {
     /// Create an empty document. `actor` (this device) becomes the automerge
@@ -99,6 +107,7 @@ impl EncryptedDoc {
             authors_indexed: 0,
             snapshot_cache: None,
             checkpoint: None,
+            catchup_index: AncestryIndex::default(),
         }
     }
 
@@ -556,9 +565,11 @@ impl EncryptedDoc {
         let count = d.get_u32().map_err(|_| ReplError::Malformed)?;
         let mut log = Vec::new();
         let mut applied = HashSet::new();
+        let mut catchup_index = AncestryIndex::default();
         for _ in 0..count {
             let op = SignedOp::decode(d.get_bytes().map_err(|_| ReplError::Malformed)?)?;
             applied.insert(op.hash());
+            Self::index_catchup_op(&mut catchup_index, &doc, log.len(), &op);
             log.push(op);
         }
         let checkpoint = if d.is_empty() {
@@ -589,6 +600,7 @@ impl EncryptedDoc {
             authors_indexed: 0,
             snapshot_cache: None,
             checkpoint,
+            catchup_index,
         })
     }
 
@@ -914,8 +926,7 @@ impl EncryptedDoc {
             },
             || {
                 self.doc = staged;
-                self.applied.insert(op_hash);
-                self.log.push(op);
+                self.record(op);
             },
         )?;
         match admission {
@@ -1064,8 +1075,8 @@ impl EncryptedDoc {
     /// positions on different members. Callers must not replay a position to a peer that did not
     /// issue it; the sync layer binds each one to the peer and the runtime that produced it.
     ///
-    /// A page may legitimately be empty while still returning a resume point, because a run of
-    /// operations the requester already holds is skipped rather than sent.
+    /// Locally certified ancestor ranges are skipped in constant work per range. Uncertified
+    /// ancestry retains a bounded walk and may legitimately yield empty continuation pages.
     pub fn export_catchup_page(
         &mut self,
         have_heads: &[[u8; 32]],
@@ -1103,22 +1114,36 @@ impl EncryptedDoc {
         rng: &mut impl CryptoRngCore,
         bounded: bool,
     ) -> Result<(Vec<SealedOp>, Option<usize>), ReplError> {
-        let have = if bounded {
+        let (have, ranges) = if bounded {
             self.held_closure_bounded(have_heads)
         } else {
-            self.held_closure(have_heads)
+            (self.held_closure(have_heads), Vec::new())
         };
         let mut position = from.min(self.log.len());
-        let end = if bounded {
-            position
-                .saturating_add(MAX_CATCHUP_PAGE_SCANNED_OPS)
-                .min(self.log.len())
-        } else {
-            self.log.len()
-        };
+        let mut scanned = 0;
+        let mut range_index = 0;
         let mut out = Vec::new();
         let mut used = 0usize;
-        while position < end {
+        while position < self.log.len() {
+            while ranges
+                .get(range_index)
+                .is_some_and(|range| range.end as usize <= position)
+            {
+                range_index += 1;
+            }
+            if let Some(range) = ranges
+                .get(range_index)
+                .filter(|range| range.start as usize <= position)
+            {
+                // A certified interval is a local dependency fact, not a remote archive claim.
+                // Jumping it inspects no operation body and cannot cross an unproved sibling.
+                position = range.end as usize;
+                continue;
+            }
+            if bounded && scanned >= MAX_CATCHUP_PAGE_SCANNED_OPS {
+                break;
+            }
+            scanned += 1;
             let op = &self.log[position];
             let carried = Change::from_bytes(op.delta.clone()).ok().map(|c| c.hash());
             if carried.is_some_and(|hash| have.contains(&hash)) {
@@ -1142,20 +1167,26 @@ impl EncryptedDoc {
         Ok((out, next))
     }
 
-    /// A conservative subset of the requester's known closure. Charge both popped hashes and
-    /// scheduled dependency edges, including duplicates and unknown hashes, so a wide DAG
-    /// cannot hide unbounded traversal or temporary storage behind a tiny response.
-    fn held_closure_bounded(&self, have_heads: &[[u8; 32]]) -> HashSet<ChangeHash> {
+    /// Conservative known hashes and certified log ranges. Charge hashes, scheduled dependency
+    /// edges and copied range certificates, including duplicates and unknown hashes. The index
+    /// was built under local acceptance/restore; this path never reconstructs the full log.
+    /// Both the input frontier and the pending stack are capped at the same 2,048 hashes.
+    fn held_closure_bounded(
+        &self,
+        have_heads: &[[u8; 32]],
+    ) -> (HashSet<ChangeHash>, Vec<LogRange>) {
         let mut have = HashSet::new();
+        let mut ranges = Vec::new();
         let mut stack: Vec<_> = have_heads
             .iter()
             .take(MAX_CATCHUP_PAGE_CLOSURE_STEPS)
             .copied()
             .map(ChangeHash)
             .collect();
-        let mut remaining_edges = MAX_CATCHUP_PAGE_CLOSURE_STEPS.saturating_sub(stack.len());
-        for _ in 0..MAX_CATCHUP_PAGE_CLOSURE_STEPS {
+        let mut remaining = MAX_CATCHUP_PAGE_CLOSURE_STEPS;
+        while remaining > 0 {
             let Some(hash) = stack.pop() else { break };
+            remaining -= 1;
             if have.contains(&hash) {
                 continue;
             }
@@ -1163,11 +1194,24 @@ impl EncryptedDoc {
                 continue;
             };
             have.insert(hash);
-            let take = change.deps().len().min(remaining_edges);
+            if let Some(certificate) = self.catchup_index.get(&hash) {
+                let take = certificate.ranges().len().min(remaining);
+                ranges.extend_from_slice(&certificate.ranges()[..take]);
+                remaining -= take;
+                if certificate.complete && take == certificate.ranges().len() {
+                    continue;
+                }
+            }
+            let take = change
+                .deps()
+                .len()
+                .min(remaining)
+                .min(MAX_CATCHUP_PAGE_CLOSURE_STEPS.saturating_sub(stack.len()));
             stack.extend(change.deps().iter().take(take).copied());
-            remaining_edges -= take;
+            remaining -= take;
         }
-        have
+        merge_ranges(&mut ranges);
+        (have, ranges)
     }
 
     /// Every change at or behind `heads` that this node can actually resolve.
@@ -1262,8 +1306,7 @@ impl EncryptedDoc {
         self.doc
             .load_incremental(&op.delta)
             .map_err(|e| ReplError::Automerge(e.to_string()))?;
-        self.applied.insert(hash);
-        self.log.push(op);
+        self.record(op);
         Ok(Some(AppliedOp {
             author_device,
             change,
@@ -1272,7 +1315,29 @@ impl EncryptedDoc {
 
     fn record(&mut self, op: SignedOp) {
         if self.applied.insert(op.hash()) {
+            Self::index_catchup_op(&mut self.catchup_index, &self.doc, self.log.len(), &op);
             self.log.push(op);
+        }
+    }
+
+    fn index_catchup_op(
+        index: &mut AncestryIndex,
+        doc: &AutoCommit,
+        position: usize,
+        op: &SignedOp,
+    ) {
+        // P1 has its own bounded epoch pager, so it does not pay for this legacy history index.
+        if is_epoch_managed(op.doc_type) {
+            return;
+        }
+        let Ok(change) = Change::from_bytes(op.delta.clone()) else {
+            return;
+        };
+        let hash = change.hash();
+        // Automerge may have buffered an authenticated child with unavailable dependencies.
+        // A retained envelope alone cannot certify any causal range until the graph has it.
+        if let Some(canonical) = doc.get_change_by_hash(&hash) {
+            index.record(position, hash, canonical.deps());
         }
     }
 
@@ -1895,7 +1960,7 @@ mod page_work_tests {
     use rand_core::SeedableRng;
 
     #[test]
-    fn bounded_pages_yield_after_a_duplicate_prefix_and_reach_missing_history() {
+    fn certified_duplicate_prefix_is_skipped_without_empty_pages() {
         let author = MlsDevice::generate().unwrap();
         let group = ServerGroup::create(&author).unwrap();
         let mut rng = ChaCha20Rng::seed_from_u64(901);
@@ -1923,10 +1988,7 @@ mod page_work_tests {
                 .export_catchup_page(&heads, position, usize::MAX, &group, &author, &mut rng)
                 .unwrap();
             pages += 1;
-            if pages <= 2 {
-                assert!(page.is_empty());
-                assert_eq!(next, Some(position + MAX_CATCHUP_PAGE_SCANNED_OPS));
-            }
+            assert_eq!(page.len(), 1);
             requester.import_catchup(&page, &group, &author).unwrap();
             match next {
                 Some(next) => {
@@ -1936,7 +1998,7 @@ mod page_work_tests {
                 None => break,
             }
         }
-        assert_eq!(pages, 3);
+        assert_eq!(pages, 1);
         assert_eq!(requester.heads(), provider.heads());
         // The old no-cursor grammar must still get past this prefix in one response.
         let (legacy, next) = provider
@@ -1959,12 +2021,20 @@ mod page_work_tests {
             .unwrap();
         }
         let heads = doc.heads();
-        let known = doc.held_closure_bounded(&heads);
-        assert_eq!(known.len(), MAX_CATCHUP_PAGE_CLOSURE_STEPS);
+        let (known, ranges) = doc.held_closure_bounded(&heads);
+        assert_eq!(known.len(), 1);
         assert!(known.is_subset(&doc.held_closure(&heads)));
+        assert_eq!(
+            ranges,
+            vec![LogRange {
+                start: 0,
+                end: (MAX_CATCHUP_PAGE_CLOSURE_STEPS + 2) as u32
+            }]
+        );
         let mut untrusted = vec![[0xff; 32]; MAX_CATCHUP_PAGE_CLOSURE_STEPS];
         untrusted.extend(heads);
-        assert!(doc.held_closure_bounded(&untrusted).is_empty());
+        let (known, ranges) = doc.held_closure_bounded(&untrusted);
+        assert!(known.is_empty() && ranges.is_empty());
         let (page, next) = doc
             .export_catchup_page(&untrusted, 0, usize::MAX, &group, &author, &mut rng)
             .unwrap();

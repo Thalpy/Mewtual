@@ -152,16 +152,21 @@ current member, then:
 
 - If it does not hold the document at all, it answers `CATCHUP_SINCE_ABSENT`. This is
   deliberately distinct from "you have everything I have", because those mean opposite things.
-- Otherwise it calls
-  [`export_catchup_page`](../crates/catcoms-replication/src/doc.rs), **always**, whether or not
-  the request carried a cursor. `export_catchup_since` (same file) is the unpaged shape this path
-  used to run on and has no production caller left; it survives because the replication-layer and
-  sync-layer tests assert against it.
+- Otherwise a cursor-capable request calls
+  [`export_catchup_page`](../crates/catcoms-replication/src/doc.rs). Older requests use
+  `export_legacy_catchup_page`, preserving their unbounded ancestry walk because they have no
+  continuation for a bounded scan that found only duplicates.
 
-`export_catchup_page(&have_heads, from, budget, ..)` walks the transitive closure behind every head
-the requester named *that this node can resolve*, then walks **the local signed-op log from
-position `from`**, sealing every op whose change is not in that closure until `budget` bytes are
-spent. It returns the ops plus `Option<usize>`: where to resume, or `None` when the log ran out.
+`export_catchup_page(&have_heads, from, budget, ..)` resolves named heads against its own canonical
+graph. Locally derived ancestor certificates let it skip exact ranges of **the local signed-op
+log from position `from`** without inspecting each operation. A recent head on a long linear
+history certifies its whole prefix even after older certificates have been evicted. An incomplete
+certificate falls back to a conservative bounded dependency walk. Unknown heads exclude nothing.
+Each page charges at most 2,048 hash/edge/range steps and inspects at most 256 uncertified log
+positions, sealing missing operations until `budget` bytes are spent. It returns the operations
+and the next position, or `None` when the log ran out. The
+[cache and fallback limits](communication-recovery/PAGING.md) do not promise optimal transfer
+cost for every fragmented DAG or an evicted old head.
 
 Resuming by position is the whole point of the paged form. `export_catchup_since` recomputes the
 entire difference on every call, so a caller that can only send a prefix of it sends the *same*
@@ -214,10 +219,10 @@ They differ in how a round that applied *nothing* is judged:
   wider than its cap produces; the walk is consuming the peer's log and will reach the end of it. It
   is deliberately not treated as a continuation claim either, because the peer chooses its own
   positions.
-- a `PAGE` counts if **either** half of that fails: the bundle is empty **or** the cursor did not
-  advance. An empty page counts even when its cursor moved: a conforming pager stops early only on a
-  full budget, so it cannot emit an empty page alongside "there is more", and an empty one is a peer
-  minting positions for nothing.
+- a bounded scan can legitimately return an empty advancing `PAGE`. The requester grants at most
+  eight such pages per document/provider before counting them against the existing non-progress
+  bound. Repeating a position or rotating provider stamps does not replenish that grace. This
+  bounds a peer's invented progress while allowing conservative scans to cross duplicate regions.
 - a `MORE` that applies nothing always counts, because that path recomputes from the frontier and
   can therefore repeat identically forever. That is the shape the non-progress bound exists for.
 

@@ -25,8 +25,16 @@ async fn pair() -> (Member, Member, ManualClock) {
 }
 
 async fn exchange(provider: &mut Member, requester: &mut Member, answer: Option<Vec<u8>>) -> usize {
+    exchange_with_cost(provider, requester, answer).await.0
+}
+
+async fn exchange_with_cost(
+    provider: &mut Member,
+    requester: &mut Member,
+    answer: Option<Vec<u8>>,
+) -> (usize, usize) {
     let peer = provider.local_peer();
-    let (applied, ()) = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+    let (applied, transferred) = tokio::time::timeout(std::time::Duration::from_secs(5), async {
         tokio::join!(
             requester.request_catchup(peer, DocType::Channel, CHANNEL),
             async {
@@ -49,8 +57,20 @@ async fn exchange(provider: &mut Member, requester: &mut Member, answer: Option<
                                         .unwrap()
                                 }
                             };
+                            let (_, _, signed_answer) =
+                                decode_signed_commit_resp(&response).unwrap();
+                            let bundle = match signed_answer.first() {
+                                Some(&CATCHUP_SINCE_PAGE) => {
+                                    &signed_answer[1 + CATCHUP_CURSOR_BYTES..]
+                                }
+                                Some(&CATCHUP_SINCE_UNDERSTOOD) | Some(&CATCHUP_SINCE_MORE) => {
+                                    &signed_answer[1..]
+                                }
+                                _ => panic!("expected a history page"),
+                            };
+                            let transferred = decode_bundle(bundle).unwrap().len();
                             responder.respond(Bytes::from(response));
-                            return;
+                            return transferred;
                         }
                         Some(_) => continue,
                         None => panic!("transport ended before the request"),
@@ -62,7 +82,10 @@ async fn exchange(provider: &mut Member, requester: &mut Member, answer: Option<
     })
     .await
     .expect("one signed page must finish without advancing the injected clock");
-    applied.expect("the signed response authenticates against this request and provider")
+    (
+        applied.expect("the signed response authenticates against this request and provider"),
+        transferred,
+    )
 }
 
 fn empty_page(provider: [u8; 16], position: u32) -> Vec<u8> {
@@ -73,9 +96,11 @@ fn empty_page(provider: [u8; 16], position: u32) -> Vec<u8> {
 }
 
 #[tokio::test]
-async fn the_requester_crosses_eight_empty_bounded_pages_without_cooling_an_honest_provider() {
+async fn the_real_requester_recovers_a_large_recent_gap_without_duplicate_operation_payload() {
     let (mut alice, mut bob, _clock) = pair().await;
-    for count in 0..catcoms_replication::doc::MAX_CATCHUP_PAGE_CLOSURE_STEPS {
+    // Exceeds both the 2,048-step query budget and the 4,096-entry derived cache.
+    // The separate public-API cost regression covers the full 10,000-operation example.
+    for count in 0..4_098 {
         let operation = alice
             .docs
             .get_mut(&(DocType::Channel, CHANNEL))
@@ -99,20 +124,8 @@ async fn the_requester_crosses_eight_empty_bounded_pages_without_cooling_an_hone
         })
         .unwrap();
     let peer = alice.local_peer();
-    for round in 1..=MAX_EMPTY_CATCHUP_PAGE_GRACE {
-        assert_eq!(exchange(&mut alice, &mut bob, None).await, 0);
-        assert!(!bob.catchup_peer_is_cooling(peer, DocType::Channel, CHANNEL));
-        assert_eq!(
-            bob.catchup_empty_page_grace
-                .get(&(DocType::Channel, CHANNEL, peer)),
-            Some(&round)
-        );
-        assert_eq!(
-            bob.catchup_cursors[&(DocType::Channel, CHANNEL, peer)].position as usize,
-            round * catcoms_replication::doc::MAX_CATCHUP_PAGE_SCANNED_OPS
-        );
-    }
-    assert_eq!(exchange(&mut alice, &mut bob, None).await, 1);
+    assert_eq!(exchange_with_cost(&mut alice, &mut bob, None).await, (1, 1));
+    assert!(!bob.catchup_peer_is_cooling(peer, DocType::Channel, CHANNEL));
     assert!(bob
         .doc(DocType::Channel, CHANNEL)
         .unwrap()
@@ -123,6 +136,48 @@ async fn the_requester_crosses_eight_empty_bounded_pages_without_cooling_an_hone
     assert!(!bob
         .catchup_empty_page_grace
         .contains_key(&(DocType::Channel, CHANNEL, peer)));
+    assert_eq!(
+        alice
+            .docs
+            .get_mut(&(DocType::Channel, CHANNEL))
+            .unwrap()
+            .heads(),
+        bob.docs
+            .get_mut(&(DocType::Channel, CHANNEL))
+            .unwrap()
+            .heads()
+    );
+
+    // A provider restart cannot reuse another runtime's scan position. Its document-local
+    // certificates are rebuilt by the ordinary restore before any request is served.
+    let bytes = alice
+        .docs
+        .get_mut(&(DocType::Channel, CHANNEL))
+        .unwrap()
+        .snapshot()
+        .unwrap();
+    alice.docs.insert(
+        (DocType::Channel, CHANNEL),
+        EncryptedDoc::restore_for_actor(&bytes, &alice.device.device_id()).unwrap(),
+    );
+    let old_provider = alice.catchup_provider;
+    alice.catchup_provider = [73; 16];
+    bob.catchup_cursors.insert(
+        (DocType::Channel, CHANNEL, peer),
+        CatchupCursor {
+            provider: old_provider,
+            position: u32::MAX,
+        },
+    );
+    alice
+        .docs
+        .get_mut(&(DocType::Channel, CHANNEL))
+        .unwrap()
+        .edit(&alice.device, &alice.group, &mut alice.rng, |doc| {
+            doc.put(ROOT, "after_restart", true)
+        })
+        .unwrap();
+    assert_eq!(exchange_with_cost(&mut alice, &mut bob, None).await, (1, 1));
 }
 
 #[tokio::test]
