@@ -118,6 +118,7 @@ function appFixture(clock: FakeClock, failure: string | null = null) {
   const app = new Function("PendingSendRetry", "pendingSendRetryBlock", "persistenceWarning", "sanitizePendingSends", "intent", "initialFailure", `
     let locked = false, uiStateReady = true, uiStateLoadGeneration = 1, sending = false;
     let pendingSends = { [intent.token]: structuredClone(intent) }, pendingSendErrors = {}, retryingPendingSends = false;
+    let recoveredSendDrafts = {}, pendingSendResolution = null, pendingManagerOpen = false;
     let draft = intent.text, drafts = { room: intent.text }, draftRevisions = {}, replyingTo = intent.replyTo;
     let cur = { active: intent.channel }, activeServerId = intent.server, error = "";
     let savesFail = false, failure = initialFailure, lostAcknowledgement = false, writes = [], submissions = [], authored = new Set();

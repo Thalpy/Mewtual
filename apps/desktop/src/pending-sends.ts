@@ -8,6 +8,8 @@ export type PendingSend = {
   replyTo: string;
   /** A permanent refusal requires a user decision, including after the vault reopens. */
   retryBlock?: PendingSendRetryBlock;
+  /** Missing legacy state is ambiguous. Only a fresh, never-submitted request is known absent. */
+  acceptance?: "not_accepted" | "ambiguous";
 };
 export type PendingSendRetryBlock = "invalid" | "conflict" | "context_changed";
 export type PendingSends = Record<string, PendingSend>;
@@ -39,9 +41,33 @@ export function sanitizePendingSends(value: unknown): PendingSends {
       intent.retryBlock = ["invalid", "conflict", "context_changed"].includes(entry.retryBlock)
         ? entry.retryBlock : "invalid";
     }
+    if (entry.acceptance !== undefined) {
+      intent.acceptance = entry.acceptance === "not_accepted" ? "not_accepted" : "ambiguous";
+    }
     result[token] = intent;
   }
   return result;
+}
+
+export type PendingResolution = "recover" | "cancel";
+
+/** A recovered draft preserves the original payload and provenance; it is never a send queue. */
+export function resolvePendingSend(
+  pending: PendingSends, recovered: PendingSends, token: string, action: PendingResolution,
+): { pending: PendingSends; recovered: PendingSends } {
+  const intent = pending[token];
+  if (!intent) throw new Error("This pending message has already been resolved.");
+  if (action !== "recover" && action !== "cancel") throw new Error("Choose how to resolve this message.");
+  const nextRecovered = action === "recover" ? addPendingSend(recovered, intent) : recovered;
+  const nextPending = { ...pending };
+  delete nextPending[token];
+  return { pending: nextPending, recovered: nextRecovered };
+}
+
+export function pendingAcceptanceWarning(intent: PendingSend): string {
+  return intent.acceptance === "not_accepted"
+    ? "This request has not been submitted."
+    : "This message may already have been accepted. Stopping retries cannot retract a message. Sending recovered text later may create a duplicate.";
 }
 
 /** Refuse capacity pressure; never evict an unresolved send or give it another retry token. */

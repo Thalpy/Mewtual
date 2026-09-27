@@ -21,6 +21,7 @@ test("retry refuses IPC until the caller identity survives an actual successful 
     let locked = false, uiStateLoadGeneration = 0, replyingTo = "", mentionQuery = null;
     let drafts = { room: draft }, draftRevisions = {}, pendingSendNonce = 0, chatStickToBottom = false;
     let pendingSends = {}, pendingSendErrors = {}, retryingPendingSends = false, uiStateReady = true, uiStateSaveTimer;
+    let recoveredSendDrafts = {}, pendingSendResolution = null, pendingManagerOpen = false;
     let tailLoaded = false, messageWindowScope = "", messages = [], pageTotal = 0;
     let replyingToRow, error = "", sealed = null, savesFail = true, submissions = [];
     const chanKey = () => "room", chatScopeKey = () => "room", scheduleUiStateSave = () => {};
@@ -29,7 +30,7 @@ test("retry refuses IPC until the caller identity survives an actual successful 
     const continuityJson = () => JSON.stringify({drafts, pendingSends});
     const queueUiStateSave = async json => {
       if (savesFail) throw new Error("injected continuity failure");
-      sealed = JSON.parse(json);
+      sealed = JSON.parse(typeof json === "function" ? json() : json);
     };
     const saveUiStateImmediately = async () => {
       try { await queueUiStateSave(continuityJson()); return true; } catch { return false; }
@@ -73,6 +74,7 @@ test("failed continuity hydration cannot replace the sealed pending identities w
     let locked = false, uiStateLoadGeneration = 7, uiStateReady = false, uiStateSaveTimer;
     let uiStateSaveChain = Promise.resolve(), uiStateSaveFailed = false, uiStateFailureToast = 0;
     let pendingSends = structuredClone(initial.pendingSends), drafts = structuredClone(initial.drafts);
+    let recoveredSendDrafts = {};
     let readMarks = {}, statusCursors = {}, fileTrustPolicies = {}, latePast = {}, embedAutoLoad = false, error = "";
     let sealed = JSON.stringify(initial), failLoad = true, writes = 0, flushed = 0;
     const localStorage = { getItem() { return null; }, removeItem() {} };
