@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import ts from "typescript";
-import { addPendingSend, matchingPendingSend, pendingSendRetryBlock } from "./pending-sends.ts";
+import { addPendingSend, matchingPendingSend, pendingSendRetryBlock, resolvePendingSend } from "./pending-sends.ts";
 import { readFileSync } from "node:fs";
 import { persistenceWarning, sendAndRefresh, type SendMessageResult } from "./message-send.ts";
 
@@ -45,28 +45,29 @@ function composer(submit: (args: Record<string, unknown>) => Promise<SendMessage
   const source = readFileSync(new URL("./App.svelte", import.meta.url), "utf8");
   const body = ts.transpile(source.slice(source.indexOf("  async function submitPendingSend("),
     source.indexOf("  // Inline edit of one of your own messages.")), { target: ts.ScriptTarget.ES2022 });
-  return new Function("submit", "refresh", "context", "sendAndRefresh", "persistenceWarning", "addPendingSend", "matchingPendingSend", "pendingSendRetryBlock", `
+  return new Function("submit", "refresh", "context", "sendAndRefresh", "persistenceWarning", "addPendingSend", "matchingPendingSend", "pendingSendRetryBlock", "resolvePendingSend", `
     let draft = "one message", cur = { active: "1" }, activeServerId = 1, sending = false;
     let locked = false, uiStateLoadGeneration = 0, replyingTo = "", mentionQuery = null;
     let drafts = { room: draft }, draftRevisions = {}, pendingSendNonce = 0, chatStickToBottom = false;
     let pendingSends = {}, pendingSendErrors = {}, retryingPendingSends = false, uiStateReady = true, uiStateSaveTimer;
+    let recoveredSendDrafts = {}, pendingSendResolution = null, pendingManagerOpen = false;
     let tailLoaded = false, messageWindowScope = "", messages = [], pageTotal = 0;
     let replyingToRow, error = "", warnings = [], sealed = null;
     const chanKey = () => "room", scheduleUiStateSave = () => {}, chatScopeKey = () => "room";
     const toast = text => warnings.push(text), errorText = String;
     const invoke = () => context();
-    const continuityJson = () => JSON.stringify({drafts,pendingSends});
-    const queueUiStateSave = async json => { sealed = JSON.parse(json); };
+    const continuityJson = () => JSON.stringify({drafts,pendingSends,recoveredSendDrafts});
+    const queueUiStateSave = async (json, afterSave = () => {}) => { sealed = JSON.parse(typeof json === "function" ? json() : json); afterSave(); };
     const saveUiStateImmediately = async () => { await queueUiStateSave(continuityJson()); return true; };
     const invokeDebugged = (_, args) => submit(args).then(value => ({ value }));
     ${body}
     return {
-      send, retryPendingSends, movePendingToDraft,
+      send, retryPendingSends, resolvePendingMessage,
       type(text) { draft = text; drafts.room = text; draftRevisions.room = (draftRevisions.room ?? 0) + 1; },
       lock() { sealed = JSON.parse(continuityJson()); locked = true; uiStateLoadGeneration++; draft = ""; drafts = {}; pendingSends = {}; sending = false; pendingSendNonce++; },
-      state() { return { draft, drafts, pendingSends, sealed, warnings, error, sending }; }
+      state() { return { draft, drafts, pendingSends, recoveredSendDrafts, sealed, warnings, error, sending }; }
     };
-  `)(submit, refresh, context, sendAndRefresh, persistenceWarning, addPendingSend, matchingPendingSend, pendingSendRetryBlock);
+  `)(submit, refresh, context, sendAndRefresh, persistenceWarning, addPendingSend, matchingPendingSend, pendingSendRetryBlock, resolvePendingSend);
 }
 
 test("composer keeps the draft until its retry identity can be sealed", async () => {
@@ -147,8 +148,10 @@ test("a stale authoring context requires an explicit new-send decision", async (
   await app.retryPendingSends();
   assert.equal(tokens[0], tokens[1]);
   const token = Object.keys(app.state().pendingSends)[0];
-  await app.movePendingToDraft(token);
+  await app.resolvePendingMessage(token, "recover");
   assert.deepEqual(app.state().pendingSends, {});
+  assert.equal(app.state().recoveredSendDrafts[token].text, "one message");
+  assert.equal(tokens.length, 2, "recovering the saved text never publishes it");
   assert.equal(app.state().draft, "one message");
   await app.send();
   assert.notEqual(tokens[2], tokens[0]);

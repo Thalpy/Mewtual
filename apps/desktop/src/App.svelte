@@ -38,7 +38,8 @@
     type MessagePage, type PageAnchor, type PageRequest, type PagedRowContext, type UnreadSummary,
   } from "./message-paging";
   import { persistenceWarning, sendAndRefresh, type SendMessageResult } from "./message-send";
-  import { addPendingSend, matchingPendingSend, pendingSendRetryBlock, type PendingSend, type PendingSends } from "./pending-sends";
+  import { addPendingSend, matchingPendingSend, pendingSendRetryBlock, resolvePendingSend, type PendingResolution, type PendingSend, type PendingSends } from "./pending-sends";
+  import PendingSendManager from "./PendingSendManager.svelte";
   import { PendingSendRetry } from "./pending-send-retry";
   import { ImageSrcCache } from "./image-src";
   import { pastedMedia, pastedName } from "./clipboard-media";
@@ -186,7 +187,7 @@
     selectTimelineRows, timelineIdentities, voteTally, warningMap,
     type ModerationEvent, type ModerationState, type TimelineMessage,
   } from "./moderation";
-  import { planLegacyReadMarkMigration, sanitizeUiContinuity } from "./ui-continuity";
+  import { MAX_DRAFT_CHARS, planLegacyReadMarkMigration, sanitizeUiContinuity } from "./ui-continuity";
   import {
     NativeVaultLockCoordinator, type NativeVaultCloseOutcome, type NativeVaultLockOutcome,
   } from "./window-close";
@@ -532,6 +533,7 @@
     { id: "profile", label: "My Profile", cat: "Account" },
     { id: "devices", label: "Devices", cat: "Account" },
     { id: "vault", label: "Vault & Lock", cat: "Account" },
+    { id: "pending", label: "Pending messages", cat: "Account" },
     { id: "backup", label: "Backup & Recovery", cat: "Account" },
     { id: "verify", label: "Verification", cat: "Account" },
     { id: "appearance", label: "Appearance", cat: "App" },
@@ -3454,6 +3456,10 @@
   // completes asynchronously after unlock.
   let uiStateReady = $state(false);
   let pendingSends = $state<PendingSends>({});
+  let recoveredSendDrafts = $state<PendingSends>({});
+  // Holds submissions/result mutations while a user's explicit resolution crosses the vault barrier.
+  let pendingSendResolution = $state<string | null>(null);
+  let pendingManagerOpen = $derived(showSettings && settingsPage === "pending");
   let pendingSendErrors = $state<Record<string, string>>({});
   let retryingPendingSends = $state(false);
   let uiStateSaveFailed = $state(false);
@@ -3466,25 +3472,31 @@
     pendingSendRetry.update(
       !locked && uiStateReady ? uiStateLoadGeneration : null,
       Object.values(pendingSends).some(intent => !intent.retryBlock),
-      sending || retryingPendingSends,
+      sending || retryingPendingSends || pendingManagerOpen || pendingSendResolution !== null,
     );
   });
   onMount(() => () => pendingSendRetry.cancel());
-  function queueUiStateSave(json: string): Promise<void> {
+  function queueUiStateSave(json: string | (() => string), afterSave: () => void = () => {}): Promise<void> {
     // Native lock/generation checks order this queue against a final lock snapshot. This local
     // chain additionally prevents two ordinary same-session saves from overtaking one another.
     const generation = uiStateLoadGeneration;
-    const save = uiStateSaveChain.then(() => {
+    const save = uiStateSaveChain.then(async () => {
       if (locked || generation !== uiStateLoadGeneration) {
         throw new Error("the UI session changed before continuity could be saved");
       }
-      return invoke<void>("save_ui_state", { json });
+      // Ordinary saves build from current state at execution, so a queued typing save cannot
+      // resurrect a request retired by an earlier resolution in this same chain.
+      await invoke<void>("save_ui_state", { json: typeof json === "function" ? json() : json });
+      if (locked || generation !== uiStateLoadGeneration) {
+        throw new Error("the UI session changed before continuity finished saving");
+      }
+      afterSave();
     });
     uiStateSaveChain = save.catch(() => {});
     return save;
   }
   function continuityJson(): string {
-    return JSON.stringify({ version: 1, drafts, readMarks, statusCursors, fileTrustPolicies, latePast, embedAutoLoad, pendingSends });
+    return JSON.stringify({ version: 1, drafts, readMarks, statusCursors, fileTrustPolicies, latePast, embedAutoLoad, pendingSends, recoveredSendDrafts });
   }
   /**
    * Seal the current continuity snapshot without the ordinary typing/read-position debounce.
@@ -3493,9 +3505,10 @@
    */
   async function saveUiStateImmediately(): Promise<boolean> {
     if (!uiStateReady || locked) return false;
+    const session = uiStateLoadGeneration;
     clearTimeout(uiStateSaveTimer);
     try {
-      await queueUiStateSave(continuityJson());
+      await queueUiStateSave(continuityJson);
       uiStateSaveFailed = false;
       if (uiStateFailureToast) {
         updateToast(uiStateFailureToast, "Vault preferences saved", "ok", 2500);
@@ -3503,6 +3516,7 @@
       }
       return true;
     } catch (e) {
+      if (locked || session !== uiStateLoadGeneration) return false;
       console.warn("UI continuity save failed", e);
       const message = "Vault preferences, drafts, and read positions were not saved; retry before closing";
       if (uiStateFailureToast) updateToast(uiStateFailureToast, message, "err", 0);
@@ -3540,6 +3554,7 @@
       }
       if (generation !== uiStateLoadGeneration || locked) return;
       pendingSends = next.pendingSends;
+      recoveredSendDrafts = next.recoveredSendDrafts;
       drafts = next.drafts;
       readMarks = next.readMarks;
       statusCursors = next.statusCursors;
@@ -6382,6 +6397,8 @@
     draft = "";
     drafts = {};
     pendingSends = {};
+    recoveredSendDrafts = {};
+    pendingSendResolution = null;
     pendingSendErrors = {};
     retryingPendingSends = false;
     sending = false;
@@ -18513,10 +18530,13 @@
     const draftRevision = originalDraftRevision ?? draftRevisions[draftKey] ?? 0;
     let result: SendMessageResult;
     try {
+      if (!pendingSubmissionCurrent(intent, session)) throw new Error("This pending request is being resolved or its session changed.");
+      // Seal uncertainty before dispatch, even on retry. Native errors and token conflicts do
+      // not prove absence: a previous invocation may already have committed this identity.
+      pendingSends[intent.token] = { ...pendingSends[intent.token], acceptance: "ambiguous" };
       // Also covers retry after an earlier continuity-write failure. No native authoring
       // request may outlive the only copy of its caller identity.
-      if (locked || !uiStateReady || session !== uiStateLoadGeneration
-        || !(await saveUiStateImmediately()) || locked || session !== uiStateLoadGeneration) {
+      if (!(await saveUiStateImmediately()) || !pendingSubmissionCurrent(intent, session)) {
         throw new Error("Save the pending message in this vault before retrying it.");
       }
       result = (await invokeDebugged<SendMessageResult>("send_message", {
@@ -18524,7 +18544,7 @@
         retryToken: intent.token, expectedContext: intent.expectedContext,
       })).value;
     } catch (failure) {
-      if (!locked && session === uiStateLoadGeneration) {
+      if (pendingSubmissionCurrent(intent, session)) {
         pendingSendErrors[intent.token] = errorText(failure);
         const block = pendingSendRetryBlock(errorText(failure));
         const current = pendingSends[intent.token];
@@ -18535,14 +18555,14 @@
       }
       throw failure;
     }
-    if (!locked && session === uiStateLoadGeneration && result.persistence.status === "superseded") {
-      pendingSends[intent.token] = { ...intent, retryBlock: "context_changed" };
+    if (pendingSubmissionCurrent(intent, session) && result.persistence.status === "superseded") {
+      pendingSends[intent.token] = { ...pendingSends[intent.token], retryBlock: "context_changed" };
       await saveUiStateImmediately();
-    } else if (!locked && session === uiStateLoadGeneration && result.persistence.status !== "durable" && pendingSends[intent.token]?.retryBlock) {
-      pendingSends[intent.token] = { ...intent, retryBlock: undefined };
+    } else if (pendingSubmissionCurrent(intent, session) && result.persistence.status !== "durable" && pendingSends[intent.token]?.retryBlock) {
+      pendingSends[intent.token] = { ...pendingSends[intent.token], retryBlock: undefined };
       await saveUiStateImmediately();
     }
-    if (!locked && session === uiStateLoadGeneration && result.accepted && result.persistence.status === "durable") {
+    if (pendingSubmissionCurrent(intent, session) && result.accepted && result.persistence.status === "durable") {
       delete pendingSends[intent.token];
       delete pendingSendErrors[intent.token];
       const key = chatScopeKey(intent.server, intent.channel);
@@ -18558,30 +18578,95 @@
     return result;
   }
 
-  async function movePendingToDraft(token: string) {
-    const intent = pendingSends[token];
-    if (!intent || locked || sending || retryingPendingSends || intent.server !== activeServerId
-      || intent.channel !== cur?.active || (draft.trim() && draft.trim() !== intent.text)
-      || (intent.retryBlock !== "context_changed" && !pendingSendErrors[token]?.includes("CHAT_SEND_CONTEXT_CHANGED"))) return;
+  function pendingSubmissionCurrent(intent: PendingSend, session: number): boolean {
+    const current = pendingSends[intent.token];
+    return !locked && uiStateReady && session === uiStateLoadGeneration && pendingSendResolution === null
+      && !!current && current.server === intent.server && current.channel === intent.channel
+      && current.text === intent.text && current.replyTo === intent.replyTo && current.expectedContext === intent.expectedContext;
+  }
+
+  /** A resolution owns this queue entry until both the sealed write and local commit finish. */
+  async function savePendingDecision(token: string, prepare: () => { json: string; commit: () => void }): Promise<void> {
+    if (locked || !uiStateReady || pendingSendResolution !== null) throw new Error("Wait until the vault is ready to save this decision.");
     const session = uiStateLoadGeneration;
-    // Only an explicit user decision can turn refused old-authority work into a new send.
-    // Persist the recovered draft in the same continuity replacement that retires its intent.
-    draft = intent.text;
-    replyingTo = intent.replyTo;
-    drafts[chatScopeKey(intent.server, intent.channel)] = intent.text;
-    delete pendingSends[token];
-    if (!(await saveUiStateImmediately()) && !locked && session === uiStateLoadGeneration) {
-      pendingSends[token] = intent;
+    pendingSendResolution = token;
+    clearTimeout(uiStateSaveTimer);
+    let commit: (() => void) | undefined;
+    try {
+      await queueUiStateSave(() => {
+        if (pendingSendResolution !== token) throw new Error("The pending decision changed before it could be saved.");
+        const candidate = prepare();
+        commit = candidate.commit;
+        return candidate.json;
+      }, () => {
+        if (pendingSendResolution !== token) throw new Error("The pending decision changed while saving.");
+        commit!();
+      });
+    } catch (failure) {
+      const retained = locked || session !== uiStateLoadGeneration
+        ? "Reopen Pending messages after unlocking to check the saved decision."
+        : "Your original request or saved draft is retained.";
+      throw new Error(`The decision was not completed. ${retained} ${errorText(failure)}`);
+    } finally {
+      if (session === uiStateLoadGeneration && pendingSendResolution === token) pendingSendResolution = null;
     }
   }
 
+  async function resolvePendingMessage(token: string, action: PendingResolution): Promise<void> {
+    await savePendingDecision(token, () => {
+      const next = resolvePendingSend(pendingSends, recoveredSendDrafts, token, action);
+      return {
+        json: JSON.stringify({ ...JSON.parse(continuityJson()), pendingSends: next.pending, recoveredSendDrafts: next.recovered }),
+        commit: () => { pendingSends = next.pending; recoveredSendDrafts = next.recovered; delete pendingSendErrors[token]; },
+      };
+    });
+  }
+
+  async function removeRecoveredSendDraft(token: string): Promise<void> {
+    await savePendingDecision(token, () => {
+      if (!recoveredSendDrafts[token]) throw new Error("This saved draft has already been removed.");
+      const next = { ...recoveredSendDrafts };
+      delete next[token];
+      return { json: JSON.stringify({ ...JSON.parse(continuityJson()), recoveredSendDrafts: next }),
+        commit: () => { recoveredSendDrafts = next; } };
+    });
+  }
+
+  async function useRecoveredSendDraft(token: string): Promise<void> {
+    await savePendingDecision(token, () => {
+      const item = recoveredSendDrafts[token], key = chanKey();
+      if (!item || !key || activeServerId === null || !cur?.active) throw new Error("Open a conversation before using this saved text.");
+      if (draft.trim() && draft !== item.text) throw new Error("Keep or clear the current composer draft first.");
+      if (item.text.length > MAX_DRAFT_CHARS) throw new Error("This text exceeds the composer draft limit. Copy the saved text instead; the full copy remains here.");
+      const revision = draftRevisions[key] ?? 0;
+      const nextDrafts = { ...drafts, [key]: item.text };
+      if (sanitizeUiContinuity({ drafts: nextDrafts }).drafts[key] !== item.text) throw new Error("Saved composer drafts are full. Copy the saved text instead; the full copy remains here.");
+      return {
+        json: JSON.stringify({ ...JSON.parse(continuityJson()), drafts: nextDrafts }),
+        commit: () => {
+          // Retain the recovered source, and never overwrite text typed while disk I/O ran.
+          if ((draftRevisions[key] ?? 0) !== revision) { scheduleUiStateSave(); return; }
+          drafts[key] = item.text;
+          draftRevisions[key] = revision + 1;
+          if (chanKey() === key) { draft = item.text; replyingTo = ""; }
+        },
+      };
+    });
+  }
+
+  function pendingConversationName(server: number, channel: string): string {
+    const group = servers.find(item => item.id === server);
+    return group ? `${group.name} / channel ${channel}` : `Unavailable conversation ${server} / channel ${channel}`;
+  }
+
   async function retryPendingSends(automatic = false) {
-    if (locked || !uiStateReady || retryingPendingSends || sending) return;
+    if (locked || !uiStateReady || retryingPendingSends || sending || pendingSendResolution !== null || (automatic && pendingManagerOpen)) return;
     const session = uiStateLoadGeneration;
     retryingPendingSends = true;
     try {
       for (const intent of Object.values(pendingSends)) {
-        if (locked || session !== uiStateLoadGeneration) return;
+        if (locked || session !== uiStateLoadGeneration || pendingSendResolution !== null || (automatic && pendingManagerOpen)) return;
+        if (!pendingSubmissionCurrent(intent, session)) continue;
         if (automatic && intent.retryBlock) continue;
         try {
           const result = await submitPendingSend(intent, session);
@@ -18601,7 +18686,7 @@
 
   async function send() {
     const text = draft.trim();
-    if (!text || !cur?.active || activeServerId === null || sending || retryingPendingSends || locked || !uiStateReady) return;
+    if (!text || !cur?.active || activeServerId === null || sending || retryingPendingSends || locked || !uiStateReady || pendingSendResolution !== null || pendingManagerOpen) return;
     const server = activeServerId;
     const channel = cur.active;
     const session = uiStateLoadGeneration;
@@ -18612,20 +18697,21 @@
     sending = true;
     const operation = ++pendingSendNonce;
     const pendingId = `pending:${operation}`;
+    let intent: PendingSend | undefined;
     try {
-      let intent = matchingPendingSend(pendingSends, server, channel, text, reply_to);
+      intent = matchingPendingSend(pendingSends, server, channel, text, reply_to);
       if (!intent) {
         const expectedContext = await invoke<string>("durable_send_context", { server });
-        if (!sessionCurrent()) return;
+        if (!sessionCurrent() || pendingSendResolution !== null || pendingManagerOpen) return;
         intent = { token: crypto.randomUUID().replaceAll("-", ""), server, channel,
-          text, replyTo: reply_to, expectedContext };
+          text, replyTo: reply_to, expectedContext, acceptance: "not_accepted" };
         pendingSends = addPendingSend(pendingSends, intent);
       }
       // Keep the composer intact until its retry identity and payload have crossed the vault
       // barrier. A lock at either await captures the draft or this resumable intent.
       clearTimeout(uiStateSaveTimer);
-      await queueUiStateSave(continuityJson());
-      if (!sessionCurrent()) return;
+      await queueUiStateSave(continuityJson);
+      if (!pendingSubmissionCurrent(intent, session)) return;
       const sameDraft = !key || (draftRevisions[key] ?? 0) === draftRevision;
       if (sameDraft && activeServerId === server && cur?.active === channel && draft.trim() === text) {
         draft = "";
@@ -18663,7 +18749,7 @@
         pageTotal = Math.max(0, pageTotal - 1);
       }
       // A retry of this unchanged composer reuses the sealed intent's token.
-      if (activeServerId === server && cur?.active === channel && !draft.trim()) {
+      if ((!intent || pendingSubmissionCurrent(intent, session)) && activeServerId === server && cur?.active === channel && !draft.trim()) {
         draft = text;
         if (key) drafts[key] = text;
         scheduleUiStateSave();
@@ -24348,7 +24434,7 @@
       {@render brandMark("opening your vault")}
       <p class="muted small">Loading encrypted preferences before servers can fetch shared content.</p>
     </div>
-  {:else if servers.length === 0 || showAdd}
+  {:else if (servers.length === 0 || showAdd) && !showSettings}
     <!-- The start surface uses the window. It was a single 480px column stacking identity,
          the trust choice, the tabs, the pane, pairing and diagnostics, which squeezed the one
          real decision (how people connect) into two paragraphs each and pushed the primary
@@ -24363,6 +24449,7 @@
           <small class="muted">Who you are to the people in a group, not what the group is called.</small>
         </label>
         <div class="st-identity-side">
+          <button type="button" class="ghost small" onclick={() => openSettings("pending")}>Pending messages &amp; saved drafts ({Object.keys(pendingSends).length + Object.keys(recoveredSendDrafts).length})</button>
           <!-- Folded by default: the summary states the current answer, so folding it hides
                nothing. Opened, it is one segmented choice and one line saying what it does. -->
           <details class="start-trust">
@@ -25749,10 +25836,8 @@
                   {#if pendingSendErrors[item.token]}
                     <p>{pendingSendErrors[item.token]}</p>
                   {/if}
-                  {#if (item.retryBlock === "context_changed" || pendingSendErrors[item.token]?.includes("CHAT_SEND_CONTEXT_CHANGED")) && item.channel === cur?.active}
-                    <button type="button" disabled={sending || retryingPendingSends || (!!draft.trim() && draft.trim() !== item.text)} onclick={() => movePendingToDraft(item.token)}>Move to draft for a new send</button>
-                  {/if}
                 {/each}
+                <button type="button" onclick={() => openSettings("pending")}>Manage all pending messages</button>
                 <button type="button" disabled={sending || retryingPendingSends} onclick={() => retryPendingSends()}>Retry pending messages</button>
               </details>
             {/if}
@@ -28274,6 +28359,15 @@
                   {/each}
                 </ul>
               </section>
+            {:else if settingsPage === "pending"}
+              <div class="stx-crumb">SETTINGS // ACCOUNT // PENDING MESSAGES</div>
+              <h1>Pending messages &amp; saved drafts</h1>
+              <PendingSendManager pending={pendingSends} recovered={recoveredSendDrafts}
+                ready={uiStateReady && !locked} busy={pendingSendResolution !== null}
+                conversationName={pendingConversationName}
+                activeLabel={activeServerId !== null && cur?.active ? pendingConversationName(activeServerId, cur.active) : null}
+                onresolve={resolvePendingMessage} onuse={useRecoveredSendDraft}
+                onremove={removeRecoveredSendDraft} />
             {:else if settingsPage === "vault"}
               <div class="stx-crumb">SETTINGS // ACCOUNT // VAULT &amp; LOCK</div>
               <h1>Vault &amp; Lock</h1>

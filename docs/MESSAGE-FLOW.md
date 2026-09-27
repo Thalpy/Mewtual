@@ -79,6 +79,15 @@ failure nor a later UI refresh failure should invite authoring the same message 
 timeout, so there is no duplicate-message hazard from retries, and no `client_message_id`
 deduplication is needed at this layer.
 
+The desktop's durable caller-intent path separately retains a sealed retry identity when a
+native response is uncertain. Its vault-wide **Settings > Pending messages** manager can
+recover text to a saved draft or explicitly stop future retries, even when the original
+conversation is gone. A resolution releases pending capacity only after its replacement
+continuity record saves. It never retracts an accepted message or publishes a replacement;
+legacy and uncertain outcomes carry a duplicate warning. See
+[the pending-intent contract](communication-recovery/PENDING-RETRY.md) for the dispatch
+barrier, bounded recovery storage and session/race checks.
+
 ---
 
 ## 3. Receiving live (gossip)
