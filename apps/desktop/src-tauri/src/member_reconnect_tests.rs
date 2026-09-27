@@ -28,6 +28,134 @@ mod member_reconnect_regressions {
         );
     }
 
+    /// The native capture uses real outbound Noise evidence. The actor fixture uses the same
+    /// transport identities on a deterministic Hub so selected members can stop serving while
+    /// the TCP observation remains, without substituting descriptor or membership authority.
+    async fn capture_worker_three_members(first_two_proven: bool) {
+        timeout(Duration::from_secs(30), async {
+            let dir = tempfile::tempdir().unwrap();
+            let state = mount(dir.path()).await;
+            let mut identities: Vec<_> = (0..4).map(|_| new_server_net("", "", "")).collect();
+            identities.sort_by_key(|net| {
+                phase0_peer_id(&keypair_from_seed(net.key_seed).unwrap().public().to_peer_id())
+            });
+            let owner_net = identities.remove(0);
+            let (owner_tcp, _, _) = MeshService::new_tcp_with_key(
+                keypair_from_seed(owner_net.key_seed).unwrap(), &[], &[],
+            ).unwrap();
+            let owner_peer = owner_tcp.handle().local_peer();
+            let hub = catcoms_rt::Hub::new();
+            let mut owner = Server::found(
+                hub.join(owner_peer), MlsDevice::generate().unwrap(),
+                ChaCha20Rng::seed_from_u64(70), Box::new(SystemClock), "owner",
+            ).unwrap();
+            owner.subscribe_control().await.unwrap();
+            owner.publish_self_record(Vec::new(), owner_net.record_seq).unwrap();
+            let mut members = Vec::new();
+            let mut tcp_members = Vec::new();
+            let mut member_peers = Vec::new();
+            for (i, network) in identities.iter().enumerate() {
+                let (tcp, id, _) = MeshService::new_tcp_with_key(
+                    keypair_from_seed(network.key_seed).unwrap(),
+                    &["/ip4/127.0.0.1/tcp/0".parse().unwrap()], &[],
+                ).unwrap();
+                let listener = tcp.next_listen_addr().await.unwrap();
+                let peer = tcp.handle().local_peer();
+                owner_tcp.handle().dial(format!("{listener}/p2p/{id}").parse().unwrap()).await.unwrap();
+                tcp.wait_for_peer_connected(owner_peer).await.unwrap();
+                let invite = owner.mint_invite([i as u8 + 70; 16], SystemClock.now_ms() + 60_000, vec![]).unwrap();
+                let mut member = tokio::select! {
+                    joined = Server::join(
+                        hub.join(peer), MlsDevice::generate().unwrap(),
+                        ChaCha20Rng::seed_from_u64(71 + i as u64), Box::new(SystemClock),
+                        "member", owner_peer, &invite,
+                    ) => joined.unwrap(),
+                    _ = async { loop { owner.sync_once().await.unwrap(); } } => unreachable!(),
+                };
+                member.subscribe_control().await.unwrap();
+                member.publish_self_record(Vec::new(), network.record_seq).unwrap();
+                members.push(member);
+                member_peers.push(peer);
+                tcp_members.push(tcp);
+            }
+            for member in &mut members {
+                while member.epoch() < owner.epoch() {
+                    tokio::select! {
+                        result = member.sync_once() => { result.unwrap(); },
+                        _ = async { loop { owner.sync_once().await.unwrap(); } } => unreachable!(),
+                    }
+                }
+            }
+            assert_eq!(owner.member_finalization_candidates(), member_peers);
+            assert!(owner.finalized_member_peers().is_empty());
+            if first_two_proven {
+                for member in members.iter_mut().take(2) {
+                    let peer = member.member_finalization_candidates()[0];
+                    assert_eq!(peer, owner_peer);
+                    tokio::select! {
+                        done = member.finalize_member_connection(owner_peer) => assert!(done.unwrap()),
+                        _ = async { loop { owner.sync_once().await.unwrap(); } } => unreachable!(),
+                    }
+                }
+                let proven: HashSet<_> = owner.finalized_member_peers().into_iter().collect();
+                assert_eq!(proven, member_peers[..2].iter().copied().collect());
+            }
+            let healthy = members.pop().unwrap();
+            // Closed Hub request receivers fail immediately; the native observation is still
+            // real, retained successful Noise evidence. These two cannot complete kind 26.
+            drop(members);
+            let (healthy_actor, mut healthy_events, healthy_task) = spawn(healthy);
+            let healthy_drain = tokio::spawn(async move { while healthy_events.recv().await.is_some() {} });
+            let group = owner.group_id();
+            let device = owner.device_id();
+            let (actor, events, task) = spawn(owner);
+            let running = register(&state, actor, owner_tcp.handle(), events, task, group, device).await;
+            persist_server_net(&state, 1, &owner_net).await;
+            let evidence = owner_tcp.handle().authenticated_dial_route_evidence();
+            assert_eq!(evidence.iter().map(|route| route.peer).collect::<HashSet<_>>(), member_peers.iter().copied().collect());
+            let (wake, mut receiver) = watch::channel(0);
+            tokio::select! {
+                _ = member_reconnect::run_capture_worker(&state, 1, 1, &running.actor, &mut receiver) => unreachable!(),
+                _ = async {
+                    if !first_two_proven {
+                        // First pass spends only its two work slots, but its incomplete result
+                        // still saves the restrictive snapshot/net barrier. Then wake that SAME
+                        // production worker: rotation must offer the third member a turn.
+                        loop {
+                            SystemClock.sleep(Duration::from_millis(100)).await;
+                            if net(&state).await.reconnect_policy == ReconnectPolicy::MemberMesh { break; }
+                        }
+                        assert!(!running.actor.finalized_member_peers().await.unwrap().contains(&member_peers[2]));
+                        wake.send(1).unwrap();
+                    }
+                    loop {
+                        SystemClock.sleep(Duration::from_millis(300)).await;
+                        if running.actor.finalized_member_peers().await.unwrap().contains(&member_peers[2]) { break; }
+                    }
+                } => {}
+            }
+            if !first_two_proven {
+                assert!(member_reconnect::persist(&state, 1, 1, &running.actor, evidence).await.is_err(),
+                    "unselected/failing admitted members must remain outstanding after the healthy member progresses");
+            }
+            stop(&state, running).await;
+            healthy_actor.shutdown().await;
+            healthy_task.await.unwrap();
+            healthy_drain.await.unwrap();
+            drop(tcp_members);
+        }).await.expect("three-member finalization worker progresses within bounded passes");
+    }
+
+    #[tokio::test]
+    async fn capture_worker_skips_two_finalized_members_before_spending_its_work_budget() {
+        capture_worker_three_members(true).await;
+    }
+
+    #[tokio::test]
+    async fn capture_worker_rotates_past_two_failed_members_and_keeps_their_obligations() {
+        capture_worker_three_members(false).await;
+    }
+
     struct Running {
         actor: ServerActor,
         mesh: MeshHandle,

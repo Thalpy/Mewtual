@@ -118,3 +118,33 @@ fixtures verify the sealed predecessor directly and advance injected retry deadl
 real TCP actors recover history. All authority and direction assertions remain; no history
 is injected. The final complete native suite passes. This is loopback TCP and independently
 reopened stores, not physical NAT or OS process-kill acceptance.
+
+
+## PR review R1: fair finalization work
+
+The capture worker now computes completion over every currently admitted member with local
+outbound Noise evidence. Its work budget is separate: two unfinalized members per pass, after
+excluding current proofs. One actor-owned peer cursor rotates failed work and is advanced before
+network awaits; cancellation cannot leave the same first two peers at the front. The cursor is
+session-local and grants no connection authority. Queued canceled commands are skipped and an
+executing finalization stops waiting when its native caller is canceled. Each exchange retains its
+existing two-second core deadline and exact policy, epoch and endpoint checks.
+
+The observed-peer command is bounded to the transport ledger's maximum of 640 observations. The
+native capture loop checks the exact registry incarnation before work, and snapshot/net writes
+retain their existing final checks. Watch wakes coalesce; ordinary discovery remains the quiet
+retry cadence. Unselected eligible members keep close pending, except for the existing exemption
+for a previously sealed direction whose current unique roster descriptor is still present.
+
+Required focused verification (execution belongs to the integration owner):
+
+```text
+cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml --lib capture_worker_ -- --test-threads=1
+cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml --lib member_reconnect_regressions -- --test-threads=1
+```
+
+The two new regressions execute the production watch worker using real outbound TCP Noise route
+evidence and same-identity signed actor peers on the deterministic transport. They cover two
+already-finalized predecessors and two failing predecessors, then successful service from the
+third member. They do not claim that finalization fairness alone fixes route retention; that is
+an independent bound addressed by R2.

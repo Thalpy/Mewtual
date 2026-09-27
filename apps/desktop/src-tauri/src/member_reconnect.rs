@@ -9,9 +9,6 @@ pub(super) fn finalization_targets(
         .iter()
         .map(|route| route.peer)
         .filter(|peer| candidates.contains(peer))
-        .collect::<std::collections::BTreeSet<_>>()
-        .into_iter()
-        .take(MAX_RECONNECT_ROUTES)
         .collect()
 }
 
@@ -37,7 +34,6 @@ pub(super) async fn persist(
             .map_err(|_| "server stopped".to_string())?;
         return Ok(true);
     }
-    let mut peers: HashSet<_> = actor.finalized_member_peers().await?.into_iter().collect();
     let candidates: HashSet<_> = actor
         .member_finalization_candidates()
         .await?
@@ -49,27 +45,26 @@ pub(super) async fn persist(
         .await
         .get(&server)
         .filter(|entry| entry.instance == instance)
-        .and_then(|entry| entry.mesh.as_ref().map(MeshHandle::local_peer));
+        .and_then(|entry| entry.mesh.as_ref().map(MeshHandle::local_peer))
+        .ok_or_else(|| "group changed during reconnect finalization".to_string())?;
     // A close can race the post-admission worker before either side pulled a descriptor. Give
     // this already-proven outbound direction two bounded connected-only opportunities. This
     // also lets an actor leave an earlier reciprocal catch-up wait before the second request.
     let targets = finalization_targets(&evidence, &candidates);
-    for peer in targets
-        .iter()
-        .filter(|peer| !peers.contains(peer))
-        .copied()
-        .collect::<Vec<_>>()
-    {
+    let work = actor
+        .member_finalization_work(targets.iter().copied().collect())
+        .await?;
+    for peer in work {
         // Opposite owners must not occupy both sole actor loops with reciprocal requests. Wait
         // outside the actor on one deterministic side, where it can serve the other's request.
-        if local.is_some_and(|local| local > peer) {
+        if local > peer {
             SystemClock.sleep(Duration::from_millis(250)).await;
             if actor.finalized_member_peers().await?.contains(&peer) {
                 continue;
             }
         }
         for attempt in 0..2 {
-            if attempt == 1 && local.is_some_and(|local| local > peer) {
+            if attempt == 1 && local > peer {
                 // A slow network can exceed the initial stagger. Leave this actor available
                 // for the opposite request's entire two-second deadline before retrying.
                 SystemClock.sleep(Duration::from_millis(2_250)).await;
@@ -82,7 +77,15 @@ pub(super) async fn persist(
             }
         }
     }
-    peers = actor.finalized_member_peers().await?.into_iter().collect();
+    let peers: HashSet<_> = actor.finalized_member_peers().await?.into_iter().collect();
+    // Membership may have changed while the selected requests ran. Completion covers every
+    // currently eligible observed member, including those outside this pass's work budget.
+    let candidates = actor
+        .member_finalization_candidates()
+        .await?
+        .into_iter()
+        .collect();
+    let targets = finalization_targets(&evidence, &candidates);
     let observed = select_authenticated_reconnect_routes(evidence, &peers, false);
     if admission_storage::retry_server_net(state, server, instance)
         .await
@@ -201,4 +204,30 @@ pub(super) async fn before_shutdown(state: &AppState) -> Result<(), String> {
         persist(state, id, instance, &actor, evidence).await?;
     }
     Ok(())
+}
+
+/// One coalesced capture worker per exact registered actor. The regular discovery cadence also
+/// calls the same capture body, so an unmet obligation remains retryable without a new task.
+pub(super) async fn run_capture_worker(
+    state: &AppState,
+    server: u64,
+    instance: u64,
+    actor: &ServerActor,
+    wake: &mut watch::Receiver<u64>,
+) {
+    loop {
+        if state
+            .servers
+            .lock()
+            .await
+            .get(&server)
+            .is_none_or(|entry| entry.instance != instance)
+        {
+            break;
+        }
+        persist_live_local_reconnect_routes_in_state(state, server, instance, actor).await;
+        if wake.changed().await.is_err() {
+            break;
+        }
+    }
 }

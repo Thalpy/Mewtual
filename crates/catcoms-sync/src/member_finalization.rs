@@ -7,6 +7,11 @@ pub(super) const KIND_MEMBER_FINALIZE: u8 = 26;
 const MAX_FRAME: usize = 4_096;
 const RESPONSE_DOMAIN: &str = "catcoms/member-finalization/response/v1";
 const DEADLINE_MS: u64 = 2_000;
+/// Scheduling is independent of the number of listener routes retained on disk.
+pub const MEMBER_FINALIZATION_WORK_PER_PASS: usize = 2;
+/// The local transport retains at most two recent successful observations per connected slot.
+pub const MAX_MEMBER_FINALIZATION_OBSERVATIONS: usize =
+    catcoms_rt::MAX_CONNECTED_PEER_SNAPSHOT * catcoms_rt::MAX_PEER_DIAL_BATCH;
 
 fn body(
     policy: [u8; 32],
@@ -105,6 +110,34 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         peers.sort();
         peers.dedup();
         peers
+    }
+
+    /// Choose a bounded, fair slice of unmet finalization work. Observations are local host
+    /// evidence, not authority: current admission/roster candidates and the final exchange still
+    /// authenticate the member. Selection consumes its cursor synchronously, before any await,
+    /// so failed, cancelled and concurrent native passes cannot pin the first two members.
+    pub fn member_finalization_work(&mut self, observed: &[PeerId]) -> Vec<PeerId> {
+        if observed.len() > MAX_MEMBER_FINALIZATION_OBSERVATIONS {
+            return Vec::new();
+        }
+        let observed: HashSet<_> = observed.iter().copied().collect();
+        let finalized: HashSet<_> = self.finalized_member_peers().into_iter().collect();
+        let mut pending: Vec<_> = self
+            .member_finalization_candidates()
+            .into_iter()
+            .filter(|peer| observed.contains(peer) && !finalized.contains(peer))
+            .collect();
+        if let Some(cursor) = self.member_finalization_cursor {
+            let start = pending.partition_point(|peer| *peer <= cursor);
+            if start < pending.len() {
+                pending.rotate_left(start);
+            }
+        }
+        pending.truncate(MEMBER_FINALIZATION_WORK_PER_PASS);
+        if let Some(last) = pending.last() {
+            self.member_finalization_cursor = Some(*last);
+        }
+        pending
     }
 
     /// Current dual-key bindings suitable for retaining LOCAL outbound listener observations.

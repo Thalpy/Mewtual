@@ -587,6 +587,10 @@ pub enum AppCommand {
     MemberFinalizationCandidates {
         reply: oneshot::Sender<Vec<PeerId>>,
     },
+    MemberFinalizationWork {
+        observed: Vec<PeerId>,
+        reply: oneshot::Sender<Vec<PeerId>>,
+    },
     FinalizeMemberConnection {
         peer: PeerId,
         reply: oneshot::Sender<Result<bool, String>>,
@@ -3511,6 +3515,21 @@ impl ServerActor {
         result.await.map_err(|_| "server stopped".to_string())
     }
 
+    pub async fn member_finalization_work(
+        &self,
+        observed: Vec<PeerId>,
+    ) -> Result<Vec<PeerId>, String> {
+        if observed.len() > catcoms_sync::MAX_MEMBER_FINALIZATION_OBSERVATIONS {
+            return Err("too many member finalization observations".into());
+        }
+        let (reply, result) = oneshot::channel();
+        self.cmd_tx
+            .send(AppCommand::MemberFinalizationWork { observed, reply })
+            .await
+            .map_err(|_| "server stopped".to_string())?;
+        result.await.map_err(|_| "server stopped".to_string())
+    }
+
     pub async fn finalize_member_connection(&self, peer: PeerId) -> Result<bool, String> {
         let (reply, result) = oneshot::channel();
         self.cmd_tx
@@ -4443,9 +4462,21 @@ where
                     Some(AppCommand::MemberFinalizationCandidates { reply }) => {
                         let _ = reply.send(server.member_finalization_candidates());
                     }
-                    Some(AppCommand::FinalizeMemberConnection { peer, reply }) => {
-                        let result = server.finalize_member_connection(peer).await.map_err(|e| e.to_string());
-                        let _ = reply.send(result);
+                    Some(AppCommand::MemberFinalizationWork { observed, reply }) => {
+                        if !reply.is_closed() {
+                            let _ = reply.send(server.member_finalization_work(&observed));
+                        }
+                    }
+                    Some(AppCommand::FinalizeMemberConnection { peer, mut reply }) => {
+                        if reply.is_closed() {
+                            continue;
+                        }
+                        tokio::select! {
+                            result = server.finalize_member_connection(peer) => {
+                                let _ = reply.send(result.map_err(|e| e.to_string()));
+                            }
+                            _ = reply.closed() => {}
+                        }
                     }
                     Some(AppCommand::JoinAttempts { reply }) => {
                         let _ = reply.send(server.join_attempts());

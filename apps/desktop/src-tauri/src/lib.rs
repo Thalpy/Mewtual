@@ -2054,12 +2054,14 @@ fn spawn_reconnect_capture_worker(
     mut wake: watch::Receiver<u64>,
 ) {
     let task = tokio::spawn(async move {
-        loop {
-            persist_live_local_reconnect_routes(&app, server, instance, &actor).await;
-            if wake.changed().await.is_err() {
-                break;
-            }
-        }
+        member_reconnect::run_capture_worker(
+            app.state::<AppState>().inner(),
+            server,
+            instance,
+            &actor,
+            &mut wake,
+        )
+        .await;
     });
     supervise("reconnect_capture", server, task);
 }
@@ -3595,8 +3597,21 @@ async fn persist_live_local_reconnect_routes(
     instance: u64,
     actor: &ServerActor,
 ) {
-    let state = app.state::<AppState>();
-    let state = state.inner();
+    persist_live_local_reconnect_routes_in_state(
+        app.state::<AppState>().inner(),
+        server,
+        instance,
+        actor,
+    )
+    .await;
+}
+
+async fn persist_live_local_reconnect_routes_in_state(
+    state: &AppState,
+    server: u64,
+    instance: u64,
+    actor: &ServerActor,
+) {
     let mesh = state
         .servers
         .lock()

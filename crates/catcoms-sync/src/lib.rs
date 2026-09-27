@@ -62,6 +62,9 @@ use zeroize::Zeroizing;
 mod blob_fetch;
 mod member_finalization;
 use member_finalization::KIND_MEMBER_FINALIZE;
+pub use member_finalization::{
+    MAX_MEMBER_FINALIZATION_OBSERVATIONS, MEMBER_FINALIZATION_WORK_PER_PASS,
+};
 pub mod checkpoint_exchange;
 pub mod durable_chat;
 pub mod epoch_service;
@@ -4104,6 +4107,7 @@ pub struct ChannelSync<T: MeshTransport, R: CryptoRngCore> {
     member_route_revision: u64,
     member_finalization_served_at: HashMap<DeviceId, u64>,
     member_finalization_pending: HashMap<DeviceId, PeerId>,
+    member_finalization_cursor: Option<PeerId>,
     /// Recovery work to perform on the next async drain.
     catchup_queue: Vec<CatchupTask>,
     /// Periodic neighbour reconciliation is paced and rotates through open documents when the
@@ -4490,6 +4494,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             member_route_revision: 0,
             member_finalization_served_at: HashMap::new(),
             member_finalization_pending: HashMap::new(),
+            member_finalization_cursor: None,
             catchup_queue: Vec::new(),
             reconciliation_next_ms: 0,
             reconciliation_cursor: 0,
