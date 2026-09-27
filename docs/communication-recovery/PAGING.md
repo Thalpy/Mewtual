@@ -70,5 +70,6 @@ restore, incomparable branches in both log orders, changing heads and appends du
 buffered children, and foreign document heads; and a real signed requester/provider test with
 4,098 shared operations (larger than both work/cache caps) that counts every transferred operation. That requester test also
 restores the provider before a second request and rejects a stale runtime cursor. These new
-regressions have not yet been executed in this implementation branch; the root agent owns the
-serialized Cargo run and separate public-API transfer-cost regression.
+regressions and the separate 10,000-operation public-API transfer-cost regression are run by
+the root agent with Cargo serialized. Their actual results and the baseline amplification
+reproduction are recorded in [PR29-REVIEW.md](PR29-REVIEW.md).

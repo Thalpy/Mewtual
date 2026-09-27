@@ -1,6 +1,6 @@
 # Communication recovery: scope and gap ledger
 
-Updated 2026-09-26. The supplied [programme plan](IMPLEMENTATION-PLAN.md) is preserved verbatim.
+Updated 2026-09-27. The supplied [programme plan](IMPLEMENTATION-PLAN.md) is preserved verbatim.
 Its proposed work packages and T01-T58 are acceptance requirements, not executed results.
 The [bounded patch design](../design-chat-recovery.md) describes the initial foundation.
 Subsequent features have their own contracts and evidence: [safe shutdown](SHUTDOWN.md),
@@ -9,6 +9,9 @@ Subsequent features have their own contracts and evidence: [safe shutdown](SHUTD
 and [temporal bridge recovery](TEMPORAL-BRIDGE.md). The final batch and its independent
 review branches are recorded in [REVIEW-PUSHES.md](REVIEW-PUSHES.md). Evidence below the feature ledger is historical foundation
 evidence, not a claim that later changes passed those same complete suites.
+The subsequent PR #29 corrections and their independent pushes are recorded in
+[PR29-REVIEW.md](PR29-REVIEW.md): fair member finalization, bounded peer-diverse restart
+routes, a vault-wide pending-message manager, and bounded local ancestry certificates.
 
 ## Comparison with the supplied plan
 
@@ -18,13 +21,13 @@ evidence, not a claim that later changes passed those same complete suites.
 | CR01 | Owner-authenticated immutable P2P policy, signed invite and join binding, sealed pin, explicit legacy state and migration primitives | Dedicated service unsupported; settings and invite preview implemented; vacant-leaf owner succession requires an authenticated transition proof |
 | CR02 | New chat sends save operation/MLS state/token/publication obligation before exposure; sealed UI retries; failed-write, abrupt-reopen and context-change coverage; truthful background persistence | Other authoring paths, remote durable receipts and coordinated multi-file admission acceptance remain; bounded pending capacity is explicit |
 | CR03 | Coalesced warm-unlock wake, periodic neighbor sweep, quiet retry deadline and collision regression | General durable obligations, typed recovery status, detached outbound waits, account teardown/sleep matrix and load fairness remain |
-| CR04 | Authenticated reciprocal member finalization, actual outbound route retention, sealed MemberMesh permission, failed identity-write retry and close barrier | Forced-direction real TCP restart regression passes in both orders; abrupt crash before first successful admission write and physical NAT acceptance remain |
+| CR04 | Authenticated reciprocal member finalization with fair bounded attempts, peer-diverse outbound route retention, sealed MemberMesh permission, failed identity-write retry and close barrier | Forced-direction TCP restart and alternate private-member fallback have local coverage; abrupt crash before first successful admission write and physical NAT acceptance remain |
 | CR05 | Existing discovery, endpoint budgets and temporary capability boundaries retained | No new member-assistance protocol or relay-renewal acceptance |
-| CR06 | Revisit unchanged neighbors, bounded cursor page scans, advancing-empty-page grace with abuse cap, fair full-queue rotation and signed bidirectional fixture | Durable target/coverage summaries, bounded legacy no-cursor compatibility path, alternate source generations and full inventory acceptance remain |
+| CR06 | Revisit unchanged neighbors, bounded cursor page scans and local ancestry certificates, advancing-empty-page grace with abuse cap, fair full-queue rotation and signed bidirectional fixture | Reordered/fragmented history can still resend duplicates; durable target/coverage summaries, bounded legacy no-cursor path and full inventory acceptance remain |
 | CR07 | Signed history crosses a forced chain, including independently sealed bridge restart and a previously unknown channel | Opaque forwarding, alternate bridges, attachment custody and physical-device acceptance remain |
 | CR08 | Existing epoch/lifecycle authority unchanged | Long-absence control adapter, historical-author admission audit and rejoin integration remain |
 | CR09 | No dedicated guarantees exposed | Dedicated admission, persistent sustained-abuse controls and service failover remain |
-| CR10 | Sealed pending-message UI with original retry identity, coalesced quiet retries, explicit changed-context draft recovery, storage failures and late-completion fencing | Full recovery-state UI, remote custody/delivery distinctions and diagnostics matrix remain |
+| CR10 | Sealed pending-message UI with original retry identity, quiet retries, vault-wide recovery/cancellation for orphaned and refused requests, storage failures and late-completion fencing | Full recovery-state UI, remote custody/delivery distinctions and diagnostics matrix remain |
 | CR11 | Independent design and implementation reviews plus local checks | UI send-barrier mutation evidence recorded; pinned integrated checks, real devices, supported platform CI and release acceptance remain |
 
 No complete CR package or T01-T58 integration case is marked passed by these narrower tests.

@@ -90,13 +90,11 @@ mod tests {
                     <= MAX_RECONNECT_ROUTES_PER_PEER
             );
         }
-        assert!(
-            1 + retained
-                .iter()
-                .map(|(_, address)| address.len() + RECONNECT_ROUTE_WIRE_OVERHEAD)
-                .sum::<usize>()
-                <= MAX_RECONNECT_SERIALIZED_ROUTE_BYTES
-        );
+        let encoded_bytes = 1 + retained
+            .iter()
+            .map(|(_, address)| address.len() + RECONNECT_ROUTE_WIRE_OVERHEAD)
+            .sum::<usize>();
+        assert!(encoded_bytes <= MAX_RECONNECT_SERIALIZED_ROUTE_BYTES);
         assert!(
             retained.len() < MAX_RECONNECT_RETAINED_ROUTES,
             "the independent byte cap must also constrain worst-case descriptors"
