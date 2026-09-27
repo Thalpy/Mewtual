@@ -18,6 +18,12 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use catcoms_crypto::{seal, unseal, KeyHierarchy, SealedBlob};
+pub use catcoms_discovery::reconnect::MAX_RECONNECT_ROUTE_BYTES;
+use catcoms_discovery::reconnect::{
+    retain_reconnect_routes, MAX_RECONNECT_PEERS, MAX_RECONNECT_RETAINED_ROUTES,
+    MAX_RECONNECT_ROUTES_PER_PEER, MAX_RECONNECT_SERIALIZED_ROUTE_BYTES,
+    RECONNECT_ROUTE_WIRE_OVERHEAD,
+};
 use catcoms_rt::{CryptoRngCore, OsCryptoRng};
 use catcoms_storage::{
     acquire_vault_session, change_vault_passphrase, open_or_create_vault, vault_exists,
@@ -183,10 +189,7 @@ pub enum ReconnectPolicy {
 }
 
 /// A join races at most two useful direct transports (normally TCP and QUIC) for one peer.
-pub const MAX_RECONNECT_ROUTES: usize = 2;
-/// Canonical direct multiaddrs are tiny. This bound prevents a corrupt local record from turning
-/// reconnect setup into an oversized allocation or log value.
-pub const MAX_RECONNECT_ROUTE_BYTES: usize = 512;
+pub const MAX_RECONNECT_ROUTES: usize = MAX_RECONNECT_ROUTES_PER_PEER;
 
 /// Domain separator for the derived listen port, so the port derivation can never collide with
 /// any other use of the seed.
@@ -258,10 +261,11 @@ const SERVER_NET_V2: u8 = 2;
 const SERVER_NET_V3: u8 = 3;
 const SERVER_NET_V4: u8 = 4;
 const SERVER_NET_V5: u8 = 5;
+const SERVER_NET_V6: u8 = 6;
 
 fn encode_server_net(net: &ServerNet) -> Vec<u8> {
     let mut e = Encoder::new();
-    e.put_u8(SERVER_NET_V5);
+    e.put_u8(SERVER_NET_V6);
     e.put_bytes(&net.key_seed).expect("seed fits");
     e.put_u16(net.port);
     e.put_str(&net.advertise).expect("advertise fits");
@@ -293,20 +297,25 @@ fn encode_server_net(net: &ServerNet) -> Vec<u8> {
         | ReconnectPolicy::LegacyPending
         | ReconnectPolicy::MemberMesh => None,
     };
-    let routes: Vec<_> = net
-        .reconnect_routes
-        .iter()
-        .filter(|route| {
-            (authorized_peer == Some(route.peer_id)
-                || net.reconnect_policy == ReconnectPolicy::MemberMesh)
-                && route.address.len() <= MAX_RECONNECT_ROUTE_BYTES
-        })
-        .take(MAX_RECONNECT_ROUTES)
-        .collect();
+    let routes = retain_reconnect_routes(
+        net.reconnect_routes
+            .iter()
+            .take(catcoms_discovery::reconnect::MAX_RECONNECT_ROUTE_CANDIDATES)
+            .filter(|route| {
+                authorized_peer == Some(route.peer_id)
+                    || net.reconnect_policy == ReconnectPolicy::MemberMesh
+            })
+            .map(|route| (route.peer_id, route.address.clone())),
+        if net.reconnect_policy == ReconnectPolicy::MemberMesh {
+            MAX_RECONNECT_PEERS
+        } else {
+            1
+        },
+    );
     e.put_u8(routes.len() as u8);
-    for route in routes {
-        e.put_bytes(&route.peer_id).expect("peer id fits");
-        e.put_str(&route.address).expect("reconnect route fits");
+    for (peer, address) in routes {
+        e.put_bytes(&peer).expect("peer id fits");
+        e.put_str(&address).expect("reconnect route fits");
     }
     match net.pending_recovery_peer {
         Some(peer) => {
@@ -330,6 +339,7 @@ fn decode_server_net(bytes: &[u8]) -> Result<ServerNet, AppError> {
         && version != SERVER_NET_V3
         && version != SERVER_NET_V4
         && version != SERVER_NET_V5
+        && version != SERVER_NET_V6
     {
         return Err(AppError::Io("unknown server net record version".into()));
     }
@@ -368,9 +378,17 @@ fn decode_server_net(bytes: &[u8]) -> Result<ServerNet, AppError> {
     let mut reconnect_routes = Vec::new();
     if version >= SERVER_NET_V3 {
         let count = d.get_u8().map_err(|_| bad())? as usize;
-        if count > MAX_RECONNECT_ROUTES {
+        let mesh_v6 = version >= SERVER_NET_V6 && reconnect_policy == ReconnectPolicy::MemberMesh;
+        let limit = if mesh_v6 {
+            MAX_RECONNECT_RETAINED_ROUTES
+        } else {
+            MAX_RECONNECT_ROUTES
+        };
+        if count > limit {
             return Err(bad());
         }
+        let mut peer_counts = std::collections::HashMap::new();
+        let mut route_bytes = 1;
         for _ in 0..count {
             let peer_id = d
                 .get_bytes()
@@ -378,7 +396,15 @@ fn decode_server_net(bytes: &[u8]) -> Result<ServerNet, AppError> {
                 .try_into()
                 .map_err(|_| bad())?;
             let address = d.get_str().map_err(|_| bad())?;
-            if address.len() > MAX_RECONNECT_ROUTE_BYTES {
+            route_bytes += RECONNECT_ROUTE_WIRE_OVERHEAD + address.len();
+            let peer_count = peer_counts.entry(peer_id).or_insert(0);
+            *peer_count += 1;
+            if address.len() > MAX_RECONNECT_ROUTE_BYTES
+                || (mesh_v6
+                    && (*peer_count > MAX_RECONNECT_ROUTES_PER_PEER
+                        || peer_counts.len() > MAX_RECONNECT_PEERS
+                        || route_bytes > MAX_RECONNECT_SERIALIZED_ROUTE_BYTES))
+            {
                 return Err(bad());
             }
             reconnect_routes.push(ReconnectRoute {
@@ -2383,7 +2409,7 @@ mod tests {
     }
 
     #[test]
-    fn member_mesh_net_v5_retains_two_directions_without_promoting_old_disabled_records() {
+    fn member_mesh_net_v6_retains_peer_diversity_and_migrates_v5() {
         let mut net = ServerNet {
             key_seed: [7; 32],
             port: 22487,
@@ -2404,9 +2430,22 @@ mod tests {
         };
         let saved = decode_server_net(&encode_server_net(&net)).unwrap();
         assert_eq!(saved.reconnect_policy, ReconnectPolicy::MemberMesh);
+        assert_eq!(saved.reconnect_routes, net.reconnect_routes);
+        let mut v5 = net.clone();
+        v5.reconnect_routes.truncate(MAX_RECONNECT_ROUTES);
+        let mut v5_bytes = encode_server_net(&v5);
+        v5_bytes[0] = SERVER_NET_V5;
+        let migrated = decode_server_net(&v5_bytes).unwrap();
         assert_eq!(
-            saved.reconnect_routes,
-            net.reconnect_routes[..MAX_RECONNECT_ROUTES]
+            migrated, v5,
+            "v5 retains its original two routes and policy"
+        );
+        assert_eq!(encode_server_net(&migrated)[0], SERVER_NET_V6);
+        let mut invalid_v5 = encode_server_net(&net);
+        invalid_v5[0] = SERVER_NET_V5;
+        assert!(
+            decode_server_net(&invalid_v5).is_err(),
+            "old codecs never gain a larger route allowance"
         );
         assert_eq!(saved.key_seed, net.key_seed);
         assert_eq!(saved.record_seq, net.record_seq);
@@ -2423,6 +2462,78 @@ mod tests {
         assert_eq!(
             decode_server_net(&old_disabled).unwrap().reconnect_policy,
             ReconnectPolicy::Disabled
+        );
+    }
+
+    #[test]
+    fn member_mesh_net_v6_rejects_peer_route_and_encoded_byte_overflow() {
+        fn raw(routes: Vec<ReconnectRoute>) -> Vec<u8> {
+            let mut e = Encoder::new();
+            e.put_u8(SERVER_NET_V6);
+            e.put_bytes(&[7; 32]).unwrap();
+            e.put_u16(22487);
+            e.put_str("").unwrap();
+            e.put_str("").unwrap();
+            e.put_str("").unwrap();
+            e.put_u64(65_536);
+            e.put_u8(0);
+            e.put_u8(3);
+            e.put_u8(routes.len() as u8);
+            for route in routes {
+                e.put_bytes(&route.peer_id).unwrap();
+                e.put_str(&route.address).unwrap();
+            }
+            e.put_u8(0);
+            e.finish()
+        }
+        let routes = |peers: usize, per_peer: usize, bytes: usize| -> Vec<ReconnectRoute> {
+            (0..peers)
+                .flat_map(|peer| {
+                    (0..per_peer).map(move |route| ReconnectRoute {
+                        peer_id: [peer as u8; 32],
+                        address: format!("{route}{}", "x".repeat(bytes - 1)),
+                    })
+                })
+                .collect()
+        };
+        assert!(decode_server_net(&raw(routes(
+            MAX_RECONNECT_PEERS,
+            MAX_RECONNECT_ROUTES_PER_PEER,
+            64
+        )))
+        .is_ok());
+        assert!(decode_server_net(&raw(routes(MAX_RECONNECT_PEERS + 1, 1, 64))).is_err());
+        assert!(decode_server_net(&raw(routes(1, MAX_RECONNECT_ROUTES_PER_PEER + 1, 64))).is_err());
+        assert!(decode_server_net(&raw(routes(1, 1, MAX_RECONNECT_ROUTE_BYTES + 1))).is_err());
+        assert!(
+            decode_server_net(&raw(routes(
+                MAX_RECONNECT_PEERS,
+                MAX_RECONNECT_ROUTES_PER_PEER,
+                MAX_RECONNECT_ROUTE_BYTES
+            )))
+            .is_err(),
+            "length prefixes and peer bytes count toward the independent aggregate byte limit"
+        );
+        let count = MAX_RECONNECT_PEERS * MAX_RECONNECT_ROUTES_PER_PEER;
+        let payload =
+            MAX_RECONNECT_SERIALIZED_ROUTE_BYTES - 1 - count * RECONNECT_ROUTE_WIRE_OVERHEAD;
+        let mut boundary = routes(
+            MAX_RECONNECT_PEERS,
+            MAX_RECONNECT_ROUTES_PER_PEER,
+            payload / count,
+        );
+        for route in boundary.iter_mut().take(payload % count) {
+            route.address.push('x');
+        }
+        assert!(
+            decode_server_net(&raw(boundary.clone())).is_ok(),
+            "the exact aggregate byte limit is accepted"
+        );
+        boundary[0].address.push('x');
+        assert!(boundary[0].address.len() <= MAX_RECONNECT_ROUTE_BYTES);
+        assert!(
+            decode_server_net(&raw(boundary)).is_err(),
+            "one extra encoded byte is refused independently of the per-address cap"
         );
     }
 

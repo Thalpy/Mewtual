@@ -1,5 +1,6 @@
 //! Durable continuing member reachability after authenticated P2P admission.
 use super::*;
+use catcoms_discovery::reconnect::{retain_reconnect_routes, MAX_RECONNECT_PEERS};
 
 pub(super) fn finalization_targets(
     evidence: &[AuthenticatedDialRoute],
@@ -86,7 +87,13 @@ pub(super) async fn persist(
         .into_iter()
         .collect();
     let targets = finalization_targets(&evidence, &candidates);
-    let observed = select_authenticated_reconnect_routes(evidence, &peers, false);
+    // The transport ledger is oldest-to-newest. Preserve its actual successful-overlap order,
+    // unlike the legacy singleton selector which sorts before its two-route admission cap.
+    let observed = validated_authenticated_reconnect_routes(
+        evidence.into_iter().rev().collect(),
+        &peers,
+        false,
+    );
     if admission_storage::retry_server_net(state, server, instance)
         .await
         .is_some_and(|outcome| outcome != PersistOutcome::Durable)
@@ -134,18 +141,26 @@ pub(super) async fn persist(
     let old = net.clone();
     net.reconnect_policy = ReconnectPolicy::MemberMesh;
     if !observed.is_empty() {
-        // Refresh observed members while retaining other last-good directions. Seeing no live
+        // Prefer newly observed routes while retaining still-current last-good directions,
+        // including a second transport for the same peer when only one new route was observed. Seeing no live
         // route is expected when the peer stopped, and can never erase its restart hint.
         let refreshed: HashSet<_> = observed.iter().map(|route| route.peer_id).collect();
         let mut routes = observed;
         routes.extend(
             net.reconnect_routes
                 .iter()
-                .filter(|route| !refreshed.contains(&route.peer_id))
+                .filter(|route| claims.contains(&PeerId::new(route.peer_id)))
                 .cloned(),
         );
-        routes.truncate(MAX_RECONNECT_ROUTES);
-        net.reconnect_routes = routes;
+        net.reconnect_routes = retain_reconnect_routes(
+            routes
+                .into_iter()
+                .map(|route| (route.peer_id, route.address)),
+            MAX_RECONNECT_PEERS,
+        )
+        .into_iter()
+        .map(|(peer_id, address)| ReconnectRoute { peer_id, address })
+        .collect();
         if net
             .pending_recovery_peer
             .is_some_and(|peer| refreshed.contains(&peer))

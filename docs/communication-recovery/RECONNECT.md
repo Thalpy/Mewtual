@@ -14,8 +14,8 @@ group policy and signed member descriptors; no private address is added to PEX.
   proofs, saves the exact actor incarnation's core snapshot, then saves its local network hints.
   The native bridge invokes capture after registration, on existing network/event wakeups and
   on its discovery cadence. Close runs the capture pre-pass before freezing actors.
-- [`store.rs`](../../crates/catcoms-app/src/store.rs) adds network record version 5 and the
-  `MemberMesh` provenance tag. This preserves the existing transport seed, listener port,
+- [`store.rs`](../../crates/catcoms-app/src/store.rs) writes network record version 6, retaining
+  the version-5 `MemberMesh` provenance tag and adding separate mesh-retention bounds. This preserves the existing transport seed, listener port,
   sequence reservation and bounded last-good routes.
 - The actor exposes permission and candidate queries. Candidate records are separate from
   operational proof. The sync dial boundary still checks the current roster, descriptor,
@@ -60,7 +60,9 @@ is installed only when the restored core snapshot independently permits active P
 This is an ordering barrier between individual files, not an atomic multi-file transaction.
 
 Only the local transport's successful outbound Noise listener evidence can create a new private
-hint. At most two routes are sealed. Empty observations retain prior last-good routes. An unfinished
+hint. At most eight members with two routes each are sealed, within an 8 KiB encoded-route
+budget. Legacy single-contact authority remains capped at two routes for that contact. Empty
+observations retain prior last-good routes. An unfinished
 identified member target keeps close pending after other successful persistence work is preserved.
 An already-sealed route can cover that target only while a unique current roster descriptor still
 claims it and the saved route remains retained. Unknown transport peers cannot hold close pending.
@@ -71,9 +73,11 @@ evidence. Ordinary close defers while an observed admitted route still lacks tha
 crash before the barrier finishes does not imply restart-safe reachability or a save acknowledgement.
 The feature cannot reconnect two peers when neither has a usable permitted listener direction.
 
-Version 5 decodes older v1-v4 records under their existing restrictive provenance. It does not
-reinterpret an empty old route list as continuing permission. A v4 decoder cannot interpret the
-new tag. Public member discovery and canonical signed retained history remain separate from
+Version 6 decodes v1-v5 records under their existing provenance and original route-count bounds.
+It does not reinterpret an empty old route list as continuing permission. All newly saved network
+records use v6, including disabled and legacy records. Older binaries cannot decode these v6
+records: downgrading is unsupported without restoring a compatible backup. A decode/read failure
+in the current loader fails closed; it does not become a missing record or regenerate identity. Public member discovery and canonical signed retained history remain separate from
 these local private hints; no custom history-routing envelope or dedicated fallback is introduced.
 
 ## Review corrections
@@ -99,7 +103,7 @@ Reproduction commands (add the recorded locked/offline/serial settings for this 
 
 ```text
 cargo test -p catcoms-sync member_finalization::tests
-cargo test -p catcoms-app member_mesh_net_v5
+cargo test -p catcoms-app member_mesh_net_v6
 cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml --lib member_reconnect_regressions -- --test-threads=1
 cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml --lib reply_admission_fetches_signed_records_before_its_first_snapshot
 ```
@@ -148,3 +152,50 @@ evidence and same-identity signed actor peers on the deterministic transport. Th
 already-finalized predecessors and two failing predecessors, then successful service from the
 third member. They do not claim that finalization fairness alone fixes route retention; that is
 an independent bound addressed by R2.
+
+
+## PR review R2: independent peer diversity and dial work
+
+The shared policy in `catcoms-discovery::reconnect` bounds retained state at eight peers, two routes
+per peer, 512 bytes per address and 8,192 encoded bytes in total. The total includes the one-byte
+route count and, per route, the 32-byte peer id, both four-byte length prefixes and address bytes.
+Selection scans at most the 640-entry transport evidence ledger plus 16 previously retained rows.
+These are retention limits, not permission to attempt all retained addresses at once.
+
+The native bridge ranks actual successful outbound observations newest first, then keeps
+still-current, uniquely claimed old hints. One route for each retained member precedes second
+transports. Refreshing B cannot remove C merely because B has TCP and QUIC. If more than eight
+members have evidence, the most recent proven overlaps win; remaining peers keep the prior sealed
+order. This is bounded recovery diversity, not a promise to retain every historical group member.
+Private routes stay local and sealed. Inbound source ports and unverified claims never enter the
+selection.
+
+The runtime installer uses the same bounds and address validation. Each discovery pass considers
+at most two eligible peers, with one actor-owned cursor advanced before scheduler/transport awaits.
+A denied or failed first pair cannot monopolize later passes. Each peer's batch remains at most two
+addresses, and all attempts still consume the existing process, group, peer, endpoint and prefix
+gates. Repeated native hint installation does not reset the cursor.
+
+The v6 decoder rejects peer-count, per-peer route-count, per-address length and aggregate encoded
+byte overflow. The encoder normalizes arbitrary local route vectors with the same diversity policy,
+so its output stays readable. v1-v5 parsing remains restricted to its original count and authority;
+v5 hints migrate without changing seed, port, sequence, pending recovery or policy.
+
+Required focused verification, not yet claimed executed for R2:
+
+```text
+cargo test -p catcoms-discovery reconnect_retention
+cargo test -p catcoms-app member_mesh_net_v6
+cargo test -p catcoms-app server_net_reconnect_routes_are_backward_compatible_and_bounded
+cargo test -p catcoms-sync mesh_reconnect_retains_three_peers_and_rotates_two_peer_dial_passes
+cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml --lib mesh_restart_keeps_private_alternative -- --test-threads=1
+```
+
+The native regression captures independently successful outbound TCP and QUIC connections to B,
+retains C's private listener, then refreshes B through production persistence. B stops. A reopens its
+vault and runs production cold restore without rendezvous, relay or advertised public addresses;
+A must connect to C over the retained private direction and recover C's original signed message
+identity, author and text through real TCP actors. Initial signed admission uses a deterministic
+Hub with the same identities; no member proof, route authority or remote history is injected.
+This is loopback integration coverage, not physical NAT testing. Transfer amplification for a large
+archive is measured separately by the R4 reconciliation regression.

@@ -49,7 +49,6 @@ use catcoms_rt::{
     Clock, ConnectionFamily, ConnectionPath, ConnectionTransport, CryptoRngCore, DiscoveredPeer,
     MeshTransport, PeerId, ProtocolId, RendezvousRegistration, RequestCancellation, Topic,
     TransportError, TransportEvent, MAX_CONNECTED_PEER_SNAPSHOT, MAX_CONNECTION_PATH_SNAPSHOT,
-    MAX_PEER_DIAL_BATCH,
 };
 use catcoms_storage::{
     open_file as open_file_fn, seal_file as seal_file_fn, BlobStore, Cid, FileRef, MemoryBlobStore,
@@ -4290,6 +4289,7 @@ pub struct ChannelSync<T: MeshTransport, R: CryptoRngCore> {
     /// re-checks that exactly one current roster member still claims the authenticated transport
     /// peer, then spends the shared endpoint budget. Transient here; the desktop owns persistence.
     local_reconnect_routes: Vec<(PeerId, String)>,
+    local_reconnect_cursor: Option<PeerId>,
     /// Advisory-only isolation detector (never gates anything): hysteretic over R (roster) / D
     /// (reachable member peers) / S (distinct rendezvous trust roots). Surfaced to the UI as a
     /// "verify out-of-band" hint. Transient; rebuilt on restore.
@@ -4546,6 +4546,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             ),
             dial_retries: HashMap::new(),
             local_reconnect_routes: Vec::new(),
+            local_reconnect_cursor: None,
             eclipse: EclipseDetector::new(EclipseConfig::default()),
             pending_dm_invites: Vec::new(),
             pending_call_signals: Vec::new(),
@@ -7400,8 +7401,12 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     /// member may be removed or replace its signed transport descriptor after installation.
     pub fn set_local_reconnect_routes(&mut self, routes: Vec<(PeerId, String)>) {
         let mut accepted = Vec::new();
-        for (peer, address) in routes.into_iter().take(MAX_PEER_DIAL_BATCH) {
-            if address.len() > 512 {
+        use catcoms_discovery::reconnect::{
+            retain_reconnect_routes, MAX_RECONNECT_PEERS, MAX_RECONNECT_ROUTE_BYTES,
+            MAX_RECONNECT_ROUTE_CANDIDATES,
+        };
+        for (peer, address) in routes.into_iter().take(MAX_RECONNECT_ROUTE_CANDIDATES) {
+            if address.len() > MAX_RECONNECT_ROUTE_BYTES {
                 continue;
             }
             let Some(route) = parse_peer_dial_route(&address, peer.as_bytes()) else {
@@ -7423,7 +7428,19 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
                 accepted.push((peer, address));
             }
         }
-        self.local_reconnect_routes = accepted;
+        self.local_reconnect_routes = retain_reconnect_routes(
+            accepted
+                .into_iter()
+                .map(|(peer, address)| (*peer.as_bytes(), address)),
+            if self.policy_allows_member_mesh() {
+                MAX_RECONNECT_PEERS
+            } else {
+                1
+            },
+        )
+        .into_iter()
+        .map(|(peer, address)| (PeerId::new(peer), address))
+        .collect();
     }
 
     /// Mint a short-lived code another existing member can paste to dial this device's current
@@ -7610,8 +7627,21 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
                 .push((address, route.endpoint));
         }
 
+        // Retention diversity is independent of per-pass socket work. Rotate even denied or
+        // failed peers before awaiting transport, so a fixed prefix cannot consume every pass.
+        let mut candidates: Vec<_> = by_peer.into_iter().collect();
+        if let Some(cursor) = self.local_reconnect_cursor {
+            let start = candidates.partition_point(|(peer, _)| *peer <= cursor);
+            if start < candidates.len() {
+                candidates.rotate_left(start);
+            }
+        }
         let mut dialed = 0;
-        for (peer, routes) in by_peer {
+        for (peer, routes) in candidates
+            .into_iter()
+            .take(catcoms_discovery::reconnect::MAX_RECONNECT_DIAL_PEERS_PER_PASS)
+        {
+            self.local_reconnect_cursor = Some(peer);
             let endpoints: Vec<_> = routes
                 .iter()
                 .map(|(_, endpoint)| endpoint.clone())
@@ -15546,7 +15576,7 @@ mod tests {
         node.set_local_reconnect_routes(vec![
             (bob_peer, valid.clone()),
             (bob_peer, second.clone()),
-            // The cap is applied before processing additional persisted entries.
+            // A third route for this peer cannot consume another member's retention slot.
             (bob_peer, test_peer_route(9, "/ip4/192.168.1.41/tcp/22488")),
         ]);
         assert_eq!(
@@ -15583,6 +15613,60 @@ mod tests {
         )]);
         assert_eq!(node.dial_local_reconnect_routes().await, 0);
         assert_eq!(node.transport.dialed.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn mesh_reconnect_retains_three_peers_and_rotates_two_peer_dial_passes() {
+        let hub = Hub::new();
+        let device = MlsDevice::generate().unwrap();
+        let group = ServerGroup::create(&device).unwrap();
+        let owner_peer = PeerId::from_u64(1);
+        let mut node = ChannelSync::new(
+            RecordingNet::new(hub.join(owner_peer)),
+            group,
+            device,
+            ChaCha20Rng::seed_from_u64(50),
+            Box::new(ManualClock::new(1_000)),
+        );
+        node.initialize_group_policy(GroupMode::PeerToPeer).unwrap();
+        node.snapshot().unwrap();
+        node.publish_group_policy().unwrap();
+        let mut routes = Vec::new();
+        for id in 2..=4 {
+            let device = MlsDevice::generate().unwrap();
+            let invite = node.mint_invite([id; 16], 10_000, vec![]).unwrap();
+            let joining = hub.join(PeerId::from_u64(id as u64));
+            tokio::select! {
+                joined = request_join(&joining, owner_peer, &device, &invite) => { joined.unwrap(); },
+                _ = async { loop { node.run_once().await.unwrap(); } } => unreachable!(),
+            }
+            let peer = test_transport_peer(id);
+            stash_peer_record(&mut node, device.device_id(), *peer.as_bytes());
+            routes.push((
+                peer,
+                test_peer_route(id, &format!("/ip4/192.168.1.{id}/tcp/22487")),
+            ));
+        }
+        node.set_local_reconnect_routes(routes.clone());
+        assert_eq!(node.local_reconnect_routes.len(), 3);
+        assert_eq!(node.dial_local_reconnect_routes().await, 2);
+        assert_eq!(node.transport.dialed.lock().unwrap().len(), 2);
+        // A native refresh of the same sealed hints must not reset the fair work cursor.
+        node.set_local_reconnect_routes(routes);
+        assert!(node.dial_local_reconnect_routes().await <= 2);
+        let dialed = node.transport.dialed.lock().unwrap();
+        assert_eq!(
+            dialed
+                .iter()
+                .map(|(peer, _)| *peer)
+                .collect::<HashSet<_>>()
+                .len(),
+            3,
+            "the later peer gets a turn even while the first two keep failing"
+        );
+        assert!(dialed
+            .iter()
+            .all(|(_, routes)| routes.len() <= catcoms_rt::MAX_PEER_DIAL_BATCH));
     }
 
     /// **F1, check 2.** A removed member's record naming a transport peer that a *current*

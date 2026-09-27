@@ -5171,12 +5171,12 @@ fn canonical_invite_peer_endpoint(address: &Multiaddr) -> Option<DialEndpoint> {
 /// admission. This is the local-only substitute for putting private LAN addresses into PEX: the
 /// route is sealed with `ServerNet`, capped to TCP/QUIC scale, and is roster-checked again by the
 /// sync layer before every later dial.
-fn select_authenticated_reconnect_routes(
+fn validated_authenticated_reconnect_routes(
     routes: Vec<AuthenticatedDialRoute>,
     member_peers: &HashSet<PeerId>,
     local_only: bool,
 ) -> Vec<ReconnectRoute> {
-    let mut routes: Vec<_> = routes
+    routes
         .into_iter()
         .filter(|route| member_peers.contains(&route.peer))
         .filter(|route| route.address.len() <= MAX_RECONNECT_ROUTE_BYTES)
@@ -5192,7 +5192,15 @@ fn select_authenticated_reconnect_routes(
             peer_id: *route.peer.as_bytes(),
             address: route.address,
         })
-        .collect();
+        .collect()
+}
+
+fn select_authenticated_reconnect_routes(
+    routes: Vec<AuthenticatedDialRoute>,
+    member_peers: &HashSet<PeerId>,
+    local_only: bool,
+) -> Vec<ReconnectRoute> {
+    let mut routes = validated_authenticated_reconnect_routes(routes, member_peers, local_only);
     routes.sort_by(|left, right| {
         left.peer_id
             .cmp(&right.peer_id)

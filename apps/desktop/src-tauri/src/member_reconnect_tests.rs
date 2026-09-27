@@ -689,6 +689,159 @@ mod member_reconnect_regressions {
     }
 
     #[tokio::test]
+    async fn mesh_restart_keeps_private_alternative_after_refreshing_two_transports_to_an_offline_peer(
+    ) {
+        timeout(Duration::from_secs(50), async {
+            let dir = tempfile::tempdir().unwrap();
+            let state = mount(dir.path()).await;
+            let a_net = new_server_net("", "", "");
+            let (a_tcp, _, _) = MeshService::new_tcp_with_key(
+                keypair_from_seed(a_net.key_seed).unwrap(), &[], &[],
+            ).unwrap();
+            let a_peer = a_tcp.handle().local_peer();
+            let hub = catcoms_rt::Hub::new();
+            let mut a = Server::found(
+                hub.join(a_peer), MlsDevice::generate().unwrap(), ChaCha20Rng::seed_from_u64(80),
+                Box::new(SystemClock), "owner",
+            ).unwrap();
+            a.subscribe_control().await.unwrap();
+            a.publish_self_record(Vec::new(), a_net.record_seq).unwrap();
+            let mut members = Vec::new();
+            let mut transports = Vec::new();
+            let mut peers = Vec::new();
+            let mut listener_ports = Vec::new();
+            for index in 0..2 {
+                let network = new_server_net("", "", "");
+                let mut listeners = vec!["/ip4/127.0.0.1/tcp/0".parse().unwrap()];
+                if index == 0 { listeners.push("/ip4/127.0.0.1/udp/0/quic-v1".parse().unwrap()); }
+                let (tcp, id, _) = MeshService::new_tcp_with_key(
+                    keypair_from_seed(network.key_seed).unwrap(), &listeners, &[],
+                ).unwrap();
+                let peer = tcp.handle().local_peer();
+                for _ in 0..listeners.len() {
+                    let listener = tcp.next_listen_addr().await.unwrap();
+                    listener_ports.push(listener.clone());
+                    let route = format!("{listener}/p2p/{id}");
+                    a_tcp.handle().dial(route.parse().unwrap()).await.unwrap();
+                    loop {
+                        if a_tcp.handle().authenticated_dial_route_evidence().iter().any(|e| e.address == route) { break; }
+                        SystemClock.sleep(Duration::from_millis(20)).await;
+                    }
+                }
+                let invite = a.mint_invite([80 + index; 16], SystemClock.now_ms() + 60_000, vec![]).unwrap();
+                let mut member = tokio::select! {
+                    joined = Server::join(
+                        hub.join(peer), MlsDevice::generate().unwrap(),
+                        ChaCha20Rng::seed_from_u64(81 + index as u64), Box::new(SystemClock),
+                        "member", a_peer, &invite,
+                    ) => joined.unwrap(),
+                    _ = async { loop { a.sync_once().await.unwrap(); } } => unreachable!(),
+                };
+                member.subscribe_control().await.unwrap();
+                member.publish_self_record(Vec::new(), network.record_seq).unwrap();
+                members.push(member);
+                transports.push(tcp);
+                peers.push(peer);
+            }
+            for member in &mut members {
+                while member.epoch() < a.epoch() {
+                    tokio::select! {
+                        result = member.sync_once() => { result.unwrap(); },
+                        _ = async { loop { a.sync_once().await.unwrap(); } } => unreachable!(),
+                    }
+                }
+                tokio::select! {
+                    done = member.finalize_member_connection(a_peer) => assert!(done.unwrap()),
+                    _ = async { loop { a.sync_once().await.unwrap(); } } => unreachable!(),
+                }
+            }
+            assert!(a.member_routes().iter().all(|member| member.addresses.is_empty()),
+                "neither member advertises a public/cache fallback");
+            let group = a.group_id();
+            let device = a.device_id();
+            let (actor, events, task) = spawn(a);
+            let running = register(&state, actor, a_tcp.handle(), events, task, group, device).await;
+            persist_server_net(&state, 1, &a_net).await;
+            let evidence = a_tcp.handle().authenticated_dial_route_evidence();
+            let b: Vec<_> = evidence.iter().filter(|route| route.peer == peers[0]).cloned().collect();
+            let c: Vec<_> = evidence.iter().filter(|route| route.peer == peers[1]).cloned().collect();
+            assert_eq!(b.len(), 2, "B has independently successful TCP and QUIC observations");
+            assert_eq!(c.len(), 1, "C has one private last-good direction");
+            assert!(member_reconnect::persist(&state, 1, 1, &running.actor, c.clone()).await.unwrap());
+            assert!(member_reconnect::persist(&state, 1, 1, &running.actor, b).await.unwrap());
+            let saved = net(&state).await;
+            assert_eq!(saved.reconnect_routes.len(), 3);
+            assert_eq!(saved.reconnect_routes.iter().filter(|route| route.peer_id == *peers[0].as_bytes()).count(), 2);
+            assert!(saved.reconnect_routes.iter().any(|route| route.address == c[0].address));
+            assert!(saved.rendezvous.is_empty() && saved.relay.is_empty() && saved.advertise.is_empty());
+            stop(&state, running).await;
+            drop(a_tcp);
+            let channel = channel_id("general");
+            let mut c_server = members.pop().unwrap();
+            c_server.open_channel(channel).await.unwrap();
+            c_server.send_message(channel, "signed history from the retained alternative").await.unwrap();
+            let original = c_server.messages(channel).into_iter().find(|message| message.text == "signed history from the retained alternative").unwrap();
+            let c_snapshot = c_server.snapshot().unwrap();
+            drop(c_server);
+            drop(members);
+            // B disappears entirely; C remains on its original, private listener.
+            drop(transports.remove(0));
+            for listener in listener_ports.iter().take(2) {
+                loop {
+                    let released = if listener.iter().any(|part| matches!(part, Protocol::QuicV1)) {
+                        let port = listener.iter().find_map(|part| if let Protocol::Udp(port) = part { Some(port) } else { None }).unwrap();
+                        std::net::UdpSocket::bind((std::net::Ipv4Addr::LOCALHOST, port)).is_ok()
+                    } else {
+                        std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, listen_port(listener).unwrap())).is_ok()
+                    };
+                    if released { break; }
+                    SystemClock.sleep(Duration::from_millis(20)).await;
+                }
+            }
+            *state.store.lock().await = None;
+            let state = mount(dir.path()).await;
+            let clock = ManualClock::new(SystemClock.now_ms());
+            let mut c_server = Server::restore(
+                &c_snapshot, transports.remove(0), ChaCha20Rng::seed_from_u64(83),
+                Box::new(clock.clone()), "alternative",
+            ).unwrap();
+            c_server.subscribe_control().await.unwrap();
+            let (c_actor, mut c_events, c_task) = spawn(c_server);
+            let c_drain = tokio::spawn(async move { while c_events.recv().await.is_some() {} });
+            tokio::select! {
+                _ = async { loop { SystemClock.sleep(Duration::from_millis(100)).await; clock.advance_ms(500); } } => unreachable!(),
+                _ = async {
+                    let restored = restore(&state, false, &clock).await;
+                    timeout(Duration::from_secs(8), async {
+                        loop {
+                            if restored.mesh.authenticated_dial_routes().iter().any(|route| route.peer == peers[1]) { break; }
+                            SystemClock.sleep(Duration::from_millis(20)).await;
+                        }
+                    }).await.expect("cold native restore attempts the retained private alternative while B is gone");
+                    assert!(!restored.mesh.authenticated_dial_routes().iter().any(|route| route.peer == peers[0]));
+                    assert_eq!(net(&state).await.key_seed, saved.key_seed);
+                    restored.actor.catch_up(peers[1], channel).await;
+                    timeout(Duration::from_secs(20), async {
+                        loop {
+                            SystemClock.sleep(Duration::from_millis(300)).await;
+                            if let Some(message) = restored.actor.messages(channel).await.into_iter().find(|message| message.id == original.id) {
+                                assert_eq!(message.author, original.author);
+                                assert_eq!(message.text, original.text);
+                                break;
+                            }
+                        }
+                    }).await.expect("the alternative supplies its original signed retained message over real TCP");
+                    stop(&state, restored).await;
+                    c_actor.shutdown().await;
+                    c_task.await.unwrap();
+                    c_drain.await.unwrap();
+                } => {}
+            }
+            drop(transports);
+        }).await.expect("bounded multi-member restart fallback");
+    }
+
+    #[tokio::test]
     async fn reply_callback_restart_uses_proven_outbound_listener_in_both_start_orders() {
         timeout(Duration::from_secs(60), async {
             for listener_first in [true, false] {
