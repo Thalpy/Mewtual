@@ -23,6 +23,12 @@ those jobs. This is a turn-count bound, not a wall-time latency guarantee for ev
 Explicit request commands and some discovery/profile/admission handlers still await their existing
 operations inline. Slow event consumers also retain the existing bounded-event-channel backpressure.
 
+The delivery/Studio wake is anchored to its sampled monotonic deadline before creating the selector.
+Advancing an injected clock before the future's first poll must not start another full throttle
+interval. The local wait helper checks the original deadline before and after polling its sleep,
+including advances during the sleep's own arming. Delivery projection still checks the throttle
+before emitting; a conservative early Studio wake only revisits its existing eligibility checks.
+
 The broader polling schedule required correcting queue ownership before transport awaits. Control
 publications, Welcome/admission pushes, eviction commands, receipts and repair pushes retain their
 row until the attempt resolves. Cancellation alone cannot discard accepted bytes. Their existing
@@ -43,6 +49,11 @@ Regressions added (execution belongs to integration; no test success is claimed 
 - `removed_member_discards_owned_response_without_retiring_its_recovery_obligation`: the exact
   response passes admission in an equivalent pre-removal context, then fails after real local
   removal without importing history, retiring the target or issuing a replacement request.
+- `stale_commit_wait_keeps_its_stronger_gap_when_a_bare_probe_fills_the_queue`: a real epoch
+  transition invalidates the owned wait while a weaker probe occupies the sole queue slot; the
+  original stronger gap must merge into the surviving task before capacity checks.
+- `actor_deadline_*`: deterministic first-poll and sleep-arming clock advances preserve the
+  original deadline, while wall changes and pre-deadline polling cannot advance delivery.
 
 Integration must also rerun the existing throttled delivery wake, reciprocal reconciliation,
 multi-page/legacy catch-up, cancellation and Studio scheduling regressions. No timeout inflation or

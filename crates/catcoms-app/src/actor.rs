@@ -30,6 +30,7 @@ use crate::{
     StorageSnapshot, SwitchboardOffer, WikiPendingEdit, WikiRevision,
 };
 
+mod deadline;
 mod fair;
 #[cfg(test)]
 mod fair_tests;
@@ -3838,29 +3839,26 @@ where
             // from one clock read. Sampling them separately leaves a window where the deadline
             // passes between the two and neither answer schedules anything, which strands the
             // permit a handoff job is holding until unrelated work happens by.
+            let delivery_clock = server.runtime_clock();
+            let wake_sampled_at = delivery_clock.monotonic_ms();
             let studio_wake = studio_receiver.signal_and_wake(&server, &studio_signal);
             #[cfg(test)]
             studio_preparation_signal.send_replace(studio_receiver.preparing_for_test());
-            let delivery_clock = server.runtime_clock();
             // The Studio receiver's own deadline shares this wake. A handoff job held by backoff
             // reports no pending work, so without merging its deadline here a quiescent actor
             // would never revisit it, and a job parked at `Ready` holds admission and one of four
             // process-wide preparation permits for as long as that lasts.
             let delivery_delay = match (
-                next_delivery_delay(delivery_clock.monotonic_ms(), &delivery, &delivery_dirty),
+                next_delivery_delay(wake_sampled_at, &delivery, &delivery_dirty),
                 studio_wake,
             ) {
                 (Some(a), Some(b)) => Some(a.min(b)),
                 (only, None) | (None, only) => only,
             };
-            let delivery_wake = async move {
-                match delivery_delay {
-                    Some(delay_ms) => {
-                        delivery_clock.sleep(Duration::from_millis(delay_ms)).await;
-                    }
-                    None => std::future::pending::<()>().await,
-                }
-            };
+            // Anchor before the selector's first poll. Clock advancement during another turn
+            // must not arm a fresh full relative interval after the original deadline elapsed.
+            let delivery_due = delivery_delay.map(|delay| wake_sampled_at.saturating_add(delay));
+            let delivery_wake = deadline::wait(delivery_clock, delivery_due);
             tokio::pin!(delivery_wake);
             let turn = fair::next(
                 &mut ready_cursor,
