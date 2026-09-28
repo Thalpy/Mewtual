@@ -165,7 +165,7 @@ async fn turn(
         client.actor.wait_studio_preparation().await;
     }
     // Let detached network completions reach the actor before advancing simulated deadlines.
-    tokio::time::sleep(Duration::from_millis(5)).await;
+    catcoms_rt::Clock::sleep(&catcoms_rt::SystemClock, Duration::from_millis(5)).await;
     clock.advance_ms(250);
 }
 

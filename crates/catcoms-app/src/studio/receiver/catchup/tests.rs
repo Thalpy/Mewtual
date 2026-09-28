@@ -1845,7 +1845,11 @@ async fn a_cancelled_waiter_leaves_a_real_paused_worker_holding_admission_and_it
         if pool.available_permits() == free {
             break;
         }
-        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        catcoms_rt::Clock::sleep(
+            &catcoms_rt::SystemClock,
+            std::time::Duration::from_millis(5),
+        )
+        .await;
     }
     assert_eq!(
         pool.available_permits(),
