@@ -326,7 +326,7 @@ async fn quiet_catchup_wakes_after_cooldown_without_a_network_event() {
 }
 
 #[tokio::test]
-async fn simultaneous_reciprocal_catchup_breaks_the_timeout_lockstep() {
+async fn simultaneous_reciprocal_catchup_serves_both_owners_without_a_timeout() {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     let (_old_hub, mut original, _) = tests::build_members(2).await;
@@ -381,25 +381,11 @@ async fn simultaneous_reciprocal_catchup_breaks_the_timeout_lockstep() {
     assert_eq!(alice.schedule_reconciliation(), 1);
     assert_eq!(bob.schedule_reconciliation(), 1);
 
-    // Neither owner serves inbound while its first outbound catch-up is waiting. Finish both
-    // timed-out ticks before allowing either owner to consume the abandoned inbound request.
-    {
-        let ticks = futures::future::join(alice.run_once(), bob.run_once());
-        futures::pin_mut!(ticks);
-        assert!(futures::poll!(&mut ticks).is_pending());
-        clock.advance_ms(CATCHUP_REQUEST_MS);
-        let (a, b) = ticks.await;
-        assert!(a.unwrap() && b.unwrap());
-    }
-    let a_delay = alice.next_catchup_retry_delay().unwrap();
-    let b_delay = bob.next_catchup_retry_delay().unwrap();
-    assert_eq!(a_delay.min(b_delay), CATCHUP_PEER_COOLDOWN_MS);
-    assert_eq!(
-        a_delay.abs_diff(b_delay),
-        1_000,
-        "opposite directions must not wake together"
-    );
-
+    let started_at = clock.monotonic_ms();
+    let requests_before = [
+        alice.stats().doc_catchups_requested,
+        bob.stats().doc_catchups_requested,
+    ];
     let observed_a = AtomicUsize::new(1);
     let observed_b = AtomicUsize::new(1);
     {
@@ -411,6 +397,7 @@ async fn simultaneous_reciprocal_catchup_breaks_the_timeout_lockstep() {
                         alice.doc(DocType::Channel, CHANNEL).unwrap().op_count(),
                         Ordering::SeqCst,
                     );
+                    tokio::task::yield_now().await;
                 }
             },
             async {
@@ -420,27 +407,14 @@ async fn simultaneous_reciprocal_catchup_breaks_the_timeout_lockstep() {
                         bob.doc(DocType::Channel, CHANNEL).unwrap().op_count(),
                         Ordering::SeqCst,
                     );
+                    tokio::task::yield_now().await;
                 }
             },
         );
         futures::pin_mut!(drive);
-        // Only the earlier direction becomes retryable; the other owner remains available to
-        // serve. Polling these are the production run_once loops, with no special serve helper.
-        assert!(futures::poll!(&mut drive).is_pending());
-        clock.advance_ms(a_delay.min(b_delay));
-        for _ in 0..16 {
-            assert!(futures::poll!(&mut drive).is_pending());
-            tokio::task::yield_now().await;
-            if observed_a.load(Ordering::SeqCst) == 2 || observed_b.load(Ordering::SeqCst) == 2 {
-                break;
-            }
-        }
-        assert!(
-            observed_a.load(Ordering::SeqCst) == 2 || observed_b.load(Ordering::SeqCst) == 2,
-            "one side must progress while the other remains in its original cooldown"
-        );
-        clock.advance_ms(a_delay.abs_diff(b_delay));
-        for _ in 0..16 {
+        // Both production owners keep serving inbound requests while their outbound waits are
+        // pending. No serve helper or clock advance supplies a quiet retry window.
+        for _ in 0..32 {
             assert!(futures::poll!(&mut drive).is_pending());
             tokio::task::yield_now().await;
             if observed_a.load(Ordering::SeqCst) == 2 && observed_b.load(Ordering::SeqCst) == 2 {
@@ -450,8 +424,30 @@ async fn simultaneous_reciprocal_catchup_breaks_the_timeout_lockstep() {
         assert_eq!(observed_a.load(Ordering::SeqCst), 2);
         assert_eq!(observed_b.load(Ordering::SeqCst), 2);
     }
-    assert_eq!(alice.doc(DocType::Channel, CHANNEL).unwrap().op_count(), 2);
-    assert_eq!(bob.doc(DocType::Channel, CHANNEL).unwrap().op_count(), 2);
+    assert_eq!(clock.monotonic_ms(), started_at);
+    for (member, before) in [(&alice, requests_before[0]), (&bob, requests_before[1])] {
+        let document = member.doc(DocType::Channel, CHANNEL).unwrap();
+        assert_eq!(document.op_count(), 2);
+        assert_eq!(
+            document
+                .doc()
+                .get(ROOT, "alice")
+                .unwrap()
+                .unwrap()
+                .0
+                .to_str(),
+            Some("A")
+        );
+        assert_eq!(
+            document.doc().get(ROOT, "bob").unwrap().unwrap().0.to_str(),
+            Some("B")
+        );
+        assert_eq!(
+            member.stats().doc_catchups_requested - before,
+            1,
+            "each original request completes without timeout or retry"
+        );
+    }
 }
 
 #[tokio::test]

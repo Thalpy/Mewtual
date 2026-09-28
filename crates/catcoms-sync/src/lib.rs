@@ -16670,10 +16670,9 @@ mod tests {
 
     /// Ask Alice for commits from `from_epoch` and let her serve it from her real commit log.
     ///
-    /// Deliberately not `run_once` on the serving side: that also drains her catch-up queue,
-    /// which issues a request nobody in these fixtures answers and an injected clock never times
-    /// out. Her stream also carries whatever else the fixture left on it, so this drains to the
-    /// commit request rather than assuming it is first.
+    /// Serve only this explicit exchange: `run_once` also starts independent queued recovery
+    /// whose responses these fixtures do not serve. Her stream carries whatever else the fixture
+    /// left on it, so this drains to the commit request rather than assuming it is first.
     async fn commit_catchup_between(
         bob: &mut Member,
         alice: &mut Member,
@@ -17128,6 +17127,8 @@ mod tests {
 
     #[tokio::test]
     async fn a_genuinely_missed_commit_heals_without_an_older_member_speaking() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
         // The property the defect actually broke, and the test that would have caught it.
         // Alice never posts, never gossips and never subscribes to the channel; she only
         // answers the one request Bob directs at her. Before the fix Bob asked Carol on this
@@ -17148,13 +17149,42 @@ mod tests {
         assert!(bob.run_once().await.unwrap()); // sees the future-epoch op, queues the chase
         assert_eq!(bob.epoch(), 1);
 
-        // One drain. The commit chase goes to Alice, and the doc chase that follows it goes
-        // to Alice too, because serving a verified bundle is what promoted her into the
-        // proven-member pool; so she answers two requests and Carol is never asked again.
-        let (_, _) = tokio::join!(bob.run_once(), async {
-            alice.run_once().await.unwrap();
-            alice.run_once().await.unwrap();
-        });
+        // Drive both production owners until the authenticated commit has actually applied.
+        // A turn can now serve inbound work or finish a held response; no single-turn drain
+        // or fixed number of provider requests is part of that contract.
+        let healed = AtomicBool::new(false);
+        {
+            let drive = futures::future::join(
+                async {
+                    loop {
+                        assert!(bob.run_once().await.unwrap());
+                        healed.store(
+                            bob.epoch() == 2 && bob.contains_member(&ids[2]),
+                            Ordering::SeqCst,
+                        );
+                        tokio::task::yield_now().await;
+                    }
+                },
+                async {
+                    loop {
+                        assert!(alice.run_once().await.unwrap());
+                        tokio::task::yield_now().await;
+                    }
+                },
+            );
+            futures::pin_mut!(drive);
+            for _ in 0..32 {
+                assert!(futures::poll!(&mut drive).is_pending());
+                if healed.load(Ordering::SeqCst) {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+            assert!(
+                healed.load(Ordering::SeqCst),
+                "the bounded owner turns heal the gap"
+            );
+        }
 
         assert_eq!(bob.epoch(), 2, "the missed commit healed");
         assert!(

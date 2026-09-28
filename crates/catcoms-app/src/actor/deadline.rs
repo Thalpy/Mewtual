@@ -1,6 +1,6 @@
 //! Preserve the sampled actor deadline across selector cancellation and delayed first polls.
 use catcoms_rt::Clock;
-use std::future::{poll_fn, Future};
+use std::future::poll_fn;
 use std::task::Poll;
 use std::time::Duration;
 
@@ -33,6 +33,7 @@ pub(super) async fn wait(clock: impl Clock, due_ms: Option<u64>) {
 mod tests {
     use super::*;
     use catcoms_rt::ManualClock;
+    use std::future::Future;
     use std::pin::Pin;
 
     async fn poll_once<F: Future>(mut future: Pin<&mut F>) -> Poll<F::Output> {
