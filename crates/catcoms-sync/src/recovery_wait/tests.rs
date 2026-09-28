@@ -83,6 +83,48 @@ async fn interrupted_commit_wait_merges_newly_detected_gap_into_one_obligation()
 }
 
 #[tokio::test]
+async fn stale_commit_wait_keeps_its_stronger_gap_when_a_bare_probe_fills_the_queue() {
+    let (_, mut members, ids) = crate::tests::build_members(2).await;
+    let mut b = members.pop().unwrap();
+    let mut a = members.pop().unwrap();
+    let epoch = b.group.epoch();
+    b.config.max_catchup_queue = 1;
+    b.catchup_queue.clear();
+    b.enqueue_commit_catchup_for(epoch, Some(epoch + 5), None);
+    b.start_queued_catchup();
+    let pending = b
+        .pending_catchup
+        .as_mut()
+        .expect("strong gap owns a request");
+    assert!(
+        poll_fn(|cx| Poll::Ready(pending.response.as_mut().poll(cx)))
+            .await
+            .is_pending()
+    );
+    b.enqueue_commit_catchup_for(epoch, None, None);
+    assert_eq!(b.catchup_queue.len(), 1, "the sole queue slot is full");
+    assert!(matches!(
+        b.catchup_queue[0],
+        CatchupTask::Commits { gap_at: None, .. }
+    ));
+
+    a.commit_remove_now(&ids[1]);
+    assert!(b.apply_commit_in_order(a.commit_log.back().unwrap()));
+    assert!(b.group.epoch() > epoch);
+    b.start_queued_catchup(); // Drop the obsolete wait and merge its admitted obligation.
+    assert!(b.pending_catchup.is_none());
+    assert_eq!(
+        b.catchup_queue,
+        vec![CatchupTask::Commits {
+            from_epoch: epoch,
+            gap_at: Some(epoch + 5),
+            avoid: None,
+        }],
+        "capacity cannot let a weaker probe erase the held proven gap"
+    );
+}
+
+#[tokio::test]
 async fn cancelled_owner_polls_retain_the_original_signed_control_publication() {
     let (_, mut members, ids) = crate::tests::build_members(2).await;
     let mut original = members.remove(0);
