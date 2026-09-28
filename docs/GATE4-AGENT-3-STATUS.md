@@ -4,6 +4,29 @@ Owner: Agent 3 ([assignment](GATE4-AGENT-HANDOFFS.md#agent-3-runtime-signed-faul
 Proposal: [GATE4-AGENT-3-DESIGN](GATE4-AGENT-3-DESIGN.md), revision 16 follow-up.
 Review preamble: 3. Current entries override older ones.
 
+## Empty fault-section correction, 2026-09-28
+
+Code: `ddedbba31709ea43607bfb3f7af25320b3fd8526`. AG3-IMP-002 rejects an entirely empty tag 3;
+final recycling must omit the section. AG3-TEST-015 now pins rejection and absent-tag compatibility
+through sealed reopen, ordinary preparation/publication and another reopen, with and without tag 2.
+The negative failed before the fix; all 29 focused owner tests and all six store mutations/restored
+controls pass. Adversarial review caught a LOW test-isolation gap; canonicality negatives now start
+from valid nonempty records, and re-review has no remaining findings. A real terminal-repair cleanup
+integration test remains required when the contextual recycler exists; this change does not add it.
+Required local verification (logs: `logs/empty-fault-*`):
+
+- `cargo test -j 1 --config profile.test.package.catcoms-app.debug=0 --all --all-features --no-fail-fast -- --test-threads=4`: **1,857 passed / 1 failed / 13 ignored**. The failure is `studio_exchange::tests::unopened::studio_registry_preparation_outliving_head_needs_a_fresh_request` at `unopened.rs:33` (expected cold preparation). An exact isolated retry using the same compiled test binary passes. Read-only triage confirms this setup cannot reach tag 3; shared four-permit preparation-pool contention is plausible but not proven by the log. Follow-up: isolate test capacity without weakening its lifetime assertions. All three owner-return scheduling cases pass.
+- `cargo test -j 1 --config profile.test.package.catcoms-app.debug=0 --manifest-path apps/desktop/src-tauri/Cargo.toml`: PASS, **261 unit + 5 ACL**. `npm.cmd --prefix apps/desktop test`: PASS, **1,229**.
+- `cargo fmt --all -- --check` and `cargo clippy -j 1 --all-targets --all-features -- -D warnings`: PASS.
+- `bash scripts/check-no-ambient.sh`: FAIL, the same seven untouched calls. `cargo deny check`: FAIL, local rustls 0.23.40 / RUSTSEC-2026-0285. Startup/flow gates do not apply to this store-only correction.
+
+[Core CI 36468854692](https://github.com/Thalpy/Mewtual/actions/runs/36468854692): Linux PASS;
+Windows exceeded its 30-minute job limit during mutations, so the run is not a pass.
+[Full CI 36468854991](https://github.com/Thalpy/Mewtual/actions/runs/36468854991): Linux frontend/Tauri
+and cargo-deny PASS; root Linux/Windows jobs still running at handoff. CI uses merge checkout
+`6b5eda10c7837b5b8ddae04de7e57d99e9ec8369` with Agent 1's newer base `918ffb9` and rustls 0.23.45;
+the isolated local base remains `48f9069`. No merge or change to another agent's branch was made.
+
 ## Owner fault-record checkpoint, 2026-09-25
 
 Code: `2488a097a52681deb5edb3a701513a65a5ed4029`; verification recorded 2026-09-28.
