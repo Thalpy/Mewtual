@@ -37,7 +37,8 @@ Durable chat already retains its original publication record and cadence, and su
 already retains its uncertain-topic cleanup token. This change makes no additional crash-durability
 promise for transient outboxes.
 
-Regressions added (execution belongs to integration; no test success is claimed here):
+Regressions exercise the production owner and semantic completion, rather than assuming that one
+`run_once` drains all recovery work:
 
 - `delayed_signed_history_completes_while_actor_commands_remain_saturated`: actual signed response
   delayed after service, gossip dropped, eight continuous actor readers, at least 128 reads during
@@ -54,7 +55,41 @@ Regressions added (execution belongs to integration; no test success is claimed 
   original stronger gap must merge into the surviving task before capacity checks.
 - `actor_deadline_*`: deterministic first-poll and sleep-arming clock advances preserve the
   original deadline, while wall changes and pre-deadline polling cannot advance delivery.
+- `simultaneous_reciprocal_catchup_serves_both_owners_without_a_timeout`: both production owners
+  recover exact separately authored A/B content within 32 polling rounds, with gossip disabled
+  and no injected-clock advance or serving helper during recovery. Each owner's request count is
+  latched at its first complete history and must equal one; neither peer is cooling off. A faster
+  owner may legitimately request a confirmation at the new frontier while the other finishes.
+- `a_genuinely_missed_commit_heals_without_an_older_member_speaking`: bounded driving of both
+  owners must advance the recipient to the verified epoch and current membership. It still
+  requires exactly one commit request and one served commit, without an older-member post or
+  injected recovery history.
 
-Integration must also rerun the existing throttled delivery wake, reciprocal reconciliation,
-multi-page/legacy catch-up, cancellation and Studio scheduling regressions. No timeout inflation or
-idle command window is part of this correction.
+Recorded integration evidence through `1912b34` (2026-09-28; paths name local evidence logs):
+
+- Focused sync: **6 passed in 1.18s**: the four retained-recovery regressions, reciprocal owner
+  recovery, and missed-commit recovery. `logs/six-client-sync-focused-final.log`.
+- Focused app: **17 passed, 1 ignored in 30.82s**, covering deadlines, source rotation,
+  continuously active readers, quiet delivery wake, cancellation, durable sends, shutdown and
+  Studio owner-return scheduling. The ignored process-pool contention test intentionally owns
+  all global preparation permits; run alone it **passed in 12.97s**.
+  `logs/six-client-app-regressions-final.log` and `logs/six-client-owner-contention.log`.
+- Temporal bridge: **1 passed in 7.22s**. Signed history survives a crashed sealed bridge and
+  reaches a later member without an origin-to-recipient edge.
+  `logs/six-client-temporal-bridge.log`. This is the existing actor/store topology fixture,
+  which retains 300ms between observer reads; the separate continuous-reader regression proves
+  progress under command load. It is not a physical-NAT test.
+- Mutation check: removing commit requeue merging compiled, then the selected cap-one regression
+  **failed as intended**: the queued bare probe retained `gap_at: None` instead of the held
+  `Some(6)`. The integrating agent restored the source byte-for-byte at that checkpoint
+  (SHA-256 `4E71F6B22AFE11D4E5BE23E09533AA00D9C698FFCBFE82AAE35967458CC30DB2`), then
+  reran the focused six tests successfully. That hash records mutation restoration, not the
+  later lint-adjusted source at `1912b34`. `logs/six-client-commit-gap-mutation.log` and
+  `logs/six-client-sync-focused-final.log`.
+- Strict core and native Clippy passed at `1912b34`.
+  `logs/six-client-core-clippy-final.log` and `logs/six-client-native-clippy.log`.
+
+At this checkpoint the full native suite (301 tests) was running and the full sync suite
+(303 tests), including broader multi-page/legacy recovery coverage, was pending. Those suites are
+not claimed passed here. The new fairness regressions require no timeout inflation or idle command
+window.

@@ -37,7 +37,25 @@ it. Rollback compatibility is not promised. The network-record format and route 
 Regressions added for core snapshot compatibility, malformed tails and authority preservation,
 and for real native `freeze_servers` after an admitted peer disappears. The native case records an
 actual outbound TCP/Noise observation, durably accepts a chat through the native send barrier,
-refuses unmounted-store and actual checkpoint-replacement failures, then closes and opens a fresh vault. Exact history and the pending
-correlation must survive with no promoted listener. The UI test executes the production restore
-function to verify the disclosure. Rust execution is recorded by the integrating agent; these
-tests are not a six-client or physical-NAT acceptance claim.
+refuses unmounted-store and actual checkpoint-replacement failures, then closes and opens a fresh
+vault. Exact history and the pending correlation must survive with no promoted listener. The UI
+test executes the production restore function to verify the disclosure. These focused tests are
+not a six-client or physical-NAT acceptance claim.
+
+Recorded integration evidence through `1912b34` (2026-09-28; paths name local evidence logs):
+
+- Core member-finalization tests: **8 passed**, including absent/invalid snapshot tails,
+  correlation retention, removal pruning and no restored proof or route authority.
+  `logs/six-client-pending-snapshot-tests.log`.
+- Native close/reconnect regressions: **10 passed in 26.80s**, including offline pending-member
+  close, real store-write refusal, exact-instance durability, and immediate reply admission with
+  both restart orders. `logs/six-client-native-close-tests.log`.
+- Focused UI regressions: **22 passed**, including the actual restored-server warning function.
+  Svelte check: **0 errors, 0 warnings**. `logs/six-client-ui-warning-tests.log` and
+  `logs/six-client-ui-check.log`.
+- Strict core and native Clippy passed at `1912b34`.
+  `logs/six-client-core-clippy-final.log` and `logs/six-client-native-clippy.log`.
+
+At this checkpoint the full native suite (301 tests) was running and the full sync suite
+(303 tests) was pending. Their success is not inferred from these focused results. Actor recovery
+and retained-history evidence is recorded separately in [ACTOR-FAIRNESS.md](ACTOR-FAIRNESS.md).
