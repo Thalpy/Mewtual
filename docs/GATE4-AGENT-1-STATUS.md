@@ -24,7 +24,7 @@ they are the highest-conflict changes, so they land last. The per-item verdict r
 | 1 | C-1 structural decode, with C-2's digest fences and the R4 replay exclusion | **landed; reviewed PASS; no-replay boundary covered by N24; R4 selection covered by N25/M9** |
 | 2 | C-4 transient reference holds, with the I-3 transfer | **landed; seam reviewed PASS; transfer implemented and mutation-proven; dead-code markers removed** |
 | 3 | The runtime: Flows S, H and R, admission, scheduling, commit seams | **Flow S and Flow H both land end to end as scheduled jobs. Flow R not started; no native command, gated on Agent 2's P5** |
-| 4 | I-4 and C-3 | not started |
+| 4 | I-4 and C-3 | **I-4 complete**, including requirement 3's type-level enforcement. **C-3's storage half complete and reviewed** (C3-001/002/003 and C3-TEST-001 all closed). What remains is C-3's runtime adoption at six call sites, which is its own checkpoint and wants Agent 3's coordinated verdict first |
 
 ## Checkpoints
 
