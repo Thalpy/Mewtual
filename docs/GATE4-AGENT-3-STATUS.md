@@ -6,6 +6,7 @@ Review preamble: 3. Current entries override older ones.
 
 ## Owner fault-record checkpoint, 2026-09-25
 
+Code: `2488a097a52681deb5edb3a701513a65a5ed4029`; verification recorded 2026-09-28.
 Implemented strict inert tag-3 decoding in `store/epoch_owner/fault_record.rs`: canonical bounded
 pairs, local attestation framing, overflow, exact repair bindings and historical signatures.
 Inventory/reopen accepts and accounts these bytes under the shared 27,904-byte plaintext /
@@ -20,8 +21,21 @@ Read-only design and actual-diff implementation reviews found no remaining findi
 tests pass, including maximal combined records above the old cap and refusal without byte/budget/RNG
 changes. All five store mutations fail at their intended assertions, restore exact bytes, and pass
 their restored controls (`python scripts/check-agent3-store-mutations.py`). Script/test re-review
-also has no findings. Required full-suite validation is in progress; an initial app test rebuild
-exhausted memory, so the focused/mutation runs use `profile.test.package.catcoms-app.debug=0`.
+also has no findings. An initial app test rebuild exhausted memory; the passing focused, mutation
+and full Cargo test runs use `profile.test.package.catcoms-app.debug=0` without changing assertions.
+
+Required local verification at the code SHA is complete:
+
+- `cargo test -j 1 --config profile.test.package.catcoms-app.debug=0 --all --all-features --no-fail-fast -- --test-threads=2`: PASS, **1,856 passed / 13 existing ignored**, including all 699 app tests and all owner-return scheduling cases.
+- `cargo test -j 1 --config profile.test.package.catcoms-app.debug=0 --manifest-path apps/desktop/src-tauri/Cargo.toml`: PASS, **261 unit + 5 ACL**.
+- `npm.cmd --prefix apps/desktop test`: PASS, **1,229**.
+- `cargo fmt --all -- --check` and `cargo clippy -j 1 --all-targets --all-features -- -D warnings`: PASS.
+- `bash scripts/check-no-ambient.sh`: FAIL, the same seven untouched calls listed below. `cargo deny check`: FAIL, unchanged rustls 0.23.40 / RUSTSEC-2026-0285; bans, licences and sources pass. Startup/flow gates do not apply to this store/core-only slice.
+
+[Core CI 36127096674](https://github.com/Thalpy/Mewtual/actions/runs/36127096674): PASS, **295 library tests + all 25 core mutations/restored controls on each of Linux and Windows**.
+Actual merge checkout: `5b19998204540ae9b3ad91a15b266c34b532fa7c` (Agent 1 base `48f9069`).
+[Full CI 36127096549](https://github.com/Thalpy/Mewtual/actions/runs/36127096549): all **10 new store tests pass on both platforms**, but the broader run FAILS in untouched owner-return scheduling at `studio_exchange/tests/scheduling.rs:567` (Linux: cancelled transport; Windows: cancelled transport/parser and three retained previews), native unused-code checks, and cargo-deny. No integrated Gate 4 PASS is claimed.
+Agent 4 CI wiring: run `python scripts/check-agent3-store-mutations.py` serially in isolated Linux/Windows jobs; shared workflows remain unchanged.
 
 ## CORE-006 implementation checkpoint, 2026-09-24
 
