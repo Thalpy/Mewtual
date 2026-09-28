@@ -306,7 +306,7 @@
   // `wiki_pages.length > 0`: a wiki-embedded file never drops out of circulation.
   type UiFileUsage = { wiki_pages: string[]; status_count: number; chat_count: number; event_count: number; pinned: boolean };
   type Found = { server: number; channel: string; channels?: Channel[]; is_dm: boolean; storage_warning?: string | null };
-  type Reloaded = { server: number; name: string; invite: string; channel: string; channels?: Channel[]; is_dm: boolean };
+  type Reloaded = { server: number; name: string; invite: string; channel: string; channels?: Channel[]; is_dm: boolean; reconnect_warning?: string | null };
 
   // One server in the rail (each its own encrypted group). Per-server UI state lives here;
   // messages/roster/profiles/files are loaded for the active server on switch + events.
@@ -6240,6 +6240,10 @@
       isDm: r.is_dm,
     }));
     locked = false;
+    const reconnectWarnings = reloaded.filter((r) => r.reconnect_warning);
+    if (reconnectWarnings.length) {
+      toast(reconnectWarnings.map((r) => `${r.name}: ${r.reconnect_warning}`).join("\n"), "warn", 0);
+    }
     try { sessionStorage.removeItem("catcoms.explicit-lock"); } catch { /* best effort */ }
     const firstServer = servers.find((s) => !s.isDm) ?? servers[0];
     // Drafts/read boundaries must land before switchServer restores the active composer and

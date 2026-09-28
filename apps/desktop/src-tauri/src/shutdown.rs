@@ -52,8 +52,8 @@ pub(super) async fn freeze_servers(state: &AppState) -> Result<ShutdownBarrier, 
     let generation = state.ui_session_generation.load(Ordering::Acquire);
     let save = async {
         // Admission may have completed just before close, ahead of the periodic route worker.
-        // Save the authenticated policy and actual outbound listener evidence while every actor
-        // can still serve its neighbour's connected-only proof request.
+        // Save policy, retry correlations and already-proven outbound listener evidence locally.
+        // Closing never requires a neighbour to finish a new proof exchange.
         admission_storage::before_shutdown(state).await?;
         member_reconnect::before_shutdown(state).await?;
         let mut actors: Vec<_> = state

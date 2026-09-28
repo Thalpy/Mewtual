@@ -1,7 +1,10 @@
 mod member_reconnect_regressions {
     use super::*;
+    use member_reconnect::CaptureOutcome;
     use rand_chacha::ChaCha20Rng;
     use rand_core::SeedableRng;
+
+    include!("member_shutdown_tests.rs");
 
     #[test]
     fn duplicate_address_families_do_not_hide_another_member_finalization_target() {
@@ -135,7 +138,8 @@ mod member_reconnect_regressions {
                 } => {}
             }
             if !first_two_proven {
-                assert!(member_reconnect::persist(&state, 1, 1, &running.actor, evidence).await.is_err(),
+                assert!(matches!(member_reconnect::persist(&state, 1, 1, &running.actor, evidence).await.unwrap(),
+                    CaptureOutcome::Saved { pending_peers: 2, .. }),
                     "unselected/failing admitted members must remain outstanding after the healthy member progresses");
             }
             stop(&state, running).await;
@@ -324,11 +328,16 @@ mod member_reconnect_regressions {
             peer: joiner_peer,
             address: format!("/ip4/127.0.0.1/tcp/9412/p2p/{}", test_libp2p_peer(112)),
         };
-        assert!(
+        assert!(matches!(
             member_reconnect::persist(&state, 1, 1, &running.actor, vec![evidence.clone()])
                 .await
-                .is_err()
-        );
+                .unwrap(),
+            CaptureOutcome::Saved {
+                pending_peers: 1,
+                saved_outgoing_routes: 0,
+                ..
+            }
+        ));
         let mut saved = net(&state).await;
         assert!(
             saved.reconnect_routes.is_empty(),
@@ -356,11 +365,16 @@ mod member_reconnect_regressions {
             .save_server_net(1, &saved, &mut OsCryptoRng)
             .unwrap();
         assert_eq!(net(&state).await.reconnect_routes, saved.reconnect_routes);
-        assert!(
+        assert!(matches!(
             member_reconnect::persist(&state, 1, 1, &running.actor, vec![evidence])
                 .await
-                .unwrap()
-        );
+                .unwrap(),
+            CaptureOutcome::Saved {
+                pending_peers: 0,
+                saved_outgoing_routes: 1,
+                ..
+            }
+        ));
         assert_eq!(net(&state).await.reconnect_routes, saved.reconnect_routes);
         // A sealed route without its current roster descriptor is insufficient: the predicate
         // above consumes actor member_routes, not only a byte match in a network record.
@@ -374,7 +388,7 @@ mod member_reconnect_regressions {
     }
 
     #[tokio::test]
-    async fn only_an_admitted_observed_callback_can_hold_close_pending_before_its_descriptor() {
+    async fn only_an_admitted_observed_callback_becomes_pending_before_its_descriptor() {
         timeout(Duration::from_secs(20), async {
             let a_dir = tempfile::tempdir().unwrap();
             let b_dir = tempfile::tempdir().unwrap();
@@ -447,21 +461,32 @@ mod member_reconnect_regressions {
                 address: format!("/ip4/127.0.0.1/tcp/9499/p2p/{stranger}"),
             };
             assert!(
-                member_reconnect::persist(&a_state, 1, 1, &a.actor, vec![unknown])
-                    .await
-                    .unwrap(),
-                "a Noise-only infrastructure/helper endpoint cannot hold close pending"
+                matches!(
+                    member_reconnect::persist(&a_state, 1, 1, &a.actor, vec![unknown])
+                        .await
+                        .unwrap(),
+                    CaptureOutcome::Saved {
+                        pending_peers: 0,
+                        ..
+                    }
+                ),
+                "a Noise-only infrastructure/helper endpoint cannot create pending member work"
             );
             let evidence = AuthenticatedDialRoute {
                 peer: b_peer,
                 address: format!("/ip4/127.0.0.1/tcp/9452/p2p/{b_id}"),
             };
             // B accepted membership but its actor is deliberately not serving the new exchange.
-            assert!(
+            assert!(matches!(
                 member_reconnect::persist(&a_state, 1, 1, &a.actor, vec![evidence.clone()])
                     .await
-                    .is_err()
-            );
+                    .unwrap(),
+                CaptureOutcome::Saved {
+                    pending_peers: 1,
+                    saved_outgoing_routes: 0,
+                    ..
+                }
+            ));
             assert!(net(&a_state).await.reconnect_routes.is_empty());
             let group = b.group_id();
             let device = b.device_id();
@@ -479,17 +504,22 @@ mod member_reconnect_regressions {
             // The new owner first drains requests whose caller already timed out. Let the
             // existing per-device serving interval expire before the next close attempt.
             SystemClock.sleep(Duration::from_millis(1_100)).await;
-            assert!(
+            assert!(matches!(
                 member_reconnect::persist(&a_state, 1, 1, &a.actor, vec![evidence])
                     .await
-                    .unwrap()
-            );
+                    .unwrap(),
+                CaptureOutcome::Saved {
+                    pending_peers: 0,
+                    saved_outgoing_routes: 1,
+                    ..
+                }
+            ));
             assert_eq!(net(&a_state).await.reconnect_routes.len(), 1);
             stop(&a_state, a).await;
             stop(&b_state, b).await;
         })
         .await
-        .expect("an admitted candidate must either finalize or keep close pending");
+        .expect("an admitted candidate must either finalize or remain saved retry work");
     }
 
     #[tokio::test]
@@ -547,11 +577,15 @@ mod member_reconnect_regressions {
             net(&state).await.reconnect_policy,
             ReconnectPolicy::Disabled
         );
-        assert!(
+        assert!(matches!(
             member_reconnect::persist(&state, 1, 2, &running.actor, Vec::new())
                 .await
-                .unwrap()
-        );
+                .unwrap(),
+            CaptureOutcome::Saved {
+                pending_peers: 0,
+                ..
+            }
+        ));
         let snapshot = state
             .store
             .lock()
@@ -677,8 +711,20 @@ mod member_reconnect_regressions {
                 member_reconnect::persist(&a_state, 1, 1, &a.actor, vec![a_route]),
                 member_reconnect::persist(&b_state, 1, 1, &b.actor, vec![b_route]),
             );
-            assert!(left.unwrap());
-            assert!(right.unwrap());
+            assert!(matches!(
+                left.unwrap(),
+                CaptureOutcome::Saved {
+                    pending_peers: 0,
+                    ..
+                }
+            ));
+            assert!(matches!(
+                right.unwrap(),
+                CaptureOutcome::Saved {
+                    pending_peers: 0,
+                    ..
+                }
+            ));
             assert_eq!(net(&a_state).await.reconnect_routes.len(), 1);
             assert_eq!(net(&b_state).await.reconnect_routes.len(), 1);
             stop(&a_state, a).await;
@@ -767,8 +813,8 @@ mod member_reconnect_regressions {
             let c: Vec<_> = evidence.iter().filter(|route| route.peer == peers[1]).cloned().collect();
             assert_eq!(b.len(), 2, "B has independently successful TCP and QUIC observations");
             assert_eq!(c.len(), 1, "C has one private last-good direction");
-            assert!(member_reconnect::persist(&state, 1, 1, &running.actor, c.clone()).await.unwrap());
-            assert!(member_reconnect::persist(&state, 1, 1, &running.actor, b).await.unwrap());
+            assert!(matches!(member_reconnect::persist(&state, 1, 1, &running.actor, c.clone()).await.unwrap(), CaptureOutcome::Saved { pending_peers: 0, .. }));
+            assert!(matches!(member_reconnect::persist(&state, 1, 1, &running.actor, b).await.unwrap(), CaptureOutcome::Saved { pending_peers: 0, .. }));
             let saved = net(&state).await;
             assert_eq!(saved.reconnect_routes.len(), 3);
             assert_eq!(saved.reconnect_routes.iter().filter(|route| route.peer_id == *peers[0].as_bytes()).count(), 2);
@@ -939,7 +985,10 @@ mod member_reconnect_regressions {
                 let channel = channel_id("general");
                 a.actor.open_channel(channel).await;
                 b.actor.open_channel(channel).await;
-                // Exercise the production close pre-pass immediately after successful admission.
+                // The actual common admission helper already established both endpoint proofs.
+                // Close captures those proofs locally, without requiring any new peer response.
+                assert!(a.actor.finalized_member_peers().await.unwrap().contains(&b_peer));
+                assert!(b.actor.finalized_member_peers().await.unwrap().contains(&a_peer));
                 let (left, right) = tokio::join!(
                     member_reconnect::before_shutdown(&a_state),
                     member_reconnect::before_shutdown(&b_state)

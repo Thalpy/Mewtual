@@ -2,6 +2,63 @@
 use super::*;
 use catcoms_discovery::reconnect::{retain_reconnect_routes, MAX_RECONNECT_PEERS};
 
+const NO_SAVED_ROUTE: &str = "This group has no saved outgoing route. Reconnecting may depend on another member connecting to you or on discovery.";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum CaptureOutcome {
+    NotApplicable,
+    Inactive,
+    Saved {
+        /// Observed outbound member endpoints still lacking proof or a saved qualifying route.
+        /// Saved correlations with no observation in this process are not counted here.
+        pending_peers: usize,
+        saved_outgoing_routes: usize,
+        has_other_members: bool,
+    },
+}
+
+impl CaptureOutcome {
+    pub(super) fn warning(self) -> Option<&'static str> {
+        match self {
+            Self::Saved { saved_outgoing_routes: 0, has_other_members: true, .. } => {
+                Some(NO_SAVED_ROUTE)
+            }
+            Self::Saved { pending_peers, .. } if pending_peers > 0 => Some(
+                "Some member reconnect checks remain pending. Reconnect state is saved; checks can retry when a connection returns.",
+            ),
+            _ => None,
+        }
+    }
+}
+
+/// Read-only disclosure after unlock. A route count is not a connectivity or delivery promise.
+pub(super) async fn saved_warning(
+    state: &AppState,
+    server: u64,
+    actor: &ServerActor,
+) -> Option<String> {
+    if !actor.member_mesh_allowed().await.ok()? {
+        return None;
+    }
+    let members = actor.member_routes().await;
+    if members.is_empty() {
+        return None;
+    }
+    let claims = uniquely_claimed_member_peers(
+        members
+            .into_iter()
+            .filter_map(|route| route.peer_id.map(PeerId::new)),
+    );
+    let guard = state.store.lock().await;
+    let net = guard.as_ref()?.load_server_net(server).ok()??;
+    (!net.reconnect_routes.iter().any(|route| {
+        claims.contains(&PeerId::new(route.peer_id))
+            && (net.reconnect_policy == ReconnectPolicy::MemberMesh
+                || net.reconnect_policy == ReconnectPolicy::AuthorizedPeer(route.peer_id))
+    }))
+    .then(|| NO_SAVED_ROUTE.to_string())
+}
+
 pub(super) fn finalization_targets(
     evidence: &[AuthenticatedDialRoute],
     candidates: &HashSet<PeerId>,
@@ -15,16 +72,39 @@ pub(super) fn finalization_targets(
 
 /// Capture only the local transport's successful outbound Noise listener evidence. The sealed
 /// P2P policy is a standing retry obligation, including when this launch sees no usable route.
-/// Returns false for legacy/dedicated groups, which retain their prior admission restrictions.
+/// The saved outcome distinguishes an unfinished remote proof from a failed local write.
 pub(super) async fn persist(
     state: &AppState,
     server: u64,
     instance: u64,
     actor: &ServerActor,
     evidence: Vec<AuthenticatedDialRoute>,
-) -> Result<bool, String> {
+) -> Result<CaptureOutcome, String> {
+    persist_with_proofs(state, server, instance, actor, evidence, true).await
+}
+
+/// Orderly close must not initiate a network exchange. Save existing proof and retry correlation;
+/// the final actor freeze separately checkpoints all accepted history before destruction.
+pub(super) async fn capture_before_shutdown(
+    state: &AppState,
+    server: u64,
+    instance: u64,
+    actor: &ServerActor,
+    evidence: Vec<AuthenticatedDialRoute>,
+) -> Result<CaptureOutcome, String> {
+    persist_with_proofs(state, server, instance, actor, evidence, false).await
+}
+
+async fn persist_with_proofs(
+    state: &AppState,
+    server: u64,
+    instance: u64,
+    actor: &ServerActor,
+    evidence: Vec<AuthenticatedDialRoute>,
+    acquire_proofs: bool,
+) -> Result<CaptureOutcome, String> {
     if actor.group_mode().await? != catcoms_app::GroupMode::PeerToPeer {
-        return Ok(false);
+        return Ok(CaptureOutcome::NotApplicable);
     }
     if !actor.member_mesh_allowed().await? {
         // The immutable mode remains P2P after this device is removed. That historical pin
@@ -33,7 +113,7 @@ pub(super) async fn persist(
             .set_local_reconnect_routes(Vec::new())
             .await
             .map_err(|_| "server stopped".to_string())?;
-        return Ok(true);
+        return Ok(CaptureOutcome::Inactive);
     }
     let candidates: HashSet<_> = actor
         .member_finalization_candidates()
@@ -52,9 +132,13 @@ pub(super) async fn persist(
     // this already-proven outbound direction two bounded connected-only opportunities. This
     // also lets an actor leave an earlier reciprocal catch-up wait before the second request.
     let targets = finalization_targets(&evidence, &candidates);
-    let work = actor
-        .member_finalization_work(targets.iter().copied().collect())
-        .await?;
+    let work = if acquire_proofs {
+        actor
+            .member_finalization_work(targets.iter().copied().collect())
+            .await?
+    } else {
+        Vec::new()
+    };
     for peer in work {
         // Opposite owners must not occupy both sole actor loops with reciprocal requests. Wait
         // outside the actor on one deterministic side, where it can serve the other's request.
@@ -114,12 +198,12 @@ pub(super) async fn persist(
             .set_local_reconnect_routes(Vec::new())
             .await
             .map_err(|_| "server stopped".to_string())?;
-        return Ok(true);
+        return Ok(CaptureOutcome::Inactive);
     }
+    let member_routes = actor.member_routes().await;
+    let has_other_members = !member_routes.is_empty();
     let claims = uniquely_claimed_member_peers(
-        actor
-            .member_routes()
-            .await
+        member_routes
             .into_iter()
             .filter_map(|route| route.peer_id.map(PeerId::new)),
     );
@@ -174,15 +258,25 @@ pub(super) async fn persist(
             .save_server_net(server, &net, &mut OsCryptoRng)
             .map_err(|e| e.to_string())?;
     }
-    let pending = targets.iter().any(|target| {
-        !peers.contains(target)
-            && !(claims.contains(target)
-                && (old.reconnect_policy == ReconnectPolicy::MemberMesh
-                    || old.reconnect_policy == ReconnectPolicy::AuthorizedPeer(*target.as_bytes()))
-                && net.reconnect_routes.iter().any(|route| {
-                    route.peer_id == *target.as_bytes() && old.reconnect_routes.contains(route)
-                }))
-    });
+    let pending_peers = targets
+        .iter()
+        .filter(|target| {
+            let target = *target;
+            !peers.contains(target)
+                && !(claims.contains(target)
+                    && (old.reconnect_policy == ReconnectPolicy::MemberMesh
+                        || old.reconnect_policy
+                            == ReconnectPolicy::AuthorizedPeer(*target.as_bytes()))
+                    && net.reconnect_routes.iter().any(|route| {
+                        route.peer_id == *target.as_bytes() && old.reconnect_routes.contains(route)
+                    }))
+        })
+        .count();
+    let saved_outgoing_routes = net
+        .reconnect_routes
+        .iter()
+        .filter(|route| claims.contains(&PeerId::new(route.peer_id)))
+        .count();
     let routes = net
         .reconnect_routes
         .iter()
@@ -194,15 +288,15 @@ pub(super) async fn persist(
         .set_local_reconnect_routes(routes)
         .await
         .map_err(|_| "server stopped".to_string())?;
-    if pending {
-        Err("member reconnect finalization is still pending; keep the conversation open to finish saving its proven route".into())
-    } else {
-        Ok(true)
-    }
+    Ok(CaptureOutcome::Saved {
+        pending_peers,
+        saved_outgoing_routes,
+        has_other_members,
+    })
 }
 
-/// Complete every available outbound observation before any actor is frozen for orderly close.
-/// No renderer data or new connection is needed. Root close coordination owns the outer deadline.
+/// Persist available local evidence before freezing. Offline peers and unfinalized observations
+/// remain retry work; only local storage/identity failures can prevent this close phase.
 pub(super) async fn before_shutdown(state: &AppState) -> Result<(), String> {
     let entries: Vec<_> = state
         .servers
@@ -216,7 +310,10 @@ pub(super) async fn before_shutdown(state: &AppState) -> Result<(), String> {
             continue;
         };
         let evidence = mesh.authenticated_dial_route_evidence();
-        persist(state, id, instance, &actor, evidence).await?;
+        let outcome = capture_before_shutdown(state, id, instance, &actor, evidence).await?;
+        if let Some(warning) = outcome.warning() {
+            tracing::warn!(target: "catcoms_app", server = id, warning, "VAULT.MEMBER_RECONNECT.PENDING");
+        }
     }
     Ok(())
 }

@@ -12,6 +12,51 @@ pub const MEMBER_FINALIZATION_WORK_PER_PASS: usize = 2;
 /// The local transport retains at most two recent successful observations per connected slot.
 pub const MAX_MEMBER_FINALIZATION_OBSERVATIONS: usize =
     catcoms_rt::MAX_CONNECTED_PEER_SNAPSHOT * catcoms_rt::MAX_PEER_DIAL_BATCH;
+const PENDING_SNAPSHOT_VERSION: u8 = 1;
+const MAX_PENDING_SNAPSHOT_BYTES: usize = 5 + MAX_PEER_RECORDS * 72;
+
+/// This sealed local tail retains an accepted admission correlation, never endpoint proof,
+/// a listener address or permission to dial. Descriptors already persist in the main snapshot.
+pub(super) fn decode_pending_snapshot(
+    bytes: &[u8],
+) -> Result<HashMap<DeviceId, PeerId>, SyncError> {
+    let bad = || SyncError::Malformed;
+    if bytes.len() > MAX_PENDING_SNAPSHOT_BYTES {
+        return Err(bad());
+    }
+    let mut d = Decoder::new(bytes);
+    if d.get_u8().map_err(|_| bad())? != PENDING_SNAPSHOT_VERSION {
+        return Err(bad());
+    }
+    let count = d.get_u32().map_err(|_| bad())? as usize;
+    if count > MAX_PEER_RECORDS {
+        return Err(bad());
+    }
+    let mut result = HashMap::new();
+    let mut peers = HashSet::new();
+    let mut previous = None;
+    for _ in 0..count {
+        let device = DeviceId::from_bytes(
+            d.get_bytes()
+                .map_err(|_| bad())?
+                .try_into()
+                .map_err(|_| bad())?,
+        );
+        let peer = PeerId::new(
+            d.get_bytes()
+                .map_err(|_| bad())?
+                .try_into()
+                .map_err(|_| bad())?,
+        );
+        if previous.is_some_and(|old| old >= device) || !peers.insert(peer) {
+            return Err(bad());
+        }
+        result.insert(device, peer);
+        previous = Some(device);
+    }
+    d.finish().map_err(|_| bad())?;
+    Ok(result)
+}
 
 fn body(
     policy: [u8; 32],
@@ -51,6 +96,35 @@ fn descriptor(
 }
 
 impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
+    pub(super) fn pending_finalization_snapshot(&mut self) -> Result<Vec<u8>, SyncError> {
+        self.prune_member_finalization_candidates();
+        let mut entries: Vec<_> = if self.policy_allows_member_mesh() {
+            self.member_finalization_pending.iter().collect()
+        } else {
+            Vec::new()
+        };
+        entries.sort_unstable_by_key(|(device, _)| **device);
+        if entries.len() > MAX_PEER_RECORDS {
+            return Err(SyncError::Malformed);
+        }
+        let mut e = Encoder::new();
+        e.put_u8(PENDING_SNAPSHOT_VERSION);
+        e.put_u32(entries.len() as u32);
+        for (device, peer) in entries {
+            e.put_bytes(device.as_bytes())
+                .map_err(|_| SyncError::Malformed)?;
+            e.put_bytes(peer.as_bytes())
+                .map_err(|_| SyncError::Malformed)?;
+        }
+        Ok(e.finish())
+    }
+
+    pub(super) fn restore_pending_finalization(&mut self, pending: HashMap<DeviceId, PeerId>) {
+        for (device, peer) in pending {
+            self.note_member_finalization_candidate(peer, device);
+        }
+    }
+
     fn prune_member_finalization_candidates(&mut self) {
         let local = self.transport.local_peer();
         self.member_finalization_pending.retain(|device, peer| {
@@ -313,6 +387,8 @@ mod tests {
     use rand_core::SeedableRng;
 
     type Node = ChannelSync<MemNetwork, ChaCha20Rng>;
+
+    include!("member_finalization_snapshot_tests.rs");
 
     fn pair(p2p: bool) -> (Node, Node) {
         let hub = Hub::new();

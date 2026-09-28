@@ -4653,6 +4653,9 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             .map_err(|_| oversize())?;
         e.put_bytes(&self.durable_chat.encode()?)
             .map_err(|_| oversize())?;
+        // Retry correlation only: no connected/bound proof or private listener is restored.
+        e.put_bytes(&self.pending_finalization_snapshot()?)
+            .map_err(|_| oversize())?;
         Ok(Zeroizing::new(e.finish()))
     }
 
@@ -4769,6 +4772,11 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         } else {
             durable_chat::DurableChatState::decode(d.get_bytes().map_err(|_| bad())?)?
         };
+        let pending_finalization = if d.is_empty() {
+            HashMap::new()
+        } else {
+            member_finalization::decode_pending_snapshot(d.get_bytes().map_err(|_| bad())?)?
+        };
         d.finish().map_err(|_| bad())?;
 
         // Reconstruct the MLS device + group, then build a base synchronizer and override its
@@ -4820,6 +4828,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         let restored_at = this.clock.now_ms();
         this.peer_record_seen = peer_records.keys().map(|d| (*d, restored_at)).collect();
         this.peer_records = peer_records;
+        this.restore_pending_finalization(pending_finalization);
         this.roster_gen = roster_gen;
         this.admin_roster = admin_roster;
         this.rendezvous_nodes = rendezvous_nodes;

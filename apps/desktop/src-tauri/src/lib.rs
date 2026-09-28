@@ -3628,8 +3628,13 @@ async fn persist_live_local_reconnect_routes_in_state(
     )
     .await
     {
-        Ok(true) => return,
-        Ok(false) => {}
+        Ok(member_reconnect::CaptureOutcome::NotApplicable) => {}
+        Ok(outcome) => {
+            if let Some(warning) = outcome.warning() {
+                tracing::warn!(target: "catcoms_app", server, warning, "VAULT.MEMBER_RECONNECT.PENDING");
+            }
+            return;
+        }
         Err(error) => {
             tracing::warn!(target: "catcoms_app", server, %error, "VAULT.MEMBER_RECONNECT.PENDING");
             return;
@@ -5955,7 +5960,7 @@ async fn found_server_inner(
         .get(&server_id)
         .map(|entry| (entry.instance, entry.actor.clone(), entry.mesh.clone()));
     if let Some((instance, actor, Some(mesh))) = registered {
-        if let Err(error) = member_reconnect::persist(
+        match member_reconnect::persist(
             state,
             server_id,
             instance,
@@ -5964,8 +5969,15 @@ async fn found_server_inner(
         )
         .await
         {
-            tracing::warn!(target: "catcoms_app", server = server_id, %error, "VAULT.ADMISSION_RECONNECT.PENDING");
-            storage_warning.get_or_insert_with(|| "This group is available, but reconnect setup is still pending. Keep Mewtual open while it retries.".into());
+            Ok(outcome) => {
+                if let Some(warning) = outcome.warning() {
+                    storage_warning.get_or_insert_with(|| warning.into());
+                }
+            }
+            Err(error) => {
+                tracing::warn!(target: "catcoms_app", server = server_id, %error, "VAULT.ADMISSION_RECONNECT.PENDING");
+                storage_warning.get_or_insert_with(|| "This group is available, but reconnect state could not finish saving. Keep Mewtual open while storage retries.".into());
+            }
         }
     }
     drop(session_commit);
@@ -6747,7 +6759,7 @@ async fn join_server_inner(
         .get(&server_id)
         .map(|entry| (entry.instance, entry.actor.clone(), entry.mesh.clone()));
     if let Some((instance, actor, Some(mesh))) = registered {
-        if let Err(error) = member_reconnect::persist(
+        match member_reconnect::persist(
             state,
             server_id,
             instance,
@@ -6756,8 +6768,15 @@ async fn join_server_inner(
         )
         .await
         {
-            tracing::warn!(target: "catcoms_app", server = server_id, %error, "VAULT.ADMISSION_RECONNECT.PENDING");
-            storage_warning.get_or_insert_with(|| "This group is available, but reconnect setup is still pending. Keep Mewtual open while it retries.".into());
+            Ok(outcome) => {
+                if let Some(warning) = outcome.warning() {
+                    storage_warning.get_or_insert_with(|| warning.into());
+                }
+            }
+            Err(error) => {
+                tracing::warn!(target: "catcoms_app", server = server_id, %error, "VAULT.ADMISSION_RECONNECT.PENDING");
+                storage_warning.get_or_insert_with(|| "This group is available, but reconnect state could not finish saving. Keep Mewtual open while storage retries.".into());
+            }
         }
     }
     drop(session_commit);
@@ -12052,6 +12071,7 @@ struct ReloadedServer {
     channel: String,
     channels: Vec<UiChannel>,
     is_dm: bool,
+    reconnect_warning: Option<String>,
 }
 
 /// Transport-independent half of vault reload. Keeping this seam below Tauri's concrete runtime
@@ -12182,6 +12202,7 @@ async fn running_servers(state: &AppState) -> Vec<ReloadedServer> {
         .collect();
     let mut reloaded = Vec::with_capacity(servers.len());
     for (server, name, invite, is_dm, actor) in servers {
+        let reconnect_warning = member_reconnect::saved_warning(state, server, &actor).await;
         reloaded.push(ReloadedServer {
             server,
             name,
@@ -12189,6 +12210,7 @@ async fn running_servers(state: &AppState) -> Vec<ReloadedServer> {
             channel: channel_id("general").to_string(),
             channels: ui_channels(actor.channels().await),
             is_dm,
+            reconnect_warning,
         });
     }
     reloaded.sort_by_key(|s| s.server);
@@ -13920,19 +13942,18 @@ async fn unlock(
             failed += 1;
             continue;
         }
+        let actor = actor_of_unchecked(&state, record.id)
+            .await
+            .map_err(|e| op.fail(codes::SERVER_UNAVAILABLE, e))?;
+        let reconnect_warning = member_reconnect::saved_warning(&state, record.id, &actor).await;
         reloaded.push(ReloadedServer {
             server: record.id,
             name: record.display_name.clone(),
             invite: record.invite.clone(),
             channel: channel_id("general").to_string(),
-            channels: ui_channels(
-                actor_of_unchecked(&state, record.id)
-                    .await
-                    .map_err(|e| op.fail(codes::SERVER_UNAVAILABLE, e))?
-                    .channels()
-                    .await,
-            ),
+            channels: ui_channels(actor.channels().await),
             is_dm: record.is_dm,
+            reconnect_warning,
         });
     }
     finalize_unlock_session(&state, unlock_generation, false)

@@ -2491,6 +2491,15 @@ partial, malformed or trailing data rejects. New snapshots always encode the tai
 Unknown. Older binaries reject the new tail; backward reading of old snapshots is supported,
 not downgrade compatibility. Existing peer-address extraction stops before this appended data.
 
+Current snapshots follow the tenure frame with the authenticated group-policy pin and durable-chat
+state, then an optional member-finalization correlation frame. Its version-1 body contains a u32
+count and at most 512 device/transport pairs (two length-prefixed 32-byte identities each; 36,869
+inner bytes maximum). Canonical device order, unique peers, exact lengths and full consumption are
+required. Absence loads an empty correlation map; malformed/unknown data rejects. Current P2P
+permission, membership and descriptor conflicts are checked on restore. These are admitted retry
+correlations only, with no live proof, addresses or dial authority. An older reader rejects the
+new trailing frame, even with zero entries; reopening after a new write requires the new reader.
+
 Welcome joins start Unknown, even if the new device fills the lowest leaf and becomes owner.
 Legacy upgrades and such owners may remain Unknown indefinitely across same-owner commits.
 Do not recover availability by assigning the current epoch or copying a receipt's own tenure.
@@ -2832,9 +2841,11 @@ clone/decode/verification, containing malicious replicated-index work.
 `ReconnectRoute { peer_id, address }` rows. A row is valid only under `AuthorizedPeer` and must name
 that exact peer. Version 4 appends an optional `pending_recovery_peer` plus the signed code's
 absolute expiry. Versions 1 and 2 decode with an empty route list and `LegacyPending`; version 3
-decodes with no pending recovery. New founders
-and helper/reply/switchboard admissions persist `Disabled`, while a successful direct admission
-persists only its named inviter as `AuthorizedPeer`. Each address is capped at 512 bytes and the
+decodes with no pending recovery. Without authenticated P2P permission, helper/reply/switchboard
+admissions retain `Disabled`, while a successful direct admission permits only its named inviter
+as `AuthorizedPeer`. Version 5 adds `MemberMesh` for authenticated P2P groups; version 6 retains up
+to eight current members with two routes each inside an exact 8-KiB encoded route budget. Each
+address is capped at 512 bytes and the
 entire record remains vault-sealed and atomically replaced. Every `ServerStore` record uses the
 same durability primitive: write and sync a sibling staging file, rename it over the destination,
 then sync the parent directory on Unix. Abrupt termination before rename therefore retains the
@@ -2864,7 +2875,17 @@ On the discovery cadence, an authorized record may refresh only that inviter. `L
 promote once only when the group has exactly one other member and exactly one unique live member
 claim; its captured route must additionally be private/loopback. A non-empty observation replaces
 and installs the bounded hints; an empty observation does not erase them merely because the remote
-app is closed.
+app is closed. These narrow migration rules apply to legacy groups. Authenticated P2P admission
+also performs a connected two-way signed member-finalization exchange, which can prove the
+callback dialer's peer before immediate close. Its bounded capture worker retries unfinished
+observed members without granting authority to an unverified endpoint.
+
+Orderly close performs local capture only: unfinished peer verification is saved retry work and
+does not require a network response. The final actor barrier still saves accepted history before
+freezing; failed local snapshot/network writes or stale custody refuse close. Initial admission
+and restored-server projections expose an absent saved outgoing route without claiming the group
+cannot reconnect: inbound connections and discovery may still recover it. See
+[the offline-close contract](communication-recovery/OFFLINE-CLOSE.md).
 
 Applying a member recovery code first verifies its group, signature, current roster membership,
 exact unique device→transport record, deadline and route grammar **without dialing**. While the UI
