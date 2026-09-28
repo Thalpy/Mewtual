@@ -3696,6 +3696,7 @@ where
 
 /// Move `server` into a background task. Returns a [`ServerActor`] handle, a receiver of
 /// [`AppEvent`]s, and the task's [`JoinHandle`].
+#[rustfmt::skip] // Preserve the existing command-table layout previously inside select! macro.
 pub fn spawn<T, R>(
     mut server: Server<T, R>,
 ) -> (ServerActor, mpsc::Receiver<TracedEvent>, JoinHandle<()>)
@@ -3889,7 +3890,6 @@ where
                 server.sync_once(),
             )
             .await;
-            #[rustfmt::skip]
             match turn {
                 fair::Turn::Reset(reset) => {
                     event_tx.idle();

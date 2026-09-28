@@ -6251,6 +6251,17 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     /// Put a task back on the queue, without letting a re-queue exceed the cap or duplicate a
     /// task already waiting.
     fn requeue_catchup(&mut self, task: CatchupTask) {
+        if let CatchupTask::Commits {
+            from_epoch,
+            gap_at,
+            avoid,
+        } = task
+        {
+            // Events may record a newer gap while the old request is in flight. Retain one
+            // merged obligation, preserving its lowest epoch and largest proven gap.
+            self.enqueue_commit_catchup_for(from_epoch, gap_at, avoid);
+            return;
+        }
         if self.catchup_queue.contains(&task) {
             return;
         }

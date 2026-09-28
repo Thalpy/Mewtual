@@ -40,9 +40,46 @@ impl MeshTransport for PausedPublisher {
     async fn request(&self, _: PeerId, _: ProtocolId, _: Bytes) -> Result<Bytes, TransportError> {
         std::future::pending().await
     }
+    async fn request_cancellable(
+        &self,
+        peer: PeerId,
+        protocol: ProtocolId,
+        data: Bytes,
+        mut cancellation: RequestCancellation,
+    ) -> Result<Bytes, TransportError> {
+        tokio::select! {
+            result = self.request(peer, protocol, data) => result,
+            _ = cancellation.cancelled() => Err(TransportError::Cancelled),
+        }
+    }
     async fn next_event(&self) -> Option<TransportEvent> {
         std::future::pending().await
     }
+}
+
+#[tokio::test]
+async fn interrupted_commit_wait_merges_newly_detected_gap_into_one_obligation() {
+    let (_, mut members, _) = crate::tests::build_members(2).await;
+    let mut node = members.pop().unwrap();
+    let epoch = node.group.epoch();
+    node.catchup_queue.clear();
+    let held = CatchupTask::Commits {
+        from_epoch: epoch,
+        gap_at: Some(epoch + 1),
+        avoid: Some(PeerId::from_u64(8)),
+    };
+    node.catchup_inflight = Some((held, Some(PeerId::from_u64(7))));
+    node.enqueue_commit_catchup_for(epoch + 1, Some(epoch + 3), Some(PeerId::from_u64(9)));
+    node.requeue_catchup(held);
+    assert_eq!(
+        node.catchup_queue,
+        vec![CatchupTask::Commits {
+            from_epoch: epoch,
+            gap_at: Some(epoch + 3),
+            avoid: None,
+        }],
+        "a stale completion cannot duplicate or weaken the newer proven gap"
+    );
 }
 
 #[tokio::test]

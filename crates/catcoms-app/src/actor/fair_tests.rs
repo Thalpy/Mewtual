@@ -76,6 +76,28 @@ impl MeshTransport for DelayedTransport {
     async fn next_event(&self) -> Option<TransportEvent> {
         self.inner.next_event().await
     }
+    async fn request_cancellable(
+        &self,
+        peer: PeerId,
+        protocol: ProtocolId,
+        data: Bytes,
+        mut cancellation: RequestCancellation,
+    ) -> Result<Bytes, TransportError> {
+        let held = self.delay.hold.load(Ordering::SeqCst) && is_channel_page(&data);
+        let response = self
+            .inner
+            .request_cancellable(peer, protocol, data, cancellation.clone())
+            .await?;
+        if held {
+            self.delay.requests.fetch_add(1, Ordering::SeqCst);
+            self.delay.started.notify_one();
+            tokio::select! {
+                permit = self.delay.release.acquire() => permit.unwrap().forget(),
+                _ = cancellation.cancelled() => return Err(TransportError::Cancelled),
+            }
+        }
+        Ok(response)
+    }
 }
 
 async fn bounded<T>(future: impl Future<Output = T>) -> T {
