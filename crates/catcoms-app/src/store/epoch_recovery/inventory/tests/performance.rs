@@ -312,6 +312,35 @@ impl std::fmt::Display for FixtureShape {
     }
 }
 
+/// The exact reference result a timed scan must produce.
+///
+/// Two shapes, because two kinds of case need checking. A fixture that plants CIDs names its group
+/// and its set. A family that collects none - Registry, and the title-only Studio sources - has no
+/// group to name, and the right expectation is that **nothing at all** was collected, which
+/// `CreativeReferences::is_empty` can state directly. Recording the second as an empty set against
+/// some arbitrary group would check nothing.
+#[derive(Debug, Clone)]
+struct ExpectedRefs {
+    /// `None` means no group should hold any reference.
+    group: Option<Vec<u8>>,
+    cids: std::collections::BTreeSet<Cid>,
+}
+
+impl ExpectedRefs {
+    fn none() -> Self {
+        Self {
+            group: None,
+            cids: std::collections::BTreeSet::new(),
+        }
+    }
+    fn group(group: &[u8], cids: std::collections::BTreeSet<Cid>) -> Self {
+        Self {
+            group: Some(group.to_vec()),
+            cids,
+        }
+    }
+}
+
 /// One fixture plus the scan mode to profile it in, carrying its own store.
 ///
 /// Cases exist so trials can be **interleaved**. Running every trial of case A and then every
@@ -329,6 +358,9 @@ struct Case {
     references: bool,
     cache: CachePolicy,
     shape: FixtureShape,
+    /// What a reference-mode case must actually collect, checked on every trial. Required for any
+    /// case with `references` set: see the oracle in [`run_trial`].
+    expected_refs: Option<ExpectedRefs>,
     cost: ScanCost,
 }
 
@@ -343,10 +375,12 @@ fn run_trial(case: &mut Case, clock: &dyn catcoms_rt::Clock) {
         coverage,
         references,
         cache,
+        expected_refs,
         cost,
         ..
     } = case;
     let (coverage, references) = (*coverage, *references);
+    let expected_refs = expected_refs.as_ref();
     if *cache == CachePolicy::Fresh {
         store.inventory_cache.clear_for_test();
     }
@@ -401,12 +435,54 @@ fn run_trial(case: &mut Case, clock: &dyn catcoms_rt::Clock) {
     cost.reused.push(last.reused_records);
     cost.parked.push(parked_this_trial);
     let t = clock.monotonic_ms();
-    if references {
-        store.finish_cursor_creative_references(cursor).unwrap();
+    let collected = if references {
+        Some(store.finish_cursor_creative_references(cursor).unwrap())
     } else {
         store.finish_epoch_storage_scan(cursor).unwrap();
-    }
+        None
+    };
     cost.finish_ms += clock.monotonic_ms().saturating_sub(t);
+
+    // The reference-result oracle, deliberately **after** the timer stops so checking it cannot
+    // be charged to the phase it is checking.
+    //
+    // Without this the profile timed a reference scan and threw its result away, asserting only
+    // that the *fixture* contained N CIDs - never that the scan returned them. A Studio collector
+    // regression that completed successfully with an empty set would have satisfied every
+    // structural check and produced a fast, meaningless number. "The fixture contains 128
+    // references" and "the profiled scan returned those 128 references" are different claims, and
+    // only the second makes the timing worth anything.
+    if let (Some(collected), Some(expected)) = (collected, expected_refs) {
+        match &expected.group {
+            Some(group) => {
+                let got: std::collections::BTreeSet<_> =
+                    collected.for_group(group).copied().collect();
+                assert_eq!(
+                    &got,
+                    &expected.cids,
+                    "the profiled Studio reference result differs from the fixture's expected \
+                     set: collected {} of {} expected CIDs for this group",
+                    got.len(),
+                    expected.cids.len(),
+                );
+                // And nothing beyond this group, so a collector attributing references to the
+                // wrong document cannot pass by coincidence.
+                assert_eq!(
+                    collected.len(),
+                    expected.cids.len(),
+                    "the profiled reference result holds {} references in total against {} \
+                     expected for the fixture's only group",
+                    collected.len(),
+                    expected.cids.len(),
+                );
+            }
+            None => assert!(
+                collected.is_empty(),
+                "a family that collects no references returned {} of them",
+                collected.len()
+            ),
+        }
+    }
 }
 
 /// Run `TRIALS` trials of every case, **round-robin rather than case by case**.
@@ -431,6 +507,7 @@ fn case(
     references: bool,
     cache: CachePolicy,
     shape: FixtureShape,
+    expected_refs: Option<ExpectedRefs>,
 ) -> Case {
     Case {
         label: label.into(),
@@ -440,19 +517,23 @@ fn case(
         references,
         cache,
         shape,
+        expected_refs,
         cost: ScanCost::default(),
     }
 }
 
 /// Convenience for the frozen-clock smoke tests, which profile one case and assert structure.
+#[allow(clippy::too_many_arguments)]
 fn profile_scan(
     root: tempfile::TempDir,
     store: ServerStore,
     coverage: EpochInventoryCoverage,
     references: bool,
     cache: CachePolicy,
+    expected_refs: Option<ExpectedRefs>,
     clock: &dyn catcoms_rt::Clock,
 ) -> Case {
+    let cids = expected_refs.as_ref().map(|e| e.cids.len());
     let mut one = [case(
         "smoke",
         root,
@@ -460,12 +541,13 @@ fn profile_scan(
         coverage,
         references,
         cache,
-        // Smoke fixtures have no operation axis; `cids: Some(0)` where a reference mode is used
-        // says so explicitly rather than tripping the shape check.
+        // Smoke fixtures have no operation axis. The CID count comes from the expected set, so the
+        // two cannot disagree.
         FixtureShape {
-            cids: references.then_some(0),
+            cids,
             ..FixtureShape::default()
         },
+        expected_refs,
     )];
     run_interleaved(&mut one, clock);
     one.into_iter().next().expect("one case")
@@ -659,6 +741,7 @@ fn recovery_accounting_case(sizes: &[usize]) -> Case {
         // The axis here is bytes of opaque projection, with no operation structure at all - which
         // is exactly why it cannot settle whether cost follows bytes or operations.
         FixtureShape::default(),
+        None,
     )
 }
 
@@ -740,6 +823,8 @@ fn recovery_reference_cases(frames: &[usize], clock: &dyn catcoms_rt::Clock) -> 
                     physical_bytes: None,
                     cids: Some(got.len()),
                 },
+                // The oracle: every timed trial must return exactly this set, not merely finish.
+                Some(ExpectedRefs::group(&group.group_id(), got)),
             )
         })
         .collect()
@@ -796,9 +881,11 @@ fn registry_cases(op_counts: &[usize]) -> Vec<Case> {
                     // back here - unlike Studio's, which silently truncates.
                     actual_ops: Some(*ops),
                     physical_bytes: Some(bytes),
-                    // The Registry validator arm collects no CIDs in either mode.
+                    // The Registry validator arm collects no CIDs in either mode. Checked, not
+                    // assumed: the oracle requires the scan to return nothing at all.
                     cids: Some(0),
                 },
+                references.then(ExpectedRefs::none),
             ));
         }
     }
@@ -859,9 +946,12 @@ fn studio_cases(op_counts: &[usize]) -> Vec<Case> {
                     requested_ops: Some(*ops),
                     actual_ops: Some(persisted),
                     physical_bytes: None,
-                    // Title headers name no CIDs. Stated, not implied.
+                    // Title headers name no CIDs. Stated, not implied - and the oracle requires
+                    // the scan to actually return none, so "these sources have nothing to
+                    // collect" is an observation rather than an assumption about `title_op`.
                     cids: Some(0),
                 },
+                references.then(ExpectedRefs::none),
             ));
         }
     }
@@ -908,6 +998,10 @@ fn studio_frame_cases(frame_counts: &[usize]) -> Vec<Case> {
                     physical_bytes: None,
                     cids: Some(distinct.len()),
                 },
+                // The oracle that was missing: the fixture containing N references and the timed
+                // scan *returning* them are different claims, and only the second makes the
+                // reference-mode timing mean anything.
+                references.then(|| ExpectedRefs::group(&group.group_id(), distinct.clone())),
             ));
         }
     }
@@ -967,6 +1061,18 @@ fn check_case_structure(case: &Case) {
             case.shape.cids.is_some(),
             "{label}: a reference-mode case did not record how many CIDs its fixture plants, so \
              its timing cannot be distinguished from the timing of an empty collection"
+        );
+        // And the fixture's contents are not the scan's output. Every reference-mode case must
+        // carry an expected set for `run_trial`'s oracle to check the returned one against;
+        // without it a collector that returned nothing would still produce a clean profile.
+        let expected = case.expected_refs.as_ref().unwrap_or_else(|| {
+            panic!("{label}: a reference-mode case carries no expected CID set")
+        });
+        assert_eq!(
+            expected.cids.len(),
+            case.shape.cids.unwrap(),
+            "{label}: the expected CID set and the recorded fixture CID count disagree, so one of \
+             them is wrong"
         );
     }
 
@@ -1051,6 +1157,7 @@ fn c3_visit_profile_smoke() {
         EpochInventoryCoverage::RecoveryOnly,
         false,
         CachePolicy::Fresh,
+        None,
         &clock,
     );
     let cost = &profiled.cost;
@@ -1187,6 +1294,11 @@ fn c3_canonical_reference_fixture_collects_its_planted_cids() {
         REFERENCE_COVERAGE,
         true,
         CachePolicy::Warm,
+        // The oracle, on the frozen clock too: every trial must return exactly the planted set.
+        Some(ExpectedRefs::group(
+            &group.group_id(),
+            planted.iter().copied().collect(),
+        )),
         &clock,
     );
     check_case_structure(&profiled);
@@ -1275,6 +1387,39 @@ fn c3_cacheable_family_parks_when_fresh_and_hits_cache_when_warm() {
     );
 
     // The structural checks the profile itself applies, on the same cases.
+    for case in &cases {
+        check_case_structure(case);
+    }
+}
+
+/// The Studio frame path, in the ordinary suite, so the reference oracle is load-bearing here and
+/// not only in the `#[ignore]`d profile.
+///
+/// This exists because of a gap found by mutation. `studio_frame_cases` is the only fixture that
+/// reaches the **Studio** arm of `validate_record_body` with references on;
+/// `c3_canonical_reference_fixture_collects_its_planted_cids` stages a *Recovery* record and
+/// exercises a different arm. So replacing `cids.extend(inspected.cids)` with a discard in the
+/// Studio arm left every ordinary test passing, and would have been caught only by someone
+/// running the opt-in profile. Four frames keeps it cheap.
+#[test]
+fn c3_studio_frame_reference_scan_returns_its_planted_cids() {
+    let clock = ManualClock::new(0);
+    let mut cases = studio_frame_cases(&[4]);
+    assert_eq!(cases.len(), MODES.len());
+    let reference_cases = cases.iter().filter(|c| c.references).count();
+    assert_eq!(
+        reference_cases, 1,
+        "exactly one of the three modes collects references; without it this test proves nothing"
+    );
+    assert!(
+        cases
+            .iter()
+            .filter(|c| c.references)
+            .all(|c| c.shape.cids == Some(4)),
+        "the frame fixture did not plant four distinct CIDs"
+    );
+    // The oracle inside `run_trial` is what checks the returned set on every trial.
+    run_interleaved(&mut cases, &clock);
     for case in &cases {
         check_case_structure(case);
     }

@@ -1531,7 +1531,29 @@ Also not established here: the parked plaintext's residency is not charged to se
 retained-input sum, and no runtime variant yet demonstrates that a cancelled waiter does not
 release a still-running validation's reservation. Both are activation requirements.
 
-### The C-3 storage review: C3-001, C3-002, C3-003 closed; C3-TEST-001 closed here
+### Review provenance: what is independently closed, and what is only submitted
+
+**A distinction this ledger had been blurring.** "Landed and reviewed PASS" was being used for two
+different states, and they need separating:
+
+| State | Meaning |
+|---|---|
+| **independently reviewed and closed** | a returned verdict says so, and the SHA it was given against is recorded |
+| **implemented, tested and submitted** | the work and its mutation evidence exist and are pushed; no returned closure |
+
+- **C3-001, C3-002, C3-003: independently closed.** The returned verdict closing them is on record.
+- **C3-TEST-001: implemented, tested and submitted - not independently closed.** The last explicit
+  verdict received left it **open at P2**. The corrections that followed, and the heading below
+  saying "closed here", are *my* status statements. They are not a closure record, and the
+  distinction stands until a verdict is returned or the fixes are re-reviewed.
+- **R4-TEST-001: the same.** Its recorded status has been "awaiting the reviewer's inspection of
+  `079e59a` on GitHub" for a long time. A push that was once missing should not remain the status
+  indefinitely; the outstanding question and its closure evidence need recording properly.
+
+This does not reopen C3-001/002/003 or I-4, and does not suggest the later test work is wrong. It
+means the summary list must not present submitted work as reviewed work.
+
+### The C-3 storage review: C3-001, C3-002, C3-003 closed; C3-TEST-001 corrections submitted
 
 The reviewed C-3 code is at `e6111ed`. **Any accepted combined checkpoint must also include
 `397f689`**, which restores a check of Agent 2's that I deleted by mistake with a path-scoped
@@ -1923,28 +1945,73 @@ bytes move in opposite directions.
 | frames, 16 | 16 626 | 5 875 / **7 296** / 7 484 |
 | frames, 128 | 130 487 | 211 765 / **252 703** / 260 921 |
 
-**A 130 KB frame-bearing record costs about ten times what a 3.7 MB title-only record costs -
-roughly 290x per byte.** Bytes went down by a factor of 28 while cost went up by a factor of 10.
-No byte-based cost model survives that, so the earlier worry that a byte-driven validator would
-merely *look* operation-linear is settled: for Studio, bytes are not the driver.
+**A 130 KB frame-bearing record's validation was about ten times a 3.7 MB title-only record's.**
+Bytes fell by a factor of 28 while measured cost rose by a factor of 10.
 
-**And frame-bearing validation is superlinear in frame count.** Eight times the frames (16 to
-128) cost about 34.6 times as much - roughly `n^1.7`. Per frame that is 456 us at 16 and 1 974 us
-at 128, so **no per-operation constant describes this shape at all**, and a threshold built from
-one would underestimate badly exactly where it matters. This is the single most consequential
-number 13.7 has produced: **a 128-frame, 130 KB Studio record takes about a quarter of a second
-to validate.**
+The defensible conclusion, stated at that width: **encoded size alone does not explain validation
+cost across the measured Studio shapes, so structural shape has to be represented in the
+measurements or conservatively bounded.** That is enough to reject "small record, therefore cheap
+validation" for this corpus. It is **not** a finding that bytes are irrelevant - the two shapes
+differ in operation type, operation count, materialised document structure and reference content
+all at once, so no single factor is isolated. An earlier version of this section said "bytes are
+decisively not the driver", which claims more than the comparison supports and is withdrawn.
 
-**Reference collection is confirmed free for Studio - now on a fixture that actually has CIDs.**
-Frames, 128: 252 703 us accounting against **248 328 us** reference-collecting, inside the spread,
-with 128 distinct CIDs really collected. The claim withdrawn above for resting on an empty set is
-now supported by evidence that has a non-empty one. Installation of that 128-CID merge stayed
-below resolution.
+**Growth between 16 and 128 frames was more than linear:** 8x the frames cost about 34.6x, which
+is an **endpoint slope** of roughly `n^1.7`. That is not an established complexity law and must
+not be used to extrapolate to the frame ceiling - doing so needs intermediate points and repeated
+runs, neither of which exists. What it does support is that **no per-operation constant describes
+this shape**, so a threshold built from one would underestimate where it matters most.
 
-**Caveat carried forward:** the frame axis varies frame count, CID count and bytes together in
-the *same* direction as each other, so it separates Studio's cost from bytes only because the
-title axis moves bytes the opposite way. Within the frame series, frame count and CID count are
-still confounded with each other. Holding one fixed while varying the other is still not done.
+**The headline number, precisely labelled:** roughly **253 ms was the upper median of
+batch-average validation time** for the 128-frame, 130 KB fixture. It is not the worst individual
+validation latency, not an end-to-end read latency, and not measured actor custody - the harness
+times repeated `revalidate()` calls separately from the consuming validation and from
+installation. A conservative classifier would eventually want the worst individual figure, which
+this batching cannot produce.
+
+**Reference mode versus accounting, on a fixture with real CIDs.** Frames, 128: 252 703 us
+accounting against 248 328 us reference-collecting, inside their own spreads, with 128 distinct
+CIDs collected and the collection now *verified* rather than assumed (see the oracle below).
+Stated as: **for the verified 128-frame fixture, reference-mode validation was similar to fresh
+accounting validation in this run; incremental cost was not resolved. Installation stayed below
+the harness's resolution.** "Free" and "confirmed equivalent" are both withdrawn - the paths are
+not the same work, since the reference path additionally returns CIDs and required-metadata for
+later merging, and "no difference resolved at this resolution" is not "no difference".
+
+**Caveats carried forward:** the frame axis varies frame count, CID count and bytes together, so
+it separates Studio's cost from bytes only because the title axis moves bytes the other way.
+Within the frame series, frame count and CID count remain confounded with each other; a factorial
+case holding one fixed is still not done.
+
+### The reference-result oracle, which was missing
+
+The profile timed reference scans and **threw their results away**. `run_trial` called
+`finish_cursor_creative_references` and discarded the returned set, and the structural check
+required only that the fixture had *recorded* a CID count. So these were different claims, and
+only the first was checked:
+
+- the fixture contains 128 distinct referenced CIDs - established;
+- the profiled scan returned those 128 CIDs - **not asserted anywhere**.
+
+A Studio collector regression that completed successfully with an empty set would have satisfied
+every structural check and produced a fast, meaningless number - and the reference-mode timings
+above would have been the timings of collecting nothing, which is precisely the mistake this
+ledger had already recorded once.
+
+Corrected: each case carries an `ExpectedRefs` - a group and its exact CID set, or "no group holds
+any", which is the right expectation for Registry and for the title-only Studio sources. Every
+reference-mode trial now compares the returned set against it **after the timer stops**, so
+checking is not charged to the phase being checked, and also requires the total reference count to
+match so a collector attributing references to the wrong document cannot pass by coincidence.
+`check_case_structure` refuses any reference-mode case that carries no expectation.
+
+**Verified by mutation, and the mutation exposed a second gap.** Replacing `cids.extend(...)` with
+a discard in the Studio arm of `validate_record_body` left **all four existing tests passing** -
+because the only fixture reaching that arm with references on lived in the `#[ignore]`d profile,
+while the canonical reference smoke test stages a *Recovery* record and exercises a different arm.
+So `c3_studio_frame_reference_scan_returns_its_planted_cids` was added to the ordinary suite. With
+the mutation applied it fails at *"the profiled Studio reference result differs from the fixture's
+expected set: collected 0 of 4 expected CIDs for this group"*; restored byte-exact, it passes.
 
 ### The axes for the large-record fixtures remain confounded
 
@@ -3120,6 +3187,48 @@ Accompanying prose:
   the same target. One overlay operation is live per server at a time, and capacity exhaustion,
   storage-reference capacity and an unstable vault inventory all return retryable errors.
 
+## Accepted sequencing for the remaining work
+
+Agreed with the reviewer, whose two adjustments to my proposed order are adopted: build isolation
+and the reference oracle come **before** the next measurement, not after it.
+
+| Priority | Action | Done when |
+|---|---|---|
+| **First** | Send the SHA-pinned Agent 2 interface **confirmation** (not a stale checklist), the Agent 3 coordination request, and Agent 4's design 15 edit list | each recipient has the real dependency SHAs, the interface contract, and the specific decision being asked of them |
+| **Alongside** | Isolated verification workspace, and the reference-result oracle | oracle **done** (see above, mutation-verified); isolation still outstanding |
+| **Then** | C-1's bounded before/after measurement, with the shared pure decoder timed separately from end-to-end inventory work so setup and I/O cannot conceal the difference | same valid encoded fixtures, structural and full paths separated, shared metadata outputs verified, raw repeated-run data kept |
+| **Then** | Counterbalanced fixed-corpus 13.7 runs, and the frame-versus-CID factorial cases | actual shapes and outputs verified; protocol, order and run identity retained |
+| **After coordination and storage acceptance** | C-3 runtime adoption, then Flow R | runtime ownership, cancellation, retained-input accounting and bounded progress **demonstrated**, not inferred from storage tests |
+
+**Build isolation is acceptance work, not housekeeping.** What this ledger records about the
+contention is symptoms plus a proposed explanation - unresolved exports alongside concurrent
+builds do **not** by themselves prove shared artifacts caused every failure. They justify
+isolating before drawing further conclusions. The next evidence run needs: a pinned worktree
+**outside every build-output directory**; a dedicated build-output location for it (checking for
+any separately configured intermediate directory too, since isolating final executables alone is
+insufficient when intermediates are redirected); and no competing benchmark or compilation load,
+because unique output directories remove artifact interference but not CPU, memory or I/O
+contention during timing. Record the source SHA, worktree cleanliness, toolchain, profile, relevant
+configuration, executable path and executable hash. A legitimate cache hit is not invalid evidence
+- the requirement is reliable source-to-artifact provenance, not recompilation as ritual.
+
+**Do not run broad cleanup against `target/` while it contains agent worktrees.** Two live ones
+are inside it. They must be relocated deliberately before that directory is treated as disposable.
+
+The ambient-gate and formatting passes recorded at this checkpoint are **reported passing at this
+checkpoint**; they do not convert the unreproduced build attempts into a clean exact-head
+acceptance run.
+
+**Standing summary, corrected.** Not "storage and correctness work is essentially done", which
+understates what remains:
+
+> The core storage mechanisms are largely implemented. Remaining acceptance includes storage-test
+> closure provenance, cross-agent integration, runtime custody and cancellation, and measured
+> behaviour.
+
+Those runtime properties are correctness work, not wiring - and the quarter-second validation case
+makes that more important, not less.
+
 ## Next actions
 
 1. **C-3**, now the largest remaining piece and unblocked: `EpochStorageCursor` as an owned type
@@ -3162,14 +3271,45 @@ Accompanying prose:
    passes its own review and their status note says so. Agent 2's P5 is still false.
 8. Do not send the design 18.3 implementation review until the scope it names has real evidence. A
    partial branch is not a checkpoint.
-9. When Agent 2's archive writer lands, delete `write_draft_archive_for_test`, replace the
-   fail-closed reference arm with their collector, and add their two archive writers to the I-4
-   audit as design 9.2 now records.
-10. **Tell Agent 2 what requirement 3 changed under them**, which has not been sent. The eight
-    per-transaction tag enums are gone, replaced by one store-wide `WriteTag`; `WriteTag::Archive`
-    covers the draft archive record and is what their `release_studio_draft_archive_with_io`
-    should carry. Transactions no longer accept `writer`/`sync`/`unlink` closures at all: a new
-    writer takes `WriteStep` and `&mut WriteHooks<'_>` and performs its own operations through
-    `EpochMutation`. A caller that needs "flush only, never replace" says so with
-    `WriteStep::flush_only`, and the leaf must call `permit_replacement()` before its
-    replacement branch for that to mean anything.
+9. **Reconcile the landed archive code with its review status.** This item was stale and is
+   rewritten. At this head `epoch_draft_archive.rs` already contains
+   `write_studio_draft_archive_with_io`, `release_studio_draft_archive_with_io` and
+   `inventory_references`; the writer and release take `WriteHooks`, the mutation paths acquire
+   `EpochMutation`, release checks the expected archive identity before unlinking, and the
+   collector decodes the archive and obtains its blob references. So "when their archive writer
+   lands, replace the fail-closed reference arm with their collector" no longer describes
+   reality. **Presence is not a review PASS** - what is needed is the actual verdict status for
+   that code, not a checklist written before it existed.
+
+   **And `write_draft_archive_for_test` must not simply be deleted.** Its own comment says every
+   *valid* archive in the tests goes through the production writer and that this helper exists
+   only where the payload is deliberately malformed or misplaced. Removing it would remove the
+   fault injection that proves the reader rejects those states. Valid-archive setup should use
+   the production writer; malformed-record injection keeps this helper.
+
+   Remaining archive work, accurately: **reconcile the landed writer/release/collector with their
+   review status, retain malformed-record injection, and add the missing DraftArchive
+   cursor-invalidation case to N17** - DraftArchive is still the one inventoried family N17 does
+   not cover.
+
+   There is also a stale comment in that file, at `epoch_draft_archive.rs:255`, saying
+   `release_studio_draft_archive_with_io` "does not exist yet" - 68 lines above its
+   implementation. It is Agent 2's file, so it goes in the handover rather than being edited here.
+10. **Send Agent 2 a requirement-3 contract confirmation**, SHA-pinned. Still not sent, but the
+    framing in the earlier version of this item was wrong: it read as "you are still writing
+    against the old API", and the landed archive code already consumes the new `WriteHooks` form.
+    Telling them otherwise would be inaccurate and unhelpful.
+
+    What to send instead is the contract to preserve plus a request to confirm the remaining
+    callers: the eight per-transaction tag enums are gone, replaced by one store-wide `WriteTag`,
+    and `WriteTag::Archive` is what the draft-archive record carries. Transactions accept no
+    `writer`/`sync`/`unlink` closures at all: a writer takes `WriteStep` and
+    `&mut WriteHooks<'_>` and performs its own operations through `EpochMutation`. "Flush only,
+    never replace" is `WriteStep::flush_only`, and the leaf must call `permit_replacement()`
+    before its replacement branch for that to mean anything. Include the stale
+    `epoch_draft_archive.rs:255` comment.
+
+    **Their status document also needs reconciling**, and this is theirs to do: its top-level
+    table still says no production code or tests have been written, which the archive code
+    contradicts. Correcting stale implementation rows is **not** permission to promote P5 - that
+    stays false until the required implementation reviews are complete.
