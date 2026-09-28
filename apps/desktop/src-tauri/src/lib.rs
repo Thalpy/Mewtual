@@ -60,6 +60,7 @@ mod errors;
 mod group_policy;
 mod leaving;
 mod media_decode;
+mod media_worker;
 mod member_reconnect;
 // This broker model has no registered command consumers yet. Retain its contract tests without
 // presenting the unwired implementation as a production pairing boundary.
@@ -10316,9 +10317,11 @@ const MEDIA_TRANSCODE_PERMITS: usize = 2;
 /// the reason for the permit cap above, not a detail of it.
 const MEDIA_TRANSCODE_TIMEOUT: Duration = Duration::from_secs(10);
 
-fn media_transcode_permits() -> &'static tokio::sync::Semaphore {
-    static PERMITS: std::sync::OnceLock<tokio::sync::Semaphore> = std::sync::OnceLock::new();
-    PERMITS.get_or_init(|| tokio::sync::Semaphore::new(MEDIA_TRANSCODE_PERMITS))
+fn media_transcode_permits() -> Arc<tokio::sync::Semaphore> {
+    static PERMITS: std::sync::OnceLock<Arc<tokio::sync::Semaphore>> = std::sync::OnceLock::new();
+    Arc::clone(
+        PERMITS.get_or_init(|| Arc::new(tokio::sync::Semaphore::new(MEDIA_TRANSCODE_PERMITS))),
+    )
 }
 
 /// Decode a shared image in Rust and return the PNG to serve in its place.
@@ -10330,19 +10333,14 @@ async fn transcoded_image_body(
     declared: &str,
     body: Vec<u8>,
 ) -> Result<media_decode::DecodedImage, media_decode::DecodeRefusal> {
-    let Ok(_permit) = media_transcode_permits().acquire().await else {
-        return Err(media_decode::DecodeRefusal::DeadlineExceeded);
-    };
     let declared = declared.to_string();
-    let handle = tauri::async_runtime::spawn_blocking(move || {
-        media_decode::transcode_inline_image(&declared, &body)
-    });
-    match tokio::time::timeout(MEDIA_TRANSCODE_TIMEOUT, handle).await {
-        Ok(Ok(result)) => result,
-        // The module contains its own unwinds, so this is the blocking pool itself failing.
-        Ok(Err(_)) => Err(media_decode::DecodeRefusal::DecoderPanicked),
-        Err(_) => Err(media_decode::DecodeRefusal::DeadlineExceeded),
-    }
+    media_worker::run(
+        media_transcode_permits(),
+        MEDIA_TRANSCODE_TIMEOUT,
+        &SystemClock,
+        move || media_decode::transcode_inline_image(&declared, &body),
+    )
+    .await?
 }
 
 /// Serve one media request. Split out from the protocol registration so the whole path is
