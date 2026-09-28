@@ -1969,6 +1969,9 @@ times repeated `revalidate()` calls separately from the consuming validation and
 installation. A conservative classifier would eventually want the worst individual figure, which
 this batching cannot produce.
 
+*(The figures in this subsection are from the contended run. They are replicated within 11% by the
+isolated run recorded under "The isolated release profile" below, which is the one to quote.)*
+
 **Reference mode versus accounting, on a fixture with real CIDs.** Frames, 128: 252 703 us
 accounting against 248 328 us reference-collecting, inside their own spreads, with 128 distinct
 CIDs collected and the collection now *verified* rather than assumed (see the oracle below).
@@ -3199,6 +3202,80 @@ and the reference oracle come **before** the next measurement, not after it.
 | **Then** | C-1's bounded before/after measurement, with the shared pure decoder timed separately from end-to-end inventory work so setup and I/O cannot conceal the difference | same valid encoded fixtures, structural and full paths separated, shared metadata outputs verified, raw repeated-run data kept |
 | **Then** | Counterbalanced fixed-corpus 13.7 runs, and the frame-versus-CID factorial cases | actual shapes and outputs verified; protocol, order and run identity retained |
 | **After coordination and storage acceptance** | C-3 runtime adoption, then Flow R | runtime ownership, cancellation, retained-input accounting and bounded progress **demonstrated**, not inferred from storage tests |
+
+### The isolated verification workspace, established
+
+| Property | Value |
+|---|---|
+| Worktree | `M:/catcoms-verify-137`, detached, **outside the repo and therefore outside its `target/`** |
+| Pinned commit | `d30d1b5e31d3ce6f2c59111c160d01ab2e13b85b` |
+| Worktree cleanliness | `git status --porcelain` empty at creation |
+| Build output | `CARGO_TARGET_DIR=M:/catcoms-verify-137-target`, separate from the shared `target/` |
+| Redirected intermediates | none - no repo-level `.cargo/config.toml`, and `CARGO_TARGET_DIR` was previously unset |
+| Toolchain | pinned by `rust-toolchain.toml` to 1.89.0; `rustc 1.89.0 (29483883e 2025-08-04)`, `cargo 1.89.0 (c24e10642 2025-06-23)` |
+| Disk | M: had 402 GB free, so the isolated output does not compete for space |
+
+The worktree is deliberately **not** under `.claude/worktrees/` either, since that path sits inside
+the repo. Executable path and hash are recorded with each run, so a result can be traced to the
+artifact that produced it without requiring recompilation as ritual.
+
+**First run from the isolated workspace.** Debug lib test, built in 4m08s with no contention:
+
+| Property | Value |
+|---|---|
+| Executable | `M:/catcoms-verify-137-target/debug/deps/catcoms_app-92a5297ae14f0f5d.exe` |
+| SHA-256 | `E752AE02915C27722965AC9B1BD0264B165B6E89DDB1B14DA611B93119BC9304` |
+| Size | 62 979 072 bytes |
+| Worktree at run time | clean |
+| Result | the five `performance::c3` structural tests **5 passed, 0 failed** in 85.94 s |
+
+That is the first result on this ledger whose artifact can be traced to a pinned source SHA. It
+establishes that the structural checks, including the new reference oracle, pass from a known build
+of a known commit rather than from whatever the shared target directory happened to hold.
+
+### The isolated release profile: the first replication on this ledger
+
+| Property | Value |
+|---|---|
+| Executable | `M:/catcoms-verify-137-target/release/deps/catcoms_app-5a0650d663014b39.exe` |
+| SHA-256 | `B7B9A2131756C8577A30633582F9D04DE7A23F67B568C436491C9D9188E539E3` |
+| Run | 29 cases, 8 trials, interleaved, 380.20 s, no competing build |
+| Reference results | **verified on every reference-mode trial** by the new oracle |
+
+Against the contended run of the same source, the same cases:
+
+| case | contended | isolated | difference |
+|---|---|---|---|
+| Studio titles, 24 ops (3.70 MB) | 23 890 us | **23 843 us** | 0.2% |
+| Studio frames, 128 (130 KB), accounting | 252 703 us | **238 734 us** | 5.5% |
+| Studio frames, 128, reference-collecting | 248 328 us | **239 968 us** | 3.4% |
+| Studio frames, 16 (16.6 KB) | 7 296 us | **6 750 us** | 7.5% |
+| Registry, 24 ops (3.86 MB) | 19 140 us | **16 968 us** | 11% |
+| Recovery, 4.19 MB | 11 031 us | **10 421 us** | 5.5% |
+
+**Two things this settles and one it does not.**
+
+It **replicates the frame finding**: a 130 KB frame-bearing record's validation was 10.0x a
+3.70 MB title-only record's, at a 28th of the bytes - 10.0x isolated against 10.6x contended. And
+the endpoint slope between 16 and 128 frames comes out at `n^1.71` isolated against `n^1.70`
+contended. Those are the first figures here to survive an environment change, which is a
+materially better footing than one run.
+
+It **also replicates reference mode's similarity to accounting for Studio**, now with the CID sets
+checked on every trial rather than discarded: 239 968 against 238 734 us at 128 verified CIDs, a
+0.5% difference inside their own spreads. Installation of that verified 128-CID merge was
+`0/0/0(z8)` - every one of the eight samples below the clock's resolution.
+
+What it does **not** settle: the contended and isolated figures agree to within 11%, which means
+**contention was not distorting these particular numbers materially**. So the earlier 2.5x
+block-versus-interleaved shift was a *protocol* effect, not a contention effect - the two
+explanations were being carried together and only one of them is supported here. Contention broke
+the *build*, repeatedly and unmistakably; it did not visibly move these timings. That distinction
+is now on record rather than conflated.
+
+Still absent, and still the reason no constant here is calibration: a counterbalanced
+blocked-versus-interleaved comparison on this fixed corpus, and a factorial case separating frame
+count from CID count.
 
 **Build isolation is acceptance work, not housekeeping.** What this ledger records about the
 contention is symptoms plus a proposed explanation - unresolved exports alongside concurrent
