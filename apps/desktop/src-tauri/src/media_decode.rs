@@ -104,7 +104,8 @@ impl SourceFormat {
         }
     }
 
-    /// The MIME type this format is admitted under, for logs and tests.
+    /// The MIME type used by the decoder's format fixtures.
+    #[cfg(test)]
     #[must_use]
     pub fn as_mime(self) -> &'static str {
         match self {

@@ -61,6 +61,9 @@ mod group_policy;
 mod leaving;
 mod media_decode;
 mod member_reconnect;
+// This broker model has no registered command consumers yet. Retain its contract tests without
+// presenting the unwired implementation as a production pairing boundary.
+#[cfg(test)]
 mod security_intent;
 mod shutdown;
 mod studio;
