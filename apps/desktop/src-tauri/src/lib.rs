@@ -68,6 +68,8 @@ mod member_reconnect;
 #[cfg(test)]
 mod security_intent;
 mod shutdown;
+#[cfg(test)]
+mod six_client_recovery;
 mod studio;
 mod tasks;
 use errors::{codes, AppError, ErrorCode};
