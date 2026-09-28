@@ -70,8 +70,9 @@ bounds and native storage-worker sleeps use `SystemClock`.
 reopen, discards incoming gossip after all admissions, and delays completed request replies by
 125 real milliseconds during the bridge/reunion phases. The delay also covers cancellable
 requests without replacing the real transport's cancellation ownership. Repeated actor reads
-run every 5 ms, beginning on 5 and 6 before 4 returns. The exact-union assertion must succeed
-while load remains active; counters require actual reads, discarded gossip and delayed replies.
+wait 5 ms after each completed read before requesting the next, beginning on 5 and 6 before 4
+returns. The exact-union assertion must succeed while load remains active; counters require
+actual reads, discarded gossip and delayed replies.
 
 ## Limits and execution ledger
 
@@ -82,8 +83,31 @@ chat channel and bounded synthetic messages do not establish crash/power-loss du
 membership-change correctness, arbitrary archive performance, or adversarial-peer security.
 Separate protocol, authority, storage-failure and cancellation tests remain necessary.
 
-Execution is pending the root agent's serial native build and test run. Static API inspection,
-formatting and whitespace checks completed; independent review found no remaining blocker/high
-after correcting worker lifetime during close and replacing an exclusive socket-bind teardown
-probe with the real driver lifetime signal. Record actual command, revision, selected counts,
-failures and final results here after execution; this document does not claim either test passed.
+At `255817f`, both variants passed in 281.53 seconds: 2 passed, 0 failed, 0 ignored,
+299 filtered out. Command (from the repository root):
+
+```powershell
+cargo test --locked --offline --manifest-path apps/desktop/src-tauri/Cargo.toml --lib -j1 six_client_native_ -- --test-threads=2
+```
+
+Output: `logs/six-client-native-scenarios.log`. This first run preceded the explicit isolated
+delivery-proof assertions added in `4980edd`; it is not evidence for those later assertions.
+At Rust source revision `1912b34`, the complete native suite passed:
+**301 passed, 0 failed, 0 ignored, 0 filtered out in 263.32 seconds**, including both scenario
+variants with the added delivery-proof assertions. Command:
+
+```powershell
+cargo test --locked --offline --manifest-path apps/desktop/src-tauri/Cargo.toml --lib -j1 -- --test-threads=2
+```
+
+Output: `logs/six-client-native-suite-final.log`. Strict core/native Clippy and the unchanged
+ambient-dependency gate also passed at the same Rust source revision. A prior build exhausted
+local disk space before testing; only generated build artifacts were removed to make room.
+That failed build is not passing evidence and did not change the test bounds or source.
+
+Independent design and implementation reviews found no remaining blocker/high after fixing
+worker lifetime during close and replacing an exclusive socket-bind teardown probe with the
+real driver lifetime signal. The reviews also required negative isolated-history and delivery
+assertions, exact accepted IDs/authors, production discovery cadence, and convergence while
+command producers remain active. Root integration runs Cargo serially with dev/test debug
+information and incremental compilation disabled and a shared `target` directory.

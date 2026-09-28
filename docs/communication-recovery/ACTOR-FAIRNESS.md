@@ -88,8 +88,28 @@ Recorded integration evidence through `1912b34` (2026-09-28; paths name local ev
   `logs/six-client-sync-focused-final.log`.
 - Strict core and native Clippy passed at `1912b34`.
   `logs/six-client-core-clippy-final.log` and `logs/six-client-native-clippy.log`.
+- Existing integration binary `sync-f2b1660b382f34bc.exe`, built from that same Rust source,
+  passed **29 tests in 20.50s** with `--test-threads=1`. It covers bidirectional gossip,
+  removed-member access, missed/out-of-order commits, forks, late key-window recovery and
+  interrupted multi-member history exchange. `logs/six-client-sync-integration-final.log`.
+  The similarly built TCP and rendezvous integration binaries each passed their one test
+  (0.22s and 0.25s); `logs/six-client-tcp-integration-final.log` and
+  `logs/six-client-rendezvous-integration-final.log`.
 
-At this checkpoint the full native suite (301 tests) was running and the full sync suite
-(303 tests), including broader multi-page/legacy recovery coverage, was pending. Those suites are
-not claimed passed here. The new fairness regressions require no timeout inflation or idle command
-window.
+These integration binaries were built before the broad package command exhausted disk while
+linking a different target (`tcp_rendezvous_e2e`). They were then executed directly. The failed
+package invocation, `logs/six-client-sync-suite-final.log`, is not a full-package pass. The
+library suite is run separately with `cargo test --locked --offline -p catcoms-sync --lib -j1 -- --test-threads=2`.
+
+The subsequent full native suite at the same Rust source revision passed: **301 passed,
+0 failed, 0 ignored in 263.32s**, including both six-client variants and their negative delivery
+assertions. `logs/six-client-native-suite-final.log`; command and scope are in
+[SIX-CLIENT-RECOVERY.md](SIX-CLIENT-RECOVERY.md).
+
+The complete sync library run at that same Rust source revision passed: **303 passed, 0 failed,
+0 ignored in 224.74s**. It includes the large-history transfer-cost regression, multi-page and
+legacy recovery, reciprocal recovery, cancellation, membership and lifecycle checks.
+Output: `logs/six-client-sync-lib-final.log`. The other five integration targets were not executed
+in this final local checkpoint; the failed broad package link is not relabelled a full-package
+pass. Workspace/native formatting and the unchanged ambient-dependency gate passed. The new
+fairness regressions require no timeout inflation or idle command window.

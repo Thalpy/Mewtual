@@ -13,9 +13,10 @@ of present connectivity or delivery. Initial admission and unlock disclose when 
 members has no saved outgoing route: recovery may depend on another member connecting inbound or
 on discovery. An empty new founder does not receive that warning.
 
-The common admission helper already performs the connected, signed two-way finalization before
-PEX. A successful reply admission therefore supplies both endpoint proofs while the peer is
-available. The existing real-TCP test now explicitly asserts those proofs before the unchanged
+The common admission helper already attempts the connected, signed two-way finalization before
+PEX. When that exchange succeeds, reply admission supplies both endpoint proofs while the peer
+is available; membership success alone is not endpoint proof. The existing real-TCP test explicitly
+asserts those proofs before the unchanged
 immediate close/restart route checks, in both restart orders. No extra finalization pass was added
 to make that fixture pass. If the peer leaves before verification, close preserves the obligation
 and discloses the missing outgoing route; it cannot manufacture a usable route.
@@ -56,6 +57,8 @@ Recorded integration evidence through `1912b34` (2026-09-28; paths name local ev
 - Strict core and native Clippy passed at `1912b34`.
   `logs/six-client-core-clippy-final.log` and `logs/six-client-native-clippy.log`.
 
-At this checkpoint the full native suite (301 tests) was running and the full sync suite
-(303 tests) was pending. Their success is not inferred from these focused results. Actor recovery
-and retained-history evidence is recorded separately in [ACTOR-FAIRNESS.md](ACTOR-FAIRNESS.md).
+The subsequent complete native run at the same Rust source revision passed: **301 passed,
+0 failed, 0 ignored in 263.32s**, including both six-client scenarios and the offline-close
+regression. Command: `cargo test --locked --offline --manifest-path apps/desktop/src-tauri/Cargo.toml --lib -j1 -- --test-threads=2`.
+Output: `logs/six-client-native-suite-final.log`. Full sync execution is recorded separately in
+[ACTOR-FAIRNESS.md](ACTOR-FAIRNESS.md); native success does not stand in for that result.
