@@ -44,14 +44,36 @@ at fixture setup, compilation or a timeout. Restore the source byte-for-byte and
 run it again. This proves the cross-fixture mechanism, rather than attributing
 every historical scheduling failure to it without evidence.
 
-Required checks, owned by the root agent; not executed in this implementation lane:
+Executed on Windows at `c2d4cb4` with locked/offline dependencies, serial Cargo,
+debug information disabled, and the shared root target directory:
+
+| Check | Result |
+| --- | --- |
+| Shared capacity/cancelled custody plus the five succession regressions | 6 passed, 0 failed |
+| Three owner-return variants together, `--test-threads=3` | 3 passed, 0 failed; 11.92 seconds |
+| Saturation case alone with `--ignored --test-threads=1` | 1 passed, 0 failed; 8.19 seconds |
+| Remove only the test actor pool configuration | Expected assertion failure: `preview 0 never became ready`; 0 passed, 1 failed |
+| Restore the actor source byte-for-byte, verify its SHA-256, rerun saturation | 1 passed, 0 failed; 8.61 seconds |
+
+The three installation cases completed within the unchanged 40,000-ms simulated
+budget (22,750 ms for Ready and 33,000 ms for each of the other cases). Raw outputs
+are `logs/pr29-r5-core-focused-final.log`, `logs/pr29-owner-return-parallel.log`,
+`logs/pr29-owner-return-contention.log`, `logs/pr29-owner-return-mutation.log`, and
+`logs/pr29-owner-return-restored.log`. The mutation compiled and failed the intended
+assertion; it was not a build-error or zero-test result. The initial integration
+compile found four missing `Arc` qualifications in test-only dispatch; those were
+corrected before these passing runs.
+
+Reproduction commands (add the environment settings above):
 
 ```text
 cargo test -p catcoms-app --lib actor_preparation_classes_share_capacity_and_cancelled_custody
 cargo test -p catcoms-app --lib studio_actor_owner_return_installs_both_classes -- --nocapture --test-threads=3
 cargo test -p catcoms-app --lib studio_actor_owner_return_survives_unrelated_process_pool_contention -- --ignored --nocapture --test-threads=1
-cargo test -p catcoms-app --lib studio_exchange::tests:: -- --test-threads=4
 ```
+
+The broad parallel `studio_exchange::tests::` suite and supported-platform CI are
+separate checks; these focused results do not claim they have passed.
 
 There remains a wall-clock handoff in the fixture: after waiting for known local
 CPU work, it gives detached transport completions five milliseconds before

@@ -12,6 +12,9 @@ evidence, not a claim that later changes passed those same complete suites.
 The subsequent PR #29 corrections and their independent pushes are recorded in
 [PR29-REVIEW.md](PR29-REVIEW.md): fair member finalization, bounded peer-diverse restart
 routes, a vault-wide pending-message manager, and bounded local ancestry certificates.
+The subsequent close-race correction and CI investigation are recorded in
+[PR29-REREVIEW.md](PR29-REREVIEW.md). Its evidence supersedes only the named failures;
+the older full-suite and platform limitations below remain historical records.
 
 ## Comparison with the supplied plan
 
