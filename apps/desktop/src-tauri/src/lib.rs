@@ -11426,6 +11426,8 @@ struct SendMessageResult {
 /// Note what is not recorded: the message. Not its text, not its length, not its recipient. The
 /// channel becomes a session reference and the stage names carry the diagnosis.
 #[tauri::command]
+// Keep the established flat native command payload, including the durable retry fields.
+#[allow(clippy::too_many_arguments)]
 async fn send_message(
     state: State<'_, AppState>,
     server: u64,
