@@ -55,6 +55,7 @@ use zeroize::Zeroizing;
 
 mod admission_storage;
 mod creative_blobs;
+mod discovery_timer;
 mod durable_chat;
 mod errors;
 mod group_policy;
@@ -1822,8 +1823,7 @@ fn delivery_payload(snapshot: catcoms_app::DeliverySnapshot) -> DeliverySnapshot
 /// Forward one server actor's event stream to the frontend, tagging each with `server`.
 /// How often, on average, the bridge nudges a server's actor to drive steady-state discovery
 /// (rendezvous re-register/re-discover, member PEX, address-cache refresh). The real-time
-/// interval lives HERE (in the bridge / `apps`, off the deterministic-time seam the `crates`
-/// ambient gate enforces; `scripts/check-no-ambient.sh` searches `crates` and `bins` only).
+/// interval lives in the native bridge; the shared cadence runner uses the injected Clock seam.
 const DISCOVERY_INTERVAL_SECS: u64 = 60;
 /// Half-width of the random jitter applied to every discovery period, so the actual cadence is
 /// uniform over `[60s - 15s, 60s + 15s)`.
@@ -1989,7 +1989,7 @@ fn spawn_discovery_timer(app: AppHandle, server: u64, instance: u64, actor: Serv
     // Subscribe before spawning so a network change between server registration and the task's
     // first poll cannot be lost. The current startup sample is already authoritative; only future
     // generations wake this server early.
-    let mut network_changes = app.state::<AppState>().network_changes.subscribe();
+    let network_changes = app.state::<AppState>().network_changes.subscribe();
     // Declared before the task starts, so the handle exists for the loop to beat on.
     let watched = tasks::register(
         "discovery_timer",
@@ -2001,39 +2001,32 @@ fn spawn_discovery_timer(app: AppHandle, server: u64, instance: u64, actor: Serv
         Some(DISCOVERY_INTERVAL_SECS * 1_000 + DISCOVERY_JITTER_MS),
     );
     let task = tokio::spawn(async move {
-        // A short randomised start offset, then an independently randomised period each round.
-        let mut delay = jittered_delay(0, DISCOVERY_START_SPREAD_MS);
-        loop {
-            watched.beat(wall_ms());
-            tokio::select! {
-                _ = SystemClock.sleep(delay) => {}
-                changed = network_changes.changed() => {
-                    if changed.is_err() {
-                        break;
+        discovery_timer::run(
+            &SystemClock,
+            network_changes,
+            |base, spread| {
+                watched.beat(wall_ms());
+                jittered_delay(base, spread)
+            },
+            || {
+                let app = app.clone();
+                let actor = actor.clone();
+                async move {
+                    // Refresh before PEX so this pass can share the new interface's signed record.
+                    refresh_interface_routes(&app, server).await;
+                    if actor.drive_discovery().await.is_err() {
+                        return false;
                     }
+                    // Retry local durability independently of incoming chat or UI traffic.
+                    retry_pending_persistence(app.state::<AppState>().inner(), server, instance)
+                        .await;
+                    persist_address_cache(&app, server).await;
+                    persist_live_local_reconnect_routes(&app, server, instance, &actor).await;
+                    true
                 }
-            }
-            // Poll before PEX/rendezvous so a new interface address receives a fresh signed epoch
-            // and can be shared in this same discovery pass.
-            refresh_interface_routes(&app, server).await;
-            if actor.drive_discovery().await.is_err() {
-                break; // the actor stopped
-            }
-            // Failed local saves remain dirty even on a quiet channel. Retry the existing ticket
-            // on this bounded cadence rather than creating one worker or ticket per failed send.
-            retry_pending_persistence(app.state::<AppState>().inner(), server, instance).await;
-            // The pass just refreshed the member records; seal the cache on the same cadence, so
-            // the next launch starts from the members this one actually proved.
-            persist_address_cache(&app, server).await;
-            // Learn a currently connected member's private route as well. This upgrades pre-v3
-            // records after one successful overlap and updates the running actor without ever
-            // publishing the address to the group.
-            persist_live_local_reconnect_routes(&app, server, instance, &actor).await;
-            delay = jittered_delay(
-                DISCOVERY_INTERVAL_SECS * 1_000 - DISCOVERY_JITTER_MS,
-                DISCOVERY_JITTER_MS * 2,
-            );
-        }
+            },
+        )
+        .await;
     });
     supervise_registered("discovery_timer", Some(server), watched, task);
 }
