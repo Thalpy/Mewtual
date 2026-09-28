@@ -87,6 +87,9 @@ async fn stale_commit_wait_keeps_its_stronger_gap_when_a_bare_probe_fills_the_qu
     let (_, mut members, ids) = crate::tests::build_members(2).await;
     let mut b = members.pop().unwrap();
     let mut a = members.pop().unwrap();
+    // The bare core fixture has no host handoff; remember its actual admission contact only
+    // as an untrusted candidate. Response authority still comes from the signed exchange.
+    b.note_candidate_peer(a.local_peer());
     let epoch = b.group.epoch();
     b.config.max_catchup_queue = 1;
     b.catchup_queue.clear();
@@ -176,6 +179,7 @@ async fn removed_member_discards_owned_response_without_retiring_its_recovery_ob
     let (_, mut members, ids) = crate::tests::build_members(2).await;
     let mut b = members.pop().unwrap();
     let mut a = members.pop().unwrap();
+    b.note_candidate_peer(a.local_peer());
     a.open_channel(DocType::Channel, 901).await.unwrap();
     b.open_channel(DocType::Channel, 901).await.unwrap();
     a.post(DocType::Channel, 901, |doc| {
