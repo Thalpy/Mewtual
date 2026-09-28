@@ -54,6 +54,31 @@ Focused regression coverage lives in `catcoms-mls/tests/group_policy.rs`,
 `catcoms-sync/src/group_policy/tests.rs`, the app actor migration test and the existing product
 found/invite/join conversation test. Execution results belong in the feature integration report.
 
+## Studio succession fixture boundary
+
+The four `studio_actor_post_succession_joiner_*` cases exercise historical **legacy** admission,
+Studio history availability, and refusal to turn a former owner's checkpoint hint into current
+installation authority. Their group is now explicitly `LegacyUnverified` from construction, with
+that assertion repeated across restored successor and newcomer state. No established pin is
+removed or replaced. All other `Pair::new` Studio cases still use ordinary P2P founding.
+
+Source comparison attributes the fixture mismatch to
+`37c6e2f91d9be9fc6715f17d47e3ec7f9b7b7151`, which made `Server::found` initialize P2P policy and
+introduced the higher-leaf admission refusal. The Studio joining fixture is byte-identical at
+`48f9069`, `f77c82c`, and `d8f72ce` (blob `3a4997b450b544c07d9e71facfaa30878cebc9c6`);
+the enforcing policy module is also unchanged between `f77c82c` and `d8f72ce`. The four failures
+reported in CI run `36328899735` therefore expose that earlier fixture/contract mismatch, rather
+than a new policy change in the six follow-up commits. This is source attribution, not a claim
+that the full earlier test baselines were executed locally.
+
+The separate app regression
+`studio_actor_restored_p2p_successor_preserves_policy_and_refuses_unprovable_admission` keeps a
+founder-signed pin through removal and encrypted-store reopen, confirms the departed founder is
+not current authority, and expects `AdmissionAuthorityUnavailable` without changing the MLS
+epoch, saved policy or retained message history. The sync regression also checks actual admission
+refusal before Add or nonce consumption. These tests do not implement or claim P2P successor
+admission. That still requires the authenticated succession proof described above.
+
 The native read-only `group_communication_mode` command queries the exact actor incarnation and
 checks the unlocked UI generation again before returning. Settings shows that authenticated mode,
 including explicit unresolved legacy state. Invite preview shows only the signed declaration and
