@@ -11320,7 +11320,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         // them. Sources are drawn from untrusted candidates as well as proven members, and an
         // empty bundle carries no sealed operation to authenticate, so without this a stranger
         // could end a catch-up, invent a continuation, or push us between sources at will.
-        let (responder_pubkey, signature, answer) = decode_signed_commit_resp(&resp)?;
+        let (responder_pubkey, signature, answer) = decode_signed_commit_resp(resp)?;
         let responder = DeviceId::from_public_key_bytes(&responder_pubkey);
         if !self.group.contains_device(&responder) {
             self.demote_member_peer(peer);
@@ -11553,7 +11553,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         let applied = if resp.is_empty() {
             0 // peer had nothing for this document
         } else {
-            self.apply_catchup_response(doc_type, doc_id, &resp)?
+            self.apply_catchup_response(doc_type, doc_id, resp)?
         };
         if applied > 0 {
             self.clear_sources_checked(doc_type, doc_id);
@@ -12018,7 +12018,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         // (6e-3d-6, below), closing the same-millisecond `ts`-collision window; so a
         // captured member response cannot be replayed against a different request. An
         // invalid response fills no gap, so the drain marks it failed.
-        let (responder_pubkey, signature, bundle) = decode_signed_commit_resp(&resp)?;
+        let (responder_pubkey, signature, bundle) = decode_signed_commit_resp(resp)?;
         let group_id = self.group.group_id();
         let responder = DeviceId::from_public_key_bytes(&responder_pubkey);
         let my_pubkey = self.device.public_key_bytes();
