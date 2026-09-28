@@ -327,7 +327,7 @@ async fn quiet_catchup_wakes_after_cooldown_without_a_network_event() {
 
 #[tokio::test]
 async fn simultaneous_reciprocal_catchup_serves_both_owners_without_a_timeout() {
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
     let (_old_hub, mut original, _) = tests::build_members(2).await;
     for member in &mut original {
@@ -388,25 +388,35 @@ async fn simultaneous_reciprocal_catchup_serves_both_owners_without_a_timeout() 
     ];
     let observed_a = AtomicUsize::new(1);
     let observed_b = AtomicUsize::new(1);
+    let requests_at_a_convergence = AtomicU64::new(0);
+    let requests_at_b_convergence = AtomicU64::new(0);
     {
         let drive = futures::future::join(
             async {
                 loop {
                     assert!(alice.run_once().await.unwrap());
-                    observed_a.store(
-                        alice.doc(DocType::Channel, CHANNEL).unwrap().op_count(),
-                        Ordering::SeqCst,
-                    );
+                    let count = alice.doc(DocType::Channel, CHANNEL).unwrap().op_count();
+                    if count == 2 && observed_a.load(Ordering::SeqCst) != 2 {
+                        requests_at_a_convergence.store(
+                            alice.stats().doc_catchups_requested - requests_before[0],
+                            Ordering::SeqCst,
+                        );
+                    }
+                    observed_a.store(count, Ordering::SeqCst);
                     tokio::task::yield_now().await;
                 }
             },
             async {
                 loop {
                     assert!(bob.run_once().await.unwrap());
-                    observed_b.store(
-                        bob.doc(DocType::Channel, CHANNEL).unwrap().op_count(),
-                        Ordering::SeqCst,
-                    );
+                    let count = bob.doc(DocType::Channel, CHANNEL).unwrap().op_count();
+                    if count == 2 && observed_b.load(Ordering::SeqCst) != 2 {
+                        requests_at_b_convergence.store(
+                            bob.stats().doc_catchups_requested - requests_before[1],
+                            Ordering::SeqCst,
+                        );
+                    }
+                    observed_b.store(count, Ordering::SeqCst);
                     tokio::task::yield_now().await;
                 }
             },
@@ -425,7 +435,13 @@ async fn simultaneous_reciprocal_catchup_serves_both_owners_without_a_timeout() 
         assert_eq!(observed_b.load(Ordering::SeqCst), 2);
     }
     assert_eq!(clock.monotonic_ms(), started_at);
-    for (member, before) in [(&alice, requests_before[0]), (&bob, requests_before[1])] {
+    // Applying new history queues a confirmation at the new frontier. The faster owner may
+    // start that legitimate follow-up while the other owner is still completing its first
+    // response, so count only requests made before each owner's first complete history.
+    for (member, requests_at_convergence, peer) in [
+        (&alice, &requests_at_a_convergence, peers[1]),
+        (&bob, &requests_at_b_convergence, peers[0]),
+    ] {
         let document = member.doc(DocType::Channel, CHANNEL).unwrap();
         assert_eq!(document.op_count(), 2);
         assert_eq!(
@@ -443,10 +459,11 @@ async fn simultaneous_reciprocal_catchup_serves_both_owners_without_a_timeout() 
             Some("B")
         );
         assert_eq!(
-            member.stats().doc_catchups_requested - before,
+            requests_at_convergence.load(Ordering::SeqCst),
             1,
             "each original request completes without timeout or retry"
         );
+        assert!(!member.catchup_peer_is_cooling(peer, DocType::Channel, CHANNEL));
     }
 }
 
