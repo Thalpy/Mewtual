@@ -27,6 +27,12 @@ duplicate IDs are rejected separately.
 8. Close all six. Reopen each client alone, one at a time, and require the entire union from that
    client's own encrypted store before closing it again.
 
+While 4 is alone, and while 5 and 6 remain mutually isolated after the periodic discovery pass,
+the fixture queries each actor's delivery snapshot for exactly its new native-accepted IDs.
+Each ID must be present once with `delivered == 0` and `any_peer == false`. Local durable
+acceptance therefore cannot be mistaken for remote delivery proof. These negative assertions
+do not apply to old common-history IDs, which may have legitimate prior delivery evidence.
+
 ## Native paths and bootstrap boundary
 
 Sends call `durable_chat::send` with a stable token and original authoring context. The fixture

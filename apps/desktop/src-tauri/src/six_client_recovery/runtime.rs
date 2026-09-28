@@ -239,6 +239,40 @@ impl Running {
         history
     }
 
+    pub async fn assert_no_remote_delivery(&self, accepted_ids: &[String]) {
+        assert!(
+            !accepted_ids.is_empty(),
+            "check the newly accepted isolated sends"
+        );
+        let snapshot = bounded(
+            "native delivery proof snapshot",
+            self.actor.delivery_snapshot(channel_id("general")),
+        )
+        .await
+        .unwrap();
+        for id in accepted_ids {
+            let states: Vec<_> = snapshot
+                .states
+                .iter()
+                .filter(|state| &state.id == id)
+                .collect();
+            assert_eq!(
+                states.len(),
+                1,
+                "new native-accepted ID must have one delivery state: {id}"
+            );
+            let state = states[0];
+            assert_eq!(
+                state.delivered, 0,
+                "local durable acceptance is not proof that another member holds {id}"
+            );
+            assert!(
+                !state.any_peer,
+                "an isolated sender cannot claim a live proven peer for {id}"
+            );
+        }
+    }
+
     pub async fn send(&self, token_number: u128, text: &str) -> String {
         let channel = channel_id("general").to_string();
         let token = hex::encode(token_number.to_be_bytes());

@@ -161,7 +161,7 @@ impl Scenario {
                         MlsDevice::generate().unwrap(),
                         ChaCha20Rng::seed_from_u64(90 + index as u64),
                         Box::new(self.clock.clone()),
-                        &format!("client {}", index + 1),
+                        format!("client {}", index + 1),
                         self.rules.peers[0],
                         &invite,
                     ),
@@ -378,17 +378,25 @@ impl Scenario {
         }
     }
 
-    async fn author(&mut self, indices: &[usize], phase: &str, history: &mut History) {
+    async fn author(
+        &mut self,
+        indices: &[usize],
+        phase: &str,
+        history: &mut History,
+    ) -> Vec<String> {
+        let mut accepted_ids = Vec::with_capacity(indices.len());
         for index in indices {
             self.token += 1;
             let text = format!("{phase}: original client {}", index + 1);
             let id = self.online(*index).send(self.token, &text).await;
             let author = fingerprint(&self.clients[*index].identity.as_ref().unwrap().1);
             assert!(
-                history.insert(id, (author, text)).is_none(),
+                history.insert(id.clone(), (author, text)).is_none(),
                 "native acceptance reused an ID"
             );
+            accepted_ids.push(id);
         }
+        accepted_ids
     }
 
     async fn converge(&self, indices: &[usize], expected: &History, phase: &str) {
@@ -468,19 +476,23 @@ async fn six_client_scenario(hostile: bool) {
 
     scenario.reopen(&[3]).await;
     let mut second_partition = common.clone();
-    scenario
+    let solo_ids = scenario
         .author(&[3], "client 4 completely alone", &mut second_partition)
         .await;
     scenario
         .converge(&[3], &second_partition, "offline native acceptance on 4")
+        .await;
+    scenario
+        .online(3)
+        .assert_no_remote_delivery(&solo_ids)
         .await;
     scenario.close(&[3]).await;
 
     scenario.reopen(&[4, 5]).await;
     let mut fifth = common.clone();
     let mut sixth = common.clone();
-    scenario.author(&[4], "isolated client 5", &mut fifth).await;
-    scenario.author(&[5], "isolated client 6", &mut sixth).await;
+    let fifth_ids = scenario.author(&[4], "isolated client 5", &mut fifth).await;
+    let sixth_ids = scenario.author(&[5], "isolated client 6", &mut sixth).await;
     let starting_passes = [
         scenario.online(4).passes.load(Ordering::Acquire),
         scenario.online(5).passes.load(Ordering::Acquire),
@@ -505,6 +517,14 @@ async fn six_client_scenario(hostile: bool) {
         sixth,
         "6 cannot receive 5, 4's solo send, or the 1-2-3 batch"
     );
+    scenario
+        .online(4)
+        .assert_no_remote_delivery(&fifth_ids)
+        .await;
+    scenario
+        .online(5)
+        .assert_no_remote_delivery(&sixth_ids)
+        .await;
     assert!(scenario
         .online(4)
         .mesh
