@@ -7,10 +7,9 @@
 //! directly over the in-memory transport.
 //!
 //! The task `select!`s between the command channel and `Server::sync_once`. When a
-//! command arrives mid-`sync_once`, the in-flight `sync_once` is cancelled; safe at its
-//! only real suspension point (`next_event`, which leaves the event queued); a cancel
-//! during the brief pre-event recovery work may at worst drop an in-flight catch-up,
-//! which the recovery machinery re-detects on the next inbound event (self-healing).
+//! command arrives mid-`sync_once`, that poll is cancelled. Queued recovery retains its
+//! single network wait and exact request context on the sync owner, while ready actor sources
+//! rotate so sustained command traffic cannot suppress inbound work or timer wakes.
 
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
@@ -31,6 +30,9 @@ use crate::{
     StorageSnapshot, SwitchboardOffer, WikiPendingEdit, WikiRevision,
 };
 
+mod fair;
+#[cfg(test)]
+mod fair_tests;
 mod file_transfers;
 
 /// Per drive: how long to wait for a discovered record before concluding the queue is drained.
@@ -3824,6 +3826,7 @@ where
         // Startup persistence belongs to the host. Thereafter raw versions are independent of
         // the UI's change detector: an accepted signed operation can leave its projection equal.
         let mut snapshot_versions = SnapshotVersions::capture(&server);
+        let mut ready_cursor = 0;
         loop {
             // Check at the owner boundary, including after a command cancelled a sync tick that
             // already applied a valid prefix. No snapshot I/O belongs in this event channel.
@@ -3858,9 +3861,37 @@ where
                 }
             };
             tokio::pin!(delivery_wake);
-            tokio::select! {
-                biased;
-                reset = studio_preview_resets.changed(), if studio_preview_resets_open => {
+            let turn = fair::next(
+                &mut ready_cursor,
+                async {
+                    if studio_preview_resets_open {
+                        studio_preview_resets.changed().await
+                    } else {
+                        std::future::pending().await
+                    }
+                },
+                async {
+                    if !studio_jobs.is_empty() {
+                        studio_jobs.join_next().await
+                    } else {
+                        std::future::pending().await
+                    }
+                },
+                cmd_rx.recv(),
+                async {
+                    if !file_transfers.is_empty() {
+                        file_transfers.next().await
+                    } else {
+                        std::future::pending().await
+                    }
+                },
+                delivery_wake,
+                server.sync_once(),
+            )
+            .await;
+            #[rustfmt::skip]
+            match turn {
+                fair::Turn::Reset(reset) => {
                     event_tx.idle();
                     if reset.is_ok() { studio_receiver.clear_previews(); }
                     else { studio_preview_resets_open = false; }
@@ -3868,7 +3899,7 @@ where
                 // Consume an already-completed bounded Studio job before granting another
                 // native lease. A continuously ready command queue must not leave a fetched
                 // page/preparation marked in-flight forever. Pending work never blocks commands.
-                completed = studio_jobs.join_next(), if !studio_jobs.is_empty() => {
+                fair::Turn::Studio(completed) => {
                     event_tx.idle();
                     match completed {
                         Some(Ok(result)) => studio_receiver.complete(&mut server, result),
@@ -3879,7 +3910,7 @@ where
                 // `begin` unwraps the envelope and adopts the caller's operation for as long as
                 // this arm runs, so every event the arm emits is attributed to the command that
                 // caused it without any of the fifty arms below having to mention it.
-                cmd = cmd_rx.recv() => match event_tx.begin(cmd) {
+                fair::Turn::Command(cmd) => match event_tx.begin(cmd) {
                     Some(AppCommand::CreateChannel { name, reply }) => {
                         let res = server.create_channel(&name).await.map_err(|e| e.to_string());
                         // The creator already opened this document as part of create_channel.
@@ -5205,13 +5236,11 @@ where
                         break;
                     }
                 },
-                // Queued commands have priority even when a local-copy worker is already ready.
-                // Do not add an immediate fallback that polls/drops sync_once: legacy outbox
-                // drains may own unpublished work across an await. Local Keep yields each chunk;
-                // an all-local finite copy can still delay background sync, never queued commands.
+                // Ready local-copy work shares the finite rotation with commands and sync.
+                // Local Keep yields each chunk; network waits own no mutable Server borrow.
                 // Network waits own no Server borrow. A ready result is committed against the
                 // current index/membership before another chunk or provider can be admitted.
-                completed = file_transfers.next(), if !file_transfers.is_empty() => {
+                fair::Turn::File(completed) => {
                     event_tx.idle();
                     if let Some(completed) = completed {
                         file_transfers.complete(&mut server, completed);
@@ -5220,7 +5249,7 @@ where
                 // A receipt may be the final network event in a quiet room. Wake from the same
                 // injected clock used to start the throttle so the last coalesced state is still
                 // surfaced without waiting for unrelated traffic.
-                _ = &mut delivery_wake => {
+                fair::Turn::Delivery => {
                     event_tx.idle();
                     for (channel, snapshot) in recompute_due_delivery(
                         &mut server,
@@ -5235,7 +5264,7 @@ where
                 // Work nobody asked for. An op arriving from a peer is not the consequence of the
                 // last local command, and attributing it to one would invent a causal link that a
                 // reader would go on to trust.
-                cont = server.sync_once() => { event_tx.idle(); match cont {
+                fair::Turn::Sync(cont) => { event_tx.idle(); match cont {
                     Ok(true) => {
                         studio_receiver.signal(&server, &studio_signal);
                         if server.has_pending_reciprocal() {
@@ -7572,10 +7601,9 @@ mod tests {
         .expect("Carol did not receive Alice's message");
 
         // Other post-send protocol traffic can establish the throttled baseline at zero before
-        // the first receipt arrives. Poll the underlying authenticated state slowly enough to
-        // leave the biased command arm idle between reads. This establishes that both requests
-        // were accepted while the injected clock remains fixed, not by introducing a third
-        // network event.
+        // the first receipt arrives. Repeated reads must share turns with inbound receipt work.
+        // This establishes both requests were accepted while the injected clock remains fixed,
+        // without relying on an idle command window or introducing a third network event.
         timeout(Duration::from_secs(10), async {
             loop {
                 if alice

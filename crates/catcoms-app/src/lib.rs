@@ -8125,7 +8125,10 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
     /// Advance the server: process one inbound network event (after draining the outbox
     /// and any recovery). Returns `false` once the transport has closed. The bridge
     /// layer drives this in a background loop; tests drive it explicitly.
-    pub async fn sync_once(&mut self) -> Result<bool, AppError> {
+    pub async fn sync_once(&mut self) -> Result<bool, AppError>
+    where
+        T: 'static,
+    {
         let cont = self.sync.run_once().await?;
         // Publish anything the tick admitted, and refresh the companion → origin registry the
         // sync layer's depth-1 admission gate reads (multi-device M3).

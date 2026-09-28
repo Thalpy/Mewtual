@@ -60,6 +60,7 @@ use zeroize::Zeroizing;
 
 mod blob_fetch;
 mod member_finalization;
+mod recovery_wait;
 use member_finalization::KIND_MEMBER_FINALIZE;
 pub use member_finalization::{
     MAX_MEMBER_FINALIZATION_OBSERVATIONS, MEMBER_FINALIZATION_WORK_PER_PASS,
@@ -4153,8 +4154,10 @@ pub struct ChannelSync<T: MeshTransport, R: CryptoRngCore> {
     /// survives cooldown and provider changes; only applied history or completion resets it.
     catchup_empty_page_grace: HashMap<(DocType, u128, PeerId), usize>,
     /// The task whose request is in flight right now, held here rather than on the stack so that
-    /// cancelling the tick cannot lose it. Restored to the queue by the next drain.
+    /// cancelling the tick cannot lose it. Its exact response wait also remains on this owner.
     catchup_inflight: Option<(CatchupTask, Option<PeerId>)>,
+    pending_catchup: Option<recovery_wait::PendingCatchup>,
+    prefer_catchup_response: bool,
     /// `(document, peer)` to the elapsed time before which that peer is not worth asking about
     /// that document again. See [`CATCHUP_PEER_COOLDOWN_MS`].
     catchup_cooldowns: HashMap<(DocType, u128, PeerId), u64>,
@@ -4507,6 +4510,8 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             catchup_stalls: HashMap::new(),
             catchup_empty_page_grace: HashMap::new(),
             catchup_inflight: None,
+            pending_catchup: None,
+            prefer_catchup_response: true,
             catchup_cooldowns: HashMap::new(),
             catchup_continuations: HashMap::new(),
             catchup_sources_checked: HashMap::new(),
@@ -5662,7 +5667,10 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         }
     }
 
-    pub async fn run_once(&mut self) -> Result<bool, SyncError> {
+    pub async fn run_once(&mut self) -> Result<bool, SyncError>
+    where
+        T: 'static,
+    {
         self.drain_durable_chat().await;
         // Admin invites (Option C): re-broadcast any pending Add-request whose retry elapsed
         // (caught up by the owner on its reconnect), then flush the Welcome a result produced;
@@ -5702,30 +5710,11 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             self.drain_welcome_outbox().await;
             return Ok(true);
         }
-        // Perform recovery work queued by the previous event (commit/doc catch-up).
-        // A tick that spent its turn fetching catch-up yields here instead of
-        // blocking on a fresh event; the recovery *was* this tick's work.
-        if self.drain_catchup_queue().await {
+        // Network waits remain owned on self across a cancelled actor selection. One request
+        // is in flight at a time, and inbound requests remain serviceable while it waits.
+        self.start_queued_catchup();
+        let Some(event) = self.next_recovery_or_event().await else {
             return Ok(true);
-        }
-
-        let retry_delay = [
-            self.next_catchup_retry_delay(),
-            self.next_durable_chat_retry_delay(),
-        ]
-        .into_iter()
-        .flatten()
-        .min();
-        let event = if let Some(delay_ms) = retry_delay {
-            let next_event = self.transport.next_event();
-            let retry = self.clock.sleep(std::time::Duration::from_millis(delay_ms));
-            futures::pin_mut!(next_event, retry);
-            match futures::future::select(next_event, retry).await {
-                futures::future::Either::Left((event, _)) => event,
-                futures::future::Either::Right(((), _)) => return Ok(true),
-            }
-        } else {
-            self.transport.next_event().await
         };
         match event {
             None => Ok(false),
@@ -5844,15 +5833,22 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     /// by `max_outbox` (drop oldest on overflow so a persistently failing transport
     /// cannot grow the queue without bound).
     async fn drain_outbox(&mut self) {
-        let pending = std::mem::take(&mut self.outbox);
-        for (topic, bytes) in pending {
+        let mut index = 0;
+        let remaining = self.outbox.len();
+        for _ in 0..remaining {
+            let (topic, bytes) = self.outbox[index].clone();
+            // Queue ownership survives a cancelled actor poll, including a transport which
+            // submitted its command but has not yet acknowledged it. Exact retries may duplicate
+            // delivery; they cannot manufacture another signed operation or lose this one.
             if self
                 .transport
-                .publish(topic.clone(), Bytes::from(bytes.clone()))
+                .publish(topic, Bytes::from(bytes))
                 .await
-                .is_err()
+                .is_ok()
             {
-                self.outbox.push((topic, bytes));
+                self.outbox.remove(index);
+            } else {
+                index += 1;
             }
         }
         while self.outbox.len() > self.config.max_outbox {
@@ -5864,59 +5860,24 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     /// request/response (best-effort: if the joiner is unreachable the join just
     /// fails and the joiner retries).
     async fn drain_welcome_outbox(&mut self) {
-        let pending = std::mem::take(&mut self.welcome_outbox);
-        for (joiner, payload) in pending {
+        while let Some((joiner, payload)) = self.welcome_outbox.first().cloned() {
             let mut req = vec![KIND_WELCOME];
             req.extend_from_slice(&payload);
             let _ = self
                 .transport
                 .request(joiner, ProtocolId(RR_PROTOCOL), Bytes::from(req))
                 .await;
+            // Existing best-effort disposition applies only after the attempt resolves.
+            self.welcome_outbox.remove(0);
         }
     }
 
-    /// Perform any queued recovery (commit / document catch-up). Tasks queued
-    /// while servicing this drain wait for the next `run_once`, so one tick does
-    /// bounded work. Returns `true` if at least one catch-up request was attempted
-    /// (so `run_once` can yield rather than block on a fresh event); a task with
-    /// no known peer is re-queued and does not count.
-    async fn drain_catchup_queue(&mut self) -> bool {
-        // A task in flight when this future is dropped is put back before anything else happens.
-        //
-        // The actor races `sync_once` against UI commands and its own timer, so any await in here
-        // can simply stop existing mid-tick. The queue used to be emptied into a local vector
-        // before the first request, which meant a cancelled tick took the in-flight task and
-        // every task behind it with it, and nothing remembered the gap: a quiet document has no
-        // later inbound op to rediscover it with, so a UI keystroke could make a channel
-        // permanently short for the rest of the session. Ownership stays on `self` instead: one
-        // task moves into `catchup_inflight` for exactly as long as its request lasts, and the
-        // rest are left in the queue where they started.
-        if let Some((interrupted, asked)) = self.catchup_inflight.take() {
-            // The peer it was mid-conversation with is cooled off before the task goes back.
-            // Without that, a tick cancelled while blocked on an unresponsive peer re-picks the
-            // same peer on the very next tick and blocks again, which is how a node with a
-            // standing task stops serving anybody else: two of them chasing each other never let
-            // go. Cooling the pair off keeps the gap owned while freeing the tick.
-            tracing::debug!(
-                task = ?interrupted,
-                peer = ?asked,
-                "catch-up tick was cancelled mid-request; task restored to the front of the queue"
-            );
-            if let (Some(peer), CatchupTask::Doc { doc_type, doc_id }) = (asked, interrupted) {
-                self.cool_off_catchup_peer(peer, doc_type, doc_id);
-            }
-            // Restored ahead of the cap rather than through it. This task was already admitted
-            // before the drain took it, and the command that cancelled the tick may have filled
-            // the slot it vacated; refusing it there would discard proven recovery work in favour
-            // of work that has not been tried yet.
-            if !self.catchup_queue.contains(&interrupted) {
-                self.catchup_queue.insert(0, interrupted);
-            }
-        }
+    /// Select one queued recovery task with a currently live eligible source. Inspect at most
+    /// the queue admitted on entry; retain unavailable work without retrying it inside this turn.
+    fn select_queued_catchup(&mut self) -> Option<(CatchupTask, PeerId)> {
         // Bounded by what was queued on entry, so a task re-queued by this drain waits for the
         // next tick rather than being retried inside this one.
         let mut remaining = self.catchup_queue.len();
-        let mut attempted = false;
         while remaining > 0 {
             remaining -= 1;
             if self.catchup_queue.is_empty() {
@@ -6059,102 +6020,46 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
                 self.catchup_inflight = None;
                 continue;
             }
-            attempted = true;
             tracing::debug!(task = ?task, ?peer, "catch-up request starting");
-            // Now that a peer is chosen, record it with the task: if this tick is cancelled while
-            // waiting on it, the restore knows who not to ask again immediately.
+            // Record ownership before constructing the wait. Commands may cancel its poll,
+            // but the task and exact request remain together until completion or stale context.
             self.catchup_inflight = Some((task, Some(peer)));
-            match task {
-                CatchupTask::Commits {
-                    from_epoch, gap_at, ..
-                } => {
-                    let before = self.group.epoch();
-                    let outcome = self
-                        .do_commit_catchup(peer, from_epoch)
-                        .await
-                        .unwrap_or(CommitCatchupOutcome::Unanswered);
-                    let here = self.group.epoch();
-                    // "Filled" has to be judged against the proven gap, not against whether
-                    // the reply parsed: an empty bundle used to fall through both arms below,
-                    // marking nothing, so the next op re-picked the same peer forever.
-                    let progressed = here > before;
-                    // A request nobody answered closes nothing. Every other term below is already
-                    // satisfied for an initial probe (nothing buffered, no gap yet proven), so a
-                    // timeout or an unsigned reply retired it exactly as a member's "you are up
-                    // to date" does, and the task was neither re-queued nor handed to another
-                    // source: an ordinary member that missed an epoch while offline discarded its
-                    // own recovery on the way back and stayed unable to decrypt current traffic
-                    // until an unrelated event re-detected the gap.
-                    //
-                    // An empty response still closes it, because that is also what an up-to-date
-                    // member sends; see [`CommitCatchupOutcome::Empty`] for what that costs.
-                    //
-                    // A source that proved it cannot chain us closes nothing, however tidy its
-                    // answer looked. Until that outcome was typed it arrived as
-                    // `Verified { applied: 0 }` with an empty buffer, satisfied every term here,
-                    // and retired the recovery: the node then sat connected and permanently
-                    // behind, with nothing anywhere recording why. Falling through to the branch
-                    // below instead marks the source and re-queues, so the next drain asks
-                    // somebody whose log reaches further back.
-                    let closed = outcome.answered()
-                        && !matches!(outcome, CommitCatchupOutcome::Stranded { .. })
-                        && self.pending_commits.is_empty()
-                        && gap_at.is_none_or(|gap| here >= gap);
-                    tracing::debug!(
-                        ?peer,
-                        ?outcome,
-                        from_epoch,
-                        gap_at,
-                        epoch_before = before,
-                        epoch_after = here,
-                        buffered_commits = self.pending_commits.len(),
-                        closed,
-                        "commit catch-up finished"
-                    );
-                    if closed {
-                        if progressed {
-                            // Progress made: clear the failed-peer set and stop chasing.
-                            self.failed_catchup_peers.clear();
-                        }
-                    } else {
-                        if progressed {
-                            // It moved us but did not finish (a bundle truncated to the
-                            // response budget); it is still a good source, so keep asking it.
-                            self.failed_catchup_peers.clear();
-                        } else {
-                            // Nothing usable came back. An **empty** bundle lands here, and
-                            // that is the defect: a member that joined at the missed commit
-                            // holds no commit log, and leaving it unmarked made the drain
-                            // re-pick it, most-recently-seen, on every single op forever.
-                            //
-                            // An unanswered request lands here too, and is marked for the same
-                            // reason rather than because it proved anything: the task outlives
-                            // the attempt now, so without moving on the next drain would re-pick
-                            // the peer that just spent a whole tick's deadline saying nothing.
-                            // Any inbound traffic from it clears the mark again.
-                            self.note_failed_catchup_peer(peer);
-                        }
-                        self.enqueue_commit_catchup_for(here, gap_at, None);
-                    }
-                }
-                CatchupTask::Doc { doc_type, doc_id } => {
-                    // A failed request says nothing about whether the gap is still there, so the
-                    // task outlives it. Discarding the result left a timeout, a refusal or a
-                    // malformed answer looking exactly like a completed catch-up: the peer was
-                    // not marked, the document was not re-queued, and a second, healthy source
-                    // was never asked. The serving peer is marked for the same reason the commit
-                    // branch marks one, so the next drain picks somebody else.
-                    if let Err(e) = self
-                        .request_catchup_allowing_legacy(peer, doc_type, doc_id)
-                        .await
-                    {
-                        tracing::debug!(error = %e, ?doc_type, doc_id, ?peer, "doc catch-up failed");
-                        self.cool_off_catchup_peer(peer, doc_type, doc_id);
-                        self.enqueue_doc_catchup(doc_type, doc_id);
-                    }
+            return Some((task, peer));
+        }
+        None
+    }
+
+    /// Manual/test driver: retain the same wait-until-recovery-completes contract, while the
+    /// production owner polls the owned wait alongside inbound events.
+    #[cfg(test)]
+    async fn drain_catchup_queue(&mut self) -> bool
+    where
+        T: 'static,
+    {
+        let mut attempted = false;
+        let turns = self
+            .catchup_queue
+            .len()
+            .max(usize::from(self.pending_catchup.is_some()));
+        for _ in 0..turns {
+            self.start_queued_catchup();
+            if self.pending_catchup.is_none() {
+                break;
+            }
+            attempted = true;
+            loop {
+                let response = self
+                    .pending_catchup
+                    .as_mut()
+                    .expect("owned wait")
+                    .response
+                    .as_mut()
+                    .await;
+                self.complete_queued_catchup(response);
+                if self.pending_catchup.is_none() {
+                    break;
                 }
             }
-            self.catchup_inflight = None;
         }
         attempted
     }
@@ -6349,7 +6254,10 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         if self.catchup_queue.contains(&task) {
             return;
         }
-        if self.catchup_queue.len() >= self.config.max_catchup_queue {
+        if self.catchup_queue.len()
+            + usize::from(self.catchup_inflight.is_some_and(|(held, _)| held != task))
+            >= self.config.max_catchup_queue
+        {
             tracing::warn!("catch-up queue full; dropping a re-queued task");
             return;
         }
@@ -6685,7 +6593,13 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             };
             return;
         }
-        if self.catchup_queue.len() >= self.config.max_catchup_queue {
+        if self.catchup_queue.len()
+            + usize::from(
+                self.catchup_inflight
+                    .is_some_and(|(held, _)| !matches!(held, CatchupTask::Commits { .. })),
+            )
+            >= self.config.max_catchup_queue
+        {
             tracing::warn!("catch-up queue full; dropping a commit catch-up task");
             return;
         }
@@ -6714,7 +6628,10 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         if self.catchup_queue.contains(&task) {
             return;
         }
-        if self.catchup_queue.len() >= self.config.max_catchup_queue {
+        if self.catchup_queue.len()
+            + usize::from(self.catchup_inflight.is_some_and(|(held, _)| held != task))
+            >= self.config.max_catchup_queue
+        {
             tracing::warn!("catch-up queue full; dropping a doc catch-up task");
             return;
         }
@@ -7309,15 +7226,17 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     /// retry loop against a closed transport would be pure noise.
     async fn drain_evictions(&mut self) {
         self.reconcile_readmissions();
-        for peer in std::mem::take(&mut self.unevict_outbox) {
+        while let Some(peer) = self.unevict_outbox.first().copied() {
             if let Err(e) = self.transport.unevict_peer(peer).await {
                 tracing::debug!(error = %e, ?peer, "transport declined to lift an eviction");
             }
+            self.unevict_outbox.remove(0);
         }
-        for peer in std::mem::take(&mut self.eviction_outbox) {
+        while let Some(peer) = self.eviction_outbox.first().copied() {
             if let Err(e) = self.transport.evict_peer(peer).await {
                 tracing::debug!(error = %e, ?peer, "transport declined to evict a removed member");
             }
+            self.eviction_outbox.remove(0);
         }
     }
 
@@ -8597,22 +8516,25 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     /// socket, extend discovery authority or stall the actor on request/response; the recipient
     /// either receives this best-effort push or causal evidence remains the fallback.
     async fn drain_delivery_receipt_outbox(&mut self) -> bool {
-        let pending = std::mem::take(&mut self.delivery_receipt_outbox);
         let mut submitted = false;
-        for receipt in pending {
+        let mut index = 0;
+        for _ in 0..self.delivery_receipt_outbox.len() {
+            let receipt = self.delivery_receipt_outbox[index];
             if !self.group.contains_device(&receipt.author) {
+                self.delivery_receipt_outbox.remove(index);
                 continue;
             }
             let Some(peer) = self.transport_peer_of(&receipt.author) else {
-                self.delivery_receipt_outbox.push_back(receipt);
+                index += 1;
                 continue;
             };
             if !self.connected_peers.contains(&peer) {
-                self.delivery_receipt_outbox.push_back(receipt);
+                index += 1;
                 continue;
             }
             let inner = encode_delivery_receipt(receipt.doc_type, receipt.doc_id, receipt.change);
             let Ok((request, _)) = self.build_authed_request(KIND_DELIVERY_RECEIPT, &inner) else {
+                self.delivery_receipt_outbox.remove(index);
                 continue;
             };
             match self
@@ -8620,8 +8542,13 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
                 .notify_connected(peer, ProtocolId(RR_PROTOCOL), Bytes::from(request))
                 .await
             {
-                Ok(()) => submitted = true,
-                Err(_) => self.delivery_receipt_outbox.push_back(receipt),
+                Ok(()) => {
+                    self.delivery_receipt_outbox.remove(index);
+                    submitted = true;
+                }
+                Err(_) => {
+                    index += 1;
+                }
             }
         }
         while self.delivery_receipt_outbox.len() > MAX_DELIVERY_RECEIPT_OUTBOX {
@@ -9523,8 +9450,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
 
     async fn drain_repair_outbox(&mut self) {
         let now = self.clock.now_ms();
-        let pending = std::mem::take(&mut self.repair_outbox);
-        for item in pending {
+        while let Some(item) = self.repair_outbox.front().cloned() {
             if item.expires_at_ms < now
                 || !self.connected_peers.contains(&item.target)
                 || !item
@@ -9532,6 +9458,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
                     .iter()
                     .all(|reference| self.descriptor_ref_is_current(reference))
             {
+                self.repair_outbox.pop_front();
                 continue;
             }
             let _ = self
@@ -9542,6 +9469,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
                     Bytes::from(item.payload),
                 )
                 .await;
+            self.repair_outbox.pop_front();
         }
     }
 
@@ -11286,22 +11214,6 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         result
     }
 
-    /// [`Self::request_catchup`] with the whole-history compatibility request allowed.
-    ///
-    /// Only the recovery drain uses this. That request can legally take over two minutes, and the
-    /// drain runs inside the tick the actor cancels whenever a command arrives, so waiting there
-    /// costs nothing anybody is watching; the in-flight task survives the cancellation and is
-    /// tried again. A UI-facing command awaits its request inline and must not spend that long.
-    async fn request_catchup_allowing_legacy(
-        &mut self,
-        peer: catcoms_rt::PeerId,
-        doc_type: DocType,
-        doc_id: u128,
-    ) -> Result<usize, SyncError> {
-        self.request_catchup_inner(peer, doc_type, doc_id, true)
-            .await
-    }
-
     async fn request_catchup_inner(
         &mut self,
         peer: catcoms_rt::PeerId,
@@ -11377,6 +11289,17 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             CATCHUP_REQUEST_MS,
         )
         .await?;
+        self.apply_catchup_since_response(peer, doc_type, doc_id, req_auth, &resp)
+    }
+
+    fn apply_catchup_since_response(
+        &mut self,
+        peer: PeerId,
+        doc_type: DocType,
+        doc_id: u128,
+        req_auth: RequestAuth,
+        resp: &[u8],
+    ) -> Result<Option<usize>, SyncError> {
         // Nothing at all is the one answer that needs no proof, because it asserts nothing: it is
         // how a build that does not know this kind, and a peer that refused us, both reply.
         if resp.is_empty() {
@@ -11606,6 +11529,16 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             FULL_CATCHUP_REQUEST_MS,
         )
         .await?;
+        self.apply_full_catchup_response(peer, doc_type, doc_id, &resp)
+    }
+
+    fn apply_full_catchup_response(
+        &mut self,
+        peer: PeerId,
+        doc_type: DocType,
+        doc_id: u128,
+        resp: &[u8],
+    ) -> Result<usize, SyncError> {
         let applied = if resp.is_empty() {
             0 // peer had nothing for this document
         } else {
@@ -12048,6 +11981,15 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             CATCHUP_REQUEST_MS,
         )
         .await?;
+        self.apply_commit_catchup_response(peer, req_auth, &resp)
+    }
+
+    fn apply_commit_catchup_response(
+        &mut self,
+        peer: PeerId,
+        req_auth: RequestAuth,
+        resp: &[u8],
+    ) -> Result<CommitCatchupOutcome, SyncError> {
         if resp.is_empty() {
             return Ok(CommitCatchupOutcome::Empty);
         }
@@ -13530,14 +13472,15 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     /// Owner side: push finalized admit results to the requesting admins over RR (best-effort;
     /// the admin re-broadcasts the request if its result doesn't arrive).
     async fn drain_admit_result_outbox(&mut self) {
-        let pending = std::mem::take(&mut self.admit_result_outbox);
-        for (admin, payload) in pending {
+        while let Some((admin, payload)) = self.admit_result_outbox.first().cloned() {
             let mut req = vec![KIND_ADMIT_RESULT];
             req.extend_from_slice(&payload);
             let _ = self
                 .transport
                 .request(admin, ProtocolId(RR_PROTOCOL), Bytes::from(req))
                 .await;
+            // Existing best-effort disposition applies only after the attempt resolves.
+            self.admit_result_outbox.remove(0);
         }
     }
 
@@ -14043,14 +13986,15 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     /// Owner side: push finalized companion admit results to the relaying members over RR
     /// (best-effort; the relay re-broadcasts if its result doesn't arrive).
     async fn drain_device_admit_outbox(&mut self) {
-        let pending = std::mem::take(&mut self.device_admit_outbox);
-        for (relay, payload) in pending {
+        while let Some((relay, payload)) = self.device_admit_outbox.first().cloned() {
             let mut req = vec![KIND_DEVICE_ADMIT_RESULT];
             req.extend_from_slice(&payload);
             let _ = self
                 .transport
                 .request(relay, ProtocolId(RR_PROTOCOL), Bytes::from(req))
                 .await;
+            // Existing best-effort disposition applies only after the attempt resolves.
+            self.device_admit_outbox.remove(0);
         }
     }
 
@@ -20085,9 +20029,8 @@ mod tests {
             "and the rest of the queue was never moved off it"
         );
 
-        // The next tick takes the held one back before anything else, so both gaps are owned
-        // again by the queue itself. Driven under the same bound, because with nobody answering
-        // it will go straight back to waiting on the peer it picks.
+        // The next tick resumes the same held request. Both gaps remain owned without another
+        // request or a fresh nonce, even though commands repeatedly cancel their polling turn.
         let _ = tokio::time::timeout(
             std::time::Duration::from_millis(200),
             futures::future::join(bob.drain_catchup_queue(), async {
