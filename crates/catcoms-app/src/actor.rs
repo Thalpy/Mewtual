@@ -229,6 +229,12 @@ impl EventSink {
 #[derive(Debug)]
 pub enum AppCommand {
     #[cfg(test)]
+    StudioPreparationPoolsForTest {
+        shared: std::sync::Arc<tokio::sync::Semaphore>,
+        preview: std::sync::Arc<tokio::sync::Semaphore>,
+        reply: oneshot::Sender<()>,
+    },
+    #[cfg(test)]
     StudioSchedulingForTest {
         pause_parse: Option<(oneshot::Sender<()>, std::sync::mpsc::Receiver<()>)>,
         reply: oneshot::Sender<(Vec<catcoms_replication::studio::StudioTarget>, usize)>,
@@ -1181,6 +1187,24 @@ pub struct ServerActor {
 }
 
 impl ServerActor {
+    #[cfg(test)]
+    pub(crate) async fn studio_preparation_pools_for_test(
+        &self,
+        shared: std::sync::Arc<tokio::sync::Semaphore>,
+        preview: std::sync::Arc<tokio::sync::Semaphore>,
+    ) {
+        let (reply, result) = oneshot::channel();
+        self.cmd_tx
+            .send(AppCommand::StudioPreparationPoolsForTest {
+                shared,
+                preview,
+                reply,
+            })
+            .await
+            .unwrap();
+        result.await.unwrap();
+    }
+
     #[cfg(test)]
     pub(crate) async fn studio_scheduling_for_test(
         &self,
@@ -4292,6 +4316,11 @@ where
                             .seal_upload_chunk(&bytes, &mime)
                             .map_err(|e| e.to_string());
                         let _ = reply.send(res);
+                    }
+                    #[cfg(test)]
+                    Some(AppCommand::StudioPreparationPoolsForTest { shared, preview, reply }) => {
+                        studio_receiver.preparation_pools_for_test(shared, preview);
+                        let _ = reply.send(());
                     }
                     #[cfg(test)]
                     Some(AppCommand::StudioSchedulingForTest { pause_parse, reply }) => {
