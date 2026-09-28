@@ -48,6 +48,29 @@ or clear a newer composer. Lock invalidates completion callbacks. A failed write
 the original payload; an interrupted session asks the user to reopen the manager to check
 what reached the sealed record. Leaving a conversation does not erase pending requests.
 
+Orderly window close fences new continuity-save admissions, decisions and submission
+continuations before waiting for the already-admitted save queue. That queue includes each
+decision's synchronous `afterSave` memory commit. Only after it settles does close capture a
+fresh continuity snapshot and invoke native close. Waiting only for native write ordering is
+insufficient: a final snapshot captured while the old token remains in memory could overwrite
+the successful decision. A failed decision write retains the original request in the final
+snapshot; it is not reported as a successful cancellation or recovery.
+
+If the queue has not settled within ten seconds of browser timer time, this close attempt
+stops before native close and leaves the window open with a warning. It does not destroy or
+restart the process. The active decision remains fenced until it settles; the user can close
+again afterward. A UI-generation change also aborts that close attempt, preventing a snapshot
+from a replacement session from being used under the original close request.
+
+Ctrl+L still clears the view immediately. If it interrupts a decision before its memory
+commit, generation validation rejects that decision instead of claiming cancellation succeeded.
+The request remains unresolved and may retry on a later unlock if it was eligible beforehand;
+the user must revisit the manager to complete the decision. A fresh close while already locked
+reuses the lock coordinator's exact immutable snapshot. This preserves immediate privacy
+redaction without adding a new stored retry state or promising that an interrupted decision
+completed. Hard process termination and unacknowledged filesystem writes remain outside the
+orderly-close guarantee.
+
 Recovered drafts are a separate collection, never a retry queue, with the same independent
 32-entry and 256 KiB payload limits. Full recovery storage does not prevent Stop retrying.
 Saved copies retain their original text, reply target and source identity. Copy text, use
@@ -84,3 +107,13 @@ onboarding ordering requirement. `svelte-check` reported zero errors and warning
 independent read-only implementation review examined the save queue, delayed IPC outcomes,
 orphan handling and resource limits and found no blocker or high-severity issue. Full-App
 Tauri account replacement and actual filesystem faults are not simulated by these UI tests.
+
+R5 validation (2026-09-28): the cancellation and recovery tests in `pending-close.test.ts`
+first failed against the preceding implementation because the actual registered
+`onCloseRequested` callback dispatched a competing snapshot before the deferred decision save
+finished. With the fence and queue drain, all ten close-specific tests and the surrounding
+focused send/continuity suites passed (58 tests). The fixture executes that production callback,
+save queue and decision functions with serialized native-write mocks; it covers successful and
+failed saves, admitted trailing saves, denied new work, pre-dispatch continuations, timeout and
+retry, immediate-lock interruption, and replacement UI generations. It is not a real native
+filesystem or operating-system close test.

@@ -141,7 +141,7 @@ test("lock invalidates a delayed resolution save and reopening preserves its unr
   const gate = deferred(); app.holdSave(gate.promise);
   const resolution = app.resolve(item.token, "cancel");
   const rejected = assert.rejects(resolution, /session changed/); await settle();
-  app.lock(); await app.unlock(); gate.resolve(); await rejected;
+  app.lock(); gate.resolve(); await rejected; await app.unlock();
   assert.deepEqual(app.state().pendingSends[item.token], item);
   assert.equal(app.state().pendingSendResolution, null);
   app.done();

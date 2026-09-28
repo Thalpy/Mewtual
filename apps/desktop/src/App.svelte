@@ -3470,13 +3470,16 @@
   });
   $effect(() => {
     pendingSendRetry.update(
-      !locked && uiStateReady ? uiStateLoadGeneration : null,
+      !locked && uiStateReady && !windowCloseInFlight ? uiStateLoadGeneration : null,
       Object.values(pendingSends).some(intent => !intent.retryBlock),
       sending || retryingPendingSends || pendingManagerOpen || pendingSendResolution !== null,
     );
   });
   onMount(() => () => pendingSendRetry.cancel());
   function queueUiStateSave(json: string | (() => string), afterSave: () => void = () => {}): Promise<void> {
+    // Close drains entries already admitted here, including their afterSave memory commits.
+    // New work must not extend that drain or race the fresh final snapshot captured afterward.
+    if (windowCloseInFlight) return Promise.reject(new Error("The window is closing; no new continuity save can start."));
     // Native lock/generation checks order this queue against a final lock snapshot. This local
     // chain additionally prevents two ordinary same-session saves from overtaking one another.
     const generation = uiStateLoadGeneration;
@@ -3495,6 +3498,17 @@
     uiStateSaveChain = save.catch(() => {});
     return save;
   }
+  async function drainUiStateForClose(): Promise<boolean> {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      return await Promise.race([
+        uiStateSaveChain.then(() => true),
+        new Promise<boolean>(resolve => { timer = setTimeout(() => resolve(false), 10_000); }),
+      ]);
+    } finally {
+      clearTimeout(timer);
+    }
+  }
   function continuityJson(): string {
     return JSON.stringify({ version: 1, drafts, readMarks, statusCursors, fileTrustPolicies, latePast, embedAutoLoad, pendingSends, recoveredSendDrafts });
   }
@@ -3504,7 +3518,7 @@
    * restore a more permissive policy. A hard process/OS failure can still interrupt any disk write.
    */
   async function saveUiStateImmediately(): Promise<boolean> {
-    if (!uiStateReady || locked) return false;
+    if (!uiStateReady || locked || windowCloseInFlight) return false;
     const session = uiStateLoadGeneration;
     clearTimeout(uiStateSaveTimer);
     try {
@@ -3526,7 +3540,7 @@
     }
   }
   function scheduleUiStateSave() {
-    if (!uiStateReady || locked) return;
+    if (!uiStateReady || locked || windowCloseInFlight) return;
     clearTimeout(uiStateSaveTimer);
     uiStateSaveTimer = setTimeout(() => {
       void saveUiStateImmediately();
@@ -18580,14 +18594,14 @@
 
   function pendingSubmissionCurrent(intent: PendingSend, session: number): boolean {
     const current = pendingSends[intent.token];
-    return !locked && uiStateReady && session === uiStateLoadGeneration && pendingSendResolution === null
+    return !locked && uiStateReady && !windowCloseInFlight && session === uiStateLoadGeneration && pendingSendResolution === null
       && !!current && current.server === intent.server && current.channel === intent.channel
       && current.text === intent.text && current.replyTo === intent.replyTo && current.expectedContext === intent.expectedContext;
   }
 
   /** A resolution owns this queue entry until both the sealed write and local commit finish. */
   async function savePendingDecision(token: string, prepare: () => { json: string; commit: () => void }): Promise<void> {
-    if (locked || !uiStateReady || pendingSendResolution !== null) throw new Error("Wait until the vault is ready to save this decision.");
+    if (locked || !uiStateReady || windowCloseInFlight || pendingSendResolution !== null) throw new Error("Wait until the vault is ready to save this decision.");
     const session = uiStateLoadGeneration;
     pendingSendResolution = token;
     clearTimeout(uiStateSaveTimer);
@@ -18660,12 +18674,12 @@
   }
 
   async function retryPendingSends(automatic = false) {
-    if (locked || !uiStateReady || retryingPendingSends || sending || pendingSendResolution !== null || (automatic && pendingManagerOpen)) return;
+    if (locked || !uiStateReady || windowCloseInFlight || retryingPendingSends || sending || pendingSendResolution !== null || (automatic && pendingManagerOpen)) return;
     const session = uiStateLoadGeneration;
     retryingPendingSends = true;
     try {
       for (const intent of Object.values(pendingSends)) {
-        if (locked || session !== uiStateLoadGeneration || pendingSendResolution !== null || (automatic && pendingManagerOpen)) return;
+        if (locked || windowCloseInFlight || session !== uiStateLoadGeneration || pendingSendResolution !== null || (automatic && pendingManagerOpen)) return;
         if (!pendingSubmissionCurrent(intent, session)) continue;
         if (automatic && intent.retryBlock) continue;
         try {
@@ -18686,11 +18700,11 @@
 
   async function send() {
     const text = draft.trim();
-    if (!text || !cur?.active || activeServerId === null || sending || retryingPendingSends || locked || !uiStateReady || pendingSendResolution !== null || pendingManagerOpen) return;
+    if (!text || !cur?.active || activeServerId === null || sending || retryingPendingSends || locked || !uiStateReady || windowCloseInFlight || pendingSendResolution !== null || pendingManagerOpen) return;
     const server = activeServerId;
     const channel = cur.active;
     const session = uiStateLoadGeneration;
-    const sessionCurrent = () => !locked && session === uiStateLoadGeneration;
+    const sessionCurrent = () => !locked && !windowCloseInFlight && session === uiStateLoadGeneration;
     const reply_to = replyingTo;
     const key = chanKey();
     const draftRevision = key ? draftRevisions[key] ?? 0 : 0;
@@ -19791,7 +19805,7 @@
     (uiStateJson) => invoke<NativeVaultLockOutcome>("lock_session", { uiStateJson }),
   );
   let winMaximized = $state(false);
-  let windowCloseInFlight = false;
+  let windowCloseInFlight = $state(false);
   // The first continuity failure leaves a confirmed-locked window open with a warning. Repeating
   // close is the user's explicit acknowledgement that exiting without that latest snapshot is OK.
   let closeAfterContinuityError = false;
@@ -20034,12 +20048,31 @@
           return;
         }
         windowCloseInFlight = true;
+        pendingSendRetry.cancel();
+        const closingGeneration = uiStateLoadGeneration;
         callLifecycleSession.invalidate();
         micCaptureSession.invalidate();
         videoCaptureSession.invalidate();
         screenAudioCaptureSession.invalidate();
         if (inCall) leaveVoice();
         clearTimeout(uiStateSaveTimer);
+        // Native serialization cannot repair a JSON snapshot captured before a pending decision's
+        // afterSave commit. Keep that logical transaction alive, then take fresh state. A stalled
+        // bridge defers this close attempt; it is not a reason to destroy the webview below.
+        if (!(await drainUiStateForClose())) {
+          windowCloseInFlight = false;
+          if (!locked && closingGeneration === uiStateLoadGeneration) {
+            error = "Vault state is still saving. The window remains open; wait and try closing again.";
+          }
+          return;
+        }
+        if (closingGeneration !== uiStateLoadGeneration) {
+          // Ctrl+L can interrupt a decision and a replacement session has different authority.
+          // Neither may reuse this close attempt. An already-locked fresh close below reuses the
+          // lock coordinator's exact snapshot; it never reads the cleared UI state as a snapshot.
+          windowCloseInFlight = false;
+          return;
+        }
         const finalContinuityJson = locked
           ? nativeVaultLock.snapshot()
           : (uiStateReady ? continuityJson() : null);

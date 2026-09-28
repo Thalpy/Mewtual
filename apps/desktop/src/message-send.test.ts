@@ -51,6 +51,7 @@ function composer(submit: (args: Record<string, unknown>) => Promise<SendMessage
     let drafts = { room: draft }, draftRevisions = {}, pendingSendNonce = 0, chatStickToBottom = false;
     let pendingSends = {}, pendingSendErrors = {}, retryingPendingSends = false, uiStateReady = true, uiStateSaveTimer;
     let recoveredSendDrafts = {}, pendingSendResolution = null, pendingManagerOpen = false;
+    let windowCloseInFlight = false;
     let tailLoaded = false, messageWindowScope = "", messages = [], pageTotal = 0;
     let replyingToRow, error = "", warnings = [], sealed = null;
     const chanKey = () => "room", scheduleUiStateSave = () => {}, chatScopeKey = () => "room";

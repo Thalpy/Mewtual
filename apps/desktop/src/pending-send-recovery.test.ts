@@ -22,6 +22,7 @@ test("retry refuses IPC until the caller identity survives an actual successful 
     let drafts = { room: draft }, draftRevisions = {}, pendingSendNonce = 0, chatStickToBottom = false;
     let pendingSends = {}, pendingSendErrors = {}, retryingPendingSends = false, uiStateReady = true, uiStateSaveTimer;
     let recoveredSendDrafts = {}, pendingSendResolution = null, pendingManagerOpen = false;
+    let windowCloseInFlight = false;
     let tailLoaded = false, messageWindowScope = "", messages = [], pageTotal = 0;
     let replyingToRow, error = "", sealed = null, savesFail = true, submissions = [];
     const chanKey = () => "room", chatScopeKey = () => "room", scheduleUiStateSave = () => {};
@@ -75,6 +76,7 @@ test("failed continuity hydration cannot replace the sealed pending identities w
     let uiStateSaveChain = Promise.resolve(), uiStateSaveFailed = false, uiStateFailureToast = 0;
     let pendingSends = structuredClone(initial.pendingSends), drafts = structuredClone(initial.drafts);
     let recoveredSendDrafts = {};
+    let windowCloseInFlight = false;
     let readMarks = {}, statusCursors = {}, fileTrustPolicies = {}, latePast = {}, embedAutoLoad = false, error = "";
     let sealed = JSON.stringify(initial), failLoad = true, writes = 0, flushed = 0;
     const localStorage = { getItem() { return null; }, removeItem() {} };
