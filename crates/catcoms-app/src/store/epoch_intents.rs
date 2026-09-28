@@ -312,6 +312,16 @@ impl EpochIntentBudget {
         self.record_slots
     }
 
+    /// Test-only: whether this budget still believes it may authorise a write.
+    ///
+    /// Needed to state a precondition positively. A regression proving that some *other* stale
+    /// budget is refused has to establish that the budget started usable, or a refusal for an
+    /// unrelated reason would satisfy it and the test would prove nothing about what closed it.
+    #[cfg(test)]
+    pub(in crate::store) fn requires_reconciliation_for_test(&self) -> bool {
+        !self.ready
+    }
+
     /// Test-only: position the archive tally near its cap so a regression can prove the real
     /// writer consults the archive sub-cap, without fabricating 16 MiB of genuine archives.
     /// Only the sub-tally moves; the class total is left alone, so a refusal is attributable to

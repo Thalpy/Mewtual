@@ -237,6 +237,7 @@ impl ServerGroup {
             expires_at_ms,
             bootstrap,
             rendezvous,
+            policy: None,
             signature,
         })
     }
@@ -533,6 +534,11 @@ impl ServerGroup {
     /// Whether `id` is a current member.
     pub fn contains_device(&self, id: &DeviceId) -> bool {
         self.member_device_ids().contains(id)
+    }
+
+    /// Whether this local MLS instance still belongs to the group after applied removals.
+    pub fn is_active(&self) -> bool {
+        self.group.is_active()
     }
 }
 

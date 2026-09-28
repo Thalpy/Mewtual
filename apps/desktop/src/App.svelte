@@ -37,6 +37,10 @@
     PageAdmission, planJump, planRefresh, planRevealNewer, planRevealOlder, reanchorByIndex,
     type MessagePage, type PageAnchor, type PageRequest, type PagedRowContext, type UnreadSummary,
   } from "./message-paging";
+  import { persistenceWarning, sendAndRefresh, type SendMessageResult } from "./message-send";
+  import { addPendingSend, matchingPendingSend, pendingSendRetryBlock, resolvePendingSend, type PendingResolution, type PendingSend, type PendingSends } from "./pending-sends";
+  import PendingSendManager from "./PendingSendManager.svelte";
+  import { PendingSendRetry } from "./pending-send-retry";
   import { ImageSrcCache } from "./image-src";
   import { pastedMedia, pastedName } from "./clipboard-media";
   import {
@@ -183,7 +187,7 @@
     selectTimelineRows, timelineIdentities, voteTally, warningMap,
     type ModerationEvent, type ModerationState, type TimelineMessage,
   } from "./moderation";
-  import { planLegacyReadMarkMigration, sanitizeUiContinuity } from "./ui-continuity";
+  import { MAX_DRAFT_CHARS, planLegacyReadMarkMigration, sanitizeUiContinuity } from "./ui-continuity";
   import {
     NativeVaultLockCoordinator, type NativeVaultCloseOutcome, type NativeVaultLockOutcome,
   } from "./window-close";
@@ -301,8 +305,8 @@
   // Where a file is referenced across the server (Properties → "Used in"). `pinned` mirrors
   // `wiki_pages.length > 0`: a wiki-embedded file never drops out of circulation.
   type UiFileUsage = { wiki_pages: string[]; status_count: number; chat_count: number; event_count: number; pinned: boolean };
-  type Found = { server: number; channel: string; channels?: Channel[]; is_dm: boolean };
-  type Reloaded = { server: number; name: string; invite: string; channel: string; channels?: Channel[]; is_dm: boolean };
+  type Found = { server: number; channel: string; channels?: Channel[]; is_dm: boolean; storage_warning?: string | null };
+  type Reloaded = { server: number; name: string; invite: string; channel: string; channels?: Channel[]; is_dm: boolean; reconnect_warning?: string | null };
 
   // One server in the rail (each its own encrypted group). Per-server UI state lives here;
   // messages/roster/profiles/files are loaded for the active server on switch + events.
@@ -486,6 +490,28 @@
   // `setSearch` filters BOTH sidebars by label (cleared on open, "/" focuses it).
   let settingsPage = $state("appearance");
   let serverSettingsPage = $state("overview");
+  type CommunicationMode = "legacy_unverified" | "peer_to_peer" | "dedicated";
+  let communicationMode = $state<CommunicationMode | null>(null);
+  let communicationModeError = $state("");
+  function communicationModeLabel(mode: CommunicationMode): string {
+    return mode === "peer_to_peer" ? "Peer to peer" : mode === "dedicated" ? "Dedicated" : "Legacy · policy unverified";
+  }
+  $effect(() => {
+    const server = activeServerId;
+    const generation = viewGeneration;
+    if (locked || !showServerSettings || serverSettingsPage !== "overview" || server === null) return;
+    let cancelled = false;
+    communicationMode = null;
+    communicationModeError = "";
+    void invoke<string>("group_communication_mode", { server }).then((mode) => {
+      if (cancelled || !sessionContinuationCurrent(generation, viewGeneration, locked)) return;
+      if (mode === "peer_to_peer" || mode === "legacy_unverified" || mode === "dedicated") communicationMode = mode;
+      else communicationModeError = "This app cannot interpret the group's communication policy.";
+    }).catch((reason) => {
+      if (!cancelled && sessionContinuationCurrent(generation, viewGeneration, locked)) communicationModeError = errorText(reason);
+    });
+    return () => { cancelled = true; };
+  });
   let setSearch = $state("");
   let backupBusy = $state(false);
   let backupResult = $state<{ path: string; files: number; bytes: number; displayed: boolean; warning?: string } | null>(null);
@@ -507,6 +533,7 @@
     { id: "profile", label: "My Profile", cat: "Account" },
     { id: "devices", label: "Devices", cat: "Account" },
     { id: "vault", label: "Vault & Lock", cat: "Account" },
+    { id: "pending", label: "Pending messages", cat: "Account" },
     { id: "backup", label: "Backup & Recovery", cat: "Account" },
     { id: "verify", label: "Verification", cat: "Account" },
     { id: "appearance", label: "Appearance", cat: "App" },
@@ -653,6 +680,8 @@
   }
 
   function openServerSettings(id: number | null = null, page: string = serverSettingsPage) {
+    communicationMode = null;
+    communicationModeError = "";
     const targetServer = id ?? activeServerId;
     // switchServer runs synchronously as far as its first await, so `cur` below already names the
     // target. It also empties `livery` on the way past and refills it a round-trip later, which is
@@ -2461,7 +2490,6 @@
   // The create-server product question, in product terms (see docs/design-zeroconf-reachability
   // and the connectivity mockup): a friend circle connects members directly; a hosted community
   // runs through a node the founder operates. Hosted maps onto the relay field below.
-  let serverMode = $state<"friends" | "hosted">("friends");
   let advertise = $state(""); // optional reachable address (LAN/public IP) for the founder
   let relay = $state(""); // optional relay-node multiaddr (zero-config NAT traversal)
   // Optional rendezvous multiaddr: when set, the founder registers there so a joiner discovers
@@ -2476,6 +2504,7 @@
     rendezvous_routes: number;
     switchboards: number;
     expires_at_ms: number;
+    communication_mode: CommunicationMode;
   };
   let joinPreview = $state<InvitePreview | null>(null);
   let joinPreviewCode = $state("");
@@ -3426,24 +3455,62 @@
   // file-trust policy) has been restored. This must be reactive: the load
   // completes asynchronously after unlock.
   let uiStateReady = $state(false);
+  let pendingSends = $state<PendingSends>({});
+  let recoveredSendDrafts = $state<PendingSends>({});
+  // Holds submissions/result mutations while a user's explicit resolution crosses the vault barrier.
+  let pendingSendResolution = $state<string | null>(null);
+  let pendingManagerOpen = $derived(showSettings && settingsPage === "pending");
+  let pendingSendErrors = $state<Record<string, string>>({});
+  let retryingPendingSends = $state(false);
   let uiStateSaveFailed = $state(false);
   let uiStateFailureToast = 0;
   let uiStateLoadGeneration = 0;
-  function queueUiStateSave(json: string): Promise<void> {
+  const pendingSendRetry = new PendingSendRetry(async (session) => {
+    if (!locked && uiStateReady && session === uiStateLoadGeneration) await retryPendingSends(true);
+  });
+  $effect(() => {
+    pendingSendRetry.update(
+      !locked && uiStateReady && !windowCloseInFlight ? uiStateLoadGeneration : null,
+      Object.values(pendingSends).some(intent => !intent.retryBlock),
+      sending || retryingPendingSends || pendingManagerOpen || pendingSendResolution !== null,
+    );
+  });
+  onMount(() => () => pendingSendRetry.cancel());
+  function queueUiStateSave(json: string | (() => string), afterSave: () => void = () => {}): Promise<void> {
+    // Close drains entries already admitted here, including their afterSave memory commits.
+    // New work must not extend that drain or race the fresh final snapshot captured afterward.
+    if (windowCloseInFlight) return Promise.reject(new Error("The window is closing; no new continuity save can start."));
     // Native lock/generation checks order this queue against a final lock snapshot. This local
     // chain additionally prevents two ordinary same-session saves from overtaking one another.
     const generation = uiStateLoadGeneration;
-    const save = uiStateSaveChain.then(() => {
+    const save = uiStateSaveChain.then(async () => {
       if (locked || generation !== uiStateLoadGeneration) {
         throw new Error("the UI session changed before continuity could be saved");
       }
-      return invoke<void>("save_ui_state", { json });
+      // Ordinary saves build from current state at execution, so a queued typing save cannot
+      // resurrect a request retired by an earlier resolution in this same chain.
+      await invoke<void>("save_ui_state", { json: typeof json === "function" ? json() : json });
+      if (locked || generation !== uiStateLoadGeneration) {
+        throw new Error("the UI session changed before continuity finished saving");
+      }
+      afterSave();
     });
     uiStateSaveChain = save.catch(() => {});
     return save;
   }
+  async function drainUiStateForClose(): Promise<boolean> {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      return await Promise.race([
+        uiStateSaveChain.then(() => true),
+        new Promise<boolean>(resolve => { timer = setTimeout(() => resolve(false), 10_000); }),
+      ]);
+    } finally {
+      clearTimeout(timer);
+    }
+  }
   function continuityJson(): string {
-    return JSON.stringify({ version: 1, drafts, readMarks, statusCursors, fileTrustPolicies, latePast, embedAutoLoad });
+    return JSON.stringify({ version: 1, drafts, readMarks, statusCursors, fileTrustPolicies, latePast, embedAutoLoad, pendingSends, recoveredSendDrafts });
   }
   /**
    * Seal the current continuity snapshot without the ordinary typing/read-position debounce.
@@ -3451,10 +3518,11 @@
    * restore a more permissive policy. A hard process/OS failure can still interrupt any disk write.
    */
   async function saveUiStateImmediately(): Promise<boolean> {
-    if (!uiStateReady || locked) return false;
+    if (!uiStateReady || locked || windowCloseInFlight) return false;
+    const session = uiStateLoadGeneration;
     clearTimeout(uiStateSaveTimer);
     try {
-      await queueUiStateSave(continuityJson());
+      await queueUiStateSave(continuityJson);
       uiStateSaveFailed = false;
       if (uiStateFailureToast) {
         updateToast(uiStateFailureToast, "Vault preferences saved", "ok", 2500);
@@ -3462,6 +3530,7 @@
       }
       return true;
     } catch (e) {
+      if (locked || session !== uiStateLoadGeneration) return false;
       console.warn("UI continuity save failed", e);
       const message = "Vault preferences, drafts, and read positions were not saved; retry before closing";
       if (uiStateFailureToast) updateToast(uiStateFailureToast, message, "err", 0);
@@ -3471,13 +3540,14 @@
     }
   }
   function scheduleUiStateSave() {
-    if (!uiStateReady || locked) return;
+    if (!uiStateReady || locked || windowCloseInFlight) return;
     clearTimeout(uiStateSaveTimer);
     uiStateSaveTimer = setTimeout(() => {
       void saveUiStateImmediately();
     }, 250);
   }
   async function loadUiContinuity(generation: number) {
+    let loaded = false;
     try {
       let next = sanitizeUiContinuity(JSON.parse(await invoke<string>("get_ui_state")));
       if (generation !== uiStateLoadGeneration || locked) return;
@@ -3497,28 +3567,28 @@
         console.warn("Legacy read-mark migration failed", migrationError);
       }
       if (generation !== uiStateLoadGeneration || locked) return;
+      pendingSends = next.pendingSends;
+      recoveredSendDrafts = next.recoveredSendDrafts;
       drafts = next.drafts;
       readMarks = next.readMarks;
       statusCursors = next.statusCursors;
       fileTrustPolicies = next.fileTrustPolicies;
       latePast = next.latePast;
       embedAutoLoad = next.embedAutoLoad;
+      loaded = true;
     } catch (e) {
       if (generation !== uiStateLoadGeneration || locked) return;
       console.warn("UI continuity load failed", e);
-      drafts = {};
-      readMarks = {};
-      statusCursors = {};
-      fileTrustPolicies = {};
-      latePast = {};
+      // Preserve the last sealed record and block replacements until a successful load.
+      // An unreadable record may contain the only retry identity for an accepted message.
       embedAutoLoad = false; // an unreadable record is not permission to start contacting anyone
       error = `Durable history could not be authenticated and was not loaded: ${e}`;
     } finally {
       if (generation === uiStateLoadGeneration && !locked) {
-        uiStateReady = true;
+        uiStateReady = loaded;
         // Anything marked read while this was in flight was held rather than written, because the
         // assignments above would have overwritten it. Replay it now, against what actually loaded.
-        flushPendingStatusMarks();
+        if (loaded) flushPendingStatusMarks();
       }
     }
   }
@@ -3892,7 +3962,7 @@
     return evBody;
   }
   function setTextEffectValue(target: TextEffectTarget, value: string) {
-    if (target === "chat") draft = value;
+    if (target === "chat") { draft = value; saveDraftFor(chanKey()); }
     else if (target === "chat-edit") editDraft = value;
     else if (target === "announcement") statusDraft = value;
     else if (target === "wiki") { wikiBody = value; wikiDirty = true; }
@@ -6137,6 +6207,7 @@
   }
   function insertEmoji(code: string) {
     draft = draft ? `${draft} :${code}:` : `:${code}:`;
+    saveDraftFor(chanKey());
     showEmoji = false;
   }
 
@@ -6152,6 +6223,7 @@
   ];
   function insertUnicodeEmoji(e: string) {
     draft = draft + e;
+    saveDraftFor(chanKey());
     showEmoji = false;
   }
 
@@ -6168,6 +6240,10 @@
       isDm: r.is_dm,
     }));
     locked = false;
+    const reconnectWarnings = reloaded.filter((r) => r.reconnect_warning);
+    if (reconnectWarnings.length) {
+      toast(reconnectWarnings.map((r) => `${r.name}: ${r.reconnect_warning}`).join("\n"), "warn", 0);
+    }
     try { sessionStorage.removeItem("catcoms.explicit-lock"); } catch { /* best effort */ }
     const firstServer = servers.find((s) => !s.isDm) ?? servers[0];
     // Drafts/read boundaries must land before switchServer restores the active composer and
@@ -6182,6 +6258,7 @@
       // activity head against the read marks that just loaded. Without this pass, a message
       // received during a lock or across a restart is silently lost from the indicators.
       rebuildAllUnread();
+      void retryPendingSends(true);
       // The announcement indicators are the same rebuild, for the same reason: posts made while
       // this device was closed or locked raised no event anyone was awake to hear, so the counts
       // come from the feeds themselves rather than from what this session witnessed. It waits on
@@ -6242,6 +6319,7 @@
   // passphrase again. Re-entering calls `unlock`, which no-ops on an already-open vault and hands
   // back the registered servers, so no actor or transport is duplicated.
   function lockScreen(nativeAlreadyLocked = false) {
+    pendingSendRetry.cancel();
     // Lock also cancels calls still waiting on a native permission prompt; those have not yet set
     // `inCall`, so the ordinary leave path alone cannot see or invalidate them.
     callLifecycleSession.invalidate();
@@ -6336,6 +6414,13 @@
     deliverySnapshot = { revision: 0, reports: {} };
     draft = "";
     drafts = {};
+    pendingSends = {};
+    recoveredSendDrafts = {};
+    pendingSendResolution = null;
+    pendingSendErrors = {};
+    retryingPendingSends = false;
+    sending = false;
+    pendingSendNonce += 1;
     readMarks = {};
     statusCursors = {}; // a reading habit, sealed beside the marks above and dropped with them
     fileTrustPolicies = {}; // member trust choices name relationships and leave the screen too
@@ -6354,10 +6439,6 @@
   }
 
   async function found() {
-    if (serverMode === "hosted" && !relay.trim()) {
-      error = "A hosted community runs through a node you operate: paste its address, or pick \"People I know\" instead.";
-      return;
-    }
     busy = true;
     error = "";
     const operationGeneration = viewGeneration;
@@ -6399,14 +6480,23 @@
     joinError = "";
     const operationGeneration = viewGeneration;
     try {
-      const { hex, turn } = unwrapInvite(joinInvite);
+      const enteredInvite = joinInvite;
+      const { hex, turn } = unwrapInvite(enteredInvite);
       const previewMatchesCode = joinPreviewCode === hex;
       if (!previewMatchesCode) {
-        joinPreview = await invoke<InvitePreview>("preview_invite", { inviteHex: hex });
+        const preview = await invoke<InvitePreview>("preview_invite", { inviteHex: hex });
         if (!sessionContinuationCurrent(operationGeneration, viewGeneration, locked)) return;
+        if (joinInvite !== enteredInvite) return;
+        joinPreview = preview;
         joinPreviewCode = hex;
         joinSwitchboardConsent = true;
       }
+      if (joinPreview?.communication_mode === "dedicated") {
+        joinError = "This invite declares a dedicated group, which this version cannot join.";
+        return;
+      }
+      // Mode and IP-disclosure consequences must be visible before the action contacts peers.
+      if (!previewMatchesCode) return;
       const assistedAction = assistedJoinAction(
         previewMatchesCode,
         joinPreview?.switchboards ?? 0,
@@ -6580,6 +6670,7 @@
    * profile leaves it alone.
    */
   function addServer(r: Found, name: string, profileName: string = "") {
+    if (r.storage_warning) toast(r.storage_warning, "warn", 0);
     const channels = r.channels?.length ? r.channels : [{ id: r.channel, name: "general" }];
     if (!r.is_dm) {
       // A numeric native id can be reused after a leave + restart, so an override left behind by
@@ -9020,6 +9111,7 @@
   // the composer is mounted before focusing (these can fire from the wiki/files tab).
   async function appendToDraft(text: string) {
     draft = draft ? `${draft} ${text}` : text;
+    saveDraftFor(chanKey());
     view = "chat";
     await tick();
     composerEl?.focus();
@@ -10436,7 +10528,7 @@
           // Brackets in the alt would break the `![alt](cid:…)` marker parse: strip them.
           const alt = name.replace(/[[\]]/g, " ");
           const marker = `![${alt}](cid:${cid})`;
-          if (target === "chat") draft = draft ? `${draft} ${marker}` : marker;
+          if (target === "chat") { draft = draft ? `${draft} ${marker}` : marker; saveDraftFor(chanKey()); }
           else statusDraft = statusDraft ? `${statusDraft} ${marker}` : marker;
           updateToast(tid, `Attached ${name}`, "ok");
         } catch (e) {
@@ -11774,6 +11866,7 @@
     const end = composerEl?.selectionEnd ?? draft.length;
     const { text, caret } = insertInto(draft, start, end, insert);
     draft = text;
+    saveDraftFor(chanKey());
     queueMicrotask(() => {
       if (composerEl) {
         composerEl.focus();
@@ -11884,6 +11977,7 @@
     const before = draft.slice(0, mentionStart);
     const insert = `@[${mentionName(c.name)}] `;
     draft = before + insert + draft.slice(caret);
+    saveDraftFor(chanKey());
     mentionQuery = null;
     const pos = before.length + insert.length;
     queueMicrotask(() => {
@@ -18418,8 +18512,10 @@
   // Per-channel composer drafts: switching channels/servers preserves what you typed, and the
   // bounded map is vault-sealed through scheduleUiStateSave for restart durability.
   let drafts = $state<Record<string, string>>({});
+  const draftRevisions: Record<string, number> = {};
   function saveDraftFor(key: string | null) {
     if (!key) return;
+    draftRevisions[key] = (draftRevisions[key] ?? 0) + 1;
     if (draft.trim()) drafts[key] = draft;
     else delete drafts[key];
     scheduleUiStateSave();
@@ -18436,6 +18532,7 @@
     const end = ta?.selectionEnd ?? start;
     const sel = draft.slice(start, end);
     draft = draft.slice(0, start) + before + sel + after + draft.slice(end);
+    saveDraftFor(chanKey());
     const a = start + before.length;
     queueMicrotask(() => {
       if (composerEl) {
@@ -18446,71 +18543,238 @@
     });
   }
 
+  async function submitPendingSend(intent: PendingSend, session: number, originalDraftRevision: number | undefined = undefined): Promise<SendMessageResult> {
+    const draftKey = chatScopeKey(intent.server, intent.channel);
+    const draftRevision = originalDraftRevision ?? draftRevisions[draftKey] ?? 0;
+    let result: SendMessageResult;
+    try {
+      if (!pendingSubmissionCurrent(intent, session)) throw new Error("This pending request is being resolved or its session changed.");
+      // Seal uncertainty before dispatch, even on retry. Native errors and token conflicts do
+      // not prove absence: a previous invocation may already have committed this identity.
+      pendingSends[intent.token] = { ...pendingSends[intent.token], acceptance: "ambiguous" };
+      // Also covers retry after an earlier continuity-write failure. No native authoring
+      // request may outlive the only copy of its caller identity.
+      if (!(await saveUiStateImmediately()) || !pendingSubmissionCurrent(intent, session)) {
+        throw new Error("Save the pending message in this vault before retrying it.");
+      }
+      result = (await invokeDebugged<SendMessageResult>("send_message", {
+        server: intent.server, channel: intent.channel, text: intent.text, replyTo: intent.replyTo,
+        retryToken: intent.token, expectedContext: intent.expectedContext,
+      })).value;
+    } catch (failure) {
+      if (pendingSubmissionCurrent(intent, session)) {
+        pendingSendErrors[intent.token] = errorText(failure);
+        const block = pendingSendRetryBlock(errorText(failure));
+        const current = pendingSends[intent.token];
+        if (current && current.retryBlock !== block) {
+          pendingSends[intent.token] = { ...current, retryBlock: block };
+          await saveUiStateImmediately();
+        }
+      }
+      throw failure;
+    }
+    if (pendingSubmissionCurrent(intent, session) && result.persistence.status === "superseded") {
+      pendingSends[intent.token] = { ...pendingSends[intent.token], retryBlock: "context_changed" };
+      await saveUiStateImmediately();
+    } else if (pendingSubmissionCurrent(intent, session) && result.persistence.status !== "durable" && pendingSends[intent.token]?.retryBlock) {
+      pendingSends[intent.token] = { ...pendingSends[intent.token], retryBlock: undefined };
+      await saveUiStateImmediately();
+    }
+    if (pendingSubmissionCurrent(intent, session) && result.accepted && result.persistence.status === "durable") {
+      delete pendingSends[intent.token];
+      delete pendingSendErrors[intent.token];
+      const key = chatScopeKey(intent.server, intent.channel);
+      const sameDraft = (draftRevisions[key] ?? 0) === draftRevision;
+      if (sameDraft && drafts[key]?.trim() === intent.text) delete drafts[key];
+      if (sameDraft && activeServerId === intent.server && cur?.active === intent.channel && draft.trim() === intent.text) {
+        draft = "";
+        replyingTo = "";
+      }
+      // If cleanup cannot persist, replaying the still-sealed token is safe on next unlock.
+      await saveUiStateImmediately();
+    }
+    return result;
+  }
+
+  function pendingSubmissionCurrent(intent: PendingSend, session: number): boolean {
+    const current = pendingSends[intent.token];
+    return !locked && uiStateReady && !windowCloseInFlight && session === uiStateLoadGeneration && pendingSendResolution === null
+      && !!current && current.server === intent.server && current.channel === intent.channel
+      && current.text === intent.text && current.replyTo === intent.replyTo && current.expectedContext === intent.expectedContext;
+  }
+
+  /** A resolution owns this queue entry until both the sealed write and local commit finish. */
+  async function savePendingDecision(token: string, prepare: () => { json: string; commit: () => void }): Promise<void> {
+    if (locked || !uiStateReady || windowCloseInFlight || pendingSendResolution !== null) throw new Error("Wait until the vault is ready to save this decision.");
+    const session = uiStateLoadGeneration;
+    pendingSendResolution = token;
+    clearTimeout(uiStateSaveTimer);
+    let commit: (() => void) | undefined;
+    try {
+      await queueUiStateSave(() => {
+        if (pendingSendResolution !== token) throw new Error("The pending decision changed before it could be saved.");
+        const candidate = prepare();
+        commit = candidate.commit;
+        return candidate.json;
+      }, () => {
+        if (pendingSendResolution !== token) throw new Error("The pending decision changed while saving.");
+        commit!();
+      });
+    } catch (failure) {
+      const retained = locked || session !== uiStateLoadGeneration
+        ? "Reopen Pending messages after unlocking to check the saved decision."
+        : "Your original request or saved draft is retained.";
+      throw new Error(`The decision was not completed. ${retained} ${errorText(failure)}`);
+    } finally {
+      if (session === uiStateLoadGeneration && pendingSendResolution === token) pendingSendResolution = null;
+    }
+  }
+
+  async function resolvePendingMessage(token: string, action: PendingResolution): Promise<void> {
+    await savePendingDecision(token, () => {
+      const next = resolvePendingSend(pendingSends, recoveredSendDrafts, token, action);
+      return {
+        json: JSON.stringify({ ...JSON.parse(continuityJson()), pendingSends: next.pending, recoveredSendDrafts: next.recovered }),
+        commit: () => { pendingSends = next.pending; recoveredSendDrafts = next.recovered; delete pendingSendErrors[token]; },
+      };
+    });
+  }
+
+  async function removeRecoveredSendDraft(token: string): Promise<void> {
+    await savePendingDecision(token, () => {
+      if (!recoveredSendDrafts[token]) throw new Error("This saved draft has already been removed.");
+      const next = { ...recoveredSendDrafts };
+      delete next[token];
+      return { json: JSON.stringify({ ...JSON.parse(continuityJson()), recoveredSendDrafts: next }),
+        commit: () => { recoveredSendDrafts = next; } };
+    });
+  }
+
+  async function useRecoveredSendDraft(token: string): Promise<void> {
+    await savePendingDecision(token, () => {
+      const item = recoveredSendDrafts[token], key = chanKey();
+      if (!item || !key || activeServerId === null || !cur?.active) throw new Error("Open a conversation before using this saved text.");
+      if (draft.trim() && draft !== item.text) throw new Error("Keep or clear the current composer draft first.");
+      if (item.text.length > MAX_DRAFT_CHARS) throw new Error("This text exceeds the composer draft limit. Copy the saved text instead; the full copy remains here.");
+      const revision = draftRevisions[key] ?? 0;
+      const nextDrafts = { ...drafts, [key]: item.text };
+      if (sanitizeUiContinuity({ drafts: nextDrafts }).drafts[key] !== item.text) throw new Error("Saved composer drafts are full. Copy the saved text instead; the full copy remains here.");
+      return {
+        json: JSON.stringify({ ...JSON.parse(continuityJson()), drafts: nextDrafts }),
+        commit: () => {
+          // Retain the recovered source, and never overwrite text typed while disk I/O ran.
+          if ((draftRevisions[key] ?? 0) !== revision) { scheduleUiStateSave(); return; }
+          drafts[key] = item.text;
+          draftRevisions[key] = revision + 1;
+          if (chanKey() === key) { draft = item.text; replyingTo = ""; }
+        },
+      };
+    });
+  }
+
+  function pendingConversationName(server: number, channel: string): string {
+    const group = servers.find(item => item.id === server);
+    return group ? `${group.name} / channel ${channel}` : `Unavailable conversation ${server} / channel ${channel}`;
+  }
+
+  async function retryPendingSends(automatic = false) {
+    if (locked || !uiStateReady || windowCloseInFlight || retryingPendingSends || sending || pendingSendResolution !== null || (automatic && pendingManagerOpen)) return;
+    const session = uiStateLoadGeneration;
+    retryingPendingSends = true;
+    try {
+      for (const intent of Object.values(pendingSends)) {
+        if (locked || windowCloseInFlight || session !== uiStateLoadGeneration || pendingSendResolution !== null || (automatic && pendingManagerOpen)) return;
+        if (!pendingSubmissionCurrent(intent, session)) continue;
+        if (automatic && intent.retryBlock) continue;
+        try {
+          const result = await submitPendingSend(intent, session);
+          if (locked || session !== uiStateLoadGeneration) return;
+          const warning = persistenceWarning(result);
+          if (warning) error = warning;
+        } catch (failure) {
+          if (locked || session !== uiStateLoadGeneration) return;
+          error = `A pending message needs attention: ${errorText(failure)}`;
+        }
+      }
+      if (!locked && session === uiStateLoadGeneration && cur?.active) await refresh();
+    } finally {
+      if (session === uiStateLoadGeneration) retryingPendingSends = false;
+    }
+  }
+
   async function send() {
     const text = draft.trim();
-    if (!text || !cur || !cur.active || activeServerId === null || sending) return;
+    if (!text || !cur?.active || activeServerId === null || sending || retryingPendingSends || locked || !uiStateReady || windowCloseInFlight || pendingSendResolution !== null || pendingManagerOpen) return;
     const server = activeServerId;
     const channel = cur.active;
+    const session = uiStateLoadGeneration;
+    const sessionCurrent = () => !locked && !windowCloseInFlight && session === uiStateLoadGeneration;
     const reply_to = replyingTo;
     const key = chanKey();
-    draft = "";
-    replyingTo = "";
-    mentionQuery = null;
-    if (key) delete drafts[key];
-    scheduleUiStateSave();
+    const draftRevision = key ? draftRevisions[key] ?? 0 : 0;
     sending = true;
-    const pendingId = `pending:${Date.now()}:${pendingSendNonce++}`;
-    const nextScope = chatScopeKey(server, channel);
-    chatStickToBottom = true;
-    // The optimistic row belongs at the end of the log, which is only where the slice ends when
-    // the tail is loaded. Away from the tail the acknowledgement refresh lands there instead.
-    if (tailLoaded && messageWindowScope === nextScope) {
-      const parent = replyTarget;
-      messages = [...messages, {
-        id: pendingId,
-        author: myFp,
-        text,
-        ts: Date.now(),
-        edited: 0,
-        reactions: [],
-        reply_to,
-        pinned: false,
-        targets_me: false,
-        reply_count: 0,
-        reply_to_preview: parent ? { id: reply_to, author: parent.author, text: parent.text } : null,
-      }];
-      pageTotal += 1;
-      markMessageArrivals([pendingId]);
-    }
-    replyingToRow = undefined;
-    await tick();
+    const operation = ++pendingSendNonce;
+    const pendingId = `pending:${operation}`;
+    let intent: PendingSend | undefined;
     try {
-      // The one path instrumented end to end, and the pattern the rest adopt. The trace is
-      // allocated here, travels with the command, and stamps every native stage, so a send that
-      // goes nowhere can be read as one story rather than two halves lined up by timestamp.
-      // Nothing about the message itself is recorded: not its text, not its length.
-      await invokeDebugged("send_message", { server, channel, text, replyTo: reply_to });
-      sending = false;
-      // The channel-updated event normally refreshes this too, but the command acknowledgement is
-      // the deterministic local completion point. Do not leave the just-sent message dependent on
-      // event scheduling, and do not refresh a different conversation if the user switched away.
-      if (activeServerId === server && cur?.active === channel) await refresh();
+      intent = matchingPendingSend(pendingSends, server, channel, text, reply_to);
+      if (!intent) {
+        const expectedContext = await invoke<string>("durable_send_context", { server });
+        if (!sessionCurrent() || pendingSendResolution !== null || pendingManagerOpen) return;
+        intent = { token: crypto.randomUUID().replaceAll("-", ""), server, channel,
+          text, replyTo: reply_to, expectedContext, acceptance: "not_accepted" };
+        pendingSends = addPendingSend(pendingSends, intent);
+      }
+      // Keep the composer intact until its retry identity and payload have crossed the vault
+      // barrier. A lock at either await captures the draft or this resumable intent.
+      clearTimeout(uiStateSaveTimer);
+      await queueUiStateSave(continuityJson);
+      if (!pendingSubmissionCurrent(intent, session)) return;
+      const sameDraft = !key || (draftRevisions[key] ?? 0) === draftRevision;
+      if (sameDraft && activeServerId === server && cur?.active === channel && draft.trim() === text) {
+        draft = "";
+        replyingTo = "";
+        mentionQuery = null;
+      }
+      if (sameDraft && key && drafts[key]?.trim() === text) delete drafts[key];
+      scheduleUiStateSave();
+      const nextScope = chatScopeKey(server, channel);
+      chatStickToBottom = true;
+      if (tailLoaded && messageWindowScope === nextScope) {
+        const parent = replyTarget;
+        messages = [...messages, { id: pendingId, author: myFp, text, ts: Date.now(), edited: 0,
+          reactions: [], reply_to, pinned: false, targets_me: false, reply_count: 0,
+          reply_to_preview: parent ? { id: reply_to, author: parent.author, text: parent.text } : null }];
+        pageTotal += 1;
+        markMessageArrivals([pendingId]);
+      }
+      replyingToRow = undefined;
+      const { result, refreshError } = await sendAndRefresh(
+        () => submitPendingSend(intent!, session, draftRevision),
+        async () => {
+          if (sessionCurrent() && activeServerId === server && cur?.active === channel) await refresh();
+        },
+      );
+      if (!sessionCurrent()) return;
+      const warning = persistenceWarning(result);
+      if (warning) toast(warning, "warn", 12000);
+      if (refreshError) error = `Message result saved, but the conversation could not refresh: ${errorText(refreshError)}`;
     } catch (e) {
+      if (!sessionCurrent()) return;
       error = String(e);
       if (activeServerId === server && cur?.active === channel && messages.some((m) => m.id === pendingId)) {
         messages = messages.filter((m) => m.id !== pendingId);
         pageTotal = Math.max(0, pageTotal - 1);
       }
-      // Put the message back only if the user has not already started another one while the send
-      // was in flight. A failed send should never silently eat their text.
-      if (activeServerId === server && cur?.active === channel && !draft.trim()) {
+      // A retry of this unchanged composer reuses the sealed intent's token.
+      if ((!intent || pendingSubmissionCurrent(intent, session)) && activeServerId === server && cur?.active === channel && !draft.trim()) {
         draft = text;
         if (key) drafts[key] = text;
         scheduleUiStateSave();
         replyingTo = reply_to;
       }
     } finally {
-      sending = false;
+      if (pendingSendNonce === operation) sending = false;
     }
   }
 
@@ -19545,7 +19809,7 @@
     (uiStateJson) => invoke<NativeVaultLockOutcome>("lock_session", { uiStateJson }),
   );
   let winMaximized = $state(false);
-  let windowCloseInFlight = false;
+  let windowCloseInFlight = $state(false);
   // The first continuity failure leaves a confirmed-locked window open with a warning. Repeating
   // close is the user's explicit acknowledgement that exiting without that latest snapshot is OK.
   let closeAfterContinuityError = false;
@@ -19788,12 +20052,31 @@
           return;
         }
         windowCloseInFlight = true;
+        pendingSendRetry.cancel();
+        const closingGeneration = uiStateLoadGeneration;
         callLifecycleSession.invalidate();
         micCaptureSession.invalidate();
         videoCaptureSession.invalidate();
         screenAudioCaptureSession.invalidate();
         if (inCall) leaveVoice();
         clearTimeout(uiStateSaveTimer);
+        // Native serialization cannot repair a JSON snapshot captured before a pending decision's
+        // afterSave commit. Keep that logical transaction alive, then take fresh state. A stalled
+        // bridge defers this close attempt; it is not a reason to destroy the webview below.
+        if (!(await drainUiStateForClose())) {
+          windowCloseInFlight = false;
+          if (!locked && closingGeneration === uiStateLoadGeneration) {
+            error = "Vault state is still saving. The window remains open; wait and try closing again.";
+          }
+          return;
+        }
+        if (closingGeneration !== uiStateLoadGeneration) {
+          // Ctrl+L can interrupt a decision and a replacement session has different authority.
+          // Neither may reuse this close attempt. An already-locked fresh close below reuses the
+          // lock coordinator's exact snapshot; it never reads the cleared UI state as a snapshot.
+          windowCloseInFlight = false;
+          return;
+        }
         const finalContinuityJson = locked
           ? nativeVaultLock.snapshot()
           : (uiStateReady ? continuityJson() : null);
@@ -19809,7 +20092,10 @@
           // destroy failure) and native locking is confirmed, so frontend teardown is now safe.
           lockScreen(true);
           windowCloseInFlight = false;
-          if (result.deferred) {
+          if (result.history_error) {
+            closeAfterContinuityError = false;
+            error = `The vault is locked, but message history has not finished saving. ${result.history_error}`;
+          } else if (result.deferred) {
             closeAfterContinuityError = true;
             error = `The vault is locked, but Mewtual could not save the latest screen state: ${result.continuity_error}. Close the window again to exit without that latest screen state.`;
           } else if (result.destroy_error) {
@@ -24185,7 +24471,7 @@
       {@render brandMark("opening your vault")}
       <p class="muted small">Loading encrypted preferences before servers can fetch shared content.</p>
     </div>
-  {:else if servers.length === 0 || showAdd}
+  {:else if (servers.length === 0 || showAdd) && !showSettings}
     <!-- The start surface uses the window. It was a single 480px column stacking identity,
          the trust choice, the tabs, the pane, pairing and diagnostics, which squeezed the one
          real decision (how people connect) into two paragraphs each and pushed the primary
@@ -24200,6 +24486,7 @@
           <small class="muted">Who you are to the people in a group, not what the group is called.</small>
         </label>
         <div class="st-identity-side">
+          <button type="button" class="ghost small" onclick={() => openSettings("pending")}>Pending messages &amp; saved drafts ({Object.keys(pendingSends).length + Object.keys(recoveredSendDrafts).length})</button>
           <!-- Folded by default: the summary states the current answer, so folding it hides
                nothing. Opened, it is one segmented choice and one line saying what it does. -->
           <details class="start-trust">
@@ -24294,12 +24581,23 @@
               <div class="st-readout">
                 <span class="k">signature</span><span class="v ok">valid · signed by the inviter's device</span>
                 <span class="k">expires</span><span class="v">{fmtTime(joinPreview.expires_at_ms)}</span>
+                <span class="k">declared mode</span><span class="v">{communicationModeLabel(joinPreview.communication_mode)}</span>
                 <span class="k">routes</span>
                 <span class="v">
                   {joinPreview.direct_routes} direct · {joinPreview.rendezvous_routes} via an introducer ·
                   {joinPreview.switchboards} member switchboard{joinPreview.switchboards === 1 ? "" : "s"}
                 </span>
               </div>
+            {/if}
+            {#if joinPreview}
+              <p class="muted small">The inviter signed this mode declaration. The group's authority is checked when you join.</p>
+              {#if joinPreview.communication_mode === "peer_to_peer"}
+                <p class="muted small">Members can connect directly and exchange signed history they hold. Connected members may learn your IP address.</p>
+              {:else if joinPreview.communication_mode === "legacy_unverified"}
+                <p class="muted small">This older invitation has no authenticated communication policy. Joining does not enable new standing member-route permissions.</p>
+              {:else}
+                <p class="warnline">Dedicated groups are not supported by this version.</p>
+              {/if}
             {/if}
             {#if joinPreview?.switchboards}
               <section class="st-consent">
@@ -24319,10 +24617,12 @@
               </section>
             {/if}
             <div class="pc-actions">
-              <button onclick={join} disabled={busy || !joinInvite.trim()}>
+              <button onclick={join} disabled={busy || !joinInvite.trim() || joinPreview?.communication_mode === "dedicated"}>
                 {busy
                   ? "Dialling…"
-                  : joinPreview?.switchboards
+                  : !joinPreview
+                    ? "Review invite"
+                    : joinPreview.switchboards
                     ? joinSwitchboardConsent
                       ? "Join with fallback"
                       : "Join directly"
@@ -24454,10 +24754,10 @@
               {/if}
             </div>
             <div class="st-card">
-              <span class="k">What happens when I press Join</span>
+              <span class="k">Review, then join</span>
               <ol class="st-steps">
-                <li><b>Your app reads the invite</b> and checks its signature and which routes it offers.</li>
-                <li><b>It dials the inviter</b>, one route at a time. Most joins finish here in a few seconds.</li>
+                <li><b>Review invite</b> checks its signature and shows its declared mode and connection routes.</li>
+                <li><b>Join contacts the inviter</b>, one route at a time.</li>
                 <li><b>If nobody answers</b>, you get a 60-second reply code to send back, and a plain account of what failed.</li>
                 <li><b>The inviter's app admits you</b> under the group's rules. Refusals are logged on their side.</li>
               </ol>
@@ -24517,67 +24817,30 @@
           <section class="st-sect">
             <div class="st-sect-head">
               <span class="k">2 · how people connect</span>
-              <h2>Who carries the traffic?</h2>
-              <span class="why muted small">Neither is the safer one: they guard against different people.</span>
+              <h2>Members connect and share history</h2>
+              <span class="why muted small">New groups use an authenticated peer-to-peer policy that remains fixed for the group.</span>
             </div>
-            <div class="st-topo" role="radiogroup" aria-label="How people connect">
-              <label class="tcard" class:selected={serverMode === "friends"}>
-                <input type="radio" class="mc-radio" name="server-mode" value="friends" bind:group={serverMode} />
+            <div class="st-topo" style="grid-template-columns: minmax(0, 1fr)">
+              <article class="tcard selected">
                 <div class="tc-head">
-                  <div><span class="k">peer to peer · no server</span><h3>Friend mesh</h3></div>
-                  <span class="tc-pick" aria-hidden="true"></span>
+                  <div><span class="k">authenticated group policy</span><h3>Peer to peer</h3></div>
                 </div>
                 <div class="tc-diag">
                   <canvas use:topoDiagram={"mesh"}></canvas>
-                  <div class="tc-cap">no server exists · the group is the truth</div>
+                  <div class="tc-cap">members exchange signed history through available connections</div>
                 </div>
                 <div class="tc-body">
-                  <p>Everyone connects to everyone. Each member's device keeps the encrypted history, so any one of them can catch the others up.</p>
+                  <p>This group uses a fixed peer-to-peer policy. Members can connect directly and pass on the signed history they hold.</p>
                   <dl class="tc-facts">
-                    <dt>Requires</dt><dd><b>Nothing.</b> No machine to run, no address to paste.</dd>
-                    <dt>Who sees</dt><dd>Members may see each other's IP addresses.</dd>
-                    <dt>Removal</dt><dd><span class="m">Cooperative.</span> A ban depends on every member's app playing fair.</dd>
-                    <dt>Offline</dt><dd>Catch-up waits until another member is online. Works on a LAN with no internet.</dd>
-                    <dt>Files</dt><dd>Circulation dates are metadata. Files need a reachable holder; local kept copies are opt-in.</dd>
+                    <dt>Privacy</dt><dd>Connected members may learn your IP address and connection timing.</dd>
+                    <dt>Catch-up</dt><dd>A reachable member must hold the missing history. Another member can pass it on after reconnecting.</dd>
+                    <dt>Removal</dt><dd>Membership changes rotate the group keys. Previously received copies cannot be recalled.</dd>
+                    <dt>Files</dt><dd>Files need a reachable holder; keeping a local copy is optional.</dd>
+                    <dt>Relay</dt><dd>An optional relay carries encrypted traffic. It does not provide a dedicated group or promise to retain history.</dd>
                   </dl>
                 </div>
-                <div class="tc-foot"><span>best for</span><span class="who">friend circles · small crews</span></div>
-              </label>
-              <label class="tcard" class:selected={serverMode === "hosted"}>
-                <input type="radio" class="mc-radio" name="server-mode" value="hosted" bind:group={serverMode} />
-                <div class="tc-head">
-                  <div><span class="k">decentralised server · your node</span><h3>Community node</h3></div>
-                  <span class="tc-pick" aria-hidden="true"></span>
-                </div>
-                <div class="tc-diag">
-                  <canvas use:topoDiagram={"node"}></canvas>
-                  <div class="tc-cap">node forwards encrypted traffic · holds no group keys</div>
-                </div>
-                <div class="tc-body">
-                  <p>Everyone connects through an always-on machine you run. It relays traffic, keeps members' IP addresses from each other, and serves signed snapshots so catch-up works when nobody else is online.</p>
-                  <dl class="tc-facts">
-                    <dt>Requires</dt><dd><b>A node you operate.</b> A small always-on box running <span class="fp">catcomsctl relay</span>, and its address.</dd>
-                    <dt>Who sees</dt><dd>The operator sees who is a member, who talks to whom, when, and how much. Messages are encrypted before they reach the node.</dd>
-                    <dt>Removal</dt><dd><span class="y">Holds.</span> The group rotates keys and the node stops carrying the removed person's traffic.</dd>
-                    <dt>Offline</dt><dd>24/7 catch-up. Voice rooms larger than a mesh can carry.</dd>
-                    <dt>Lose it</dt><dd>Members still hold the history; the group keeps working between whoever is online.</dd>
-                  </dl>
-                </div>
-                <div class="tc-foot"><span>best for</span><span class="who">bigger communities · people you don't know</span></div>
-              </label>
+              </article>
             </div>
-            {#if serverMode === "hosted"}
-              <div class="st-node-req">
-                <label class="field">
-                  <span class="muted">Your node's address</span>
-                  <input bind:value={relay} placeholder="/dns4/your-host/udp/7220/quic-v1/p2p/12D3Koo…" />
-                  <small class="muted">
-                    Set a node up with <span class="fp">catcomsctl relay</span>; it prints this line.
-                    No node yet? Pick Friend mesh instead.
-                  </small>
-                </label>
-              </div>
-            {/if}
           </section>
           <details class="st-fold">
             <summary>Advanced: connectivity <span class="k">optional</span></summary>
@@ -24592,13 +24855,11 @@
                 <input bind:value={rendezvous} placeholder="/ip4/…/tcp/…/p2p/…" />
                 <small class="muted">Register at a rendezvous node so people can join with <em>just the invite</em>, no address needed. Saved as your default.</small>
               </label>
-              {#if serverMode === "friends"}
                 <label class="field">
                   <span class="muted">Relay node</span>
                   <input bind:value={relay} placeholder="/ip4/…/udp/…/quic-v1/p2p/…" />
-                  <small class="muted">A relay's address makes a mesh reachable over the internet with no port-forward. The relay carries encrypted traffic only.</small>
+                  <small class="muted">An optional relay can help members connect. It carries encrypted traffic and does not change the group's peer-to-peer policy.</small>
                 </label>
-              {/if}
             </div>
           </details>
           <div class="st-found-foot">
@@ -24611,12 +24872,9 @@
               <span class="chip">
                 {PRESETS.find((p) => p.id === liveryDraft.preset)?.name ?? "Nightshade"}{liveryDraft.accent ? " · custom accent" : ""}{foundIcon ? " · icon" : ""}{foundBanner ? " · banner" : ""}{foundCursor ? " · cursor" : ""}
               </span>
-              <span class="chip">{serverMode === "hosted" ? "community node" : "friend mesh"}</span>
-              {#if serverMode === "hosted" && !relay.trim()}
-                <span class="warnline">needs a node address before it can be founded</span>
-              {/if}
+              <span class="chip">peer to peer</span>
             </div>
-            <button onclick={found} disabled={busy || (serverMode === "hosted" && !relay.trim())}>
+            <button onclick={found} disabled={busy}>
               {busy ? "Working…" : "Found server"}
             </button>
           </div>
@@ -25605,6 +25863,21 @@
                 {/each}
               </div>
             {/if}
+            {#if Object.keys(pendingSends).length}
+              <details class="muted small">
+                <summary>{Object.keys(pendingSends).length} message(s) awaiting save confirmation</summary>
+                <p>Pending messages keep their original identity. Temporary save failures retry automatically while unlocked.</p>
+                {#each Object.values(pendingSends).filter((item) => item.server === activeServerId) as item (item.token)}
+                  <p>{item.text}</p>
+                  {#if item.retryBlock}<p>Automatic retry paused. Review this message before retrying.</p>{/if}
+                  {#if pendingSendErrors[item.token]}
+                    <p>{pendingSendErrors[item.token]}</p>
+                  {/if}
+                {/each}
+                <button type="button" onclick={() => openSettings("pending")}>Manage all pending messages</button>
+                <button type="button" disabled={sending || retryingPendingSends} onclick={() => retryPendingSends()}>Retry pending messages</button>
+              </details>
+            {/if}
             <!-- svelte-ignore a11y_no_static_element_interactions -->
             <form
               class="composer"
@@ -25650,7 +25923,7 @@
               </div>
               {@render textEffectButton("chat", "Message text effects")}
               <button type="button" class="attach" title="Emoji" onclick={() => (showEmoji = !showEmoji)}>{@render icoCat()}</button>
-              <button type="submit" disabled={uploading || sending}>Send</button>
+              <button type="submit" disabled={uploading || sending || retryingPendingSends}>Send</button>
             </form>
           </div>
         {:else if view === "moderation" && canModerate}
@@ -28123,6 +28396,15 @@
                   {/each}
                 </ul>
               </section>
+            {:else if settingsPage === "pending"}
+              <div class="stx-crumb">SETTINGS // ACCOUNT // PENDING MESSAGES</div>
+              <h1>Pending messages &amp; saved drafts</h1>
+              <PendingSendManager pending={pendingSends} recovered={recoveredSendDrafts}
+                ready={uiStateReady && !locked} busy={pendingSendResolution !== null}
+                conversationName={pendingConversationName}
+                activeLabel={activeServerId !== null && cur?.active ? pendingConversationName(activeServerId, cur.active) : null}
+                onresolve={resolvePendingMessage} onuse={useRecoveredSendDraft}
+                onremove={removeRecoveredSendDraft} />
             {:else if settingsPage === "vault"}
               <div class="stx-crumb">SETTINGS // ACCOUNT // VAULT &amp; LOCK</div>
               <h1>Vault &amp; Lock</h1>
@@ -29071,6 +29353,23 @@
             {#if serverSettingsPage === "overview"}
               <div class="stx-crumb">SERVER // {cur?.name?.toUpperCase()} // OVERVIEW</div>
               <h1>Overview</h1>
+              <section class="set-section">
+                <h3>Communication policy</h3>
+                {#if communicationModeError}
+                  <p class="warnline">{communicationModeError}</p>
+                {:else if communicationMode === null}
+                  <p class="muted small">Reading this group's authenticated policy…</p>
+                {:else}
+                  <p><b>{communicationModeLabel(communicationMode)}</b></p>
+                  {#if communicationMode === "peer_to_peer"}
+                    <p class="muted small">The group has a fixed, owner-authenticated peer-to-peer policy. Members may connect directly and exchange signed history they hold. Connected members may learn your IP address. Catch-up needs a reachable copy of the missing history.</p>
+                  {:else if communicationMode === "legacy_unverified"}
+                    <p class="muted small">This older group has no active authenticated communication policy. Its existing messaging remains available; new standing member-route permissions stay disabled. No policy upgrade is offered in this version.</p>
+                  {:else}
+                    <p class="muted small">Dedicated groups are not supported by this version.</p>
+                  {/if}
+                {/if}
+              </section>
               <section class="set-section">
               <p>{cur ? serverLabel(cur) : ":"} <span class="role-badge {myRole}">{myRole}</span></p>
               {#if canModerate && !cur?.isDm}

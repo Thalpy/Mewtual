@@ -923,13 +923,16 @@ fn a_flush_only_step_refuses_a_registry_replacement_but_still_reaches_the_flush(
 
 /// N17, Registry family, plus the two shapes the matrix calls out separately.
 ///
-/// A same-size authenticated replacement matters because size is the cheap thing a cursor could
-/// have keyed on; an inventory that survived a same-size rewrite would be wrong about content
-/// while looking right about bytes. A failed write that leaves a temporary sibling matters
-/// because rotation is required before the *first possible* I/O, not on success: a cursor that
-/// survived a failed attempt would miss the orphan that attempt left behind.
+/// The unchanged exact-retry flush matters because it changes no bytes at all: an inventory
+/// captured before it still describes the right content, and it must invalidate anyway, because
+/// the operation changes the record's durability. A failed write matters because rotation is
+/// required before the *first possible* I/O, not on success: a cursor that survived a failed
+/// attempt would miss whatever that attempt left behind.
+///
+/// Neither of these is the design's "same-size authenticated replacement" - a *different* record
+/// that happens to seal to the same physical length. That case is not covered here.
 #[test]
-fn a_cursor_parked_across_registry_writes_refuses_including_same_size_and_failed_attempts() {
+fn a_cursor_parked_across_registry_writes_refuses_including_retry_flush_and_failed_attempts() {
     let park = |store: &mut ServerStore| {
         let mut cursor = store
             .begin_epoch_storage_scan(
@@ -966,8 +969,8 @@ fn a_cursor_parked_across_registry_writes_refuses_including_same_size_and_failed
     );
     refused(&store, cursor, "a Registry write");
 
-    // 2. A same-size authenticated replacement: the exact-retry flush of an unchanged record,
-    //    which changes no bytes at all and must still invalidate.
+    // 2. The exact-retry flush of an unchanged record, which changes no bytes at all and must
+    //    still invalidate.
     let held = fs::read(f.path(&store)).unwrap();
     let mut budget = self::budget(&mut store, &f);
     let mut cursor = park(&mut store);

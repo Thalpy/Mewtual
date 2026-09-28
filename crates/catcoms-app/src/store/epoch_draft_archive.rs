@@ -267,6 +267,145 @@ impl ServerStore {
     }
 }
 
+impl ServerStore {
+    /// Destroy the preserved draft archive for a logical document.
+    ///
+    /// **This is the only thing in the system that removes a final archive record.** Nothing
+    /// retires a final record by family: intent retirement removes ledger entries inside the
+    /// intent record and addresses `epoch_intent_path` alone, and cleanup unlinks only
+    /// `RecoveryName::Temporary`, saying so in its own refusal. So an archive that is never
+    /// released here survives every other path by construction, which is the whole preservation
+    /// guarantee. The corollary is that this function is the single point where that guarantee is
+    /// spent, and it is why it is separately confirmed a layer above.
+    ///
+    /// `expected_archive` binds the destruction to the archive the user actually saw. The
+    /// confirmation literal lives at the native adapter, but a literal only proves the user typed
+    /// something; it cannot prove they typed it about *this* archive. Between the read that
+    /// populated the dialog and the release, the archive could have been replaced.
+    ///
+    /// It is deliberately `StudioDraftArchive::archive_id`, a digest of the canonical payload, and
+    /// **not** `content()`. `content` is the branch's content identity, so two archives of one
+    /// branch that differ only in `replayable`, `provenance` or `generation` share it. Binding to
+    /// `content` would let a token read from archive A be spent destroying a later archive B with
+    /// the same branch content - reachable without any collision, because release-then-write is
+    /// exactly how an archive is replaced. Binding to the payload makes "release the archive I was
+    /// shown" a statement about the archive rather than about its branch.
+    ///
+    /// **Both budgets are closed before the first destructive step, and neither is reopened on any
+    /// path after it.** Release is the one operation in this family that cannot be expressed as a
+    /// replacement: [`EpochStorageBudget::reserve`] refuses a zero-footprint record and `commit`
+    /// only inserts, so there is no removal primitive to call and no reservation to commit. The
+    /// alternative would be to subtract the freed bytes from both tallies by hand, which is a
+    /// second representation of occupancy maintained beside the inventory's, drifting silently the
+    /// first time a subtraction is wrong. A rare, user-initiated, destructive action can afford a
+    /// rescan; a quietly wrong byte count cannot be afforded at all.
+    ///
+    /// Closing them *before* the unlink rather than after it is the difference between a rule and
+    /// a wish. The failure that matters is a successful `remove_file` followed by a failed parent
+    /// sync: that returns early, so a closure placed at the end of the happy path would never run,
+    /// and the caller would keep a storage budget still claiming a record that this process can no
+    /// longer see.
+    ///
+    /// **Uncertainty here is not resolved by an exact retry, unlike every writing path in this
+    /// family.** A retry after a successful unlink finds nothing and is refused, by design: the
+    /// store cannot distinguish "this archive was already released" from "the caller addressed a
+    /// scope that never held one", and collapsing those would be the bug. A caller that receives
+    /// [`AppError::CommittedButNotDurable`] must reconcile and re-read the archive state, not
+    /// resend the request. Design section 12.1 records this exemption.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "the native release command is this function's production caller and lands \
+        later in this scope; its own tests exercise it today"
+        )
+    )]
+    pub(in crate::store) fn release_studio_draft_archive_with_io(
+        &mut self,
+        server: u64,
+        document: &LogicalDocument,
+        expected_archive: [u8; 32],
+        budget: &mut EpochStorageBudget,
+        intents: &mut EpochIntentBudget,
+        hooks: &mut WriteHooks<'_>,
+    ) -> Result<(), AppError> {
+        let scope = scope_bytes(server, document)?;
+        let storage_scope = StorageScope::new(server, &document.server_id).map_err(invalid)?;
+        let id = *blake3::hash(&scope).as_bytes();
+
+        let Some(existing) = self.read_scoped_draft_archive_plain(&scope)? else {
+            // Deliberately an error rather than a silent success. A release that reports "done"
+            // when it found nothing would report the same thing whether the archive was already
+            // gone or the scope was computed wrongly, and the second is a bug that destroys the
+            // wrong evidence elsewhere.
+            return Err(invalid("no draft archive is preserved for this document"));
+        };
+        let bytes = existing.physical_bytes;
+
+        // Decode before destroying. The identity check is the point of the read, but decoding also
+        // means an archive this build cannot parse is refused here rather than unlinked on the
+        // strength of its filename alone.
+        //
+        // This is deliberately NARROWER than the reference collector's rule, not the same one.
+        // The collector additionally requires `blob_cids` to succeed, because it is deciding what
+        // may be reclaimed. Release only requires the payload to be canonically decodable. An
+        // archive whose seed is semantically damaged makes reference scanning fail closed, and if
+        // release demanded full semantic validation too, that archive could never be removed: the
+        // vault would hold evidence it can neither use nor discard.
+        let mut d = Decoder::new(existing.plain.as_slice());
+        if d.get_bytes().map_err(invalid)? != scope {
+            return Err(invalid("wrong sealed scope"));
+        }
+        let body = d.get_bytes().map_err(invalid)?;
+        d.finish().map_err(invalid)?;
+        let archive =
+            catcoms_replication::studio::StudioDraftArchive::decode(body).map_err(invalid)?;
+        if archive.document() != document {
+            return Err(invalid("draft archive names another logical document"));
+        }
+        if archive.archive_id().map_err(invalid)? != expected_archive {
+            return Err(invalid(
+                "draft archive changed since it was read; release names a different archive",
+            ));
+        }
+
+        // Prove the accounting matches disk before spending it. A mismatch here invalidates the
+        // inventory instead of destroying a record the budget never knew about.
+        let observed = storage_record(server, document, &scope, bytes)?;
+        budget
+            .verify_record(&storage_scope, id, Some(observed))
+            .map_err(invalid)?;
+
+        // Close BOTH budgets before the first possible I/O, and rotate ahead of the guard. Every
+        // validation that could refuse without touching disk has already run, so nothing below
+        // this line can return with an accounting that still describes the pre-release vault.
+        //
+        // The storage budget is closed here rather than after a successful unlink because the
+        // failure that matters returns early: `remove_file` succeeds, the parent sync fails, and
+        // a closure at the end of the happy path is simply skipped, leaving the caller holding a
+        // budget that still claims a record this process can no longer see.
+        budget.invalidate();
+        intents.begin_write();
+        self.intent_generation = Arc::new(());
+        let path = self.epoch_draft_archive_path(&scope);
+        let parent = self.dir.join("servers");
+        let mutation = self.epoch_mutation_guard();
+        hooks.before_unlink(WriteTag::Archive, &path)?;
+        mutation
+            .remove_io(&path)
+            .map_err(|e| AppError::Io(e.to_string()))?;
+        // The unlink is not durable until the directory entry is. Report the distinction rather
+        // than flattening it: the bytes are gone from this process's view either way, but only a
+        // synced parent makes that survive a crash, and a caller that reported "released" on an
+        // unsynced removal would be making a claim about evidence it cannot support.
+        mutation
+            .sync_parent_io(&parent)
+            .map_err(|e| AppError::CommittedButNotDurable(e.to_string()))?;
+        hooks.after_unlink(WriteTag::Archive, &path)?;
+        Ok(())
+    }
+}
+
 /// One archive's accounting record and the conservative reference set it keeps alive.
 pub(super) struct InspectedDraftArchive {
     pub(super) record: StorageRecord,

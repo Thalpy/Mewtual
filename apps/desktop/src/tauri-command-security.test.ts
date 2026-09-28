@@ -76,13 +76,124 @@ function registeredCommands(source: string): string[] {
  * The module commands are `pub(crate)`, which the old `(?:pub\s+)?` could not match. That is the
  * same bug as the handler-list one wearing different clothes: two independent reasons the Studio
  * surface stayed invisible, either of which was enough on its own.
+ *
+ * Rust comments may separate stacked attributes, and strings/comments may contain convincing
+ * command markers. Skip those lexically, then require a supported function prefix rather than
+ * searching ahead for an arbitrary `fn`. Unsupported command syntax fails the audit. This only
+ * repairs declaration extraction; the later body/gate checks remain a static source heuristic.
  */
+function skipRustTrivia(source: string, start: number): number {
+  let cursor = start;
+  while (cursor < source.length) {
+    if (/\s/.test(source[cursor])) cursor += 1;
+    else if (source.startsWith("//", cursor)) {
+      const end = source.indexOf("\n", cursor + 2);
+      cursor = end < 0 ? source.length : end + 1;
+    } else if (source.startsWith("/*", cursor)) {
+      let depth = 1;
+      cursor += 2;
+      while (cursor < source.length && depth > 0) {
+        if (source.startsWith("/*", cursor)) { depth += 1; cursor += 2; }
+        else if (source.startsWith("*/", cursor)) { depth -= 1; cursor += 2; }
+        else cursor += 1;
+      }
+      assert.equal(depth, 0, "unterminated Rust comment in native command audit");
+    } else break;
+  }
+  return cursor;
+}
+
+function skipRustLiteral(source: string, start: number): number {
+  if (source[start] === '"') {
+    let cursor = start + 1;
+    while (cursor < source.length) {
+      if (source[cursor] === "\\") cursor += 2;
+      else if (source[cursor++] === '"') return cursor;
+    }
+    assert.fail("unterminated Rust string in native command audit");
+  }
+  if (/[rbc]/.test(source[start] ?? "")) {
+    const raw = /^(?:b|c)?r(#{0,255})"/.exec(source.slice(start));
+    if (raw) {
+      const closing = `"${raw[1]}`;
+      const end = source.indexOf(closing, start + raw[0].length);
+      assert.ok(end >= 0, "unterminated Rust raw string in native command audit");
+      return end + closing.length;
+    }
+  }
+  if (source[start] === "'") {
+    // A character is exactly one scalar/escape followed by its closing quote. A lifetime such
+    // as 'static has no such close and must not hide the code following it.
+    const character = /^'(?:[^'\\]|\\(?:u\{[0-9a-fA-F_]+\}|x[0-9a-fA-F]{2}|.))'/u.exec(source.slice(start));
+    if (character) return start + character[0].length;
+  }
+  return start;
+}
+
+function outerAttributeOpening(source: string, start: number): number | undefined {
+  if (source[start] !== "#") return undefined;
+  const opening = skipRustTrivia(source, start + 1);
+  return source[opening] === "[" ? opening : undefined;
+}
+
+function isCommandAttribute(source: string, opening: number): boolean {
+  let cursor = skipRustTrivia(source, opening + 1);
+  if (!/^tauri\b/.test(source.slice(cursor))) return false;
+  cursor = skipRustTrivia(source, cursor + "tauri".length);
+  if (!source.startsWith("::", cursor)) return false;
+  cursor = skipRustTrivia(source, cursor + 2);
+  if (!/^command\b/.test(source.slice(cursor))) return false;
+  cursor = skipRustTrivia(source, cursor + "command".length);
+  assert.equal(source[cursor], "]", "configured or unsupported tauri::command attribute; teach the extractor which IPC name it produces");
+  return true;
+}
+
+function skipRustAttribute(source: string, opening: number): number {
+  let cursor = opening + 1;
+  const expectedClosers = ["]"];
+  const pairs: Record<string, string> = { "[": "]", "(": ")", "{": "}" };
+  while (cursor < source.length) {
+    cursor = skipRustTrivia(source, cursor);
+    const literalEnd = skipRustLiteral(source, cursor);
+    if (literalEnd > cursor) { cursor = literalEnd; continue; }
+    const token = source[cursor];
+    if (pairs[token]) expectedClosers.push(pairs[token]);
+    else if (token !== undefined && "])}".includes(token)) {
+      assert.equal(token, expectedClosers.pop(), "mismatched Rust attribute delimiter in native command audit");
+      if (expectedClosers.length === 0) return cursor + 1;
+    }
+    cursor += 1;
+  }
+  assert.fail("unterminated Rust attribute in native command audit");
+}
+
+function commandDefinitions(source: string): { name: string; start: number }[] {
+  const definitions: { name: string; start: number }[] = [];
+  for (let cursor = 0; cursor < source.length;) {
+    cursor = skipRustTrivia(source, cursor);
+    const literalEnd = skipRustLiteral(source, cursor);
+    if (literalEnd > cursor) { cursor = literalEnd; continue; }
+    const opening = outerAttributeOpening(source, cursor);
+    if (opening === undefined) { cursor += 1; continue; }
+    const start = cursor;
+    const command = isCommandAttribute(source, opening);
+    cursor = skipRustTrivia(source, skipRustAttribute(source, opening));
+    if (!command) continue;
+    for (let next = outerAttributeOpening(source, cursor); next !== undefined; next = outerAttributeOpening(source, cursor)) {
+      // A command annotation must never disappear into another command's attribute stack.
+      assert.ok(!isCommandAttribute(source, next), "duplicate Tauri command attribute");
+      cursor = skipRustTrivia(source, skipRustAttribute(source, next));
+    }
+    const declaration = /^(?:pub(?:\s*\([^)]*\))?\s+)?(?:async\s+)?fn\s+([a-z][a-z0-9_]*)\b/.exec(source.slice(cursor));
+    assert.ok(declaration, "every Tauri command attribute must directly precede a supported named function");
+    definitions.push({ name: declaration[1], start });
+    cursor += declaration[0].length;
+  }
+  return definitions;
+}
+
 function commandFunctions(source: string): string[] {
-  return [
-    ...source.matchAll(
-      /#\[tauri::command\]\s*(?:#\[[^\]]*\]\s*)*(?:pub(?:\s*\([^)]*\))?\s+)?(?:async\s+)?fn\s+([a-z][a-z0-9_]*)/g,
-    ),
-  ].map((match) => match[1]);
+  return commandDefinitions(source).map(({ name }) => name);
 }
 
 /**
@@ -103,13 +214,11 @@ function endOfCommands(source: string, start: number): number {
 function commandSegments(sources: Map<string, string>): Map<string, { file: string; segment: string }> {
   const segments = new Map<string, { file: string; segment: string }>();
   for (const [file, source] of sources) {
-    const attributes = [...source.matchAll(/#\[tauri::command\]/g)];
-    for (let index = 0; index < attributes.length; index += 1) {
-      const start = attributes[index].index;
-      const end = attributes[index + 1]?.index ?? endOfCommands(source, start);
+    const definitions = commandDefinitions(source);
+    for (let index = 0; index < definitions.length; index += 1) {
+      const { name, start } = definitions[index];
+      const end = definitions[index + 1]?.start ?? endOfCommands(source, start);
       const segment = source.slice(start, end > start ? end : undefined);
-      const name = /(?:async\s+)?fn\s+([a-z][a-z0-9_]*)/.exec(segment)?.[1];
-      assert.ok(name, "every Tauri command attribute must precede a named function");
       assert.ok(!segments.has(name), `two native sources define a command named ${name}`);
       segments.set(name, { file, segment });
     }
@@ -161,6 +270,65 @@ function invokedCommands(source: string): string[] {
  * cannot be audited by reading the frontend.
  */
 const INVOKE_WRAPPERS = ["diagnostics.ts"];
+
+test("native command extraction handles stacked attributes and intervening Rust trivia", () => {
+  const source = String.raw`
+#[allow(dead_code)]
+#[tauri::command]
+// Preserve a documented exception; fn comment_decoy() is not this command.
+#[allow(clippy::too_many_arguments)]
+/* outer comment /* nested comment with ] */ still outer */
+#[doc = "a closing bracket ] and fn string_decoy() and an escaped quote \""]
+#[example(values = [']', '['], text = r##"raw ] #[tauri::command] fn raw_decoy()"##)]
+pub(crate) async fn stacked_command() {}
+# [ tauri /* path trivia */ :: command ]
+/// Documentation after the command attribute.
+pub(super) fn plain_command() {}
+`;
+  assert.deepEqual(commandFunctions(source), ["stacked_command", "plain_command"]);
+  const segments = commandSegments(new Map([["fixture.rs", source]]));
+  assert.deepEqual([...segments.keys()], ["stacked_command", "plain_command"]);
+  assert.ok(!segments.get("stacked_command")!.segment.includes("fn plain_command"));
+});
+
+test("comments and literals cannot manufacture native command entries", () => {
+  const source = String.raw`
+// #[tauri::command] fn line_decoy() {}
+/* #[tauri::command] fn block_decoy() {} /* nested */ */
+const TEXT: &str = "#[tauri::command] fn string_decoy() {}";
+const RAW: &str = r#"#[tauri::command] fn raw_decoy() {}"#;
+const BYTE_RAW: &[u8] = br##"#[tauri::command] fn byte_decoy() {}"##;
+const C_RAW: &CStr = cr#"#[tauri::command] fn c_decoy() {}"#;
+const CHARACTER: char = '\'';
+const BYTE_CHARACTER: u8 = b']';
+fn helper<'a>(value: &'a str) -> &'a str { value }
+#[tauri::command]
+async fn actual_command() {}
+`;
+  assert.deepEqual(commandFunctions(source), ["actual_command"]);
+  assert.deepEqual([...commandSegments(new Map([["fixture.rs", source]])).keys()], ["actual_command"]);
+});
+
+test("unparsed command declarations fail closed instead of borrowing a later function", () => {
+  for (const suffix of [
+    "#[allow(dead_code) fn later() {}",
+    "#[example(values = [1, 2))] fn mismatched() {}",
+    "/* unterminated comment",
+    'const OTHER: &str = "not a function"; fn later() {}',
+    "struct Other; fn later() {}",
+    "#[tauri::command] fn duplicate() {}",
+  ]) {
+    assert.throws(() => commandFunctions(`#[tauri::command]\n${suffix}`));
+    assert.throws(() => commandSegments(new Map([["fixture.rs", `#[tauri::command]\n${suffix}`]])));
+  }
+  for (const attribute of [
+    '#[tauri::command(rename = "other")]',
+    '# [ tauri /* path trivia */ :: command (rename = "other") ]',
+    "#[tauri::command",
+  ]) {
+    assert.throws(() => commandFunctions(`${attribute}\nfn later() {}`));
+  }
+});
 
 function frontendSources(dir: string): string[] {
   const sources: string[] = [];

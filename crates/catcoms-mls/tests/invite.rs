@@ -160,6 +160,7 @@ fn invite_from_a_non_member_is_rejected() {
         expires_at_ms: SOON,
         bootstrap: vec![],
         rendezvous: vec![],
+        policy: None,
         signature: [0u8; 64],
     };
 

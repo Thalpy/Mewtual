@@ -400,17 +400,147 @@ constraint the handoffs record about exhausted RAM and disk. The alternative of 
 1's file was also rejected: reverting a peer's work mid-edit could corrupt their session. The
 working answer is to retry and to report which signals could not be obtained.
 
+### Slice 3: the release path, and a stack regression found on the way
+
+`release_studio_draft_archive_with_io` landed at `47bad73`. The design left its signature open;
+what slice 3 fixed, and why, is in the commit message and the function's own doc comment. The four
+decisions worth repeating here: `expected_content` binds the destruction to the archive the user
+was shown, decode happens before destroying, `verify_record` runs before the unlink, and **both
+budgets are closed afterwards with a reconcile required**, because release cannot be expressed as
+a replacement and hand-subtracting the freed bytes would be a second representation of occupancy
+maintained beside the inventory's.
+
+Seven tests, one per guard. The load-bearing one is
+`releasing_an_archive_makes_its_sole_references_reclaimable`, the mirror of N19: one vault shows
+the pixels pinned because of the archive and reclaimable again because it was released. It is the
+only test that proves release reaches the scanner rather than merely returning `Ok`.
+
+**Mutation evidence: COMPLETE, and it found a real gap.** Eight mutations, each restored
+byte-exact from git and followed by a passing restored run:
+
+| # | Mutation | Tests that failed |
+|---|---|---|
+| 1 | delete the `expected_content` comparison | `release_refuses_an_archive_other_than_the_one_it_names` only |
+| 2 | delete the `verify_record` call | `release_refuses_a_record_its_budget_does_not_know` only |
+| 3 | missing archive returns `Ok(())` | `release_refuses_when_no_archive_is_preserved` only |
+| 4 | delete `budget.invalidate()` | `release_closes_both_budgets_so_the_next_write_must_reconcile` only |
+| 5 | move `before_unlink` after the removal | `release_consults_hooks_on_both_sides_of_its_unlink` only |
+| 6 | skip the unlink entirely | **three** tests |
+| 7 | let an undecodable payload proceed | `release_refuses_an_archive_it_cannot_decode` only |
+| 8 | delete the `document()` check | `release_refuses_an_archive_naming_another_document` only |
+
+Two of these are worth keeping in mind rather than just counting:
+
+- **6 is not a guard mutation** and is not expected to fail one test. It deletes the operation
+  itself, and three tests independently notice the archive surviving. That is the right shape for
+  the core operation; only guards owe a single-test failure.
+- **8 did not exist until the mutation pass demanded it.** Deleting the document check originally
+  failed nothing, because the content comparison catches the cases the other tests happen to
+  build. The guard is reachable on its own: an archive for B sealed into A's record would be
+  released by a user who confirmed a release for A, destroying B's only preserved evidence while
+  the dialog, the scope and the content all agreed. The test now builds that vault and passes B's
+  real content, so the document claim is the only thing that can refuse it. This is the third time
+  in this scope that a mutation has converted a plausible-looking test set into a real one.
+
+### Slice 3 adversarial review: all four findings addressed, and two mutations that survived
+
+The review of `47bad73` + `d023a9e` returned CHANGES REQUIRED with one High and three Mediums.
+Every one was correct. Fixed at `2dba8fa` and after.
+
+**High: the release token did not identify the archive.** `content()` is the *branch's* content
+identity, supplied by the caller and stored verbatim, so two archives of one branch that differ
+only in `replayable`, `provenance` or `generation` share it. Release-then-write is the only way to
+replace an archive, which makes the dangerous sequence ordinary rather than exotic: read A, A is
+released by another valid action, B is archived for the same branch, and the queued confirmation
+for A destroys B. New `StudioDraftArchive::archive_id`, a derive-key digest over the canonical
+payload, hashed over the body rather than the sealed record so re-sealing identical evidence does
+not change the identity a user was shown.
+
+**Medium: the storage budget closed too late.** The failure that matters returns early - unlink
+succeeds, parent sync fails - so a closure at the end of the happy path never ran. Both budgets
+now close before the first destructive step. Mutation 10 (move it back) fails only the new
+after-unlink test, which is direct evidence the finding was real.
+
+**Medium: release cannot honour the exact-retry contract.** Recorded as an explicit exemption in
+design 12.1, option (a): uncertainty resolves by reconcile-and-re-read, not by resending. Option
+(b), a release tombstone, was rejected: a new durable record family with its own accounting,
+bound, reference rules and eviction question, built solely to preserve a retry slogan for the one
+operation whose purpose is to remove records. The exemption also lives in the function's doc
+comment, because a rule that lives only in a design document is one the next caller's author will
+not read.
+
+**Medium: the invalidation rails were not independently anchored.** Now closed, in two rounds.
+
+| Rail | State |
+|---|---|
+| storage-budget closure across a destructive failure | anchored, mutation 10 |
+| `inventory_generation` rotation | anchored, mutation 13 |
+| over-cap release remediation | anchored, mutation 14 |
+| `intent_generation` rotation | anchored, mutation 12b |
+| `intents.begin_write()` | redundant hardening, deliberately unanchored |
+
+The first attempt failed and the failure is worth keeping. Mutations 11 and 12 removed each intent
+rail and **failed nothing**; removing **both** still failed nothing. Every probe I had written
+wrote a record whose map entry the release had changed, so `preflight`'s
+`records.get(&id) != old` refused before the generation was ever compared and hid both rails
+behind it. Two tests that claimed to isolate the rails were renamed to say what they actually
+prove.
+
+I then recorded the rotation as test debt for the disposal slice, on the grounds that isolating it
+needed a multi-document fixture this module lacked. **The re-review disagreed and was right.** No
+second Studio source is needed: a second logical document in the same group plus the ordinary
+`prepare_epoch_intent` path is enough, because A's release does not touch B's intent record, so
+B's map entry still matches disk and the rotation is the only remaining fence. That is
+`a_stale_intent_budget_cannot_write_another_document_after_a_release`, and deleting the rotation
+now fails it and only it.
+
+The lesson is the one worth carrying: "this needs an expensive fixture" was an assumption about
+the *probe*, not a fact about the code, and it went unchallenged because the honest negative
+result felt like enough diligence on its own. Documenting a gap is not the same as establishing
+that the gap is hard to close.
+
+`intents.begin_write()` remains deliberately unanchored. With the rotation in place no stale
+intent budget can preflight, so a surviving mutation there implies no safety regression. It is
+kept as redundant hardening, consistent with `write_prepared_intents`' discipline, and the
+re-review explicitly did not require an anchor for it.
+
+The mutations ran against a private `CARGO_TARGET_DIR` (`M:/catcoms-agent2-target`): the shared
+workspace target is contended by the other agents' test binaries, whose long runs hold
+`catcoms_app-*.exe` open and fail the link with `LNK1104`. A ten-minute retry loop was not enough;
+a private target dir took the cycle to about 35 seconds. This is the opposite of the recorded
+shared-target hazard, which is about a *shared* dir poisoning a cache.
+
+**A pre-existing stack regression, reported to Agent 1, not caused by this slice.** While verifying
+slice 3, `store::epoch_studio` began aborting with exit `0xffffffff` and no panic message. The
+first comparison appeared to implicate slice 3 (three crashing runs with the changes, one passing
+run without), and that was **wrong**: the passing run predated Agent 1's C-3 commits, and the tree
+moved between the two samples because another agent's uncommitted `epoch_studio/tests.rs` was
+present for one and not the other. Re-running the comparison after the tree settled reproduced the
+crash **at HEAD with slice 3 stashed**, which is what actually attributes it.
+
+The cause is stack exhaustion, not logic:
+
+| Suite | default stack | `RUST_MIN_STACK=32 MiB` | `RUST_MIN_STACK=128 MiB` |
+|---|---|---|---|
+| `rotation::overlay::archive` | aborts after 15/17 | 17 passed | - |
+| `rotation::overlay::handoff` | aborts | aborts | 37 passed, 2 ignored |
+
+Every test passes in isolation, so it is cumulative depth rather than one deep test. The handoff
+suite needing somewhere between 32 MiB and 128 MiB of thread stack is the signal worth acting on,
+and it appeared with the C-3 parked-cursor work. Agent 2 is not fixing this: it is Agent 1's area.
+Slice 3's own evidence was taken at `RUST_MIN_STACK=33554432`, and **that is a workaround, not a
+result** - any later claim that this scope is green must say which stack size it used.
+
 ### Built so far
 
 The payload codec, the reference collector that narrows Agent 1's fail-closed arm under I-5, the
-archive record writer with its accounting and sub-cap, and the archive tally on
-`EpochIntentBudget`.
+archive record writer with its accounting and sub-cap, the archive tally on `EpochIntentBudget`,
+and **the archive release path** (slice 3).
 
 ### Not yet built
 
-The archive release path, the disposal transaction (which is the writer's first production
-caller), the v3 record arms, the composite copy capture, the lifecycle classifier, the tenure
-work and every native command.
+The disposal transaction (which is the writer's first production caller), the v3 record arms, the
+composite copy capture, the lifecycle classifier, the tenure work and every native command.
 
 **Sections above this point are an append-only ledger and are dated.** Where an earlier entry
 says something is not yet built, read it as the state at that entry's date, not as current
