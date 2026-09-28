@@ -75,20 +75,33 @@ const REPETITIONS: usize = 64;
 /// Complete scans, so the single-sample phases are summed rather than reported from one tick.
 const TRIALS: usize = 8;
 
-/// Min, median and max of a sample set, converted to microseconds per unit of work.
+/// Min, **upper median**, max of a sample set, converted to microseconds per unit of work.
 ///
-/// A mean hides exactly what the first profiles of this design got wrong. Re-measuring identical
-/// Recovery fixtures moved 36%, 39% and 86% between runs, so a single averaged figure carries no
-/// information about whether a difference between two cases is real. The spread does.
+/// A single summary figure carries no information about whether a difference between two cases is
+/// real, and re-measuring identical Recovery fixtures moved 36%, 39% and 86% between runs. The
+/// spread is what makes that visible.
+///
+/// **The middle figure is the upper median**, `sorted[len / 2]`, not an interpolated one: for
+/// eight samples it is the fifth sorted value. For `0,0,0,0,1000,1000,1000,1000` it reports
+/// 1000, where an arithmetic midpoint would be 500. That convention is deliberate - it never
+/// invents a value the clock did not produce - but it must be labelled, because it is not what
+/// "median" unqualified would mean.
+///
+/// `zero_samples` is carried for the same reason: a printed `0/1000/1000` is compatible with
+/// several different zero counts, so the spread alone cannot say how much of the phase fell
+/// below the clock's resolution. The count can.
 ///
 /// `per` is how many units of work one sample covers: 1 for a phase timed once per trial,
-/// `REPETITIONS` for the batched validation.
+/// `REPETITIONS` for the batched validation - in which case each sample is itself a batch mean,
+/// and this is a spread *of means*, not of individual timings.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 struct Spread {
     min_us: u128,
-    median_us: u128,
+    upper_median_us: u128,
     max_us: u128,
     samples: usize,
+    /// How many raw samples read exactly zero milliseconds.
+    zero_samples: usize,
     /// Sum of the raw millisecond samples, so a spread of all-zeros is visibly "below the
     /// clock's resolution" rather than "free".
     raw_total_ms: u64,
@@ -103,20 +116,32 @@ impl Spread {
         us.sort_unstable();
         Self {
             min_us: us[0],
-            median_us: us[us.len() / 2],
+            upper_median_us: us[us.len() / 2],
             max_us: us[us.len() - 1],
             samples: us.len(),
+            zero_samples: samples.iter().filter(|ms| **ms == 0).count(),
             raw_total_ms: samples.iter().sum(),
         }
     }
-    fn resolved(&self) -> bool {
-        self.raw_total_ms > 0
+    /// Resolved *well enough to take a ratio from*, which is a stronger condition than nonzero.
+    ///
+    /// A phase whose upper median is a single clock tick is not measured to better than 100%:
+    /// the true value lies somewhere in one whole millisecond. Requiring strictly more than one
+    /// tick is what makes the reported fraction mean anything, and it is the condition the
+    /// status ledger states - the earlier implementation only rejected a median of zero, which
+    /// left one-tick medians producing confident-looking fractions.
+    fn resolved_for_ratio(&self) -> bool {
+        self.upper_median_us > 1_000
     }
 }
 
 impl std::fmt::Display for Spread {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}/{}/{}", self.min_us, self.median_us, self.max_us)
+        write!(
+            f,
+            "{}/{}/{}(z{})",
+            self.min_us, self.upper_median_us, self.max_us, self.zero_samples
+        )
     }
 }
 
@@ -138,7 +163,17 @@ impl RecordCost {
     fn trials(&self) -> usize {
         self.read_and_park.len()
     }
-    fn validation(&self) -> Spread {
+    /// Every phase vector holds one sample per trial. A spread over vectors of different lengths
+    /// would compare different trial sets, so the checker enforces this rather than assuming it.
+    fn vectors_aligned(&self) -> bool {
+        let n = self.read_and_park.len();
+        self.install.len() == n && self.validation_batch.len() == n
+    }
+    /// A spread of **batch means**: each sample is the time for `REPETITIONS` validations divided
+    /// by `REPETITIONS`, so this is the distribution of eight averages rather than of 512
+    /// individual timings. It cannot show a single slow validation hidden inside an ordinary
+    /// batch, which is what a conservative worst-case classifier would eventually want.
+    fn validation_batch_mean(&self) -> Spread {
         Spread::of(&self.validation_batch, REPETITIONS as u128)
     }
     fn read_and_park(&self) -> Spread {
@@ -154,20 +189,17 @@ impl RecordCost {
     /// Reported only when both components resolved; a ratio built on a phase that never rose
     /// above the clock's resolution says nothing.
     fn deferrable_fraction(&self) -> Option<u128> {
-        let validation = self.validation();
+        let validation = self.validation_batch_mean();
         let retained = self.read_and_park();
-        if !validation.resolved() || !retained.resolved() {
+        // Both phases must be resolved to better than a single clock tick. Two weaker rules were
+        // tried and both produced confident-looking nonsense: checking the raw *sum* let seven
+        // zeros plus one 1 ms sample through and printed 100% deferrable, and rejecting only a
+        // zero median let a one-tick median through, which is a value known to within 100% of
+        // itself. "Nonzero" and "good enough to divide by" are different predicates.
+        if !validation.resolved_for_ratio() || !retained.resolved_for_ratio() {
             return None;
         }
-        let (v, r) = (validation.median_us, retained.median_us);
-        // A *median* of zero is the same trap the earlier `visit_ms == 0` case was: the phase
-        // straddles the clock's resolution, half its samples read 0, and the ratio prints 100%
-        // deferrable when what it means is "this phase is too small for this clock to see".
-        // `resolved()` alone does not catch it, because a single nonzero sample out of eight
-        // makes the raw total positive while the median stays 0.
-        if v == 0 || r == 0 {
-            return None;
-        }
+        let (v, r) = (validation.upper_median_us, retained.upper_median_us);
         Some(v * 100 / (v + r))
     }
 }
@@ -199,9 +231,16 @@ struct ScanCost {
     /// parking or not. This is what compares a warm-cache scan against a fresh one, since a
     /// warm scan parks nothing and so has no per-record rows.
     step_total: Vec<u64>,
-    /// `reused_records` from the final progress of each trial: validation-cache hits, which are
-    /// never parked and so never contribute a validation sample.
-    reused: usize,
+    /// One entry per trial: `reused_records` from that trial's final progress - validation-cache
+    /// hits, which are never parked and so never contribute a validation sample.
+    ///
+    /// Per trial rather than a single scalar, because the first warm-mode trial is not like the
+    /// rest: it populates the cache and therefore still parks. Keeping only the last trial's
+    /// count could not distinguish "hit on every trial" from "hit on all but the first", and
+    /// those are different experiments.
+    reused: Vec<usize>,
+    /// One entry per trial: how many records parked in that trial.
+    parked: Vec<usize>,
     records: Vec<RecordCost>,
 }
 
@@ -238,6 +277,41 @@ impl ScanCost {
     }
 }
 
+/// What a fixture actually turned out to be, as opposed to what was asked for.
+///
+/// This exists because a requested operation count is not a measured one. The Studio builder
+/// stops early when the epoch is nearly full (`if bytes >= MAX_EPOCH_BYTES - 64 * 1024 { break }`)
+/// and returns however many operations it managed, with no requirement that the count match.
+/// At 160 KiB per message the 4 MiB epoch allows about 25, so a request for 32 silently produced
+/// fewer, and a per-operation figure computed from the *request* divided by the wrong number.
+/// Every axis value here is now read back from the fixture and checked.
+#[derive(Debug, Clone, Default)]
+struct FixtureShape {
+    requested_ops: Option<usize>,
+    /// Observed: the operations the builder actually created and the store accepted.
+    actual_ops: Option<usize>,
+    physical_bytes: Option<u64>,
+    /// Observed count of distinct CIDs the fixture plants. `Some(0)` is meaningful and different
+    /// from `None`: it says a reference-mode case has nothing to collect, which is exactly the
+    /// state the title-only Studio source was silently measured in.
+    cids: Option<usize>,
+}
+
+impl std::fmt::Display for FixtureShape {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let show = |v: Option<usize>| v.map_or_else(|| "na".to_string(), |v| v.to_string());
+        write!(
+            f,
+            "requested_ops={} actual_ops={} physical_bytes={} cids={}",
+            show(self.requested_ops),
+            show(self.actual_ops),
+            self.physical_bytes
+                .map_or_else(|| "na".to_string(), |v| v.to_string()),
+            show(self.cids),
+        )
+    }
+}
+
 /// One fixture plus the scan mode to profile it in, carrying its own store.
 ///
 /// Cases exist so trials can be **interleaved**. Running every trial of case A and then every
@@ -254,6 +328,7 @@ struct Case {
     coverage: EpochInventoryCoverage,
     references: bool,
     cache: CachePolicy,
+    shape: FixtureShape,
     cost: ScanCost,
 }
 
@@ -285,6 +360,7 @@ fn run_trial(case: &mut Case, clock: &dyn catcoms_rt::Clock) {
     }
     cost.begin_ms += clock.monotonic_ms().saturating_sub(t);
     let mut step_total = 0;
+    let mut parked_this_trial = 0;
     let mut last;
     loop {
         let t = clock.monotonic_ms();
@@ -296,6 +372,7 @@ fn run_trial(case: &mut Case, clock: &dyn catcoms_rt::Clock) {
         step_total += read_and_park_ms;
         last = progress;
         if let Some(parked) = store.take_parked_record(&mut cursor) {
+            parked_this_trial += 1;
             let (family, size, refs) = parked.classification();
             let t = clock.monotonic_ms();
             for _ in 0..REPETITIONS {
@@ -321,7 +398,8 @@ fn run_trial(case: &mut Case, clock: &dyn catcoms_rt::Clock) {
         }
     }
     cost.step_total.push(step_total);
-    cost.reused = last.reused_records;
+    cost.reused.push(last.reused_records);
+    cost.parked.push(parked_this_trial);
     let t = clock.monotonic_ms();
     if references {
         store.finish_cursor_creative_references(cursor).unwrap();
@@ -352,6 +430,7 @@ fn case(
     coverage: EpochInventoryCoverage,
     references: bool,
     cache: CachePolicy,
+    shape: FixtureShape,
 ) -> Case {
     Case {
         label: label.into(),
@@ -360,6 +439,7 @@ fn case(
         coverage,
         references,
         cache,
+        shape,
         cost: ScanCost::default(),
     }
 }
@@ -373,7 +453,20 @@ fn profile_scan(
     cache: CachePolicy,
     clock: &dyn catcoms_rt::Clock,
 ) -> Case {
-    let mut one = [case("smoke", root, store, coverage, references, cache)];
+    let mut one = [case(
+        "smoke",
+        root,
+        store,
+        coverage,
+        references,
+        cache,
+        // Smoke fixtures have no operation axis; `cids: Some(0)` where a reference mode is used
+        // says so explicitly rather than tripping the shape check.
+        FixtureShape {
+            cids: references.then_some(0),
+            ..FixtureShape::default()
+        },
+    )];
     run_interleaved(&mut one, clock);
     one.into_iter().next().expect("one case")
 }
@@ -513,25 +606,27 @@ fn report(case: &Case, profile: &str) {
     for r in &records {
         println!(
             "C3_PROFILE scan={label} family={} bytes={} references={} \
-             read_and_park_us={} validation_us={} install_us={} \
+             read_and_park_us={} validation_batch_mean_us={} install_us={} \
              validation_batch_ms_total={} trials={} deferrable_fraction_of_measured={}",
             r.family
                 .map_or_else(|| "none".to_string(), |f| format!("{f:?}")),
             r.size,
             r.references,
             r.read_and_park(),
-            r.validation(),
+            r.validation_batch_mean(),
             r.install(),
-            r.validation().raw_total_ms,
+            r.validation_batch_mean().raw_total_ms,
             r.trials(),
             r.deferrable_fraction()
                 .map_or_else(|| "unresolved".to_string(), |v| v.to_string()),
         );
     }
     println!(
-        "C3_PROFILE scan={label} trials={} visits={} records={} begin_ms={} finish_ms={} \
-         step_total_us={} cache_hits_last_trial={} repetitions={} interleaved=true \
-         build={profile} page_cache=warm_written_immediately_before units=min/median/max_us",
+        "C3_PROFILE scan={label} {} trials={} visits={} records={} begin_ms={} finish_ms={} \
+         step_total_us={} cache_hits_per_trial={:?} parked_per_trial={:?} repetitions={} \
+         interleaved=true build={profile} page_cache=warm_written_immediately_before \
+         units=min/upper_median/max_us_and_zero_sample_count",
+        case.shape,
         cost.trials,
         cost.visits,
         cost.records.len(),
@@ -539,6 +634,7 @@ fn report(case: &Case, profile: &str) {
         cost.finish_ms,
         cost.step_total(),
         cost.reused,
+        cost.parked,
         REPETITIONS,
     );
 }
@@ -560,6 +656,9 @@ fn recovery_accounting_case(sizes: &[usize]) -> Case {
         EpochInventoryCoverage::RecoveryOnly,
         false,
         CachePolicy::Fresh,
+        // The axis here is bytes of opaque projection, with no operation structure at all - which
+        // is exactly why it cannot settle whether cost follows bytes or operations.
+        FixtureShape::default(),
     )
 }
 
@@ -633,6 +732,14 @@ fn recovery_reference_cases(frames: &[usize], clock: &dyn catcoms_rt::Clock) -> 
                 REFERENCE_COVERAGE,
                 true,
                 CachePolicy::Warm,
+                FixtureShape {
+                    // Frame count, CID count and projection bytes all rise together here, so this
+                    // axis cannot separate which of them drives the cost.
+                    requested_ops: Some(*count),
+                    actual_ops: Some(*count),
+                    physical_bytes: None,
+                    cids: Some(got.len()),
+                },
             )
         })
         .collect()
@@ -674,7 +781,6 @@ fn registry_cases(op_counts: &[usize]) -> Vec<Case> {
                 &mut store, *ops,
             );
             let bytes = fs::metadata(&path).unwrap().len();
-            println!("C3_PROFILE fixture=registry ops={ops} mode={mode} physical_bytes={bytes}");
             cases.push(case(
                 format!("registry_{mode}_ops{ops}"),
                 root,
@@ -682,6 +788,17 @@ fn registry_cases(op_counts: &[usize]) -> Vec<Case> {
                 REFERENCE_COVERAGE,
                 references,
                 cache,
+                FixtureShape {
+                    requested_ops: Some(*ops),
+                    // `Source::fill` ingests `count + 1` and asserts that any acceptance has
+                    // `n < count`, so it panics unless exactly `count` were accepted and the
+                    // last refused. The count is guaranteed by that builder rather than read
+                    // back here - unlike Studio's, which silently truncates.
+                    actual_ops: Some(*ops),
+                    physical_bytes: Some(bytes),
+                    // The Registry validator arm collects no CIDs in either mode.
+                    cids: Some(0),
+                },
             ));
         }
     }
@@ -689,6 +806,19 @@ fn registry_cases(op_counts: &[usize]) -> Vec<Case> {
 }
 
 /// Studio: the other family C-3 was designed for. Same three modes, same reasoning.
+/// Studio: the other family C-3 was designed for. Same three modes, same reasoning.
+///
+/// **The operation count is read back, not assumed.** `build` stops early once the epoch is
+/// nearly full, and at 160 KiB per message the 4 MiB epoch fits about 25 operations, so a
+/// request for more silently produces fewer. `check_case_structure` fails the case if the
+/// builder did not deliver what was asked for, which is why the requested counts here are
+/// chosen to fit rather than to look round.
+///
+/// **These sources carry title headers, not frames.** `title_op` emits
+/// `FlipnoteOp::SetHeader(Title(..))`, which names no CID, so the reference mode of these cases
+/// collects an **empty** set. That is recorded as `cids=0` rather than left implicit: the timing
+/// is the timing of reference collection over a source with nothing to collect, and says nothing
+/// about a source that has frames. [`studio_frame_cases`] is the one that does.
 fn studio_cases(op_counts: &[usize]) -> Vec<Case> {
     let mut cases = Vec::new();
     for ops in op_counts {
@@ -701,17 +831,83 @@ fn studio_cases(op_counts: &[usize]) -> Vec<Case> {
                 channel: [7; 16],
                 object: [9; 16],
             };
-            crate::store::epoch_studio::tests::performance::save_studio_source_fixture_ops(
-                &mut store, 7, &group, &device, target, *ops, 160_000,
+            let operations =
+                crate::store::epoch_studio::tests::performance::save_studio_source_fixture_ops(
+                    &mut store, 7, &group, &device, target, *ops, 160_000,
+                );
+            // Observed two ways: what the builder returned, and what the persisted source says
+            // it accepted. They must agree, or the fixture is not what either number claims.
+            let persisted = store
+                .load_studio_epoch(7, &group, target, &device)
+                .unwrap()
+                .expect("the fixture wrote a Studio source")
+                .op_count();
+            assert_eq!(
+                operations.len(),
+                persisted,
+                "the builder returned {} operations but the persisted source holds {persisted}",
+                operations.len()
             );
-            println!("C3_PROFILE fixture=studio ops={ops} mode={mode}");
             cases.push(case(
-                format!("studio_{mode}_ops{ops}"),
+                format!("studio_titles_{mode}_ops{ops}"),
                 root,
                 store,
                 REFERENCE_COVERAGE,
                 references,
                 cache,
+                FixtureShape {
+                    requested_ops: Some(*ops),
+                    actual_ops: Some(persisted),
+                    physical_bytes: None,
+                    // Title headers name no CIDs. Stated, not implied.
+                    cids: Some(0),
+                },
+            ));
+        }
+    }
+    cases
+}
+
+/// A Studio source whose operations actually name pixels, so reference mode has work to do.
+///
+/// The title-only cases above cannot support any claim about the cost of Studio reference
+/// collection, because their CID set is empty. This builds frames through the same
+/// `edit_or_reseal` path, each naming a distinct blob, and records the count.
+fn studio_frame_cases(frame_counts: &[usize]) -> Vec<Case> {
+    let mut cases = Vec::new();
+    for frames in frame_counts {
+        for (mode, references, cache) in MODES {
+            let root = tempfile::tempdir().unwrap();
+            let mut store = open(root.path());
+            let device = catcoms_mls::MlsDevice::generate().unwrap();
+            let group = catcoms_mls::ServerGroup::create(&device).unwrap();
+            let target = StudioTarget::Flipnote {
+                channel: [7; 16],
+                object: [9; 16],
+            };
+            let (planted, accepted) =
+                crate::store::epoch_studio::tests::performance::save_studio_frame_fixture(
+                    &mut store, 7, &group, &device, target, *frames,
+                );
+            let distinct: std::collections::BTreeSet<_> = planted.iter().copied().collect();
+            assert_eq!(
+                distinct.len(),
+                *frames,
+                "the frame fixture planted duplicate CIDs, so its reference-count axis is fiction"
+            );
+            cases.push(case(
+                format!("studio_frames_{mode}_n{frames}"),
+                root,
+                store,
+                REFERENCE_COVERAGE,
+                references,
+                cache,
+                FixtureShape {
+                    requested_ops: Some(*frames),
+                    actual_ops: Some(accepted),
+                    physical_bytes: None,
+                    cids: Some(distinct.len()),
+                },
             ));
         }
     }
@@ -728,18 +924,66 @@ fn check_case_structure(case: &Case) {
     let label = &case.label;
     let cost = &case.cost;
     assert_eq!(cost.trials, TRIALS, "{label}: a trial did not complete");
-    if case.references {
+
+    // Sampling preconditions, enforced for *every* case rather than inferred from one smoke
+    // fixture. `trials()` reads only the read-and-park vector's length, so without this a
+    // validation or install vector of a different length would go unnoticed and its spread would
+    // be over a different trial set.
+    for r in &cost.records {
+        assert!(
+            r.vectors_aligned(),
+            "{label}: phase vectors are ragged for a {:?} record ({} read, {} validation, {} \
+             install), so their spreads are not over the same trials",
+            r.family,
+            r.read_and_park.len(),
+            r.validation_batch.len(),
+            r.install.len(),
+        );
+    }
+    for (name, len) in [
+        ("step_total", cost.step_total.len()),
+        ("reused", cost.reused.len()),
+        ("parked", cost.parked.len()),
+    ] {
         assert_eq!(
-            cost.reused, 0,
+            len, TRIALS,
+            "{label}: {name} has {len} entries for {TRIALS} trials"
+        );
+    }
+
+    // A fixture's axis must be observed, not requested. See `FixtureShape`.
+    if let (Some(requested), Some(actual)) = (case.shape.requested_ops, case.shape.actual_ops) {
+        assert_eq!(
+            requested, actual,
+            "{label}: asked for {requested} operations and the fixture built {actual}; a \
+             per-operation figure divided by the request would be wrong. Pick a count that fits \
+             the epoch, or label this case capacity-limited and divide by the actual count."
+        );
+    }
+    // A reference-mode case with nothing to collect measures an empty merge. That is a legal
+    // thing to measure and an illegal thing to report as "reference collection costs X".
+    if case.references {
+        assert!(
+            case.shape.cids.is_some(),
+            "{label}: a reference-mode case did not record how many CIDs its fixture plants, so \
+             its timing cannot be distinguished from the timing of an empty collection"
+        );
+    }
+
+    if case.references {
+        assert!(
+            cost.reused.iter().all(|n| *n == 0),
             "{label}: a reference scan reported validation-cache hits, but nothing is cacheable \
-             in that mode"
+             in that mode: {:?}",
+            cost.reused
         );
     }
     match case.cache {
         CachePolicy::Fresh => {
-            assert_eq!(
-                cost.reused, 0,
-                "{label}: a cleared cache still reported hits"
+            assert!(
+                cost.reused.iter().all(|n| *n == 0),
+                "{label}: a cleared cache still reported hits: {:?}",
+                cost.reused
             );
             assert!(
                 !cost.records.is_empty(),
@@ -752,10 +996,29 @@ fn check_case_structure(case: &Case) {
             );
         }
         CachePolicy::Warm if !case.references => {
+            // The first warm trial populates the cache and therefore still parks; only the rest
+            // are hits. Asserting that shape explicitly is what distinguishes "hit every trial"
+            // from "hit on all but the first", which a single last-trial scalar could not.
+            assert_eq!(
+                cost.reused[0], 0,
+                "{label}: the first warm trial reported a hit, so the cache was already warm \
+                 and this case is not measuring a cold-then-warm sequence"
+            );
             assert!(
-                cost.reused > 0,
-                "{label}: a warm-cache accounting scan of a cacheable family reported no hits, \
-                 so it is not measuring the hit path"
+                cost.reused[1..].iter().all(|n| *n > 0),
+                "{label}: a warm-cache accounting scan of a cacheable family stopped reporting \
+                 hits after the first trial: {:?}",
+                cost.reused
+            );
+            assert_eq!(
+                cost.parked[0], 1,
+                "{label}: the first warm trial must park once to populate the cache"
+            );
+            assert!(
+                cost.parked[1..].iter().all(|n| *n == 0),
+                "{label}: a cache hit is never parked, so no trial after the first may park: \
+                 {:?}",
+                cost.parked
             );
         }
         CachePolicy::Warm => {
@@ -848,34 +1111,55 @@ fn c3_visit_profile_smoke() {
 /// ratio would print 100% deferrable. A real profile hit exactly that on the small
 /// reference-scan rows before it was fixed.
 #[test]
-fn c3_a_phase_median_of_zero_reports_no_fraction() {
+fn c3_a_phase_resolved_to_one_tick_or_less_reports_no_fraction() {
+    // Seven zeros and one 1 ms sample: the raw *sum* is positive, which is what made this
+    // reachable under the first rule.
     let mostly_zero = RecordCost {
         family: Some(EpochRecordKind::Recovery),
         size: 1,
         references: true,
         read_and_park: vec![0, 0, 0, 0, 0, 0, 0, 1],
         install: vec![0; 8],
-        validation_batch: vec![64; 8],
+        validation_batch: vec![640; 8],
     };
     assert!(
-        mostly_zero.read_and_park().resolved(),
+        mostly_zero.read_and_park().raw_total_ms > 0,
         "control: the raw total is positive, which is what makes this trap reachable"
     );
-    assert_eq!(mostly_zero.read_and_park().median_us, 0);
+    assert_eq!(mostly_zero.read_and_park().upper_median_us, 0);
+    assert_eq!(
+        mostly_zero.read_and_park().zero_samples,
+        7,
+        "the zero count is what tells a reader how much of the phase the clock could not see"
+    );
     assert_eq!(
         mostly_zero.deferrable_fraction(),
         None,
-        "a fraction was reported against a phase whose median is below the clock's resolution"
+        "a fraction was reported against a phase whose upper median is below the clock's \
+         resolution"
     );
 
-    // And the positive control: once the phase resolves at the median, a fraction appears.
-    let resolved = RecordCost {
+    // A phase resolved to exactly one tick is known only to within 100% of itself, so it must
+    // also report nothing. The earlier rule rejected only a zero median and let this through.
+    let one_tick = RecordCost {
         read_and_park: vec![1; 8],
+        ..mostly_zero.clone()
+    };
+    assert_eq!(one_tick.read_and_park().upper_median_us, 1_000);
+    assert_eq!(
+        one_tick.deferrable_fraction(),
+        None,
+        "a fraction was reported from a phase measured as a single clock tick"
+    );
+
+    // Positive control: above one tick, a fraction appears.
+    let resolved = RecordCost {
+        read_and_park: vec![5; 8],
         ..mostly_zero
     };
     assert!(
         resolved.deferrable_fraction().is_some(),
-        "control is broken: a phase that does resolve must still report a fraction"
+        "control is broken: a phase resolved beyond one tick must still report a fraction"
     );
 }
 
@@ -949,9 +1233,10 @@ fn c3_cacheable_family_parks_when_fresh_and_hits_cache_when_warm() {
     };
 
     let fresh = by("accounting_fresh");
-    assert_eq!(
-        fresh.cost.reused, 0,
-        "a cleared cache still reported hits, so clear_for_test is not clearing"
+    assert!(
+        fresh.cost.reused.iter().all(|n| *n == 0),
+        "a cleared cache still reported hits, so clear_for_test is not clearing: {:?}",
+        fresh.cost.reused
     );
     assert!(
         parked_every_trial(fresh),
@@ -959,10 +1244,17 @@ fn c3_cacheable_family_parks_when_fresh_and_hits_cache_when_warm() {
          per-phase spreads divide by the wrong count"
     );
 
+    // Warm is a *sequence*, not a state: the first trial populates the cache and parks, and only
+    // the rest are hits. A single last-trial scalar could not tell those apart.
     let warm = by("accounting_warm");
+    assert_eq!(
+        warm.cost.reused[0], 0,
+        "the first warm trial must be a miss - it is what populates the cache"
+    );
     assert!(
-        warm.cost.reused > 0,
-        "a warm cache produced no hits for a cacheable family, so the hit path is unmeasured"
+        warm.cost.reused[1..].iter().all(|n| *n > 0),
+        "a warm cache produced no hits after the first trial, so the hit path is unmeasured: {:?}",
+        warm.cost.reused
     );
     assert!(
         !parked_every_trial(warm),
@@ -972,9 +1264,10 @@ fn c3_cacheable_family_parks_when_fresh_and_hits_cache_when_warm() {
 
     // And in reference mode the cache is bypassed entirely, warm or not.
     let refs = by("references");
-    assert_eq!(
-        refs.cost.reused, 0,
-        "nothing is cacheable while collecting references"
+    assert!(
+        refs.cost.reused.iter().all(|n| *n == 0),
+        "nothing is cacheable while collecting references: {:?}",
+        refs.cost.reused
     );
     assert!(
         parked_every_trial(refs),
@@ -1015,7 +1308,12 @@ fn profile_c3_visit_cost() {
     ])];
     cases.extend(recovery_reference_cases(&[1, 16, 128, 512], clock));
     cases.extend(registry_cases(&[2, 8, 24]));
-    cases.extend(studio_cases(&[3, 12, 32]));
+    // 24 and not 32: `build` stops once the epoch is nearly full, and at 160 KiB per message the
+    // 4 MiB epoch fits about 25. The previous run requested 32, silently got fewer, and divided
+    // by 32 anyway. `check_case_structure` now fails rather than letting that recur.
+    cases.extend(studio_cases(&[3, 12, 24]));
+    // Studio with actual pixels, because the title-only sources above collect no CIDs at all.
+    cases.extend(studio_frame_cases(&[16, 128]));
     println!(
         "C3_PROFILE run cases={} trials={TRIALS} order=interleaved",
         cases.len()

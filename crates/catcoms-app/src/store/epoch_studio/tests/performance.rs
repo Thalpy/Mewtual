@@ -122,6 +122,72 @@ pub(crate) fn save_studio_source_fixture(
 /// `pub(crate)` for design 13.7's C-3 profile: Studio is one of the two families whose expensive
 /// typed reconstruction motivated C-3, and measuring it needs an operation-count axis rather
 /// than the single fixed shape the wrapper above pins.
+/// A Studio source whose operations name real pixels, for design 13.7's reference-mode profile.
+///
+/// The title-header sources the other builders produce name **no CIDs at all**, so timing a
+/// reference scan over them times an empty collection. This inserts `frames` frames, each naming
+/// a distinct blob that is actually stored, and returns those CIDs so a measurement can assert
+/// the collected set rather than assume it.
+pub(crate) fn save_studio_frame_fixture(
+    store: &mut ServerStore,
+    server: u64,
+    group: &ServerGroup,
+    device: &MlsDevice,
+    target: StudioTarget,
+    frames: usize,
+) -> (Vec<catcoms_storage::Cid>, usize) {
+    let logical = target.document(&group.group_id()).unwrap();
+    let mut blobs = store.blob_store(&hex::encode(group.group_id())).unwrap();
+    let mut planted = Vec::new();
+    let mut unit = StudioEpoch::new(group, target, device.device_id()).unwrap();
+    for n in 0..frames {
+        let cid = blobs.put(&(n as u64).to_be_bytes()).unwrap();
+        planted.push(cid);
+        let mut nonce = [0; 16];
+        nonce[..8].copy_from_slice(&(n as u64).to_be_bytes());
+        let mut frame = [0; 16];
+        frame[..8].copy_from_slice(&(n as u64).to_be_bytes());
+        unit.edit_or_reseal(
+            device,
+            group,
+            &mut rng(),
+            &DomainOp {
+                nonce,
+                doc_type: logical.doc_type,
+                logical_key: logical.logical_key.clone(),
+                body: FlipnoteOp::InsertFrame {
+                    frame,
+                    after: None,
+                    cid: *cid.as_bytes(),
+                    bytes: 8,
+                }
+                .encode()
+                .unwrap(),
+            },
+            100,
+        )
+        .unwrap();
+    }
+    drop(blobs);
+    let accepted = unit.op_count();
+    let inv = inventory(store);
+    let mut b = store.studio_storage_budget(server, group, &inv).unwrap();
+    store
+        .save_studio_source(
+            server,
+            unit,
+            None,
+            &[],
+            WritePurpose::Ordinary,
+            &mut rng(),
+            &mut b.storage,
+            WriteStep::new(WriteTag::Source),
+            &mut WriteHooks::None,
+        )
+        .unwrap();
+    (planted, accepted)
+}
+
 pub(crate) fn save_studio_source_fixture_ops(
     store: &mut ServerStore,
     server: u64,
