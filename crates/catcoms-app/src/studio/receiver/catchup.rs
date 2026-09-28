@@ -400,9 +400,8 @@ pub(super) struct CatchupRuntime {
     /// flag does not make a second job admissible.
     overlay_detached: bool,
     overlay_admission: OverlayAdmission,
-    /// Test-only injected pool, mirroring `PreviewRuntime::preparation_pools`. Exhaustion
-    /// arithmetic is asserted against this; that production shares the one process-wide pool is
-    /// asserted separately by pointer identity, so no test has to drain a global.
+    /// Test-only simulated process pool. All preparation classes in that process share it;
+    /// unrelated fixtures must not consume capacity against independent simulated clocks.
     #[cfg(test)]
     overlay_pool: Option<Arc<tokio::sync::Semaphore>>,
     in_flight: bool,
@@ -774,6 +773,10 @@ impl CatchupRuntime {
     /// source and registry preparation, so a full pool refuses the reservation and the caller
     /// retries. `overlay_reservation_shares_the_one_preparation_pool` asserts this identity.
     pub(super) fn overlay_pool(&self) -> Arc<tokio::sync::Semaphore> {
+        self.preparation_pool()
+    }
+
+    fn preparation_pool(&self) -> Arc<tokio::sync::Semaphore> {
         #[cfg(test)]
         if let Some(pool) = &self.overlay_pool {
             return pool.clone();
@@ -864,10 +867,7 @@ impl CatchupRuntime {
         {
             return Ok(false);
         }
-        let Ok(permit) = crate::registry_catchup::preparation_pool()
-            .clone()
-            .try_acquire_owned()
-        else {
+        let Ok(permit) = self.preparation_pool().try_acquire_owned() else {
             // A retained Registry graph must not permanently occupy this actor's preparation
             // capacity while a foreground/receive Studio graph needs the shared worker pool.
             self.registry_provider = None;

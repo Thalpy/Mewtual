@@ -106,6 +106,7 @@ impl CatchupRuntime {
         id: u64,
         bucket: u8,
     ) -> Result<bool, AppError> {
+        let pool = self.preparation_pool();
         if self
             .registry_provider
             .as_ref()
@@ -133,10 +134,7 @@ impl CatchupRuntime {
         }
         // A busy global pool is not corrupt storage. A future idle turn retries; any installed
         // Registry graphs release their slots on their fixed local-clock deadlines.
-        let Ok(permit) = crate::registry_catchup::preparation_pool()
-            .clone()
-            .try_acquire_owned()
-        else {
+        let Ok(permit) = pool.try_acquire_owned() else {
             return Ok(false);
         };
         if let Some(job) =
@@ -155,6 +153,7 @@ impl CatchupRuntime {
         id: u64,
         mut work: ServiceWork,
     ) {
+        let pool = self.preparation_pool();
         let CheckpointTarget::Registry(bucket) = work.interest.target() else {
             return;
         };
@@ -193,7 +192,7 @@ impl CatchupRuntime {
             if work.captured {
                 return;
             }
-            match server.begin_registry_page_preparation(store, provider) {
+            match server.begin_registry_page_preparation_with(store, provider, &pool) {
                 Ok(Some(job)) => {
                     work.captured = true;
                     self.registry_preparation = Some((job, Some(work.generation.clone())));

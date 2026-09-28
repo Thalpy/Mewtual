@@ -495,7 +495,7 @@ impl ParkedEpochRecord {
     ///
     /// [`Self::validate`] takes `self`, which is right for production: a parked body is validated
     /// once and installed. Design 13.7 needs its *cost*, and the only clock available has
-    /// millisecond resolution - `scripts/check-no-ambient.sh` forbids `Instant::now` everywhere
+    /// millisecond resolution - `scripts/check-no-ambient.sh` forbids direct OS clock reads everywhere
     /// under `crates/`, test code included. One record's validation can round to zero against
     /// that, so the measurement times a batch of repetitions and divides, which needs an input it
     /// can run more than once.

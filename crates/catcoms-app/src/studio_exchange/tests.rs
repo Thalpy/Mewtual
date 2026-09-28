@@ -212,18 +212,49 @@ struct Pair {
 }
 impl Pair {
     async fn new() -> Self {
+        Self::with_legacy_group(false).await
+    }
+
+    /// Historical Studio lifecycle coverage. Construct an unresolved group from inception;
+    /// never remove an authenticated pin from a newly founded or restored P2P group.
+    async fn new_legacy() -> Self {
+        Self::with_legacy_group(true).await
+    }
+
+    async fn with_legacy_group(legacy: bool) -> Self {
         let hub = Hub::new();
         let wire = Net::new(hub.join(PeerId::from_u64(1)));
         let bob_wire = Net::new(hub.join(PeerId::from_u64(2)));
         let clock = ManualClock::new(1000);
-        let mut alice = Server::found(
-            wire.clone(),
-            MlsDevice::generate().unwrap(),
-            rng(),
-            Box::new(clock.clone()),
-            "alice",
-        )
-        .unwrap();
+        let mut alice = if legacy {
+            let device = MlsDevice::generate().unwrap();
+            let device_id = device.device_id();
+            let group = catcoms_mls::ServerGroup::create(&device).unwrap();
+            Server {
+                sync: catcoms_sync::ChannelSync::new(
+                    wire.clone(),
+                    group,
+                    device,
+                    rng(),
+                    Box::new(clock.clone()),
+                ),
+                display_name: "legacy alice".into(),
+                device_id,
+                own_message_changes: Default::default(),
+                messages_cache: Default::default(),
+                delivery_snapshot_revision: 0,
+                devices_sig: None,
+            }
+        } else {
+            Server::found(
+                wire.clone(),
+                MlsDevice::generate().unwrap(),
+                rng(),
+                Box::new(clock.clone()),
+                "alice",
+            )
+            .unwrap()
+        };
         alice.subscribe_control().await.unwrap();
         let invite = alice.mint_invite([1; 16], u64::MAX, vec![]).unwrap();
         let (bob, tick) = tokio::join!(

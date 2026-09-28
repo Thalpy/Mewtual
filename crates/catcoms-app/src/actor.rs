@@ -7,10 +7,9 @@
 //! directly over the in-memory transport.
 //!
 //! The task `select!`s between the command channel and `Server::sync_once`. When a
-//! command arrives mid-`sync_once`, the in-flight `sync_once` is cancelled; safe at its
-//! only real suspension point (`next_event`, which leaves the event queued); a cancel
-//! during the brief pre-event recovery work may at worst drop an in-flight catch-up,
-//! which the recovery machinery re-detects on the next inbound event (self-healing).
+//! command arrives mid-`sync_once`, that poll is cancelled. Queued recovery retains its
+//! single network wait and exact request context on the sync owner, while ready actor sources
+//! rotate so sustained command traffic cannot suppress inbound work or timer wakes.
 
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
@@ -31,6 +30,10 @@ use crate::{
     StorageSnapshot, SwitchboardOffer, WikiPendingEdit, WikiRevision,
 };
 
+mod deadline;
+mod fair;
+#[cfg(test)]
+mod fair_tests;
 mod file_transfers;
 
 /// Per drive: how long to wait for a discovered record before concluding the queue is drained.
@@ -229,6 +232,12 @@ impl EventSink {
 #[derive(Debug)]
 pub enum AppCommand {
     #[cfg(test)]
+    StudioPreparationPoolsForTest {
+        shared: std::sync::Arc<tokio::sync::Semaphore>,
+        preview: std::sync::Arc<tokio::sync::Semaphore>,
+        reply: oneshot::Sender<()>,
+    },
+    #[cfg(test)]
     StudioSchedulingForTest {
         pause_parse: Option<(oneshot::Sender<()>, std::sync::mpsc::Receiver<()>)>,
         reply: oneshot::Sender<(Vec<catcoms_replication::studio::StudioTarget>, usize)>,
@@ -268,7 +277,9 @@ pub enum AppCommand {
         reply: oneshot::Sender<Vec<ChannelInfo>>,
     },
     /// Pull the channel directory from the join contact, then subscribe/catch up every entry.
-    CatchUpChannelIndex { peer: PeerId },
+    CatchUpChannelIndex {
+        peer: PeerId,
+    },
     /// Open a channel (subscribe + create locally). Acked once subscribed, so a caller
     /// can avoid racing a subsequent publish ahead of the subscription.
     OpenChannel {
@@ -281,6 +292,14 @@ pub enum AppCommand {
         text: String,
         reply_to: String,
         reply: oneshot::Sender<Result<(), String>>,
+    },
+    /// Durable caller-token send. No native/store guard is queued with this command.
+    DurableSend {
+        request: crate::durable_chat::DurableSendRequest,
+        ready: oneshot::Sender<crate::durable_chat::DurableSendReady>,
+    },
+    DurableSendContext {
+        reply: oneshot::Sender<Result<[u8; 32], String>>,
     },
     /// Edit the text of one of your own messages (by id) in a channel.
     EditMessage {
@@ -348,9 +367,14 @@ pub enum AppCommand {
         reply: oneshot::Sender<Vec<JukeEntry>>,
     },
     /// Pull a channel's history from `peer` (e.g. right after joining).
-    CatchUp { peer: PeerId, channel: u128 },
+    CatchUp {
+        peer: PeerId,
+        channel: u128,
+    },
     /// Pull a channel's history from the best known peer (no peer named).
-    CatchUpAny { channel: u128 },
+    CatchUpAny {
+        channel: u128,
+    },
     /// Query a channel's current materialized messages.
     Messages {
         channel: u128,
@@ -396,7 +420,9 @@ pub enum AppCommand {
         reply: oneshot::Sender<Vec<InboxItem>>,
     },
     /// Query the current member count.
-    MemberCount { reply: oneshot::Sender<usize> },
+    MemberCount {
+        reply: oneshot::Sender<usize>,
+    },
     /// Query the roster (member fingerprints + which one is self).
     Members {
         reply: oneshot::Sender<Vec<MemberView>>,
@@ -427,15 +453,21 @@ pub enum AppCommand {
     },
     /// Enable/disable the local standing protocol gate; persistence and record publication are
     /// coordinated by the bridge.
-    SetSwitchboardOffered { offered: bool },
+    SetSwitchboardOffered {
+        offered: bool,
+    },
     /// Query only fresh, connected and record-bound standing offers.
     SwitchboardOffers {
         reply: oneshot::Sender<Vec<SwitchboardOffer>>,
     },
     /// Set this member's own profile (name + styling).
-    SetProfile { profile: Profile },
+    SetProfile {
+        profile: Profile,
+    },
     /// Pull the profile document from `peer` (e.g. right after joining).
-    CatchUpProfiles { peer: PeerId },
+    CatchUpProfiles {
+        peer: PeerId,
+    },
     /// Query all known member profiles, keyed by fingerprint.
     Profiles {
         reply: oneshot::Sender<HashMap<String, Profile>>,
@@ -466,9 +498,13 @@ pub enum AppCommand {
         reply: oneshot::Sender<Result<(), String>>,
     },
     /// Query the server's published livery.
-    Livery { reply: oneshot::Sender<Livery> },
+    Livery {
+        reply: oneshot::Sender<Livery>,
+    },
     /// Pull the livery document from `peer` (e.g. right after joining).
-    CatchUpLivery { peer: PeerId },
+    CatchUpLivery {
+        peer: PeerId,
+    },
     /// Assign (or clear, with an empty label) a member's custom badge (owner/admin only).
     SetMemberBadge {
         fp: String,
@@ -481,13 +517,17 @@ pub enum AppCommand {
         reply: oneshot::Sender<HashMap<String, MemberBadge>>,
     },
     /// Pull the badge document from `peer` (e.g. right after joining).
-    CatchUpBadges { peer: PeerId },
+    CatchUpBadges {
+        peer: PeerId,
+    },
     /// Query the companion-device registry (multi-device M3), keyed by companion fingerprint.
     Devices {
         reply: oneshot::Sender<HashMap<String, DeviceEntry>>,
     },
     /// Pull the companion-device registry from `peer` (e.g. right after joining).
-    CatchUpDevices { peer: PeerId },
+    CatchUpDevices {
+        peer: PeerId,
+    },
     /// Share a file under folder `path`; replies with its content-address hex, or an error.
     AddFile {
         name: String,
@@ -524,7 +564,9 @@ pub enum AppCommand {
         reply: oneshot::Sender<Vec<FileEntry>>,
     },
     /// Query the shared file list with per-file local-availability counts + a reachable-peer flag.
-    FilesView { reply: oneshot::Sender<FilesView> },
+    FilesView {
+        reply: oneshot::Sender<FilesView>,
+    },
     /// Verify every file chunk referenced by this server without network traffic.
     StorageHealth {
         reply: oneshot::Sender<StorageHealth>,
@@ -538,10 +580,29 @@ pub enum AppCommand {
         reply: oneshot::Sender<Result<StorageRepair, String>>,
     },
     /// Query the fingerprints of members reachable right now (presence).
-    OnlineMembers { reply: oneshot::Sender<Vec<String>> },
+    OnlineMembers {
+        reply: oneshot::Sender<Vec<String>>,
+    },
     /// Query what this node knows about reaching each member (the debug console's network view).
     MemberRoutes {
         reply: oneshot::Sender<Vec<catcoms_sync::MemberRoute>>,
+    },
+    FinalizedMemberPeers {
+        reply: oneshot::Sender<Vec<PeerId>>,
+    },
+    MemberMeshAllowed {
+        reply: oneshot::Sender<bool>,
+    },
+    MemberFinalizationCandidates {
+        reply: oneshot::Sender<Vec<PeerId>>,
+    },
+    MemberFinalizationWork {
+        observed: Vec<PeerId>,
+        reply: oneshot::Sender<Vec<PeerId>>,
+    },
+    FinalizeMemberConnection {
+        peer: PeerId,
+        reply: oneshot::Sender<Result<bool, String>>,
     },
     /// Query the recent inbound join attempts this node served, newest first (operator
     /// diagnostics; see `Server::join_attempts`).
@@ -559,7 +620,9 @@ pub enum AppCommand {
         reply: oneshot::Sender<Vec<(String, String, Vec<u8>)>>,
     },
     /// Dismiss a pending DM request by the sender's fingerprint (accepted or declined).
-    DismissDmRequest { from_fp: String },
+    DismissDmRequest {
+        from_fp: String,
+    },
     /// Deliver a DM (friend) invite to a member over this group ("Add friend"); `true` if reached.
     SendDmInvite {
         target_fp: String,
@@ -642,9 +705,13 @@ pub enum AppCommand {
         reply: oneshot::Sender<FileUsage>,
     },
     /// The wiki-pinned content addresses (lowercase hex); files that must never decay.
-    WikiPinnedCids { reply: oneshot::Sender<Vec<String>> },
+    WikiPinnedCids {
+        reply: oneshot::Sender<Vec<String>>,
+    },
     /// Pull the file index from `peer` (e.g. right after joining).
-    CatchUpFiles { peer: PeerId },
+    CatchUpFiles {
+        peer: PeerId,
+    },
     /// Post to the server status feed (owner/admin, or anyone once the feed is opened to members).
     PostStatus {
         text: String,
@@ -678,14 +745,18 @@ pub enum AppCommand {
         reply: oneshot::Sender<Result<(), String>>,
     },
     /// Query whether plain members may post to the status feed.
-    StatusMembersMayPost { reply: oneshot::Sender<bool> },
+    StatusMembersMayPost {
+        reply: oneshot::Sender<bool>,
+    },
     /// Open or close the status feed to plain members (owner/admin only).
     SetStatusMembersMayPost {
         allow: bool,
         reply: oneshot::Sender<Result<(), String>>,
     },
     /// Pull the status feed from `peer` (e.g. right after joining).
-    CatchUpStatus { peer: PeerId },
+    CatchUpStatus {
+        peer: PeerId,
+    },
     /// Create a server event (any member); replies with its id, or a validation error.
     CreateEvent {
         title: String,
@@ -705,9 +776,13 @@ pub enum AppCommand {
         reply: oneshot::Sender<Vec<ServerEvent>>,
     },
     /// Pull the calendar document from `peer` (e.g. right after joining).
-    CatchUpCalendar { peer: PeerId },
+    CatchUpCalendar {
+        peer: PeerId,
+    },
     /// Query the wiki page names (sorted).
-    WikiPages { reply: oneshot::Sender<Vec<String>> },
+    WikiPages {
+        reply: oneshot::Sender<Vec<String>>,
+    },
     /// Query the whole wiki as a name -> body map (for backlinks / link existence).
     WikiMap {
         reply: oneshot::Sender<HashMap<String, String>>,
@@ -734,14 +809,18 @@ pub enum AppCommand {
         reply: oneshot::Sender<Vec<WikiPendingEdit>>,
     },
     /// Query the largest file this server accepts, in bytes.
-    FileSizeLimit { reply: oneshot::Sender<u64> },
+    FileSizeLimit {
+        reply: oneshot::Sender<u64>,
+    },
     /// Set the largest file this server accepts, in bytes (owner/admin only).
     SetFileSizeLimit {
         bytes: u64,
         reply: oneshot::Sender<Result<(), String>>,
     },
     /// Query the wiki review window in days (0 = off).
-    WikiReviewDays { reply: oneshot::Sender<u32> },
+    WikiReviewDays {
+        reply: oneshot::Sender<u32>,
+    },
     /// Set the wiki review window in days, 0..=30 (owner/admin only).
     SetWikiReviewDays {
         days: u32,
@@ -786,7 +865,9 @@ pub enum AppCommand {
         reply: oneshot::Sender<Result<(), String>>,
     },
     /// Pull the wiki from `peer` (e.g. right after joining).
-    CatchUpWiki { peer: PeerId },
+    CatchUpWiki {
+        peer: PeerId,
+    },
     /// Query every member's role, keyed by fingerprint (owner/admin/member).
     Roles {
         reply: oneshot::Sender<HashMap<String, String>>,
@@ -798,7 +879,9 @@ pub enum AppCommand {
         reply: oneshot::Sender<Result<(), String>>,
     },
     /// Pull the roles document from `peer` (e.g. right after joining).
-    CatchUpRoles { peer: PeerId },
+    CatchUpRoles {
+        peer: PeerId,
+    },
     /// Query the public signed moderation history and advisory votes.
     ModerationState {
         reply: oneshot::Sender<ModerationState>,
@@ -830,7 +913,9 @@ pub enum AppCommand {
         reply: oneshot::Sender<Result<(), String>>,
     },
     /// Pull moderation history from `peer` after joining.
-    CatchUpModeration { peer: PeerId },
+    CatchUpModeration {
+        peer: PeerId,
+    },
     /// Remove a member by fingerprint (owner only).
     RemoveMember {
         fp: String,
@@ -896,6 +981,16 @@ pub enum AppCommand {
     Snapshot {
         reply: oneshot::Sender<Result<Vec<u8>, String>>,
     },
+    GroupMode {
+        reply: oneshot::Sender<crate::GroupMode>,
+    },
+    InitializeGroupPolicy {
+        mode: crate::GroupMode,
+        reply: oneshot::Sender<Result<(), String>>,
+    },
+    PublishGroupPolicy {
+        reply: oneshot::Sender<Result<(), String>>,
+    },
     /// Drive one steady-state rendezvous-discovery pass (re-register + re-discover + dial newly
     /// found members), then one member-PEX pass and a refresh of the cross-session address cache.
     /// Fire-and-forget; sent periodically by the bridge's per-server timer (the real-time interval
@@ -905,7 +1000,9 @@ pub enum AppCommand {
     DriveDiscovery,
     /// Replace the transient local-only reconnect hints after the bridge observes a currently
     /// live outbound member route. Validation and membership checks remain inside `ChannelSync`.
-    SetLocalReconnectRoutes { routes: Vec<(PeerId, String)> },
+    SetLocalReconnectRoutes {
+        routes: Vec<(PeerId, String)>,
+    },
     /// Mint a short-lived, member-signed recovery code containing only safe direct listener
     /// routes. The code is intended for an already-authorized group member over an out-of-band
     /// channel; it is not an invitation and cannot add a device to the roster.
@@ -933,14 +1030,25 @@ pub enum AppCommand {
     /// (Re)publish this device's own signed peer record with `addresses` at `seq`. Sent by the
     /// bridge when this node's reachability changes (a UPnP mapping arriving, say), so members
     /// learn the new address instead of holding a dead one.
-    PublishSelfRecord { addresses: Vec<String>, seq: u64 },
+    PublishSelfRecord {
+        addresses: Vec<String>,
+        seq: u64,
+    },
     /// Serialize the cross-session address cache for sealing beside the snapshot (Phase 9f).
     AddressCacheBytes {
         integrity_key: [u8; 32],
         reply: oneshot::Sender<Vec<u8>>,
     },
+    /// Pause at an actor boundary, then save under native custody before orderly shutdown.
+    PrepareShutdown {
+        ready: oneshot::Sender<crate::shutdown::ShutdownReady>,
+    },
     /// Stop the actor.
     Shutdown,
+    /// Acknowledged terminal boundary. No actor command/network turn follows acknowledgement.
+    StopAndWait {
+        stopped: oneshot::Sender<()>,
+    },
 }
 
 /// Which part of a channel document moved, carried by [`AppEvent::ChannelUpdated`].
@@ -982,6 +1090,10 @@ impl ChannelChange {
 /// An event from a running server actor to the UI.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AppEvent {
+    /// Open legacy document history or the MLS epoch changed. The host should schedule a
+    /// snapshot even when no rendered projection changed. This requests persistence; it does
+    /// not acknowledge a completed save and carries no UI content.
+    SnapshotNeeded,
     /// Invalidate settlement/recovery metadata for this Studio logical document. State is an
     /// observation, not a success/receipt assertion; phase and recovery observations can coexist.
     SettlementChanged {
@@ -1078,6 +1190,24 @@ pub struct ServerActor {
 }
 
 impl ServerActor {
+    #[cfg(test)]
+    pub(crate) async fn studio_preparation_pools_for_test(
+        &self,
+        shared: std::sync::Arc<tokio::sync::Semaphore>,
+        preview: std::sync::Arc<tokio::sync::Semaphore>,
+    ) {
+        let (reply, result) = oneshot::channel();
+        self.cmd_tx
+            .send(AppCommand::StudioPreparationPoolsForTest {
+                shared,
+                preview,
+                reply,
+            })
+            .await
+            .unwrap();
+        result.await.unwrap();
+    }
+
     #[cfg(test)]
     pub(crate) async fn studio_scheduling_for_test(
         &self,
@@ -1234,6 +1364,30 @@ impl ServerActor {
     }
 
     /// Send a chat message replying to `reply_to` (the parent message's id).
+    pub async fn durable_send_context(&self) -> Result<[u8; 32], String> {
+        let (reply, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(AppCommand::DurableSendContext { reply })
+            .await
+            .map_err(|_| "server stopped".to_string())?;
+        rx.await.map_err(|_| "server stopped".to_string())?
+    }
+
+    /// Obtain Ready before acquiring native custody; commit with a lease to cross the barrier.
+    pub async fn prepare_durable_send(
+        &self,
+        request: crate::durable_chat::DurableSendRequest,
+    ) -> Result<crate::durable_chat::DurableSendReady, String> {
+        request.validate()?;
+        let (ready, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(AppCommand::DurableSend { request, ready })
+            .await
+            .map_err(|_| "server stopped".to_string())?;
+        rx.await.map_err(|_| "server stopped".to_string())
+    }
+
+    /// Send a chat message replying to `reply_to` without a storage barrier (non-desktop callers).
     pub async fn send_reply(
         &self,
         channel: u128,
@@ -1627,6 +1781,36 @@ impl ServerActor {
         }
         rx.await
             .unwrap_or_else(|_| Err("server actor dropped".into()))
+    }
+
+    /// Authenticated mode, queried from actor-owned state. A stopped actor is an error, not a
+    /// fabricated legacy mode.
+    pub async fn group_mode(&self) -> Result<crate::GroupMode, String> {
+        let (reply, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(AppCommand::GroupMode { reply })
+            .await
+            .map_err(|_| "server actor stopped".to_string())?;
+        rx.await.map_err(|_| "server actor dropped".to_string())
+    }
+
+    /// Initialize a legacy group's owner-authorized pin. The caller must persist before publish.
+    pub async fn initialize_group_policy(&self, mode: crate::GroupMode) -> Result<(), String> {
+        let (reply, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(AppCommand::InitializeGroupPolicy { mode, reply })
+            .await
+            .map_err(|_| "server actor stopped".to_string())?;
+        rx.await.map_err(|_| "server actor dropped".to_string())?
+    }
+
+    pub async fn publish_group_policy(&self) -> Result<(), String> {
+        let (reply, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(AppCommand::PublishGroupPolicy { reply })
+            .await
+            .map_err(|_| "server actor stopped".to_string())?;
+        rx.await.map_err(|_| "server actor dropped".to_string())?
     }
 
     /// Mint a fresh single-use invite (owner/admin only) carrying `bootstrap`; returns the
@@ -3279,6 +3463,37 @@ impl ServerActor {
         let _ = self.cmd_tx.send(AppCommand::Shutdown).await;
     }
 
+    pub async fn prepare_shutdown(&self) -> Result<crate::shutdown::ShutdownReady, String> {
+        let (ready, result) = oneshot::channel();
+        self.cmd_tx
+            .send(AppCommand::PrepareShutdown { ready })
+            .await
+            .map_err(|_| "server stopped before shutdown".to_string())?;
+        result
+            .await
+            .map_err(|_| "server stopped before shutdown".to_string())
+    }
+
+    /// Stop before retiring a native incarnation. Already closed actors are safely stopped.
+    /// Dropping a queued request cancels it; a concurrent acknowledgement can still complete,
+    /// so a timed-out caller must keep local state and may retry this idempotent operation.
+    pub async fn stop_and_wait(&self) -> Result<(), String> {
+        let (stopped, result) = oneshot::channel();
+        if self
+            .cmd_tx
+            .send(AppCommand::StopAndWait { stopped })
+            .await
+            .is_err()
+        {
+            return Ok(());
+        }
+        match result.await {
+            Ok(()) => Ok(()),
+            Err(_) if self.cmd_tx.tx.is_closed() => Ok(()),
+            Err(_) => Err("server stop was not acknowledged".into()),
+        }
+    }
+
     /// Drive one steady-state rendezvous-discovery pass. Fire-and-forget; the bridge calls this on
     /// a timer. Returns `Err` once the actor has stopped (so the bridge's timer task can exit).
     pub async fn drive_discovery(&self) -> Result<(), ()> {
@@ -3298,6 +3513,57 @@ impl ServerActor {
             .send(AppCommand::SetLocalReconnectRoutes { routes })
             .await
             .map_err(|_| ())
+    }
+
+    pub async fn finalized_member_peers(&self) -> Result<Vec<PeerId>, String> {
+        let (reply, result) = oneshot::channel();
+        self.cmd_tx
+            .send(AppCommand::FinalizedMemberPeers { reply })
+            .await
+            .map_err(|_| "server stopped".to_string())?;
+        result.await.map_err(|_| "server stopped".to_string())
+    }
+
+    pub async fn member_mesh_allowed(&self) -> Result<bool, String> {
+        let (reply, result) = oneshot::channel();
+        self.cmd_tx
+            .send(AppCommand::MemberMeshAllowed { reply })
+            .await
+            .map_err(|_| "server stopped".to_string())?;
+        result.await.map_err(|_| "server stopped".to_string())
+    }
+
+    pub async fn member_finalization_candidates(&self) -> Result<Vec<PeerId>, String> {
+        let (reply, result) = oneshot::channel();
+        self.cmd_tx
+            .send(AppCommand::MemberFinalizationCandidates { reply })
+            .await
+            .map_err(|_| "server stopped".to_string())?;
+        result.await.map_err(|_| "server stopped".to_string())
+    }
+
+    pub async fn member_finalization_work(
+        &self,
+        observed: Vec<PeerId>,
+    ) -> Result<Vec<PeerId>, String> {
+        if observed.len() > catcoms_sync::MAX_MEMBER_FINALIZATION_OBSERVATIONS {
+            return Err("too many member finalization observations".into());
+        }
+        let (reply, result) = oneshot::channel();
+        self.cmd_tx
+            .send(AppCommand::MemberFinalizationWork { observed, reply })
+            .await
+            .map_err(|_| "server stopped".to_string())?;
+        result.await.map_err(|_| "server stopped".to_string())
+    }
+
+    pub async fn finalize_member_connection(&self, peer: PeerId) -> Result<bool, String> {
+        let (reply, result) = oneshot::channel();
+        self.cmd_tx
+            .send(AppCommand::FinalizeMemberConnection { peer, reply })
+            .await
+            .map_err(|_| "server stopped".to_string())?;
+        result.await.map_err(|_| "server stopped".to_string())?
     }
 
     /// Create an out-of-band recovery code for a member that has lost every usable route to this
@@ -3431,6 +3697,7 @@ where
 
 /// Move `server` into a background task. Returns a [`ServerActor`] handle, a receiver of
 /// [`AppEvent`]s, and the task's [`JoinHandle`].
+#[rustfmt::skip] // Preserve the existing command-table layout previously inside select! macro.
 pub fn spawn<T, R>(
     mut server: Server<T, R>,
 ) -> (ServerActor, mpsc::Receiver<TracedEvent>, JoinHandle<()>)
@@ -3558,38 +3825,71 @@ where
         let mut delivery_dirty = HashSet::new();
         let mut file_transfers = file_transfers::FileTransfers::new();
         let mut studio_preview_resets_open = true;
+        // Startup persistence belongs to the host. Thereafter raw versions are independent of
+        // the UI's change detector: an accepted signed operation can leave its projection equal.
+        let mut snapshot_versions = SnapshotVersions::capture(&server);
+        let mut ready_cursor = 0;
         loop {
+            // Check at the owner boundary, including after a command cancelled a sync tick that
+            // already applied a valid prefix. No snapshot I/O belongs in this event channel.
+            if snapshot_versions.update(&server) {
+                let _ = event_tx.send(AppEvent::SnapshotNeeded).await;
+            }
             // One call, because "is there work now" and "when is there work next" have to come
             // from one clock read. Sampling them separately leaves a window where the deadline
             // passes between the two and neither answer schedules anything, which strands the
             // permit a handoff job is holding until unrelated work happens by.
+            let delivery_clock = server.runtime_clock();
+            let wake_sampled_at = delivery_clock.monotonic_ms();
             let studio_wake = studio_receiver.signal_and_wake(&server, &studio_signal);
             #[cfg(test)]
             studio_preparation_signal.send_replace(studio_receiver.preparing_for_test());
-            let delivery_clock = server.runtime_clock();
             // The Studio receiver's own deadline shares this wake. A handoff job held by backoff
             // reports no pending work, so without merging its deadline here a quiescent actor
             // would never revisit it, and a job parked at `Ready` holds admission and one of four
             // process-wide preparation permits for as long as that lasts.
             let delivery_delay = match (
-                next_delivery_delay(delivery_clock.monotonic_ms(), &delivery, &delivery_dirty),
+                next_delivery_delay(wake_sampled_at, &delivery, &delivery_dirty),
                 studio_wake,
             ) {
                 (Some(a), Some(b)) => Some(a.min(b)),
                 (only, None) | (None, only) => only,
             };
-            let delivery_wake = async move {
-                match delivery_delay {
-                    Some(delay_ms) => {
-                        delivery_clock.sleep(Duration::from_millis(delay_ms)).await;
-                    }
-                    None => std::future::pending::<()>().await,
-                }
-            };
+            // Anchor before the selector's first poll. Clock advancement during another turn
+            // must not arm a fresh full relative interval after the original deadline elapsed.
+            let delivery_due = delivery_delay.map(|delay| wake_sampled_at.saturating_add(delay));
+            let delivery_wake = deadline::wait(delivery_clock, delivery_due);
             tokio::pin!(delivery_wake);
-            tokio::select! {
-                biased;
-                reset = studio_preview_resets.changed(), if studio_preview_resets_open => {
+            let turn = fair::next(
+                &mut ready_cursor,
+                async {
+                    if studio_preview_resets_open {
+                        studio_preview_resets.changed().await
+                    } else {
+                        std::future::pending().await
+                    }
+                },
+                async {
+                    if !studio_jobs.is_empty() {
+                        studio_jobs.join_next().await
+                    } else {
+                        std::future::pending().await
+                    }
+                },
+                cmd_rx.recv(),
+                async {
+                    if !file_transfers.is_empty() {
+                        file_transfers.next().await
+                    } else {
+                        std::future::pending().await
+                    }
+                },
+                delivery_wake,
+                server.sync_once(),
+            )
+            .await;
+            match turn {
+                fair::Turn::Reset(reset) => {
                     event_tx.idle();
                     if reset.is_ok() { studio_receiver.clear_previews(); }
                     else { studio_preview_resets_open = false; }
@@ -3597,7 +3897,7 @@ where
                 // Consume an already-completed bounded Studio job before granting another
                 // native lease. A continuously ready command queue must not leave a fetched
                 // page/preparation marked in-flight forever. Pending work never blocks commands.
-                completed = studio_jobs.join_next(), if !studio_jobs.is_empty() => {
+                fair::Turn::Studio(completed) => {
                     event_tx.idle();
                     match completed {
                         Some(Ok(result)) => studio_receiver.complete(&mut server, result),
@@ -3608,7 +3908,7 @@ where
                 // `begin` unwraps the envelope and adopts the caller's operation for as long as
                 // this arm runs, so every event the arm emits is attributed to the command that
                 // caused it without any of the fifty arms below having to mention it.
-                cmd = cmd_rx.recv() => match event_tx.begin(cmd) {
+                fair::Turn::Command(cmd) => match event_tx.begin(cmd) {
                     Some(AppCommand::CreateChannel { name, reply }) => {
                         let res = server.create_channel(&name).await.map_err(|e| e.to_string());
                         // The creator already opened this document as part of create_channel.
@@ -3656,6 +3956,18 @@ where
                         // nothing on first sight for exactly this reason.
                         channel_delta_if_moved(&server, channel, &mut counts, &mut versions);
                         let _ = ack.send(());
+                    }
+                    Some(AppCommand::DurableSendContext { reply }) => {
+                        let _ = reply.send(server.sync.durable_send_context());
+                    }
+                    Some(AppCommand::DurableSend { request, ready }) => {
+                        let channel = request.channel;
+                        if crate::durable_chat::execute(&mut server, request, ready).await {
+                            let _ = event_tx.send(AppEvent::SnapshotNeeded).await;
+                            if let Some(change) = channel_delta_if_moved(&server, channel, &mut counts, &mut versions) {
+                                let _ = event_tx.send(AppEvent::ChannelUpdated { channel, change }).await;
+                            }
+                        }
                     }
                     Some(AppCommand::SendMessage {
                         channel,
@@ -4035,6 +4347,11 @@ where
                         let _ = reply.send(res);
                     }
                     #[cfg(test)]
+                    Some(AppCommand::StudioPreparationPoolsForTest { shared, preview, reply }) => {
+                        studio_receiver.preparation_pools_for_test(shared, preview);
+                        let _ = reply.send(());
+                    }
+                    #[cfg(test)]
                     Some(AppCommand::StudioSchedulingForTest { pause_parse, reply }) => {
                         let _ = reply.send(studio_receiver.scheduling_for_test(&mut server, pause_parse));
                     }
@@ -4193,6 +4510,31 @@ where
                     }
                     Some(AppCommand::MemberRoutes { reply }) => {
                         let _ = reply.send(server.member_routes());
+                    }
+                    Some(AppCommand::FinalizedMemberPeers { reply }) => {
+                        let _ = reply.send(server.finalized_member_peers());
+                    }
+                    Some(AppCommand::MemberMeshAllowed { reply }) => {
+                        let _ = reply.send(server.member_mesh_allowed());
+                    }
+                    Some(AppCommand::MemberFinalizationCandidates { reply }) => {
+                        let _ = reply.send(server.member_finalization_candidates());
+                    }
+                    Some(AppCommand::MemberFinalizationWork { observed, reply }) => {
+                        if !reply.is_closed() {
+                            let _ = reply.send(server.member_finalization_work(&observed));
+                        }
+                    }
+                    Some(AppCommand::FinalizeMemberConnection { peer, mut reply }) => {
+                        if reply.is_closed() {
+                            continue;
+                        }
+                        tokio::select! {
+                            result = server.finalize_member_connection(peer) => {
+                                let _ = reply.send(result.map_err(|e| e.to_string()));
+                            }
+                            _ = reply.closed() => {}
+                        }
                     }
                     Some(AppCommand::JoinAttempts { reply }) => {
                         let _ = reply.send(server.join_attempts());
@@ -4658,11 +5000,21 @@ where
                     Some(AppCommand::Snapshot { reply }) => {
                         let _ = reply.send(server.snapshot().map(|z| z.to_vec()).map_err(|e| e.to_string()));
                     }
+                    Some(AppCommand::GroupMode { reply }) => {
+                        let _ = reply.send(server.group_mode());
+                    }
+                    Some(AppCommand::InitializeGroupPolicy { mode, reply }) => {
+                        let _ = reply.send(server.initialize_group_policy(mode).map_err(|e| e.to_string()));
+                    }
+                    Some(AppCommand::PublishGroupPolicy { reply }) => {
+                        let _ = reply.send(server.publish_group_policy().map_err(|e| e.to_string()));
+                    }
                     // Steady-state rendezvous discovery: re-register + re-discover at the rendezvous,
                     // then drain the records that arrive in a bounded window and dial each
                     // (policy-gated). Driven by a periodic command from the bridge (the real-time
                     // timer lives there, off the deterministic-time seam). A no-op without rendezvous.
                     Some(AppCommand::DriveDiscovery) => {
+                        server.sync.republish_group_policy_if_ready();
                         // Re-evaluate the advisory eclipse verdict each pass; surface a change.
                         let caution = server.observe_eclipse();
                         if caution != last_eclipse {
@@ -4718,6 +5070,10 @@ where
                             .await
                             {
                                 Ok(Ok(_)) => {
+                                    // PEX pulls descriptors in only one direction. This additive,
+                                    // connected-only exchange confirms both member endpoints so
+                                    // a reply callback can become a permitted restart route.
+                                    let _ = server.finalize_member_connection(peer).await;
                                     // The role offer uses its own additive request kind so old
                                     // peers remain PEX-compatible. It is best-effort and bounded
                                     // by the same per-peer deadline as PEX.
@@ -4747,6 +5103,10 @@ where
                         // resulting sockets remain behind the ordinary policy + endpoint budget.
                         server.drive_mesh_repair().await;
                         server.dial_cached_peers().await;
+                        // A connected neighbour may have learned older operations through a
+                        // different member since our last exchange. Re-open completed searches
+                        // without waiting for new gossip or a disconnect/reconnect edge.
+                        server.schedule_reconciliation();
                         // PEX can authenticate the signed descriptor for a transport identity
                         // that was already connected before this pass. In that ordering there is
                         // no later transport event to announce the now-resolved member as online,
@@ -4853,18 +5213,32 @@ where
                             .map_err(|e| e.to_string());
                         let _ = reply.send(res);
                     }
+                    Some(AppCommand::PrepareShutdown { ready }) => {
+                        if crate::shutdown::save_and_freeze(&mut server, ready).await {
+                            let _ = event_tx.send(AppEvent::Closed).await;
+                            break;
+                        }
+                    }
+                    Some(AppCommand::StopAndWait { stopped }) => {
+                        // A timed-out request which is still queued must not later stop a live
+                        // group unexpectedly. Once acknowledged this branch is terminal; close
+                        // the command receiver before awaiting the UI event consumer.
+                        if stopped.send(()).is_ok() {
+                            cmd_rx.close();
+                            let _ = event_tx.send(AppEvent::Closed).await;
+                            break;
+                        }
+                    }
                     Some(AppCommand::Shutdown) | None => {
                         let _ = event_tx.send(AppEvent::Closed).await;
                         break;
                     }
                 },
-                // Queued commands have priority even when a local-copy worker is already ready.
-                // Do not add an immediate fallback that polls/drops sync_once: legacy outbox
-                // drains may own unpublished work across an await. Local Keep yields each chunk;
-                // an all-local finite copy can still delay background sync, never queued commands.
+                // Ready local-copy work shares the finite rotation with commands and sync.
+                // Local Keep yields each chunk; network waits own no mutable Server borrow.
                 // Network waits own no Server borrow. A ready result is committed against the
                 // current index/membership before another chunk or provider can be admitted.
-                completed = file_transfers.next(), if !file_transfers.is_empty() => {
+                fair::Turn::File(completed) => {
                     event_tx.idle();
                     if let Some(completed) = completed {
                         file_transfers.complete(&mut server, completed);
@@ -4873,7 +5247,7 @@ where
                 // A receipt may be the final network event in a quiet room. Wake from the same
                 // injected clock used to start the throttle so the last coalesced state is still
                 // surfaced without waiting for unrelated traffic.
-                _ = &mut delivery_wake => {
+                fair::Turn::Delivery => {
                     event_tx.idle();
                     for (channel, snapshot) in recompute_due_delivery(
                         &mut server,
@@ -4888,7 +5262,7 @@ where
                 // Work nobody asked for. An op arriving from a peer is not the consequence of the
                 // last local command, and attributing it to one would invent a causal link that a
                 // reader would go on to trust.
-                cont = server.sync_once() => { event_tx.idle(); match cont {
+                fair::Turn::Sync(cont) => { event_tx.idle(); match cont {
                     Ok(true) => {
                         studio_receiver.signal(&server, &studio_signal);
                         if server.has_pending_reciprocal() {
@@ -5161,6 +5535,33 @@ async fn sync_channels<T, R>(
     }
     *last = next;
     let _ = event_tx.send(AppEvent::ChannelsUpdated).await;
+}
+
+/// Raw persisted content versions, independent of all rendered projections. O(open documents)
+/// per owner turn, with no body scan; replacing the map also forgets documents no longer held.
+struct SnapshotVersions {
+    epoch: u64,
+    group_policy_revision: u64,
+    documents: HashMap<(crate::DocType, u128), u64>,
+}
+
+impl SnapshotVersions {
+    fn capture<T: MeshTransport, R: CryptoRngCore>(server: &Server<T, R>) -> Self {
+        Self {
+            epoch: server.epoch(),
+            group_policy_revision: server.sync().group_policy_revision(),
+            documents: server.sync().document_versions().collect(),
+        }
+    }
+
+    fn update<T: MeshTransport, R: CryptoRngCore>(&mut self, server: &Server<T, R>) -> bool {
+        let next = Self::capture(server);
+        let changed = self.epoch != next.epoch
+            || self.group_policy_revision != next.group_policy_revision
+            || self.documents != next.documents;
+        *self = next;
+        changed
+    }
 }
 
 /// The last-seen version of every document the actor projects (see [`Server::doc_version`]),
@@ -5587,6 +5988,9 @@ async fn sync_profiles<T, R>(
 }
 
 #[cfg(test)]
+mod stop_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::Server;
@@ -5859,6 +6263,231 @@ mod tests {
             name,
         )
         .unwrap()
+    }
+
+    #[tokio::test]
+    async fn group_policy_migration_reaches_the_actor_and_requests_received_persistence() {
+        let hub = Hub::new();
+        let alice_peer = PeerId::from_u64(1);
+        let mut fresh = founder(&hub, alice_peer, "alice", 1);
+        // Exact pre-policy snapshot fixture: retain the preceding observed-tenure extension.
+        let policy_tail = fresh.sync().group_policy().unwrap().encode().len() + 9;
+        let snapshot = fresh.snapshot().unwrap();
+        // Both unused trailing extensions are framed v1, zero-record payloads. Strip
+        // pending finalization first, then durable chat, before reaching the policy frame.
+        let empty_pending_tail = [0, 0, 0, 5, 1, 0, 0, 0, 0];
+        assert!(snapshot.ends_with(&empty_pending_tail));
+        let snapshot = &snapshot[..snapshot.len() - empty_pending_tail.len()];
+        let empty_chat_tail = [0, 0, 0, 5, 1, 0, 0, 0, 0];
+        assert!(snapshot.ends_with(&empty_chat_tail));
+        let legacy = snapshot[..snapshot.len() - empty_chat_tail.len() - policy_tail].to_vec();
+        drop(fresh);
+        let mut alice = Server::restore(
+            &legacy,
+            hub.join(alice_peer),
+            ChaCha20Rng::seed_from_u64(1),
+            Box::new(ManualClock::new(1_000)),
+            "alice",
+        )
+        .unwrap();
+        alice.subscribe_control().await.unwrap();
+        let invite = alice.mint_invite([90; 16], 60_000, vec![]).unwrap();
+        assert!(invite.policy.is_none());
+        let (joined, _) = tokio::join!(
+            Server::join(
+                hub.join(PeerId::from_u64(2)),
+                MlsDevice::generate().unwrap(),
+                ChaCha20Rng::seed_from_u64(2),
+                Box::new(ManualClock::new(1_000)),
+                "bob",
+                alice_peer,
+                &invite
+            ),
+            alice.sync_once(),
+        );
+        let mut bob = joined.unwrap();
+        bob.subscribe_control().await.unwrap();
+        let epoch = bob.epoch();
+        let (alice, _alice_events, alice_task) = spawn(alice);
+        let (bob, mut events, bob_task) = spawn(bob);
+        assert_eq!(
+            bob.group_mode().await.unwrap(),
+            crate::GroupMode::LegacyUnverified
+        );
+        while events.try_recv().is_ok() {}
+        alice
+            .initialize_group_policy(crate::GroupMode::PeerToPeer)
+            .await
+            .unwrap();
+        let owner_snapshot = alice.snapshot().await.unwrap();
+        assert!(!owner_snapshot.is_empty());
+        alice.publish_group_policy().await.unwrap();
+        timeout(Duration::from_secs(3), async {
+            loop {
+                if matches!(events.recv().await.unwrap().event, AppEvent::SnapshotNeeded)
+                    && bob.group_mode().await.unwrap() == crate::GroupMode::PeerToPeer
+                {
+                    break;
+                }
+            }
+        })
+        .await
+        .expect("received policy must request persistence without a rendered change");
+        let saved = bob.snapshot().await.unwrap();
+        let restored = Server::restore(
+            &saved,
+            Hub::new().join(PeerId::from_u64(3)),
+            ChaCha20Rng::seed_from_u64(3),
+            Box::new(ManualClock::new(1_000)),
+            "bob",
+        )
+        .unwrap();
+        assert_eq!(restored.group_mode(), crate::GroupMode::PeerToPeer);
+        assert_eq!(
+            restored.epoch(),
+            epoch,
+            "policy migration did not fake an MLS transition"
+        );
+        alice.shutdown().await;
+        bob.shutdown().await;
+        alice_task.await.unwrap();
+        bob_task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn snapshot_needed_tracks_a_projection_invisible_remote_change() {
+        use automerge::{transaction::Transactable, ReadDoc, ROOT};
+
+        let hub = Hub::new();
+        let alice_peer = PeerId::from_u64(1);
+        let mut alice = founder(&hub, alice_peer, "alice", 1);
+        alice.open_channel(GENERAL).await.unwrap();
+        let invite = alice.mint_invite([91; 16], 60_000, vec![]).unwrap();
+        let (joined, _) = tokio::join!(
+            Server::join(
+                hub.join(PeerId::from_u64(2)),
+                MlsDevice::generate().unwrap(),
+                ChaCha20Rng::seed_from_u64(2),
+                Box::new(ManualClock::new(1_000)),
+                "bob",
+                alice_peer,
+                &invite,
+            ),
+            alice.sync_once(),
+        );
+        let mut bob_server = joined.unwrap();
+        bob_server.open_channel(GENERAL).await.unwrap();
+        let (bob, mut events, task) = spawn(bob_server);
+        bob.open_channel(GENERAL).await; // include this document in the actor's UI projection
+        assert!(bob.messages(GENERAL).await.is_empty()); // actor startup is complete
+        while events.try_recv().is_ok() {}
+
+        alice
+            .sync
+            .post(crate::DocType::Channel, GENERAL, |doc| {
+                doc.put(ROOT, "unrendered-metadata", "valid retained history")
+            })
+            .await
+            .unwrap();
+        timeout(Duration::from_secs(5), async {
+            loop {
+                match events.recv().await.expect("receiver actor is live").event {
+                    AppEvent::SnapshotNeeded => break,
+                    AppEvent::ChannelUpdated {
+                        channel: GENERAL, ..
+                    } => {
+                        panic!("the hidden operation must not invent a rendered channel delta");
+                    }
+                    _ => {}
+                }
+            }
+        })
+        .await
+        .expect("accepted signed history must request a snapshot");
+        assert!(bob.messages(GENERAL).await.is_empty());
+        let bytes = bob.snapshot().await.unwrap();
+        let restored = Server::restore(
+            &bytes,
+            Hub::new().join(PeerId::from_u64(3)),
+            ChaCha20Rng::seed_from_u64(3),
+            Box::new(ManualClock::new(1_000)),
+            "bob",
+        )
+        .unwrap();
+        assert!(restored
+            .sync
+            .doc(crate::DocType::Channel, GENERAL)
+            .unwrap()
+            .doc()
+            .get(ROOT, "unrendered-metadata")
+            .unwrap()
+            .is_some());
+        for _ in 0..3 {
+            bob.snapshot().await.unwrap();
+            assert!(bob.messages(GENERAL).await.is_empty());
+        }
+        while let Ok(event) = events.try_recv() {
+            assert!(
+                !matches!(event.event, AppEvent::SnapshotNeeded),
+                "snapshot/read commands must not request another snapshot"
+            );
+            assert!(!matches!(
+                event.event,
+                AppEvent::ChannelUpdated {
+                    channel: GENERAL,
+                    ..
+                }
+            ));
+        }
+        bob.shutdown().await;
+        task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn snapshot_versions_track_epoch_changes_even_when_member_count_returns_to_equal() {
+        let hub = Hub::new();
+        let alice_peer = PeerId::from_u64(1);
+        let mut alice = founder(&hub, alice_peer, "alice", 1);
+        alice.open_channel(GENERAL).await.unwrap();
+        let mut versions = SnapshotVersions::capture(&alice);
+        let old_count = alice.member_count();
+        let old_documents = versions.documents.clone();
+        let invite = alice.mint_invite([92; 16], 60_000, vec![]).unwrap();
+        let (joined, _) = tokio::join!(
+            Server::join(
+                hub.join(PeerId::from_u64(2)),
+                MlsDevice::generate().unwrap(),
+                ChaCha20Rng::seed_from_u64(2),
+                Box::new(ManualClock::new(1_000)),
+                "bob",
+                alice_peer,
+                &invite,
+            ),
+            alice.sync_once(),
+        );
+        let bob = joined.unwrap();
+        alice.remove_member(&bob.my_fingerprint()).await.unwrap();
+        assert_eq!(alice.member_count(), old_count);
+        assert_eq!(SnapshotVersions::capture(&alice).documents, old_documents);
+        assert!(
+            versions.update(&alice),
+            "MLS state changed although the roster size did not"
+        );
+        assert!(
+            !versions.update(&alice),
+            "one mutation requests persistence once"
+        );
+
+        // A same-sized set with a different document identity is still a different snapshot,
+        // and replacing the exact map must release keys no longer present in the owner.
+        versions
+            .documents
+            .remove(&(crate::DocType::Channel, GENERAL));
+        versions
+            .documents
+            .insert((crate::DocType::Channel, GENERAL + 1), 0);
+        assert!(versions.update(&alice));
+        assert_eq!(versions.documents, old_documents);
     }
 
     /// The version gate must be exactly as sensitive as the delta it guards: a quiet tick costs
@@ -6786,15 +7415,8 @@ mod tests {
         actor.open_channel(GENERAL).await;
         actor.send_message(GENERAL, "hi there").await;
 
-        let ev = timeout(Duration::from_secs(5), events.recv())
-            .await
-            .expect("event timeout")
-            .expect("actor closed");
+        let (_, change) = next_traced_change(&mut events, GENERAL).await;
         // The delta names the row that arrived, whose id is generated, so it is compared by shape.
-        let AppEvent::ChannelUpdated { channel, change } = &ev.event else {
-            panic!("expected a channel update, got {:?}", ev.event);
-        };
-        assert_eq!(*channel, GENERAL);
         assert!(change.messages_appended);
         assert_eq!(change.arrivals.len(), 1, "the message that was just sent");
         assert!(!change.messages_changed && !change.topic && !change.jukebox);
@@ -6815,7 +7437,7 @@ mod tests {
 
         actor.open_channel(GENERAL).await;
         actor.send_message(GENERAL, "remember me").await;
-        let _ = timeout(Duration::from_secs(5), events.recv()).await; // drain the update
+        next_traced_change(&mut events, GENERAL).await; // drain the actual channel update
 
         let bytes = actor.snapshot().await.expect("snapshot");
         actor.shutdown().await;
@@ -6981,10 +7603,9 @@ mod tests {
         .expect("Carol did not receive Alice's message");
 
         // Other post-send protocol traffic can establish the throttled baseline at zero before
-        // the first receipt arrives. Poll the underlying authenticated state slowly enough to
-        // leave the biased command arm idle between reads. This establishes that both requests
-        // were accepted while the injected clock remains fixed, not by introducing a third
-        // network event.
+        // the first receipt arrives. Repeated reads must share turns with inbound receipt work.
+        // This establishes both requests were accepted while the injected clock remains fixed,
+        // without relying on an idle command window or introducing a third network event.
         timeout(Duration::from_secs(10), async {
             loop {
                 if alice

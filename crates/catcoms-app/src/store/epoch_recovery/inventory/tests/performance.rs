@@ -51,7 +51,7 @@
 //!
 //! # Resolution
 //!
-//! `scripts/check-no-ambient.sh` forbids `Instant::now` everywhere under `crates/`, test code
+//! `scripts/check-no-ambient.sh` forbids direct OS clock reads everywhere under `crates/`, test code
 //! included, so the finest clock available is `catcoms_rt::Clock` at milliseconds. A scan step
 //! cannot be replayed on an advanced cursor, but an equivalent scan can be repeated on a fresh
 //! one, so the per-record phases are summed over `TRIALS` complete scans with the individual

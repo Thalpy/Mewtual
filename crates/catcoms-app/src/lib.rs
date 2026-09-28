@@ -29,6 +29,7 @@ pub use catcoms_crypto::DeviceId;
 // The companion-device statements the `Devices` registry stores + verifies (multi-device M3).
 use catcoms_crypto::verify_with_public_bytes;
 pub use catcoms_crypto::{DeviceCertificate, DeviceRevocation};
+pub use catcoms_mls::GroupMode;
 use catcoms_mls::{InviteToken, MlsDevice, MlsError, ServerGroup};
 use catcoms_rt::{
     Clock, CryptoRngCore, DiscoveredPeer, MeshTransport, PeerId, RequestCancellation,
@@ -53,6 +54,7 @@ use thiserror::Error;
 
 mod actor;
 pub mod creative;
+pub mod durable_chat;
 mod file_resolution;
 mod moderation;
 pub mod pairing;
@@ -61,6 +63,7 @@ pub mod registry_head;
 pub mod registry_ingress;
 pub mod registry_replay;
 pub mod registry_seed;
+pub mod shutdown;
 pub mod store;
 pub mod studio;
 pub mod studio_exchange;
@@ -3565,8 +3568,10 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
     ) -> Result<Self, AppError> {
         let device_id = device.device_id();
         let group = ServerGroup::create(&device)?;
+        let mut sync = ChannelSync::new(transport, group, device, rng, clock);
+        sync.initialize_new_group_policy()?;
         Ok(Self {
-            sync: ChannelSync::new(transport, group, device, rng, clock),
+            sync,
             display_name: display_name.into(),
             device_id,
             own_message_changes: HashMap::new(),
@@ -3574,6 +3579,20 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
             delivery_snapshot_revision: 0,
             devices_sig: None,
         })
+    }
+
+    /// Authenticated immutable communication mode; old snapshots/invites remain unresolved.
+    pub fn group_mode(&self) -> GroupMode {
+        self.sync.group_mode()
+    }
+
+    /// Owner-authorized legacy migration. Persist the resulting snapshot before publication.
+    pub fn initialize_group_policy(&mut self, mode: GroupMode) -> Result<(), AppError> {
+        Ok(self.sync.initialize_group_policy(mode)?)
+    }
+
+    pub fn publish_group_policy(&mut self) -> Result<(), AppError> {
+        Ok(self.sync.publish_group_policy()?)
     }
 
     /// Join an existing server from a pasted invite (the caller must already be
@@ -3612,6 +3631,7 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
         // inviter happens to send it something first. Candidate pool only; the inviter still has
         // to serve a roster-verified signed catch-up to become a trusted source.
         sync.note_candidate_peer(inviter);
+        sync.note_member_finalization_candidate(inviter, invite.inviter_device_id);
         Ok(Self {
             sync,
             display_name: display_name.into(),
@@ -3738,6 +3758,9 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
         sync.adopt_pre_owner_connections(connection_handoff);
         sync.note_candidate_peer(inviter);
         sync.note_candidate_peer(contact);
+        if contact == inviter {
+            sync.note_member_finalization_candidate(contact, invite.inviter_device_id);
+        }
         Ok((
             Self {
                 sync,
@@ -3789,6 +3812,9 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
         sync.adopt_pre_owner_connections(connection_handoff);
         sync.note_candidate_peer(inviter);
         sync.note_candidate_peer(contact);
+        if contact == inviter {
+            sync.note_member_finalization_candidate(contact, invite.inviter_device_id);
+        }
         Ok((
             Self {
                 sync,
@@ -5574,6 +5600,22 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
     /// view. Local state only; see [`ChannelSync::member_routes`].
     pub fn member_routes(&self) -> Vec<catcoms_sync::MemberRoute> {
         self.sync.member_routes()
+    }
+
+    pub fn finalized_member_peers(&self) -> Vec<PeerId> {
+        self.sync.finalized_member_peers()
+    }
+
+    pub fn member_mesh_allowed(&self) -> bool {
+        self.sync.policy_allows_member_mesh()
+    }
+
+    pub fn member_finalization_candidates(&mut self) -> Vec<PeerId> {
+        self.sync.member_finalization_candidates()
+    }
+
+    pub fn member_finalization_work(&mut self, observed: &[PeerId]) -> Vec<PeerId> {
+        self.sync.member_finalization_work(observed)
     }
 
     /// Cheap session-local invalidation epoch for [`Self::member_routes`].
@@ -8083,7 +8125,10 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
     /// Advance the server: process one inbound network event (after draining the outbox
     /// and any recovery). Returns `false` once the transport has closed. The bridge
     /// layer drives this in a background loop; tests drive it explicitly.
-    pub async fn sync_once(&mut self) -> Result<bool, AppError> {
+    pub async fn sync_once(&mut self) -> Result<bool, AppError>
+    where
+        T: 'static,
+    {
         let cont = self.sync.run_once().await?;
         // Publish anything the tick admitted, and refresh the companion → origin registry the
         // sync layer's depth-1 admission gate reads (multi-device M3).
@@ -8245,6 +8290,18 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
         Ok(self.sync.request_pex(peer).await?)
     }
 
+    /// Fetch signed member records using only a currently established connection. Unlike
+    /// ordinary discovery, post-admission exchange may not extend a temporary callback's
+    /// authority by letting the transport redial its remembered endpoint.
+    pub async fn request_pex_connected(&mut self, peer: PeerId) -> Result<usize, AppError> {
+        Ok(self.sync.request_pex_connected(peer).await?)
+    }
+
+    /// Exchange both self-signed member/transport bindings under the authenticated P2P policy.
+    pub async fn finalize_member_connection(&mut self, peer: PeerId) -> Result<bool, AppError> {
+        Ok(self.sync.finalize_member_connection(peer).await?)
+    }
+
     /// Back a peer off after it failed to answer a PEX request within the caller's deadline.
     pub fn note_pex_failure(&mut self, peer: PeerId) {
         self.sync.note_pex_failure(peer);
@@ -8265,6 +8322,12 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
     /// Run one bounded SWIM/reciprocal/topology repair pass.
     pub async fn drive_mesh_repair(&mut self) -> usize {
         self.sync.drive_mesh_repair().await
+    }
+
+    /// Queue a paced reconciliation of open documents with currently proven neighbours.
+    /// The ordinary sync loop owns requests, continuation cursors and retries.
+    pub fn schedule_reconciliation(&mut self) -> usize {
+        self.sync.schedule_reconciliation()
     }
 
     pub fn has_pending_reciprocal(&self) -> bool {

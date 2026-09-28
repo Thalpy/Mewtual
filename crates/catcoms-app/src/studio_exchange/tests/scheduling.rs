@@ -13,7 +13,22 @@ use catcoms_sync::{
     receipt_head::ReceiptHeadSelection,
 };
 use std::{sync::Weak, time::Duration};
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, Semaphore};
+
+struct PreparationPools {
+    shared: Arc<Semaphore>,
+    preview: Arc<Semaphore>,
+}
+impl PreparationPools {
+    fn new() -> Self {
+        // Every actor below shares these exact resources and one ManualClock. Other tests model
+        // independent processes/clocks, so their retained sources must not spend this budget.
+        Self {
+            shared: Arc::new(Semaphore::new(4)),
+            preview: Arc::new(Semaphore::new(3)),
+        }
+    }
+}
 
 struct Running {
     actor: crate::ServerActor,
@@ -22,13 +37,16 @@ struct Running {
     drain: tokio::task::JoinHandle<()>,
 }
 impl Running {
-    fn new(node: Node, store: ServerStore) -> Self {
+    async fn new(node: Node, store: ServerStore, pools: &PreparationPools) -> Self {
         let (actor, mut events, task) = crate::spawn(node);
         let drain = tokio::spawn(async move {
             while let Some(event) = events.recv().await {
                 assert!(!matches!(event.event, crate::AppEvent::StudioReceivePaused));
             }
         });
+        actor
+            .studio_preparation_pools_for_test(pools.shared.clone(), pools.preview.clone())
+            .await;
         Self {
             actor,
             store: Arc::new(Mutex::new(Some(store))),
@@ -147,7 +165,7 @@ async fn turn(
         client.actor.wait_studio_preparation().await;
     }
     // Let detached network completions reach the actor before advancing simulated deadlines.
-    tokio::time::sleep(Duration::from_millis(5)).await;
+    catcoms_rt::Clock::sleep(&catcoms_rt::SystemClock, Duration::from_millis(5)).await;
     clock.advance_ms(250);
 }
 
@@ -204,6 +222,24 @@ async fn studio_actor_owner_return_installs_both_classes_with_cancelled_preview_
         .unwrap();
 }
 
+/// Deliberately drains production's global pools, so execute this diagnostic alone. It must not
+/// run beside other tests that intentionally exercise those pools. With the fixture injection
+/// removed, the ordinary "preview 0 never became ready" assertion detects the old interference.
+#[tokio::test]
+#[ignore = "run alone: intentionally occupies all process-global preparation permits"]
+async fn studio_actor_owner_return_survives_unrelated_process_pool_contention() {
+    let (shared, preview) = crate::studio::StudioReceiver::default_preparation_pools_for_test();
+    let _shared = shared.clone().try_acquire_many_owned(4).unwrap();
+    let _preview = preview.clone().try_acquire_many_owned(3).unwrap();
+    assert_eq!(shared.available_permits(), 0);
+    assert_eq!(preview.available_permits(), 0);
+    tokio::time::timeout(Duration::from_secs(90), owner_return(Pressure::Ready))
+        .await
+        .unwrap();
+    assert_eq!(shared.available_permits(), 0);
+    assert_eq!(preview.available_permits(), 0);
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Pressure {
     Ready,
@@ -212,6 +248,7 @@ enum Pressure {
 }
 
 async fn owner_return(pressure: Pressure) {
+    let pools = PreparationPools::new();
     let ready_count = if pressure == Pressure::Ready { 3 } else { 2 };
     let mut p = Pair::new().await;
     let targets = [
@@ -360,8 +397,8 @@ async fn owner_return(pressure: Pressure) {
     .unwrap();
     *wire.hidden_peer.lock().unwrap() = Some(owner_peer);
     assert_eq!(client.sync.studio_page_peers(), vec![provider_peer]);
-    let owner = Running::new(p.alice, p.a_store);
-    let client = Running::new(client, client_store);
+    let owner = Running::new(p.alice, p.a_store, &pools).await;
+    let client = Running::new(client, client_store, &pools).await;
     eprintln!("{pressure:?}: joined, authenticated, owner hidden");
     let mut deliveries = Vec::new();
     let mut seeds = Vec::new();
@@ -424,12 +461,24 @@ async fn owner_return(pressure: Pressure) {
             paused,
             "the actual actor {pressure:?} never reached its barrier"
         );
+        if pressure == Pressure::Parser {
+            assert_eq!(pools.preview.available_permits(), 2);
+            assert!(pools.shared.available_permits() < 4);
+        }
         assert_eq!(client.actor.studio_scheduling_for_test(None).await.1, 0);
         cancel.send_replace(true);
         client.actor.wait_studio_preparation().await;
         // Process cancellation through the actor without releasing lower transport custody.
         for _ in 0..4 {
             turn(&owner, &client, &p.clock, None, true).await;
+        }
+        if pressure == Pressure::Parser {
+            assert_eq!(
+                pools.preview.available_permits(),
+                2,
+                "cancelling the waiter cannot refund its blocked parser's reservation"
+            );
+            assert!(pools.shared.available_permits() < 4);
         }
         if pressure == Pressure::Transport {
             let held = wire.held_seed.lock().unwrap();

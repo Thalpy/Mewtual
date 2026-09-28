@@ -1,32 +1,35 @@
-//! A genuine post-succession join recycles the departed founder's low MLS leaf and changes
-//! ownership AGAIN. Held PIX bytes remain fetchable, but a former owner's checkpoint hint must
-//! not become current-owner installation authority. Preview reads retain that boundary.
+//! Historical legacy-group post-succession admission recycles the departed founder's low MLS
+//! leaf and changes ownership AGAIN. Held PIX bytes remain fetchable, but a former owner's
+//! checkpoint hint must not become current-owner installation authority. Authenticated P2P
+//! policy currently refuses that admission; the separate negative case below preserves it.
 use super::*;
 
 #[tokio::test]
-async fn studio_actor_post_succession_joiner_fetches_open_source_pixels_without_owner_confirmation()
+async fn studio_actor_post_succession_joiner_legacy_fetches_open_pixels_without_owner_confirmation()
 {
     newcomer(false, false).await;
 }
 
 #[tokio::test]
-async fn studio_actor_post_succession_joiner_fetches_closing_source_pixels_without_owner_confirmation(
+async fn studio_actor_post_succession_joiner_legacy_fetches_closing_pixels_without_owner_confirmation(
 ) {
     newcomer(true, false).await;
 }
 
 #[tokio::test]
-async fn studio_actor_post_succession_joiner_reads_open_history_provisionally() {
+async fn studio_actor_post_succession_joiner_legacy_reads_open_history_provisionally() {
     newcomer(false, true).await;
 }
 
 #[tokio::test]
-async fn studio_actor_post_succession_joiner_reads_closing_history_provisionally() {
+async fn studio_actor_post_succession_joiner_legacy_reads_closing_history_provisionally() {
     newcomer(true, true).await;
 }
 
 async fn newcomer(closing: bool, require_preview: bool) {
-    let mut p = Pair::new().await;
+    let mut p = Pair::new_legacy().await;
+    assert_eq!(p.alice.group_mode(), crate::GroupMode::LegacyUnverified);
+    assert_eq!(p.bob.group_mode(), crate::GroupMode::LegacyUnverified);
     let logical = target().document(&p.bob.group_id()).unwrap();
     let group_key = hex::encode(p.bob.group_id());
     let old_owner = p
@@ -116,6 +119,7 @@ async fn newcomer(closing: bool, require_preview: bool) {
     p.bob.sync_once().await.unwrap();
     p.bob.sync.set_config(catcoms_sync::SyncConfig::default());
     assert!(p.bob.is_owner());
+    assert_eq!(p.bob.group_mode(), crate::GroupMode::LegacyUnverified);
     let tenure = p.bob.sync.observed_owner_tenure_start().unwrap();
     assert!(tenure > 0);
     let snapshot = p.bob.snapshot().unwrap();
@@ -143,6 +147,7 @@ async fn newcomer(closing: bool, require_preview: bool) {
         "successor",
     )
     .unwrap();
+    assert_eq!(provider.group_mode(), crate::GroupMode::LegacyUnverified);
     provider.set_blob_store(restored_store.blob_store(&group_key).unwrap());
     let mut verifier = Node::restore(
         &snapshot,
@@ -295,8 +300,13 @@ async fn newcomer(closing: bool, require_preview: bool) {
     )
     .unwrap();
     assert_eq!(provider.sync.observed_owner_tenure_start(), Some(tenure));
+    assert_eq!(provider.group_mode(), crate::GroupMode::LegacyUnverified);
     provider.set_blob_store(provider_store.blob_store(&group_key).unwrap());
     let invite = provider.mint_invite([44; 16], u64::MAX, vec![]).unwrap();
+    assert!(
+        invite.policy.is_none(),
+        "legacy admission establishes no P2P pin"
+    );
     let (joined, tick) = tokio::join!(
         Node::join(
             Net::new(hub.join(PeerId::from_u64(3))),
@@ -311,6 +321,7 @@ async fn newcomer(closing: bool, require_preview: bool) {
     );
     tick.unwrap();
     let mut newcomer = joined.unwrap();
+    assert_eq!(newcomer.group_mode(), crate::GroupMode::LegacyUnverified);
     let provider_peer = provider.local_peer();
     // Adding into Alice's recycled leaf changes Bob -> newcomer. A Welcome is not an
     // independently witnessed tenure transition, even when it makes its recipient owner.
@@ -503,6 +514,7 @@ async fn newcomer(closing: bool, require_preview: bool) {
         "offline reopened newcomer",
     )
     .unwrap();
+    assert_eq!(offline.group_mode(), crate::GroupMode::LegacyUnverified);
     offline.set_blob_store(reopened.blob_store(&group_key).unwrap());
     assert_eq!(
         offline
@@ -521,6 +533,98 @@ async fn newcomer(closing: bool, require_preview: bool) {
         assert_title(&read.1, new_owner, &tail, "pixels after owner succession");
         assert_frame(&read.1, &frame, old_owner, &cid, fetched.len());
     }
+}
+
+#[tokio::test]
+async fn studio_actor_restored_p2p_successor_preserves_policy_and_refuses_unprovable_admission() {
+    let mut p = Pair::new().await;
+    let founder = p.alice.device_id();
+    let successor = p.bob.device_id();
+    let pin = p.bob.sync.group_policy().unwrap().clone();
+    assert_eq!(p.alice.group_mode(), crate::GroupMode::PeerToPeer);
+    assert_eq!(p.bob.group_mode(), crate::GroupMode::PeerToPeer);
+    assert_eq!(pin.issuer(), founder);
+    assert_eq!(p.bob.sync.observed_owner_tenure_start(), None);
+    p.bob.open_channel(314).await.unwrap();
+    p.bob
+        .send_message(314, "history survives refused successor admission")
+        .await
+        .unwrap();
+    p.bob.sync.set_config(catcoms_sync::SyncConfig {
+        max_committer_rank: 1,
+        stage_decision_window_ms: 0,
+        ..Default::default()
+    });
+    p.bob.sync.remove(&founder).await.unwrap();
+    p.bob.sync_once().await.unwrap();
+    p.bob.sync.set_config(catcoms_sync::SyncConfig::default());
+    assert!(p.bob.is_owner());
+    let tenure = p.bob.sync.observed_owner_tenure_start().unwrap();
+    assert!(tenure > 0);
+    let bytes = p.bob.snapshot().unwrap();
+    p.b_store.save_server(SERVER, &bytes, &mut rng()).unwrap();
+    let Pair {
+        b_root,
+        b_store,
+        clock,
+        alice,
+        bob,
+        ..
+    } = p;
+    drop(alice);
+    drop(bob);
+    drop(b_store);
+
+    let restored_store = open(b_root.path());
+    let mut restored = Node::restore(
+        &restored_store.load_server(SERVER).unwrap(),
+        Net::new(Hub::new().join(PeerId::from_u64(22))),
+        rng(),
+        Box::new(clock),
+        "restored authenticated successor",
+    )
+    .unwrap();
+    assert_eq!(restored.group_mode(), crate::GroupMode::PeerToPeer);
+    assert_eq!(restored.sync.group_policy(), Some(&pin));
+    assert_eq!(restored.sync.observed_owner_tenure_start(), Some(tenure));
+    restored.sync.with_registry_context(|group, _, _, _| {
+        assert_eq!(group.designated_committer(), Some(successor));
+        assert_eq!(group.designated_committer_index(), Some(1));
+        assert!(!group.contains_device(&founder));
+        pin.verify_pin(group).unwrap();
+        assert!(
+            matches!(
+                pin.verify_current_owner(group),
+                Err(catcoms_mls::PolicyError::Unauthorized)
+            ),
+            "a saved founder pin is not current founder authority after removal"
+        );
+    });
+    let before = restored.snapshot().unwrap();
+    let epoch = restored.epoch();
+    let version = restored.doc_version(catcoms_wire::DocType::Channel, 314);
+    assert_eq!(restored.messages(314).len(), 1);
+    assert_eq!(
+        restored.messages(314)[0].text,
+        "history survives refused successor admission"
+    );
+    assert!(matches!(
+        restored.mint_invite([44; 16], u64::MAX, vec![]),
+        Err(AppError::Sync(catcoms_sync::SyncError::Policy(
+            catcoms_mls::PolicyError::AdmissionAuthorityUnavailable
+        )))
+    ));
+    assert_eq!(restored.epoch(), epoch);
+    assert_eq!(
+        restored.doc_version(catcoms_wire::DocType::Channel, 314),
+        version
+    );
+    assert_eq!(restored.sync.group_policy(), Some(&pin));
+    assert_eq!(
+        restored.snapshot().unwrap(),
+        before,
+        "refusal cannot mutate the MLS state, retained history or authenticated pin"
+    );
 }
 
 pub(super) async fn step(actor: &crate::ServerActor, store: &Arc<Mutex<Option<ServerStore>>>) {
