@@ -27,11 +27,12 @@ async fn owner_tenure_founder_joiner_and_legacy_snapshot_have_distinct_evidence(
         let snap = node.snapshot().unwrap();
         let mut reopened = restore(&snap).unwrap();
         assert_eq!(reopened.observed_owner_tenure_start(), before);
-        // Remove the policy extension and tenure tail to produce the pre-tenure format.
+        // Remove all following extensions and the tenure tail to produce the pre-tenure format.
         let policy_tail = crate::group_policy::encode_pin(node.group_policy.as_ref()).len() + 4;
         let tail = node.owner_tenure.encode(&node.group).unwrap().len() + 4;
         let chat_tail = node.durable_chat.encode().unwrap().len() + 4;
-        let legacy = &snap[..snap.len() - chat_tail - policy_tail - tail];
+        let pending_tail = node.pending_finalization_snapshot().unwrap().len() + 4;
+        let legacy = &snap[..snap.len() - pending_tail - chat_tail - policy_tail - tail];
         let mut upgraded = restore(legacy).unwrap();
         assert_eq!(upgraded.observed_owner_tenure_start(), None);
         let saved = upgraded.snapshot().unwrap();
@@ -53,6 +54,8 @@ async fn owner_tenure_unknown_owner_stays_unknown_after_valid_same_owner_adds() 
         + crate::group_policy::encode_pin(nodes[0].group_policy.as_ref()).len()
         + 4
         + nodes[0].durable_chat.encode().unwrap().len()
+        + 4
+        + nodes[0].pending_finalization_snapshot().unwrap().len()
         + 4;
     let mut owner = restore(&snap[..snap.len() - tail]).unwrap();
     assert!(owner.is_designated_committer());

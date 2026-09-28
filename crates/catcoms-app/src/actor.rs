@@ -6275,7 +6275,11 @@ mod tests {
         // Exact pre-policy snapshot fixture: retain the preceding observed-tenure extension.
         let policy_tail = fresh.sync().group_policy().unwrap().encode().len() + 9;
         let snapshot = fresh.snapshot().unwrap();
-        // The unused durable-chat extension is a framed v1, zero-record payload.
+        // Both unused trailing extensions are framed v1, zero-record payloads. Strip
+        // pending finalization first, then durable chat, before reaching the policy frame.
+        let empty_pending_tail = [0, 0, 0, 5, 1, 0, 0, 0, 0];
+        assert!(snapshot.ends_with(&empty_pending_tail));
+        let snapshot = &snapshot[..snapshot.len() - empty_pending_tail.len()];
         let empty_chat_tail = [0, 0, 0, 5, 1, 0, 0, 0, 0];
         assert!(snapshot.ends_with(&empty_chat_tail));
         let legacy = snapshot[..snapshot.len() - empty_chat_tail.len() - policy_tail].to_vec();
