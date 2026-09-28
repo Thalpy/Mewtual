@@ -122,7 +122,8 @@ impl InertFaultRecord {
         {
             return Err(invalid("reserved pair duplicates an external pair"));
         }
-        if boolean(&mut d)? {
+        let has_overflow = boolean(&mut d)?;
+        if has_overflow {
             let _tenure = fixed(&mut d)?;
             let count = d.get_u8().map_err(invalid)?;
             if count > 4 {
@@ -181,6 +182,11 @@ impl InertFaultRecord {
             return Err(invalid("applied marker without a repair"));
         }
         d.finish().map_err(invalid)?;
+        // Section presence fences ordinary owner operations. Final recycling must omit tag 3,
+        // otherwise a logically empty record would retain that hold forever after restart.
+        if pairs.is_empty() && reserved.is_none() && !has_overflow && bound.is_none() {
+            return Err(invalid("empty fault record must be absent"));
+        }
         Ok(Self {
             bytes: Zeroizing::new(bytes.to_vec()),
         })

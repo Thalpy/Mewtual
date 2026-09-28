@@ -175,6 +175,96 @@ fn decode(record: &WireRecord, f: &Fixture) -> Result<InertFaultRecord, AppError
 }
 
 #[test]
+fn fault_record_empty_section_is_noncanonical() {
+    let f = Fixture::new();
+    let empty = WireRecord::default().encode();
+    assert_eq!(empty, [3, 1, 0, 0, 0, 0, 0]);
+    assert!(
+        InertFaultRecord::decode(&empty, &f.doc).is_err(),
+        "empty fault section must be absent"
+    );
+    let scope = scope_bytes(7, &f.doc).unwrap();
+    for with_close in [false, true] {
+        let mut state = EpochOwnerReceiptState::default();
+        if with_close {
+            let (receipt, close) = f.receipt(9);
+            state.journal.prepare(receipt.clone(), &f.group, 0).unwrap();
+            state.decision_close = Some((receipt.hash(), close));
+        }
+        let mut bytes = state.encode(&scope, &f.doc).unwrap();
+        bytes.extend_from_slice(&empty);
+        assert!(EpochOwnerReceiptState::decode(&bytes, &scope, &f.doc).is_err());
+    }
+}
+
+#[test]
+fn fault_record_absence_roundtrips_and_allows_ordinary_owner_operations() {
+    let f = Fixture::new();
+    let scope = scope_bytes(7, &f.doc).unwrap();
+    // Pin both the empty legacy journal and the optional tag-2 close. Future terminal
+    // recycling must produce this absent-tag-3 representation, not an empty tag 3.
+    for with_close in [false, true] {
+        let (receipt, close) = f.receipt(9);
+        let mut state = EpochOwnerReceiptState::default();
+        if with_close {
+            state.journal.prepare(receipt.clone(), &f.group, 0).unwrap();
+            state.decision_close = Some((receipt.hash(), close));
+        }
+        let bytes = state.encode(&scope, &f.doc).unwrap();
+        let restored = EpochOwnerReceiptState::decode(&bytes, &scope, &f.doc).unwrap();
+        assert!(restored.fault_record.is_none());
+        restored.require_ordinary().unwrap();
+        assert_eq!(*restored.encode(&scope, &f.doc).unwrap(), *bytes);
+
+        let root = tempfile::tempdir().unwrap();
+        let store = ServerStore::open(root.path(), b"fault-record-test", &mut store_rng()).unwrap();
+        save_fixture(&store, &f.doc, &bytes);
+        drop(store);
+        let mut store =
+            ServerStore::open(root.path(), b"fault-record-test", &mut store_rng()).unwrap();
+        let loaded = store.load_epoch_owner_receipts(7, &f.doc).unwrap();
+        assert_eq!(*loaded.encode(&scope, &f.doc).unwrap(), *bytes);
+        let record = store
+            .epoch_owner_receipt_inventory_record(7, &f.doc)
+            .unwrap()
+            .unwrap();
+        let mut budget = EpochStorageBudget::from_inventory(
+            StorageScope::new(7, &f.doc.server_id).unwrap(),
+            [record],
+        )
+        .unwrap();
+        let prepared = store
+            .prepare_epoch_owner_receipt(
+                7,
+                receipt.clone(),
+                &f.group,
+                0,
+                &mut store_rng(),
+                &mut budget,
+            )
+            .unwrap();
+        assert_eq!(prepared.pending().unwrap().hash(), receipt.hash());
+        store
+            .mark_epoch_owner_receipt_published(
+                7,
+                &f.doc,
+                receipt.hash(),
+                &mut store_rng(),
+                &mut budget,
+            )
+            .unwrap();
+        drop(store);
+        let store = ServerStore::open(root.path(), b"fault-record-test", &mut store_rng()).unwrap();
+        let loaded = store.load_epoch_owner_receipts(7, &f.doc).unwrap();
+        assert!(loaded.fault_record.is_none());
+        assert!(loaded.pending().is_none());
+        assert_eq!(loaded.published().unwrap().hash(), receipt.hash());
+        assert_eq!(loaded.close_for(&receipt).is_some(), with_close);
+        loaded.require_ordinary().unwrap();
+    }
+}
+
+#[test]
 fn fault_record_all_bindings_and_maximum_shape_roundtrip_without_authority() {
     let f = Fixture::new();
     let mut externals = [f.pair(1, 2), f.pair(3, 4)];
@@ -229,32 +319,34 @@ fn fault_record_canonical_sections_flags_lengths_and_versions_are_strict() {
         ..Default::default()
     }
     .encode();
+    assert!(InertFaultRecord::decode(&raw, &f.doc).is_ok());
     for end in 0..raw.len() {
         assert!(
             InertFaultRecord::decode(&raw[..end], &f.doc).is_err(),
             "prefix {end}"
         );
     }
-    let empty = WireRecord::default().encode();
+    // Mutate an otherwise valid nonempty section, so the empty-section rejection cannot
+    // mask a missing tag/version/boolean check. The final three fields follow the pair.
     for (offset, value) in [
         (0, 2),
         (1, 0),
         (1, 2),
         (2, 3),
         (3, 2),
-        (4, 2),
-        (5, 4),
-        (6, 2),
-        (6, 1),
+        (raw.len() - 3, 2),
+        (raw.len() - 2, 4),
+        (raw.len() - 1, 2),
+        (raw.len() - 1, 1),
     ] {
-        let mut bad = empty.clone();
+        let mut bad = raw.clone();
         bad[offset] = value;
         assert!(
             InertFaultRecord::decode(&bad, &f.doc).is_err(),
             "offset {offset}"
         );
     }
-    for trailing in [vec![0], empty.clone(), vec![2, 0, 0, 0, 0]] {
+    for trailing in [vec![0], WireRecord::default().encode(), vec![2, 0, 0, 0, 0]] {
         let mut bad = raw.clone();
         bad.extend_from_slice(&trailing);
         assert!(InertFaultRecord::decode(&bad, &f.doc).is_err());
@@ -661,7 +753,6 @@ fn fault_record_reopen_inventory_succeeds_but_legacy_reads_and_writes_refuse() {
     let f = Fixture::new();
     let pair = f.pair(1, 2);
     for wire in [
-        WireRecord::default(),
         WireRecord {
             reserved: Some(encoded_pair(&pair)),
             ..Default::default()

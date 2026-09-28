@@ -22,6 +22,13 @@ OWNER = "crates/catcoms-app/src/store/epoch_owner.rs"
 FAULT = "crates/catcoms-app/src/store/epoch_owner/fault_record.rs"
 core.MUTATIONS = [
     (
+        "STORE-empty-fault-section", FAULT,
+        "if pairs.is_empty() && reserved.is_none() && !has_overflow && bound.is_none() {",
+        "if false {",
+        "fault_record_empty_section_is_noncanonical",
+        "empty fault section must be absent",
+    ),
+    (
         "STORE-live-fault-guard", OWNER,
         "if self.fault_record.is_some()\n", "if false\n",
         "fault_record_reopen_inventory_succeeds_but_legacy_reads_and_writes_refuse",

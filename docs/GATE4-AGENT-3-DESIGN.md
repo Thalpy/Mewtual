@@ -1250,6 +1250,10 @@ repair_kind 2 = source-bound    repair_binding = the pair itself, inline
 repair_kind 3 = reserved        repair_binding = empty; binds to `reserved`, which must be present
 ```
 
+An entirely empty tag-3 section is noncanonical and rejected (AG3-IMP-002). Once terminal
+recycling removes the last pair/attestation, overflow and repair/applied state, the writer must
+omit tag 3 entirely so its presence cannot strand an otherwise ordinary owner record.
+
 **A source-bound repair carries its pair inline** (AG3-DES-026). Revision 6 said the source's own
 pair is never stored and then left a codec that demanded `pair_count` of 1 or 2 with the repair
 matching a retained pair, so the one path that correction existed to unblock, an owner faulted on
