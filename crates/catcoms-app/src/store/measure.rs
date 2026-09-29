@@ -73,6 +73,11 @@ impl Spread {
     /// strict for batched ones, because dividing by `per` first means a well-resolved 12 ms batch
     /// reports 187 us and fails - so batched phases were being suppressed as "unresolved" when
     /// they were the best-resolved figures in the run.
+    ///
+    /// **This is a floor, not a precision guarantee.** It admits a two-tick reading, and two
+    /// phases both read as 2 ms put the true ratio anywhere in roughly 40 to 60% while 50 is
+    /// printed. A ratio drawn from small raw medians is a rough one; only where both phases are
+    /// tens of ticks is the printed figure tight.
     pub(in crate::store) fn resolved_for_ratio(&self) -> bool {
         self.raw_upper_median_ms > 1
     }
@@ -120,6 +125,22 @@ mod tests {
         // is not resolved, two are.
         assert!(!Spread::of(&[1, 1, 1, 1], 1).resolved_for_ratio());
         assert!(Spread::of(&[2, 2, 2, 2], 1).resolved_for_ratio());
+
+        // The batched boundary, which the predicate is judged on the raw sample for: a one-tick
+        // batch is still unresolved however small the per-unit figure looks, and two ticks pass.
+        // Without these the fix could have over-corrected into accepting single-tick batches.
+        let one_tick_batch = Spread::of(&[1; 8], 64);
+        assert_eq!(one_tick_batch.upper_median_us, 15);
+        assert!(
+            !one_tick_batch.resolved_for_ratio(),
+            "a single-tick batch is not resolved just because dividing by 64 makes it look small"
+        );
+        assert!(Spread::of(&[2; 8], 64).resolved_for_ratio());
+
+        // The per-unit figure and the raw median must describe the same sample.
+        let s = Spread::of(&[3, 5, 9], 10);
+        assert_eq!(s.raw_upper_median_ms, 5);
+        assert_eq!(s.upper_median_us, 5 * 1_000 / 10);
         // Seven zeros and one nonzero sample: the raw *sum* is positive, which is what an even
         // earlier version wrongly accepted.
         let mostly_zero = Spread::of(&[0, 0, 0, 0, 0, 0, 0, 1], 1);

@@ -2030,7 +2030,100 @@ of the validator collects no CIDs in either mode, so equal fresh-validation cost
 expected from the code rather than inferred from the timing; what reference mode changes for
 Registry is the surrounding cache behaviour.
 
-### The frame fixture breaks the confound, and bytes are decisively not the driver
+### The factorial answers the confound: it is the operation axis, not the reference axis
+
+The `(frames, distinct_cids)` factorial holds frame count *and* encoded size fixed while varying
+how many of the references are distinct - the record carries the same signed operations either
+way, each naming one 32-byte CID. Isolated workspace, release, 8 interleaved trials, accounting
+mode, `validation_batch_mean` upper medians:
+
+| frames | distinct CIDs | bytes | validation | change |
+|---|---|---|---|---|
+| 16 | 1 | 16 626 | 5 750 us | - |
+| 16 | 16 | 16 626 | 5 640 us | **-2%** |
+| 128 | 1 | 130 487 | 196 718 us | - |
+| 128 | 128 | 130 487 | 200 687 us | **+2%** |
+
+**Distinct reference count has no measurable effect on validation cost.** Two percent either way,
+at a 16x change in reference count, inside the spreads. And the direction is not even consistent -
+it falls at 16 frames and rises at 128.
+
+That was **predicted before the run and recorded in the code**: `blob_cids()` parses every signed
+operation regardless of how many distinct CIDs result, so only the resulting set's size differs.
+The prediction also said any reference cost should surface in `install` or `finish` instead. It
+does not: `install_us` was `0/0/0(z8)` for every case including the 128-distinct-CID one - all
+eight samples below the clock's resolution. So at these scales the reference merge is free too.
+
+**And with references held fixed, the frame axis is confirmed superlinear.** 16 to 128 frames at a
+constant single reference: 5 750 to 196 718 us, **34.2x for 8x the frames**, an endpoint slope of
+`n^1.70`. That matches the earlier confounded measurement almost exactly, which now means
+something it did not before: the superlinear growth belongs to the **operation** axis, not to the
+reference axis it used to be entangled with.
+
+**What is still confounded:** frames and bytes. Eight times the operations is eight times the
+signed history, so the `(16,1)` to `(128,1)` comparison moves both. Separating those needs a
+payload axis at fixed frame count - `build`'s `message` padding could supply it - and is not done.
+So the honest statement is that cost tracks operation count *or* the bytes that come with it, and
+**not** distinct reference count, which is now excluded.
+
+### The protocol comparison: scheduling does not move these numbers
+
+Four arms, ABBA, one fixed corpus shape, identical cache rules and statistic, varying only the
+schedule. `step_total` upper medians per trial:
+
+| case | blocked (arm 1) | interleaved (arm 2) | interleaved (arm 3) | blocked (arm 4) |
+|---|---|---|---|---|
+| recovery_accounting | 9 000 us | 9 000 us | 8 000 us | 9 000 us |
+| registry fresh, 8 ops | 3 000 us | 3 000 us | 3 000 us | 2 000 us |
+| registry warm, 8 ops | 3 000 us | 3 000 us | 3 000 us | 3 000 us |
+| registry references | 2 000 us | 3 000 us | 2 000 us | 3 000 us |
+
+**No detectable difference between the protocols.** Every figure sits within one clock tick of
+every other, blocked and interleaved alike, in both positions.
+
+**This narrows the withdrawn claim further, and in the direction that costs me.** The earlier 2.5x
+shift between the block-ordered and interleaved harnesses was first attributed to ordering, then
+withdrawn as unproven because several variables moved together. This says the scheduling was
+**not** the cause: a 2.5x effect would be far larger than the tick-level agreement above and would
+be plainly readable on this corpus. Whatever produced that shift was one of the other things that
+changed - store construction, the central statistic, or the fixture-to-measurement delay - and
+identifying it is not done.
+
+**What this comparison cannot say.** One observation per (protocol, slot) cell, so there is no
+arm-to-arm noise estimate; the corpus is small and deliberately so; the arms differ in corpus
+*instance* as well as schedule, since cases cannot be reused without inheriting warm state; and
+ABBA gives Blocked the cold first slot while Interleaved never occupies it. It can rule out an
+effect of the size previously claimed. It cannot measure a small one.
+
+### A P1 in the interleaving itself, found by adversarial review
+
+The interleaved schedule was documented as rotating the case order each round so no case kept a
+fixed predecessor. **It did not do that.** `(round + offset) % n` emits
+`c[r], c[r+1], … c[r+n-1]`, which preserves the cyclic order: every case except the round's first
+follows exactly the predecessor it always did. Measured at the profile's real shape, **35 of 35
+cases had at most one predecessor across all eight rounds.** The property the interleaved arm was
+described as having was entirely absent, and it would have gone into this ledger as established.
+
+Replaced with a seeded Fisher-Yates permutation per round, with the seed printed on every result
+row so an order can be reproduced. `c3_interleaved_rounds_vary_each_case_predecessor` pins it: put
+the rotation back and it fails with "35 of 35 cases have at most one predecessor across 8 rounds".
+
+Three further corrections from the same review:
+
+- **The `black_box` was a no-op.** `revalidate` returns `Result<(), AppError>`, so black-boxing its
+  result pinned a unit value; and the justifying comment claimed the call "crosses a crate
+  boundary", which is false - `revalidate`, `run` and `validate_record_body` are all in
+  `catcoms-app`. Now pinned on the input side, which is what prevents hoisting.
+- **`interleaved=true` was printed on the blocked arm's rows.** The schedule is now threaded into
+  the report as `order=`, with an arm index, a slot label and a block header, and the stale
+  `units=` string was corrected after `Spread`'s display gained the raw median.
+- **`protocol_comparison`'s own doc overclaimed three ways** - "one fixed corpus" (it is one fixed
+  corpus *shape*; four instances), "varies only the schedule" (fresh directories, fresh device
+  keys, differing global position, and by construction a differing fixture-to-measurement delay),
+  and "measured once in each position" (Blocked holds global slots 1 and 4; Interleaved never runs
+  cold-first). All three are now stated as they are.
+
+### The earlier frame comparison, superseded by the factorial above
 
 Building the Studio frame fixture to fix the empty-CID problem produced the independent axis the
 ops-versus-bytes confound needed, by accident: frame-bearing records are **small**, so cost and

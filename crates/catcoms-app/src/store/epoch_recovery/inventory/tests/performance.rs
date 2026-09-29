@@ -65,6 +65,7 @@ use catcoms_replication::studio::{FlipnoteOp, StudioEpoch, StudioRecovery, Studi
 use catcoms_replication::DomainOp;
 use catcoms_rt::SystemClock;
 use catcoms_storage::Cid;
+use rand_core::RngCore;
 use std::collections::BTreeMap;
 
 /// Reference collection refuses anything narrower: a partial inventory must not be allowed to
@@ -341,7 +342,12 @@ fn run_trial(case: &mut Case, clock: &dyn catcoms_rt::Clock) {
             let (family, size, refs) = parked.classification();
             let t = clock.monotonic_ms();
             for _ in 0..REPETITIONS {
-                parked.revalidate().unwrap();
+                // Pinned on the **input** side. `revalidate` returns `Result<(), AppError>`, so
+                // black-boxing its result pins a unit value and buys nothing - which is what the
+                // first version of this did, while claiming to prevent elision. Pinning the
+                // receiver is what stops the call being hoisted out of the loop or
+                // common-subexpressioned across iterations.
+                std::hint::black_box(&parked).revalidate().unwrap();
             }
             let validation_batch_ms = clock.monotonic_ms().saturating_sub(t);
             let validated = parked.validate().unwrap();
@@ -416,17 +422,84 @@ fn run_trial(case: &mut Case, clock: &dyn catcoms_rt::Clock) {
     }
 }
 
+/// How a run schedules its trials across cases.
+///
+/// Both exist so the two can be **compared on one fixed corpus**, which is the only way to say
+/// what the scheduling itself is worth. Earlier work observed a 2.5x shift when moving from
+/// blocked to interleaved and attributed it to ordering; that was not established, because the
+/// change that produced it altered store construction, the summary statistic and the
+/// fixture-to-measurement delay at the same time. Holding everything else fixed and varying only
+/// this is what isolates it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Protocol {
+    /// Every trial of case A, then every trial of case B. Any drift over the run lands entirely
+    /// on whichever cases ran late.
+    Blocked,
+    /// One trial of every case, then the second trial of every case, each round in a fresh
+    /// **seeded permutation** so drift is spread across cases and no case keeps a fixed
+    /// predecessor.
+    Interleaved,
+}
+
+/// Seed for the interleaved rounds' permutations, printed with every result so an order can be
+/// reproduced exactly.
+const ORDER_SEED: u64 = 0x1307_2026;
+
+impl Protocol {
+    fn label(self) -> &'static str {
+        match self {
+            Protocol::Blocked => "blocked",
+            Protocol::Interleaved => "interleaved",
+        }
+    }
+}
+
+/// Run `TRIALS` trials of every case under `protocol`.
+///
+/// Under `Interleaved` each round runs the cases in a **fresh seeded permutation**.
+///
+/// Rotating the start index was tried first and does nothing: `(round + offset) % n` emits
+/// `c[r], c[r+1], … c[r+n-1]`, which preserves the cyclic order, so every case except the round's
+/// first still follows exactly the same predecessor it did before. At the profile's real shape
+/// that left most cases with a single predecessor across all eight rounds - which is the very
+/// thing interleaving is supposed to stop mattering. A permutation is what actually varies it.
+fn run_scheduled(cases: &mut [Case], protocol: Protocol, clock: &dyn catcoms_rt::Clock) {
+    match protocol {
+        Protocol::Blocked => {
+            for case in cases.iter_mut() {
+                for _ in 0..TRIALS {
+                    run_trial(case, clock);
+                }
+            }
+        }
+        Protocol::Interleaved => {
+            let n = cases.len();
+            if n == 0 {
+                return;
+            }
+            let mut rng = ChaCha20Rng::seed_from_u64(ORDER_SEED);
+            for _ in 0..TRIALS {
+                let mut order: Vec<usize> = (0..n).collect();
+                // Fisher-Yates from the seeded stream, so the order is varied and reproducible.
+                for i in (1..n).rev() {
+                    let j = (rng.next_u32() as usize) % (i + 1);
+                    order.swap(i, j);
+                }
+                for index in order {
+                    run_trial(&mut cases[index], clock);
+                }
+            }
+        }
+    }
+}
+
 /// Run `TRIALS` trials of every case, **round-robin rather than case by case**.
 ///
 /// See [`Case`] for why the ordering is the point. This is the whole of the repetition
 /// discipline: it does not make any single figure more accurate, it makes differences *between*
 /// cases in one profile comparable, which the block-ordered version could not claim.
 fn run_interleaved(cases: &mut [Case], clock: &dyn catcoms_rt::Clock) {
-    for _ in 0..TRIALS {
-        for case in cases.iter_mut() {
-            run_trial(case, clock);
-        }
-    }
+    run_scheduled(cases, Protocol::Interleaved, clock);
 }
 
 /// Build a case around a store that has already been populated.
@@ -615,7 +688,7 @@ fn stage_canonical(
 ///
 /// The spread is the part that says whether a difference between two rows is worth reading. A
 /// mean concealed exactly that in the first profiles of this design.
-fn report(case: &Case, profile: &str) {
+fn report(case: &Case, order: &str, profile: &str) {
     let label = &case.label;
     let cost = &case.cost;
     let mut records = cost.records.clone();
@@ -641,8 +714,9 @@ fn report(case: &Case, profile: &str) {
     println!(
         "C3_PROFILE scan={label} {} trials={} visits={} records={} begin_ms={} finish_ms={} \
          step_total_us={} cache_hits_per_trial={:?} parked_per_trial={:?} repetitions={} \
-         interleaved=true build={profile} page_cache=warm_written_immediately_before \
-         units=min/upper_median/max_us_and_zero_sample_count",
+         order={order} order_seed={ORDER_SEED:#x} build={profile} \
+         page_cache=warm_written_immediately_before \
+         units=min/upper_median/max_us_and_zero_sample_count_and_raw_upper_median_ms",
         case.shape,
         cost.trials,
         cost.visits,
@@ -899,8 +973,30 @@ fn studio_cases(op_counts: &[usize]) -> Vec<Case> {
 /// collection, because their CID set is empty. This builds frames through the same
 /// `edit_or_reseal` path, each naming a distinct blob, and records the count.
 fn studio_frame_cases(frame_counts: &[usize]) -> Vec<Case> {
+    studio_frame_factorial(&frame_counts.iter().map(|n| (*n, *n)).collect::<Vec<_>>())
+}
+
+/// The distinct-reference axis, decoupled from frame count.
+///
+/// **What this does decouple:** `(128, 1)` against `(128, 128)` holds frame count *and* encoded
+/// size fixed - the record carries the same 128 signed operations either way, each naming one
+/// 32-byte CID - and varies only how many of those references are distinct.
+///
+/// **What it does not:** `(16, 1)` against `(128, 1)` holds the reference count fixed but frames
+/// and bytes still move together, because eight times the operations is eight times the signed
+/// history. So frame count is still confounded with encoded size, exactly as the earlier Studio
+/// and Recovery axes were. Separating those needs a payload axis at fixed frame count, which
+/// `build`'s `message` padding could supply and this does not use. An earlier version of this
+/// comment claimed the factorial settled which of the three drives cost; it settles one of the
+/// three.
+///
+/// **A prediction worth recording, so a null result is read correctly:** `blob_cids()` parses
+/// every signed operation regardless of how many distinct CIDs result, so the *validation* figure
+/// should barely move between `(128, 1)` and `(128, 128)`. If the reference count costs anything,
+/// it should appear in `install` and `finish`, where the set is merged.
+fn studio_frame_factorial(shapes: &[(usize, usize)]) -> Vec<Case> {
     let mut cases = Vec::new();
-    for frames in frame_counts {
+    for (frames, distinct) in shapes.iter().copied() {
         for (mode, references, cache) in MODES {
             let root = tempfile::tempdir().unwrap();
             let mut store = open(root.path());
@@ -912,31 +1008,35 @@ fn studio_frame_cases(frame_counts: &[usize]) -> Vec<Case> {
             };
             let (planted, accepted) =
                 crate::store::epoch_studio::tests::performance::save_studio_frame_fixture(
-                    &mut store, 7, &group, &device, target, *frames,
+                    &mut store, 7, &group, &device, target, frames, distinct,
                 );
-            let distinct: std::collections::BTreeSet<_> = planted.iter().copied().collect();
+            let cids: std::collections::BTreeSet<_> = planted.iter().copied().collect();
+            // The distinct count is now a deliberate axis rather than an accident, so it is
+            // checked against what was asked for rather than against the frame count.
             assert_eq!(
-                distinct.len(),
-                *frames,
-                "the frame fixture planted duplicate CIDs, so its reference-count axis is fiction"
+                cids.len(),
+                distinct,
+                "the frame fixture planted {} distinct CIDs where {distinct} were requested, so \
+                 its reference-count axis is fiction",
+                cids.len()
             );
             cases.push(case(
-                format!("studio_frames_{mode}_n{frames}"),
+                format!("studio_frames_{mode}_n{frames}_c{distinct}"),
                 root,
                 store,
                 REFERENCE_COVERAGE,
                 references,
                 cache,
                 FixtureShape {
-                    requested_ops: Some(*frames),
+                    requested_ops: Some(frames),
                     actual_ops: Some(accepted),
                     physical_bytes: None,
-                    cids: Some(distinct.len()),
+                    cids: Some(cids.len()),
                 },
                 // The oracle that was missing: the fixture containing N references and the timed
                 // scan *returning* them are different claims, and only the second makes the
                 // reference-mode timing mean anything.
-                references.then(|| ExpectedRefs::group(&group.group_id(), distinct.clone())),
+                references.then(|| ExpectedRefs::group(&group.group_id(), cids.clone())),
             ));
         }
     }
@@ -1327,6 +1427,110 @@ fn c3_cacheable_family_parks_when_fresh_and_hits_cache_when_warm() {
     }
 }
 
+/// Interleaved rounds must actually vary which case follows which.
+///
+/// This is a regression test for a claim that was false. The first implementation rotated the
+/// start index, `(round + offset) % n`, and its comment said that stopped each case having a fixed
+/// predecessor. It does not: rotating a cyclic sequence preserves the order, so every case except
+/// the round's first keeps exactly the predecessor it had. At 35 cases over 8 rounds most cases
+/// had precisely one predecessor throughout - the scheduling property the interleaved arm is
+/// documented to have was simply absent.
+///
+/// Reproduces the ordering arithmetic rather than driving real cases, because the property is
+/// about the schedule and nothing else: a real run costs minutes and would test the same integers.
+#[test]
+fn c3_interleaved_rounds_vary_each_case_predecessor() {
+    let n = 35;
+    let orders: Vec<Vec<usize>> = {
+        let mut rng = ChaCha20Rng::seed_from_u64(ORDER_SEED);
+        (0..TRIALS)
+            .map(|_| {
+                let mut order: Vec<usize> = (0..n).collect();
+                for i in (1..n).rev() {
+                    let j = (rng.next_u32() as usize) % (i + 1);
+                    order.swap(i, j);
+                }
+                order
+            })
+            .collect()
+    };
+
+    // Every case still runs exactly once per round.
+    for order in &orders {
+        let mut seen: Vec<usize> = order.clone();
+        seen.sort_unstable();
+        assert_eq!(
+            seen,
+            (0..n).collect::<Vec<_>>(),
+            "a round is not a permutation"
+        );
+    }
+
+    // The property the rotation failed: collect each case's set of predecessors across rounds.
+    let mut predecessors: Vec<std::collections::BTreeSet<usize>> = vec![Default::default(); n];
+    for order in &orders {
+        for w in order.windows(2) {
+            predecessors[w[1]].insert(w[0]);
+        }
+    }
+    let single = predecessors.iter().filter(|p| p.len() <= 1).count();
+    assert!(
+        single <= 2,
+        "{single} of {n} cases have at most one predecessor across {TRIALS} rounds, so the \
+         schedule is not varying what precedes each case - which is what rotating the start index \
+         wrongly claimed to do"
+    );
+
+    // And the orders are genuinely different from each other, not one permutation repeated.
+    assert!(
+        orders.windows(2).any(|w| w[0] != w[1]),
+        "every round used the same order"
+    );
+}
+
+/// The distinct-CID count is settable at a fixed frame count, and the scan returns that set.
+///
+/// Named for what it establishes. It does **not** show the two axes are independent in any
+/// stronger sense: the cells' timings are never compared, and on a frozen clock they could not be.
+///
+/// What running the cases adds, beyond `studio_frame_factorial`'s own count assertion: a fixture
+/// that planted one CID per frame but *reported* a truncated set would satisfy that assertion and
+/// still fail here, because `run_trial`'s oracle compares the returned set and its total against
+/// the expectation. An earlier comment claimed such a fixture "would pass every other check",
+/// which was wrong - the factorial's own assertion catches the simple case, as its mutation
+/// showed.
+#[test]
+fn c3_distinct_cid_count_is_settable_at_a_fixed_frame_count() {
+    let clock = ManualClock::new(0);
+    // Same frame count, different reference counts: the axis that was previously confounded.
+    let mut cases = studio_frame_factorial(&[(8, 1), (8, 8)]);
+    assert_eq!(cases.len(), 2 * MODES.len());
+
+    let cids_for = |cases: &[Case], suffix: &str| {
+        cases
+            .iter()
+            .find(|c| c.label.ends_with(suffix))
+            .unwrap_or_else(|| panic!("no case ending {suffix}"))
+            .shape
+            .cids
+    };
+    assert_eq!(cids_for(&cases, "n8_c1"), Some(1));
+    assert_eq!(cids_for(&cases, "n8_c8"), Some(8));
+    assert!(
+        cases
+            .iter()
+            .all(|c| c.shape.requested_ops == Some(8) && c.shape.actual_ops == Some(8)),
+        "the frame axis moved when only the reference axis was supposed to"
+    );
+
+    // And the oracle tracks the reference axis, not the frame count: the one-CID case must
+    // collect exactly one.
+    run_interleaved(&mut cases, &clock);
+    for case in &cases {
+        check_case_structure(case);
+    }
+}
+
 /// The Studio frame path, in the ordinary suite, so the reference oracle is load-bearing here and
 /// not only in the `#[ignore]`d profile.
 ///
@@ -1357,6 +1561,66 @@ fn c3_studio_frame_reference_scan_returns_its_planted_cids() {
     run_interleaved(&mut cases, &clock);
     for case in &cases {
         check_case_structure(case);
+    }
+}
+
+/// The blocked-versus-interleaved comparison: one fixed corpus **shape**, four arms, ABBA order.
+///
+/// Earlier work reported a 2.5x shift on moving from blocked to interleaved and attributed it to
+/// ordering. That was withdrawn, because the same patch also changed store construction, the
+/// central statistic and the fixture-to-measurement delay. This holds those fixed - identical
+/// fixture shapes, identical cache rules, identical summary statistic, the same `run_trial` on
+/// both sides - so the schedule is the *intended* variable.
+///
+/// **What still differs between arms, stated rather than glossed.** Each arm builds its own
+/// corpus, because cases cannot be reused without inheriting the previous arm's warm state - so
+/// the corpus *shape* is fixed and the corpus *instance* is not: new temporary directories and,
+/// for the Registry fixtures, freshly generated device keys. Arms also occupy different global
+/// positions, and each follows a different predecessor (arm 1 follows the main run's reporting;
+/// arms 2 to 4 follow the previous arm's teardown of four stores). And the schedules differ by
+/// construction in fixture-to-first-measurement delay: Blocked first measures case *k* after
+/// `8k` trials, Interleaved after *k*. That delay is part of what "the schedule" means here, not
+/// a confound to be removed.
+///
+/// **What the ABBA order can and cannot do.** The order is Blocked, Interleaved, Interleaved,
+/// Blocked, so Blocked holds global slots 1 and 4 and Interleaved slots 2 and 3; the `slot`
+/// labels are within-pair. Averaging the two arms of each protocol cancels a *linear* drift. It
+/// cancels neither a first-arm step nor curvature, and Interleaved never occupies the cold first
+/// slot. With one observation per (protocol, slot) cell there is **no estimate of arm-to-arm
+/// noise**, in a module that has recorded up to 86% movement between identical re-measurements.
+/// So this comparison can only speak to an effect much larger than that; a small difference
+/// between arms is not evidence of anything and must not be read as one. Replicating the arms is
+/// what would fix that, and has not been done.
+fn protocol_comparison(clock: &dyn catcoms_rt::Clock, profile: &str) {
+    // Deliberately small: this measures scheduling, not families, and four corpus builds are the
+    // cost of counterbalancing.
+    let corpus = || {
+        let mut cases = vec![recovery_accounting_case(&[256 * 1024, 4 * 1024 * 1024])];
+        cases.extend(registry_cases(&[8]));
+        cases
+    };
+    println!(
+        "C3_PROFILE block=protocol_comparison arms=4 order=ABBA note=one_observation_per_cell_\
+         so_only_a_large_effect_is_readable"
+    );
+    let mut arm = 0;
+    for (first, second) in [
+        (Protocol::Blocked, Protocol::Interleaved),
+        (Protocol::Interleaved, Protocol::Blocked),
+    ] {
+        for (position, protocol) in [("first", first), ("second", second)] {
+            arm += 1;
+            let mut cases = corpus();
+            run_scheduled(&mut cases, protocol, clock);
+            for case in &cases {
+                check_case_structure(case);
+                report(
+                    case,
+                    protocol.label(),
+                    &format!("{profile} arm={arm} slot={position}"),
+                );
+            }
+        }
     }
 }
 
@@ -1393,7 +1657,14 @@ fn profile_c3_visit_cost() {
     // by 32 anyway. `check_case_structure` now fails rather than letting that recur.
     cases.extend(studio_cases(&[3, 12, 24]));
     // Studio with actual pixels, because the title-only sources above collect no CIDs at all.
-    cases.extend(studio_frame_cases(&[16, 128]));
+    // The factorial: (128,1) against (128,128) isolates reference count at fixed frame count;
+    // (16,1) against (128,1) isolates frame count at fixed reference count.
+    cases.extend(studio_frame_factorial(&[
+        (16, 1),
+        (16, 16),
+        (128, 1),
+        (128, 128),
+    ]));
     println!(
         "C3_PROFILE run cases={} trials={TRIALS} order=interleaved",
         cases.len()
@@ -1403,6 +1674,12 @@ fn profile_c3_visit_cost() {
 
     for case in &cases {
         check_case_structure(case);
-        report(case, profile);
+        report(case, Protocol::Interleaved.label(), profile);
     }
+
+    // Deliberately after the main run's cases are dropped: the comparison's own stores should not
+    // be competing with 35 live ones, and its labels would otherwise be ambiguous against the
+    // rows above.
+    drop(cases);
+    protocol_comparison(clock, profile);
 }

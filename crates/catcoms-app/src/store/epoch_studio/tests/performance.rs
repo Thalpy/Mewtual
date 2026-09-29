@@ -128,6 +128,15 @@ pub(crate) fn save_studio_source_fixture(
 /// reference scan over them times an empty collection. This inserts `frames` frames, each naming
 /// a distinct blob that is actually stored, and returns those CIDs so a measurement can assert
 /// the collected set rather than assume it.
+/// `distinct_cids` is what makes frame count and reference count **independent axes**.
+///
+/// Every frame still names a pixel, but the pixels repeat cyclically once `distinct_cids` is
+/// exhausted, so a 128-frame source can hold 1 distinct reference or 128. Without that, frame
+/// count, reference count and encoded bytes all rise together and no measurement can say which
+/// drives the cost. Passing `distinct_cids == frames` gives the all-distinct case.
+///
+/// Returns the **distinct** CIDs planted, not one per frame, so a caller comparing collected
+/// references against this set is comparing like with like.
 pub(crate) fn save_studio_frame_fixture(
     store: &mut ServerStore,
     server: u64,
@@ -135,14 +144,25 @@ pub(crate) fn save_studio_frame_fixture(
     device: &MlsDevice,
     target: StudioTarget,
     frames: usize,
+    distinct_cids: usize,
 ) -> (Vec<catcoms_storage::Cid>, usize) {
+    // `frames == 0` is a legal empty source and needs no pixels; the range only has to hold when
+    // there are frames to name them. Stating it as `1..=frames` unconditionally made the bound
+    // unsatisfiable at zero, with a message that read as nonsense there.
+    assert!(
+        frames == 0 || (1..=frames).contains(&distinct_cids),
+        "with {frames} frames, distinct_cids must be in 1..={frames}, got {distinct_cids}"
+    );
     let logical = target.document(&group.group_id()).unwrap();
     let mut blobs = store.blob_store(&hex::encode(group.group_id())).unwrap();
-    let mut planted = Vec::new();
+    let mut pixels = Vec::new();
+    for n in 0..distinct_cids {
+        pixels.push(blobs.put(&(n as u64).to_be_bytes()).unwrap());
+    }
+    let planted = pixels.clone();
     let mut unit = StudioEpoch::new(group, target, device.device_id()).unwrap();
     for n in 0..frames {
-        let cid = blobs.put(&(n as u64).to_be_bytes()).unwrap();
-        planted.push(cid);
+        let cid = pixels[n % distinct_cids];
         let mut nonce = [0; 16];
         nonce[..8].copy_from_slice(&(n as u64).to_be_bytes());
         let mut frame = [0; 16];
