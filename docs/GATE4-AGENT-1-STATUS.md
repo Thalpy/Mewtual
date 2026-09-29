@@ -1673,6 +1673,120 @@ run is not reproducible here, so it should not be quoted as one. The ledger's ex
 runs. The C-3 acceptance evidence is the serial run: `store::epoch_recovery::inventory` plus
 `store::epoch_studio::tests` at `--test-threads=1`, **167 passed, 0 failed, 3 ignored**.
 
+## Design 13.1, 13.3 and 13.8: already measured, never mapped to the obligation
+
+Before building anything further I checked what the existing profiles already report. Two of them
+- `OVERLAY_PROFILE` and `HANDOFF_SIGNING_PROFILE`, both written during Flow H and predating
+design 13's list - turn out to cover substantial parts of three obligations. Nothing new was
+needed; what was missing was the mapping.
+
+Release, isolated of other test work:
+
+| shape | ops | intent bytes | decode | draft | candidate | **C-3 inventory** | durable handoff |
+|---|---|---|---|---|---|---|---|
+| Flipnote | 1 | 1 524 | 1 ms | 1 ms | 2 ms | **0 ms** | 37 ms |
+| Flipnote | 32 | 9 048 | 22 ms | 20 ms | 37 ms | **1 ms** | 113 ms |
+| Flipnote | 256 | 63 636 | 578 ms | 590 ms | 925 ms | **2 ms** | 2 083 ms |
+| Index | 1 | 1 433 | 1 ms | 1 ms | 2 ms | **1 ms** | 40 ms |
+| Index | 32 | 9 794 | 16 ms | 17 ms | 23 ms | **0 ms** | 85 ms |
+| Index | 256 | 70 430 | 523 ms | 459 ms | 495 ms | **2 ms** | 1 113 ms |
+
+**13.1 - custody per stage of Flow H at 1, 32 and 256 operations, with C-3's inventory separated
+from the rest of H5: measured.** That separation was the specific thing 13.1 asked for, and
+`inventory_ms` is exactly it.
+
+**The result is that C-3's inventory is not the dominant term at these shapes - it is about a
+tenth of a percent of the durable handoff.** 2 ms against 2 083 ms at 256 operations.
+
+That needs its caveat stated immediately, because it would otherwise read as retiring C-3's
+premise: **this fixture's vault is tiny.** `source_bytes` is 1 607, and 13.7 measured a 4 MB
+Studio record's validation alone at 24 ms and a 128-frame record at 197 ms. So the honest reading
+is that the inventory is negligible *when the vault is small*, and 13.7 says what happens when it
+is not. The two measurements are about different quantities: 13.1 measures the inventory a handoff
+actually pays on this fixture, 13.7 measures what one record can cost.
+
+**13.3 - worst single-signature time, since the deadline is checked between signatures:
+`max_turn_ms = 1` at 256 operations**, for both Index and Flipnote. The signing loop already
+asserts that no turn exceeds one operation, so this figure comes from a test that runs in the
+ordinary suite rather than an opt-in profile. **Partial**: these are roughly 100-byte title
+operations and a small roster, not 13.3's "largest admitted individual operation and roster
+shape".
+
+**13.8 - wall-clock for a 256-operation handoff, reported separately from maximum continuous
+custody: mostly measured.** `prepare_ms` 529, 256 turns at 1 ms, `finish_ms` 244 for Flipnote, and
+the separation from custody is intrinsic - `max_turn_ms` is the custody figure and these are
+wall-clock. **Missing: the visit count**, which 13.8 explicitly names and neither profile reports.
+
+## Design 13.4: the sum of accounted bounds, and C-3's parked body is the largest term
+
+13.4 asks for the sum of the accounted bounds on retained input and output within one permit, and
+says explicitly that this is **not a measured heap ceiling**. So it is arithmetic over the caps,
+not a profile, and it can be completed by reading them.
+
+| term | bound | bytes |
+|---|---|---|
+| Captured intent plaintext | `MAX_INTENT_LEDGER_BYTES + 1024` | 5 243 904 |
+| Captured source plaintext *(dropped after H2 but for digest, size and derived facts)* | `MAX_STUDIO_EPOCH_SNAPSHOT_BYTES + 1024` | 9 528 448 |
+| Decoded state | `MAX_STUDIO_EPOCH_SNAPSHOT_BYTES` | 9 527 424 |
+| Restored private successor | same | 9 527 424 |
+| Signed candidate | same | 9 527 424 |
+| Encoded Prepared record | `MAX_EXTENSION` = `MAX_CHECKPOINT_BYTES + MAX_METADATA` | 2 162 688 |
+| Encoded Completed record | same | 2 162 688 |
+| **C-3's at most one parked record body** | largest family record cap: Recovery's `MAX_RECOVERY_SLOTS_BYTES + 1024` | **18 876 416** |
+| **Sum** | | **66 556 416 (63.5 MiB)** |
+
+`MAX_STUDIO_EPOCH_SNAPSHOT_BYTES` itself is `MAX_CHECKPOINT_BYTES` 2 MiB + `MAX_EPOCH_BYTES`
+4 MiB + `MAX_EPOCH_GATE_BYTES` 3 MiB + `MAX_RECEIPT_BOOK_BYTES` 8 KiB + `MAX_RECEIPT_BYTES` 1 KiB
++ `4 * MAX_EPOCH_OPERATIONS` 80 KB + 1 KiB = 9 527 424.
+
+### The finding: the parked body is the single biggest contributor
+
+**C-3's one parked record body is 18 MiB - 28% of the whole accounted sum, and the largest single
+term in it.** The reason is that the bound has to be the *largest* family's record cap, and
+Recovery's is three retained snapshots at 6 MiB each. Every other family is far smaller: Studio
+9.1 MiB, Intents 5.0 MiB, OwnerReceipts 8.25 **KiB**.
+
+This is the concrete cost of the activation requirement this ledger has been carrying as "the
+parked plaintext's residency is not charged to section 13.4's retained-input sum". Charging it
+costs 18 MiB and makes C-3 the dominant retained-input term in the design. That is worth knowing
+before the runtime adoption, not after: a runtime that holds a parked body across a scheduler turn
+is holding up to 18 MiB of authenticated plaintext, and `Zeroizing` governs its disposal but not
+its residency.
+
+### Three caveats, because a sum of bounds is not a measurement
+
+1. **Items three to five use encoded bounds as proxies for in-memory state.** A restored automerge
+   document's heap footprint is not its encoded size, and can exceed it. 13.4 says this is not a
+   heap ceiling, so encoded bounds are the right currency for the obligation - but the proxy
+   should be named rather than left to look like a measurement.
+2. **The sum is an upper bound on retention, not a snapshot of concurrent residency.** The source
+   plaintext is dropped after H2; Prepared and Completed are not both live at once in the ordinary
+   flow. Whether all eight terms are ever simultaneously resident is a separate question this sum
+   does not answer, and 13.4 does not ask.
+3. **It is a bound on the accounted terms only.** Anything not on 13.4's list - transient buffers,
+   the sealing scratch, the directory iterator - is outside it by construction.
+
+### What that leaves genuinely unmeasured
+
+| item | state |
+|---|---|
+| 13.1 | **measured** at 1/32/256, inventory separated |
+| 13.2 | **no numbers** - maximal accepted shapes: the 5 MiB + 1024-byte intent record at 256 maximal bodies, a 2 MiB seed, the 64 KiB metadata ceiling, maximal projection widths, a large roster |
+| 13.3 | **partial** - worst single signature is 1 ms, but not at the largest admitted operation or roster |
+| 13.4 | **done** - 63.5 MiB accounted, of which C-3's parked body is 18 MiB and the largest single term. See "Design 13.4" above |
+| 13.5 | **no numbers** - Flow S custody per stage at 1/32/255 |
+| 13.6 | **measured** |
+| 13.7 | **measured**, all items |
+| 13.8 | **partial** - wall-clock measured, visit count not reported |
+
+So of eight: **13.1, 13.4, 13.6 and 13.7 are done**, 13.3 and 13.8 are partial with the missing
+piece named, and **13.2 and 13.5 have no numbers.**
+
+Both remaining gaps are the same kind of work: custody per stage at shapes this suite does not
+currently build. 13.2 needs the maximal accepted shapes (a 5 MiB + 1024-byte intent record filled
+by 256 maximal bodies, a 2 MiB seed, the 64 KiB metadata ceiling, maximal projection widths, a
+large roster); 13.5 needs Flow S at 1/32/255. Neither is blocked on another agent.
+
 ## Design 13.6: what C-1's structural decode saves
 
 The second of design 13's eight measurements to have numbers. Isolated workspace, release, 8
@@ -2465,16 +2579,34 @@ whole Studio factorial in one group, the Registry operation sweep in one, the Re
 in one. Cross-group figures in the tables above should be read as separate experiments.
 
 **Then the compiler itself ran out of memory** - `rustc-LLVM ERROR: out of memory`, exit
-`STATUS_STACK_BUFFER_OVERRUN`, during the *release* build rather than during any test. At that
-moment other sessions on this machine were building concurrently; with them finished, 12.6 GB of
-63.8 GB was free. So the first abort may well have had the same cause as the second rather than
-the one diagnosed, and the grouping was a fix for a problem that was at least partly external.
-The grouping is kept regardless - 37 live stores is a bad idea on its own merits - but the
-attribution is recorded as uncertain rather than asserted.
+`STATUS_STACK_BUFFER_OVERRUN`, during the *release build* rather than during any test, while
+other sessions were building concurrently. With them finished, 12.6 GB of 63.8 GB was free.
 
-This is the fourth resource-related failure on this checkout, after the stale fingerprint, the
-stale dependency rlibs and the parallel-suite starvation. The standing rule those add up to:
-**`-j 1`, and treat any build or timing failure here as environmental until shown otherwise.**
+**And the third failure was self-inflicted, which retroactively undermines the first's
+diagnosis.** A third run reached five of seven groups and then died with the same
+`0xffffffff` - because **I killed it**. Every one of my test invocations begins by stopping
+lingering `catcoms*` processes, a habit adopted to clear a Windows linker lock; that kill is
+indiscriminate and it terminates my own background profiles. Starting the next run is what ended
+the previous one.
+
+So of three aborts: one was a compiler OOM under external contention, one was me, and the first -
+the 37-case abort that motivated grouping - has **no established cause**. It may have been
+resource exhaustion, and it may have been the same contention that produced the OOM minutes
+later. The grouping is kept on its own merits, because 37 simultaneously open stores and
+temporary directories is a bad idea regardless, but **the claim that all cases alive at once
+exhausted the machine is withdrawn as unproven.**
+
+Two practice changes follow, both mine to keep:
+
+- **Do not kill `catcoms*` processes while a background run of this session's own is in flight.**
+  The linker-lock workaround and a running profile are incompatible.
+- Treat a bare `0xffffffff` with no panic as *unexplained* rather than as evidence of resource
+  exhaustion. It is what a force-kill looks like too.
+
+This is now the fifth resource- or environment-related failure on this checkout, after the stale
+fingerprint, the stale dependency rlibs and the parallel-suite starvation. The standing rule they
+add up to: **`-j 1`, one run at a time, and treat any build or timing failure here as
+environmental - or self-inflicted - until shown otherwise.**
 
 ### Build contention on this machine, and what the evidence for this checkpoint actually is
 
