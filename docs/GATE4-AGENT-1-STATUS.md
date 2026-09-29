@@ -1483,7 +1483,7 @@ overstatement: rail filtering bounds the *scheduling* impact, not the *retained 
 | --- | --- |
 | Scan is an owned `EpochStorageCursor`, store borrowed per call | The property was previously inexpressible: the old scanner held `&mut ServerStore` for its whole life, so no write could land between its steps |
 | Invalidation refused before resuming **and** before issuing | Two mutations, each caught at its own assertion |
-| N17 with the real writers | **Five of the six families** - Recovery, OwnerReceipts, Intents, Registry, Studio - plus the cleanup unlink, which is an operation class and not the sixth family. **DraftArchive is not covered.** Also the unchanged exact-retry flush and a failed write; Studio carries the negative half (a budget mint must not invalidate) |
+| N17 with the real writers | **Five of the six families** - Recovery, OwnerReceipts, Intents, Registry, Studio - plus the cleanup unlink, which is an operation class and not the sixth family. Also the unchanged exact-retry flush and a failed write; Studio carries the negative half (a budget mint must not invalidate). **DraftArchive: its release path is asserted, its two write shapes are not** - see "The DraftArchive N17 gap was mischaracterised" below, which supersedes the flat "not covered" this row used to carry and explains why no sixth *cursor* test is needed |
 | Validation extracted as a pure function | Purity is now a signature, not a claim: if it ever needs the store back, the compiler says so |
 | Parked body, detached validation, four rebinding checks | Cursor identity, mount, record id, generation |
 | `MAX_INVENTORY_RESTARTS` with `Unstable` | Mutation: removing the bound fails at "restarted more times than its budget allows" |
@@ -1923,6 +1923,51 @@ with "reference scan requires fresh full inventory". That also means nothing is 
 a reference scan - `cacheable` requires `references.is_none()` - so in that mode every record
 parks on every trial, which the fixture now asserts rather than assumes.
 
+### The DraftArchive N17 "gap" was mischaracterised, and is re-described rather than closed
+
+This ledger has repeatedly said "DraftArchive is the one inventoried family N17 does not cover",
+and offered it to Agent 2 as something owed. On inspection that is the wrong description of the
+gap.
+
+**The cursor side needs no per-family test at all.** `check_not_invalidated` compares exactly one
+thing - `Arc::ptr_eq` between the cursor's captured generation and the store's current one - and
+that comparison carries **no family information**. A cursor cannot refuse for Recovery and fail to
+refuse for DraftArchive; either the writer rotated the token or it did not. The five existing
+parked-cursor tests each drive a real writer and so prove two things at once, which is what made
+the matrix look as though it needed a sixth row.
+
+`a_parked_cursor_refuses_after_a_bare_guard_rotation_with_no_family_writer` now separates them:
+it parks a cursor, takes the mutation guard with **nothing written**, and requires refusal at both
+the next step and at issue, with a positive control that the same sequence completes without a
+rotation. That makes N17's matrix a matrix of *writer* obligations, and means a new family needs a
+rotation assertion rather than a cursor fixture.
+
+**What DraftArchive actually still needs is one line on its writer.** Its *release* path already
+has a rotation assertion, in `release_rotates_the_inventory_generation_so_a_scan_cannot_overtake_it`
+- Agent 2's test, deliberately written at the generation rather than with a cursor because C-3's
+surface was moving at the time. That reasoning was sound and no longer applies, but the test is
+right as it stands. Its *writer*, `write_studio_draft_archive_with_io`, has **no** rotation
+assertion; `preserve()` calls it without checking the token.
+
+**The outstanding item is three write shapes, not one line.** An earlier version of this section
+said "one `before`/`after` pair", which under-specifies it against the standard this ledger
+already applies to the other families: the Registry entry in the C-3 table counts the unchanged
+exact-retry flush and a *failed* write as part of N17, and the Registry test drives all three.
+DraftArchive has three mutation paths - an exact-retry sync, a fresh replacement, and release -
+of which only release is asserted. The failed-attempt shape is the one that actually tests I-4's
+ordering requirement, that rotation precedes the *first possible* I/O rather than following a
+successful one, so it is the shape least safe to skip.
+
+It is Agent 2's writer on Agent 2's fixture and sits in their handover rather than being done
+here; what is recorded here is the correct size of it.
+
+**A wrong guess caught by running the test.** The refusal assertion first looked for "restart
+required". The cursor refused correctly but with a different message - "invalidated by a
+concurrent record mutation". Those are two distinct refusals: a cursor that hit an accounting rail
+is *poisoned* and says the former; one overtaken by a mutation says the latter. Asserting the
+wrong string would have let a rail bug masquerade as an invalidation with the test still passing,
+which is exactly the class of imprecision this ledger has had to correct before.
+
 ### Registry and Studio measured, and they invert the Recovery conclusion
 
 These are the families whose expensive typed reconstruction motivated C-3, so they are the ones
@@ -2029,6 +2074,39 @@ reference case with a non-empty set. The title-only cases are kept, relabelled
 of the validator collects no CIDs in either mode, so equal fresh-validation cost there is
 expected from the code rather than inferred from the timing; what reference mode changes for
 Registry is the surrounding cache behaviour.
+
+### 13.7's last item: the restart budget bounds retries, it does not make a moving vault scannable
+
+The restart rate under concurrent writes is **deterministic**, so unlike everything else in 13.7
+it is a structural test in the ordinary suite rather than a printed number. A write either lands
+between two steps or it does not, and a restart discards the cursor's progress whatever the
+machine's speed.
+
+`c3_restart_budget_bounds_retries_but_does_not_survive_sustained_writes` drives a real
+`EpochInventoryJob` with a `epoch_mutation_guard()` landing every *n* steps:
+
+| write rate | restarts | outcome |
+|---|---|---|
+| none | 0 | inventory issued |
+| one per step | 3 (the whole budget) | **`Unstable`** |
+
+**A vault written to on every step never completes, whatever the budget is**, because a restart
+discards all progress - so the scan can never get further than one step before being overtaken
+again. Enlarging `MAX_INVENTORY_RESTARTS` would not help; it would only delay the refusal.
+
+That makes L6's "under sustained writes a commit is held and retried" a statement about
+**liveness, not latency**. The failure mode is not a slow scan, it is `Unstable` and a caller that
+must back off - which is the behaviour the runtime adoption has to handle, and a reason the
+adoption is its own checkpoint rather than a signature change.
+
+Mutation-verified: removing the budget check so restarts are unbounded fails the test at its
+budget assertion, then restores byte-exact.
+
+**With this, every item design 13.7 names has been addressed**: maximum continuous custody per
+scan slice, the largest single-record step per family with and without reference collection, how
+often detached validation is needed (always - `validation_fits` returns false), visits per full
+scan, and the restart rate. What remains for 13.7 is not coverage but confidence: single runs,
+frames still confounded with bytes, and DraftArchive unmeasured.
 
 ### The factorial answers the confound: it is the operation axis, not the reference axis
 
@@ -2369,6 +2447,34 @@ parks the Registry record in every trial and reports zero hits, that a warm cach
 and stops parking in every trial, and that a reference scan reports zero hits and parks in every
 trial regardless of cache state. If any of those three stops holding, the profile's arithmetic
 is wrong and a test says so rather than a number quietly shifting.
+
+### The profile now runs in groups, because all cases alive at once exhausted the machine
+
+Two distinct resource failures, a day apart, both worth recording because both were first
+mistaken for something else.
+
+**The release lib test aborted with exit `0xffffffff` and no panic** once the profile reached 37
+cases. Every case holds an open `ServerStore` and a temporary directory, and the multi-family
+cases hold five families each. The profile now builds and runs **groups**, each interleaved
+internally and dropped before the next is built.
+
+**The cost of grouping, stated rather than glossed:** cases are interleaved *within* a group, so
+a difference between two cases in the same group is comparable and a difference **across** groups
+is not. Groups are therefore drawn so each measurement's actual comparisons fall inside one - the
+whole Studio factorial in one group, the Registry operation sweep in one, the Recovery size sweep
+in one. Cross-group figures in the tables above should be read as separate experiments.
+
+**Then the compiler itself ran out of memory** - `rustc-LLVM ERROR: out of memory`, exit
+`STATUS_STACK_BUFFER_OVERRUN`, during the *release* build rather than during any test. At that
+moment other sessions on this machine were building concurrently; with them finished, 12.6 GB of
+63.8 GB was free. So the first abort may well have had the same cause as the second rather than
+the one diagnosed, and the grouping was a fix for a problem that was at least partly external.
+The grouping is kept regardless - 37 live stores is a bad idea on its own merits - but the
+attribution is recorded as uncertain rather than asserted.
+
+This is the fourth resource-related failure on this checkout, after the stale fingerprint, the
+stale dependency rlibs and the parallel-suite starvation. The standing rule those add up to:
+**`-j 1`, and treat any build or timing failure here as environmental until shown otherwise.**
 
 ### Build contention on this machine, and what the evidence for this checkpoint actually is
 
@@ -3555,9 +3661,10 @@ makes that more important, not less.
    the production writer; malformed-record injection keeps this helper.
 
    Remaining archive work, accurately: **reconcile the landed writer/release/collector with their
-   review status, retain malformed-record injection, and add the missing DraftArchive
-   cursor-invalidation case to N17** - DraftArchive is still the one inventoried family N17 does
-   not cover.
+   review status, retain malformed-record injection, and assert `inventory_generation` rotation
+   on the two draft-archive *write* shapes** - the exact-retry sync and the fresh replacement.
+   Release is already asserted. **No DraftArchive cursor test is needed**; see "The DraftArchive
+   N17 gap was mischaracterised" for why the cursor refusal is family-agnostic.
 
    There is also a stale comment in that file, at `epoch_draft_archive.rs:255`, saying
    `release_studio_draft_archive_with_io` "does not exist yet" - 68 lines above its

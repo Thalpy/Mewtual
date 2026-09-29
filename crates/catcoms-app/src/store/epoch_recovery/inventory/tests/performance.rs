@@ -840,14 +840,167 @@ fn recovery_reference_cases(frames: &[usize], clock: &dyn catcoms_rt::Clock) -> 
 }
 
 /// Registry: one of the two families whose expensive typed reconstruction motivated C-3.
+/// One vault holding a record of **five of the six** scanned families, measured in a single scan.
 ///
-/// The axis is **operation count**, not bytes: `save_inventory_fixture_ops` builds a real signed
-/// registry log of `ops` operations at 160 KiB per message, and the reconstruction walks them.
-/// A byte axis alone would not distinguish a large record from a structurally deep one.
+/// The sixth is DraftArchive, which this does not write: `REFERENCE_COVERAGE` would scan it, so
+/// "every family" would be wrong.
 ///
-/// Measured in all three modes, because Registry is cacheable and the modes are not variations
-/// of one number: fresh accounting validation, the accounting cache-hit path, and reference
-/// collection (in which nothing is cacheable at all).
+/// A fixture for two outstanding 13.7 items - it is not itself the measurement, and no
+/// OwnerReceipts or Intents figures are recorded until the profile is run and read. It supplies
+/// records of those two families, which had none at all; and a **realistic scan shape** - visits,
+/// per-visit custody and a per-family breakdown over a vault holding more than one family. Every
+/// earlier case held a single family (though not always a single record), so the visits figure
+/// described the fixture rather than a scan.
+///
+/// Built through the production writers - `prepare_epoch_owner_receipt`, `prepare_epoch_intent`,
+/// `update_epoch_recovery` and the registry and studio fixtures - rather than by widening other
+/// modules' test helpers, which would have meant making their whole test modules reachable.
+fn multi_family_case(cache: CachePolicy, references: bool) -> Case {
+    let root = tempfile::tempdir().unwrap();
+    let mut store = open(root.path());
+    let device = catcoms_mls::MlsDevice::generate().unwrap();
+    let group = catcoms_mls::ServerGroup::create(&device).unwrap();
+    let target = StudioTarget::Flipnote {
+        channel: [7; 16],
+        object: [9; 16],
+    };
+    let studio_doc = target.document(&group.group_id()).unwrap();
+
+    // Studio, and with it a Registry record for the same vault.
+    crate::store::epoch_studio::tests::performance::save_studio_source_fixture_ops(
+        &mut store, 7, &group, &device, target, 3, 160_000,
+    );
+    crate::store::epoch_registry::tests::performance::save_inventory_fixture_ops(&mut store, 2);
+
+    // Recovery, through `stage_canonical` rather than `stage_sized`.
+    //
+    // This vault is scanned in reference mode as well as accounting mode, and `recovery_cids`
+    // runs `inspect_vault_references` for a Studio-typed document - which needs a canonically
+    // valid projection and refuses opaque filler. `stage_sized` plants filler, which is stated
+    // in its own doc comment, and using it here made the reference-mode case fail with "creative
+    // reference scan incomplete, unsupported or over bound". A caveat recorded on a helper is no
+    // use if the next fixture ignores it.
+    let planted = stage_canonical(&mut store, 7, &group, &device, target, 8);
+
+    // OwnerReceipts, through the production writer.
+    let receipt = catcoms_replication::Receipt::sign(
+        studio_doc.clone(),
+        0,
+        [11; 32],
+        [12; 32],
+        group.epoch(),
+        catcoms_replication::InheritedCheckpoint::EpochZero,
+        &device,
+    )
+    .unwrap();
+    let mut owner_budget = family_budget(&mut store, 7, &studio_doc);
+    store
+        .prepare_epoch_owner_receipt(
+            7,
+            receipt,
+            &group,
+            group.epoch(),
+            &mut ChaCha20Rng::seed_from_u64(5),
+            &mut owner_budget,
+        )
+        .expect("owner receipt");
+
+    // Intents, likewise.
+    let mut storage_budget = family_budget(&mut store, 7, &studio_doc);
+    let mut intent_budget = crate::store::epoch_intents::EpochIntentBudget::from_inventory(
+        &collect_with(&mut store, REFERENCE_COVERAGE),
+    )
+    .expect("intent budget");
+    store
+        .prepare_epoch_intent(
+            7,
+            &studio_doc,
+            DomainOp {
+                nonce: [3; 16],
+                doc_type: studio_doc.doc_type,
+                logical_key: studio_doc.logical_key.clone(),
+                body: FlipnoteOp::SetHeader(catcoms_replication::studio::FlipnoteHeader::Title(
+                    "multi family".into(),
+                ))
+                .encode()
+                .unwrap(),
+            },
+            &device,
+            &group,
+            &mut ChaCha20Rng::seed_from_u64(6),
+            &mut storage_budget,
+            &mut intent_budget,
+        )
+        .expect("intent");
+
+    // What the scan actually found, so the case is labelled by observation.
+    let inventory = collect_with(&mut store, REFERENCE_COVERAGE);
+    let families: std::collections::BTreeSet<_> =
+        inventory.records().map(|entry| entry.kind).collect();
+    // The exact set, not a count. `>= 5` is `== 5` in disguise when only five are written, and
+    // it would not say *which* five.
+    assert_eq!(
+        families,
+        [
+            EpochRecordKind::Recovery,
+            EpochRecordKind::OwnerReceipts,
+            EpochRecordKind::Intents,
+            EpochRecordKind::Registry,
+            EpochRecordKind::Studio,
+        ]
+        .into_iter()
+        .collect::<std::collections::BTreeSet<_>>(),
+        "the multi-family vault does not hold the five families it claims"
+    );
+
+    case(
+        format!(
+            "multi_family_{}_{}",
+            if references {
+                "references"
+            } else {
+                "accounting"
+            },
+            if cache == CachePolicy::Fresh {
+                "fresh"
+            } else {
+                "warm"
+            }
+        ),
+        root,
+        store,
+        REFERENCE_COVERAGE,
+        references,
+        cache,
+        FixtureShape {
+            cids: references.then_some(planted.len()),
+            ..FixtureShape::default()
+        },
+        // The canonical Recovery record's pixels are the only references in this vault: the
+        // Studio source is title-only and the Registry arm collects none. So the expectation is
+        // that exact set - checked on every trial like any other reference case, rather than
+        // waved through because this fixture's purpose is scan shape.
+        references
+            .then(|| ExpectedRefs::group(&group.group_id(), planted.iter().copied().collect())),
+    )
+}
+
+/// An `EpochStorageBudget` for one document, from a fresh full-coverage inventory.
+fn family_budget(
+    store: &mut ServerStore,
+    server: u64,
+    doc: &LogicalDocument,
+) -> crate::store::epoch_budget::EpochStorageBudget {
+    let inventory = collect_with(store, REFERENCE_COVERAGE);
+    crate::store::epoch_budget::EpochStorageBudget::from_inventory(
+        StorageScope::new(server, &doc.server_id).unwrap(),
+        inventory
+            .records_for_server(server, &doc.server_id)
+            .unwrap(),
+    )
+    .expect("storage budget")
+}
+
 /// The three modes every cacheable family needs, as separate cases over separate fixtures.
 ///
 /// A `Case` owns its store, so each mode gets its own build of the same fixture shape. That is
@@ -1427,6 +1580,182 @@ fn c3_cacheable_family_parks_when_fresh_and_hits_cache_when_warm() {
     }
 }
 
+/// The multi-family vault really holds several families, and the scan really visits them.
+///
+/// Without this the "realistic full scan" label rests on the fixture builder having worked. A
+/// vault that silently ended up with one family would still produce a scan, a visits count and a
+/// per-family row - just not the ones the label claims. The builder asserts at least five
+/// families are present; this additionally requires the **scan** to park a record from more than
+/// one of them, which is what makes the visits figure a scan shape rather than an artifact.
+#[test]
+fn c3_multi_family_scan_parks_records_from_several_families() {
+    let clock = ManualClock::new(0);
+    let mut cases = [multi_family_case(CachePolicy::Fresh, false)];
+    run_interleaved(&mut cases, &clock);
+    check_case_structure(&cases[0]);
+
+    let families: std::collections::BTreeSet<_> = cases[0]
+        .cost
+        .records
+        .iter()
+        .filter_map(|r| r.family)
+        .collect();
+    // Named, not counted. A threshold like "at least three" is satisfied by Recovery, Registry
+    // and Studio alone - the three families already measured - so it would pass with the two
+    // this fixture exists for entirely absent. The cache is cleared and `validation_fits`
+    // detaches everything, so every record present must park.
+    for required in [
+        EpochRecordKind::Recovery,
+        EpochRecordKind::OwnerReceipts,
+        EpochRecordKind::Intents,
+        EpochRecordKind::Registry,
+        EpochRecordKind::Studio,
+    ] {
+        assert!(
+            families.contains(&required),
+            "the scan parked no {required:?} record; parked families were {families:?}. \
+             OwnerReceipts and Intents are the two this fixture exists to measure, so a count \
+             threshold would have passed with both missing"
+        );
+    }
+    assert!(
+        cases[0].cost.visits > cases[0].cost.records.len() * TRIALS,
+        "a parked record ends its visit, so a multi-family scan cannot take fewer visits than \
+         records x trials"
+    );
+}
+
+/// 13.7's restart rate under concurrent writes - what an `EpochInventoryJob` does when the vault
+/// will not hold still.
+///
+/// **Deterministic, so it is a structural test rather than a profile.** Restart behaviour is
+/// decided by counting, not by timing: a write either lands between two steps or it does not, and
+/// a restart discards the cursor's progress whatever the machine's speed. That makes this the one
+/// 13.7 item that can assert its result in the ordinary suite instead of printing a number.
+///
+/// `write_every` writes once per that many steps; `None` means an undisturbed scan. Returns the
+/// restarts consumed and whether the job produced an inventory.
+fn restart_rate(records: usize, write_every: Option<usize>) -> (usize, bool) {
+    let root = tempfile::tempdir().unwrap();
+    let mut store = open(root.path());
+    for n in 0..records {
+        let key = format!("restart-{n}");
+        stage_sized(&mut store, 7, &document(b"group", key.as_bytes()), 1024);
+    }
+
+    let mut job = store
+        .begin_epoch_inventory_job(EpochInventoryCoverage::RecoveryOnly)
+        .unwrap();
+    let mut restarts = 0;
+    let mut steps = 0;
+    // A ceiling so a job that can never finish terminates the test rather than the test runner.
+    // `MAX_INVENTORY_RESTARTS` bounds restarts, not steps, and a job that restarts forever would
+    // otherwise spin.
+    let ceiling = (records + 4) * (MAX_INVENTORY_RESTARTS + 2) * 4;
+    loop {
+        if steps >= ceiling {
+            return (restarts, false);
+        }
+        steps += 1;
+        // The interfering write, landing *between* steps, which is exactly the window C-3 exists
+        // to survive: the old scanner held the store for its whole life so this could not happen.
+        if write_every.is_some_and(|every| steps % every == 0) {
+            store.epoch_mutation_guard();
+        }
+        match store.step_epoch_inventory_job(&mut job, 1, None).unwrap() {
+            EpochInventoryStep::Parked => {
+                let parked = store
+                    .take_parked_job_record(&mut job)
+                    .expect("Parked means a record is waiting");
+                let validated = parked.validate().unwrap();
+                if let EpochInventoryStep::Restarted = store
+                    .install_validated_job_record(&mut job, validated)
+                    .unwrap()
+                {
+                    restarts += 1;
+                }
+            }
+            EpochInventoryStep::Restarted => restarts += 1,
+            EpochInventoryStep::Unstable => return (restarts, false),
+            EpochInventoryStep::Stepped(progress) => {
+                if progress.complete {
+                    return match store.finish_epoch_inventory_job(job).unwrap() {
+                        EpochInventoryOutcome::Complete(_) => (restarts, true),
+                        EpochInventoryOutcome::Restarted(next) => {
+                            job = *next;
+                            restarts += 1;
+                            continue;
+                        }
+                        EpochInventoryOutcome::Unstable => (restarts, false),
+                    };
+                }
+            }
+        }
+    }
+}
+
+/// The restart budget bounds retries; it does not make a moving vault scannable.
+///
+/// This is 13.7's last item, and the answer is a shape rather than a rate. An undisturbed scan
+/// completes with no restarts. A vault written to rarely enough completes having spent some of
+/// the budget. A vault written to on every step **never** completes, however large the budget,
+/// because a restart discards all progress - so the scan can never get further than one step
+/// before being overtaken again.
+///
+/// That is what makes L6's "under sustained writes a commit is held and retried" a statement
+/// about liveness rather than latency: the failure is not a slow scan, it is `Unstable` and a
+/// caller that must back off.
+#[test]
+fn c3_restart_budget_bounds_retries_but_does_not_survive_sustained_writes() {
+    // Undisturbed: the control. No restarts, and an inventory.
+    let (restarts, completed) = restart_rate(6, None);
+    assert_eq!(restarts, 0, "an undisturbed scan restarted");
+    assert!(
+        completed,
+        "an undisturbed scan did not produce an inventory"
+    );
+
+    // A write before every step. The scan cannot make progress between interruptions, so the
+    // budget is spent and the job reports Unstable rather than completing slowly.
+    let (restarts, completed) = restart_rate(6, Some(1));
+    assert!(
+        !completed,
+        "a scan interrupted before every step produced an inventory, which would mean a restart \
+         preserved progress it is specified to discard"
+    );
+    assert!(
+        restarts <= MAX_INVENTORY_RESTARTS,
+        "the job consumed {restarts} restarts against a budget of {MAX_INVENTORY_RESTARTS}"
+    );
+
+    // And the bound is real: the budget is spent, not merely large.
+    assert_eq!(
+        restarts, MAX_INVENTORY_RESTARTS,
+        "sustained writes should consume the whole restart budget before giving up"
+    );
+}
+
+/// The reference-mode multi-family vault, in the ordinary suite.
+///
+/// This exists because its absence cost a debugging cycle. The reference-mode case was only
+/// instantiated inside the `#[ignore]`d profile, so when the vault was built with an
+/// opaque-projection Recovery record - which `recovery_cids` refuses, as that helper's own doc
+/// comment says - nothing failed until the profile was run by hand. A frozen-clock case keeps the
+/// CID oracle load-bearing in CI for this fixture as it is for the others.
+#[test]
+fn c3_multi_family_reference_scan_collects_the_vaults_cids() {
+    let clock = ManualClock::new(0);
+    let mut cases = [multi_family_case(CachePolicy::Warm, true)];
+    assert_eq!(
+        cases[0].shape.cids,
+        Some(8),
+        "the canonical Recovery record is the only source of references in this vault"
+    );
+    // `run_trial`'s oracle checks the returned set against the expectation on every trial.
+    run_interleaved(&mut cases, &clock);
+    check_case_structure(&cases[0]);
+}
+
 /// Interleaved rounds must actually vary which case follows which.
 ///
 /// This is a regression test for a claim that was false. The first implementation rotated the
@@ -1643,43 +1972,72 @@ fn profile_c3_visit_cost() {
     };
     let clock = &SystemClock;
 
-    let mut cases = vec![recovery_accounting_case(&[
-        1024,
-        16 * 1024,
-        256 * 1024,
-        1024 * 1024,
-        4 * 1024 * 1024,
-    ])];
-    cases.extend(recovery_reference_cases(&[1, 16, 128, 512], clock));
-    cases.extend(registry_cases(&[2, 8, 24]));
+    // Run in groups, each interleaved internally and dropped before the next is built.
+    //
+    // All 37 cases alive at once aborted the release binary with no panic - every case holds an
+    // open `ServerStore` and a temporary directory, and the multi-family ones hold five families
+    // each. Grouping caps how many are live.
+    //
+    // **The cost, stated:** cases are interleaved *within* a group, so a difference between two
+    // cases in the same group is comparable and a difference across groups is not. Groups are
+    // therefore drawn so that the comparisons each measurement actually makes fall inside one -
+    // the whole Studio factorial in one group, the Registry operation sweep in one, and so on.
+    let mut groups: Vec<(&str, Vec<Case>)> = Vec::new();
+    groups.push((
+        "recovery",
+        vec![recovery_accounting_case(&[
+            1024,
+            16 * 1024,
+            256 * 1024,
+            1024 * 1024,
+            4 * 1024 * 1024,
+        ])],
+    ));
+    groups.push((
+        "recovery_references",
+        recovery_reference_cases(&[1, 16, 128, 512], clock),
+    ));
+    groups.push(("registry", registry_cases(&[2, 8, 24])));
     // 24 and not 32: `build` stops once the epoch is nearly full, and at 160 KiB per message the
     // 4 MiB epoch fits about 25. The previous run requested 32, silently got fewer, and divided
     // by 32 anyway. `check_case_structure` now fails rather than letting that recur.
-    cases.extend(studio_cases(&[3, 12, 24]));
+    groups.push(("studio_titles", studio_cases(&[3, 12, 24])));
     // Studio with actual pixels, because the title-only sources above collect no CIDs at all.
     // The factorial: (128,1) against (128,128) isolates reference count at fixed frame count;
-    // (16,1) against (128,1) isolates frame count at fixed reference count.
-    cases.extend(studio_frame_factorial(&[
-        (16, 1),
-        (16, 16),
-        (128, 1),
-        (128, 128),
-    ]));
-    println!(
-        "C3_PROFILE run cases={} trials={TRIALS} order=interleaved",
-        cases.len()
-    );
+    // (16,1) against (128,1) isolates frame count at fixed reference count. Kept in one group so
+    // those two comparisons are interleaved.
+    groups.push((
+        "studio_frames",
+        studio_frame_factorial(&[(16, 1), (16, 16), (128, 1), (128, 128)]),
+    ));
 
-    run_interleaved(&mut cases, clock);
+    for (name, mut cases) in groups {
+        println!(
+            "C3_PROFILE group={name} cases={} trials={TRIALS} order=interleaved",
+            cases.len()
+        );
+        run_interleaved(&mut cases, clock);
+        for case in &cases {
+            check_case_structure(case);
+            report(case, Protocol::Interleaved.label(), profile);
+        }
+    }
 
-    for case in &cases {
-        check_case_structure(case);
-        report(case, Protocol::Interleaved.label(), profile);
+    // OwnerReceipts and Intents, and the only realistic scan shape in the set. Built last and in
+    // their own group: five families per store makes these the heaviest cases in the profile.
+    for (cache, references) in [(CachePolicy::Fresh, false), (CachePolicy::Warm, true)] {
+        let mut cases = [multi_family_case(cache, references)];
+        println!(
+            "C3_PROFILE group=multi_family cases=1 trials={TRIALS} order=interleaved \
+             references={references}"
+        );
+        run_interleaved(&mut cases, clock);
+        check_case_structure(&cases[0]);
+        report(&cases[0], Protocol::Interleaved.label(), profile);
     }
 
     // Deliberately after the main run's cases are dropped: the comparison's own stores should not
     // be competing with 35 live ones, and its labels would otherwise be ambiguous against the
     // rows above.
-    drop(cases);
     protocol_comparison(clock, profile);
 }
