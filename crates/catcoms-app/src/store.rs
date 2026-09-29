@@ -40,6 +40,9 @@ mod epoch_intents;
 mod epoch_owner;
 mod epoch_recovery;
 mod epoch_registry;
+/// One reporting convention shared by design 13's measurements.
+#[cfg(test)]
+mod measure;
 #[cfg(test)]
 pub(crate) use epoch_registry::registry_full_loads_for_test;
 #[cfg(test)]

@@ -1,6 +1,8 @@
 //! Opt-in custody measurements before actor activation. Initial fixture writes are batched;
 //! measured decoding, projection, signing and durable handoff use the production adapters.
 use super::*;
+use crate::store::epoch_intents::EpochIntentState;
+use crate::store::measure::Spread;
 use catcoms_replication::studio::{StudioOverlay, StudioOverlayState};
 use catcoms_rt::{Clock, SystemClock};
 
@@ -81,7 +83,17 @@ pub(super) fn fixture(
     let mut state = store.load_epoch_intents(SERVER, &f.logical).unwrap();
     let mut prefix = Vec::new();
     let mut records = Vec::new();
-    for n in 0..count {
+    // Splice all but the last entry, then add the last through the real `StudioOverlayState`
+    // append. The total is unchanged, and the record ends up in the format production writes.
+    //
+    // Why that matters: `StudioOverlay::encode_vault` emits version 1, and `decode_vault` takes a
+    // compatibility branch for v1 that *hard-codes* `prepared: None`, `completed: None`,
+    // `minimum_new_basis_closed_epoch: 0` and `legacy: true`. A record assembled purely by
+    // splicing is therefore a legacy record: the v2 header parse and `validate()` never run, and
+    // any test comparing those three fields is comparing constants rather than decoded values.
+    // `StudioOverlayState::append` sets `legacy = false`, which is what makes it v2.
+    let spliced = count.saturating_sub(1);
+    for n in 0..spliced {
         let mut op = f.title();
         op.nonce = (n as u128 + 100).to_be_bytes();
         op.body = match f.target {
@@ -112,11 +124,38 @@ pub(super) fn fixture(
         entry[72..80].copy_from_slice(&(n as u64 + 1).to_be_bytes());
         records.extend_from_slice(&entry);
     }
-    let end = prefix.len();
-    prefix[end - 12..end - 4].copy_from_slice(&(count as u64 + 1).to_be_bytes());
-    prefix[end - 4..].copy_from_slice(&(count as u32).to_be_bytes());
-    prefix.extend_from_slice(&records);
-    state.overlay = Some(StudioOverlayState::decode_vault(&prefix, &state.ledger).unwrap());
+    let mut overlay = if spliced == 0 {
+        StudioOverlayState::new(&basis)
+    } else {
+        let end = prefix.len();
+        prefix[end - 12..end - 4].copy_from_slice(&(spliced as u64 + 1).to_be_bytes());
+        prefix[end - 4..].copy_from_slice(&(spliced as u32).to_be_bytes());
+        prefix.extend_from_slice(&records);
+        StudioOverlayState::decode_vault(&prefix, &state.ledger).unwrap()
+    };
+    // The promoting append. Its operation is the `count`-th, so the totals every caller asserts
+    // are unchanged; what changes is that the encoded record is now v2.
+    let mut last = f.title();
+    last.nonce = (count as u128 + 99).to_be_bytes();
+    last.body = match f.target {
+        StudioTarget::Index { .. } => IndexOp::SetTitle {
+            object: [1; 16],
+            title: format!("overlay measurement {}", count - 1),
+        }
+        .encode()
+        .unwrap(),
+        StudioTarget::Flipnote { .. } => FlipnoteOp::SetHeader(FlipnoteHeader::Title(format!(
+            "overlay measurement {}",
+            count - 1
+        )))
+        .encode()
+        .unwrap(),
+    };
+    let last_id = state.ledger.prepare(f.device.device_id(), last).unwrap();
+    overlay
+        .append(&basis, &state.ledger, last_id, spliced as u64)
+        .unwrap();
+    state.overlay = Some(overlay);
     let draft = state.local_draft().unwrap().unwrap();
     assert_eq!(draft.accepted(), count);
     let expected = draft.projection().clone();
@@ -254,4 +293,274 @@ fn profile_studio_overlay_handoff_index() {
 #[ignore = "opt-in custody measurement, not a latency acceptance test"]
 fn profile_studio_overlay_handoff_flipnote() {
     profile(true);
+}
+
+// ---------------------------------------------------------------------------------------------
+// Design 13.6: what C-1's structural decode actually saves.
+//
+// Here rather than with the C-3 profile because the fixture that produces a vault with large
+// retained branches is here, and 13.6's subject is the overlay decoder.
+// ---------------------------------------------------------------------------------------------
+
+const C1_TRIALS: usize = 8;
+/// Batched repetitions for the pure decoder pair, which is far below millisecond resolution per
+/// call at small operation counts.
+const REPETITIONS: usize = 64;
+/// Fewer than `REPETITIONS` because each one performs a real read; still enough that a
+/// millisecond clock resolves the per-call figure.
+const C1_IO_REPETITIONS: usize = 16;
+
+/// The C-1 oracle: the two decoders must produce **byte-identical** state on valid input.
+///
+/// Structural decode is not supposed to replay the branch - that is the intended difference, not
+/// a defect - so this cannot compare projections. What it can require is that everything
+/// structural *does* compute matches, and the strongest available form of that is re-encoding
+/// both and comparing the bytes, which subsumes the basis fingerprint, author, entry ids,
+/// envelopes, sequences and timestamps, the Prepared and Completed contents, the legacy flag and
+/// the ledger's intents. Comparing a handful of accessors instead - as the first version did -
+/// left every one of those unchecked.
+///
+/// **What this oracle does not do**, stated because its previous doc comment claimed otherwise:
+/// it cannot catch a structural path that skips a *refusal* check. Both decoders are run on one
+/// valid record, and a path that stopped verifying entry sequences, authorship, envelope hashes
+/// or canonical encoding would produce identical output here while accepting records it should
+/// reject - and would look faster, so a timing comparison alone would reward it. Refusal coverage
+/// for the structural path lives in `catcoms-replication`'s handoff tests;
+/// [`c1_structural_and_full_decode_both_refuse_a_tampered_sequence`] adds the store-level case.
+fn assert_c1_agreement(scope: &[u8], full: &EpochIntentState, structural: &EpochIntentState) {
+    match (full.handoff_metadata(), structural.handoff_metadata()) {
+        (Some(_), Some(_)) => {}
+        (None, None) => {
+            panic!("the fixture has no overlay extension, so neither decoder does 13.6's work")
+        }
+        (a, b) => panic!(
+            "one decoder produced an overlay and the other did not: full={} structural={}",
+            a.is_some(),
+            b.is_some()
+        ),
+    }
+    assert_eq!(
+        full.encode(scope).unwrap().to_vec(),
+        structural.encode(scope).unwrap().to_vec(),
+        "structural decode produced state that does not re-encode identically to the full \
+         decode's, so the two disagree somewhere in the identity, ledger, entry or accounting \
+         fields that structural decode is supposed to compute"
+    );
+    // The fixture has an active, replayable branch, so the full decode really did replay - which
+    // is what makes the timing comparison below a comparison of two different amounts of work.
+    //
+    // This does **not** prove structural skipped the replay, and an earlier comment claiming it
+    // did was wrong: `local_draft` replays on demand from the decoded state, so it returns `Some`
+    // for the structural state too. That property is proven where it belongs, by the
+    // replication-crate test that decodes structurally a branch the full decoder cannot replay.
+    assert!(
+        full.local_draft().unwrap().is_some(),
+        "the full decode produced no draft, so this fixture is not exercising replay at all"
+    );
+}
+
+/// 13.6, part one: the **pure** decoder pair, on identical bytes, with no I/O between them.
+///
+/// Timed separately from the end-to-end pair because an end-to-end figure includes a file read
+/// that is identical on both sides and can conceal the decoder difference, which is the only
+/// thing C-1 changed.
+fn c1_pure(
+    plain: &[u8],
+    scope: &[u8],
+    logical: &LogicalDocument,
+    clock: &dyn Clock,
+) -> (Spread, Spread) {
+    let mut full = Vec::new();
+    let mut structural = Vec::new();
+    for _ in 0..C1_TRIALS {
+        let t = clock.monotonic_ms();
+        for _ in 0..REPETITIONS {
+            EpochIntentState::decode(plain, scope, logical).unwrap();
+        }
+        full.push(clock.monotonic_ms().saturating_sub(t));
+
+        let t = clock.monotonic_ms();
+        for _ in 0..REPETITIONS {
+            EpochIntentState::decode_structural(plain, scope, logical).unwrap();
+        }
+        structural.push(clock.monotonic_ms().saturating_sub(t));
+    }
+    (
+        Spread::of(&full, REPETITIONS as u128),
+        Spread::of(&structural, REPETITIONS as u128),
+    )
+}
+
+/// 13.6, part two: the same comparison **end to end**, through the production entry points that
+/// read the record from disk.
+fn c1_end_to_end(
+    store: &ServerStore,
+    logical: &LogicalDocument,
+    clock: &dyn Clock,
+) -> (Spread, Spread) {
+    let mut full = Vec::new();
+    let mut structural = Vec::new();
+    for _ in 0..C1_TRIALS {
+        let t = clock.monotonic_ms();
+        for _ in 0..C1_IO_REPETITIONS {
+            store.load_epoch_intents(SERVER, logical).unwrap();
+        }
+        full.push(clock.monotonic_ms().saturating_sub(t));
+
+        let t = clock.monotonic_ms();
+        for _ in 0..C1_IO_REPETITIONS {
+            store
+                .load_epoch_intents_structural(SERVER, logical)
+                .unwrap();
+        }
+        structural.push(clock.monotonic_ms().saturating_sub(t));
+    }
+    (
+        Spread::of(&full, C1_IO_REPETITIONS as u128),
+        Spread::of(&structural, C1_IO_REPETITIONS as u128),
+    )
+}
+
+fn c1_measure(art: bool, counts: &[usize], clock: &dyn Clock, profile: &str) {
+    for count in counts {
+        let root = tempfile::tempdir().unwrap();
+        let f = Fixture::new(art);
+        let mut store = open(root.path());
+        fixture(&f, &mut store, *count);
+
+        let scope = crate::store::epoch_intents::scope_bytes(SERVER, &f.logical).unwrap();
+        let record_bytes = fs::metadata(store.epoch_intent_path(&scope)).unwrap().len();
+        let plain = store.read_scoped_intent_plain(&scope).unwrap().unwrap();
+
+        // Correctness before timing: a faster path that computed less would otherwise be reported
+        // as a saving.
+        let full = EpochIntentState::decode(&plain.plain, &scope, &f.logical).unwrap();
+        let structural =
+            EpochIntentState::decode_structural(&plain.plain, &scope, &f.logical).unwrap();
+        // The **branch** length, read back from the record on disk - not `pending().len()`, which
+        // counts the ledger and is decoded identically by both paths whatever the overlay holds.
+        // Replay cost scales with the branch, so the ledger count is the wrong axis to label with.
+        assert_eq!(
+            full.local_draft().unwrap().unwrap().accepted(),
+            *count,
+            "the record on disk does not hold a {count}-entry branch, so ops={count} mislabels it"
+        );
+        assert_c1_agreement(&scope, &full, &structural);
+        let plain_bytes = plain.plain.len();
+        drop((full, structural));
+
+        let (pure_full, pure_structural) = c1_pure(&plain.plain, &scope, &f.logical, clock);
+        let (io_full, io_structural) = c1_end_to_end(&store, &f.logical, clock);
+        println!(
+            "C1_PROFILE art={art} ops={count} record_bytes={record_bytes} \
+             plain_bytes={plain_bytes} pure_full_us={pure_full} \
+             pure_structural_us={pure_structural} io_full_us={io_full} \
+             io_structural_us={io_structural} trials={C1_TRIALS} pure_reps={REPETITIONS} \
+             io_reps={C1_IO_REPETITIONS} build={profile} \
+             units=min/upper_median/max_us_and_zero_sample_count"
+        );
+    }
+}
+
+/// The harness, on the ordinary suite, asserting the **agreement** only.
+///
+/// Agreement is a correctness property and machine-independent, so it belongs here; duration does
+/// not, and nothing here asserts any.
+#[test]
+fn c1_structural_and_full_decode_agree_on_everything_structural_computes() {
+    let root = tempfile::tempdir().unwrap();
+    let f = Fixture::new(true);
+    let mut store = open(root.path());
+    fixture(&f, &mut store, 8);
+    let scope = crate::store::epoch_intents::scope_bytes(SERVER, &f.logical).unwrap();
+    let plain = store.read_scoped_intent_plain(&scope).unwrap().unwrap();
+
+    let full = EpochIntentState::decode(&plain.plain, &scope, &f.logical).unwrap();
+    let structural = EpochIntentState::decode_structural(&plain.plain, &scope, &f.logical).unwrap();
+    assert_eq!(full.local_draft().unwrap().unwrap().accepted(), 8);
+
+    // The record must be **v2**, the format production writes, not the v1 compatibility format.
+    //
+    // This is the assertion that would have caught the original defect. A purely spliced fixture
+    // encodes as v1, whose decode branch hard-codes `prepared`, `completed` and
+    // `minimum_new_basis_closed_epoch` - so the v2 header parse and `validate()` never ran, the
+    // oracle compared constants, and the structural side did half the entry passes a real record
+    // costs. Checking the version byte is the difference between measuring the format callers
+    // have and measuring a compatibility path.
+    let re_encoded = full
+        .handoff_metadata()
+        .unwrap()
+        .encode_vault(&full.ledger)
+        .unwrap();
+    assert_ne!(
+        re_encoded.first(),
+        Some(&1),
+        "the fixture produced a legacy v1 overlay record, so this measures the compatibility \
+         decode rather than the one production writes"
+    );
+
+    assert_c1_agreement(&scope, &full, &structural);
+
+    // And through the production entry points, so the agreement is a property of the paths
+    // callers actually use rather than only of the decoders.
+    let loaded_full = store.load_epoch_intents(SERVER, &f.logical).unwrap();
+    let loaded_structural = store
+        .load_epoch_intents_structural(SERVER, &f.logical)
+        .unwrap();
+    assert_c1_agreement(&scope, &loaded_full, &loaded_structural);
+}
+
+/// The refusal case the agreement oracle structurally cannot provide.
+///
+/// Comparing two decoders' output on one valid record says nothing about what either refuses. A
+/// structural path that stopped checking entry sequences would agree on every valid input, run
+/// faster, and accept a branch whose entries are out of order - so the timing comparison would
+/// reward it. This corrupts the sequence field of the last spliced entry and requires **both**
+/// decoders to refuse, which is what makes `decode_structural`'s "same checks, minus the replay"
+/// claim testable at the store layer rather than only in `catcoms-replication`.
+#[test]
+fn c1_structural_and_full_decode_both_refuse_a_tampered_sequence() {
+    let root = tempfile::tempdir().unwrap();
+    let f = Fixture::new(true);
+    let mut store = open(root.path());
+    fixture(&f, &mut store, 8);
+    let scope = crate::store::epoch_intents::scope_bytes(SERVER, &f.logical).unwrap();
+    let plain = store.read_scoped_intent_plain(&scope).unwrap().unwrap();
+
+    // Control: untouched bytes decode both ways.
+    EpochIntentState::decode(&plain.plain, &scope, &f.logical)
+        .expect("control: the untampered record must decode fully");
+    EpochIntentState::decode_structural(&plain.plain, &scope, &f.logical)
+        .expect("control: the untampered record must decode structurally");
+
+    // Each spliced entry is 88 bytes with its sequence at offset 72; the last entry therefore
+    // ends the record. Bump it so the branch is no longer consecutive.
+    let mut tampered = plain.plain.to_vec();
+    let end = tampered.len();
+    let seq = end - 88 + 72;
+    let bumped = u64::from_be_bytes(tampered[seq..seq + 8].try_into().unwrap()).wrapping_add(7);
+    tampered[seq..seq + 8].copy_from_slice(&bumped.to_be_bytes());
+    assert_ne!(tampered, plain.plain.to_vec(), "the tamper changed nothing");
+
+    assert!(
+        EpochIntentState::decode(&tampered, &scope, &f.logical).is_err(),
+        "the full decode accepted an out-of-order branch"
+    );
+    assert!(
+        EpochIntentState::decode_structural(&tampered, &scope, &f.logical).is_err(),
+        "structural decode accepted an out-of-order branch, so it is not performing the entry \
+         checks its contract claims - and it would look faster for it"
+    );
+}
+
+#[test]
+#[ignore = "opt-in design 13.6 measurement of C-1's structural decode; no machine-speed assertion"]
+fn profile_c1_structural_decode() {
+    let profile = if cfg!(debug_assertions) {
+        "debug"
+    } else {
+        "release"
+    };
+    c1_measure(true, &[1, 32, 256], &SystemClock, profile);
+    c1_measure(false, &[256], &SystemClock, profile);
 }

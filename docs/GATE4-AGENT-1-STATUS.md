@@ -1673,6 +1673,103 @@ run is not reproducible here, so it should not be quoted as one. The ledger's ex
 runs. The C-3 acceptance evidence is the serial run: `store::epoch_recovery::inventory` plus
 `store::epoch_studio::tests` at `--test-threads=1`, **167 passed, 0 failed, 3 ignored**.
 
+## Design 13.6: what C-1's structural decode saves
+
+The second of design 13's eight measurements to have numbers. Isolated workspace, release, 8
+trials, pure figures batched 64x and end-to-end figures 16x, all reported as
+`min/upper_median/max` microseconds with the raw millisecond median alongside.
+
+| shape | ops | plaintext bytes | full decode | structural decode | ratio |
+|---|---|---|---|---|---|
+| Flipnote | 1 | 1 484 | 593 us | 15 us *(raw 1 ms, 4 of 8 samples zero)* | ~40x |
+| Flipnote | 32 | 9 008 | 18 484 us | 93 us | ~199x |
+| Flipnote | 256 | 63 596 | **447 296 us** | **812 us** | **~551x** |
+| Index | 256 | 70 390 | 310 031 us | 796 us | ~389x |
+
+**A full decode of a 256-operation intent record takes about 447 milliseconds. The structural
+decode of the same bytes takes about 0.8.** That is the single largest effect measured anywhere in
+design 13 so far, and it is what C-1 removes from every metadata reader that does not need a
+projection - including the inventory's Intents arm, which is why L5 named that term as the one
+scaling with a retained branch.
+
+**The end-to-end pair agrees, which answers the concern that I/O would conceal the difference.**
+`load_epoch_intents` against `load_epoch_intents_structural` at 256 operations: 447 875 us against
+1 000 us. The read is the same on both sides and is small next to a 447 ms replay, so at this
+shape the end-to-end figure is dominated by the decode rather than by the file. At one operation
+the I/O term is at the clock's resolution floor and the comparison there says little.
+
+**Scaling.** The full decode grows faster than linearly in operation count - 1 to 32 operations
+costs 31x, and 32 to 256 a further 24x for an 8x increase, so roughly `n^1.5` over the upper
+range. The structural decode grows more slowly. So the gap *widens* with branch length, which is
+the direction that matters: the records where a full decode hurts most are exactly the ones where
+structural decode saves most.
+
+**Index is cheaper than Flipnote at the same operation count** - 310 ms against 447 ms - despite a
+slightly larger record, which is another instance of the pattern 13.7 found: encoded size does not
+predict typed-reconstruction cost.
+
+### What this measurement establishes, and what it does not
+
+**Measured:** the two production pairs, `EpochIntentState::{decode, decode_structural}` on
+identical bytes, and `ServerStore::{load_epoch_intents, load_epoch_intents_structural}` through
+the real read path. Both pairs differ only by a `replay` flag, so this is a genuine before-and-
+after rather than a reconstruction.
+
+**Not measured, and 13.6 names both:** `checked_epoch_replay_state`, which adds
+`budget.verify_record` and an intents preflight on top of the decode, and the five-family
+inventory arm. The decoder pair is the mechanism by which C-1 affects those, and the saving above
+is per intent record read, but neither end figure has been taken. **This is a deliberate narrowing
+and is recorded as one**, not an omission discovered later.
+
+**One operation is at the resolution floor:** `pure_structural_us` at ops=1 has four of eight raw
+samples reading zero. The ~40x ratio there is the least trustworthy figure in the table.
+
+**Correctness first, in the ordinary suite.** Two tests guard the measurement, and neither asserts
+any duration:
+
+- `c1_structural_and_full_decode_agree_on_everything_structural_computes` re-encodes both decoded
+  states and compares the **bytes**, which subsumes the basis fingerprint, author, entry ids,
+  envelopes, sequences and timestamps, the Prepared and Completed contents, the legacy flag and
+  the ledger. An earlier version compared five accessors and left all of that unchecked.
+- `c1_structural_and_full_decode_both_refuse_a_tampered_sequence` corrupts the last entry's
+  sequence and requires **both** decoders to refuse. Comparing two decoders' output on one valid
+  record cannot catch a structural path that stopped checking refusals - such a path agrees on
+  every valid input, runs faster, and would be *rewarded* by the timing comparison. This is the
+  store-level case; the replication crate carries the rest.
+
+### A P1 in the fixture, found by adversarial review before the numbers were quoted
+
+The first version of this measurement was of the **wrong record format**.
+`StudioOverlay::encode_vault` emits version 1, and `StudioOverlayState::decode_vault` takes a
+compatibility branch for v1 that hard-codes `prepared: None`, `completed: None`,
+`minimum_new_basis_closed_epoch: 0` and `legacy: true`. The shared fixture assembled its record
+purely by splicing encoded entries, so it was a legacy record. Three consequences, all bad:
+
+1. the oracle's Prepared, Completed and minimum-basis comparisons were comparing **constants**;
+2. the v2 header parse and `validate()` never ran, so a whole class of structural work was absent;
+3. v2 structural decode performs `checked_entries` four times against v1's two, so the reported
+   structural cost was roughly **half** a real record's and the saving was overstated.
+
+Fixed by splicing `count - 1` entries and adding the last through the real
+`StudioOverlayState::append`, which sets `legacy = false`. The total is unchanged, so every
+existing consumer of that fixture keeps its assertions, and the record is now the format
+production writes. The agreement test asserts the version byte directly, so a silent revert fails
+loudly instead of producing plausible numbers.
+
+### A defect this found in 13.7's reporting
+
+`Spread::resolved_for_ratio` tested the **per-unit** figure against one clock tick. For a batch of
+64 that demands a 64 ms batch, so a well-resolved 12 ms batch - twelve ticks, among the best
+figures in a run - divided down to 187 us and was reported **"unresolved"**. Resolution is a
+property of the clock, so the predicate now tests the raw sample, and `Spread` carries the raw
+upper median and prints it.
+
+**Consequence: some `deferrable_fraction_of_measured=unresolved` entries in the 13.7 tables above
+were suppressed when they were sound.** Those tables are from runs made under the old predicate
+and are marked accordingly; 13.7 is re-run in the next checkpoint rather than being patched by
+arithmetic here. `a_well_resolved_batch_is_not_reported_as_unresolved` pins all three rules this
+predicate has had wrong in sequence: the raw-sum rule, the zero-median rule and the per-unit rule.
+
 ## Design 13.7, partially delivered: the first measurement in this design
 
 Until now every measurement obligation in design 13 was outstanding and the ledger said so. This

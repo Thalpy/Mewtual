@@ -60,6 +60,7 @@
 //! custody, and not a before/after speedup.
 
 use super::*;
+use crate::store::measure::Spread;
 use catcoms_replication::studio::{FlipnoteOp, StudioEpoch, StudioRecovery, StudioTarget};
 use catcoms_replication::DomainOp;
 use catcoms_rt::SystemClock;
@@ -74,76 +75,6 @@ const REFERENCE_COVERAGE: EpochInventoryCoverage =
 const REPETITIONS: usize = 64;
 /// Complete scans, so the single-sample phases are summed rather than reported from one tick.
 const TRIALS: usize = 8;
-
-/// Min, **upper median**, max of a sample set, converted to microseconds per unit of work.
-///
-/// A single summary figure carries no information about whether a difference between two cases is
-/// real, and re-measuring identical Recovery fixtures moved 36%, 39% and 86% between runs. The
-/// spread is what makes that visible.
-///
-/// **The middle figure is the upper median**, `sorted[len / 2]`, not an interpolated one: for
-/// eight samples it is the fifth sorted value. For `0,0,0,0,1000,1000,1000,1000` it reports
-/// 1000, where an arithmetic midpoint would be 500. That convention is deliberate - it never
-/// invents a value the clock did not produce - but it must be labelled, because it is not what
-/// "median" unqualified would mean.
-///
-/// `zero_samples` is carried for the same reason: a printed `0/1000/1000` is compatible with
-/// several different zero counts, so the spread alone cannot say how much of the phase fell
-/// below the clock's resolution. The count can.
-///
-/// `per` is how many units of work one sample covers: 1 for a phase timed once per trial,
-/// `REPETITIONS` for the batched validation - in which case each sample is itself a batch mean,
-/// and this is a spread *of means*, not of individual timings.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-struct Spread {
-    min_us: u128,
-    upper_median_us: u128,
-    max_us: u128,
-    samples: usize,
-    /// How many raw samples read exactly zero milliseconds.
-    zero_samples: usize,
-    /// Sum of the raw millisecond samples, so a spread of all-zeros is visibly "below the
-    /// clock's resolution" rather than "free".
-    raw_total_ms: u64,
-}
-
-impl Spread {
-    fn of(samples: &[u64], per: u128) -> Self {
-        if samples.is_empty() {
-            return Self::default();
-        }
-        let mut us: Vec<u128> = samples.iter().map(|ms| *ms as u128 * 1_000 / per).collect();
-        us.sort_unstable();
-        Self {
-            min_us: us[0],
-            upper_median_us: us[us.len() / 2],
-            max_us: us[us.len() - 1],
-            samples: us.len(),
-            zero_samples: samples.iter().filter(|ms| **ms == 0).count(),
-            raw_total_ms: samples.iter().sum(),
-        }
-    }
-    /// Resolved *well enough to take a ratio from*, which is a stronger condition than nonzero.
-    ///
-    /// A phase whose upper median is a single clock tick is not measured to better than 100%:
-    /// the true value lies somewhere in one whole millisecond. Requiring strictly more than one
-    /// tick is what makes the reported fraction mean anything, and it is the condition the
-    /// status ledger states - the earlier implementation only rejected a median of zero, which
-    /// left one-tick medians producing confident-looking fractions.
-    fn resolved_for_ratio(&self) -> bool {
-        self.upper_median_us > 1_000
-    }
-}
-
-impl std::fmt::Display for Spread {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "{}/{}/{}(z{})",
-            self.min_us, self.upper_median_us, self.max_us, self.zero_samples
-        )
-    }
-}
 
 /// One record's per-phase cost, as retained samples rather than a running sum.
 #[derive(Debug, Clone, Default)]
@@ -499,6 +430,10 @@ fn run_interleaved(cases: &mut [Case], clock: &dyn catcoms_rt::Clock) {
 }
 
 /// Build a case around a store that has already been populated.
+///
+/// Every parameter is one axis of the fixture matrix these benchmarks sweep, so collapsing them
+/// into a struct would only move the same eight values one line up at each call site.
+#[allow(clippy::too_many_arguments)]
 fn case(
     label: impl Into<String>,
     root: tempfile::TempDir,
