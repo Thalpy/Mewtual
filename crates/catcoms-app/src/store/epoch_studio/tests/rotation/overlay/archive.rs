@@ -1346,6 +1346,94 @@ fn a_release_that_fails_after_the_unlink_still_closes_both_budgets() {
     );
 }
 
+/// I-4 for the archive **writer**, all three of its shapes.
+///
+/// Agent 1's N17 ledger is a matrix of writer obligations, not of cursor tests: nothing about a
+/// family reaches `check_not_invalidated`, which compares only the captured token against the
+/// store's. So what needs asserting per family is that each mutating shape rotates, and this
+/// family has three. Release was already covered; the writer's two were not.
+///
+/// The failed attempt is the shape that actually tests I-4's *ordering*. A writer that rotated
+/// after a successful write would satisfy the other two assertions and still leave a scan captured
+/// before a failed write believing it was current, which is the under-rotation I-4 exists to
+/// forbid. The refusal is injected before the replacement, so no bytes are written and the only
+/// thing that can have moved is the generation.
+#[test]
+fn every_archive_write_shape_rotates_the_inventory_generation() {
+    let root = tempfile::tempdir().unwrap();
+    let f = Fixture::new(true);
+    let mut store = open(root.path());
+    let (close, basis) = closing(&f, &mut store);
+    frame_branch(&f, &mut store, &close, &basis);
+
+    // Shape 1: the fresh replacement.
+    let before = store.inventory_generation();
+    let archive = preserve(&f, &mut store).expect("preserve");
+    assert!(
+        !std::sync::Arc::ptr_eq(&before, &store.inventory_generation()),
+        "the first archive replacement did not rotate the inventory generation"
+    );
+
+    // Shape 2: the exact-retry sync. It changes no bytes, and that is exactly why it must still
+    // rotate: the existing code treats an unchanged-file flush as invalidating a captured
+    // inventory, and over-rotation is the safe direction.
+    let before = store.inventory_generation();
+    preserve(&f, &mut store).expect("exact retry");
+    assert!(
+        !std::sync::Arc::ptr_eq(&before, &store.inventory_generation()),
+        "the exact-retry flush did not rotate the inventory generation; a sync repair is still a \
+         mutation for I-4's purposes"
+    );
+
+    // Shape 3: a write that fails before placing any bytes. Rotation must already have happened.
+    let scope = crate::store::epoch_draft_archive::scope_bytes(SERVER, &f.logical).unwrap();
+    let durable = store
+        .read_scoped_draft_archive_plain(&scope)
+        .unwrap()
+        .expect("the archive is on disk")
+        .physical_bytes;
+    let before = store.inventory_generation();
+    {
+        let mut refuse = |_t: WriteTag, _p: &std::path::Path, _l: u64| {
+            AfterIntercept::Fail(AppError::Io(
+                "injected refusal before the archive sync".into(),
+            ))
+        };
+        let mut hooks = WriteHooks::Hooked {
+            before: None,
+            before_sync: Some(&mut refuse),
+            before_unlink: None,
+            after: None,
+        };
+        let mut b = budget(&mut store, &f);
+        let failed = store.write_studio_draft_archive_with_io(
+            SERVER,
+            &f.logical,
+            &archive,
+            &mut rng(),
+            &mut b.storage,
+            &mut b.intents,
+            &mut hooks,
+        );
+        assert!(failed.is_err(), "the injected refusal must fail the call");
+    }
+    assert_eq!(
+        store
+            .read_scoped_draft_archive_plain(&scope)
+            .unwrap()
+            .expect("the record survives a refused flush")
+            .physical_bytes,
+        durable,
+        "the refused attempt must not have changed the record, or this is not the failed shape"
+    );
+    assert!(
+        !std::sync::Arc::ptr_eq(&before, &store.inventory_generation()),
+        "an archive write that failed before touching disk left the inventory generation intact, \
+         so a scan captured before it still believes it is current: I-4 requires rotation before \
+         the first possible I/O, not after a success"
+    );
+}
+
 /// I-4 for the destructive path: release must rotate `inventory_generation`.
 ///
 /// This is what stops a reference scan that observed the pre-release vault from later installing

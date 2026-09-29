@@ -21,12 +21,26 @@ Review preamble: [preamble 2](GATE4-REVIEW-PREAMBLES.md#review-2-manualprovision
 | Revision 6 base | `f2257b018d396a835529742c40d4b282bbc127d9` |
 | Revision 6 head, **accepted** | `a6d8170f6ab1f0d46287808fc8051ac2a387521c` |
 | Revision 7 head SHA | `7d98baf`. Refinements only; no reviewed decision changes. |
-| Working checkout | main repository tree. Revision 2 was committed on branch `gate4-agent1-runtime`, which a parallel Agent 1 session had checked out; the user asked for no branch change. The design content is branch-independent, but Agent 4 should expect to move these two documents when the branches are integrated. No separate worktree yet; one is taken before any production edit. |
-| Production code | **None written.** |
-| Tests added | **None.** |
-| Cargo commands executed | **None.** No local or CI run exists for this scope. |
-| Measurements | **None.** Every number in the design is an existing bound read from source, not an observation. |
+| Working checkout | `gate4-agent1-runtime`, main repository tree, by the user's decision that everything goes on one branch for now. **No separate worktree**: the shared `target` is ~138 GB and a second one was judged unaffordable at the time. What replaced it is a private `CARGO_TARGET_DIR` at `M:/catcoms-agent2-target`, taken because the other agents' test binaries hold `catcoms_app-*.exe` open and fail the link. Agent 4 should expect to move these two documents at integration. |
+| Production code | **Written, for the archive family only.** The payload codec, the reference collector, the record writer with its accounting and sub-cap, the `archive_bytes` tally, and the release path. Nothing else in this scope exists. |
+| Tests added | 26 in `epoch_studio::tests::rotation::overlay::archive`, 10 in `catcoms-replication`'s archive module, 2 in `epoch_intents::retirement`. |
+| Cargo commands executed | Yes; see the mutation ledgers below. **Every run used `RUST_MIN_STACK=33554432`**, a workaround for a stack regression at HEAD and not a clean default-stack result. |
+| Measurements | Still **none**. Every number in the design remains an existing bound read from source. The mutation ledgers are executed evidence, not measurements. |
+| CI status | **None.** No reviewed commit has an attached GitHub check; all pass/fail evidence in this document is reported local evidence. |
 | Native commands registered | **None by Agent 2.** `studio_overlay_read` remains the only registered overlay command, unchanged. |
+
+**This table was stale and Agent 1 caught it.** It said production code: none, tests: none, cargo
+commands: none, while `0287910`, `6e1551c`, `47bad73`, `2dba8fa`, `28bb73d` and `466a372` were all
+already committed. It had not been revised since the design was accepted, because the implementation
+progress was being appended further down the document instead. Two rows are worth separating
+carefully, because they are different claims and only one was wrong:
+
+- The **P1 to P4 rows** below saying "designed, accepted, unimplemented" are **correct**. The
+  manual lifecycle, the hold-variant mapping, the native results and the tenure contract are not
+  the archive plumbing, and none of them exists.
+- **P5 remains FALSE.** Correcting this table is not permission to promote it. `studio_overlay_save`
+  stays unregistered until the required implementation reviews are complete and this document says
+  so explicitly.
 
 ## Agent 1's registration prerequisites (its section 12.3)
 

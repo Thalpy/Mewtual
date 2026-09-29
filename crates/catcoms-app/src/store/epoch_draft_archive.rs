@@ -10,9 +10,12 @@
 //! This module began as Agent 1's seam, landed ahead of Agent 2's implementation so that all
 //! three agents rebase onto one enum variant rather than each adding the same conceptual arm.
 //! The seam itself decoded nothing and failed every reference scan closed; the collector below
-//! narrows that refusal to an archive it cannot read, and the writer below persists one. Still
-//! to come on top of this: the release path and the disposal transaction, which is the writer's
-//! first production caller. A vault with no archive file behaves exactly as it did before.
+//! narrows that refusal to an archive it cannot read, the writer below persists one, and the
+//! release below is the only thing that destroys one. Still to come on top of this: the disposal
+//! transaction, which is the writer's first **production** caller - until it lands, both mutating
+//! entry points are exercised only by their own tests, and the sole production consumer of this
+//! family is the inventory arm's reference collection. A vault with no archive file behaves
+//! exactly as it did before.
 
 use std::collections::BTreeSet;
 use std::io::Read;
@@ -250,10 +253,11 @@ impl ServerStore {
         intents.begin_write();
         self.intent_generation = Arc::new(());
         // I-4 and requirement 3 together: rotate before touching disk, and perform the store's
-        // own replacement rather than a caller's. Both this replacement and the exact-retry
-        // flush above are covered. What remains Agent 2's obligation is
-        // `release_studio_draft_archive_with_io`, which does not exist yet and will unlink an
-        // inventoried record when it does.
+        // own replacement rather than a caller's. All three of this family's mutating shapes are
+        // covered: this replacement, the exact-retry flush above, and the unlink in
+        // `release_studio_draft_archive_with_io` below. Each is asserted to rotate by
+        // `every_archive_write_shape_rotates_the_inventory_generation` and
+        // `release_rotates_the_inventory_generation_so_a_scan_cannot_overtake_it`.
         let path = self.epoch_draft_archive_path(&scope);
         let framed = frame(&sealed);
         let mutation = self.epoch_mutation_guard();
