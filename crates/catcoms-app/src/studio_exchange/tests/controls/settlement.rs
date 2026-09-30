@@ -96,3 +96,88 @@ async fn studio_settlement_events_follow_writes_not_refresh_reads_and_do_not_hol
     actor.shutdown().await;
     task.await.unwrap();
 }
+
+/// The destructive lifecycle actions request a refresh, and the read-only ones do not.
+///
+/// Membership of the receiver's `changing` list is the whole guard, and it had none: a review found
+/// that nothing named `DisposeOverlay`, `ReleaseOverlayArchive` or `FinishOverlayArchive` as
+/// emitters, so the list could have lost any of them silently. A renderer that got no refresh after
+/// a release would keep showing an archive that is gone.
+///
+/// **Every action here FAILS, and that is the point.** The notice follows the action, not its
+/// outcome, because the case that matters is the one where a write may already have landed - a
+/// release whose unlink succeeded and whose parent sync did not. An implementation that emitted
+/// only on success would be silent exactly when the renderer is most wrong.
+///
+/// The read-only half is not decoration: without it, a receiver that emitted for everything would
+/// satisfy the first half and be just as broken.
+#[tokio::test]
+async fn destructive_overlay_actions_request_a_refresh_even_when_they_refuse() {
+    use crate::store::{StudioDisposalRequestMode, StudioOverlayDisposalRequest};
+    use crate::studio::{StudioArchiveReleaseRequest, StudioReleaseConfirmation};
+
+    let p = Pair::new().await;
+    let store = Arc::new(Mutex::new(Some(p.a_store)));
+    let (actor, mut events, task) = crate::spawn(p.alice);
+
+    fn drain(events: &mut tokio::sync::mpsc::Receiver<crate::actor::TracedEvent>) -> Vec<S> {
+        let mut states = Vec::new();
+        while let Ok(ev) = events.try_recv() {
+            if let AppEvent::SettlementChanged { state, .. } = ev.event {
+                states.push(state);
+            }
+        }
+        states
+    }
+
+    // This vault has no branch and no archive, so all three refuse. None of them may be silent.
+    for (name, action) in [
+        (
+            "dispose",
+            Action::DisposeOverlay(Box::new(StudioOverlayDisposalRequest {
+                branch: [1; 32],
+                content: [2; 32],
+                accepted: 1,
+                mode: StudioDisposalRequestMode::Preserve,
+            })),
+        ),
+        (
+            "release",
+            Action::ReleaseOverlayArchive(Box::new(StudioArchiveReleaseRequest {
+                archive: [3; 32],
+                confirmation: StudioReleaseConfirmation::parse(StudioReleaseConfirmation::TOKEN)
+                    .unwrap(),
+            })),
+        ),
+    ] {
+        assert!(
+            invoke(&actor, &store, action).await.is_err(),
+            "{name} must refuse on an empty vault, or this test is measuring something else"
+        );
+        assert_eq!(actor.member_count().await, 2);
+        assert_eq!(
+            drain(&mut events),
+            vec![S::RefreshRequired],
+            "{name} must request a refresh even when it refuses"
+        );
+    }
+
+    // And the read-only members of the same family stay silent, refusal or not.
+    invoke(&actor, &store, Action::OverlayLifecycle).await.unwrap();
+    assert_eq!(actor.member_count().await, 2);
+    assert!(
+        drain(&mut events).is_empty(),
+        "classifying a draft changes nothing and must not ask for a refresh"
+    );
+    assert!(invoke(&actor, &store, Action::ReadOverlayArchive)
+        .await
+        .is_err());
+    assert_eq!(actor.member_count().await, 2);
+    assert!(
+        drain(&mut events).is_empty(),
+        "a failed read changes nothing either"
+    );
+
+    actor.shutdown().await;
+    task.await.unwrap();
+}
