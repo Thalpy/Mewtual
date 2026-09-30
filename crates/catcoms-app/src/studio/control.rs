@@ -71,6 +71,14 @@ pub enum StudioControlAction {
     /// disposal can ever have something to point at.
     ArchiveOverlay,
     FinishOverlayArchive(Box<StudioPreparedInspection>),
+    /// Hand the caller the canonical payload of the **live** draft without writing anything.
+    ///
+    /// The same rebuild as archiving, deliberately: design 5.3 requires export and the archive to
+    /// share one serializer, and the reason is that a draft which cannot be replayed must still be
+    /// exportable. Two serializers would drift, and the one that drifted would be the one a user
+    /// reaches for when their work will not open.
+    ExportOverlay,
+    FinishOverlayExport(Box<StudioPreparedInspection>),
     /// Read the preserved archive back. Never a basis, a source or an owner claim: reading evidence
     /// cannot turn it into authority.
     ReadOverlayArchive,
@@ -237,6 +245,13 @@ pub enum StudioControlResponse {
         /// the branch was already unreplayable and the archive records that it was.
         replayable: Result<(), String>,
     },
+    /// The live draft's canonical payload. **Nothing was written**, which is why this carries no
+    /// physical size: there is no record to have one.
+    OverlayExport {
+        archive: Box<StudioDraftArchive>,
+        id: [u8; 32],
+        replayable: Result<(), String>,
+    },
     /// The decoded archive and its identity. Reading is not authority.
     OverlayArchive {
         archive: Box<StudioDraftArchive>,
@@ -275,6 +290,7 @@ impl std::fmt::Debug for StudioControlResponse {
             Self::OverlayInspection(_) => "OverlayInspection { .. }",
             Self::OverlayLifecycle(_) => "OverlayLifecycle { .. }",
             Self::OverlayArchived { .. } => "OverlayArchived { .. }",
+            Self::OverlayExport { .. } => "OverlayExport { .. }",
             Self::OverlayArchive { .. } => "OverlayArchive { .. }",
             Self::OverlayArchiveReleased => "OverlayArchiveReleased",
             Self::OverlayDisposed(_) => "OverlayDisposed { .. }",
@@ -388,6 +404,33 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
             StudioControlAction::FinishOverlayArchive(prepared) => {
                 return self.finish_studio_archive(store, server, target, *prepared);
             }
+            StudioControlAction::ExportOverlay => {
+                return self
+                    .begin_studio_inspection(store, server, target)
+                    .map(StudioControlResponse::OverlayPreparation)
+            }
+            // Read-only: no budget, no registry write context, no record. Export is the one member
+            // of this family that changes nothing at all.
+            StudioControlAction::FinishOverlayExport(prepared) => {
+                let inspection = self.finish_studio_inspection(store, server, target, *prepared)?;
+                let replayable = inspection.replayable();
+                let archive = inspection.archive()?;
+                let id = archive.archive_id().map_err(invalid)?;
+                // Decoded back from its own bytes rather than cloned. `StudioDraftArchive` is
+                // deliberately not `Clone` - copies of evidence invite treating it as a live
+                // object - and the round trip is the one property an export actually owes its
+                // caller: what is handed out is what can be read back.
+                let payload = archive.encode().map_err(invalid)?;
+                let archive = StudioDraftArchive::decode(&payload).map_err(invalid)?;
+                if archive.archive_id().map_err(invalid)? != id {
+                    return Err(invalid("the exported payload does not round-trip"));
+                }
+                return Ok(StudioControlResponse::OverlayExport {
+                    archive: Box::new(archive),
+                    id,
+                    replayable,
+                });
+            }
             action => StudioControlRequest { target, action },
         };
         self.sync
@@ -409,8 +452,12 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
                     StudioControlAction::InspectOverlay
                     | StudioControlAction::FinishOverlayInspection(_)
                     | StudioControlAction::ArchiveOverlay
-                    | StudioControlAction::FinishOverlayArchive(_) => {
-                        unreachable!("inspection and archiving route before recovery decoding")
+                    | StudioControlAction::FinishOverlayArchive(_)
+                    | StudioControlAction::ExportOverlay
+                    | StudioControlAction::FinishOverlayExport(_) => {
+                        unreachable!(
+                            "inspection, archiving and export route before recovery decoding"
+                        )
                     }
                     // Read-only. It deliberately does NOT rebuild the branch: the whole point is to
                     // tell a caller what it is looking at cheaply enough to do before deciding

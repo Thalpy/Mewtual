@@ -12,7 +12,8 @@ use catcoms_app::store::{StudioDisposalRequestMode, StudioOverlayDisposalRequest
 // StudioDiscardConfirmation, StudioOverlayProvenance) arrive through the parent's `types::*`.
 use catcoms_app::studio::{
     StudioArchiveReleaseRequest, StudioControlAction as Action, StudioControlRequest,
-    StudioControlResponse as Response, StudioOverlayLifecycle, StudioReleaseConfirmation,
+    StudioControlResponse as Response, StudioOverlayLifecycle, StudioPreparedInspection,
+    StudioReleaseConfirmation,
 };
 use recovery::{named_hash, target};
 
@@ -63,17 +64,33 @@ pub(crate) async fn studio_overlay_archive_export(
         server,
         target(&channel, object.as_deref())?,
         |archive, id, physical_bytes| {
-            use base64::Engine;
-            let bytes = archive.encode().map_err(|e| e.to_string())?;
-            let mut value = archive_value(&archive, id, physical_bytes)?;
+            let mut value = with_payload(archive_value(&archive, id, physical_bytes)?, &archive)?;
             value["kind"] = "overlayArchiveExport".into();
-            value["format"] = "p1-studio-draft-archive-v1".into();
-            value["bytes"] = bytes.len().into();
-            value["bytesB64"] = base64::engine::general_purpose::STANDARD
-                .encode(&bytes)
-                .into();
             bounded_view(value)
         },
+    )
+    .await
+}
+
+/// Hand the caller the canonical payload of the **live** draft, writing nothing.
+///
+/// The same two visits and the same rebuild as archiving. That sharing is the point rather than an
+/// economy: a draft that cannot be replayed must still be exportable, and two serializers would
+/// drift, with the one that drifted being the one a user reaches for when their work will not open.
+#[tauri::command]
+pub(crate) async fn studio_overlay_export(
+    state: State<'_, AppState>,
+    server: u64,
+    channel: String,
+    object: Option<String>,
+) -> Result<Value, String> {
+    two_visit_archive(
+        &state,
+        server,
+        target(&channel, object.as_deref())?,
+        Action::ExportOverlay,
+        Action::FinishOverlayExport,
+        "overlay export",
     )
     .await
 }
@@ -91,39 +108,60 @@ pub(crate) async fn studio_overlay_archive(
     channel: String,
     object: Option<String>,
 ) -> Result<Value, String> {
-    let target = target(&channel, object.as_deref())?;
-    let context = InvokeContext::new(&state, server, Some(target)).await?;
-    let job = invoke_with_context(
+    two_visit_archive(
         &state,
+        server,
+        target(&channel, object.as_deref())?,
+        Action::ArchiveOverlay,
+        Action::FinishOverlayArchive,
+        "overlay archive",
+    )
+    .await
+}
+
+/// The shape both archive and export take: begin, rebuild detached, finish. One body rather than
+/// two near-copies, because the sharing is the contract - they must produce the same payload.
+async fn two_visit_archive(
+    state: &AppState,
+    server: u64,
+    target: StudioTarget,
+    begin: Action,
+    finish: impl FnOnce(Box<StudioPreparedInspection>) -> Action,
+    what: &str,
+) -> Result<Value, String> {
+    let context = InvokeContext::new(state, server, Some(target)).await?;
+    let mismatched = || format!("mismatched {what} response");
+    let job = invoke_with_context(
+        state,
         &context,
         InvokeRequest::Control(StudioControlRequest {
             target,
-            action: Action::ArchiveOverlay,
+            action: begin,
         }),
         |response| match response {
             InvokeResponse::Control(Response::OverlayPreparation(job)) => Ok(job),
-            _ => Err("mismatched overlay archive response".into()),
+            _ => Err(mismatched()),
         },
     )
     .await?;
     let mut cancellation = context.cancellation.clone();
     // The archive rebuild, not the draft rebuild: typed reconstruction is attempted and labelled
-    // here rather than required, so a branch nobody can replay can still be preserved.
+    // here rather than required, so a branch nobody can replay can still be preserved or exported.
     let prepared = tokio::select! {
         biased;
-        _ = cancellation.cancelled() => return Err("overlay archive cancelled".into()),
+        _ = cancellation.cancelled() => return Err(format!("{what} cancelled")),
         result = job.rebuild_for_archive() => result.map_err(|e| e.to_string())?,
     };
     invoke_with_context(
-        &state,
+        state,
         &context,
         InvokeRequest::Control(StudioControlRequest {
             target,
-            action: Action::FinishOverlayArchive(Box::new(prepared)),
+            action: finish(Box::new(prepared)),
         }),
         |response| match response {
             InvokeResponse::Control(response) => response_value(response),
-            _ => Err("mismatched overlay archive response".into()),
+            _ => Err(mismatched()),
         },
     )
     .await
@@ -350,6 +388,19 @@ fn archive_value(
     )
 }
 
+/// Attach the canonical bytes. One place, so an export of a live draft and an export of a stored
+/// archive cannot disagree about the format they name.
+fn with_payload(mut value: Value, archive: &StudioDraftArchive) -> Result<Value, String> {
+    use base64::Engine;
+    let bytes = archive.encode().map_err(|e| e.to_string())?;
+    value["format"] = "p1-studio-draft-archive-v1".into();
+    value["bytes"] = bytes.len().into();
+    value["bytesB64"] = base64::engine::general_purpose::STANDARD
+        .encode(&bytes)
+        .into();
+    Ok(value)
+}
+
 /// Every branch-scoped fact carries the branch it is about.
 ///
 /// `archive` and `disposed` routinely describe *other* generations than `branch`: an archive
@@ -407,6 +458,23 @@ pub(super) fn response_value(response: Response) -> Result<Value, String> {
                 Ok(()) => Value::Null,
                 Err(reason) => reason.into(),
             };
+            value
+        }
+        // Nothing was written, so there is no physical size to report and the view must not invent
+        // one. The payload is the point.
+        Response::OverlayExport {
+            archive,
+            id,
+            replayable,
+        } => {
+            let mut value = with_payload(archive_value(&archive, id, 0)?, &archive)?;
+            value["kind"] = "overlayExport".into();
+            value["preserved"] = false.into();
+            value["notReplayable"] = match replayable {
+                Ok(()) => Value::Null,
+                Err(reason) => reason.into(),
+            };
+            value.as_object_mut().unwrap().remove("physicalBytes");
             value
         }
         Response::OverlayArchive {

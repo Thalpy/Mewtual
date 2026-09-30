@@ -296,6 +296,7 @@ pub(super) fn response_value(response: Response) -> Result<Value, String> {
         // so a new response still has to choose a home here.
         response @ (Response::OverlayLifecycle(_)
         | Response::OverlayArchived { .. }
+        | Response::OverlayExport { .. }
         | Response::OverlayArchive { .. }
         | Response::OverlayArchiveReleased
         | Response::OverlayDisposed(_)) => return super::lifecycle::response_value(response),

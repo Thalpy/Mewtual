@@ -328,6 +328,56 @@ async fn the_preserving_lifecycle_runs_end_to_end_through_the_boundary() {
     f.shutdown().await;
 }
 
+/// Export writes nothing, and it produces the **same payload** the archive would.
+///
+/// That sharing is the design's requirement, not an economy: a draft that cannot be replayed must
+/// still be exportable, and two serializers would drift, with the drifted one being what a user
+/// reaches for when their work will not open. Comparing the bytes is the only thing that holds
+/// them together.
+#[tokio::test]
+async fn exporting_writes_nothing_and_produces_the_payload_the_archive_would() {
+    let f = InspectionFixture::new(true).await;
+    let state = state(&f).await;
+    let before = f.records();
+
+    let exported = two_visit(
+        &state,
+        f.target,
+        Action::ExportOverlay,
+        Action::FinishOverlayExport,
+    )
+    .await
+    .expect("exporting a live draft");
+    assert_eq!(exported["kind"], "overlayExport");
+    assert_eq!(exported["preserved"], false);
+    assert_eq!(exported["format"], "p1-studio-draft-archive-v1");
+    assert!(exported["bytes"].as_u64().unwrap() > 0);
+    assert!(
+        exported.get("physicalBytes").is_none(),
+        "nothing was written, so there is no physical size to report"
+    );
+    assert_eq!(
+        f.records(),
+        before,
+        "export is the one member of this family that changes nothing"
+    );
+
+    // Now archive, and demand byte equality with what export just handed out.
+    let written = archive(&state, f.target).await.unwrap();
+    assert_eq!(written["archive"], exported["archive"]);
+    let stored = invoke_archive(&state, fixture::SERVER, f.target, |archive, id, bytes| {
+        let value = super::with_payload(super::archive_value(&archive, id, bytes)?, &archive)?;
+        Ok(value)
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        stored["bytesB64"], exported["bytesB64"],
+        "the live export and the stored archive must be the same bytes"
+    );
+    f.shutdown().await;
+}
+
 /// Release destroys the archive, and only when named exactly.
 #[tokio::test]
 async fn releasing_destroys_only_the_archive_it_was_shown() {
@@ -534,35 +584,22 @@ async fn a_confirmed_discard_ends_the_branch_and_says_so_terminally() {
     f.shutdown().await;
 }
 
-/// The two-visit archive, one layer in. The detached rebuild and both custody visits are the real
-/// ones; only the `State` wrapper the `#[tauri::command]` needs is absent.
+/// The real two-visit body: the detached rebuild and both custody visits are the production ones,
+/// and only the `State` wrapper the `#[tauri::command]` needs is absent.
+async fn two_visit(
+    state: &AppState,
+    target: StudioTarget,
+    begin: Action,
+    finish: impl FnOnce(Box<StudioPreparedInspection>) -> Action,
+) -> Result<Value, String> {
+    two_visit_archive(state, fixture::SERVER, target, begin, finish, "test").await
+}
 async fn archive(state: &AppState, target: StudioTarget) -> Result<Value, String> {
-    let context = InvokeContext::new(state, fixture::SERVER, Some(target)).await?;
-    let job = invoke_with_context(
+    two_visit(
         state,
-        &context,
-        InvokeRequest::Control(StudioControlRequest {
-            target,
-            action: Action::ArchiveOverlay,
-        }),
-        |response| match response {
-            InvokeResponse::Control(Response::OverlayPreparation(job)) => Ok(job),
-            _ => Err("mismatched overlay archive response".into()),
-        },
-    )
-    .await?;
-    let prepared = job.rebuild_for_archive().await.map_err(|e| e.to_string())?;
-    invoke_with_context(
-        state,
-        &context,
-        InvokeRequest::Control(StudioControlRequest {
-            target,
-            action: Action::FinishOverlayArchive(Box::new(prepared)),
-        }),
-        |response| match response {
-            InvokeResponse::Control(response) => super::response_value(response),
-            _ => Err("mismatched overlay archive response".into()),
-        },
+        target,
+        Action::ArchiveOverlay,
+        Action::FinishOverlayArchive,
     )
     .await
 }
