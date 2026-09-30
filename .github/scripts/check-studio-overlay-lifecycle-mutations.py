@@ -34,7 +34,12 @@ MUTATIONS = [
         "release-identity", "catcoms-app", APP_TESTS,
         f"{APP}/epoch_draft_archive.rs",
         "if archive.archive_id().map_err(invalid)? != expected_archive {",
-        "if false {",
+        # Inverted rather than short-circuited. `if false {` drops the only use of both `archive`
+        # and `expected_archive`, and under the `-D warnings` this script now sets, two unused
+        # variables are compile ERRORS. A mutant that does not build proves nothing about the guard
+        # it names, and the harness correctly refused to call that a detection. Inverting keeps both
+        # bindings live and negates exactly the identity comparison. Found by Agent 3 in CI.
+        "if archive.archive_id().map_err(invalid)? == expected_archive {",
         "archive::release_refuses_an_archive_other_than_the_one_it_names",
         "release must refuse a content it was not asked to destroy",
     ),
@@ -125,6 +130,14 @@ def run(package, prefix, test):
     env = os.environ.copy()
     env["CARGO_INCREMENTAL"] = "0"
     env["RUST_MIN_STACK"] = "33554432"
+    # Set here rather than inherited, because inheriting it is exactly what went wrong.
+    #
+    # The workflow sets `-D warnings` at job level, so CI built every mutant with it while a local
+    # run built them without. One mutant then behaved differently in the two places: it left two
+    # bindings unused, which is a warning locally and an error in CI, so it passed here and failed
+    # there. A harness whose result depends on the caller's environment is not evidence, and the
+    # divergence let this script report nine detections while the job was red.
+    env["RUSTFLAGS"] = "-D warnings"
     if os.name == "nt":
         env["_LINK_"] = "/DEBUG:NONE"
     command = [

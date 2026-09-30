@@ -640,3 +640,88 @@ fn validate_refuses_a_zero_generation_in_a_crafted_record() {
         "generation 0 must be refused: every branch is at least the first"
     );
 }
+
+/// A branch's content identity is a property of the **branch**, not of the document around it.
+///
+/// This is the regression for a real defect. `branch_content` hashed the whole intent ledger, so an
+/// ordinary intent belonging to nobody's branch changed the identity of a branch nobody had
+/// touched. The consequence was specific and user-facing: an archive written at one moment stopped
+/// satisfying D4 at the next, and a preserving disposal refused with "the preserved archive is for
+/// a different branch" while holding an archive of exactly that branch. The only way out was to
+/// release verified evidence and archive again.
+///
+/// The unrelated intent is added to the SAME ledger and deliberately never appended to the branch,
+/// which is the shape an ordinary Save or a copy into the reopened document produces.
+#[test]
+fn an_unrelated_intent_does_not_change_the_branchs_content_identity() {
+    let mut f = Fixture::new(true);
+    let (state, mut ledger, _ordered, _basis) = branch(&mut f, 2);
+    let before = state.branch_content(&ledger).unwrap();
+
+    let stranger = ledger
+        .prepare(
+            f.owner.device_id(),
+            f.domain(f.title_body("not the branch")),
+        )
+        .unwrap();
+    assert!(
+        !state.overlay().unwrap().contains(&stranger),
+        "the intent must be outside the branch, or this proves nothing"
+    );
+
+    assert_eq!(
+        state.branch_content(&ledger).unwrap(),
+        before,
+        "an intent the branch does not hold must not change the branch's content identity"
+    );
+
+    // And the value still works where it is actually spent: a disposal carrying the identity read
+    // BEFORE the unrelated intent landed must still be accepted afterwards. This is the half that
+    // was broken, and it is the half a user hits.
+    let (after, _removed) = state
+        .dispose(
+            &ledger,
+            StudioDisposalDecision::Discard(confirmation()),
+            before,
+            1,
+            1,
+        )
+        .expect("a disposal must not be refused because the document moved around the branch");
+    assert!(after.overlay().is_none());
+}
+
+/// The complement: changing the BRANCH does change its content identity.
+///
+/// Without this the test above would be satisfied by a constant, and "content never changes" is a
+/// far worse bug than the one being fixed - it is what lets a disposal destroy work the user never
+/// saw.
+#[test]
+fn appending_to_the_branch_does_change_its_content_identity() {
+    let mut f = Fixture::new(true);
+    let (state, mut ledger, _ordered, basis) = branch(&mut f, 2);
+    let before = state.branch_content(&ledger).unwrap();
+
+    let id = ledger
+        .prepare(f.owner.device_id(), f.domain(f.title_body("a third entry")))
+        .unwrap();
+    let mut grown = state;
+    grown.append(&basis, &ledger, id, 9000).unwrap();
+
+    assert_ne!(
+        grown.branch_content(&ledger).unwrap(),
+        before,
+        "an entry the branch now holds must change its content identity"
+    );
+    assert!(
+        grown
+            .dispose(
+                &ledger,
+                StudioDisposalDecision::Discard(confirmation()),
+                before,
+                1,
+                1,
+            )
+            .is_err(),
+        "and a disposal naming the identity from before that entry must be refused"
+    );
+}
