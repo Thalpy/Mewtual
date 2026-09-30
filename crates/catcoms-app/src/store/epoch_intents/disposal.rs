@@ -12,7 +12,8 @@
 //! direction that matters: evidence first, removal second.
 use catcoms_mls::{MlsDevice, ServerGroup};
 use catcoms_replication::studio::{
-    StudioDiscardConfirmation, StudioDisposalDecision, StudioOverlayDisposal, StudioTarget,
+    StudioDiscardConfirmation, StudioDisposalDecision, StudioDisposalMode, StudioOverlayDisposal,
+    StudioTarget,
 };
 use catcoms_replication::LogicalDocument;
 
@@ -73,7 +74,7 @@ impl ServerStore {
         target: StudioTarget,
         group: &ServerGroup,
         device: &MlsDevice,
-        request: &StudioOverlayDisposalRequest,
+        request: StudioOverlayDisposalRequest,
         ts: u64,
         rng: &mut impl CryptoRngCore,
         budget: &mut EpochStorageBudget,
@@ -101,6 +102,57 @@ impl ServerStore {
             .handoff_metadata()
             .ok_or_else(|| invalid("no local draft branch exists for this document"))?;
         metadata.check_target(target).map_err(invalid)?;
+
+        // Design section 12, row 6: **the exact retry of a disposal that already landed.**
+        //
+        // A disposal can return an error after its rename has landed - a failed directory sync, for
+        // instance - so a caller that reconciles and resends is doing the right thing. Without this
+        // arm the resend meets "no local draft branch exists", which is the answer a vault that never
+        // had a branch gives, and the two states collapse: the caller can never learn whether its
+        // disposal succeeded, and the flush that would confirm durability never happens.
+        //
+        // Unlike release, disposal HAS a tombstone - the retained manifest - so it can recognise
+        // itself, which is why section 12.1's exemption covers release and not this. The identity is
+        // the manifest's own `branch` and `content`, and the mode must match too: a request to
+        // discard is not satisfied by a preserving disposal that already happened, and reporting
+        // otherwise would tell the user their bodies were destroyed when they were archived.
+        if state.overlay().is_none() {
+            let existing = metadata
+                .disposed()
+                .filter(|d| d.branch == request.branch && d.content == request.content)
+                .filter(|d| {
+                    matches!(
+                        (&d.mode, &request.mode),
+                        (
+                            StudioDisposalMode::Discarded,
+                            StudioDisposalRequestMode::Discard(_)
+                        ) | (
+                            StudioDisposalMode::Preserved { .. },
+                            StudioDisposalRequestMode::Preserve
+                        )
+                    )
+                })
+                .ok_or_else(|| invalid("no local draft branch exists for this document"))?
+                .clone();
+            // Sync-only: the record is already exactly right, so this confirms its durability
+            // without a second replacement and without needing replacement headroom.
+            let old = self
+                .read_scoped_intent_plain(&scope)?
+                .map(|record| record.physical_bytes);
+            self.write_prepared_intents(
+                server,
+                document,
+                state,
+                old,
+                true,
+                rng,
+                budget,
+                intents,
+                WriteStep::new(WriteTag::Intents),
+                hooks,
+            )?;
+            return Ok(existing);
+        }
         let active = state
             .overlay()
             .ok_or_else(|| invalid("no local draft branch exists for this document"))?;
@@ -115,6 +167,11 @@ impl ServerStore {
         // accept this work, and dropping it here would race that acceptance. `dispose` refuses this
         // too; refusing here first means the error says what is wrong rather than reporting a
         // generic conflict from deeper in.
+        //
+        // D2's other half, "no live hold", is **not** checked here and cannot be: a live editing hold
+        // is custody-layer state that this function does not see. A reader working down the D-table
+        // will look for it here, so: the custody coordinator owns it, and this transaction runs
+        // inside a visit that already holds custody exclusively.
         if state.handoff_prepared() {
             return Err(invalid(
                 "a branch under a transfer hold cannot be disposed of; resolve the handoff first",
@@ -139,17 +196,32 @@ impl ServerStore {
         }
 
         // D4 and D5: the evidence each mode requires.
-        let decision = match &request.mode {
-            // D5. The confirmation is a typed field, so its presence is already proved by the type;
-            // what is checked here is that nothing is silently substituted for it. No archive is
-            // required or implied.
-            StudioDisposalRequestMode::Discard(_) => StudioDisposalDecision::Discard(
-                StudioDiscardConfirmation::parse(StudioDiscardConfirmation::TOKEN)
-                    .ok_or_else(|| invalid("discard confirmation is not the expected literal"))?,
-            ),
-            // D4. A durable archive for THIS EXACT branch must already exist. Every field is checked
-            // against the live branch rather than against the request, because the request is what a
-            // possibly stale UI supplied and the branch is the thing about to be destroyed.
+        let decision = match request.mode {
+            // D5. The confirmation is **moved** out of the request and into the decision, not
+            // re-minted from the constant.
+            //
+            // An earlier version called `StudioDiscardConfirmation::parse(TOKEN)` here and discarded
+            // the one the caller supplied. A review pointed out that this compares the constant to
+            // itself: the refusal was unreachable and the comment claiming it checked for
+            // substitution was false. Worse, because the confirmation was never consumed, one could
+            // back any number of disposals - and the type's own contract is that a confirmation
+            // reaching a second transaction "would confirm something the user never saw".
+            //
+            // Moving it makes the type do the work: the request is taken by value, so a caller cannot
+            // reuse a confirmation, and this arm cannot be entered without one.
+            StudioDisposalRequestMode::Discard(confirmation) => {
+                StudioDisposalDecision::Discard(confirmation)
+            }
+            // D4. A durable archive for THIS EXACT branch must already exist.
+            //
+            // `content` is compared against `request.content`, which is the live branch's value
+            // *transitively*, because D3 above has already proved the two equal. An earlier comment
+            // here claimed every field was compared against the live branch directly, which a review
+            // correctly called out as misdescribing the code. `branch` and `generation` are compared
+            // against the live metadata, and they are mutually redundant - `branch_id` is
+            // `H(basis, generation)` - but kept: the generation compare is the one that refuses an
+            // archive of a *previous generation* whose entries and content happen to be identical,
+            // which `content` alone cannot catch because `branch_hash` does not cover the generation.
             StudioDisposalRequestMode::Preserve => {
                 let record = self
                     .read_studio_draft_archive(server, document)?
