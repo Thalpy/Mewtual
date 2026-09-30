@@ -210,8 +210,10 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         &mut self,
         save: impl FnOnce(&[u8], &mut R) -> Result<(), E>,
     ) -> Result<Result<DurableOwnerSnapshot, E>, SyncError> {
+        // Authoring: minting a publication permit is authoring, so an `Imported` tenure must not
+        // satisfy it.
         let tenure = self
-            .observed_owner_tenure_start()
+            .authoring_owner_tenure_start()
             .ok_or(SyncError::Unauthorized)?;
         if self.group.designated_committer() != Some(self.device.device_id())
             || !self.head_member(&self.device.public_key_bytes())
@@ -234,7 +236,10 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             && permit.epoch == self.group.epoch()
             && self.device.device_id() == permit.owner
             && self.group.designated_committer() == Some(permit.owner)
-            && self.observed_owner_tenure_start() == Some(permit.tenure)
+            // Authoring. A permit cannot exist for an `Imported` tenure, since minting one uses the
+            // authoring accessor, so either would be correct today; authoring is the semantics that
+            // stays correct if permit minting ever moves.
+            && self.authoring_owner_tenure_start() == Some(permit.tenure)
     }
     /// Admit a finite local owner transaction under the exact persisted MLS/tenure snapshot.
     /// An observed tenure alone is insufficient: a restart must not restore authority behind
@@ -523,7 +528,8 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         let proof = if selected.prove {
             let receipt = receipt.as_ref().ok_or(SyncError::Malformed)?;
             let tenure = tenure.ok_or(SyncError::Unauthorized)?;
-            if self.observed_owner_tenure_start() != Some(tenure) {
+            // Authoring: signing a proof AS the owner is authoring, not verification.
+            if self.authoring_owner_tenure_start() != Some(tenure) {
                 return Err(SyncError::Unauthorized);
             }
             receipt.verify_current_owner(&self.group, tenure)?;

@@ -171,8 +171,11 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         };
         let selection = if let Some(proof) = &outcome.proof {
             if self.group.designated_committer() != Some(c.provider)
+                // Verification: an `Imported` value counts here. `is_some_and` accepts the proof's
+                // own claim when the local value is absent, so surfacing a merely-imported tenure can
+                // only add refusals, never an acceptance that hiding it would have rejected.
                 || self
-                    .observed_owner_tenure_start()
+                    .verification_owner_tenure_start()
                     .is_some_and(|t| t != proof.tenure_start_group_epoch)
             {
                 return Err(SyncError::Unauthorized);
