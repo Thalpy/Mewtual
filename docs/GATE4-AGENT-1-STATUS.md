@@ -1902,9 +1902,12 @@ its residency.
 
 ### What that leaves genuinely unmeasured
 
-**One of the eight is now complete: 13.4**, and it is the only one that can be, because it is the
-only item that asks for arithmetic over declared caps rather than a run. The other seven need
-measurements, and none of those is done. An earlier version of this table put 13.1, 13.4, 13.6 and
+**One of the eight is complete: 13.4**, and it is the only one that can be closed by reading the
+source, because it is the only item that asks for arithmetic over declared caps rather than a run.
+The other seven need measurements. 13.5 and 13.7 now have source-correct fixtures and executed
+runs against part of what they ask; 13.2 has nothing at all, and it is also the section the
+uncovered clauses of 13.5 and 13.7 both defer to, which makes it the load-bearing gap rather than
+merely the emptiest cell. An earlier version of this table put 13.1, 13.4, 13.6 and
 13.7 in a "done" column; a review rejected all four, and on inspection it was right about each -
 13.4 needed three further corrections after that verdict before it stood. The states below are the
 four this ledger should have been distinguishing all along:
@@ -1920,7 +1923,7 @@ four this ledger should have been distinguishing all along:
 | 13.2 | **nothing** | maximal accepted shapes: 5 MiB + 1024-byte intent record at 256 maximal bodies, 2 MiB seed, 64 KiB metadata ceiling, maximal projection widths, a large roster |
 | 13.3 | **small-shape observation** | the largest admitted individual operation and roster, with its authority checks. 1 ms is a sampled maximum over ~100-byte title operations |
 | 13.4 | **complete as the arithmetic 13.4 asks for; not a measurement** | scope declared (one permit, sum of accounted bounds), stage/lifetime table with moves distinguished from clones, 55.26 MiB over 13.4's eight items plus 22.21 MiB retained beyond its list. Peak-simultaneous is located at H4 but not reduced to a number, because the largest rows are proxied automerge documents |
-| 13.5 | **nothing** | Flow S custody per stage at 1/32/255, including S1's structural classification, the S1b and S3 basis derivations and S3's I-3 holds |
+| 13.5 | **source-correct fixture on the operation-count axis; one clause uncovered** | the three real production seams are timed at every depth 1 to 255, with custody separated from the detached plan, depth read back through `local_draft()` and the 255/256 premise asserted. "Against a maximal Closing source and seed" is **not** covered - the source is at rotation eligibility, not the byte ceiling - and S3's I-3 hold is bracketed rather than measured |
 | 13.6 | **executed measurement; obligation partly unaddressed** | `checked_epoch_replay_state` and the five-family inventory over several large retained branches, both named by 13.6. What exists measures the decoder pair and the two load entry points |
 | 13.7 | **source-correct fixtures, executed measurements, narrower conclusions** | accepted-ceiling runs for each family; DraftArchive entirely; a largest-single-step figure at a ceiling rather than at fixture sizes; restart behaviour under a real workload rather than a deterministic guard rotation. OwnerReceipts and Intents are measured only at trivial sizes |
 | 13.8 | **synchronous component evidence** | scheduled end-to-end wall clock and the visit count. `256 x max_turn_ms` is not the sum of the signature durations, and the direct loop excludes receive cadence and queued visits |
@@ -1939,6 +1942,78 @@ overtaken-before-every-step exhausts the budget and reports `Unstable` - and tha
 
 It is not 13.7's restart *rate*: no workload, no write arrivals independent of scan progress, no
 detached-worker timing, and the `Parked` arm is never exercised because the calls are unbudgeted.
+
+## Design 13.5: Flow S custody per stage, on the operation-count axis only
+
+**Source-correct fixture and an executed measurement of one of 13.5's two clauses.** The harness
+is `profile_flow_s_stages` in `epoch_studio/tests/performance.rs`, with
+`flow_s_stage_profile_smoke` running the same code paths cheaply in the default suite.
+
+**What the obligation asks for.** "Flow S custody per stage at 1, 32 and 255 accepted operations,
+including S1's structural classification, the S1b and S3 basis derivations against a maximal
+Closing source and seed, and S3's I-3 holds."
+
+**Covered: the operation-count axis.** Every stage boundary is a real production seam, not a
+harness subdivision. The scheduled runtime splits Flow S into a custody visit
+(`start_studio_closing_overlay`, which is S0 + S1 + S1b + capture), a detached plan
+(`StudioOverlayCapture::plan`, S2) and a second custody visit (`commit_studio_overlay`, S3); the
+profile calls exactly those three, so custody is reported separately from detached work as L1
+requires and no second algorithm is being timed. The S1b/S3 basis derivation is also available in
+isolation as `prepare_studio_closing_overlay`, which is what both stages re-run.
+
+**Not covered: "against a maximal Closing source and seed".** The source is
+`fill_studio_epoch_fixture`'s - ten operations carrying 220 000-byte commit messages, filled to
+`close_candidate_ready()`, which is *rotation eligibility and not the byte ceiling*. Its physical
+size is printed with every run so the gap is visible rather than implied. That clause is 13.2's
+subject and is measured there or not at all; this section does not claim it.
+
+**Not measured: S3's I-3 hold as a duration.** The hold is taken inside
+`admit_studio_overlay_authoring`, which is called from within the start stage, and released when
+the commit returns. Nothing in the production API exposes the moment it is taken, so its residency
+can only be bracketed: it is at most `start + plan + commit` and at least `plan + commit`. The
+structural fact that it spans the detached stage is asserted by the runtime tests already; this
+profile adds the bracket, not a measurement.
+
+### Why this is a curve rather than three points
+
+`catcoms_rt::Clock` is millisecond-only - the ambient gate permits no finer source - so one accept
+at one depth is a single tick-resolution reading and carries almost no information. The profile
+therefore times **every** accept from depth 1 to 255 and reports the three depths 13.5 names as
+points on that curve, each accompanied by a `Spread` over the five adjacent depths.
+
+That neighbourhood spread is labelled `neighbourhood(+-2 depths)` in the output and is **not** a
+spread at a fixed depth: it mixes five different depths, so it describes the local variability of
+a rising curve, not repeat variance at one point. Distinguishing those two is the whole reason it
+carries a label instead of being printed as an ordinary spread.
+
+Two stages *can* be repeated at a fixed depth, and those get real spreads over 16 samples: the
+S1b/S3 basis derivation, which writes nothing, and S0 + S1 classification of an accepted retry,
+which writes but does not append. The retry path is the one that isolates 13.5's "S1's structural
+classification", because `exact_retry` returns before any source read - though it still includes
+the one accounted intent write the retry performs, and the figure is labelled accordingly rather
+than presented as pure classification.
+
+### What the fixture pins rather than assumes
+
+- **255 is not arbitrary.** `MAX_STUDIO_OVERLAY_OPS` is 256, so 255 is the largest accepted count
+  from which a further append is still legal. `assert_overlay_headroom` asserts that the deepest
+  measured depth plus one equals the cap, so if the cap moves the test fails rather than quietly
+  measuring a different thing.
+- **The depth is read back, not counted.** After the curve, `local_draft().unwrap().accepted()` -
+  the production reader - must equal the number of accepts performed. A writer's own tally would
+  have accepted a fixture that never reached the depth it was timed at.
+- **The basis must not move.** Local acceptance writes no source, so the fingerprint derived
+  before the first accept is re-derived after the last and required to be equal. If acceptance
+  ever began touching the source, every authorization in the run would have been against a stale
+  basis and the whole curve would be meaningless.
+- **Classification must actually classify.** The start stage asserts `Captured` for a fresh
+  operation and the retry asserts `Local`, so neither figure can come from the other path.
+
+### Figures
+
+Not yet recorded: the release profile run is what produces them, and this section is committed
+with the harness rather than after it so the two are reviewable together. The harness is verified
+to compile and the smoke test passes; the numbers follow.
 
 ## Design 13.6: what C-1's structural decode saves
 
