@@ -44,24 +44,26 @@ carefully, because they are different claims and only one was wrong:
 
 ## Agent 1's registration prerequisites (its section 12.3)
 
-**Authoritative statement: P1 to P4 are DESIGNED AND THE DESIGN IS REVIEWED, but NONE OF THEM IS
-IMPLEMENTED. P5 is FALSE. `studio_overlay_save` must not be registered.**
+**Authoritative statement: P5 is FALSE. `studio_overlay_save` must not be registered.**
 
-P1's wording is "a reviewed manual lifecycle". The design of that lifecycle is now reviewed and
-accepted; the lifecycle itself does not exist. P5 asks whether P1 to P4 are **implemented** and
-reviewed, and no line of production code has been written for any of them.
+*Table updated 2026-09-30 at `bbef5908`, in answer to Agent 1's question of whether it had gone
+stale. It had: the table still read "no line of production code has been written for any of them",
+which stopped being true at slice 6. It is now per-row, and no row has reached true.*
 
 | Prerequisite | State | Where |
 |---|---|---|
-| P1 reviewed manual lifecycle: inspect, export, copy-into-current, explicit disposition, lossless across restart and refusal | **Design accepted**, unimplemented | design 6.1-6.6, 12 |
+| P1 reviewed manual lifecycle: inspect, export, copy-into-current, explicit disposition, lossless across restart and refusal | **Partially implemented, one verb of four.** Explicit disposition is built end to end: the store transaction D1-D6 (slice 6) and `studio_overlay_dispose`. Inspect pre-dates this scope. **Export and copy-into-current do not exist**, and neither does `studio_overlay_archive`, so the Preserve arm of disposal cannot obtain an archive outside `cfg(test)`. "Lossless across restart and refusal" is proven for disposal and release only | design 6.1-6.6, 12 |
 | P2 every `StudioOverlayHold` variant mapped to a user-visible actionable state | **Design accepted**, unimplemented | design 7, 11 |
-| P3 truthful native results, events and UI-hooks rows | **Design accepted**, unimplemented; no row is published as available and no command is registered | design 11 |
-| P4 live-tenure contract, over `verification_owner_tenure_start()` and `authoring_owner_tenure_start()` | **Design accepted**, unimplemented | design 9.4 V1-V8, 9.3 part 5 A-1 |
+| P3 truthful native results, events and UI-hooks rows | **Partially implemented.** Four of nine commands are registered and their views are truthful about provisionality, non-authority and required reconciliation. The UI-hooks rows are not updated and no row is published as available | design 11 |
+| P4 live-tenure contract, over `verification_owner_tenure_start()` and `authoring_owner_tenure_start()` | **Substrate implemented, contract not started.** Slice 7 built the *mechanism*: `OwnerTenure::joined`, the `Position` leaf identity, `ObservedOwnerTenure`, the M-1 receive rule, the v1 `Imported` migration and the two accessors. P4 names the *contract* over those accessors - V1-V8, with `require_observed_owner_tenure` refusing fail-closed at every authoring entry point. **That function does not exist and no app authoring call site consults either accessor** (verified by grep at `bbef5908`). N-T7b is undischarged | design 9.4 V1-V8, 9.3 part 5 A-1 |
 | P5 explicit statement that P1-P4 are implemented and reviewed | **No** | this table |
 
 This row is the single authoritative source for P5. It changes only after implementation exists and
-review 2 returns PASS for the corresponding boundary. Revision 1 returned CHANGES REQUIRED on all
-three boundaries, so the design itself is not yet accepted.
+review 2 returns PASS for the corresponding boundary.
+
+**To Agent 1's framing directly: the landed slices are prerequisites, not the prerequisites.** Slice
+6 implements one of P1's four verbs; slice 7 implements the substrate P4's contract will be written
+over, not the contract. Reasoning from either row as FALSE remains correct today.
 
 ## Review history
 
@@ -700,6 +702,8 @@ Deleting it was the right call.
 
 ### Built so far
 
+*Current as of 2026-09-30, through `bbef5908`.*
+
 The payload codec, the reference collector that narrows Agent 1's fail-closed arm under I-5, the
 archive record writer with its accounting and sub-cap, the archive tally on `EpochIntentBudget`,
 **the archive release path** (slice 3), **the disposal manifest with its v3 extension arm** (slice
@@ -707,11 +711,42 @@ archive record writer with its accounting and sub-cap, the archive tally on `Epo
 (`branch_generation`, `provenance`, `branch_id`, `classify_request`, `admit_new_branch`,
 `new_admitted`, the completed v3 layout) and **the disposal store transaction** with D1-D6.
 
+Since then: **the tenure mechanism** (slice 7) - `OwnerTenure::joined`, the `Position` leaf
+identity, `ObservedOwnerTenure`, the `catcoms-mls` receive-side M-1 rule, the v1 migration via
+`Imported`, and the `verification_owner_tenure_start()` / `authoring_owner_tenure_start()` split;
+**the mutation harness** `.github/scripts/check-studio-overlay-lifecycle-mutations.py` and the
+`studio-overlay` `lifecycle` CI job; and **four of the nine native commands**.
+
+### Native commands: four of nine
+
+Against the design's own list (design 6.2). No command on this list enables Save, and
+`studio_overlay_save` remains unregistered.
+
+| Command | State |
+|---|---|
+| `studio_overlay_read` | Pre-existing. The section 11 extension is **not** applied |
+| `studio_overlay_lifecycle` | **Landed** `35236b0b` |
+| `studio_overlay_export` | Not built. Needs `ExportOverlay`/`FinishOverlayExport` and the shared `catcoms-studio-draft-v1` serializer |
+| `studio_overlay_archive` | Not built. Needs `ArchiveOverlay`/`FinishOverlayArchive`. **This is why the Preserve arm of disposal is currently unreachable from the UI**: nothing outside `cfg(test)` can create an archive |
+| `studio_overlay_archive_read` | **Landed** `35236b0b` |
+| `studio_overlay_archive_release` | **Landed** `35236b0b` |
+| `studio_overlay_copy_preview` | Not built |
+| `studio_overlay_copy_apply` | Not built |
+| `studio_overlay_dispose` | **Landed** `35236b0b`, payload reshaped in `bbef5908` |
+
+**One command exists that the design does not list: `studio_overlay_archive_export`.** It exports
+the canonical envelope of an already-preserved archive record. That is a different object from
+design 6.2's `studio_overlay_export`, which exports the *live* draft and must work when typed
+reconstruction fails. Recorded here rather than left as a silent addition; when `ExportOverlay`
+lands, the two share the payload format and neither subsumes the other.
+
 ### Not yet built
 
-The composite copy capture, the tenure work (`OwnerTenure::joined`, the `Position` leaf identity,
-the `catcoms-mls` receive-side M-1 rule, the v1 migration via `Imported`, V1-V8) and every native
-command. The mutation script and the `studio-overlay` `lifecycle` CI job are also still unwritten.
+The composite copy capture (design 5.2) and the two-phase copy (6.3 C1-C4);
+`StudioInspectionPurpose` / `rebuild_for` and the `catcoms-studio-draft-v1` shared serializer
+(5.3); the archive and export control actions; the section 11 `studio_overlay_read` extension; and
+**V1-V8, the live-tenure contract itself** - see the P4 row below for why the slice 7 mechanism is
+not that contract.
 
 **Sections above this point are an append-only ledger and are dated.** Where an earlier entry
 says something is not yet built, read it as the state at that entry's date, not as current
@@ -719,15 +754,24 @@ state; this pair of lists is the current one.
 
 ## Test and CI evidence
 
+*Current as of 2026-09-30, through `bbef5908`. Local runs on this Windows host, no GitHub run
+URLs yet.*
+
 | Item | State |
 |---|---|
-| Focused core/store/actor suites | Not written, not run |
-| Mutation script and restored regressions | Not written, not run |
-| `studio-overlay` `lifecycle` job | Proposed in design 17.3; not added to any workflow |
+| `cargo test -p catcoms-app --lib studio::` | **211 passed, 0 failed, 5 ignored** at `bbef5908`, `RUST_MIN_STACK=33554432` |
+| `cargo test --lib studio::` in `apps/desktop/src-tauri` | **36 passed, 0 failed** at `bbef5908` |
+| `cargo clippy -p catcoms-app --lib --all-targets` | Clean at `bbef5908` |
+| `cargo clippy --lib --all-targets` (desktop) | Clean at `bbef5908` |
+| Mutation script and restored regressions | Script written (9 mutations, 4 crates). **Not yet re-run end to end on a quiet tree** |
+| `studio-overlay` `lifecycle` job | Added to `.github/workflows/studio-overlay.yml`. No run URL observed yet |
 | GitHub run URLs and checkout SHAs | None |
 
-Nothing in this scope has been executed. Any later claim of a pass must name the exact command, the
-executed test count, the ignored cases, the run URL and the actual checkout SHA.
+`RUST_MIN_STACK=33554432` is a **workaround, not a result**: without it these suites abort with
+`0xffffffff` from stack exhaustion. The cause is not in this scope.
+
+Any later claim of a pass must name the exact command, the executed test count, the ignored cases,
+the run URL and the actual checkout SHA.
 
 ## Implementation prerequisites, in order
 
