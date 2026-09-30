@@ -545,16 +545,51 @@ and it appeared with the C-3 parked-cursor work. Agent 2 is not fixing this: it 
 Slice 3's own evidence was taken at `RUST_MIN_STACK=33554432`, and **that is a workaround, not a
 result** - any later claim that this scope is green must say which stack size it used.
 
+### Slice 4A: the disposal manifest and the v3 extension arm
+
+The replication half of the disposal transaction, at `e6f4a0d`. The store transaction enforcing
+D1-D6 is next; this is the state rebuild it calls.
+
+What is worth recording beyond the commit message:
+
+- **The manifest can coexist with a live branch.** `validate` deliberately does **not** require
+  `active` to be absent when `disposed` is set. A new branch started after a disposal is exactly
+  the `Disposed` classification case, where a request is checked against the retained
+  acknowledgement. Requiring absence would have looked tidier and broken that.
+- **The version byte is evidence, not a stamp.** 3 only when a disposal is present, so every vault
+  that never had one re-encodes byte-identically and keeps passing its own canonical re-encode
+  check. Both halves are enforced on decode: v3 must carry a manifest, v2 must not. Without the
+  second half the byte would be advisory and a v2 record with trailing bytes would decode as a
+  disposal.
+- **`dispose` returns the removed ids** rather than letting the store recompute them. Two
+  derivations of "which ids went away" is how an entry ends up charged to a branch that no longer
+  exists.
+- **No test-only constructor was added.** The transfer-hold case drives the real preparation path
+  to get a genuine `Prepared` state; the unreplayable case states its property on the manifest
+  builder, where the structural-entries guarantee actually lives, rather than inventing a way to
+  wrap a bare overlay into a state.
+- **`branch_content` is a production accessor, not a test hook.** A disposal request has to carry
+  the content the user saw, so something has to expose it; making callers re-derive the hash is the
+  second representation that lets a request name work the user never saw.
+
+**Recorded debt from this slice:** `put_target`/`get_target` are now defined **twice**, in
+`handoff.rs` and `archive.rs`, and verified byte-identical. That is one fact stored twice - the
+same shape as two findings already raised in this scope. Disposal deliberately did **not** add a
+third copy (it imports handoff's), but collapsing archive's onto the shared pair is outstanding and
+should be its own small commit so it is independently reviewable.
+
 ### Built so far
 
 The payload codec, the reference collector that narrows Agent 1's fail-closed arm under I-5, the
 archive record writer with its accounting and sub-cap, the archive tally on `EpochIntentBudget`,
-and **the archive release path** (slice 3).
+**the archive release path** (slice 3), and **the disposal manifest with its v3 extension arm**
+(slice 4A).
 
 ### Not yet built
 
-The disposal transaction (which is the writer's first production caller), the v3 record arms, the
-composite copy capture, the lifecycle classifier, the tenure work and every native command.
+The disposal **store transaction** (D1-D6, and the archive writer's first production caller), the
+composite copy capture, the lifecycle classifier (`classify_request`, `admit_new_branch`,
+`branch_id`), the tenure work and every native command.
 
 **Sections above this point are an append-only ledger and are dated.** Where an earlier entry
 says something is not yet built, read it as the state at that entry's date, not as current
