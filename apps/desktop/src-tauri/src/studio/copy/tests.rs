@@ -199,13 +199,53 @@ async fn an_apply_with_a_stale_echo_is_refused_and_writes_nothing() {
     )
     .await
     .unwrap();
+    // A different but **independently valid** body: the same operation kind carrying another title.
+    //
+    // Getting this right took three attempts and each failure was instructive. `"not what was
+    // proposed"` is refused while decoding the operation, and a frame body is refused by the blob
+    // rail with "publish the frame PIX before saving its reference". Both made the case pass with
+    // the body check deleted, proving nothing about the guard it named - the same failure mode a
+    // review caught in the disposal tests earlier today. A title body reaches the echo check
+    // because nothing before it objects.
+    let other = String::from_utf8(
+        catcoms_app::studio::types::FlipnoteOp::SetHeader(
+            catcoms_app::studio::types::FlipnoteHeader::Title("a title nobody proposed".into()),
+        )
+        .encode()
+        .unwrap(),
+    )
+    .expect("a title operation encodes as UTF-8, as the preview's own body does");
+    assert_ne!(
+        Value::from(other.clone()),
+        value["body"],
+        "the substitute must differ, or substituting it proves nothing"
+    );
     let before = f.records();
 
     // Every one of these is a value the actor re-derives rather than trusts.
-    for (reason, field, wrong) in [
-        ("another epoch", "epochId", json!(HEX[..32].to_string())),
-        ("another projection", "expectedProjection", json!(HEX)),
-        ("another body", "body", json!("not what was proposed")),
+    // Each case names the guard that actually catches it, because "three values are checked" and
+    // "each value is checked by its own guard" are different claims and only the second is useful.
+    // The epoch is caught by the preflight that establishes the destination is the Open epoch this
+    // proposal was built for, before the plan is even re-derived.
+    for (reason, field, wrong, says) in [
+        (
+            "another epoch",
+            "epochId",
+            json!(HEX[..32].to_string()),
+            "epoch is no longer Open/current",
+        ),
+        (
+            "another projection",
+            "expectedProjection",
+            json!(HEX),
+            "stale; preview again",
+        ),
+        (
+            "another body",
+            "body",
+            Value::from(other.clone()),
+            "Ready or body differs",
+        ),
     ] {
         let mut payload = json!({
             "destination": destination(into),
@@ -221,7 +261,7 @@ async fn an_apply_with_a_stale_echo_is_refused_and_writes_nothing() {
             .expect("a well-formed payload")
             .checked()
             .expect("a well-formed payload");
-        recovery::invoke_control(
+        let error = recovery::invoke_control(
             &state,
             fixture::SERVER,
             f.target,
@@ -229,6 +269,10 @@ async fn an_apply_with_a_stale_echo_is_refused_and_writes_nothing() {
         )
         .await
         .expect_err(reason);
+        assert!(
+            error.contains(says),
+            "{reason} must be refused by the guard that names {says:?}, said: {error}"
+        );
         assert_eq!(f.records(), before, "a refused apply wrote: {reason}");
     }
     f.shutdown().await;
@@ -236,8 +280,19 @@ async fn an_apply_with_a_stale_echo_is_refused_and_writes_nothing() {
 
 /// The op id of the draft's own title, which is what a title copy has to name.
 async fn title_op(f: &InspectionFixture) -> String {
+    projected(f, |p| {
+        hex::encode(p.title.as_ref().unwrap().selected.source.op_id)
+    })
+    .await
+}
+
+/// Read one value out of the draft's real projection, through the real two-visit inspection.
+async fn projected<V>(
+    f: &InspectionFixture,
+    read: impl FnOnce(&catcoms_app::studio::types::FlipnoteFrameProjection) -> V,
+) -> V {
     let prepared = f.capture().await.rebuild().await.unwrap();
-    let catcoms_app::studio::StudioControlResponse::OverlayInspection(read) = f
+    let catcoms_app::studio::StudioControlResponse::OverlayInspection(inspection) = f
         .control(
             catcoms_app::studio::StudioControlAction::FinishOverlayInspection(Box::new(prepared)),
         )
@@ -246,16 +301,18 @@ async fn title_op(f: &InspectionFixture) -> String {
     else {
         panic!("not an inspection")
     };
-    let mut id = None;
-    read.inspect(|_, _, draft| {
-        let catcoms_app::studio::types::StudioProjection::Flipnote(p) = draft.unwrap().projection()
-        else {
-            panic!("the art fixture projects a Flipnote")
-        };
-        id = Some(hex::encode(p.title.as_ref().unwrap().selected.source.op_id));
-    })
-    .unwrap();
-    id.unwrap()
+    let mut out = None;
+    inspection
+        .inspect(|_, _, draft| {
+            let catcoms_app::studio::types::StudioProjection::Flipnote(p) =
+                draft.unwrap().projection()
+            else {
+                panic!("the art fixture projects a Flipnote")
+            };
+            out = Some(read(p));
+        })
+        .unwrap();
+    out.unwrap()
 }
 
 /// The real two-visit preview, one layer in from the `#[tauri::command]` wrapper.
