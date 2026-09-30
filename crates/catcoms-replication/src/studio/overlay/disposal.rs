@@ -23,7 +23,10 @@ use super::*;
 /// `Unconfirmed` fields late - and a shared pair would have to reproduce that split for a record
 /// that has no reason to want it. The tag mapping itself is not duplicated: it comes from
 /// `StudioOverlayProvenance::tag`.
-fn put_provenance(e: &mut Encoder, provenance: &StudioOverlayProvenance) -> Result<(), ReplError> {
+pub(super) fn put_provenance(
+    e: &mut Encoder,
+    provenance: &StudioOverlayProvenance,
+) -> Result<(), ReplError> {
     e.put_u8(provenance.tag());
     if let StudioOverlayProvenance::Unconfirmed {
         provider,
@@ -38,7 +41,7 @@ fn put_provenance(e: &mut Encoder, provenance: &StudioOverlayProvenance) -> Resu
     Ok(())
 }
 
-fn get_provenance(d: &mut Decoder<'_>) -> Result<StudioOverlayProvenance, ReplError> {
+pub(super) fn get_provenance(d: &mut Decoder<'_>) -> Result<StudioOverlayProvenance, ReplError> {
     match byte(d)? {
         0 => Ok(StudioOverlayProvenance::Closing),
         1 => Ok(StudioOverlayProvenance::Unconfirmed {

@@ -7,6 +7,7 @@ mod archive;
 mod disposal;
 mod frozen;
 mod handoff;
+mod lifecycle;
 
 struct Fixture {
     owner: MlsDevice,

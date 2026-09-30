@@ -5,9 +5,7 @@
 use super::archive::{branch, unreplayable_branch};
 use super::handoff::{branch as transferable_branch, signing};
 use super::*;
-use crate::studio::{
-    StudioDiscardConfirmation, StudioDisposalDecision, StudioDisposalMode, StudioOverlayProvenance,
-};
+use crate::studio::{StudioDiscardConfirmation, StudioDisposalDecision, StudioDisposalMode};
 use crate::IntentLedger;
 
 /// Dispose the fixture's branch, returning the rebuilt state and the ids it retired.
@@ -18,16 +16,7 @@ fn dispose(
     decision: StudioDisposalDecision,
 ) -> Result<(StudioOverlayState, std::collections::BTreeSet<[u8; 32]>), ReplError> {
     let content = metadata.branch_content(ledger)?;
-    metadata.dispose(
-        ledger,
-        decision,
-        [0x5b; 32],
-        content,
-        3,
-        StudioOverlayProvenance::Closing,
-        9,
-        1_700_000_000_000,
-    )
+    metadata.dispose(ledger, decision, content, 9, 1_700_000_000_000)
 }
 
 fn confirmation() -> StudioDiscardConfirmation {
@@ -89,7 +78,12 @@ fn a_disposal_round_trips_and_retires_exactly_the_branch_ids() {
     );
     let disposal = next.disposed().expect("the manifest must be retained");
     assert_eq!(disposal.accepted, ordered.len());
-    assert_eq!(disposal.generation, 3);
+    // Derived from the state, not supplied. An earlier version of this test asserted an arbitrary 3
+    // because the caller passed it; a first branch is generation 1, and the manifest can no longer
+    // claim otherwise.
+    assert_eq!(disposal.generation, 1);
+    assert_eq!(disposal.generation, metadata.branch_generation());
+    assert_eq!(Some(disposal.branch), metadata.branch_id());
     assert_eq!(disposal.sequence, 9);
     assert_eq!(disposal.at, 1_700_000_000_000);
     assert_eq!(disposal.author, f.owner.device_id());
@@ -303,10 +297,7 @@ fn a_prepared_branch_refuses_disposal() {
     let refused = prepared.dispose(
         &ledger,
         StudioDisposalDecision::Discard(confirmation()),
-        [0x5b; 32],
         content,
-        3,
-        StudioOverlayProvenance::Closing,
         9,
         1,
     );
@@ -337,13 +328,8 @@ fn a_disposal_naming_the_wrong_branch_content_refuses() {
 
     let refused = metadata.dispose(
         &ledger,
-        StudioDisposalDecision::Discard(
-            StudioDiscardConfirmation::parse(StudioDiscardConfirmation::TOKEN).unwrap(),
-        ),
-        [0x5b; 32],
+        StudioDisposalDecision::Discard(confirmation()),
         wrong,
-        3,
-        StudioOverlayProvenance::Closing,
         9,
         1,
     );
@@ -395,10 +381,7 @@ fn an_unreplayable_branch_is_still_disposable() {
         .dispose(
             &ledger,
             StudioDisposalDecision::Discard(confirmation()),
-            [0x5b; 32],
             content,
-            3,
-            StudioOverlayProvenance::Closing,
             9,
             1,
         )
