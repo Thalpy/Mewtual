@@ -753,6 +753,54 @@ inspection capture at all. `StudioInspectionPurpose` exists with `Draft` and `Ar
 behaviour the design asked for is present; the seam it named is in a different place, for the same
 reason 5.2 itself was rewritten.
 
+### The copy review: one High, and what is still outstanding
+
+A fable adversarial review of the copy work returned CHANGES REQUIRED. It ran its mutations in a
+detached worktree rather than my tree, which is the right way to do it and the fix for the hazard
+recorded below.
+
+**Addressed at `d4531b17`:**
+
+- **High. A same-document Index `Object` copy could publish a dangling entry.** Recovery refuses
+  exactly this and says why; copy reached `restore::plan` from the detached worker, which has no
+  store and cannot probe, and neither C3 nor C4 put the probe back. The Save path has no equivalent
+  guard - `local_policy` checks only `MAX_INDEX_OBJECTS`, `index::prepare` only decodes, and
+  `check_index_object_sources` runs only at handoff. An Index branch retained across Closing whose
+  object was later cleaned up gave `Ready`, applied, and a durable entry naming a source that does
+  not exist. The probe now runs at C3 (downgrade) and C4 (refuse).
+- **Medium. `source_ops` over-reported.** An `IndexRegister` with no explicit edit falls back to the
+  creating operation's source, so a bare `PutObject` reported one id three times while claiming to
+  name exactly what it resolved. Deduplicated in order. Its test could not see it because the
+  fixture had no `SetTitle`/`SetExpiry`.
+- **Medium (part).** The destination channel was checked at C1 and C4 but not C3.
+
+**Outstanding, not yet addressed:**
+
+| Finding | What |
+|---|---|
+| M2 | No test catches a *changed* destination recovery record. The implementation is correct; the guard is unanchored, and a mutation comparing `is_some()` equality survives |
+| M3 | No test exercises a **successful** copy apply or the exact retry. The reviewer verified the behaviour is right in its own worktree; an equivalent test is not committed |
+| M4 | C1' ("refused while a transfer hold exists on the destination") is refused only at C4, so a preview returns `Ready` and the apply fails. Not a correctness hole, but the design says C1 |
+| L2 | A pre-existing vacuous test (`studio_restore_preview_fingerprint_tracks_provenance...`) asserts only `is_err()` and fails at "missing recovery title" - the same class I fixed elsewhere |
+| L4 | The exact-retry shortcut reports **any** prior `(nonce, body)` this device saved into the destination as a copy `Applied {already_saved:true}`, including an ordinary non-copy Save. No write; a misreport of kind |
+| L5 | The same-document copy path is untested, because this fixture's document is Closing. N6's "no byte of the branch's record" is verified only cross-document |
+
+### Blocked: the app crate cannot link
+
+`cargo test -p catcoms-app` has been failing for an extended stretch on **another agent's in-flight
+work**, not mine: `crates/catcoms-app/src/actor/file_transfers.rs` references
+`catcoms_sync::BlobPageOutcome`, `catcoms_sync::MIN_BLOB_PAGE` and `catcoms_rt::REQUEST_TIMEOUT_MS`,
+none of which exist yet in those crates.
+
+`cargo check -p catcoms-app --lib --all-targets` is clean, so everything below compiles, including
+the test targets. What has **not** run:
+
+- the `studio::tenure` seam tests (`23465a17`)
+- the corrected `studio::restore` tests and the H1 fix (`d4531b17`)
+
+Both commits say so in their own messages. I have not claimed a pass for either and will report the
+result when the tree links rather than assume it.
+
 ### Mutation testing found three vacuous tests I wrote
 
 All three passed while proving nothing about the guard they named, and all three were caught by
