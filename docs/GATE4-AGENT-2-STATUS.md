@@ -608,6 +608,53 @@ policy owns the remaining copy; for a discarded draft no copy remains by the use
 instruction, and for a preserved one the copy is a draft archive, not a recovery record. Reusing
 either would have put a false claim at the call site.
 
+### Fable adversarial reviews, round 1: slice 4A and the typed reader
+
+Two reviews, at the user's instruction to review each commit.
+
+**Slice 4A (`6eeca185`): CHANGES REQUIRED, nine findings, all correct.** Addressed at `85b394ae`.
+The one behavioural defect: design 5.1 lists three validation additions and I implemented two. The
+missing rule is that **no id may occur in both terminal manifests**, and the reviewer byte-crafted a
+record proving `completed_retry` and `disposed().contains()` can both answer truthfully for the same
+id - the state `classify_request` says cannot exist. `dispose` retaining `completed` is what makes
+the coexistence possible, so the rule belonged in this slice. My comment saying "the same two rules
+the transferred manifest obeys" was accurate about what was copied and silent about what was
+dropped.
+
+The rest were honesty and test-quality failures, each real:
+
+- The v3 layout is narrower than design 5.1's (no `branch_generation`, no provenance byte, mandatory
+  rather than optional disposal block), and a comment asserted a contract I already intended to
+  change. It now says the layout is **provisional**.
+- `dispose` records `branch`, `generation` and `provenance` verbatim and cannot corroborate any of
+  them - a Closing branch could be labelled `Unconfirmed` - and the doc comment claimed the rebuild
+  was validated. Stated plainly now.
+- **Three tests passed for the wrong reason.** The backward-compatibility test asserted one byte, and
+  a symmetric trailing-byte change to the v2 layout left everything green; it now assembles the whole
+  expected sequence. The retired-set oracle could not distinguish the branch's ids from every pending
+  id; a never-appended intent now separates them. And test 7 justified using the manifest builder by
+  claiming a state around a bare overlay needed a test-only constructor - **false**, and worth
+  recording as the second time I have asserted a fixture was expensive without checking:
+  `decode_vault_structural` produces one through production code.
+
+**The typed reader (`b0b28dbb`): PASS, three Lows.** Addressed at `e5bd98d9`. The valuable one: the
+sealed-scope comparison and the trailing-bytes check had no test, and the scope one carries a real
+hazard - `seal` takes no AAD, so nothing binds an archive's ciphertext to its filename except the
+plaintext prefix, and `LogicalDocument` equality excludes the local `server`, so the document binding
+does not cover a cross-slot copy.
+
+Writing that test corrected an assumption of my own: **a reference scan is not defended by this
+guard.** It refuses earlier, by the inventory's filename-against-authenticated-scope rule. My first
+version asserted the scan beside the addressed readers, which would have read as coverage of one
+guard while exercising another. They are now two tests named for what actually refuses each.
+
+### Process fix: commit before mutating
+
+`git checkout -- <file>` ate uncommitted work **three times** this session, most expensively the six
+review fixes to `handoff.rs`, which had to be reapplied from scratch. Mutation testing requires a
+committed baseline; the restore step is not compatible with holding unrelated edits in the same
+file. **Commit the fix, then mutate, then restore.** Both rounds above now follow that order.
+
 ### Built so far
 
 The payload codec, the reference collector that narrows Agent 1's fail-closed arm under I-5, the
