@@ -1527,9 +1527,10 @@ of work from beginning.** A single filesystem operation is not preemptible throu
 this is not a measured latency ceiling, and no production bounded-custody claim follows until
 those callers adopt the budgeted path.
 
-Also not established here: the parked plaintext's residency is not charged to section 13.4's
-retained-input sum, and no runtime variant yet demonstrates that a cancelled waiter does not
-release a still-running validation's reservation. Both are activation requirements.
+The parked plaintext's residency **is** now charged to section 13.4's retained-input sum, at
+18 876 416 bytes, which is the largest single accounted term in the permit. Still not established
+here: no runtime variant yet demonstrates that a cancelled waiter does not release a still-running
+validation's reservation. That remains an activation requirement.
 
 ### Review provenance: what is independently closed, and what is only submitted
 
@@ -1740,66 +1741,119 @@ count, **not** the sum of the 256 signature durations; and the direct loop exclu
 cadence, queued visits and waits. So the missing piece is not only the visit count 13.8 names -
 the scheduled elapsed time itself is absent.
 
-## Design 13.4: retained input and output - NO TOTAL IS CLAIMED
+## Design 13.4: retained input and output, with the stage and lifetime table
 
 13.4 asks for the sum of the accounted bounds on retained input and output within one permit, and
 says explicitly that this is **not a measured heap ceiling**. So it is arithmetic over the caps,
-not a profile, and it can be completed by reading them.
+not a profile, and it can be completed by reading them. It is now completed, on the fourth attempt,
+with the scope declared and the ownership of every row read out of the constructors rather than the
+struct definitions.
 
-**NO TOTAL IS CLAIMED. Two previous attempts produced one and both were wrong.**
+**Scope, declared.** One permit - one handoff job spanning H1 capture, H2 prepare, the H3 signing
+turns, H4 assemble, H5 commit, plus a C-3 parked body during adoption. The figure below is a
+**sum of accounted bounds**, exactly as 13.4 words it: rows that never coexist are still both
+counted, so it is an accounting sum and an upper bound on peak residency, **not** the peak itself
+and **not** a heap ceiling. Peak-simultaneous is reported separately and is smaller.
 
-The first charged the *overlay extension* cap to whole Prepared and Completed **records**, charged
-the Studio snapshot cap to a "decoded state" that is an `EpochIntentState`, and charged two
-encoded records the implementation does not retain at all: **63.5 MiB, withdrawn.** The second
-corrected those rows but **omitted retained representations entirely and its printed total did not
-match its own rows** - the eight figures sum to 57 947 536, not the 58 070 536 printed, a
-123 000-byte arithmetic error: **55.4 MiB, withdrawn.**
+### Two of the four "missing representations" I reported were misread
 
-What is established, and what is not:
+The previous round listed four retained representations as omitted. Two of those were wrong, and
+the error was reading struct definitions instead of the functions that build them.
 
-**Established - the two length-only rows.** `prepared_bytes` and `completed_bytes` are `u64`
-lengths (`prepared_state.encode(&scope)?.len() + 40`); the encoded buffers are dropped. 13.4's
-list names them as retained records, and the implementation does not retain them.
+`prepare_handoff_detached(self, mut source: StudioEpoch, ledger: IntentLedger, ..)` takes all three
+**by value** and moves them into `StudioHandoffSigning { changes, metadata: self, ledger, .. }`
+(`overlay/handoff/preparation.rs:95-131`). `PreparedOverlayChanges::prepare(mut source, ..)`
+likewise moves the source into `Self { source, .. }`. So:
 
-**Established - the parked-body allowance.** `ParkedEpochRecord` holds a real
-`Zeroizing<Vec<u8>>`, bounded at the general full-coverage park point by the largest family record
-cap, Recovery's `MAX_RECOVERY_SLOTS_BYTES + 1024` = **18 876 416 bytes**. Exact rather than
-proxied. Narrower per-mode read and cold-byte rails may apply, and no maximal fixture has shown a
-single park of that size is reachable.
+- "`StudioHandoffSigning` **clones** metadata and ledger" - wrong at that site; both are moves.
+- "`PreparedOverlayChanges` holds a **second** `StudioEpoch`" - wrong; it is the same one, moved.
 
-**Not established - everything that needs a total.** The retained-object inventory is incomplete.
-At least four representations were missing:
+The substance survives relocated, which is why the rows stay. The clones are real but happen one
+level up, at the **call site** in H2: `state.handoff_metadata()..clone()` (`handoff_capture.rs:282`)
+and `state.ledger.clone()` (`:302`). `StudioHandoffPlan` then retains `state` *and* `signing`
+together, so the permit really does hold the ledger twice and the overlay metadata twice - just not
+for the reason first given. The other two rows were verified correct as written.
 
-| missing representation | where |
-|---|---|
-| `StudioHandoffSigning::{metadata: StudioOverlayState, ledger: IntentLedger}` - **cloned** from the state by H2, not references into the one `EpochIntentState` the old table charged | `overlay/handoff/preparation.rs:48-54` |
-| `PreparedOverlayChanges::{source: StudioEpoch, pending: VecDeque<UnsignedChange>, signed: Vec<SignedOp>}` - a second source plus unsigned and signed operations accumulating as signing proceeds | `epoch/handoff/preparation.rs:11-15` |
-| the commit's `snapshot: Zeroizing<Vec<u8>>` - a real encoded buffer from `candidate.snapshot()`, living **alongside** the candidate, and neither of the two discarded intent encodings | `handoff_capture.rs:104` |
-| H4's `state`, `prepared_state` and `completed_state` coexisting during `assemble`'s encoding | `handoff_capture.rs:228-318` |
+### Stage and lifetime, with move relationships preserved
 
-**And the scope was never decided.** The old table mixed a transient capture allowance, retained
-output objects and scalar lengths without saying whether the figure is a **sum of stage
-allowances** or the **maximum simultaneous accounted retention**. Those are different numbers, and
-an object *moved* between stages must not be counted as two live copies.
+`->` means moved, not copied. Only `clone` rows are extra live copies.
 
-### What a correct §13.4 needs, recorded as the outstanding work
+| stage | created | fate | retained after the stage |
+|---|---|---|---|
+| H1 capture | `intent_bytes`, `source_bytes` (`Zeroizing`) | both **dropped** when `prepare` consumes `self` | neither |
+| H2 decode | `state: EpochIntentState` | -> the plan | state |
+| H2 clone | `metadata` **clone** of the state's overlay (`:282`), `ledger` **clone** (`:302`) | -> signing | both, beside the originals in `state` |
+| H2 successor | `source: StudioEpoch` from the snapshot | -> `changes.source` | the successor |
+| H2 probe | `self.clone().set_prepared(..)` framing probe (`preparation.rs:115`) | discarded in-statement | none |
+| H2 change set | `graph` (doc clone), per-op `staged` (second doc clone), projection clones, `operations` map | "die here, before signing" (`epoch/handoff/preparation.rs:98`) | none |
+| H2 batch | `pending: VecDeque<UnsignedChange>` | -> signing | the encoded-op bytes |
+| H3 turns | one `delta.clone()` per turn (`:119`) | pending entry popped as `signed` grows | pending + signed, together ~N ops |
+| H4 assemble | `prepared_state`/`completed_state` **clones** (`:244`,`:246`), two encodings, a source-record encoder holding a **second copy** of the snapshot | clones and buffers dropped; only `len()` kept | `snapshot`, `prepared`, `state`, three `u64` |
+| H5 commit | nothing new | writes | - |
+| C-3 adoption | one parked body | held across the turn | the parked body |
 
-A stage-and-lifetime table before any total:
+### The sum 13.4 asks for
 
-| stage | what to account |
-|---|---|
-| Capture | both authenticated plaintext buffers, with the source's release after H2 explicit |
-| Prepared / signing | the state, the signing-owned **cloned** ledger and metadata, the second source, and pending plus signed changes |
-| Assembly worker | live state clones and the temporary encodings, per the declared scope |
-| Commit result | candidate, prepared metadata, the original decoded state, the encoded snapshot, and the scalar lengths |
-| C-3 adoption | the parked body alongside whichever bundle holds the permit at that stage |
+Over exactly the eight items 13.4 names:
 
-Then declare sum-of-stages or peak-simultaneous, and preserve move relationships.
+| # | item | bound | basis |
+|---|---|---|---|
+| 1 | captured intent plaintext | 5 243 904 | intent `MAX_RECORD_BYTES` |
+| 2 | captured source plaintext | 9 528 448 | studio `MAX_RECORD_BYTES` |
+| 3 | decoded state | 5 243 904 | *proxy*; the record cap covers ledger + overlay |
+| 4 | restored private successor | 9 527 424 | *proxy*; `MAX_STUDIO_EPOCH_SNAPSHOT_BYTES` |
+| 5 | signed candidate | 9 527 424 | *proxy*; same |
+| 6 | encoded Prepared record | 8 | **not retained**; a `u64` length |
+| 7 | encoded Completed record | 8 | **not retained**; a `u64` length |
+| 8 | C-3's one parked body | 18 876 416 | exact; `MAX_RECOVERY_SLOTS_BYTES + 1024` |
+| | **sum of the accounted bounds** | **57 947 536** | **55.26 MiB** |
 
-**Two conclusions withdrawn until that exists.** The parked body's *percentage* of the total, and
-the claim that "the implementation is better than the design's list by ~10 MiB" - both depend on a
-total that is not established. Spare headroom in one row cannot silently cover a missing
-representation in another.
+Rows 1-8 are the same eight figures the previous attempt listed; what was wrong there was only the
+printed total, 58 070 536, off by 123 000. The sum is re-derived here rather than carried.
+
+**The correction trail, kept so the rows can be audited against what they replaced.** Three
+attempts preceded this one:
+
+| attempt | figure | what was wrong |
+|---|---|---|
+| 1 | 63.5 MiB | charged `MAX_EXTENSION` to whole Prepared and Completed **records**; charged the *Studio snapshot* cap to a "decoded state" that is an `EpochIntentState`; charged two encoded records the implementation does not retain at all |
+| 2 | 55.4 MiB | rows 3, 4, 6 and 7 corrected, but the printed total did not match its own rows, and retained representations were omitted |
+| 3 | no total | declined to total at all, and listed four omitted representations of which **two were misread** as clones |
+
+So rows 3 and 4 are the ones that moved most: the decoded state is charged at the *intent* record
+cap because `EpochIntentState` is a ledger plus an optional overlay and that cap covers both, and
+the successor is charged at the *snapshot* cap because it is a `StudioEpoch`. Rows 6 and 7 are 8
+bytes rather than a record cap because the implementation keeps only `len()`.
+
+**Retained beyond 13.4's list**, which is why the sum above is not a ceiling even for accounted
+terms:
+
+| item | bound | where |
+|---|---|---|
+| signing's cloned overlay metadata | 2 162 688 | `MAX_EXTENSION`, cloned at `handoff_capture.rs:282` |
+| signing's cloned ledger | 5 242 880 | `MAX_INTENT_LEDGER_BYTES`, cloned at `:302` |
+| pending + signed encoded ops | 4 194 304 | `MAX_EPOCH_BYTES`, the gate's aggregate cap |
+| the commit's encoded snapshot | 9 527 424 | `handoff_capture.rs:251`, retained at `:264` |
+| the commit's prepared overlay state | 2 162 688 | `MAX_EXTENSION`, retained at `:262` |
+| | **23 289 984** | **22.21 MiB** |
+
+**Combined accounted retention: 81 237 520 bytes, 77.47 MiB.**
+
+**Peak simultaneous is not reduced to one number**, and deliberately so: the three largest rows are
+automerge documents whose heap footprint is proxied by an encoded cap, and a proxy cannot bound a
+peak. What can be said is *where* the peak is. It is H4 `assemble`, which holds three
+`EpochIntentState` (the original plus two clones, 15 731 712 by the proxy), the candidate, and two
+copies of the snapshot bytes at once - the `Zeroizing` one and the source-record encoder's - before
+any of it is written. H2's change set is the runner-up, holding the successor's document plus two
+further full clones of it during the per-operation loop.
+
+**The parked body is 32.6% of 13.4's list** and 23.2% of the combined figure. That share is
+restored, because a sum now exists to take it of.
+
+**Withdrawn permanently:** "the implementation is better than the design's list by ~10 MiB". The
+gap it rested on was the two length-only rows, and the five additional retained representations
+above more than consume it. The implementation retains **more** than 13.4's list accounts for, not
+less.
 
 **The currency, where a proxy is used.** Rows charging an encoded cap for a decoded object are a
 declared proxy, not a measurement; an automerge document's heap footprint can exceed its encoded
@@ -1819,8 +1873,8 @@ other family is far smaller: Studio 9.1 MiB, Intents 5.0 MiB, OwnerReceipts 8.25
 
 It is the one term whose bound is **exact rather than proxied** - a real `Zeroizing<Vec<u8>>` of
 authenticated plaintext - which is why it is the figure worth carrying into the runtime adoption
-even while the rest of the accounting is unsettled. **Its share of any total is not claimed**,
-because no total is established.
+even while the proxied rows remain proxies. It is **32.6%** of 13.4's eight-item sum and 23.2% of
+the combined accounted retention, which makes C-3 the largest single accounted term in the permit.
 
 The operational point stands on the absolute figure alone: a runtime holding a parked body across
 a scheduler turn holds up to ~18 MiB of authenticated plaintext, and `Zeroizing` governs its
@@ -1848,9 +1902,12 @@ its residency.
 
 ### What that leaves genuinely unmeasured
 
-**None of the eight is done.** An earlier version of this table put 13.1, 13.4, 13.6 and 13.7 in
-a "done" column; a review rejected all four, and on inspection it was right about each. The
-states below are the four this ledger should have been distinguishing all along:
+**One of the eight is now complete: 13.4**, and it is the only one that can be, because it is the
+only item that asks for arithmetic over declared caps rather than a run. The other seven need
+measurements, and none of those is done. An earlier version of this table put 13.1, 13.4, 13.6 and
+13.7 in a "done" column; a review rejected all four, and on inspection it was right about each -
+13.4 needed three further corrections after that verdict before it stood. The states below are the
+four this ledger should have been distinguishing all along:
 
 - **source-correct fixture** - the fixture builds what its label says, verified;
 - **executed measurement** - a run produced figures from that fixture;
@@ -1862,7 +1919,7 @@ states below are the four this ledger should have been distinguishing all along:
 | 13.1 | **component measurements only; stage mapping rejected** | actual H1, scheduled-H3-slice and H5 intervals at 1/32/256, inventory separated on the handoff's own path. What exists times `load_epoch_intents`, an on-demand draft, the synchronous compatibility adapter and a test helper's `budget(...)` |
 | 13.2 | **nothing** | maximal accepted shapes: 5 MiB + 1024-byte intent record at 256 maximal bodies, 2 MiB seed, 64 KiB metadata ceiling, maximal projection widths, a large roster |
 | 13.3 | **small-shape observation** | the largest admitted individual operation and roster, with its authority checks. 1 ms is a sampled maximum over ~100-byte title operations |
-| 13.4 | **calculation submitted, corrections applied, not closed** | the sum has been rebuilt from retained types after a review found three wrong rows. 55.4 MiB, parked body 18 MiB. Still a calculation, not a measurement, and the proxy rows are proxies |
+| 13.4 | **complete as the arithmetic 13.4 asks for; not a measurement** | scope declared (one permit, sum of accounted bounds), stage/lifetime table with moves distinguished from clones, 55.26 MiB over 13.4's eight items plus 22.21 MiB retained beyond its list. Peak-simultaneous is located at H4 but not reduced to a number, because the largest rows are proxied automerge documents |
 | 13.5 | **nothing** | Flow S custody per stage at 1/32/255, including S1's structural classification, the S1b and S3 basis derivations and S3's I-3 holds |
 | 13.6 | **executed measurement; obligation partly unaddressed** | `checked_epoch_replay_state` and the five-family inventory over several large retained branches, both named by 13.6. What exists measures the decoder pair and the two load entry points |
 | 13.7 | **source-correct fixtures, executed measurements, narrower conclusions** | accepted-ceiling runs for each family; DraftArchive entirely; a largest-single-step figure at a ceiling rather than at fixture sizes; restart behaviour under a real workload rather than a deterministic guard rotation. OwnerReceipts and Intents are measured only at trivial sizes |
