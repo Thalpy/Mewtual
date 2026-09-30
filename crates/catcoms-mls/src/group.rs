@@ -558,9 +558,28 @@ impl ServerGroup {
                 //
                 // A test written against the by-reference path therefore PASSES with this rule
                 // deleted, for the second reason rather than this one - which is exactly the kind of
-                // test that is worse than none, so the attempt was removed rather than kept. The rule
-                // stays as defence for a future builder: if proposal storage or a multi-proposal
-                // commit is ever added, this becomes reachable and must be anchored then.
+                // test that is worse than none, so the attempt was removed rather than kept.
+                //
+                // **WITHDRAWN: the reasoning above does not establish that this rule is unreachable,
+                // and an adversarial review was right to reject it.**
+                //
+                // Every clause above is a statement about what *our* builder emits. An MLS commit
+                // carries a list of `ProposalOrRef`, and a proposal included **by value** needs no
+                // entry in anyone's proposal store - so a hostile or merely modified existing member
+                // can send a single commit carrying an inline Remove of the designated committer and
+                // an inline Add of the same `DeviceId`. That sender is not the removed member, so it
+                // is not the self-removal case, and it is not an external commit either, so the
+                // refusal above does not cover it. "Our builder cannot produce this shape" was never
+                // evidence that a peer cannot submit it, and treating the two as the same thing is
+                // the error this comment used to make.
+                //
+                // The rule is present and correctly placed - before the merge - so there is no known
+                // bypass. What is missing is the test. It is constructible: build the two proposals
+                // inline against OpenMLS directly rather than through this wrapper's single-proposal
+                // helpers, and feed the resulting bytes to this function. It must refuse with the
+                // receiver's epoch and state unchanged, and deleting this rule must then either allow
+                // the forbidden transition or reveal the specific earlier validation that genuinely
+                // makes it redundant.
                 if let Some(committer) = self.designated_committer() {
                     let removes_committer = staged.remove_proposals().any(|remove| {
                         self.group

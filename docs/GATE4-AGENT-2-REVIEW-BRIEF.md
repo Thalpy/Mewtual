@@ -58,10 +58,20 @@ Executed, not asserted:
 | desktop `--lib studio::` | 45 passed | independent audit at `288bb30c` |
 | mutation harness | 9 detected, 9 restored runs passing | under CI's `-D warnings` |
 
-An independent audit separately confirmed the hard invariants by reading and attacking the code: P5
-holds (no registered command and no composition of commands writes into a Closing branch); both
-confirmation tokens are unforgeable and non-transferable; the detached copy worker carries no live
-authority; and the `catcoms-mls` M-1 unreachability claim survives attack.
+Independent audits confirmed, by reading and attacking the code:
+
+- **P5 holds**, stated precisely: **no registered command path accepts new annotated work into a
+  Closing overlay.** Do not broaden that to "no command writes anything touching a Closing document" -
+  disposal deliberately replaces an intent record, and the archive family writes its own records.
+- **The detached copy worker carries no live authority** - data, choice, scope, instance token and a
+  permit, no group, device, key or store.
+- **Destructive requests require an explicit typed confirmation** that cannot be cloned or reused
+  across transactions, and the mutation separately checks the named evidence. **This is not the same
+  as "unforgeable"**: the parser matches a public literal, so it is not a capability and it does not
+  itself encode which branch or archive the user was shown. The evidence binding does that.
+
+**The M-1 unreachability claim has been WITHDRAWN** - see 4b. The check is present and pre-merge; the
+argument for not testing it was wrong.
 
 **Run tests in a detached worktree, not the main tree.** Other agents' in-flight work currently
 references `catcoms_rt::REQUEST_TIMEOUT` and `catcoms_sync::BlobPageOutcome`, which do not exist yet,
@@ -101,6 +111,24 @@ The last two were found by Agent 3, not by me.
 
 ---
 
+## 4b. What the external review found, and what I did with each
+
+An external adversarial review of `414fda06` returned CHANGES REQUIRED. Its dispositions:
+
+| Its finding | My response |
+|---|---|
+| **High: preserving disposal does not establish archive durability before removal** | **Disagreed, with reasoning, and documented.** Both records are entries in the same `servers/` directory, and the replacement's `atomic_write` ends in `sync_directory` on that parent - the same barrier that makes the removal durable, and the archive's rename precedes it. The removal cannot become durable while the evidence is not. **But the review was right that this was undocumented and load-bearing**: it is now written at the D4 site with a `debug_assert` on the shared parent, so moving either family cannot silently remove the guarantee |
+| **My rollover trace was wrong** | **Accepted.** The retained manifest blocks the short sequence. Corrected in section 6 and in the status doc; my replication test already used the right one |
+| **D4's regression needs an intervening disposal** | **Accepted.** Folded into issue 1 below |
+| **M-1's unreachability waiver omits inline proposal lists** | **Accepted and withdrawn.** Every clause of my argument described *our builder*; a commit carries a list of `ProposalOrRef` and an inline proposal needs no stored entry, so a hostile existing member can send Remove(A)+Add(A) in one commit. "Our builder cannot produce it" was never evidence a peer cannot submit it. The check is present and pre-merge, so no known bypass; the waiver was the defect |
+| "Unforgeable" overstates the confirmations | **Accepted**, corrected below |
+| "Only the copy issue guards a durable write" | **Accepted**, corrected below: D4 and D1 guard destructive durable transitions too |
+| The harness does not check isolation | Already recorded; its claim is corrected in the script |
+
+**New positive evidence it supplied:** CI run `36723616483` passes both `lifecycle` and `overlay`
+jobs on the merge checkout - 106 app overlay, 47 replication, 11 sync, and 9 mutations detected with
+9 restored regressions passing, under `-D warnings`.
+
 ## 5. The three open issues
 
 **All three are gaps in evidence, not known-broken behaviour.** The code is currently correct in each
@@ -121,13 +149,36 @@ code's own comment says why:
 > and content happen to be identical, which `content` alone cannot catch because `branch_hash` does
 > not cover the generation
 
-So there is a specific reachable sequence - archive generation N, dispose it, admit generation N+1
-with identical entries, then preserve-dispose against the stale archive - where **only** the
-generation compare stands between the user and destroying a branch whose "evidence" is for different
-work. `matches_branch` cannot see it. That case has no test at all.
+So there is a sequence where **only** the generation compare stands between the user and destroying a
+branch whose "evidence" is for different work. `matches_branch` cannot see it. That case has no test.
 
-*Attack it by:* constructing that sequence and checking the refusal actually happens, and for the
-right reason.
+**The obvious sequence does not work, and a review corrected mine.** "Archive N, dispose N, admit N+1
+with identical entries" is blocked: the retained manifest remembers N's ids and `validate` refuses the
+overlap. The manifest has to be replaced first:
+
+```
+G1 contains X;  archive A1 from G1;  dispose G1 with Preserve  (A1 survives)
+G2 contains disjoint Y;              dispose G2 with Discard   (replaces G1's manifest, A1 survives)
+G3 contains X again, same basis, same envelopes/order/timestamps
+attempt Preserve against A1
+```
+
+The timestamps must genuinely match, or `matches_branch` masks the generation check again. Assert
+before disposing:
+
+```
+A1.matches_branch(G3) == true
+A1.content          == G3.branch_content
+A1.generation       != G3.generation
+A1.branch           != G3.branch_id
+```
+
+then require the refusal, with G3 and A1 both intact afterwards.
+
+*Mutation discipline:* do not demand that deleting `branch` alone and `generation` alone each fail
+uniquely - `branch_id` is `H(basis, generation)`, so they are mutually redundant by construction. Test
+the semantic invariant: an archive from an earlier generation must not authorise this generation's
+disposal, while full-envelope matching still succeeds.
 
 ### Issue 2 - `probe_copy_object` (`crates/catcoms-app/src/studio/copy.rs:143-165`)
 
@@ -135,8 +186,10 @@ An Index `Object` copy must name a Flipnote that actually exists. **Force it to 
 five desktop copy tests stay green** - nothing else checks it, and the app crate has no store-backed
 copy fixture that could reach it.
 
-**It is the only one of the three that guards a durable write.** Without it, a copy publishes an Index
-entry naming an object that is not there. It was added in response to a review finding and is modelled
+Without it, a copy publishes an Index entry naming an object that is not there. (An earlier version of
+this brief called it "the only one of the three that guards a durable write". That was wrong: D4 and
+D1 both guard a destructive durable transition. What is distinctive here is that the bad outcome is a
+*new durable record naming something absent*, rather than a removal.) It was added in response to a review finding and is modelled
 directly on recovery's equivalent guard - which is why I believe it is correct, and also exactly what
 every one of the nine vacuous tests looked like.
 
@@ -163,10 +216,20 @@ fixture, which is the most expensive of the three and the least likely to be wro
 `new_admitted` have **zero non-test callers** anywhere in `catcoms-app`. The Save seam carries `basis`
 and never a `branch`, so the two-stage classification is never consulted by production code.
 
-Trace design 6.6's own worked example against the code: dispose G1 on basis B, admit G2 on B, deliver
-a delayed G1 request. It is not a completed retry, not an exact retry, no longer pending, and the
-basis still matches - so it is treated as new authoring and appended onto **G2**. Work resurrected
-into a branch the user never put it in. That is precisely the case 6.6 says must return `Stale`.
+**The short trace this brief originally gave was wrong**, and a review caught it. "Dispose G1, admit
+G2, deliver a delayed G1 request" does **not** resurrect the work: the retained G1 manifest still
+remembers G1's ids and `validate` refuses any state where an id is both in the live branch and in the
+retained manifest. The reachable sequence needs that manifest replaced, since `dispose` overwrites the
+previous one and does not advance the basis floor:
+
+1. Accept G1 containing X; dispose G1.
+2. Accept G2 containing **disjoint** Y on the still-eligible basis.
+3. Dispose G2, replacing G1's manifest.
+4. Deliver a delayed G1 request naming an operation from X.
+
+The id is now not pending, not in the retained manifest, and not a completed or exact retry, while the
+basis still matches - and a Save seam carrying only `basis` has nothing left to distinguish it from
+new work. That is the case 6.6 says must return `Stale`.
 
 It is unreachable today for exactly one reason: `studio_overlay_save` is unregistered. **That makes it
 a P1 and P5 blocker rather than a live defect**, and it is the honest reason P1 cannot be called

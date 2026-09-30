@@ -227,6 +227,36 @@ impl ServerStore {
                         )
                     })?;
                 let archive = &record.archive;
+                // **Why reading the archive is enough, and what that depends on.**
+                //
+                // A review argued this is an ordering hole: the read authenticates and decodes but
+                // syncs nothing, so an archive whose rename landed while its parent-directory
+                // barrier failed is readable here without being durable - and disposal then destroys
+                // the branch on the strength of it.
+                //
+                // It does not hold, for a reason that was load-bearing and undocumented until this
+                // comment. The archive record and the intent record are both entries in the SAME
+                // `servers/` directory, and the replacement below goes through `atomic_write`, which
+                // ends in `sync_directory` on that parent. That single barrier is what makes the
+                // branch removal durable, and it necessarily makes the archive's earlier rename
+                // durable too. So the removal cannot become durable while the evidence is not:
+                // either the shared fsync succeeds and both are, or it fails and neither is - in
+                // which case this transaction returns uncertain and the caller reconciles.
+                //
+                // The assumption is therefore: **both families live in one directory, and the
+                // replacement below syncs it.** If an archive ever moves to its own directory, or
+                // the intent write stops syncing its parent, the guarantee disappears silently and
+                // an explicit durability barrier has to be taken here instead. The debug assertion
+                // states the first half so a move cannot pass unnoticed.
+                debug_assert_eq!(
+                    self.epoch_draft_archive_path(&super::super::epoch_draft_archive::scope_bytes(
+                        server, document
+                    )?)
+                    .parent(),
+                    self.epoch_intent_path(&scope).parent(),
+                    "preserving disposal relies on the archive and the intent record sharing one \
+                     directory fsync; they no longer do"
+                );
                 // `target` and `provenance` are compared explicitly rather than left to the
                 // document binding and the sealed key to imply. Both are bound transitively today,
                 // which is exactly the kind of guarantee that quietly stops holding when a record

@@ -836,12 +836,26 @@ Found by the comprehensive correctness review, and it is the most important thin
 `store/epoch_studio/overlay.rs`) and never a `branch`, so the two-stage classification design 6.6
 specifies is never consulted by production code.
 
-Trace 6.6's own worked example against the code as it stands: dispose G1 on basis B, admit G2 on B,
-then deliver a delayed G1 request. `completed_retry` gives `None`; `exact_retry` against G2 is
-`false` because the id is absent; `pending()` no longer holds it because the disposal removed it;
-the basis fingerprint still matches, so it is treated as new authoring and `append`ed onto **G2**.
-G1's work is resurrected into a branch the user never put it in. That is precisely the case 6.6 says
-must return `Stale`.
+**CORRECTED: the short trace this row used to give was wrong, and a review caught it.** It said
+"dispose G1, admit G2, deliver a delayed G1 request" and claimed the request appends onto G2. It does
+not. The retained G1 disposal manifest still remembers G1's operation ids, and `validate` refuses any
+state where an id appears both in the live branch and in the retained manifest - so the overlap is
+rejected. That existing defence is real and I had written past it. My own replication test
+(`an_old_generation_request_is_stale_after_the_namespace_has_moved_on`) uses the correct sequence; the
+prose here did not.
+
+The reachable trace needs the manifest to be **replaced**, because `dispose` overwrites the previous
+`disposed` record and does not advance the basis floor:
+
+1. Accept G1 containing operations X; dispose G1.
+2. Accept G2 containing **disjoint** operations Y on the still-eligible basis.
+3. Dispose G2 - which replaces G1's retained manifest.
+4. Deliver a delayed G1 request naming an operation from X.
+
+Now the id is not pending, not in the retained manifest, and not a completed or exact retry, while
+the basis fingerprint still matches. With a Save seam that carries only `basis` and no branch
+identity, there is nothing left to distinguish the delayed request from new work. That is the case
+6.6 says must return `Stale`.
 
 It is not reachable today, for one reason only: `studio_overlay_save` is unregistered. That makes it
 a **P5 and P1 blocker rather than a live defect**, and it is the honest reason P1 cannot be called

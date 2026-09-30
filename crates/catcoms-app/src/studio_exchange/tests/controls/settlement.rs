@@ -163,7 +163,9 @@ async fn destructive_overlay_actions_request_a_refresh_even_when_they_refuse() {
     }
 
     // And the read-only members of the same family stay silent, refusal or not.
-    invoke(&actor, &store, Action::OverlayLifecycle).await.unwrap();
+    invoke(&actor, &store, Action::OverlayLifecycle)
+        .await
+        .unwrap();
     assert_eq!(actor.member_count().await, 2);
     assert!(
         drain(&mut events).is_empty(),
