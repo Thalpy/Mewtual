@@ -1714,15 +1714,17 @@ So these are **useful component measurements under their own function boundaries
 how they are recorded. 13.1 remains **incomplete**: it needs the actual H1, scheduled-H3-slice and
 H5 intervals at 1/32/256 with the inventory separated on the corresponding path.
 
-**The result is that C-3's inventory is not the dominant term at these shapes - it is about a
-tenth of a percent of the durable handoff.** 2 ms against 2 083 ms at 256 operations.
+**Labelled as what it is:** separate inventory/budget-**helper** time compared with the complete
+**synchronous** handoff call - 2 ms against 2 083 ms at 256 operations. That is **not** a
+measurement of the scheduled H5 share, and not "the inventory a handoff actually pays"; an earlier
+version of this paragraph said both.
 
-That needs its caveat stated immediately, because it would otherwise read as retiring C-3's
-premise: **this fixture's vault is tiny.** `source_bytes` is 1 607, and 13.7 measured a 4 MB
-Studio record's validation alone at 24 ms and a 128-frame record at 197 ms. So the honest reading
-is that the inventory is negligible *when the vault is small*, and 13.7 says what happens when it
-is not. The two measurements are about different quantities: 13.1 measures the inventory a handoff
-actually pays on this fixture, 13.7 measures what one record can cost.
+Two further caveats, because it would otherwise read as retiring C-3's premise. **This fixture's
+vault is small** - `source_bytes` 1 607 describes one *source record*, not the whole vault, which
+also holds the intent record and other retained metadata. And 13.7 measured a 4 MB Studio record's
+validation alone at 24 ms and a 128-frame record at 197 ms. So the inventory helper is cheap
+*here*, and 13.7 says what one record can cost. The two are about different quantities: this
+measures a helper call on a small fixture; 13.7 measures a single record's validation.
 
 **13.3 - worst single-signature time, since the deadline is checked between signatures:
 `max_turn_ms = 1` at 256 operations**, for both Index and Flipnote. The signing loop already
@@ -1731,69 +1733,98 @@ ordinary suite rather than an opt-in profile. **Partial**: these are roughly 100
 operations and a small roster, not 13.3's "largest admitted individual operation and roster
 shape".
 
-**13.8 - wall-clock for a 256-operation handoff, reported separately from maximum continuous
-custody: mostly measured.** `prepare_ms` 529, 256 turns at 1 ms, `finish_ms` 244 for Flipnote, and
-the separation from custody is intrinsic - `max_turn_ms` is the custody figure and these are
-wall-clock. **Missing: the visit count**, which 13.8 explicitly names and neither profile reports.
+**13.8 - synchronous component evidence only; "mostly measured" is withdrawn.** `prepare_ms` 529,
+`finish_ms` 244 and `max_turn_ms` 1 for Flipnote are real figures from the direct signing loop, and
+they are not the scheduled handoff's wall clock. `256 x max_turn_ms` is the maximum times the
+count, **not** the sum of the 256 signature durations; and the direct loop excludes actor receive
+cadence, queued visits and waits. So the missing piece is not only the visit count 13.8 names -
+the scheduled elapsed time itself is absent.
 
-## Design 13.4: the sum of accounted bounds, and C-3's parked body is the largest term
+## Design 13.4: retained input and output - NO TOTAL IS CLAIMED
 
 13.4 asks for the sum of the accounted bounds on retained input and output within one permit, and
 says explicitly that this is **not a measured heap ceiling**. So it is arithmetic over the caps,
 not a profile, and it can be completed by reading them.
 
-**The first version of this table was wrong in three ways and the 63.5 MiB headline it produced
-is withdrawn.** It charged the *overlay extension* cap to whole Prepared and Completed **records**;
-it charged the Studio snapshot cap to a "decoded state" that is an `EpochIntentState`; and it
-charged two encoded records that the implementation does not retain at all. Rebuilt from the
-retained types, with the currency declared per row:
+**NO TOTAL IS CLAIMED. Two previous attempts produced one and both were wrong.**
 
-| 13.4's term | what is actually retained | bound | copies | bytes |
-|---|---|---|---|---|
-| Captured intent plaintext | `Zeroizing<Vec<u8>>` read from the record | intent record cap `MAX_INTENT_LEDGER_BYTES + 1024` | 1 | 5 243 904 |
-| Captured source plaintext | released after H2; only digest, size and derived facts are carried | Studio record cap `MAX_STUDIO_EPOCH_SNAPSHOT_BYTES + 1024` **while live** | 1, transiently | 9 528 448 |
-| Decoded state | `StudioHandoffPlan::state`, an **`EpochIntentState`** - ledger plus optional overlay, *not* a Studio snapshot | intent record cap, as a **declared proxy** for the decoded object | 1 | 5 243 904 |
-| Restored private successor | a `StudioEpoch` | Studio snapshot cap, **declared proxy** | 1 | 9 527 424 |
-| Signed candidate | a `StudioEpoch` | Studio snapshot cap, **declared proxy** | 1 | 9 527 424 |
-| Encoded Prepared record | **not retained.** `prepared_bytes: u64` is `prepared_state.encode(&scope)?.len() + 40`; the buffer is dropped | 8 bytes of length | 1 | 8 |
-| Encoded Completed record | **not retained**, same shape | 8 bytes of length | 1 | 8 |
-| **C-3's at most one parked record body** | `Zeroizing<Vec<u8>>` inside `ParkedEpochRecord` | largest family record cap: Recovery's `MAX_RECOVERY_SLOTS_BYTES + 1024` | 1 | **18 876 416** |
-| **Sum of accounted allowances** | | | | **58 070 536 (55.4 MiB)** |
+The first charged the *overlay extension* cap to whole Prepared and Completed **records**, charged
+the Studio snapshot cap to a "decoded state" that is an `EpochIntentState`, and charged two
+encoded records the implementation does not retain at all: **63.5 MiB, withdrawn.** The second
+corrected those rows but **omitted retained representations entirely and its printed total did not
+match its own rows** - the eight figures sum to 57 947 536, not the 58 070 536 printed, a
+123 000-byte arithmetic error: **55.4 MiB, withdrawn.**
+
+What is established, and what is not:
+
+**Established - the two length-only rows.** `prepared_bytes` and `completed_bytes` are `u64`
+lengths (`prepared_state.encode(&scope)?.len() + 40`); the encoded buffers are dropped. 13.4's
+list names them as retained records, and the implementation does not retain them.
+
+**Established - the parked-body allowance.** `ParkedEpochRecord` holds a real
+`Zeroizing<Vec<u8>>`, bounded at the general full-coverage park point by the largest family record
+cap, Recovery's `MAX_RECOVERY_SLOTS_BYTES + 1024` = **18 876 416 bytes**. Exact rather than
+proxied. Narrower per-mode read and cold-byte rails may apply, and no maximal fixture has shown a
+single park of that size is reachable.
+
+**Not established - everything that needs a total.** The retained-object inventory is incomplete.
+At least four representations were missing:
+
+| missing representation | where |
+|---|---|
+| `StudioHandoffSigning::{metadata: StudioOverlayState, ledger: IntentLedger}` - **cloned** from the state by H2, not references into the one `EpochIntentState` the old table charged | `overlay/handoff/preparation.rs:48-54` |
+| `PreparedOverlayChanges::{source: StudioEpoch, pending: VecDeque<UnsignedChange>, signed: Vec<SignedOp>}` - a second source plus unsigned and signed operations accumulating as signing proceeds | `epoch/handoff/preparation.rs:11-15` |
+| the commit's `snapshot: Zeroizing<Vec<u8>>` - a real encoded buffer from `candidate.snapshot()`, living **alongside** the candidate, and neither of the two discarded intent encodings | `handoff_capture.rs:104` |
+| H4's `state`, `prepared_state` and `completed_state` coexisting during `assemble`'s encoding | `handoff_capture.rs:228-318` |
+
+**And the scope was never decided.** The old table mixed a transient capture allowance, retained
+output objects and scalar lengths without saying whether the figure is a **sum of stage
+allowances** or the **maximum simultaneous accounted retention**. Those are different numbers, and
+an object *moved* between stages must not be counted as two live copies.
+
+### What a correct §13.4 needs, recorded as the outstanding work
+
+A stage-and-lifetime table before any total:
+
+| stage | what to account |
+|---|---|
+| Capture | both authenticated plaintext buffers, with the source's release after H2 explicit |
+| Prepared / signing | the state, the signing-owned **cloned** ledger and metadata, the second source, and pending plus signed changes |
+| Assembly worker | live state clones and the temporary encodings, per the declared scope |
+| Commit result | candidate, prepared metadata, the original decoded state, the encoded snapshot, and the scalar lengths |
+| C-3 adoption | the parked body alongside whichever bundle holds the permit at that stage |
+
+Then declare sum-of-stages or peak-simultaneous, and preserve move relationships.
+
+**Two conclusions withdrawn until that exists.** The parked body's *percentage* of the total, and
+the claim that "the implementation is better than the design's list by ~10 MiB" - both depend on a
+total that is not established. Spare headroom in one row cannot silently cover a missing
+representation in another.
+
+**The currency, where a proxy is used.** Rows charging an encoded cap for a decoded object are a
+declared proxy, not a measurement; an automerge document's heap footprint can exceed its encoded
+size. 13.4's "not a measured heap ceiling" licenses encoded-byte accounting - it does not make an
+encoded cap an upper bound on heap, nor excuse omitting a representation.
 
 `MAX_STUDIO_EPOCH_SNAPSHOT_BYTES` is `MAX_CHECKPOINT_BYTES` 2 MiB + `MAX_EPOCH_BYTES` 4 MiB +
 `MAX_EPOCH_GATE_BYTES` 3 MiB + `MAX_RECEIPT_BOOK_BYTES` 8 KiB + `MAX_RECEIPT_BYTES` 1 KiB +
-`4 * MAX_EPOCH_OPERATIONS` 80 KB + 1 KiB = 9 527 424.
+`4 * MAX_EPOCH_OPERATIONS` 80 KB + 1 KiB = 9 527 424; the intent record cap is
+`MAX_INTENT_LEDGER_BYTES + 1024` = 5 243 904.
 
-**A discrepancy between design and implementation, in the implementation's favour.** 13.4 lists
-"encoded Prepared and Completed records" among the retained terms, which would be 5 MiB each at
-the record cap. The implementation retains only their **lengths** - it encodes, measures, and
-drops. So the design's own accounting list over-charges by about 10 MiB against what the code
-does. That is worth stating rather than silently using the smaller figure: either the list should
-be corrected, or a future change that starts retaining those buffers would be a 10 MiB regression
-against a bound nobody wrote down.
+### The parked body is large in absolute terms, which is the part that survives
 
-**The currency, stated once.** Three rows charge an *encoded* cap for a *decoded* object. That is a
-declared proxy, not a measurement, and an automerge document's heap footprint can exceed its
-encoded size. 13.4's "not a measured heap ceiling" licenses accounting in encoded bytes; it does
-not make an encoded cap an upper bound on heap. Where a row is a real byte buffer - the two
-plaintexts and the parked body - the bound is exact.
+**18 876 416 bytes - about 18 MiB - for one parked record**, because the bound must be the
+*largest* family's record cap and Recovery's is three retained snapshots at 6 MiB each. Every
+other family is far smaller: Studio 9.1 MiB, Intents 5.0 MiB, OwnerReceipts 8.25 **KiB**.
 
-### The finding: the parked body is the single biggest contributor
+It is the one term whose bound is **exact rather than proxied** - a real `Zeroizing<Vec<u8>>` of
+authenticated plaintext - which is why it is the figure worth carrying into the runtime adoption
+even while the rest of the accounting is unsettled. **Its share of any total is not claimed**,
+because no total is established.
 
-**C-3's one parked record body is 18 MiB - the largest single term, and about 32% of the
-rebuilt sum.** The reason is that the bound has to be the *largest* family's record cap, and
-Recovery's is three retained snapshots at 6 MiB each. Every other family is far smaller: Studio
-9.1 MiB, Intents 5.0 MiB, OwnerReceipts 8.25 **KiB**.
-
-It is also the one row whose bound is **exact rather than proxied** - it is a real
-`Zeroizing<Vec<u8>>` of authenticated plaintext - which makes it the most load-bearing figure in
-the table as well as the largest.
-
-**Two qualifications on the 18 MiB.** It is the allowance at the *general full-coverage park
-point*, where no narrower universal Recovery limit applies. Particular scan modes impose their own
-read and cold-byte rails, and the retained-input model should use the effective bounds of the mode
-the runtime actually adopts. And it is a conservative allowance, not a demonstrated reachable
-figure: no valid maximal Recovery fixture has been built to show a single park of that size.
+The operational point stands on the absolute figure alone: a runtime holding a parked body across
+a scheduler turn holds up to ~18 MiB of authenticated plaintext, and `Zeroizing` governs its
+disposal rather than its residency.
 
 This is the concrete cost of the activation requirement this ledger has been carrying as "the
 parked plaintext's residency is not charged to section 13.4's retained-input sum". Charging it
@@ -2310,12 +2341,18 @@ of the validator collects no CIDs in either mode, so equal fresh-validation cost
 expected from the code rather than inferred from the timing; what reference mode changes for
 Registry is the surrounding cache behaviour.
 
-### 13.7's last item: the restart budget bounds retries, it does not make a moving vault scannable
+### The restart budget bounds retries; it does not make a moving vault scannable
 
-The restart rate under concurrent writes is **deterministic**, so unlike everything else in 13.7
-it is a structural test in the ordinary suite rather than a printed number. A write either lands
-between two steps or it does not, and a restart discards the cursor's progress whatever the
-machine's speed.
+**This is a deterministic liveness and termination test, not 13.7's restart-rate measurement** -
+see "The restart test is a liveness result, not a restart rate" for why, and treat that as the
+current statement. An earlier version of this section opened by calling it "the restart rate under
+concurrent writes", which is the equivalence that description withdraws: the test rotates a bare
+guard at fixed step intervals, drives the job **unbudgeted** so nothing ever parks, and performs
+no write at all.
+
+What it does establish is worth having. A write either lands between two steps or it does not, and
+a restart discards the cursor's progress whatever the machine's speed - so the outcomes below are
+properties of the state machine rather than timings.
 
 `c3_restart_budget_bounds_retries_but_does_not_survive_sustained_writes` drives a real
 `EpochInventoryJob` with a `epoch_mutation_guard()` landing every *n* steps:
@@ -2373,12 +2410,16 @@ it falls at 16 frames and rises at 128.
 
 That was **predicted before the run and recorded in the code**: `blob_cids()` parses every signed
 operation regardless of how many distinct CIDs result, so only the resulting set's size differs.
-The prediction also said any reference cost should surface in `install` or `finish` instead. It
-does not: `install_us` was `0/0/0(z8)` for every case including the 128-distinct-CID one - all
-eight samples below the clock's resolution. So at these scales the reference merge is free too.
+The prediction also said any reference cost should surface in `install` or `finish` instead.
+`install_us` was `0/0/0(z8)` for every case including the 128-distinct-CID one - all eight samples
+below the clock's resolution. **That is "not resolved at this resolution", not "free"**; an
+earlier version of this sentence said the merge is free, which a row of zero-millisecond samples
+cannot establish.
 
-**And with references held fixed, the frame axis is confirmed superlinear.** 16 to 128 frames at a
-constant single reference: 5 750 to 196 718 us, **34.2x for 8x the frames**, an endpoint slope of
+**And with references held fixed, the frame axis grows superlinearly over the measured range** -
+not "confirmed" as the causal driver, since frames and signed-history bytes still move together
+there. 16 to 128 frames at a constant single reference: 5 750 to 196 718 us, **34.2x for 8x the
+frames**, an endpoint slope of
 `n^1.70`. That matches the earlier confounded measurement almost exactly, which now means
 something it did not before: the superlinear growth belongs to the **operation** axis, not to the
 reference axis it used to be entangled with.
@@ -2425,8 +2466,13 @@ and recorded corpus identities and cache conditions.
 **What this comparison cannot say.** One observation per (protocol, slot) cell, so there is no
 arm-to-arm noise estimate; the corpus is small and deliberately so; the arms differ in corpus
 *instance* as well as schedule, since cases cannot be reused without inheriting warm state; and
-ABBA gives Blocked the cold first slot while Interleaved never occupies it. It can rule out an
-effect of the size previously claimed. It cannot measure a small one.
+ABBA gives Blocked the cold first slot while Interleaved never occupies it.
+
+**And it cannot rule out an effect of the size previously claimed either** - an earlier version of
+this sentence said it could, which is the same causal exclusion withdrawn above. `step_total`
+excludes the validation phase the 2.5x shift was in, so there is no demonstrated detection bound
+for the omitted phase or the omitted shapes. What the comparison supports is only that no large
+difference was observed in step totals for these arms.
 
 ### A P1 in the interleaving itself, found by adversarial review
 
@@ -3769,6 +3815,23 @@ and the reference oracle come **before** the next measurement, not after it.
 | **Then** | C-1's bounded before/after measurement, with the shared pure decoder timed separately from end-to-end inventory work so setup and I/O cannot conceal the difference | same valid encoded fixtures, structural and full paths separated, shared metadata outputs verified, raw repeated-run data kept |
 | **Then** | Counterbalanced fixed-corpus 13.7 runs, and the frame-versus-CID factorial cases | actual shapes and outputs verified; protocol, order and run identity retained |
 | **After coordination and storage acceptance** | C-3 runtime adoption, then Flow R | runtime ownership, cancellation, retained-input accounting and bounded progress **demonstrated**, not inferred from storage tests |
+
+### Provenance of the review-fix verification, by blob identity
+
+A review noted that "isolated worktree at `e60d8315` plus copied changes" is not the same source
+identity as the integrated head, and asked for the tested files to be compared against their
+committed blobs. Done, and they match exactly:
+
+| file | tested blob | committed at `2b862b8a` |
+|---|---|---|
+| `inventory/tests/performance.rs` | `fa7704df6ce54775cf959c89c664220108a5ec87` | **same** |
+| `.../overlay/handoff/performance.rs` | `f00480a3cb7db614dfcc7aad652f8253be46801c` | **same** |
+
+So the 14 tests and clippy run did execute the exact code now under review, for those two files.
+What that still does **not** cover is integration with the intervening Agent-2 commits: the
+worktree's base was `e60d8315`, five commits behind, and the main tree could not be used because
+Agent 2's uncommitted `disposal.rs` did not compile. An exact-head run remains outstanding, and
+the claim here is precisely "these blobs passed", not "the head passed".
 
 ### The isolated verification workspace, established
 

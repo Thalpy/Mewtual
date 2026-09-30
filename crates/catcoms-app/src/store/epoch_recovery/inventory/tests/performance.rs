@@ -1865,33 +1865,48 @@ fn c3_distinct_cid_count_is_settable_at_a_fixed_frame_count() {
         check_case_structure(case);
     }
 
-    // The fixed-bytes premise, **observed rather than argued**.
-    //
-    // The factorial's whole claim is that it varies distinct-CID count while holding frame count
-    // and encoded size fixed. Equal-width CID fields do not establish that two complete records
-    // are the same size - and the earlier version asserted it only in a comment, with
-    // `physical_bytes: None`. The scan already reads each record's authenticated size when it
-    // parks it, so the premise is available for free and there is no excuse for arguing it.
-    let observed = |suffix: &str| -> Vec<u64> {
+    // The fixed-bytes premise, observed rather than argued, through the shared checker the
+    // measured corpus also uses.
+    assert_factorial_premise(&cases, 8, "accounting_fresh");
+}
+
+/// The factorial's premise: two cells differing only in distinct-CID count must hold Studio
+/// records of the **same authenticated size**.
+///
+/// Shared, because the first version of this check lived inside the eight-frame smoke test and so
+/// said nothing about the 16- and 128-frame cells the profile actually measures. A size change
+/// affecting only the larger shapes, or only reference mode, would have gone unseen while the
+/// prose claimed bytes were held fixed. The scan reads each record's authenticated size when it
+/// parks it, so the premise costs nothing to observe - and it is checked **after** the scans,
+/// outside any timed interval.
+fn assert_factorial_premise(cases: &[Case], frames: usize, mode: &str) {
+    let sizes = |distinct: usize| -> Vec<u64> {
+        let suffix = format!("n{frames}_c{distinct}");
         let case = cases
             .iter()
-            .find(|c| c.label.ends_with(suffix) && c.label.contains("accounting_fresh"))
-            .unwrap_or_else(|| panic!("no accounting_fresh case ending {suffix}"));
-        let mut sizes: Vec<u64> = case
+            .find(|c| c.label.ends_with(&suffix) && c.label.contains(mode))
+            .unwrap_or_else(|| panic!("no {mode} case ending {suffix}"));
+        let mut out: Vec<u64> = case
             .cost
             .records
             .iter()
             .filter(|r| r.family == Some(EpochRecordKind::Studio))
             .map(|r| r.size)
             .collect();
-        sizes.sort_unstable();
-        sizes
+        assert!(
+            !out.is_empty(),
+            "{}: no Studio record was parked, so its size was never observed",
+            case.label
+        );
+        out.sort_unstable();
+        out
     };
     assert_eq!(
-        observed("n8_c1"),
-        observed("n8_c8"),
-        "the two cells' Studio records differ in authenticated size, so this factorial varies \
-         bytes as well as distinct-CID count and cannot attribute a difference to either"
+        sizes(1),
+        sizes(frames),
+        "the {frames}-frame cells' Studio records differ in authenticated size under {mode}, so \
+         that factorial varies bytes as well as distinct-CID count and cannot attribute a \
+         difference to either"
     );
 }
 
@@ -2063,6 +2078,14 @@ fn profile_c3_visit_cost() {
     for case in &all {
         check_case_structure(case);
         report(case, Protocol::Interleaved.label(), profile);
+    }
+    // The factorial's fixed-bytes premise, on the cells actually measured rather than only on the
+    // smoke fixture's eight-frame pair, and in every mode the factorial reports. Checked after
+    // the scans so it costs no timed interval, and before the figures are used for anything.
+    for frames in [16, 128] {
+        for mode in ["accounting_fresh", "accounting_warm", "references"] {
+            assert_factorial_premise(&all, frames, mode);
+        }
     }
     drop(all);
 
