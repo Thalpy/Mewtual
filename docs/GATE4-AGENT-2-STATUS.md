@@ -855,6 +855,35 @@ The integration is Flow S's: S1 must carry `branch` and call `classify_request`,
 is that statement. I have not reached into the Save ordering to do it, for the same A-1 reason the
 tenure refusals are not mine either.
 
+### The evidence review: two more vacuous tests of mine, and one gap still open
+
+The evidence review's lens is "does the evidence prove what it claims", and it found three more.
+
+**1. The `Imported` preserve regression was vacuous, and it guarded a High.** The step in
+`owner_tenure_v1_snapshots_promote_only_the_provably_safe_shape` passed `Position::of(group)` as
+`before`, so `applied` returned at its own `if after == before` no-op guard and never reached the
+flag line at all. Mutating `self.imported = self.imported && !computed && start.is_some()` to
+`self.imported = false` left **all eleven sync tests green**. That flag is the `computed` fix from an
+earlier review - the one that stopped an unverifiable v1 tenure laundering itself into a fully
+observed one on its next member add - so the fix was real and its anchor was not. Fixed by using a
+synthetic `before` one epoch back with the same owner and leaf, which is the shape the preserve arm
+actually takes.
+
+**2. The `RefreshRequired` notice had no test.** `DisposeOverlay`, `ReleaseOverlayArchive` and
+`FinishOverlayArchive` are in the receiver's `changing` list and nothing named them as emitters, so
+the list could have lost any of them silently. Anchored now, with every action in the new test
+deliberately **failing**: the notice follows the action rather than its outcome, because the case
+that matters is a release whose unlink succeeded and whose parent sync did not.
+
+**3. STILL OPEN: `probe_copy_object` has no test.** The H1 fix from `d4531b17` - the one that stops a
+copy publishing an Index entry naming an object that does not exist - is unanchored. Forcing it to
+`Ok(true)` leaves all five desktop copy tests green, and the app crate has no store-backed copy
+fixture at all. The fix is believed correct and is modelled directly on recovery's equivalent, but
+**believed correct is what every vacuous test on this list also was**. It needs either an Index
+destination fixture in the desktop tests or a store-backed copy fixture in the app crate.
+
+That is now the single largest known hole in this scope's evidence, and it guards a durable write.
+
 ### Blocked: the app crate cannot link
 
 `cargo test -p catcoms-app` has been failing for an extended stretch on **another agent's in-flight

@@ -499,7 +499,20 @@ async fn owner_tenure_v1_snapshots_promote_only_the_provably_safe_shape() {
     // fresh" promoted every imported server on its next same-owner step - which is precisely the
     // authority the migration withheld, handed back by an unrelated member add. A review demonstrated
     // it; this is the regression.
-    let before = Position::of(group);
+    //
+    // The step has to REACH the preserve arm to prove anything. An earlier version of this passed
+    // `Position::of(group)` as `before`, so `applied` returned at its own `if after == before`
+    // no-op guard and never touched the flag: a review showed that mutating the flag line to
+    // `self.imported = false` left this and every other sync test green. The synthetic `before` one
+    // epoch back with the same owner and the same leaf is what the preserve arm actually looks
+    // like, and it is the shape an ordinary member add produces.
+    let live = Position::of(group);
+    let before = Position {
+        owner: live.owner,
+        leaf: live.leaf,
+        epoch: live.epoch - 1,
+    };
+    imported.position = before;
     imported.applied(before, group);
     assert_eq!(
         imported.observed(group),
