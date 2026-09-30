@@ -4028,10 +4028,50 @@ Implementation, on `gate4-agent1-runtime` only: the production and test files li
 and no frontend file has been changed, and nothing is merged to `Create-suite-2`. The remaining
 planned files are in design 5 and 15.
 
+## A verification-scope failure of mine, recorded because the fix alone would hide it
+
+**`origin/gate4-agent1-runtime` was red for six of my commits and I did not notice.**
+
+Agent 2's slice 5 (`8ceb23bd`) made a Studio overlay record v3 rather than v2, because minting a
+branch where `active` is `None` is now a generation event. That legitimately invalidated an
+assertion in **my** test,
+`studio_overlay_handoff_rollover_floor_rejects_forgotten_retry_after_rewind`, which hand-decodes
+the extension to find the completed-block offset:
+
+```
+metadata.rs:84  assertion `left == right` failed:  left: 3,  right: 2
+```
+
+`8ceb23bd` sits below `216a03c9`, so from that point on the pushed branch failed that test. I then
+pushed `216a03c9`, `d794349d`, `8287e9cf`, `e60c60b5`, `b5c0f4f4` and `e4d21148` on top of it,
+each time reporting the gates as passing.
+
+**Why the reports were not false but were worthless.** Each run really did pass: I ran a filter of
+the tests I had just touched - `performance::c3`, `performance::c1_`, `store::measure::tests`, the
+bare-guard cursor test, later `flow_s`. Every one of those passed every time. The filter simply
+never contained the failing test, because I had not edited that file in weeks. **A verification
+scope drawn around the diff cannot see a regression another agent's commit causes in a file I own
+but did not touch** - and on a shared branch that is the most likely kind of breakage, not the
+least.
+
+Agent 2 found it and fixed it in `66df230c`, in my file, and flagged it in their commit message
+rather than editing quietly. Their diagnosis and their fix are both right - I read the diff and
+confirmed the failure mode matches it exactly.
+
+**The correction is to the scope, not to the test.** Verification now runs the whole owned surface
+- the `epoch_studio` and `epoch_recovery` test trees - not a filter over the diff. The filter
+stays useful for fast iteration inside a change; it is not evidence for a push.
+
+Two things this does not excuse. The branch's redness was discoverable at any point by running
+more than I ran. And "gates pass" in six commit messages was a claim about a filter while reading
+as a claim about the branch; where those messages said clippy and tests passed, they meant the
+named subset, and that qualification belonged in them.
+
 ## Executed checks
 
 | Command | Result |
 |---|---|
+| `cargo test -p catcoms-app --lib -- performance::c3 performance::c1_ store::measure::tests a_parked_cursor_refuses_after_a_bare flow_s_stage_profile_smoke rollover` at `e4d21148` | **15 passed, 1 failed.** The failure is the rollover-floor test above, caused by Agent 2's published slice 5 and fixed by their unpushed `66df230c`. This is the run that should have been happening all along. |
 | `git log --oneline`, `git status --short` | Revision 4 starts from `7efc9c2` (Agent 3's design), which contains revision 3 at `1bcb1bc`. Agent 1's two files were unmodified by `7efc9c2`; Agent 2's documents are present untracked. Revision 4 is uncommitted. |
 | `git fetch origin Create-suite-2` | Revision 1 and 2 passes both found `origin/Create-suite-2` equal to the local head. |
 | `grep` over `docs/GATE4-AGENT-3-DESIGN.md` sections 11 and 13.1 | Agent 3 accepts I-4, names its three affected writers, asks that `save_studio_source_checked`'s `handoff` parameter shape be preserved, and confirms no competing source writer or second pool. |
