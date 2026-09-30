@@ -23,6 +23,7 @@ mod adoption;
 mod discovery;
 mod handoff;
 pub(crate) use handoff::StudioHandoffStart;
+mod copy_capture;
 mod handoff_capture;
 pub(crate) use handoff_capture::{
     SigningSlice, StudioHandoffCapture, StudioHandoffCommit, StudioHandoffPlan,
