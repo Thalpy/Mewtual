@@ -299,7 +299,7 @@ async fn studio_inspection_paused_real_draft_allows_actor_checkpoint_progress() 
             v.replayable,
             "this draft rebuilds, so it must be labelled so"
         );
-        assert_eq!(v.branch.is_some(), true, "a live branch has an identity");
+        assert!(v.branch.is_some(), "a live branch has an identity");
         let draft = v.draft.unwrap();
         assert_eq!(draft.basis(), f.basis);
         assert_eq!(draft.projection(), &f.expected);

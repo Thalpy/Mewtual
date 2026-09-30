@@ -1,4 +1,9 @@
-"""Require the overlay-lifecycle regressions to catch isolated guard removals.
+"""Require the overlay-lifecycle regressions to catch guard removals at their named assertions.
+
+**Scope, stated precisely because it used to be overstated:** each entry runs ONE test with
+`--exact`, so this script establishes "detected at the named assertion, and the restored source
+passes". It does not establish isolation - no sibling test is selected, so a mutant that also breaks
+one would go unnoticed here. Isolation rests on the hand-runs behind each entry.
 
 Covers Agent 2's scope: the draft archive and its release, the disposal transaction, the
 branch-generation namespace, and the owner-tenure observation rule.
@@ -167,9 +172,17 @@ def main():
             (log_dir / f"gate4-overlay-lifecycle-mutation-{name}.log").write_text(
                 result.stdout, encoding="utf-8"
             )
-            # The mutation must fail THIS test, at THIS assertion, and alone. "0 passed; 1 failed"
-            # is what makes it alone: a mutation that also breaks a sibling is not isolated, and an
-            # isolated guard is the whole claim.
+            # The mutation must fail THIS test, at THIS assertion.
+            #
+            # **This script does NOT check isolation, and an earlier version of this comment claimed
+            # it did.** The run below is `--exact` on one fully qualified test, so no sibling is ever
+            # selected; "0 passed; 1 failed" therefore describes only that one test and says nothing
+            # about whether the mutant also breaks others. A review pointed this out and was right.
+            #
+            # Isolation for these entries rests on the hand-runs recorded behind each of them, not on
+            # anything this script observes. Do not report a passing run here as "the mutation is
+            # isolated" - the supported claim is "the mutation was detected at its named assertion
+            # and the restored source passes".
             if not (
                 result.returncode != 0
                 and assertion in result.stdout

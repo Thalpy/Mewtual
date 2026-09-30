@@ -227,27 +227,43 @@ impl ServerStore {
                         )
                     })?;
                 let archive = &record.archive;
-                // **Why reading the archive is enough, and what that depends on.**
+                // **OPEN: the crash-ordering guarantee for a preserving disposal is NOT established
+                // here, and an earlier version of this comment wrongly claimed it was.**
                 //
-                // A review argued this is an ordering hole: the read authenticates and decodes but
-                // syncs nothing, so an archive whose rename landed while its parent-directory
-                // barrier failed is readable here without being durable - and disposal then destroys
-                // the branch on the strength of it.
+                // The read below authenticates and decodes but syncs nothing. A review asked what
+                // stops a preserving disposal destroying the branch on the strength of an archive
+                // whose rename landed while its own parent-directory barrier failed. The answer this
+                // comment used to give was: the archive record and the intent record are entries in
+                // the same `servers/` directory, the replacement goes through `atomic_write` which
+                // ends in `sync_directory` on that parent, so one barrier covers both.
                 //
-                // It does not hold, for a reason that was load-bearing and undocumented until this
-                // comment. The archive record and the intent record are both entries in the SAME
-                // `servers/` directory, and the replacement below goes through `atomic_write`, which
-                // ends in `sync_directory` on that parent. That single barrier is what makes the
-                // branch removal durable, and it necessarily makes the archive's earlier rename
-                // durable too. So the removal cannot become durable while the evidence is not:
-                // either the shared fsync succeeds and both are, or it fails and neither is - in
-                // which case this transaction returns uncertain and the caller reconciles.
+                // That argument is wrong in two ways, and a re-review was right about both.
                 //
-                // The assumption is therefore: **both families live in one directory, and the
-                // replacement below syncs it.** If an archive ever moves to its own directory, or
-                // the intent write stops syncing its parent, the guarantee disappears silently and
-                // an explicit durability barrier has to be taken here instead. The debug assertion
-                // states the first half so a move cannot pass unnoticed.
+                // 1. **`sync_directory` is `Ok(())` on `not(unix)`** (see `store.rs`). On Windows -
+                //    the platform this scope is developed on - there is no parent barrier at all, so
+                //    there is no shared barrier to rely on. `fs::rename` does not supply one either:
+                //    the pinned toolchain's `MoveFileExW` call does not request write-through.
+                // 2. It said "either the shared fsync succeeds and both are durable, or it fails and
+                //    neither is". The second half is not a property of `fsync`. A failed flush means
+                //    completion is *not guaranteed*, not that nothing reached stable storage - and
+                //    this family's own tests already treat a post-rename sync failure as **committed,
+                //    not rolled back**.
+                //
+                // So what holds today is narrower than the preservation guarantee this scope claims:
+                // on Unix, a *successfully completed* replacement does make both namespace changes
+                // durable, because the archive's contents were synced before its rename and the final
+                // directory flush covers both entries. Interrupted executions, and every execution on
+                // a platform where the barrier is a no-op, are not covered.
+                //
+                // Closing this needs a decision above this function, because `sync_directory` is
+                // shared by every record family rather than owned here: either implement a real
+                // Windows directory barrier, or have a preserving disposal refuse before removal on a
+                // platform that cannot provide one, or narrow the product's stated guarantee. Calling
+                // the existing helper again would change nothing.
+                //
+                // The assertion below is kept for what it does prove - that the two families are
+                // co-located, so a later move cannot silently invalidate the Unix half of the
+                // argument. It proves nothing about durability, and must not be read as doing so.
                 debug_assert_eq!(
                     self.epoch_draft_archive_path(&super::super::epoch_draft_archive::scope_bytes(
                         server, document

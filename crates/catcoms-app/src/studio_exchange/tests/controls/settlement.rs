@@ -162,6 +162,46 @@ async fn destructive_overlay_actions_request_a_refresh_even_when_they_refuse() {
         );
     }
 
+    // **The third `changing` member, which this test used to name and not exercise.**
+    //
+    // `FinishOverlayArchive` needs a real two-visit flow, so it cannot go in the loop above. A review
+    // caught the gap: the commentary listed three actions and the loop ran two, which is the same
+    // class of error as a vacuous test - a claim with nothing behind it.
+    //
+    // The begin visit is read-only and must stay silent; the finish visit refuses here, because this
+    // vault has no branch to archive, and must still request a refresh.
+    let Response::OverlayPreparation(job) = invoke(&actor, &store, Action::ArchiveOverlay)
+        .await
+        .expect("beginning an archive is a read and must be allowed")
+    else {
+        panic!("not an archive preparation")
+    };
+    assert_eq!(actor.member_count().await, 2);
+    assert!(
+        drain(&mut events).is_empty(),
+        "beginning an archive writes nothing and must not ask for a refresh"
+    );
+    let prepared = job
+        .rebuild_for_archive()
+        .await
+        .expect("the detached rebuild itself succeeds on an empty vault");
+    assert!(
+        invoke(
+            &actor,
+            &store,
+            Action::FinishOverlayArchive(Box::new(prepared))
+        )
+        .await
+        .is_err(),
+        "finishing an archive with no branch to archive must refuse"
+    );
+    assert_eq!(actor.member_count().await, 2);
+    assert_eq!(
+        drain(&mut events),
+        vec![S::RefreshRequired],
+        "finishing an archive must request a refresh even when it refuses"
+    );
+
     // And the read-only members of the same family stay silent, refusal or not.
     invoke(&actor, &store, Action::OverlayLifecycle)
         .await

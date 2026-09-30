@@ -117,7 +117,7 @@ An external adversarial review of `414fda06` returned CHANGES REQUIRED. Its disp
 
 | Its finding | My response |
 |---|---|
-| **High: preserving disposal does not establish archive durability before removal** | **Disagreed, with reasoning, and documented.** Both records are entries in the same `servers/` directory, and the replacement's `atomic_write` ends in `sync_directory` on that parent - the same barrier that makes the removal durable, and the archive's rename precedes it. The removal cannot become durable while the evidence is not. **But the review was right that this was undocumented and load-bearing**: it is now written at the D4 site with a `debug_assert` on the shared parent, so moving either family cannot silently remove the guarantee |
+| **High: preserving disposal does not establish archive durability before removal** | **I disagreed, and I was wrong. Now issue 0 below.** My "shared directory barrier" argument fails twice: `sync_directory` is `Ok(())` on `not(unix)`, so on Windows there is no barrier at all; and "if the fsync fails, neither is durable" is not a property of `fsync` - a failed flush means *not guaranteed*, not *nothing persisted*, which this family's own tests already reflect by treating a post-rename sync failure as committed. The closure is withdrawn |
 | **My rollover trace was wrong** | **Accepted.** The retained manifest blocks the short sequence. Corrected in section 6 and in the status doc; my replication test already used the right one |
 | **D4's regression needs an intervening disposal** | **Accepted.** Folded into issue 1 below |
 | **M-1's unreachability waiver omits inline proposal lists** | **Accepted and withdrawn.** Every clause of my argument described *our builder*; a commit carries a list of `ProposalOrRef` and an inline proposal needs no stored entry, so a hostile existing member can send Remove(A)+Add(A) in one commit. "Our builder cannot produce it" was never evidence a peer cannot submit it. The check is present and pre-merge, so no known bypass; the waiver was the defect |
@@ -129,7 +129,41 @@ An external adversarial review of `414fda06` returned CHANGES REQUIRED. Its disp
 jobs on the merge checkout - 106 app overlay, 47 replication, 11 sync, and 9 mutations detected with
 9 restored regressions passing, under `-D warnings`.
 
-## 5. The three open issues
+## 5. The open issues
+
+### Issue 0 - the preserving-disposal crash-ordering guarantee is not established (NEW, and the most serious)
+
+This is the one issue here that is **not** merely an evidence gap. The others are guards that work
+and are untested; this is a guarantee this scope claims and does not have.
+
+D4 authenticates and decodes the archive; it syncs nothing. I argued that was fine because the archive
+and intent records share a `servers/` directory and the replacement's `atomic_write` ends in
+`sync_directory` on that parent. **Two things break that:**
+
+1. **`sync_directory` is `Ok(())` on `not(unix)`** (`store.rs`). On Windows there is no parent barrier
+   at all, so there is no shared barrier to lean on. `fs::rename` does not supply one either - the
+   pinned toolchain's `MoveFileExW` does not request write-through.
+2. **"If the fsync fails, neither is durable" is false.** A failed flush means completion is not
+   guaranteed, not that nothing reached stable storage. This family's own tests already treat a
+   post-rename sync failure as **committed, not rolled back**.
+
+What actually holds is narrower: **on Unix, a successfully completed replacement makes both namespace
+changes durable.** Interrupted executions, and every execution where the barrier is a no-op, are not
+covered.
+
+*Why I have not fixed it:* `sync_directory` is shared by every record family, so the decision is above
+this scope - implement a real Windows barrier, or refuse a preserving disposal before removal on a
+platform that cannot provide one, or narrow the product's stated guarantee. Calling the existing no-op
+helper again changes nothing.
+
+*Attack it by:* injecting failure at the `atomic_write_with_hook_and_sync` boundary, between rename
+and parent sync. Note that `WriteHooks::fail_after_write` is **not** that boundary - it runs after the
+physical write completes and its own docs describe a durable-but-unaccounted record.
+
+The `debug_assert` at the D4 site is kept for the one thing it proves - the two families are
+co-located - and the comment now says explicitly that it proves nothing about durability.
+
+### The three evidence gaps
 
 **All three are gaps in evidence, not known-broken behaviour.** The code is currently correct in each
 case. What is missing is anything that would tell you if it stopped being.

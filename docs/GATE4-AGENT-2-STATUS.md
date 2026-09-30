@@ -898,6 +898,32 @@ destination fixture in the desktop tests or a store-backed copy fixture in the a
 
 That is now the single largest known hole in this scope's evidence, and it guards a durable write.
 
+### OPEN, and not an evidence gap: the preserving-disposal crash ordering
+
+The most serious item in this scope, and the only one that is a missing *guarantee* rather than a
+missing test. Raised by an external review, disputed by me, and the review was right.
+
+D4 authenticates and decodes the archive and syncs nothing. I argued that was safe because the archive
+and intent records share a `servers/` directory and the replacement's `atomic_write` ends in
+`sync_directory` on that parent, so one barrier covers both. That fails twice:
+
+1. **`sync_directory` is `Ok(())` on `not(unix)`.** On Windows there is no parent barrier at all.
+   `fs::rename` does not supply one: the pinned toolchain's `MoveFileExW` does not request
+   write-through. My own note about cfg-gated blindness on this host says exactly why I should have
+   checked this before claiming closure.
+2. **"If the fsync fails, neither is durable" is not a property of `fsync`.** A failed flush means
+   completion is not guaranteed, not that nothing persisted - and this family's own tests already
+   treat a post-rename sync failure as **committed, not rolled back**.
+
+What holds is narrower than the preservation guarantee this scope claims: on Unix, a *successfully
+completed* replacement makes both namespace changes durable. Interrupted executions, and every
+execution where the barrier is a no-op, are not covered.
+
+**Not fixed here, deliberately.** `sync_directory` is shared by every record family, so the choice is
+above this scope: implement a real Windows barrier, refuse a preserving disposal before removal where
+none can be provided, or narrow the stated guarantee. Whoever owns persistence should decide. The
+`debug_assert` at the D4 site is kept only for co-location and now says so.
+
 ### The evidence audit: "every guard has a failing mutant" was FALSE
 
 A full per-test audit ran 25 hand mutations over this scope. Its central result overturns a claim
