@@ -734,6 +734,9 @@ fn preview(
         item,
         mode,
         device.device_id(),
+        // Recovery is always same-document: a historical version of a document can only be
+        // restored into that document. Copy is the only caller that passes CrossDocument.
+        super::restore::PlanScope::SameDocument,
     )?;
     if plan.disposition == StudioRecoveryDisposition::Ready {
         if let StudioRecoveryItem::Object { id } = item {
@@ -753,6 +756,9 @@ fn preview(
                     disposition: StudioRecoveryDisposition::MissingTarget,
                     body: None,
                     original_author: None,
+                    // Held, so nothing was consumed. Carrying the ids of a proposal that is not
+                    // going to be offered would report work read on behalf of a refusal.
+                    source_ops: Vec::new(),
                 };
             }
         }
