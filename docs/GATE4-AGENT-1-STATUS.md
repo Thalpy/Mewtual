@@ -2115,9 +2115,66 @@ than presented as pure classification.
 
 ### Figures
 
-Not yet recorded: the release profile run is what produces them, and this section is committed
-with the harness rather than after it so the two are reviewable together. The harness is verified
-to compile and the smoke test passes; the numbers follow.
+Release run, 255 timed accepts, `source_bytes = 2 207 858` - which is **23.2%** of studio
+`MAX_RECORD_BYTES`, the arithmetic form of "this source is not maximal".
+
+| depth | start (S0+S1+S1b) | plan (S2, detached) | commit (S3) | **custody** = start+commit |
+|---|---|---|---|---|
+| 1 | 67 | 1 | 73 | **140** |
+| 32 | 39 | 51 | 67 | **106** |
+| 255 | 47 | **1 689** | 125 | **172** |
+
+All in milliseconds, one sample per depth; the neighbourhood spreads in the raw output agree
+(depth 255's plan band is 1 608/1 658/1 689).
+
+| repeatable stage, 16 samples | depth 1 | depth 32 | depth 255 |
+|---|---|---|---|
+| S1b/S3 basis derivation (raw upper median) | 62 | 62 | **32** |
+| S0+S1 on an accepted retry, **including its write** | 22 | 56 | **426** |
+
+**The detached stage is the only one that scales, and it scales badly.** From depth 32 to 255 - an
+8x increase - the plan grew **33x**, which is about `depth^1.7`. Both ends of that comparison are
+well resolved (50 ms and 1 658 ms raw medians), which is why the ratio is quoted from 32 rather
+than from depth 1: depth 1's plan reads 1-3 ms, a raw median of 2 ms, right at the clock's floor,
+so a "1 689x" figure taken from there would be mostly resolution artefact.
+
+**Custody is nearly flat: `depth^0.23`**, 106 ms to 172 ms across the same 8x. Start is
+`depth^0.11` and commit `depth^0.13`. This is the result the design's structure predicts and the
+first measured support for it: L1 accepts unbounded total latency provided custody per visit stays
+bounded, and the expensive reconstruction is exactly what S2 detaches. Cumulatively over all 255
+accepts, **82.3% of the work is in the detached stage** - 121 052 ms against 25 954 ms of custody.
+
+**Custody is not monotonic, and that is not noise to be smoothed away.** Depth 1 costs *more*
+custody (140 ms) than depth 32 (106 ms), and the neighbourhood bands separate cleanly (start
+53-67 ms at depth 1 against 35-45 ms at depth 32). The first accept pays cold-cache costs that
+later ones do not. Reporting the curve rather than three isolated points is what made this visible.
+
+**The basis derivation is depth-independent, as it should be.** 62, 62, then 32 ms - flat, then
+*lower* at the deepest point. It reads the source, and local acceptance never writes the source, so
+overlay depth cannot affect it; the drop at 255 is warm cache after 255 preceding reads. This is
+a confirmation rather than an anomaly, and it is also the measured form of the invariant the
+harness asserts separately by re-deriving the fingerprint and requiring equality.
+
+### One finding against the design's own text
+
+**Design 6.2 says "so S1 is cheap". At depth 255 the accepted-retry path costs 426 ms under
+custody**, growing as `depth^0.98` - linear in accepted operations. The design's reasoning is that
+classification needs only entry ids, envelopes, `basis()`, author, target and the ledger, all of
+which the structural decode yields; that is true of the *comparisons*, but the path still loads the
+whole intent record and, on recognising the retry, writes it back.
+
+**What this measurement cannot do is attribute the 426 ms.** The exact-retry path runs
+classification and `write_studio_overlay_intent` with no seam between them, so the figure bounds
+classification from above and does not isolate it. Since the record being written also grows with
+depth, the split is unresolved and is not guessed at here. The defensible statement is narrow:
+**the accepted-retry path as a whole is linear in depth and is not cheap at the cap**, whatever the
+internal split, and it holds custody throughout.
+
+That matters for the acknowledgement flow specifically, because 6.3 makes acknowledgement-after-
+rollover a retry-classification outcome, and L1's acceptance criterion is actor responsiveness.
+A 426 ms custody-held operation is not a correctness problem and no claim here says it is; it is a
+responsiveness figure that the scheduled runtime's own budget has to be calibrated against, in the
+same way 13.3's largest-single-signature figure calibrates `SIGNING_SLICE_BUDGET_MS`.
 
 ## Design 13.6: what C-1's structural decode saves
 

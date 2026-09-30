@@ -702,6 +702,36 @@ struct FlowSAccept {
     commit_ms: u64,
 }
 
+/// One distinct, legal operation per depth, against the **real** logical document.
+///
+/// Not `title_op`: that builds its `logical_key` from the fixture constant
+/// `b"fixture-type-and-key"` rather than the group, and `fill_studio_epoch_fixture` has already
+/// consumed its nonces 0 to 9 on the source. Reusing either collides - the first accept refused
+/// with "domain-operation nonce was reused with conflicting bytes" - so the nonce here carries a
+/// `flow-s` tag in its second half to stay clear of the fixture's epoch-tagged range, and the
+/// body varies with `n` so no two accepts are the same operation.
+fn flow_s_op(f: &Fixture, n: usize) -> DomainOp {
+    let mut nonce = [0u8; 16];
+    nonce[..8].copy_from_slice(&(n as u64).to_be_bytes());
+    nonce[8..].copy_from_slice(b"flow-s\0\0");
+    DomainOp {
+        nonce,
+        doc_type: f.logical.doc_type,
+        logical_key: f.logical.logical_key.clone(),
+        body: match f.target {
+            StudioTarget::Index { .. } => IndexOp::SetTitle {
+                object: [1; 16],
+                title: format!("flow s {n}"),
+            }
+            .encode()
+            .unwrap(),
+            _ => FlipnoteOp::SetHeader(FlipnoteHeader::Title(format!("flow s {n}")))
+                .encode()
+                .unwrap(),
+        },
+    }
+}
+
 /// The premise 255 rests on. If the cap ever moves, the chosen depths stop meaning what the
 /// section says they mean, and this fails rather than silently measuring something else.
 fn assert_overlay_headroom(depths: &[usize]) {
@@ -725,7 +755,8 @@ fn assert_overlay_headroom(depths: &[usize]) {
 /// consumes the first accept into a capture and this needs accepts to accumulate.
 fn flow_s_closing(store: &mut ServerStore, f: &Fixture) -> (CloseRecord, [u8; 32], u64) {
     fill_studio_epoch_fixture(store, SERVER, &f.group, &f.device, f.target);
-    let decision = studio_owner_decision_fixture(store, SERVER, &f.group, &f.device, f.target, None);
+    let decision =
+        studio_owner_decision_fixture(store, SERVER, &f.group, &f.device, f.target, None);
     let close = decision.close().clone();
     let mut b = budget(store, f);
     store
@@ -787,7 +818,7 @@ fn flow_s_curve(max_depth: usize, clock: &dyn Clock) -> (Vec<FlowSAccept>, u64) 
                 &close,
                 Some(0),
                 fingerprint,
-                title_op(f.target, n),
+                flow_s_op(&f, n),
                 300 + n as u64,
                 &mut rng(),
                 &mut b,
@@ -803,7 +834,9 @@ fn flow_s_curve(max_depth: usize, clock: &dyn Clock) -> (Vec<FlowSAccept>, u64) 
 
         // S2. Detached in the scheduled runtime, which is why it is reported apart from custody.
         let t = clock.monotonic_ms();
-        let plan = capture.plan().unwrap();
+        let plan = capture
+            .plan()
+            .unwrap_or_else(|e| panic!("S2 refused at depth {n}: {e}"));
         let plan_ms = clock.monotonic_ms().saturating_sub(t);
 
         let t = clock.monotonic_ms();
@@ -879,7 +912,7 @@ fn flow_s_repeatable(depth: usize, repeats: usize, clock: &dyn Clock) -> (Spread
                 &close,
                 Some(0),
                 fingerprint,
-                title_op(f.target, n),
+                flow_s_op(&f, n),
                 300 + n as u64,
                 &mut rng(),
                 &mut b,
@@ -920,7 +953,7 @@ fn flow_s_repeatable(depth: usize, repeats: usize, clock: &dyn Clock) -> (Spread
                 &close,
                 Some(0),
                 fingerprint,
-                title_op(f.target, depth - 1),
+                flow_s_op(&f, depth - 1),
                 300 + depth as u64 - 1,
                 &mut rng(),
                 &mut b,
@@ -956,13 +989,31 @@ fn flow_s_neighbourhood(curve: &[FlowSAccept], depth: usize) -> (Spread, Spread,
     )
 }
 
+/// Depth 12 rather than 2, which is the whole point of the number.
+///
+/// The first version of this ran to depth 2 and passed, while the release profile refused on its
+/// first accept with "domain-operation nonce was reused with conflicting bytes". The smoke test
+/// was too shallow to reach the collision: `fill_studio_epoch_fixture` consumes `title_op`'s
+/// nonces 0 to 9 on the source, so an accept sequence sharing that builder only conflicts once it
+/// reaches them. 12 crosses the whole range, so the guard now fails where the profile fails
+/// instead of certifying a fixture the profile cannot use.
 #[test]
 fn flow_s_stage_profile_smoke() {
     assert_overlay_headroom(&[1, 32, 255]);
-    let (curve, _) = flow_s_curve(2, &ManualClock::new(0));
-    assert_eq!(curve.len(), 2);
+    let (curve, source_bytes) = flow_s_curve(12, &ManualClock::new(0));
+    assert_eq!(curve.len(), 12);
     assert_eq!(curve[0].depth, 1);
-    assert_eq!(curve[1].depth, 2);
+    assert_eq!(curve[11].depth, 12);
+    // The source this axis is measured against is emphatically not maximal, and the section says
+    // so. Pin it, so "not maximal" stays a fact about the fixture rather than a remark about it.
+    assert!(
+        source_bytes < crate::store::epoch_studio::MAX_SEALED_BYTES as u64 / 2,
+        "the fixture source is {source_bytes} bytes, which is no longer the small shape 13.5 \
+         reports it as - 13.2's maximal-shape clause may now be in scope"
+    );
+    // Depth 1 here, not 12: this call builds a second whole fixture, and the curve above already
+    // crosses the colliding nonce range. What is left to check is the retry classification and
+    // the spread plumbing, both of which depth 1 exercises.
     let (basis, retry) = flow_s_repeatable(1, 2, &ManualClock::new(0));
     assert_eq!(basis.samples, 2);
     assert_eq!(retry.samples, 2);
@@ -974,7 +1025,10 @@ fn profile_flow_s_stages() {
     let depths = [1, 32, 255];
     assert_overlay_headroom(&depths);
     let (curve, source_bytes) = flow_s_curve(*depths.last().unwrap(), &SystemClock);
-    println!("FLOW_S_PROFILE source_bytes={source_bytes} timed_accepts={}", curve.len());
+    println!(
+        "FLOW_S_PROFILE source_bytes={source_bytes} timed_accepts={}",
+        curve.len()
+    );
     for depth in depths {
         let c = &curve[depth - 1];
         let (start, plan, commit) = flow_s_neighbourhood(&curve, depth);
@@ -993,9 +1047,7 @@ fn profile_flow_s_stages() {
             commit,
         );
         let (basis, retry) = flow_s_repeatable(depth, 16, &SystemClock);
-        println!(
-            "FLOW_S_PROFILE depth={depth} s1b_s3_basis={basis} s0_s1_accepted_retry={retry}"
-        );
+        println!("FLOW_S_PROFILE depth={depth} s1b_s3_basis={basis} s0_s1_accepted_retry={retry}");
     }
     let custody: u64 = curve.iter().map(|c| c.start_ms + c.commit_ms).sum();
     let detached: u64 = curve.iter().map(|c| c.plan_ms).sum();
