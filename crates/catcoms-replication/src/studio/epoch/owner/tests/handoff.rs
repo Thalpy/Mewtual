@@ -1,7 +1,7 @@
 use super::*;
 use crate::IntentLedger;
 
-fn branch(
+pub(super) fn branch(
     f: &mut Fixture,
     count: usize,
 ) -> (StudioOverlayState, IntentLedger, Vec<(DomainOp, u64)>) {
@@ -26,8 +26,12 @@ fn branch(
     assert_eq!((f.source.epoch(), f.source.op_count()), (1, 0));
     (metadata, ledger, ordered)
 }
+// Widened for the disposal tests' transfer-hold case. The successor checkpoint above is the part
+// that matters and the part the archive module's own `branch` deliberately skips: without a
+// successor epoch there is nothing to hand off into, so `handoff_authority` refuses and a test
+// that wanted a live transfer hold would fail while building its fixture.
 
-fn signing(
+pub(super) fn signing(
     f: &mut Fixture,
     metadata: &StudioOverlayState,
     ledger: &IntentLedger,

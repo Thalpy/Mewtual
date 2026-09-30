@@ -45,6 +45,11 @@ pub struct StudioOverlayState {
     active: Option<StudioOverlay>,
     prepared: Option<Prepared>,
     completed: Option<Completed>,
+    /// The retained terminal acknowledgement of a branch that was dropped rather than
+    /// transferred. Deliberately independent of `active`: a vault can hold this alone, and can
+    /// equally hold it beside a **new** branch started after the disposal, which is the state a
+    /// later request classifies against.
+    disposed: Option<StudioOverlayDisposal>,
     minimum_new_basis_closed_epoch: u64,
     legacy: bool,
 }
@@ -87,10 +92,80 @@ impl StudioOverlayState {
             active: Some(StudioOverlay::new(basis)),
             prepared: None,
             completed: None,
+            disposed: None,
             minimum_new_basis_closed_epoch: 0,
             legacy: false,
         }
     }
+    /// The retained terminal disposal, if this vault has one.
+    pub fn disposed(&self) -> Option<&StudioOverlayDisposal> {
+        self.disposed.as_ref()
+    }
+
+    /// The live branch's content identity, the value a disposal request must carry back.
+    ///
+    /// Exposed because the request has to be built from something: the inspection a user saw
+    /// reports this, and `dispose` refuses anything else. Without an accessor a caller would have
+    /// to re-derive the hash, which is precisely the second representation that lets a request
+    /// name work the user never saw.
+    pub fn branch_content(&self, ledger: &IntentLedger) -> Result<[u8; 32], ReplError> {
+        branch_hash(self.active.as_ref().ok_or(ReplError::Malformed)?, ledger)
+    }
+
+    /// Drop the active branch without transferring it.
+    ///
+    /// Returns the rebuilt state and **the exact ids the caller must retire from the ledger**,
+    /// read once from the branch rather than recomputed by the caller. Two derivations of "which
+    /// ids went away" is how an entry ends up charged to a branch that no longer exists.
+    ///
+    /// This proves nothing about authorization. The caller has already established membership,
+    /// authorship, the absence of a transfer hold, the branch identity, and - for `Preserve` - that
+    /// a durable archive for this exact branch exists. All of that needs records this layer cannot
+    /// read. What happens here is only the state rebuild and its validation, which is why a
+    /// `StudioDisposalDecision` is required rather than a mode: the decision carries the evidence
+    /// type, so a destructive disposal cannot be constructed through the preserving path.
+    ///
+    /// A branch that survives structural validation but cannot be replayed is still disposable.
+    /// Refusing here would leave exactly the drafts most in need of disposal undisposable.
+    #[allow(clippy::too_many_arguments)]
+    pub fn dispose(
+        &self,
+        ledger: &IntentLedger,
+        decision: StudioDisposalDecision,
+        branch: [u8; 32],
+        content: [u8; 32],
+        generation: u64,
+        provenance: StudioOverlayProvenance,
+        sequence: u64,
+        at: u64,
+    ) -> Result<(Self, BTreeSet<[u8; 32]>), ReplError> {
+        let active = self.active.as_ref().ok_or(ReplError::Malformed)?;
+        // A Prepared branch refuses outright: a transfer hold is live evidence that someone else
+        // may be about to accept this work, and dropping it here would race that acceptance.
+        if self.prepared.is_some() {
+            return Err(ReplError::IntentConflict);
+        }
+        if content != branch_hash(active, ledger)? {
+            return Err(ReplError::IntentConflict);
+        }
+        let manifest = StudioOverlayDisposal::from_branch(
+            active, ledger, provenance, branch, content, generation, &decision, sequence, at,
+        )?;
+        let removed = manifest.removed_ids();
+        let next = Self {
+            target: self.target,
+            // Cleared: the whole point of the transition. The manifest is self-contained, so
+            // nothing that survives refers to the branch that is gone.
+            active: None,
+            prepared: None,
+            completed: self.completed.clone(),
+            disposed: Some(manifest),
+            minimum_new_basis_closed_epoch: self.minimum_new_basis_closed_epoch,
+            legacy: false,
+        };
+        Ok((next, removed))
+    }
+
     pub fn target(&self) -> StudioTarget {
         self.target
     }
@@ -385,6 +460,32 @@ impl StudioOverlayState {
                 }
             }
         }
+        if let Some(disposal) = &self.disposed {
+            if disposal.target != self.target {
+                return Err(ReplError::EpochScope);
+            }
+            disposal.validate()?;
+            // The same two rules the transferred manifest obeys, for the same reasons. A retained
+            // terminal manifest must not claim an id the *current* live branch holds, or a request
+            // naming that id would classify against the wrong event; and where an id is somehow
+            // still in the ledger, its author and envelope must be the ones this manifest recorded,
+            // so a retained acknowledgement cannot be made to describe a different body.
+            let pending: BTreeMap<_, _> = ledger.pending().collect();
+            for entry in &disposal.entries {
+                if self
+                    .active
+                    .as_ref()
+                    .is_some_and(|active| active.contains(&entry.id))
+                {
+                    return Err(ReplError::IntentConflict);
+                }
+                if let Some(intent) = pending.get(&entry.id) {
+                    if intent.author != disposal.author || envelope(intent)? != entry.envelope {
+                        return Err(ReplError::IntentConflict);
+                    }
+                }
+            }
+        }
         Ok(())
     }
     pub fn encode_vault(&self, ledger: &IntentLedger) -> Result<Vec<u8>, ReplError> {
@@ -401,7 +502,13 @@ impl StudioOverlayState {
                 .encode_vault(ledger);
         }
         let mut e = Encoder::new();
-        e.put_u8(2);
+        // The version is 3 only when a disposal is actually present, so every vault that has
+        // never had one re-encodes byte-identically to before this field existed. That is what
+        // keeps `decode_vault_inner`'s canonical re-encode check passing for existing records,
+        // and it means a v3 record is proof that a terminal disposal is in there rather than a
+        // build stamp. An older build meeting a v3 record refuses it, exactly as it refuses a v2
+        // record it does not understand; that is the intended direction.
+        e.put_u8(if self.disposed.is_some() { 3 } else { 2 });
         put_target(&mut e, self.target)?;
         e.put_u64(self.minimum_new_basis_closed_epoch);
         match &self.active {
@@ -441,6 +548,9 @@ impl StudioOverlayState {
                 }
             }
         }
+        if let Some(d) = &self.disposed {
+            d.put(&mut e)?;
+        }
         let bytes = e.finish();
         let seed_bytes = self.active.as_ref().map_or(0, |a| a.base.seed.len());
         if bytes.len().saturating_sub(seed_bytes) > MAX_METADATA || bytes.len() > MAX_EXTENSION {
@@ -475,12 +585,14 @@ impl StudioOverlayState {
                 active: Some(active),
                 prepared: None,
                 completed: None,
+                disposed: None,
                 minimum_new_basis_closed_epoch: 0,
                 legacy: true,
             });
         }
         let mut d = Decoder::new(bytes);
-        if byte(&mut d)? != 2 {
+        let version = byte(&mut d)?;
+        if version != 2 && version != 3 {
             return Err(ReplError::Malformed);
         }
         let target = get_target(&mut d)?;
@@ -551,12 +663,21 @@ impl StudioOverlayState {
             }
             _ => return Err(ReplError::Malformed),
         };
+        // A v3 record must carry a disposal and a v2 record must not. Without both halves the
+        // version byte would be advisory: a v3 record with no manifest would decode as v2 and
+        // then fail the canonical re-encode check with a confusing error, and a v2 record that
+        // happened to have trailing bytes would be accepted as a disposal.
+        let disposed = match version {
+            3 => Some(StudioOverlayDisposal::get(&mut d)?),
+            _ => None,
+        };
         d.finish().map_err(|_| ReplError::Malformed)?;
         let out = Self {
             target,
             active,
             prepared,
             completed,
+            disposed,
             minimum_new_basis_closed_epoch,
             legacy: false,
         };
@@ -603,7 +724,7 @@ fn branch_hash(active: &StudioOverlay, ledger: &IntentLedger) -> Result<[u8; 32]
     }
     Ok(*hash.finalize().as_bytes())
 }
-fn validate_manifest(entries: &[Entry]) -> Result<(), ReplError> {
+pub(super) fn validate_manifest(entries: &[Entry]) -> Result<(), ReplError> {
     if entries.is_empty() || entries.len() > MAX_STUDIO_OVERLAY_OPS {
         return Err(ReplError::EpochBound);
     }
@@ -616,25 +737,25 @@ fn validate_manifest(entries: &[Entry]) -> Result<(), ReplError> {
     }
     Ok(())
 }
-fn put(e: &mut Encoder, bytes: &[u8]) -> Result<(), ReplError> {
+pub(super) fn put(e: &mut Encoder, bytes: &[u8]) -> Result<(), ReplError> {
     e.put_bytes(bytes)
         .map(|_| ())
         .map_err(|_| ReplError::EpochBound)
 }
-fn byte(d: &mut Decoder<'_>) -> Result<u8, ReplError> {
+pub(super) fn byte(d: &mut Decoder<'_>) -> Result<u8, ReplError> {
     d.get_u8().map_err(|_| ReplError::Malformed)
 }
-fn number(d: &mut Decoder<'_>) -> Result<u64, ReplError> {
+pub(super) fn number(d: &mut Decoder<'_>) -> Result<u64, ReplError> {
     d.get_u64().map_err(|_| ReplError::Malformed)
 }
-fn count(d: &mut Decoder<'_>) -> Result<usize, ReplError> {
+pub(super) fn count(d: &mut Decoder<'_>) -> Result<usize, ReplError> {
     let n = d.get_u32().map_err(|_| ReplError::Malformed)? as usize;
     if n == 0 || n > MAX_STUDIO_OVERLAY_OPS {
         return Err(ReplError::EpochBound);
     }
     Ok(n)
 }
-fn put_target(e: &mut Encoder, target: StudioTarget) -> Result<(), ReplError> {
+pub(super) fn put_target(e: &mut Encoder, target: StudioTarget) -> Result<(), ReplError> {
     e.put_u8(match target {
         StudioTarget::Index { .. } => 0,
         StudioTarget::Flipnote { .. } => 1,
@@ -645,7 +766,7 @@ fn put_target(e: &mut Encoder, target: StudioTarget) -> Result<(), ReplError> {
     }
     Ok(())
 }
-fn get_target(d: &mut Decoder<'_>) -> Result<StudioTarget, ReplError> {
+pub(super) fn get_target(d: &mut Decoder<'_>) -> Result<StudioTarget, ReplError> {
     let tag = byte(d)?;
     let channel = fixed(d)?;
     match tag {
@@ -657,14 +778,14 @@ fn get_target(d: &mut Decoder<'_>) -> Result<StudioTarget, ReplError> {
         _ => Err(ReplError::Malformed),
     }
 }
-fn put_entry(e: &mut Encoder, entry: &Entry) -> Result<(), ReplError> {
+pub(super) fn put_entry(e: &mut Encoder, entry: &Entry) -> Result<(), ReplError> {
     put(e, &entry.id)?;
     put(e, &entry.envelope)?;
     e.put_u64(entry.sequence);
     e.put_u64(entry.ts);
     Ok(())
 }
-fn get_entry(d: &mut Decoder<'_>) -> Result<Entry, ReplError> {
+pub(super) fn get_entry(d: &mut Decoder<'_>) -> Result<Entry, ReplError> {
     Ok(Entry {
         id: fixed(d)?,
         envelope: fixed(d)?,

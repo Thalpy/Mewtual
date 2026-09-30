@@ -49,7 +49,9 @@ pub enum StudioOverlayProvenance {
     },
 }
 impl StudioOverlayProvenance {
-    fn tag(&self) -> u8 {
+    /// Widened for the disposal manifest, which carries the same provenance and must not restate
+    /// the mapping. Its decode side matches the literals explicitly, exactly as this module's does.
+    pub(in crate::studio) fn tag(&self) -> u8 {
         match self {
             Self::Closing => 0,
             Self::Unconfirmed { .. } => 1,

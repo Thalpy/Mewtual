@@ -31,10 +31,11 @@ mod admission;
 pub use admission::StudioTarget;
 mod overlay;
 pub use overlay::{
-    StudioClosingOverlayBasis, StudioDraftArchive, StudioHandoffAuthority, StudioHandoffCandidate,
+    StudioClosingOverlayBasis, StudioDiscardConfirmation, StudioDisposalDecision,
+    StudioDisposalMode, StudioDraftArchive, StudioHandoffAuthority, StudioHandoffCandidate,
     StudioHandoffEvidence, StudioHandoffOutcome, StudioHandoffSigning, StudioLocalDraft,
-    StudioOverlay, StudioOverlayProvenance, StudioOverlaySave, StudioOverlayState,
-    MAX_STUDIO_DRAFT_ARCHIVE_BYTES, MAX_STUDIO_OVERLAY_OPS,
+    StudioOverlay, StudioOverlayDisposal, StudioOverlayProvenance, StudioOverlaySave,
+    StudioOverlayState, MAX_STUDIO_DRAFT_ARCHIVE_BYTES, MAX_STUDIO_OVERLAY_OPS,
 };
 mod epoch;
 pub use epoch::catchup;

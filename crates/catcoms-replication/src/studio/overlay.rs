@@ -11,8 +11,12 @@ const MAX_METADATA: usize = 64 * 1024;
 const MAX_EXTENSION: usize = MAX_CHECKPOINT_BYTES + MAX_METADATA;
 
 pub(in crate::studio) mod archive;
+pub(in crate::studio) mod disposal;
 mod handoff;
 pub use archive::{StudioDraftArchive, StudioOverlayProvenance, MAX_STUDIO_DRAFT_ARCHIVE_BYTES};
+pub use disposal::{
+    StudioDiscardConfirmation, StudioDisposalDecision, StudioDisposalMode, StudioOverlayDisposal,
+};
 pub use handoff::{
     StudioHandoffAuthority, StudioHandoffCandidate, StudioHandoffEvidence, StudioHandoffOutcome,
     StudioHandoffSigning, StudioOverlaySave, StudioOverlayState,
