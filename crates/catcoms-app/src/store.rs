@@ -52,7 +52,7 @@ pub(crate) use epoch_registry::{RegistrySourceCapture, RegistrySourceStamp};
 mod epoch_studio;
 pub use creative_references::{CreativeReferences, MAX_CREATIVE_REFERENCES};
 pub(crate) use epoch_intents::inspection::{
-    StudioInspectedDraft, StudioInspectionCapture, StudioInspectionStamp,
+    StudioInspectedDraft, StudioInspectionCapture, StudioInspectionPurpose, StudioInspectionStamp,
 };
 pub use epoch_intents::{EpochIntentBudget, EpochIntentState, MAX_VAULT_INTENT_BYTES};
 pub use epoch_owner::EpochOwnerReceiptState;

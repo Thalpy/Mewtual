@@ -69,6 +69,15 @@ impl StudioInspectionPreparation {
     pub async fn rebuild(self) -> Result<StudioPreparedInspection, AppError> {
         self.rebuild_with(StudioInspectionCapture::rebuild).await
     }
+    /// Rebuild for archiving instead. Same capture, same permit, same currency contract; the only
+    /// difference is that typed reconstruction becomes an observation rather than a requirement,
+    /// so a branch that cannot be replayed can still be preserved.
+    pub async fn rebuild_for_archive(self) -> Result<StudioPreparedInspection, AppError> {
+        self.rebuild_with(|capture| {
+            capture.rebuild_for(crate::store::StudioInspectionPurpose::Archive)
+        })
+        .await
+    }
     async fn rebuild_with(
         self,
         rebuild: impl FnOnce(
@@ -115,6 +124,28 @@ impl StudioOverlayInspection {
         }
         let value = &self.read.value;
         Ok(inspect(value.target, value.prepared, value.draft.as_ref()))
+    }
+    /// The archive this inspection built, for the durable write in the same custody visit.
+    ///
+    /// Not behind the delivery fence, unlike [`Self::inspect`]: that fence exists because a
+    /// renderer's conversion of a projection can outlive the state it describes. This value never
+    /// leaves the actor, and the check that matters for it - that the record has not changed under
+    /// the rebuild - is `finish_studio_inspection`'s, which has already run.
+    pub(crate) fn archive(&self) -> Result<&types::StudioDraftArchive, AppError> {
+        let value = &self.read.value;
+        value.archive.as_ref().ok_or_else(|| {
+            if value.purpose != crate::store::StudioInspectionPurpose::Archive {
+                invalid("this inspection was not prepared for archiving")
+            } else {
+                invalid("no local draft to archive")
+            }
+        })
+    }
+    /// What typed reconstruction found. An `Err` does not stop an archive being written; it is
+    /// recorded in the archive so a later reader knows the branch was already unreplayable when it
+    /// was preserved, rather than suspecting the archive of having broken it.
+    pub(crate) fn replayable(&self) -> Result<(), String> {
+        self.read.value.replayable.clone()
     }
     pub(crate) fn begin_delivery(
         &mut self,

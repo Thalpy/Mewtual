@@ -154,14 +154,6 @@ impl ServerStore {
     /// separate accounted replacement of the intent record, and it runs only after this one has
     /// returned durably: evidence first, removal second.
     #[allow(clippy::too_many_arguments)]
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "the disposal transaction is this writer's first production caller and \
-        lands next; its own tests exercise it today"
-        )
-    )]
     pub(in crate::store) fn write_studio_draft_archive_with_io(
         &mut self,
         server: u64,

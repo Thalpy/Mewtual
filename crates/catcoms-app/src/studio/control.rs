@@ -64,6 +64,13 @@ pub enum StudioControlAction {
     /// Classify the retained draft without rebuilding it: which generation is live, whether a
     /// terminal manifest is retained, and whether an archive exists. Reads only.
     OverlayLifecycle,
+    /// Build the archive payload and write the durable archive record. Two visits, like inspection,
+    /// because the rebuild is detached work and the write is not.
+    ///
+    /// This is the only path that creates an archive, and therefore the only way a preserving
+    /// disposal can ever have something to point at.
+    ArchiveOverlay,
+    FinishOverlayArchive(Box<StudioPreparedInspection>),
     /// Read the preserved archive back. Never a basis, a source or an owner claim: reading evidence
     /// cannot turn it into authority.
     ReadOverlayArchive,
@@ -180,6 +187,17 @@ pub enum StudioControlResponse {
     OverlayPreparation(StudioInspectionPreparation),
     OverlayInspection(StudioOverlayInspection),
     OverlayLifecycle(Box<StudioOverlayLifecycle>),
+    /// An archive was just written. A distinct variant from `OverlayArchive` because one of these
+    /// changed the vault and the other did not, and a caller that cannot tell them apart cannot
+    /// tell a user whether anything happened.
+    OverlayArchived {
+        archive: Box<StudioDraftArchive>,
+        id: [u8; 32],
+        physical_bytes: u64,
+        /// What typed reconstruction found at archive time. `Err` is not a failure of the archive:
+        /// the branch was already unreplayable and the archive records that it was.
+        replayable: Result<(), String>,
+    },
     /// The decoded archive and its identity. Reading is not authority.
     OverlayArchive {
         archive: Box<StudioDraftArchive>,
@@ -217,6 +235,7 @@ impl std::fmt::Debug for StudioControlResponse {
             Self::OverlayPreparation(_) => "OverlayPreparation { .. }",
             Self::OverlayInspection(_) => "OverlayInspection { .. }",
             Self::OverlayLifecycle(_) => "OverlayLifecycle { .. }",
+            Self::OverlayArchived { .. } => "OverlayArchived { .. }",
             Self::OverlayArchive { .. } => "OverlayArchive { .. }",
             Self::OverlayArchiveReleased => "OverlayArchiveReleased",
             Self::OverlayDisposed(_) => "OverlayDisposed { .. }",
@@ -248,6 +267,50 @@ impl StudioControlReady {
 }
 
 impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
+    /// Second visit of an archive: revalidate the capture, then write the record.
+    ///
+    /// The currency check is `finish_studio_inspection`'s, unchanged. What it buys here is the same
+    /// thing it buys a read - that the branch did not change under the detached rebuild - but the
+    /// consequence is larger, because this visit writes. An archive of a branch that has moved on
+    /// would be evidence for work nobody did.
+    ///
+    /// The durable read at the end is not decoration: it is how the caller learns the physical size
+    /// that its storage budget was just charged, and it proves the record is actually there rather
+    /// than reporting success from the value that was written.
+    fn finish_studio_archive(
+        &mut self,
+        store: &mut ServerStore,
+        server: u64,
+        target: StudioTarget,
+        prepared: StudioPreparedInspection,
+    ) -> Result<StudioControlResponse, AppError> {
+        let inspection = self.finish_studio_inspection(store, server, target, prepared)?;
+        let replayable = inspection.replayable();
+        self.sync.with_registry_context(|group, device, _, rng| {
+            if group.member_signature_key(&device.device_id()).as_deref()
+                != Some(device.public_key_bytes().as_slice())
+            {
+                return Err(invalid("Studio requires current membership"));
+            }
+            let logical = target.document(&group.group_id()).map_err(invalid)?;
+            let archive = inspection.archive()?;
+            let mut scan = store.scan_epoch_storage_with_studio()?;
+            while !scan.step()?.complete {}
+            let inventory = scan.finish()?;
+            let mut budget = store.studio_storage_budget(server, group, &inventory)?;
+            store.write_studio_draft_archive(server, &logical, archive, rng, &mut budget)?;
+            let (archive, id, physical_bytes) = store
+                .read_studio_draft_archive_for_app(server, &logical)?
+                .ok_or_else(|| invalid("the draft archive did not survive its own write"))?;
+            Ok(StudioControlResponse::OverlayArchived {
+                archive: Box::new(archive),
+                id,
+                physical_bytes,
+                replayable,
+            })
+        })
+    }
+
     /// Exclusive trusted-local custody only. All slots are authenticated and typed before any
     /// action, including ack. Corruption is never an empty recovery rail or an eviction permit.
     pub(crate) fn studio_control_transaction(
@@ -276,6 +339,16 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
                     .finish_studio_inspection(store, server, target, *prepared)
                     .map(StudioControlResponse::OverlayInspection)
             }
+            // Archiving takes the same two visits as inspection and the same capture; only the
+            // rebuild differs, which is why the first visit is literally the inspection's.
+            StudioControlAction::ArchiveOverlay => {
+                return self
+                    .begin_studio_inspection(store, server, target)
+                    .map(StudioControlResponse::OverlayPreparation)
+            }
+            StudioControlAction::FinishOverlayArchive(prepared) => {
+                return self.finish_studio_archive(store, server, target, *prepared);
+            }
             action => StudioControlRequest { target, action },
         };
         self.sync
@@ -295,8 +368,10 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
                 }
                 match request.action {
                     StudioControlAction::InspectOverlay
-                    | StudioControlAction::FinishOverlayInspection(_) => {
-                        unreachable!("inspection routed before recovery decoding")
+                    | StudioControlAction::FinishOverlayInspection(_)
+                    | StudioControlAction::ArchiveOverlay
+                    | StudioControlAction::FinishOverlayArchive(_) => {
+                        unreachable!("inspection and archiving route before recovery decoding")
                     }
                     // Read-only. It deliberately does NOT rebuild the branch: the whole point is to
                     // tell a caller what it is looking at cheaply enough to do before deciding

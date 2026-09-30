@@ -983,6 +983,31 @@ impl ServerStore {
         )
     }
 
+    /// App-facing archive write. The control layer holds a `StudioDraftArchive` built on the
+    /// detached worker and cannot reach `WriteHooks` or the budget halves.
+    ///
+    /// Writing is an insert or a replacement of one record, so unlike release it is an ordinary
+    /// reserving write: an exact retry after an uncertain outcome re-derives the same payload and
+    /// lands on the same record.
+    pub(crate) fn write_studio_draft_archive(
+        &mut self,
+        server: u64,
+        document: &catcoms_replication::LogicalDocument,
+        archive: &catcoms_replication::studio::StudioDraftArchive,
+        rng: &mut impl CryptoRngCore,
+        budget: &mut EpochStudioBudget,
+    ) -> Result<(), AppError> {
+        self.write_studio_draft_archive_with_io(
+            server,
+            document,
+            archive,
+            rng,
+            &mut budget.storage,
+            &mut budget.intents,
+            &mut WriteHooks::None,
+        )
+    }
+
     /// App-facing archive read, so the control layer does not need store-private types.
     pub(crate) fn read_studio_draft_archive_for_app(
         &self,
