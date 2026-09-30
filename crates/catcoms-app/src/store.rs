@@ -37,6 +37,7 @@ use crate::AppError;
 mod creative_references;
 mod epoch_draft_archive;
 mod epoch_intents;
+pub use epoch_intents::disposal::{StudioDisposalRequestMode, StudioOverlayDisposalRequest};
 mod epoch_owner;
 mod epoch_recovery;
 mod epoch_registry;

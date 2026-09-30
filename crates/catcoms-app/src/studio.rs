@@ -26,9 +26,10 @@ mod replay;
 mod restore;
 mod settlement;
 pub use control::{
-    StudioControlAction, StudioControlReady, StudioControlRequest, StudioControlResponse,
-    StudioRecoveryApply, StudioRecoveryListing, StudioRecoveryPreview, StudioRecoverySummary,
-    StudioRecoveryVersion, StudioSettlementSource,
+    StudioArchiveReleaseRequest, StudioControlAction, StudioControlReady, StudioControlRequest,
+    StudioControlResponse, StudioOverlayLifecycle, StudioRecoveryApply, StudioRecoveryListing,
+    StudioRecoveryPreview, StudioRecoverySummary, StudioRecoveryVersion, StudioReleaseConfirmation,
+    StudioSettlementSource,
 };
 pub use restore::{
     StudioRecoveryDisposition, StudioRecoveryItem, StudioRecoveryMode, StudioRecoveryPlan,

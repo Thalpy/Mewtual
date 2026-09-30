@@ -137,7 +137,7 @@ pub(super) fn hash(value: &str) -> Result<[u8; 32], String> {
         .try_into()
         .map_err(|_| "invalid recovery id".into())
 }
-fn target(channel: &str, object: Option<&str>) -> Result<StudioTarget, String> {
+pub(super) fn target(channel: &str, object: Option<&str>) -> Result<StudioTarget, String> {
     let channel = channel_id(channel)?;
     Ok(match object {
         Some(object) => StudioTarget::Flipnote {
@@ -284,6 +284,12 @@ pub(super) fn response_value(response: Response) -> Result<Value, String> {
         Response::OverlayPreparation(_) | Response::OverlayInspection(_) => {
             return Err("mismatched recovery response".into());
         }
+        // The lifecycle family converts itself. Listed by variant rather than caught by a wildcard
+        // so a new response still has to choose a home here.
+        response @ (Response::OverlayLifecycle(_)
+        | Response::OverlayArchive { .. }
+        | Response::OverlayArchiveReleased
+        | Response::OverlayDisposed(_)) => return super::lifecycle::response_value(response),
         Response::PointerRestored {
             target,
             epoch,

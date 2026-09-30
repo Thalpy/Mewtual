@@ -930,3 +930,74 @@ fn invalid(error: impl std::fmt::Display) -> AppError {
 
 #[cfg(test)]
 pub(crate) mod tests;
+
+impl ServerStore {
+    /// App-facing release: the same transaction with no hook injection, taking the studio budget the
+    /// caller already holds.
+    ///
+    /// The `_with_io` form stays private because `WriteHooks` is a store type and a caller outside
+    /// the store has no business naming it. Same shape as `handoff_studio_overlay` and its siblings.
+    pub(crate) fn release_studio_draft_archive(
+        &mut self,
+        server: u64,
+        document: &catcoms_replication::LogicalDocument,
+        expected_archive: [u8; 32],
+        budget: &mut EpochStudioBudget,
+    ) -> Result<(), AppError> {
+        self.release_studio_draft_archive_with_io(
+            server,
+            document,
+            expected_archive,
+            &mut budget.storage,
+            &mut budget.intents,
+            &mut WriteHooks::None,
+        )
+    }
+
+    /// App-facing disposal, likewise.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn dispose_studio_overlay(
+        &mut self,
+        server: u64,
+        document: &catcoms_replication::LogicalDocument,
+        target: StudioTarget,
+        group: &ServerGroup,
+        device: &MlsDevice,
+        request: crate::store::StudioOverlayDisposalRequest,
+        ts: u64,
+        rng: &mut impl CryptoRngCore,
+        budget: &mut EpochStudioBudget,
+    ) -> Result<catcoms_replication::studio::StudioOverlayDisposal, AppError> {
+        self.dispose_studio_overlay_with_io(
+            server,
+            document,
+            target,
+            group,
+            device,
+            request,
+            ts,
+            rng,
+            &mut budget.storage,
+            &mut budget.intents,
+            &mut WriteHooks::None,
+        )
+    }
+
+    /// App-facing archive read, so the control layer does not need store-private types.
+    pub(crate) fn read_studio_draft_archive_for_app(
+        &self,
+        server: u64,
+        document: &catcoms_replication::LogicalDocument,
+    ) -> Result<
+        Option<(
+            catcoms_replication::studio::StudioDraftArchive,
+            [u8; 32],
+            u64,
+        )>,
+        AppError,
+    > {
+        Ok(self
+            .read_studio_draft_archive(server, document)?
+            .map(|record| (record.archive, record.id, record.physical_bytes)))
+    }
+}

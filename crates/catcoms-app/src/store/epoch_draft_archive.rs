@@ -316,14 +316,6 @@ impl ServerStore {
     /// scope that never held one", and collapsing those would be the bug. A caller that receives
     /// [`AppError::CommittedButNotDurable`] must reconcile and re-read the archive state, not
     /// resend the request. Design section 12.1 records this exemption.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "the native release command is this function's production caller and lands \
-        later in this scope; its own tests exercise it today"
-        )
-    )]
     pub(in crate::store) fn release_studio_draft_archive_with_io(
         &mut self,
         server: u64,
@@ -418,16 +410,8 @@ pub(super) struct InspectedDraftArchive {
 pub(in crate::store) struct StudioDraftArchiveRecord {
     pub(in crate::store) archive: catcoms_replication::studio::StudioDraftArchive,
     pub(in crate::store) id: [u8; 32],
-    /// Read by this reader's own tests, and by the native read command when it lands: exporting an
-    /// archive means telling the caller how large it is.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "the native read command is this field's production reader and lands later in \
-        this scope"
-        )
-    )]
+    /// Read by this reader's own tests and by the native read command: exporting an archive means
+    /// telling the caller how large it is.
     pub(in crate::store) physical_bytes: u64,
 }
 

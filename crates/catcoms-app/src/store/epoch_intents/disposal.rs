@@ -30,25 +30,19 @@ use catcoms_rt::CryptoRngCore;
 /// deserves to know which: a wrong `branch` means the request names another generation, a wrong
 /// `content` means the branch changed under the dialog, and a wrong `accepted` means the caller and
 /// the vault disagree about size even though the hashes matched, which is a bug rather than a race.
-pub(in crate::store) struct StudioOverlayDisposalRequest {
+#[derive(Debug)]
+pub struct StudioOverlayDisposalRequest {
     /// Branch identity including its generation.
-    pub(in crate::store) branch: [u8; 32],
+    pub branch: [u8; 32],
     /// `branch_content` from the inspection the user saw.
-    pub(in crate::store) content: [u8; 32],
-    pub(in crate::store) accepted: usize,
-    pub(in crate::store) mode: StudioDisposalRequestMode,
+    pub content: [u8; 32],
+    pub accepted: usize,
+    pub mode: StudioDisposalRequestMode,
 }
 
 /// The mode, with D5's confirmation as a required typed field on the destructive arm.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "constructed by the native dispose command, which lands later in this scope; its \
-    own tests construct both arms today"
-    )
-)]
-pub(in crate::store) enum StudioDisposalRequestMode {
+#[derive(Debug)]
+pub enum StudioDisposalRequestMode {
     Preserve,
     Discard(StudioDiscardConfirmation),
 }
@@ -59,14 +53,6 @@ impl ServerStore {
     /// Every precondition is checked before any write, so a refusal costs nothing and leaves the
     /// branch, its ledger entries and any existing archive exactly as they were.
     #[allow(clippy::too_many_arguments)]
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "the native dispose command is this transaction's production caller and lands \
-        later in this scope; its own tests exercise it today"
-        )
-    )]
     pub(in crate::store) fn dispose_studio_overlay_with_io(
         &mut self,
         server: u64,
