@@ -4,6 +4,7 @@ use catcoms_replication::CloseRecord;
 use std::collections::{BTreeMap, BTreeSet};
 
 mod archive;
+mod disposal;
 mod handoff;
 mod source_version;
 

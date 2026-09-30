@@ -194,6 +194,15 @@ impl StudioOverlay {
     pub fn contains(&self, id: &[u8; 32]) -> bool {
         self.entries.iter().any(|e| &e.id == id)
     }
+    /// How many operations this branch has accepted.
+    ///
+    /// Surfaced because a disposal request carries the count the user was shown, and comparing it is
+    /// a distinct check from comparing the content hash: equal hashes with an unequal count would
+    /// mean the caller and the vault disagree about size despite agreeing about content, which is a
+    /// bug in the caller rather than a race, and it deserves to be reported as one.
+    pub fn accepted(&self) -> usize {
+        self.entries.len()
+    }
     /// Whether this branch's nested basis carries no installed-source identity.
     ///
     /// An `Unconfirmed` branch has no installed source, so these must be canonically zero rather

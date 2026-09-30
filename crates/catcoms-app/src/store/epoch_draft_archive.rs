@@ -411,20 +411,23 @@ pub(super) struct InspectedDraftArchive {
 /// `id` is [`StudioDraftArchive::archive_id`], the value a release must be given back. It is
 /// computed here rather than left to the caller so that "the identity of the archive I read" and
 /// "the identity I will name when destroying it" cannot become two different derivations.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "read by D4 in the disposal transaction and by the native read command, both of \
-    which land in this scope; its own tests read every field today. REMOVE THIS ALONGSIDE THE \
-    METHOD'S: a lint expectation covers the whole item, so once D4 reads `archive` and `id` but \
-    nothing production reads `physical_bytes`, the per-field lint keeps this fulfilled and it will \
-    never fire to tell you it is obsolete"
-    )
-)]
+/// D4 reads `archive` and `id`; `physical_bytes` is read by the reader's own tests and by the
+/// native read command when it lands. No dead-code expectation is needed any more: the reader has a
+/// production caller, which is what the previous expectation was waiting for. It fired the moment
+/// D4 landed, exactly as the reader review predicted it would.
 pub(in crate::store) struct StudioDraftArchiveRecord {
     pub(in crate::store) archive: catcoms_replication::studio::StudioDraftArchive,
     pub(in crate::store) id: [u8; 32],
+    /// Read by this reader's own tests, and by the native read command when it lands: exporting an
+    /// archive means telling the caller how large it is.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "the native read command is this field's production reader and lands later in \
+        this scope"
+        )
+    )]
     pub(in crate::store) physical_bytes: u64,
 }
 
@@ -468,14 +471,6 @@ impl ServerStore {
     /// A record that will not decode is an **error**, not `None`. `None` means no archive exists;
     /// collapsing "there is nothing here" into "there is something here I cannot read" would let a
     /// preserving disposal proceed as though no evidence had ever been required.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "D4 in the disposal transaction and the native read command are this \
-        reader's production callers; both land in this scope"
-        )
-    )]
     pub(in crate::store) fn read_studio_draft_archive(
         &self,
         server: u64,

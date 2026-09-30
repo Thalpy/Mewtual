@@ -655,18 +655,63 @@ review fixes to `handoff.rs`, which had to be reapplied from scratch. Mutation t
 committed baseline; the restore step is not compatible with holding unrelated edits in the same
 file. **Commit the fix, then mutate, then restore.** Both rounds above now follow that order.
 
+### Slice 5 and its review: the classifier, and a High worth understanding
+
+The lifecycle classifier landed at `8ceb23bd`; the disposal store transaction (D1-D6) at the same
+time in the app crate. The fable review of the classifier returned **CHANGES REQUIRED with a genuine
+High**, fixed at `a4156a5a`.
+
+**The High: the generation was caller-supplied and there were two minting paths.**
+`StudioOverlayAdmission` is a public enum with a public field, so any caller can build
+`New { generation }` for any value, and `new_admitted` stored whatever it was handed. The reviewer
+demonstrated both consequences: a skipped generation became durable, and **fabricating generation 1
+on a post-disposal vault produced a live branch sharing the disposed branch's identity**, after
+which `classify_request` answered `Active` for a branch that had been destroyed. That is exactly the
+failure the namespace exists to prevent, reached with no tampering at all.
+
+Separately, `append` minted a branch whenever `active` was `None` and did **not** increment - so the
+first Save after a transfer or a disposal reused the old generation and inherited its identity. That
+one is on the ordinary product path.
+
+Both now route through `next_generation()`, one definition used by all three callers. The increment
+had been written in one place and *trusted* in another, which is the same two-representations shape
+that has produced most of the findings in this scope.
+
+Worth recording the decision on `append`: **refusing was the wrong fix.** The first Save after a
+handoff is an ordinary thing for a user to do and must work; incrementing makes it correct rather
+than impossible, and the id it produces is the one `begin` would have offered the client.
+
+**The same wrong assertion, twice.** Writing these tests I twice asserted that a disposed branch's
+id should classify as `Unmatched` on a later state. It should not: the retained manifest still
+legitimately acknowledges it, and that is what the manifest is *for*. The property is that it must
+not resolve to the **live** branch. The code was right both times.
+
+**Stated as untested, with the reason.** Two of `validate`'s generation rules -
+`disposal.generation <= branch_generation`, and a live branch beside a disposal being strictly later
+- have no test. Both need a record carrying a manifest *and* a mismatched generation, and the
+manifest is a variable-length block after the field, so reaching them means byte surgery that
+restates the layout or a test-only setter on the state. For decode-path defences that no production
+path can violate, an honest gap beats either. The `>= 1` rule *is* tested, because the no-disposal
+v3 shape puts the generation in the last ten bytes and needs no guesswork.
+
+I also abandoned a first attempt at those tests that had drifted into offset arithmetic with dead
+helpers and a `bump_generation_for_test` mutator - the back door this scope has avoided throughout.
+Deleting it was the right call.
+
 ### Built so far
 
 The payload codec, the reference collector that narrows Agent 1's fail-closed arm under I-5, the
 archive record writer with its accounting and sub-cap, the archive tally on `EpochIntentBudget`,
-**the archive release path** (slice 3), and **the disposal manifest with its v3 extension arm**
-(slice 4A).
+**the archive release path** (slice 3), **the disposal manifest with its v3 extension arm** (slice
+4A), the **typed archive reader**, `IntentLedger::remove_disposed`, **the lifecycle classifier**
+(`branch_generation`, `provenance`, `branch_id`, `classify_request`, `admit_new_branch`,
+`new_admitted`, the completed v3 layout) and **the disposal store transaction** with D1-D6.
 
 ### Not yet built
 
-The disposal **store transaction** (D1-D6, and the archive writer's first production caller), the
-composite copy capture, the lifecycle classifier (`classify_request`, `admit_new_branch`,
-`branch_id`), the tenure work and every native command.
+The composite copy capture, the tenure work (`OwnerTenure::joined`, the `Position` leaf identity,
+the `catcoms-mls` receive-side M-1 rule, the v1 migration via `Imported`, V1-V8) and every native
+command. The mutation script and the `studio-overlay` `lifecycle` CI job are also still unwritten.
 
 **Sections above this point are an append-only ledger and are dated.** Where an earlier entry
 says something is not yet built, read it as the state at that entry's date, not as current

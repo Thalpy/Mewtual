@@ -12,7 +12,7 @@ use catcoms_replication::studio::{
 
 /// A branch whose accepted operations carry genuine published pixels, plus the CIDs they name.
 /// Frames anchor to `[1; 16]`, which this fixture's base already holds.
-fn frame_branch(
+pub(super) fn frame_branch(
     f: &Fixture,
     store: &mut ServerStore,
     close: &CloseRecord,
