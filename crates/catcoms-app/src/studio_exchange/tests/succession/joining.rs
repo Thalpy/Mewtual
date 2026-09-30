@@ -109,7 +109,7 @@ async fn newcomer(closing: bool, require_preview: bool) {
     );
     // Same observed-transition fixture as the reviewed matrix; strict policy is restored
     // before Studio runs. This is not a desktop founder-transfer feature.
-    assert_eq!(p.bob.sync.observed_owner_tenure_start(), None);
+    assert_eq!(p.bob.sync.authoring_owner_tenure_start(), None);
     p.bob.sync.set_config(catcoms_sync::SyncConfig {
         max_committer_rank: 1,
         stage_decision_window_ms: 0,
@@ -120,7 +120,7 @@ async fn newcomer(closing: bool, require_preview: bool) {
     p.bob.sync.set_config(catcoms_sync::SyncConfig::default());
     assert!(p.bob.is_owner());
     assert_eq!(p.bob.group_mode(), crate::GroupMode::LegacyUnverified);
-    let tenure = p.bob.sync.observed_owner_tenure_start().unwrap();
+    let tenure = p.bob.sync.authoring_owner_tenure_start().unwrap();
     assert!(tenure > 0);
     let snapshot = p.bob.snapshot().unwrap();
     p.bob.sync.with_registry_context(|_, _, _, rng| {
@@ -299,7 +299,7 @@ async fn newcomer(closing: bool, require_preview: bool) {
         "restarted successor",
     )
     .unwrap();
-    assert_eq!(provider.sync.observed_owner_tenure_start(), Some(tenure));
+    assert_eq!(provider.sync.authoring_owner_tenure_start(), Some(tenure));
     assert_eq!(provider.group_mode(), crate::GroupMode::LegacyUnverified);
     provider.set_blob_store(provider_store.blob_store(&group_key).unwrap());
     let invite = provider.mint_invite([44; 16], u64::MAX, vec![]).unwrap();
@@ -323,12 +323,28 @@ async fn newcomer(closing: bool, require_preview: bool) {
     let mut newcomer = joined.unwrap();
     assert_eq!(newcomer.group_mode(), crate::GroupMode::LegacyUnverified);
     let provider_peer = provider.local_peer();
-    // Adding into Alice's recycled leaf changes Bob -> newcomer. A Welcome is not an
-    // independently witnessed tenure transition, even when it makes its recipient owner.
+    // Adding into Alice's recycled leaf changes Bob -> newcomer.
+    //
+    // **The old expectation here was the bug, and the old comment stated it as a principle:** "a
+    // Welcome is not an independently witnessed tenure transition, even when it makes its recipient
+    // owner". Under that rule this newcomer is the designated committer holding `None`, so it can
+    // never issue a receipt while the provider - an actual witness - already knows the answer. And
+    // the disagreement does not self-correct, because a proof's claimed tenure is accepted when the
+    // local value is absent.
+    //
+    // A Welcome does establish one thing soundly: when this device's current continuous membership
+    // began. A tenure is an uninterrupted run as committer, so a committer's current tenure cannot
+    // predate its current membership. The property to assert is therefore agreement between the
+    // joiner and its witness, not the joiner's ignorance.
     assert!(newcomer.is_owner());
     assert!(!provider.is_owner());
-    assert_eq!(newcomer.sync.observed_owner_tenure_start(), None);
-    assert!(provider.sync.observed_owner_tenure_start().unwrap() > tenure);
+    let witnessed = provider.sync.authoring_owner_tenure_start().unwrap();
+    assert!(witnessed > tenure, "the provider observed the succession");
+    assert_eq!(
+        newcomer.sync.authoring_owner_tenure_start(),
+        Some(witnessed),
+        "the joining committer and the witness that admitted it must agree"
+    );
     let newcomer_id = newcomer
         .sync
         .with_registry_context(|_, d, _, _| d.device_id());
@@ -544,7 +560,7 @@ async fn studio_actor_restored_p2p_successor_preserves_policy_and_refuses_unprov
     assert_eq!(p.alice.group_mode(), crate::GroupMode::PeerToPeer);
     assert_eq!(p.bob.group_mode(), crate::GroupMode::PeerToPeer);
     assert_eq!(pin.issuer(), founder);
-    assert_eq!(p.bob.sync.observed_owner_tenure_start(), None);
+    assert_eq!(p.bob.sync.authoring_owner_tenure_start(), None);
     p.bob.open_channel(314).await.unwrap();
     p.bob
         .send_message(314, "history survives refused successor admission")
@@ -559,7 +575,7 @@ async fn studio_actor_restored_p2p_successor_preserves_policy_and_refuses_unprov
     p.bob.sync_once().await.unwrap();
     p.bob.sync.set_config(catcoms_sync::SyncConfig::default());
     assert!(p.bob.is_owner());
-    let tenure = p.bob.sync.observed_owner_tenure_start().unwrap();
+    let tenure = p.bob.sync.authoring_owner_tenure_start().unwrap();
     assert!(tenure > 0);
     let bytes = p.bob.snapshot().unwrap();
     p.b_store.save_server(SERVER, &bytes, &mut rng()).unwrap();
@@ -586,7 +602,7 @@ async fn studio_actor_restored_p2p_successor_preserves_policy_and_refuses_unprov
     .unwrap();
     assert_eq!(restored.group_mode(), crate::GroupMode::PeerToPeer);
     assert_eq!(restored.sync.group_policy(), Some(&pin));
-    assert_eq!(restored.sync.observed_owner_tenure_start(), Some(tenure));
+    assert_eq!(restored.sync.authoring_owner_tenure_start(), Some(tenure));
     restored.sync.with_registry_context(|group, _, _, _| {
         assert_eq!(group.designated_committer(), Some(successor));
         assert_eq!(group.designated_committer_index(), Some(1));
