@@ -166,9 +166,19 @@ impl StudioReceiver {
             ))
         } else {
             let target = request.target;
+            // Every action that can leave the vault different from what the renderer last read.
+            // Release and dispose are here for the reason the comment below gives and more
+            // sharply: release closes both budgets and unlinks a record, and a failure *after*
+            // the unlink is precisely the case where the caller must reconcile rather than
+            // resend. A destructive action that emitted no refresh would leave the renderer
+            // showing an archive that is gone.
             let changing = matches!(
                 request.action,
-                StudioControlAction::Acknowledge { .. } | StudioControlAction::RestorePointer
+                StudioControlAction::Acknowledge { .. }
+                    | StudioControlAction::RestorePointer
+                    | StudioControlAction::FinishOverlayArchive(_)
+                    | StudioControlAction::ReleaseOverlayArchive(_)
+                    | StudioControlAction::DisposeOverlay(_)
             );
             let result = server.studio_control_transaction(store, id, request);
             if changing {

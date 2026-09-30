@@ -14,7 +14,7 @@ use catcoms_app::studio::{
     StudioArchiveReleaseRequest, StudioControlAction as Action, StudioControlRequest,
     StudioControlResponse as Response, StudioOverlayLifecycle, StudioReleaseConfirmation,
 };
-use recovery::{hash, target};
+use recovery::{named_hash, target};
 
 #[tauri::command]
 pub(crate) async fn studio_overlay_lifecycle(
@@ -78,6 +78,57 @@ pub(crate) async fn studio_overlay_archive_export(
     .await
 }
 
+/// Preserve the live draft as a durable archive. Two custody visits with a detached rebuild between
+/// them, like `studio_overlay_read`, because the rebuild is the expensive part and the write is the
+/// part that needs custody.
+///
+/// Not confirmed: this only ever adds evidence. The confirmations in this module guard the two
+/// commands that remove it.
+#[tauri::command]
+pub(crate) async fn studio_overlay_archive(
+    state: State<'_, AppState>,
+    server: u64,
+    channel: String,
+    object: Option<String>,
+) -> Result<Value, String> {
+    let target = target(&channel, object.as_deref())?;
+    let context = InvokeContext::new(&state, server, Some(target)).await?;
+    let job = invoke_with_context(
+        &state,
+        &context,
+        InvokeRequest::Control(StudioControlRequest {
+            target,
+            action: Action::ArchiveOverlay,
+        }),
+        |response| match response {
+            InvokeResponse::Control(Response::OverlayPreparation(job)) => Ok(job),
+            _ => Err("mismatched overlay archive response".into()),
+        },
+    )
+    .await?;
+    let mut cancellation = context.cancellation.clone();
+    // The archive rebuild, not the draft rebuild: typed reconstruction is attempted and labelled
+    // here rather than required, so a branch nobody can replay can still be preserved.
+    let prepared = tokio::select! {
+        biased;
+        _ = cancellation.cancelled() => return Err("overlay archive cancelled".into()),
+        result = job.rebuild_for_archive() => result.map_err(|e| e.to_string())?,
+    };
+    invoke_with_context(
+        &state,
+        &context,
+        InvokeRequest::Control(StudioControlRequest {
+            target,
+            action: Action::FinishOverlayArchive(Box::new(prepared)),
+        }),
+        |response| match response {
+            InvokeResponse::Control(response) => response_value(response),
+            _ => Err("mismatched overlay archive response".into()),
+        },
+    )
+    .await
+}
+
 /// Destroy the preserved archive. `archive` is the id from the read that populated the dialog, so a
 /// confirmation typed against one archive cannot destroy a different one.
 #[tauri::command]
@@ -90,13 +141,34 @@ pub(crate) async fn studio_overlay_archive_release(
     confirmation: String,
 ) -> Result<Value, String> {
     let request = release_request(&archive, &confirmation)?;
-    recovery::invoke_control(
-        &state,
-        server,
-        target(&channel, object.as_deref())?,
-        Action::ReleaseOverlayArchive(Box::new(request)),
+    classified(
+        recovery::invoke_control(
+            &state,
+            server,
+            target(&channel, object.as_deref())?,
+            Action::ReleaseOverlayArchive(Box::new(request)),
+        )
+        .await,
     )
-    .await
+}
+
+/// Mark the outcome a destructive command must never let a renderer confuse with a clean refusal.
+///
+/// Release in particular can fail *after* the unlink, and section 12.1 is explicit that such a
+/// caller must reconcile rather than resend: an exact retry finds nothing and is refused, because
+/// the store cannot tell "already released" from "never had one". A renderer that read that as an
+/// ordinary refusal would show the archive as still present.
+///
+/// Keyed off `catcoms_app::UNCERTAIN_OUTCOME` rather than a locally written phrase, because the
+/// actor's reply channel carries `Result<_, String>` and the rendered text is all that survives it.
+fn classified(result: Result<Value, String>) -> Result<Value, String> {
+    result.map_err(|error| {
+        if error.contains(catcoms_app::UNCERTAIN_OUTCOME) {
+            format!("outcome=uncertain; {error}")
+        } else {
+            error
+        }
+    })
 }
 
 /// Split out so the refusals are reachable without an actor. The confirmation is checked before the
@@ -113,7 +185,7 @@ fn release_request(
         )
     })?;
     Ok(StudioArchiveReleaseRequest {
-        archive: hash(archive)?,
+        archive: named_hash("draft archive", archive)?,
         confirmation,
     })
 }
@@ -171,8 +243,8 @@ pub(crate) struct DisposalRequestInput {
 impl DisposalRequestInput {
     fn checked(self) -> Result<StudioOverlayDisposalRequest, String> {
         Ok(StudioOverlayDisposalRequest {
-            branch: hash(&self.branch)?,
-            content: hash(&self.content)?,
+            branch: named_hash("branch", &self.branch)?,
+            content: named_hash("branch content", &self.content)?,
             accepted: self.accepted,
             mode: self.mode.checked()?,
         })
@@ -188,13 +260,15 @@ pub(crate) async fn studio_overlay_dispose(
     object: Option<String>,
     disposal: DisposalRequestInput,
 ) -> Result<Value, String> {
-    recovery::invoke_control(
-        &state,
-        server,
-        target(&channel, object.as_deref())?,
-        Action::DisposeOverlay(Box::new(disposal.checked()?)),
+    classified(
+        recovery::invoke_control(
+            &state,
+            server,
+            target(&channel, object.as_deref())?,
+            Action::DisposeOverlay(Box::new(disposal.checked()?)),
+        )
+        .await,
     )
-    .await
 }
 
 async fn invoke_archive(
@@ -254,6 +328,9 @@ fn disposal_mode_value(mode: StudioDisposalMode) -> Value {
 
 /// Reading an archive is never a basis, a source or an owner claim, and the view says so rather
 /// than leaving a renderer to infer it from the absence of a field.
+///
+/// `terminal`, not `provisional`. Everywhere else in this surface "provisional" means an unsettled
+/// Save that may still change; an archive is finished evidence that only a release can alter.
 fn archive_value(
     archive: &StudioDraftArchive,
     id: [u8; 32],
@@ -262,20 +339,41 @@ fn archive_value(
     Ok(
         json!({"v":1,"kind":"overlayArchive","archive":hex::encode(id),
         "basis":hex::encode(archive.basis()),"content":hex::encode(archive.content()),
+        "branch":hex::encode(archive.branch()),"generation":archive.generation().to_string(),
         "author":hex::encode(archive.author().as_bytes()),"accepted":archive.accepted(),
+        "provenance":provenance_value(&archive.provenance()),
+        // The archive's own label, recorded when it was written. False says the branch was already
+        // unreplayable at preservation time; it never means the archive is damaged.
+        "replayable":archive.replayable(),
         "physicalBytes":physical_bytes.to_string(),
-        "readOnly":true,"authority":false,"provisional":true}),
+        "readOnly":true,"authority":false,"terminal":true}),
     )
 }
 
+/// Every branch-scoped fact carries the branch it is about.
+///
+/// `archive` and `disposed` routinely describe *other* generations than `branch`: an archive
+/// outlives the branch it preserved until someone releases it, and a retained disposal of
+/// generation N sits beside a live generation N+1. Flattened into bare presence flags, a renderer
+/// would tell the user their current work is preserved when the archive is evidence for work they
+/// already disposed of - and the preserving disposal they then ask for is refused at D4.
 fn lifecycle_value(v: &StudioOverlayLifecycle) -> Result<Value, String> {
     Ok(json!({"v":1,"kind":"overlayLifecycle",
         "channel":channel_of(v.target),"object":object_of(v.target),
-        "branch":v.branch.map(hex::encode),"content":v.content.map(hex::encode),
-        "generation":v.generation.to_string(),
-        "accepted":v.accepted,"archive":v.archive.map(hex::encode),
-        "disposed":v.disposed.map(disposal_mode_value),
-        "transferred":v.transferred,"provisional":true}))
+        "branch":v.branch.as_ref().map(|b| json!({"branch":hex::encode(b.id),
+            "content":hex::encode(b.content),"generation":b.generation.to_string(),
+            "accepted":b.accepted})),
+        "prepared":v.prepared,
+        "archive":v.archive.as_ref().map(|a| json!({"archive":hex::encode(a.id),
+            "branch":hex::encode(a.branch),"generation":a.generation.to_string(),
+            "replayable":a.replayable})),
+        "disposed":v.disposed.as_ref().map(|d| {
+            let mut value = disposal_mode_value(d.mode);
+            value["branch"] = hex::encode(d.branch).into();
+            value["generation"] = d.generation.to_string().into();
+            value
+        }),
+        "transferred":v.transferred}))
 }
 
 fn disposal_value(v: &StudioOverlayDisposal) -> Result<Value, String> {
@@ -293,6 +391,24 @@ fn disposal_value(v: &StudioOverlayDisposal) -> Result<Value, String> {
 pub(super) fn response_value(response: Response) -> Result<Value, String> {
     let value = match response {
         Response::OverlayLifecycle(v) => lifecycle_value(&v)?,
+        Response::OverlayArchived {
+            archive,
+            id,
+            physical_bytes,
+            replayable,
+        } => {
+            let mut value = archive_value(&archive, id, physical_bytes)?;
+            value["kind"] = "overlayArchived".into();
+            // Said positively and separately from the archive's own label: a user who archived an
+            // unreplayable branch has preserved their work and should be told so, not left to read
+            // a bare false as a failure.
+            value["preserved"] = true.into();
+            value["notReplayable"] = match replayable {
+                Ok(()) => Value::Null,
+                Err(reason) => reason.into(),
+            };
+            value
+        }
         Response::OverlayArchive {
             archive,
             id,

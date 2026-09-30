@@ -166,21 +166,60 @@ impl StudioReleaseConfirmation {
 }
 
 /// How a retained draft stands right now, without rebuilding it.
+///
+/// **Every branch-scoped fact here carries the branch it is about.** The three facts are about
+/// different generations more often than not: a retained disposal of generation N sits happily
+/// beside a live generation N+1, and an archive outlives the branch it preserved until someone
+/// releases it. A view that reported "archived" and "live branch" as two bare booleans would let a
+/// renderer tell the user their current work is preserved when the archive is evidence for work
+/// they already disposed of, and the preserving disposal they then ask for is refused at D4. The
+/// generations are the only thing that distinguishes those states, so they are not optional.
 #[derive(Debug)]
 pub struct StudioOverlayLifecycle {
     pub target: StudioTarget,
-    /// `None` when no branch is live: the vault may still hold a terminal manifest.
-    pub branch: Option<[u8; 32]>,
-    /// The live branch's content digest, carried so a disposal can be addressed at all. Present
-    /// exactly when `branch` is: they are read together from the same branch on purpose.
-    pub content: Option<[u8; 32]>,
+    /// The live branch, `None` when none is live. The vault may still hold terminal records.
+    pub branch: Option<StudioLifecycleBranch>,
+    /// A transfer is staged on the live branch. D2 refuses a disposal while this holds, and it is
+    /// here because deciding that without paying for an inspection is what this action is for.
+    pub prepared: bool,
+    /// The preserved archive, if this document has one. It is evidence for the branch it names,
+    /// which need not be the live one.
+    pub archive: Option<StudioLifecycleArchive>,
+    /// The retained terminal disposal, if one was recorded. Retained alongside a `Completed`
+    /// transfer rather than replacing it: both are terminal records and both are surfaced.
+    pub disposed: Option<StudioLifecycleDisposal>,
+    /// A branch was transferred away. Independent of `disposed`; both can be set.
+    pub transferred: bool,
+}
+
+/// The live branch, and the two values a disposal has to echo back.
+#[derive(Debug)]
+pub struct StudioLifecycleBranch {
+    pub id: [u8; 32],
+    /// Read from the same `active` branch as `id`, never derived separately.
+    pub content: [u8; 32],
     pub generation: u64,
     pub accepted: usize,
-    /// Whether a preserved archive exists for this document, and its identity if so.
-    pub archive: Option<[u8; 32]>,
-    /// Set when the most recent terminal event was a disposal, with the mode it recorded.
-    pub disposed: Option<StudioDisposalMode>,
-    pub transferred: bool,
+}
+
+/// The preserved archive and the branch it is evidence for.
+#[derive(Debug)]
+pub struct StudioLifecycleArchive {
+    /// `StudioDraftArchive::archive_id`, the value a release must name.
+    pub id: [u8; 32],
+    pub branch: [u8; 32],
+    pub generation: u64,
+    /// Whether typed reconstruction succeeded when this was written. `false` does not mean the
+    /// archive is damaged; it means the branch was already unreplayable when it was preserved.
+    pub replayable: bool,
+}
+
+/// A terminal disposal and the branch it ended.
+#[derive(Debug)]
+pub struct StudioLifecycleDisposal {
+    pub mode: StudioDisposalMode,
+    pub branch: [u8; 32],
+    pub generation: u64,
 }
 
 pub enum StudioControlResponse {
@@ -379,19 +418,37 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
                     StudioControlAction::OverlayLifecycle => {
                         let state = store.load_epoch_intents_structural(server, &logical)?;
                         let metadata = state.handoff_metadata();
-                        let live = state.live_branch()?;
+                        // The live branch's generation comes from the branch, not from the record:
+                        // `branch_generation` is the last generation this vault used, which
+                        // survives the branch that used it. Reading it beside `branch: None` would
+                        // report a generation nothing is at.
+                        let branch = state.live_branch()?.map(|live| StudioLifecycleBranch {
+                            id: live.id,
+                            content: live.content,
+                            generation: metadata.map_or(0, |m| m.branch_generation()),
+                            accepted: state.overlay().map_or(0, |o| o.accepted()),
+                        });
                         let archive = store
                             .read_studio_draft_archive_for_app(server, &logical)?
-                            .map(|(_, id, _)| id);
+                            .map(|(archive, id, _)| StudioLifecycleArchive {
+                                id,
+                                branch: archive.branch(),
+                                generation: archive.generation(),
+                                replayable: archive.replayable(),
+                            });
                         return Ok(StudioControlResponse::OverlayLifecycle(Box::new(
                             StudioOverlayLifecycle {
                                 target,
-                                branch: live.map(|live| live.id),
-                                content: live.map(|live| live.content),
-                                generation: metadata.map_or(0, |m| m.branch_generation()),
-                                accepted: state.overlay().map_or(0, |o| o.accepted()),
+                                branch,
+                                prepared: metadata.is_some_and(|m| m.is_prepared()),
                                 archive,
-                                disposed: metadata.and_then(|m| m.disposed()).map(|d| d.mode),
+                                disposed: metadata.and_then(|m| m.disposed()).map(|d| {
+                                    StudioLifecycleDisposal {
+                                        mode: d.mode,
+                                        branch: d.branch,
+                                        generation: d.generation,
+                                    }
+                                }),
                                 transferred: metadata.is_some_and(|m| m.has_completed()),
                             },
                         )));

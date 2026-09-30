@@ -16458,6 +16458,7 @@ pub fn run() {
             studio::recovery::studio_recovery_export,
             studio::recovery::studio_recovery_acknowledge,
             studio::lifecycle::studio_overlay_lifecycle,
+            studio::lifecycle::studio_overlay_archive,
             studio::lifecycle::studio_overlay_archive_read,
             studio::lifecycle::studio_overlay_archive_export,
             studio::lifecycle::studio_overlay_archive_release,

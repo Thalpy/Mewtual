@@ -85,6 +85,13 @@ pub use store::{
     MAX_RECONNECT_ROUTE_BYTES,
 };
 
+/// The Display prefix of [`AppError::CommittedButNotDurable`], published so a boundary that only
+/// receives the rendered string can still classify the outcome rather than guess at it.
+///
+/// Changing the variant's `#[error(..)]` text without changing this breaks every such boundary
+/// silently, which is why they are next to each other.
+pub const UNCERTAIN_OUTCOME: &str = "persistence committed but could not be made durable";
+
 /// Errors surfaced to the UI/product layer.
 #[derive(Debug, Error)]
 pub enum AppError {
@@ -106,6 +113,11 @@ pub enum AppError {
     /// The destination rename committed, but flushing its directory failed. The caller must not
     /// report a clean rollback: the new complete record is visible, although it may not survive
     /// sudden power loss. Retrying the same save is safe and reconciles the durability state.
+    ///
+    /// Its Display prefix is [`UNCERTAIN_OUTCOME`] and is a **contract**, not prose. The actor's
+    /// reply channel carries `Result<_, String>`, so a boundary that must tell "this refused and
+    /// cost nothing" apart from "this may have landed and you must reconcile" has only the text to
+    /// go on. Anything rewording it silently downgrades every such boundary to a guess.
     #[error("persistence committed but could not be made durable: {0}")]
     CommittedButNotDurable(String),
     /// A product-layer validation error (e.g. an over-large avatar).

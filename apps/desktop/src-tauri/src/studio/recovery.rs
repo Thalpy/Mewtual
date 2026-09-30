@@ -125,17 +125,25 @@ pub(crate) async fn studio_recovery_apply(
 }
 
 pub(super) fn hash(value: &str) -> Result<[u8; 32], String> {
+    named_hash("recovery snapshot", value)
+}
+/// The same parse, told to say what it was reading.
+///
+/// The lifecycle commands parse branch, content and archive ids through here too, and a renderer
+/// that mis-formats an archive id deserves to be told that rather than being sent to look at a
+/// recovery snapshot it never sent.
+pub(super) fn named_hash(noun: &str, value: &str) -> Result<[u8; 32], String> {
     if value.len() != 64
         || !value
             .bytes()
             .all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c))
     {
-        return Err("recovery snapshot id must be 64 lowercase hex characters".into());
+        return Err(format!("{noun} id must be 64 lowercase hex characters"));
     }
     hex::decode(value)
-        .map_err(|_| "invalid recovery id".to_string())?
+        .map_err(|_| format!("invalid {noun} id"))?
         .try_into()
-        .map_err(|_| "invalid recovery id".into())
+        .map_err(|_| format!("invalid {noun} id"))
 }
 pub(super) fn target(channel: &str, object: Option<&str>) -> Result<StudioTarget, String> {
     let channel = channel_id(channel)?;
@@ -287,6 +295,7 @@ pub(super) fn response_value(response: Response) -> Result<Value, String> {
         // The lifecycle family converts itself. Listed by variant rather than caught by a wildcard
         // so a new response still has to choose a home here.
         response @ (Response::OverlayLifecycle(_)
+        | Response::OverlayArchived { .. }
         | Response::OverlayArchive { .. }
         | Response::OverlayArchiveReleased
         | Response::OverlayDisposed(_)) => return super::lifecycle::response_value(response),

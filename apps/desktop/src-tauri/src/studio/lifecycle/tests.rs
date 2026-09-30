@@ -123,6 +123,25 @@ fn a_disposal_that_meant_to_preserve_and_lost_its_kind_is_refused_not_guessed() 
 }
 
 #[test]
+fn an_uncertain_outcome_is_marked_and_a_plain_refusal_is_not() {
+    // Release can fail after the unlink, and such a caller must reconcile rather than resend. A
+    // renderer that read that as an ordinary refusal would keep showing an archive that is gone.
+    let uncertain = classified(Err(format!(
+        "{}: syncing the parent directory",
+        catcoms_app::UNCERTAIN_OUTCOME
+    )))
+    .unwrap_err();
+    assert!(
+        uncertain.starts_with("outcome=uncertain; "),
+        "said: {uncertain}"
+    );
+    // A guard refusal cost nothing and must not be dressed up as one that might have landed.
+    let refused = classified(Err("the branch changed since it was inspected".into())).unwrap_err();
+    assert_eq!(refused, "the branch changed since it was inspected");
+    assert!(classified(Ok(json!({"ok": true}))).is_ok());
+}
+
+#[test]
 fn a_disposal_payload_must_carry_every_value_the_user_was_shown() {
     let whole = json!({"branch":HEX,"content":HEX,"accepted":1,"mode":{"kind":"preserve"}});
     serde_json::from_value::<DisposalRequestInput>(whole.clone())
@@ -150,7 +169,7 @@ fn a_disposal_payload_must_carry_every_value_the_user_was_shown() {
 }
 
 #[tokio::test]
-async fn lifecycle_classifies_a_live_branch_without_rebuilding_or_writing_it() {
+async fn lifecycle_classifies_a_live_branch_without_writing_to_the_vault() {
     for art in [false, true] {
         let f = InspectionFixture::new(art).await;
         let state = state(&f).await;
@@ -170,22 +189,24 @@ async fn lifecycle_classifies_a_live_branch_without_rebuilding_or_writing_it() {
                 assert_eq!(value["object"], hex::encode(object));
             }
         }
+        let branch = &value["branch"];
         assert!(
-            value["branch"].is_string(),
+            branch["branch"].is_string(),
             "a live accepted branch has an identity"
         );
         // Without this a renderer cannot address a disposal at all: the store demands the branch's
         // content digest back and this view is the only place it is published.
         assert!(
-            value["content"].is_string(),
+            branch["content"].is_string(),
             "a live branch must publish the content digest a disposal has to echo"
         );
         assert_ne!(
-            value["content"], value["branch"],
+            branch["content"], branch["branch"],
             "identity and content are different checks and must not be the same value"
         );
-        assert_eq!(value["generation"], "1", "the first minted generation");
-        assert_eq!(value["accepted"], 1);
+        assert_eq!(branch["generation"], "1", "the first minted generation");
+        assert_eq!(branch["accepted"], 1);
+        assert_eq!(value["prepared"], false, "no transfer is staged");
         assert!(value["archive"].is_null(), "nothing has been preserved yet");
         assert!(value["disposed"].is_null(), "nothing has been disposed yet");
         assert_eq!(value["transferred"], false);
@@ -194,6 +215,169 @@ async fn lifecycle_classifies_a_live_branch_without_rebuilding_or_writing_it() {
         assert_eq!(f.records(), before, "classification wrote to the vault");
         f.shutdown().await;
     }
+}
+
+/// The whole preserving lifecycle through the boundary: archive, read it back, see it in the
+/// classifier, dispose preserving it, and confirm the manifest names that archive.
+///
+/// Until `studio_overlay_archive` existed no test in this crate could reach any of this, because
+/// nothing outside the store could create an archive. The archive read, the export, the release
+/// and the preserving disposal were all unreachable success paths.
+#[tokio::test]
+async fn the_preserving_lifecycle_runs_end_to_end_through_the_boundary() {
+    let f = InspectionFixture::new(true).await;
+    let state = state(&f).await;
+    let live = studio_overlay_lifecycle_for_test(&state, f.target)
+        .await
+        .unwrap();
+    let branch = live["branch"]["branch"].as_str().unwrap().to_owned();
+
+    let written = archive(&state, f.target)
+        .await
+        .expect("archiving a live draft");
+    assert_eq!(written["kind"], "overlayArchived");
+    assert_eq!(written["preserved"], true);
+    assert_eq!(
+        written["branch"], branch,
+        "the archive names the live branch"
+    );
+    assert_eq!(written["generation"], "1");
+    assert_eq!(
+        written["replayable"], true,
+        "this branch replays, so the archive says so"
+    );
+    assert!(written["notReplayable"].is_null());
+    assert_eq!(written["accepted"], 1);
+    // Reading evidence is never authority, and the view says so rather than leaving a renderer to
+    // infer non-authority from a missing field.
+    assert_eq!(written["readOnly"], true);
+    assert_eq!(written["authority"], false);
+    assert_eq!(written["terminal"], true);
+    assert!(
+        written.get("provisional").is_none(),
+        "an archive is finished evidence, not an unsettled save"
+    );
+    let id = written["archive"].as_str().unwrap().to_owned();
+
+    // The read returns the same archive, and the classifier now reports it against its branch.
+    let read = recovery::invoke_control(
+        &state,
+        fixture::SERVER,
+        f.target,
+        Action::ReadOverlayArchive,
+    )
+    .await
+    .expect("the archive that was just written must read back");
+    assert_eq!(read["kind"], "overlayArchive");
+    assert_eq!(read["archive"], id);
+    assert_eq!(read["branch"], branch);
+    let classified = studio_overlay_lifecycle_for_test(&state, f.target)
+        .await
+        .unwrap();
+    assert_eq!(classified["archive"]["archive"], id);
+    assert_eq!(
+        classified["archive"]["branch"], branch,
+        "the classifier must say which branch the archive is evidence for"
+    );
+
+    // The export carries the canonical envelope, and it round-trips.
+    let exported = invoke_archive(&state, fixture::SERVER, f.target, |archive, id, bytes| {
+        super::response_value(Response::OverlayArchive {
+            archive: Box::new(archive),
+            id,
+            physical_bytes: bytes,
+        })
+    })
+    .await
+    .unwrap();
+    assert_eq!(exported["archive"], id);
+
+    // And D4 accepts it: the Preserve arm is reachable from the renderer at last.
+    let request = serde_json::from_value::<DisposalRequestInput>(json!({
+        "branch": branch,
+        "content": live["branch"]["content"],
+        "accepted": 1,
+        "mode": {"kind":"preserve"},
+    }))
+    .unwrap()
+    .checked()
+    .unwrap();
+    let manifest = recovery::invoke_control(
+        &state,
+        fixture::SERVER,
+        f.target,
+        Action::DisposeOverlay(Box::new(request)),
+    )
+    .await
+    .expect("a preserving disposal with a durable archive must succeed");
+    assert_eq!(
+        manifest["disposal"],
+        json!({"mode":"preserved","archive":id}),
+        "the manifest must name the archive that holds the bodies"
+    );
+
+    // The classifier now shows a disposal and an archive that are about the *same* branch, which
+    // is the only reading under which "preserved" is true of the work the user just disposed of.
+    let after = studio_overlay_lifecycle_for_test(&state, f.target)
+        .await
+        .unwrap();
+    assert!(after["branch"].is_null());
+    assert_eq!(after["disposed"]["mode"], "preserved");
+    assert_eq!(after["disposed"]["branch"], branch);
+    assert_eq!(after["archive"]["branch"], branch);
+    f.shutdown().await;
+}
+
+/// Release destroys the archive, and only when named exactly.
+#[tokio::test]
+async fn releasing_destroys_only_the_archive_it_was_shown() {
+    let f = InspectionFixture::new(true).await;
+    let state = state(&f).await;
+    let written = archive(&state, f.target).await.unwrap();
+    let id = written["archive"].as_str().unwrap().to_owned();
+
+    // A confirmation cannot be spent on an archive the user never saw.
+    let stale = release(&state, f.target, HEX, StudioReleaseConfirmation::TOKEN)
+        .await
+        .expect_err("a release naming another archive must be refused");
+    assert!(!stale.is_empty());
+    assert!(
+        recovery::invoke_control(
+            &state,
+            fixture::SERVER,
+            f.target,
+            Action::ReadOverlayArchive
+        )
+        .await
+        .is_ok(),
+        "a refused release must leave the archive intact"
+    );
+
+    let released = release(&state, f.target, &id, StudioReleaseConfirmation::TOKEN)
+        .await
+        .expect("releasing the archive that was read");
+    assert_eq!(released["kind"], "overlayArchiveReleased");
+    // Both budgets are closed behind this, so the renderer must not assume it may write again.
+    assert_eq!(released["reconcileRequired"], true);
+    assert!(
+        recovery::invoke_control(
+            &state,
+            fixture::SERVER,
+            f.target,
+            Action::ReadOverlayArchive
+        )
+        .await
+        .is_err(),
+        "the archive must be gone"
+    );
+    assert!(
+        studio_overlay_lifecycle_for_test(&state, f.target)
+            .await
+            .unwrap()["archive"]
+            .is_null(),
+        "the classifier must stop reporting a released archive"
+    );
+    f.shutdown().await;
 }
 
 #[tokio::test]
@@ -222,29 +406,43 @@ async fn a_live_branch_survives_every_refused_disposal() {
     let live = studio_overlay_lifecycle_for_test(&state, f.target)
         .await
         .unwrap();
-    let branch = live["branch"].as_str().unwrap().to_owned();
-    let content = live["content"].as_str().unwrap().to_owned();
+    let branch = live["branch"]["branch"].as_str().unwrap().to_owned();
+    let content = live["branch"]["content"].as_str().unwrap().to_owned();
     let before = f.records();
 
-    // Naming another branch, disagreeing about content, and disagreeing about size are three
-    // separate refusals, and none of them may cost the branch anything. The fourth is D4: a
-    // preserving disposal with nothing preserved, which would otherwise lose the bodies while
-    // claiming they were kept.
-    for (reason, payload) in [
+    // **The first three are sent as `discard`, deliberately.** As `preserve` they are all refused
+    // by D4 for having no archive, whichever D3 check is deleted, and the test passes while
+    // proving nothing: a review verified exactly that by deleting the `branch` and `accepted`
+    // checks and watching every assertion here still hold. A confirmed discard has nothing left to
+    // stop it, so deleting the guard a case names really does destroy the branch, and the survival
+    // assertion below really does catch it.
+    //
+    // Each expected message is asserted too. Three guards that all refuse is not the same as three
+    // guards that each refuse for its own reason, and only the second is what D3 claims.
+    for (reason, says, payload) in [
         (
             "another generation",
-            json!({"branch":HEX,"content":content,"accepted":1,"mode":{"kind":"preserve"}}),
+            "names another branch generation",
+            json!({"branch":HEX,"content":content,"accepted":1,
+                "mode":{"kind":"discard","confirmation":"destroy-local-draft"}}),
         ),
         (
             "content changed under the dialog",
-            json!({"branch":branch,"content":HEX,"accepted":1,"mode":{"kind":"preserve"}}),
+            "the branch changed since it was inspected",
+            json!({"branch":branch,"content":HEX,"accepted":1,
+                "mode":{"kind":"discard","confirmation":"destroy-local-draft"}}),
         ),
         (
             "size disagreement",
-            json!({"branch":branch,"content":content,"accepted":99,"mode":{"kind":"preserve"}}),
+            "disagrees with the branch's accepted count",
+            json!({"branch":branch,"content":content,"accepted":99,
+                "mode":{"kind":"discard","confirmation":"destroy-local-draft"}}),
         ),
+        // D4, which only the preserving arm has: destroying the bodies while claiming they were
+        // kept is the one refusal that has to happen even when everything else agrees.
         (
             "preserving with nothing preserved",
+            "archive",
             json!({"branch":branch,"content":content,"accepted":1,"mode":{"kind":"preserve"}}),
         ),
     ] {
@@ -252,7 +450,7 @@ async fn a_live_branch_survives_every_refused_disposal() {
             .expect("a well-formed payload")
             .checked()
             .expect("a well-formed payload");
-        recovery::invoke_control(
+        let error = recovery::invoke_control(
             &state,
             fixture::SERVER,
             f.target,
@@ -260,6 +458,10 @@ async fn a_live_branch_survives_every_refused_disposal() {
         )
         .await
         .expect_err(reason);
+        assert!(
+            error.contains(says),
+            "the refusal for {reason} must name {says}, said: {error}"
+        );
         assert_eq!(f.records(), before, "a refused disposal wrote: {reason}");
         assert_eq!(
             studio_overlay_lifecycle_for_test(&state, f.target)
@@ -279,11 +481,11 @@ async fn a_confirmed_discard_ends_the_branch_and_says_so_terminally() {
     let live = studio_overlay_lifecycle_for_test(&state, f.target)
         .await
         .unwrap();
-    let branch = live["branch"].as_str().unwrap().to_owned();
+    let branch = live["branch"]["branch"].as_str().unwrap().to_owned();
 
     let request = serde_json::from_value::<DisposalRequestInput>(json!({
         "branch": branch,
-        "content": live["content"],
+        "content": live["branch"]["content"],
         "accepted": 1,
         "mode": {"kind":"discard","confirmation":"destroy-local-draft"},
     }))
@@ -322,10 +524,63 @@ async fn a_confirmed_discard_ends_the_branch_and_says_so_terminally() {
         after["branch"].is_null(),
         "the branch outlived its disposal"
     );
-    assert_eq!(after["accepted"], 0);
-    assert_eq!(after["disposed"], json!({"mode":"discarded"}));
+    assert_eq!(after["disposed"]["mode"], "discarded");
+    assert_eq!(
+        after["disposed"]["branch"], branch,
+        "a terminal record must say which branch it ended"
+    );
+    assert_eq!(after["disposed"]["generation"], "1");
     assert!(after["archive"].is_null());
     f.shutdown().await;
+}
+
+/// The two-visit archive, one layer in. The detached rebuild and both custody visits are the real
+/// ones; only the `State` wrapper the `#[tauri::command]` needs is absent.
+async fn archive(state: &AppState, target: StudioTarget) -> Result<Value, String> {
+    let context = InvokeContext::new(state, fixture::SERVER, Some(target)).await?;
+    let job = invoke_with_context(
+        state,
+        &context,
+        InvokeRequest::Control(StudioControlRequest {
+            target,
+            action: Action::ArchiveOverlay,
+        }),
+        |response| match response {
+            InvokeResponse::Control(Response::OverlayPreparation(job)) => Ok(job),
+            _ => Err("mismatched overlay archive response".into()),
+        },
+    )
+    .await?;
+    let prepared = job.rebuild_for_archive().await.map_err(|e| e.to_string())?;
+    invoke_with_context(
+        state,
+        &context,
+        InvokeRequest::Control(StudioControlRequest {
+            target,
+            action: Action::FinishOverlayArchive(Box::new(prepared)),
+        }),
+        |response| match response {
+            InvokeResponse::Control(response) => super::response_value(response),
+            _ => Err("mismatched overlay archive response".into()),
+        },
+    )
+    .await
+}
+
+async fn release(
+    state: &AppState,
+    target: StudioTarget,
+    id: &str,
+    confirmation: &str,
+) -> Result<Value, String> {
+    let request = release_request(id, confirmation)?;
+    recovery::invoke_control(
+        state,
+        fixture::SERVER,
+        target,
+        Action::ReleaseOverlayArchive(Box::new(request)),
+    )
+    .await
 }
 
 /// The command bodies take `State<'_, AppState>`, which a unit test cannot mint. This is the same
