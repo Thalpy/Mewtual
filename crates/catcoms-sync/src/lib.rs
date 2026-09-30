@@ -70,6 +70,7 @@ pub mod durable_chat;
 pub mod epoch_service;
 mod group_policy;
 mod owner_tenure;
+pub use owner_tenure::ObservedOwnerTenure;
 pub use catcoms_mls::{GroupMode, GroupPolicy, PolicyError};
 pub mod receipt_head;
 #[cfg(test)]
@@ -5045,7 +5046,12 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     ) -> Self {
         let connection_handoff = std::mem::take(&mut routing.connection_handoff);
         let mut this = Self::new(transport, group, device, rng, clock);
-        this.owner_tenure = owner_tenure::OwnerTenure::unknown(&this.group);
+        // `joined`, not `unknown`. A device that joins into a recycled low leaf becomes the
+        // designated committer, and with `unknown` it could never issue a receipt while every witness
+        // knew the answer. The inference is about current continuous membership: a tenure is an
+        // uninterrupted run as committer, so this device's current tenure cannot predate its current
+        // membership, which began at this epoch.
+        this.owner_tenure = owner_tenure::OwnerTenure::joined(&this.group, &this.device);
         // A joiner has NO group file-wrap key of its own; only the founder mints one. Zero
         // the random key `new` seeded so that an absent/failed transfer leaves `has_file_key`
         // false (and `add_file` refuses), rather than a wrong random key that would silently
