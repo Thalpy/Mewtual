@@ -165,9 +165,17 @@ impl StudioOverlayState {
 
     /// A branch accepted where none existed, carrying forward what this vault already holds.
     ///
-    /// The generation comes from [`StudioOverlayAdmission::New`], which is the only thing that
-    /// derives it, so the increment cannot happen anywhere else. Any retained terminal manifest is
-    /// preserved: a new branch does not erase the acknowledgement owed for the previous one.
+    /// The admission is **re-checked here, not trusted**. `StudioOverlayAdmission` is a public enum
+    /// with a public field, so a caller can construct `New { generation }` for any number at all, and
+    /// an earlier version of this function stored whatever it was handed. An adversarial review
+    /// showed what that bought: fabricating generation 1 on a post-disposal vault produced a live
+    /// branch sharing the disposed branch's identity, and `classify_request` then answered `Active`
+    /// for a branch that had been destroyed. Re-deriving costs one addition and removes the hole,
+    /// and it means an admission computed against a state that has since moved on is refused rather
+    /// than silently applied.
+    ///
+    /// Any retained terminal manifest is preserved: a new branch does not erase the acknowledgement
+    /// owed for the previous one.
     pub fn new_admitted(
         &self,
         basis: &StudioClosingOverlayBasis,
@@ -178,6 +186,9 @@ impl StudioOverlayState {
             return Err(ReplError::IntentConflict);
         };
         if self.active.is_some() {
+            return Err(ReplError::IntentConflict);
+        }
+        if generation != self.next_generation()? {
             return Err(ReplError::IntentConflict);
         }
         Ok(Self {
@@ -212,6 +223,25 @@ impl StudioOverlayState {
         self.branch_generation
     }
 
+    /// The generation a branch minted here and now would carry.
+    ///
+    /// **One definition, used by all three paths that care**: `admit_new_branch` derives the id it
+    /// will accept from it, `new_admitted` checks the admission it was handed against it, and
+    /// `append` uses it when it mints a branch where none existed. Before this existed the increment
+    /// was written in one place and *trusted* in another, and an adversarial review proved the
+    /// consequences: a caller could hand `new_admitted` any `New { generation }` it liked, because
+    /// `StudioOverlayAdmission` is a public enum with a public field. Fabricating generation 1 on a
+    /// post-disposal vault produced a live branch sharing the disposed branch's identity, and
+    /// `classify_request` then answered `Active` for a branch that had been destroyed.
+    ///
+    /// Exhaustion refuses rather than wraps: a wrapped generation would let an ancient request name
+    /// a live namespace again, which is the one thing this namespace exists to prevent.
+    fn next_generation(&self) -> Result<u64, ReplError> {
+        self.branch_generation
+            .checked_add(1)
+            .ok_or(ReplError::EpochBound)
+    }
+
     /// The identity every request must carry, or `None` when there is no live branch to name.
     pub fn branch_id(&self) -> Option<[u8; 32]> {
         self.active
@@ -231,6 +261,16 @@ impl StudioOverlayState {
     /// acknowledgement is owed only for the exact operation the terminal branch recorded, so a
     /// request naming the right branch with a body that manifest never held is `Unmatched` rather
     /// than acknowledged.
+    ///
+    /// **That case is deliberately `Unmatched` and not an error**, which is a decision worth stating
+    /// because `completed_retry` answers `IntentConflict` for the same shape. The difference is what
+    /// each is for. `completed_retry` is asked "is this the exact retry I think it is?", where a near
+    /// miss is a caller bug worth reporting. This is asked "which terminal event, if any, is this
+    /// request about?", and the honest answer for a request that matches no event exactly is that
+    /// none of them is. The caller then continues to the authorizing stage, which returns `Stale`,
+    /// so the request is still refused - the cost is only that a conflict is reported as staleness.
+    /// If that distinction ever needs to reach a user, it belongs in a separate diagnostic rather
+    /// than in a classification whose whole contract is that exactly one arm matches.
     pub fn classify_request(
         &self,
         target: StudioTarget,
@@ -302,9 +342,7 @@ impl StudioOverlayState {
         if self.active.is_some() {
             return Ok(StudioOverlayAdmission::Stale);
         }
-        let Some(generation) = self.branch_generation.checked_add(1) else {
-            return Err(ReplError::EpochBound);
-        };
+        let generation = self.next_generation()?;
         if branch_identity(fresh.fingerprint(), generation) == branch {
             return Ok(StudioOverlayAdmission::New { generation });
         }
@@ -468,12 +506,29 @@ impl StudioOverlayState {
             basis.0.receipt.closed_epoch,
             self.minimum_new_basis_closed_epoch,
         )?;
+        // Minting a branch where none existed is a generation event, and this path does it: after a
+        // transfer or a disposal `active` is `None`, and the next Save legitimately starts a new
+        // branch here. It must take the NEXT generation.
+        //
+        // An adversarial review found this reusing the current one, which is the defect the namespace
+        // exists to prevent: a new branch on the same basis would have had the same `branch_id` as the
+        // transferred or disposed one, so a delayed request for the old branch would classify as the
+        // live one. Refusing instead of incrementing was the other option and it is wrong - the first
+        // Save after a handoff is an ordinary thing for a user to do, and it must work.
+        //
+        // The increment goes through `next_generation`, the same definition `admit_new_branch` derives
+        // its accepted id from, so the id a client was handed for a new acceptance is the id this
+        // produces.
+        let minting = self.active.is_none();
         let mut active = self
             .active
             .clone()
             .unwrap_or_else(|| StudioOverlay::new(basis));
         let view = active.append(basis, ledger, id, ts)?;
         let mut next = self.clone();
+        if minting {
+            next.branch_generation = self.next_generation()?;
+        }
         next.active = Some(active);
         next.legacy = false;
         next.encode_vault(ledger)?;

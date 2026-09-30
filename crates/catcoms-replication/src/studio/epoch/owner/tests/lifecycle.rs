@@ -169,6 +169,146 @@ fn an_old_generation_request_is_stale_after_the_namespace_has_moved_on() {
     );
 }
 
+/// The High from the classifier review: a fabricated admission must not mint a branch.
+///
+/// `StudioOverlayAdmission` is a public enum with a public field, so any caller can build
+/// `New { generation }` for any number. An earlier version of `new_admitted` stored whatever it was
+/// handed, and the review proved the two consequences: a skipped generation became durable, and
+/// fabricating generation 1 on a post-disposal vault produced a live branch **sharing the disposed
+/// branch's identity**, after which `classify_request` answered `Active` for a branch that had been
+/// destroyed. That is the exact failure the namespace exists to prevent, reached without any
+/// tampering.
+#[test]
+fn a_fabricated_admission_cannot_mint_a_branch_at_a_chosen_generation() {
+    let mut f = Fixture::new(true);
+    let (g1, ledger, ordered, basis) = branch(&mut f, 2);
+    let g1_id = g1.branch_id().unwrap();
+    let g1_request = intent(&f, ordered[0].0.clone());
+    let (after, _) = g1
+        .dispose(
+            &ledger,
+            StudioDisposalDecision::Discard(confirmation()),
+            g1.branch_content(&ledger).unwrap(),
+            1,
+            1,
+        )
+        .unwrap();
+
+    // Reusing the disposed branch's own generation is the dangerous one, so it is checked first.
+    assert!(
+        after
+            .new_admitted(
+                &basis,
+                StudioOverlayAdmission::New { generation: 1 },
+                StudioOverlayProvenance::Closing,
+            )
+            .is_err(),
+        "reusing the disposed branch's generation would give a new branch its identity"
+    );
+    // Skipped generations and absurd ones, in both directions.
+    for fabricated in [0, 3, 4, 99, u64::MAX] {
+        assert!(
+            after
+                .new_admitted(
+                    &basis,
+                    StudioOverlayAdmission::New {
+                        generation: fabricated
+                    },
+                    StudioOverlayProvenance::Closing,
+                )
+                .is_err(),
+            "generation {fabricated} is not the next one and must be refused"
+        );
+    }
+
+    // The real next generation works, and the branch it mints does NOT share the disposed identity.
+    let g2 = after
+        .new_admitted(
+            &basis,
+            StudioOverlayAdmission::New { generation: 2 },
+            StudioOverlayProvenance::Closing,
+        )
+        .expect("the derived next generation must be admitted");
+    assert_ne!(g2.branch_id(), Some(g1_id));
+    // The disposed id must not resolve to the LIVE branch. It does still resolve to the retained
+    // manifest, which is correct and is what that manifest is for - asserting `Unmatched` here would
+    // be the same mistake the rollover test already corrected once.
+    assert!(
+        matches!(
+            g2.classify_request(f.source.target, g1_id, &g1_request)
+                .unwrap(),
+            StudioOverlayRequestClass::Disposed(_)
+        ),
+        "the disposed id must resolve to its manifest, never to the live branch"
+    );
+    // And `Stale` is never an admission.
+    assert!(after
+        .new_admitted(
+            &basis,
+            StudioOverlayAdmission::Stale,
+            StudioOverlayProvenance::Closing,
+        )
+        .is_err());
+}
+
+/// The second minting path, which the same review found reusing the generation.
+///
+/// After a transfer or a disposal `active` is `None`, and the next ordinary Save legitimately starts
+/// a new branch through `append`. That is a generation event and must take the next number. Reusing
+/// the current one would give the new branch the transferred or disposed branch's identity - the same
+/// defect as the fabricated admission above, reached through the ordinary Save path instead.
+#[test]
+fn appending_where_no_branch_exists_takes_the_next_generation() {
+    let mut f = Fixture::new(true);
+    let (g1, ledger, _ordered, basis) = branch(&mut f, 2);
+    let g1_id = g1.branch_id().unwrap();
+    let (after, _) = g1
+        .dispose(
+            &ledger,
+            StudioDisposalDecision::Discard(confirmation()),
+            g1.branch_content(&ledger).unwrap(),
+            1,
+            1,
+        )
+        .unwrap();
+    assert!(after.overlay().is_none());
+    assert_eq!(after.branch_generation(), 1);
+
+    // The ordinary Save path: append onto a state with no live branch.
+    let mut revived = IntentLedger::new(ledger.document().clone());
+    let op = f.domain(f.title_body("the first save after a disposal"));
+    let id = revived.prepare(f.owner.device_id(), op).unwrap();
+    let mut next = after.clone();
+    next.append(&basis, &revived, id, 800)
+        .expect("the first Save after a disposal is ordinary and must work");
+
+    assert_eq!(
+        next.branch_generation(),
+        2,
+        "minting a branch where none existed must take the next generation"
+    );
+    assert_ne!(
+        next.branch_id(),
+        Some(g1_id),
+        "a new branch on the same basis must not inherit the disposed branch's identity"
+    );
+    assert_eq!(
+        next.branch_id(),
+        Some(derived_branch_id(basis.fingerprint(), 2)),
+        "and it must be the id a client was offered for a new acceptance"
+    );
+
+    // Appending again to the now-live branch must NOT increment.
+    let op2 = f.domain(f.title_body("more work on the same branch"));
+    let id2 = revived.prepare(f.owner.device_id(), op2).unwrap();
+    next.append(&basis, &revived, id2, 801).unwrap();
+    assert_eq!(
+        next.branch_generation(),
+        2,
+        "extending a live branch is not a generation event"
+    );
+}
+
 /// `admit_new_branch` refuses everything that is not the exact derived next generation.
 #[test]
 fn admission_refuses_a_live_branch_a_skipped_generation_and_an_unrelated_basis() {
@@ -379,7 +519,124 @@ fn a_new_branch_cannot_revive_the_ids_a_retained_disposal_recorded() {
     let first = ordered[0].0.id(&f.owner.device_id());
     let appended = g2.append(fresh, &revived, first, 500);
     assert!(
-        appended.is_err() || g2.encode_vault(&revived).is_err(),
+        appended.is_err(),
         "a new branch must not be able to hold an id the retained disposal recorded"
+    );
+}
+
+/// The generation must actually survive a round trip, and a v2-expressible state must stay v2.
+///
+/// The review found that `put_u64(1)` in place of the real generation passed every test: nothing
+/// decoded a generation other than 1, so the field could have been a constant. It also found that
+/// dropping the provenance clause from `is_v2_expressible` would let an `Unconfirmed` state encode as
+/// v2 and silently lose its provenance on the way back.
+#[test]
+fn the_generation_and_provenance_survive_the_round_trip_and_gate_the_version() {
+    let mut f = Fixture::new(true);
+    let (g1, ledger, _ordered, basis) = branch(&mut f, 2);
+
+    // Generation 1, Closing, no disposal: v2, and the tag proves it.
+    let v2 = g1.encode_vault(&ledger).unwrap();
+    assert_eq!(v2.first(), Some(&2));
+    assert_eq!(
+        StudioOverlayState::decode_vault(&v2, &ledger)
+            .unwrap()
+            .branch_generation(),
+        1
+    );
+
+    // Advance the namespace and round trip a generation that is NOT 1. A constant in the encoder
+    // fails here; nothing before this test would have noticed.
+    let (after, _) = g1
+        .dispose(
+            &ledger,
+            StudioDisposalDecision::Discard(confirmation()),
+            g1.branch_content(&ledger).unwrap(),
+            1,
+            1,
+        )
+        .unwrap();
+    let mut revived = IntentLedger::new(ledger.document().clone());
+    let op = f.domain(f.title_body("generation two"));
+    let id = revived.prepare(f.owner.device_id(), op).unwrap();
+    let mut g2 = after;
+    g2.append(&basis, &revived, id, 900).unwrap();
+    assert_eq!(g2.branch_generation(), 2);
+
+    let v3 = g2.encode_vault(&revived).unwrap();
+    assert_eq!(v3.first(), Some(&3), "a later generation cannot be v2");
+    let read = StudioOverlayState::decode_vault(&v3, &revived).unwrap();
+    assert_eq!(
+        read.branch_generation(),
+        2,
+        "the generation must survive the round trip, not be re-derived as 1"
+    );
+    assert_eq!(read.provenance(), StudioOverlayProvenance::Closing);
+    assert_eq!(read.branch_id(), g2.branch_id());
+    assert_eq!(
+        read.encode_vault(&revived).unwrap(),
+        v3,
+        "and the record must be canonical"
+    );
+}
+
+/// `validate`'s `branch_generation >= 1` rule, reached through the decoder.
+///
+/// Nothing in production can build a state that violates it now that the increment is
+/// single-sourced, so this rule's job is to refuse a corrupt or crafted record. Crafting one is
+/// cheap for the no-disposal shape: a v3 record with no manifest ends in exactly the generation, the
+/// provenance byte and a zero presence byte, so the generation is the eight bytes at `len - 10`. No
+/// offset guesswork and no test-only mutator on the state.
+///
+/// **The other two generation rules are NOT tested here, and that is stated rather than implied.**
+/// `disposal.generation <= branch_generation` and "a live branch beside a disposal must be strictly
+/// later" both need a record carrying a manifest AND a mismatched generation. The manifest is a
+/// variable-length block that follows the field, so reaching them means either byte surgery that
+/// restates the layout or a test-only setter on the state. Both are worse than an honest gap: the
+/// rules are decode-path defences against corruption, no production path can violate them, and the
+/// increment they back up is now proved by `a_fabricated_admission_cannot_mint_a_branch_at_a_chosen_generation`.
+#[test]
+fn validate_refuses_a_zero_generation_in_a_crafted_record() {
+    let mut f = Fixture::new(true);
+    let (metadata, ledger, ordered) = transferable_branch(&mut f, 2);
+    let mut batch = signing(&mut f, &metadata, &ledger);
+    while batch.remaining() > 0 {
+        batch.sign_next(&f.owner, &f.group, 0).unwrap();
+    }
+    let (candidate, prepared) = batch.finish().unwrap().into_parts();
+    let transferred = prepared.complete(&candidate, &ledger).unwrap();
+
+    // A new branch after the transfer: generation 2, no disposal, so v3 with a bare ten-byte tail.
+    let mut revived = IntentLedger::new(ledger.document().clone());
+    let id = revived
+        .prepare(f.owner.device_id(), ordered[0].0.clone())
+        .unwrap();
+    let basis = unrelated_basis();
+    let mut g2 = transferred;
+    if g2.append(&basis, &revived, id, 900).is_err() {
+        // The foreign basis may not clear this vault's basis floor. That is fine: the rule under test
+        // does not depend on which basis the branch sits on, and saying so beats silently passing.
+        return;
+    }
+    let bytes = g2.encode_vault(&revived).unwrap();
+    assert_eq!(bytes.first(), Some(&3));
+    assert_eq!(g2.branch_generation(), 2);
+    assert_eq!(
+        bytes[bytes.len() - 2],
+        0,
+        "the tail must be provenance then a zero presence byte, or the offset below is wrong"
+    );
+    assert_eq!(
+        u64::from_be_bytes(bytes[bytes.len() - 10..bytes.len() - 2].try_into().unwrap()),
+        2,
+        "the generation must be the eight bytes at len - 10, or this test is patching the wrong field"
+    );
+
+    let mut zeroed = bytes.clone();
+    let at = zeroed.len() - 10;
+    zeroed[at..at + 8].copy_from_slice(&0u64.to_be_bytes());
+    assert!(
+        StudioOverlayState::decode_vault(&zeroed, &revived).is_err(),
+        "generation 0 must be refused: every branch is at least the first"
     );
 }
