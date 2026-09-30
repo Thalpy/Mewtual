@@ -1393,13 +1393,196 @@ fn the_typed_reader_reports_the_identity_release_will_accept() {
         "the reported physical size must be the record's own"
     );
 
-    // The load-bearing half: hand the reader's id straight to release. If the two derivations ever
-    // diverge, this refuses and nothing else in the suite would notice.
+    // Hand the reader's id straight to release, end to end. This is **redundancy, not a unique
+    // detector**, and an earlier comment here claimed otherwise: the review verified that swapping
+    // release's comparison to `content()` already fails eleven pre-existing tests, and that both
+    // sides of this call reach the same `archive_id()`, so a wrong `archive_id` would satisfy both
+    // this and the assertion above. What it does add is that the value travels through a real
+    // caller rather than only being compared in place.
     release(&f, &mut store, read.id).expect("the identity the reader reported must release");
     assert!(store
         .read_scoped_draft_archive_plain(&scope)
         .unwrap()
         .is_none());
+}
+
+/// The sealed-scope comparison, anchored for **all three** readers at once.
+///
+/// The review found this guard unanchored and it is the most consequential of the three to lose,
+/// because `seal` carries no AAD: nothing binds an archive's ciphertext to its filename except the
+/// scope prefix inside the plaintext. So a sealed archive file copied from one slot's path to
+/// another's is authentic and decrypts cleanly. The document binding does **not** cover it, because
+/// `LogicalDocument` equality does not include the local `server`: the same document under a
+/// different server id compares equal.
+///
+/// The failure without it: someone with filesystem access and no key copies
+/// `(server 73, doc D).draft-archive` onto the path for `(server 74, doc D)`, and both slots now
+/// present the same archive as their own preserved evidence. A release on one destroys what the
+/// other is still pointing at.
+///
+/// The **addressed** readers - the typed reader and release - reach `decode_archive_plain`, and this
+/// comparison is their only defence, because they derive the path from the scope they were given and
+/// so never compare a filename they did not choose.
+///
+/// **A reference scan is not one of them, and writing this test is how that became clear.** A scan
+/// refuses a slot-mismatched record earlier and by a different mechanism: the inventory checks the
+/// filename against the record's authenticated scope before any family decode runs. Asserting the
+/// scan here would have looked like coverage of this guard while exercising that one. It gets its own
+/// test below, named for what actually refuses it.
+#[test]
+fn a_record_sealed_for_another_slot_is_refused_by_the_addressed_readers() {
+    const OTHER_SERVER: u64 = SERVER + 1;
+    let root = tempfile::tempdir().unwrap();
+    let f = Fixture::new(true);
+    let mut store = open(root.path());
+    let (close, basis) = closing(&f, &mut store);
+    frame_branch(&f, &mut store, &close, &basis);
+    let archive = archive_for(&f, &mut store);
+    let body = archive.encode().unwrap();
+
+    // Guard the guard: the same body sealed under the RIGHT scope is accepted, so any refusal below
+    // is attributable to the scope and not to the payload. The budget is taken here, while the vault
+    // is still sound, because release needs one and a scan over the bad record refuses.
+    let right = crate::store::epoch_draft_archive::record_plain_for_test(SERVER, &f.logical, &body)
+        .unwrap();
+    crate::store::epoch_draft_archive::write_draft_archive_plain_for_test(
+        &store,
+        SERVER,
+        &f.logical,
+        &right,
+        &mut rng(),
+    )
+    .unwrap();
+    assert!(
+        store
+            .read_studio_draft_archive(SERVER, &f.logical)
+            .unwrap()
+            .is_some(),
+        "the correctly scoped record must be accepted, or this test proves nothing"
+    );
+    let mut b = budget(&mut store, &f);
+
+    // The same document, the same path, a scope naming another server slot.
+    let wrong =
+        crate::store::epoch_draft_archive::record_plain_for_test(OTHER_SERVER, &f.logical, &body)
+            .unwrap();
+    assert_ne!(right, wrong, "the two scopes must actually differ");
+    crate::store::epoch_draft_archive::write_draft_archive_plain_for_test(
+        &store,
+        SERVER,
+        &f.logical,
+        &wrong,
+        &mut rng(),
+    )
+    .unwrap();
+
+    assert!(
+        store.read_studio_draft_archive(SERVER, &f.logical).is_err(),
+        "the typed reader must refuse a record sealed for another slot"
+    );
+    assert!(
+        store
+            .release_studio_draft_archive_with_io(
+                SERVER,
+                &f.logical,
+                archive.archive_id().unwrap(),
+                &mut b.storage,
+                &mut b.intents,
+                &mut WriteHooks::None,
+            )
+            .is_err(),
+        "release must refuse a record sealed for another slot rather than unlink it"
+    );
+    drop(b);
+    let scope = crate::store::epoch_draft_archive::scope_bytes(SERVER, &f.logical).unwrap();
+    assert!(
+        store
+            .read_scoped_draft_archive_plain(&scope)
+            .unwrap()
+            .is_some(),
+        "a refused read must leave the misplaced record in place for diagnosis"
+    );
+}
+
+/// The same misplaced record, refused by a **scan**, one layer earlier and by a different rule.
+///
+/// Recorded separately because the mechanism differs: the inventory compares the filename against
+/// the record's authenticated scope before any family-specific decode runs. Both defences are wanted.
+/// The scan's protects reclamation, and its refusal must be closed rather than a skip, or a complete
+/// protection set could omit the archive's CIDs. The plaintext comparison protects the addressed
+/// readers, which never see a filename they did not derive themselves.
+#[test]
+fn a_scan_refuses_a_record_whose_filename_disagrees_with_its_sealed_scope() {
+    const OTHER_SERVER: u64 = SERVER + 1;
+    let root = tempfile::tempdir().unwrap();
+    let f = Fixture::new(true);
+    let mut store = open(root.path());
+    let (close, basis) = closing(&f, &mut store);
+    frame_branch(&f, &mut store, &close, &basis);
+    let body = archive_for(&f, &mut store).encode().unwrap();
+
+    let wrong =
+        crate::store::epoch_draft_archive::record_plain_for_test(OTHER_SERVER, &f.logical, &body)
+            .unwrap();
+    crate::store::epoch_draft_archive::write_draft_archive_plain_for_test(
+        &store,
+        SERVER,
+        &f.logical,
+        &wrong,
+        &mut rng(),
+    )
+    .unwrap();
+    drop(store);
+
+    let mut store = open(root.path());
+    assert!(
+        store.creative_pinned_cids().is_err(),
+        "a reference scan must fail closed on a record whose filename does not match its \
+         authenticated scope"
+    );
+    assert!(
+        !store.creative_references_known(),
+        "a refused reference scan left protection claiming to be known"
+    );
+}
+
+/// The trailing-bytes check, likewise unanchored and likewise shared by all three readers.
+///
+/// A record whose body is followed by extra bytes is not canonical. Accepting one would mean two
+/// distinct files decode to the same archive, so the record's bytes would stop being a function of
+/// its content - and the archive's identity is a digest of exactly those bytes.
+#[test]
+fn a_record_with_bytes_after_its_body_is_refused_by_every_archive_reader() {
+    let root = tempfile::tempdir().unwrap();
+    let f = Fixture::new(true);
+    let mut store = open(root.path());
+    let (close, basis) = closing(&f, &mut store);
+    frame_branch(&f, &mut store, &close, &basis);
+    let body = archive_for(&f, &mut store).encode().unwrap();
+
+    let mut trailing =
+        crate::store::epoch_draft_archive::record_plain_for_test(SERVER, &f.logical, &body)
+            .unwrap();
+    trailing.extend_from_slice(b"trailing");
+    crate::store::epoch_draft_archive::write_draft_archive_plain_for_test(
+        &store,
+        SERVER,
+        &f.logical,
+        &trailing,
+        &mut rng(),
+    )
+    .unwrap();
+
+    assert!(
+        store.read_studio_draft_archive(SERVER, &f.logical).is_err(),
+        "the typed reader must refuse a non-canonical record"
+    );
+    drop(store);
+    let mut store = open(root.path());
+    assert!(
+        store.creative_pinned_cids().is_err(),
+        "a reference scan must fail closed on a non-canonical record"
+    );
 }
 
 /// A record that will not decode is an error, never `None`.

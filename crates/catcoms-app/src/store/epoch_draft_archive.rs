@@ -416,7 +416,10 @@ pub(super) struct InspectedDraftArchive {
     expect(
         dead_code,
         reason = "read by D4 in the disposal transaction and by the native read command, both of \
-    which land in this scope; its own tests read every field today"
+    which land in this scope; its own tests read every field today. REMOVE THIS ALONGSIDE THE \
+    METHOD'S: a lint expectation covers the whole item, so once D4 reads `archive` and `id` but \
+    nothing production reads `physical_bytes`, the per-field lint keeps this fulfilled and it will \
+    never fire to tell you it is obsolete"
     )
 )]
 pub(in crate::store) struct StudioDraftArchiveRecord {
@@ -558,4 +561,48 @@ pub(in crate::store) fn write_draft_archive_for_test(
     let path = store.epoch_draft_archive_path(&scope);
     fs::write(&path, frame(&sealed)).map_err(|e| AppError::Io(e.to_string()))?;
     Ok(path)
+}
+
+/// Test-only fault injection one level deeper: seal an arbitrary **record plaintext** at a chosen
+/// archive path.
+///
+/// The sibling above always seals the scope belonging to the path it writes to, so it cannot reach
+/// the two states [`decode_archive_plain`]'s first and third steps exist for: a record whose inner
+/// scope names a different slot than the file it sits in, and a record with bytes trailing the body.
+///
+/// Those states matter because `seal` carries **no AAD**. Nothing binds the ciphertext to its
+/// filename except the plaintext scope prefix, so a copy of a sealed archive file into another
+/// slot's path is authentic, decrypts cleanly, and is caught only by that comparison. The document
+/// binding does not cover it: [`LogicalDocument`] equality does not include the local `server`, so
+/// the same document under a different server id compares equal.
+#[cfg(test)]
+pub(in crate::store) fn write_draft_archive_plain_for_test(
+    store: &ServerStore,
+    path_server: u64,
+    document: &LogicalDocument,
+    plain: &[u8],
+    rng: &mut impl CryptoRngCore,
+) -> Result<PathBuf, AppError> {
+    if plain.len() > MAX_DRAFT_ARCHIVE_RECORD_BYTES {
+        return Err(invalid("record exceeds its bound"));
+    }
+    let sealed = seal(&store.keys.db_key()?, plain, rng)?;
+    let path = store.epoch_draft_archive_path(&scope_bytes(path_server, document)?);
+    fs::write(&path, frame(&sealed)).map_err(|e| AppError::Io(e.to_string()))?;
+    Ok(path)
+}
+
+/// Test-only: the canonical record plaintext for an archive, so a test can build a deliberately
+/// wrong one from a right one. Sealing is the caller's job.
+#[cfg(test)]
+pub(in crate::store) fn record_plain_for_test(
+    scope_server: u64,
+    document: &LogicalDocument,
+    body: &[u8],
+) -> Result<Vec<u8>, AppError> {
+    let mut e = Encoder::new();
+    e.put_bytes(&scope_bytes(scope_server, document)?)
+        .map_err(invalid)?;
+    e.put_bytes(body).map_err(invalid)?;
+    Ok(e.finish())
 }
