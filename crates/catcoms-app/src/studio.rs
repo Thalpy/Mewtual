@@ -11,6 +11,8 @@ pub use catcoms_replication::{studio as types, EpochPhase, RecoveryReason, Recov
 use catcoms_rt::{CryptoRngCore, MeshTransport};
 use tokio::sync::{oneshot, OwnedMutexGuard};
 
+mod tenure;
+pub use tenure::StudioOwnerTenure;
 mod copy;
 pub use copy::{
     StudioCopyPreparation, StudioOverlayCopyApply, StudioOverlayCopyPreview, StudioPreparedCopy,
