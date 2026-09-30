@@ -782,8 +782,78 @@ recorded below.
 | M3 | No test exercises a **successful** copy apply or the exact retry. The reviewer verified the behaviour is right in its own worktree; an equivalent test is not committed |
 | M4 | C1' ("refused while a transfer hold exists on the destination") is refused only at C4, so a preview returns `Ready` and the apply fails. Not a correctness hole, but the design says C1 |
 | L2 | A pre-existing vacuous test (`studio_restore_preview_fingerprint_tracks_provenance...`) asserts only `is_err()` and fails at "missing recovery title" - the same class I fixed elsewhere |
-| L4 | The exact-retry shortcut reports **any** prior `(nonce, body)` this device saved into the destination as a copy `Applied {already_saved:true}`, including an ordinary non-copy Save. No write; a misreport of kind |
+| L4 | The exact-retry shortcut reports **any** prior `(nonce, body)` this device saved into the destination as a copy `Applied {already_saved:true}`, including an ordinary non-copy Save. No write; a misreport of kind. Re-confirmed by the correctness review; nonce replay itself is safe, since an old nonce with a different body hits `IntentConflict` |
+| Low (new) | `probe_copy_object` surfaces a wrong-object-channel record as an error rather than a `MissingTarget` hold, so at C3 it is a preview failure. Matches recovery's existing behaviour, which is why it is not being changed unilaterally |
+| Low (new) | The tenure seam has two doors: `require_observed_owner_tenure` is expected-dead while nine sites read `authoring_owner_tenure_start()` directly. Correct today, but V5/V7's anchoring is only worth what the callers make it |
 | L5 | The same-document copy path is untested, because this fixture's document is Closing. N6's "no byte of the branch's record" is verified only cross-document |
+
+### The comprehensive review: verdict, and the verification debt cleared
+
+Two comprehensive adversarial reviews were run over the whole scope at `288bb30c`, one on
+correctness and one on test evidence. The correctness review returned **CHANGES REQUIRED, no High**,
+and confirmed the hard invariants directly: P5 holds (ten `studio_overlay_*` commands registered,
+none a save, and no composition writes into a Closing branch); evidence precedes removal; both
+confirmations are unforgeable and non-transferable; the detached worker carries no live authority;
+and M-1's unreachability claim survives attack.
+
+**It also executed the two test sets I could not**, in a worktree that excludes the other agent's
+uncommitted work:
+
+| Run | Result |
+|---|---|
+| `studio::tenure` (`23465a17`) | **3 passed** |
+| `studio::restore` (`d4531b17`) | **8 passed** |
+| `cargo test -p catcoms-app --lib studio::` | **222 passed**, 0 failed, 5 ignored |
+| desktop `--lib studio::` | **45 passed**, 0 failed |
+
+So both commits' claims now hold, and the "compiled but unrun" caveat in their messages is
+discharged.
+
+Fixed in response: the `branch_content` defect below, the row-6 retry arm now comparing `accepted`
+as D3 does, and D4 comparing `target` and `provenance` explicitly rather than relying on the
+document binding to imply them.
+
+### `content` was a property of the document, not of the branch
+
+The review's Medium 1, and the one with a user-visible consequence. `branch_hash` folded
+`ledger.encode()` into the value, so an ordinary intent belonging to nobody's branch changed the
+identity of a branch nobody had touched. An archive written at one moment then stopped satisfying D4
+at the next, and a preserving disposal refused with "the preserved archive is for a different
+branch" **while holding an archive of exactly that branch**. The only recourse was to release
+verified evidence and archive again. Reachable in the design's primary same-document copy case,
+where the copy itself lands the intent that breaks it.
+
+`branch_content_hash` covers the branch alone, under its own derive key. `Prepared.branch` keeps the
+document-wide hash deliberately: a transfer hold is a signing commitment against a state and should
+go stale on any change to it.
+
+### P1 BLOCKER: the generation namespace is built and unwired
+
+Found by the comprehensive correctness review, and it is the most important thing in this document.
+
+`classify_request`, `admit_new_branch` and `new_admitted` have **zero non-test callers anywhere in
+`crates/catcoms-app/src`**. The Save seam carries `basis` only (`studio/receiver.rs`,
+`store/epoch_studio/overlay.rs`) and never a `branch`, so the two-stage classification design 6.6
+specifies is never consulted by production code.
+
+Trace 6.6's own worked example against the code as it stands: dispose G1 on basis B, admit G2 on B,
+then deliver a delayed G1 request. `completed_retry` gives `None`; `exact_retry` against G2 is
+`false` because the id is absent; `pending()` no longer holds it because the disposal removed it;
+the basis fingerprint still matches, so it is treated as new authoring and `append`ed onto **G2**.
+G1's work is resurrected into a branch the user never put it in. That is precisely the case 6.6 says
+must return `Stale`.
+
+It is not reachable today, for one reason only: `studio_overlay_save` is unregistered. That makes it
+a **P5 and P1 blocker rather than a live defect**, and it is the honest reason P1 cannot be called
+reviewed:
+
+> "lossless across restart and refusal" cannot be claimed for a lifecycle whose rollover defence
+> has no production caller.
+
+The integration is Flow S's: S1 must carry `branch` and call `classify_request`, S1b must call
+`admit_new_branch`. That is Agent 1's seam to wire; stating the obligation is mine, and this entry
+is that statement. I have not reached into the Save ordering to do it, for the same A-1 reason the
+tenure refusals are not mine either.
 
 ### Blocked: the app crate cannot link
 

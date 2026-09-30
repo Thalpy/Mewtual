@@ -94,6 +94,80 @@ fn a_destination_capture_is_current_until_either_of_its_two_records_moves() {
     );
 }
 
+/// Stage one recovery snapshot for the destination and return it, so a second can differ from it.
+fn stage_recovery(f: &Fixture, store: &mut ServerStore, destination: StudioTarget) {
+    let logical = destination.document(&f.group.group_id()).unwrap();
+    let projection = store
+        .with_studio_source(SERVER, &f.group, destination, &f.device, |s| s.projection())
+        .unwrap()
+        .unwrap();
+    let saved = catcoms_replication::studio::StudioRecovery::snapshot(
+        &projection,
+        None,
+        catcoms_replication::RecoveryReason::Excluded,
+        [7; 32],
+        &std::collections::BTreeMap::new(),
+    )
+    .unwrap();
+    store
+        .update_epoch_recovery(
+            SERVER,
+            &logical,
+            super::super::super::EpochRecoveryAction::Stage(saved),
+            &ManualClock::new(100),
+            &mut rng(),
+        )
+        .unwrap();
+}
+
+/// **A recovery record that CHANGES is a change too**, not only one that appears.
+///
+/// The appearing case below is caught by comparing `Option`s at all. This one is caught only by
+/// comparing the digests inside them, and a review proved the difference: replacing the comparison
+/// with `recovery.is_some() == stamp.recovery.is_some()` survived every other test in this file.
+/// The consequence is the same as the appearing case and no less serious - a newly retained version
+/// carries tombstones that can block a resurrection the plan thought was free, and a plan built
+/// against the previous version has never seen them.
+#[test]
+fn a_changed_recovery_record_makes_a_destination_capture_stale() {
+    let root = tempfile::tempdir().unwrap();
+    let f = Fixture::new(true);
+    let mut store = open(root.path());
+    let destination = other_target(&f);
+    seed(&f, &mut store, destination, 1, title("first"));
+    stage_recovery(&f, &mut store, destination);
+
+    let capture = store
+        .capture_studio_destination(SERVER, &f.group, destination, &f.device)
+        .unwrap();
+    assert!(
+        capture.recovery.is_some(),
+        "this case needs a destination that ALREADY has a recovery record"
+    );
+    assert!(store
+        .studio_destination_is_current(SERVER, &f.group, destination, &f.device, &capture.stamp)
+        .unwrap());
+
+    // Move the destination, then stage a snapshot of the moved state. The record stays present and
+    // its contents differ, which is exactly the case an `is_some()` comparison cannot see.
+    seed(&f, &mut store, destination, 2, title("second"));
+    stage_recovery(&f, &mut store, destination);
+    let moved = store
+        .capture_studio_destination(SERVER, &f.group, destination, &f.device)
+        .unwrap();
+    assert!(
+        moved.recovery.is_some() && moved.recovery != capture.recovery,
+        "the two recovery records must differ, or this proves nothing"
+    );
+
+    assert!(
+        !store
+            .studio_destination_is_current(SERVER, &f.group, destination, &f.device, &capture.stamp)
+            .unwrap(),
+        "a destination whose retained versions changed has changed"
+    );
+}
+
 /// **A recovery record appearing where there was none is a change**, and this is the half that a
 /// naive implementation gets wrong by reading the second record only when it captured one.
 ///

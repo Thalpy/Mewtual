@@ -105,7 +105,16 @@ impl ServerStore {
         if state.overlay().is_none() {
             let existing = metadata
                 .disposed()
-                .filter(|d| d.branch == request.branch && d.content == request.content)
+                // All three of D3's values, not two. D3 checks `accepted` as well and calls a
+                // mismatch "a bug rather than a race"; acknowledging a retry that disagrees about
+                // the count would hand back a manifest describing a different amount of work than
+                // the caller thinks it disposed of, and would do it on the path whose whole purpose
+                // is to tell a caller what already happened.
+                .filter(|d| {
+                    d.branch == request.branch
+                        && d.content == request.content
+                        && d.accepted == request.accepted
+                })
                 .filter(|d| {
                     matches!(
                         (&d.mode, &request.mode),
@@ -218,9 +227,17 @@ impl ServerStore {
                         )
                     })?;
                 let archive = &record.archive;
+                // `target` and `provenance` are compared explicitly rather than left to the
+                // document binding and the sealed key to imply. Both are bound transitively today,
+                // which is exactly the kind of guarantee that quietly stops holding when a record
+                // gains a field or a scope is widened; and provenance in particular is the
+                // difference between preserved Closing work and an unconfirmed preview, which a
+                // terminal manifest must never misreport.
                 if archive.content() != request.content
                     || Some(archive.branch()) != metadata.branch_id()
                     || archive.generation() != metadata.branch_generation()
+                    || archive.target() != target
+                    || archive.provenance() != metadata.provenance()
                 {
                     return Err(invalid(
                         "the preserved archive is for a different branch than the one being \
