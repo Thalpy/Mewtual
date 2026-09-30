@@ -34,6 +34,40 @@ struct Retained {
     value: StudioInspectedDraft,
     _permit: OwnedSemaphorePermit,
 }
+/// What a read may say about a retained draft: design section 11's `OverlayInspection`, minus the
+/// fields that belong to another prerequisite.
+///
+/// `eligibility`, `manualReason` and `unconfirmedState` are **not** here, and not by oversight:
+/// they are P2's mapping of `StudioOverlayHold` to user-visible states, and that type does not
+/// exist anywhere in the tree yet. `archived` is not here either, because the inspection capture
+/// deliberately holds one record and the archive is a different one; `studio_overlay_lifecycle`
+/// answers that question from the record that actually knows.
+///
+/// A struct rather than a widening tuple because these are eight values of four types, and a
+/// caller destructuring them positionally would be one reordering away from reporting a branch id
+/// as a content digest.
+#[derive(Debug)]
+pub struct StudioOverlayInspected<'a> {
+    pub target: StudioTarget,
+    /// A transfer is staged. `prepared` does not mean the transfer happened.
+    pub prepared: bool,
+    /// `None` when nothing is retained, **and also** when the branch could not be reconstructed:
+    /// `replayable` is what tells those apart.
+    pub draft: Option<&'a types::StudioLocalDraft>,
+    pub branch: Option<[u8; 32]>,
+    pub content: Option<[u8; 32]>,
+    /// The last generation this vault used, which outlives the branch that used it. Meaningful
+    /// beside `branch`, not on its own.
+    pub generation: u64,
+    pub provenance: Option<types::StudioOverlayProvenance>,
+    /// A retained terminal disposal. "This was disposed of" and "there is nothing here" are
+    /// different answers and a read has to be able to give the first one.
+    pub disposed: Option<&'a types::StudioOverlayDisposal>,
+    /// Whether typed reconstruction succeeded. `false` with a branch present is the shape design
+    /// finding 5 asks for: every structural field, and a null typed projection.
+    pub replayable: bool,
+}
+
 #[derive(Debug)]
 pub struct StudioOverlayInspection {
     read: Arc<Retained>,
@@ -117,13 +151,23 @@ impl StudioOverlayInspection {
     /// A local projection only. No append basis, installed epoch or signed authority escapes.
     pub fn inspect<O>(
         &self,
-        inspect: impl FnOnce(StudioTarget, bool, Option<&types::StudioLocalDraft>) -> O,
+        inspect: impl FnOnce(StudioOverlayInspected<'_>) -> O,
     ) -> Result<O, String> {
         if !self.delivery().is_current() {
             return Err("overlay inspection delivery expired; refresh".into());
         }
         let value = &self.read.value;
-        Ok(inspect(value.target, value.prepared, value.draft.as_ref()))
+        Ok(inspect(StudioOverlayInspected {
+            target: value.target,
+            prepared: value.prepared,
+            draft: value.draft.as_ref(),
+            branch: value.branch,
+            content: value.content,
+            generation: value.generation,
+            provenance: value.provenance,
+            disposed: value.disposed.as_ref(),
+            replayable: value.replayable.is_ok(),
+        }))
     }
     /// The archive this inspection built, for the durable write in the same custody visit.
     ///

@@ -303,9 +303,9 @@ async fn projected<V>(
     };
     let mut out = None;
     inspection
-        .inspect(|_, _, draft| {
+        .inspect(|v| {
             let catcoms_app::studio::types::StudioProjection::Flipnote(p) =
-                draft.unwrap().projection()
+                v.draft.unwrap().projection()
             else {
                 panic!("the art fixture projects a Flipnote")
             };

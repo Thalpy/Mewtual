@@ -36,10 +36,11 @@ async fn native_inspection_fixture_obtains_real_actor_index_and_flipnote_drafts(
         else {
             panic!("expected real actor inspection")
         };
-        read.inspect(|target, prepared, draft| {
-            assert_eq!(target, f.target);
-            assert!(!prepared);
-            let draft = draft.unwrap();
+        read.inspect(|v| {
+            assert_eq!(v.target, f.target);
+            assert!(!v.prepared);
+            assert!(v.replayable);
+            let draft = v.draft.unwrap();
             assert_eq!(draft.basis(), f.basis);
             assert_eq!(draft.accepted(), 1);
             assert_eq!(draft.projection(), &f.expected);

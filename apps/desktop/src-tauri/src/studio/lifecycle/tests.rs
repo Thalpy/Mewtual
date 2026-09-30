@@ -350,7 +350,8 @@ async fn exporting_writes_nothing_and_produces_the_payload_the_archive_would() {
     .expect("exporting a live draft");
     assert_eq!(exported["kind"], "overlayExport");
     assert_eq!(exported["preserved"], false);
-    assert_eq!(exported["format"], "p1-studio-draft-archive-v1");
+    // The literal from design section 11, which Agent 4's UI-hooks row is written against.
+    assert_eq!(exported["format"], "catcoms-studio-draft-v1");
     assert!(exported["bytes"].as_u64().unwrap() > 0);
     assert!(
         exported.get("physicalBytes").is_none(),

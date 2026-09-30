@@ -393,7 +393,10 @@ fn archive_value(
 fn with_payload(mut value: Value, archive: &StudioDraftArchive) -> Result<Value, String> {
     use base64::Engine;
     let bytes = archive.encode().map_err(|e| e.to_string())?;
-    value["format"] = "p1-studio-draft-archive-v1".into();
+    // The design's name (section 11), not one invented here: Agent 4 wires the UI-hooks row
+    // against this literal, and a format string that differs from the contract is a format string
+    // nobody can look up.
+    value["format"] = "catcoms-studio-draft-v1".into();
     value["bytes"] = bytes.len().into();
     value["bytesB64"] = base64::engine::general_purpose::STANDARD
         .encode(&bytes)

@@ -25,8 +25,13 @@ impl StudioInspectionStamp {
 /// differs is whether typed reconstruction is a **requirement** or an **observation**.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum StudioInspectionPurpose {
-    /// Existing behaviour: a `StudioLocalDraft` projection, and a reconstruction failure is the
-    /// answer.
+    /// A `StudioLocalDraft` projection where one can be built.
+    ///
+    /// **A reconstruction failure is labelled, not returned.** Design section 11's `replayable:
+    /// false` is a draft with every structural field present and a null typed projection, which is
+    /// exactly the state a user needs to see: their work is still there and still exportable, and
+    /// only the typed view of it is unavailable. Returning the error instead reported "this read
+    /// failed", which is both less true and less useful.
     Draft,
     /// Structural decode plus the ledger's own envelopes. Typed reconstruction is **attempted and
     /// labelled, never required**: the archive's entries come from the branch's saved order and
@@ -45,6 +50,15 @@ pub(crate) struct StudioInspectedDraft {
     pub(crate) purpose: StudioInspectionPurpose,
     pub(crate) prepared: bool,
     pub(crate) draft: Option<StudioLocalDraft>,
+    /// Structural facts about the live branch, read from the same record in the same decode.
+    /// Present exactly when a branch is live, whatever the purpose.
+    pub(crate) branch: Option<[u8; 32]>,
+    pub(crate) content: Option<[u8; 32]>,
+    pub(crate) generation: u64,
+    pub(crate) provenance: Option<catcoms_replication::studio::StudioOverlayProvenance>,
+    /// The retained terminal disposal, if this vault has one. A read has to be able to say "this
+    /// was disposed of" rather than "there is nothing here", which are different answers.
+    pub(crate) disposed: Option<catcoms_replication::studio::StudioOverlayDisposal>,
     /// Present only for [`StudioInspectionPurpose::Archive`], and only when a branch is live.
     pub(crate) archive: Option<StudioDraftArchive>,
     /// `Ok(())` when typed reconstruction succeeded, `Err(reason)` when it did not. Under
@@ -65,6 +79,11 @@ impl StudioInspectionCapture {
             purpose,
             prepared: false,
             draft: None,
+            branch: None,
+            content: None,
+            generation: 0,
+            provenance: None,
+            disposed: None,
             archive: None,
             replayable: Ok(()),
         };
@@ -80,8 +99,23 @@ impl StudioInspectionCapture {
                     return Err(invalid("overlay inspection author mismatch"));
                 }
                 result.prepared = metadata.is_prepared();
+                result.provenance = Some(metadata.provenance());
+                result.generation = metadata.branch_generation();
+                result.disposed = metadata.disposed().cloned();
+                if let Some(live) = state.live_branch()? {
+                    result.branch = Some(live.id);
+                    result.content = Some(live.content);
+                }
                 match purpose {
-                    StudioInspectionPurpose::Draft => result.draft = state.local_draft()?,
+                    StudioInspectionPurpose::Draft => {
+                        result.replayable = match state.local_draft() {
+                            Ok(draft) => {
+                                result.draft = draft;
+                                Ok(())
+                            }
+                            Err(error) => Err(error.to_string()),
+                        };
+                    }
                     StudioInspectionPurpose::Archive => {
                         // The attempt runs first so its outcome can be recorded *in* the archive,
                         // and a successful one is kept: the caller that archives a replayable

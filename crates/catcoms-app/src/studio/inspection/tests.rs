@@ -292,10 +292,15 @@ async fn studio_inspection_paused_real_draft_allows_actor_checkpoint_progress() 
     else {
         panic!("not an inspection")
     };
-    read.inspect(|target, prepared, draft| {
-        assert_eq!(target, f.target);
-        assert!(!prepared);
-        let draft = draft.unwrap();
+    read.inspect(|v| {
+        assert_eq!(v.target, f.target);
+        assert!(!v.prepared);
+        assert!(
+            v.replayable,
+            "this draft rebuilds, so it must be labelled so"
+        );
+        assert_eq!(v.branch.is_some(), true, "a live branch has an identity");
+        let draft = v.draft.unwrap();
         assert_eq!(draft.basis(), f.basis);
         assert_eq!(draft.projection(), &f.expected);
     })
