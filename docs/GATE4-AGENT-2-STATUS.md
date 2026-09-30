@@ -52,7 +52,7 @@ which stopped being true at slice 6. It is now per-row, and no row has reached t
 
 | Prerequisite | State | Where |
 |---|---|---|
-| P1 reviewed manual lifecycle: inspect, export, copy-into-current, explicit disposition, lossless across restart and refusal | **Partially implemented, one verb of four.** Explicit disposition is built end to end: the store transaction D1-D6 (slice 6) and `studio_overlay_dispose`. Inspect pre-dates this scope. **Export and copy-into-current do not exist**, and neither does `studio_overlay_archive`, so the Preserve arm of disposal cannot obtain an archive outside `cfg(test)`. "Lossless across restart and refusal" is proven for disposal and release only | design 6.1-6.6, 12 |
+| P1 reviewed manual lifecycle: inspect, export, copy-into-current, explicit disposition, lossless across restart and refusal | **Partially implemented, three verbs of four.** Inspect pre-dates this scope; export and explicit disposition are built end to end, and the preserving arm is reachable now that `studio_overlay_archive` exists. **Copy-into-current does not exist.** "Lossless across restart and refusal" is proven for disposal, archive and release; not for copy, which is not written | design 6.1-6.6, 12 |
 | P2 every `StudioOverlayHold` variant mapped to a user-visible actionable state | **Design accepted**, unimplemented | design 7, 11 |
 | P3 truthful native results, events and UI-hooks rows | **Partially implemented.** Four of nine commands are registered and their views are truthful about provisionality, non-authority and required reconciliation. The UI-hooks rows are not updated and no row is published as available | design 11 |
 | P4 live-tenure contract, over `verification_owner_tenure_start()` and `authoring_owner_tenure_start()` | **Substrate implemented, contract not started.** Slice 7 built the *mechanism*: `OwnerTenure::joined`, the `Position` leaf identity, `ObservedOwnerTenure`, the M-1 receive rule, the v1 `Imported` migration and the two accessors. P4 names the *contract* over those accessors - V1-V8, with `require_observed_owner_tenure` refusing fail-closed at every authoring entry point. **That function does not exist and no app authoring call site consults either accessor** (verified by grep at `bbef5908`). N-T7b is undischarged | design 9.4 V1-V8, 9.3 part 5 A-1 |
@@ -717,7 +717,7 @@ identity, `ObservedOwnerTenure`, the `catcoms-mls` receive-side M-1 rule, the v1
 **the mutation harness** `.github/scripts/check-studio-overlay-lifecycle-mutations.py` and the
 `studio-overlay` `lifecycle` CI job; and **four of the nine native commands**.
 
-### Native commands: four of nine
+### Native commands: seven of nine
 
 Against the design's own list (design 6.2). No command on this list enables Save, and
 `studio_overlay_save` remains unregistered.
@@ -725,9 +725,9 @@ Against the design's own list (design 6.2). No command on this list enables Save
 | Command | State |
 |---|---|
 | `studio_overlay_read` | Pre-existing. The section 11 extension is **not** applied |
-| `studio_overlay_lifecycle` | **Landed** `35236b0b` |
-| `studio_overlay_export` | Not built. Needs `ExportOverlay`/`FinishOverlayExport` and the shared `catcoms-studio-draft-v1` serializer |
-| `studio_overlay_archive` | Not built. Needs `ArchiveOverlay`/`FinishOverlayArchive`. **This is why the Preserve arm of disposal is currently unreachable from the UI**: nothing outside `cfg(test)` can create an archive |
+| `studio_overlay_lifecycle` | **Landed** `35236b0b`, reshaped by review at `d92f8980` |
+| `studio_overlay_export` | **Landed** `9be5a6e7` |
+| `studio_overlay_archive` | **Landed** `d92f8980`. Before it, the Preserve arm of disposal was unreachable from the UI: nothing outside `cfg(test)` could create an archive, so D4 always refused |
 | `studio_overlay_archive_read` | **Landed** `35236b0b` |
 | `studio_overlay_archive_release` | **Landed** `35236b0b` |
 | `studio_overlay_copy_preview` | Not built |
@@ -735,18 +735,54 @@ Against the design's own list (design 6.2). No command on this list enables Save
 | `studio_overlay_dispose` | **Landed** `35236b0b`, payload reshaped in `bbef5908` |
 
 **One command exists that the design does not list: `studio_overlay_archive_export`.** It exports
-the canonical envelope of an already-preserved archive record. That is a different object from
-design 6.2's `studio_overlay_export`, which exports the *live* draft and must work when typed
-reconstruction fails. Recorded here rather than left as a silent addition; when `ExportOverlay`
-lands, the two share the payload format and neither subsumes the other.
+the canonical envelope of an already-preserved archive record, where `studio_overlay_export`
+exports the *live* draft. Both emit the same `p1-studio-draft-archive-v1` payload through one
+helper, and a test asserts the two agree byte for byte. Recorded here rather than left as a silent
+addition.
 
 ### Not yet built
 
-The composite copy capture (design 5.2) and the two-phase copy (6.3 C1-C4);
-`StudioInspectionPurpose` / `rebuild_for` and the `catcoms-studio-draft-v1` shared serializer
-(5.3); the archive and export control actions; the section 11 `studio_overlay_read` extension; and
-**V1-V8, the live-tenure contract itself** - see the P4 row below for why the slice 7 mechanism is
-not that contract.
+The composite copy capture (design 5.2) and the two-phase copy (6.3 C1-C4), including `PlanScope`,
+the planner's `source_ops` and `StudioInspectionPurpose::CopyPlan`; the section 11
+`studio_overlay_read` extension; and **V1-V8, the live-tenure contract itself** - see the P4 row
+above for why the slice 7 mechanism is not that contract.
+
+### Findings from the fable adversarial reviews, and what they cost
+
+Two rounds on the native surface. The second is worth recording because of *how* it landed: the
+reviewer did not argue that a test was weak, it **deleted two D3 guards and showed all eleven of my
+tests still passed**. Every case in `a_live_branch_survives_every_refused_disposal` used
+`mode: preserve` against a fixture with no archive, so D4 refused all four whichever D3 check was
+removed. The test was green for a reason unrelated to what it claimed. Fixed by sending the first
+three as confirmed discards, which have nothing left to stop them, and by asserting each refusal's
+own message; the reviewer's exact mutation now fails, and only in that test.
+
+Three more, all real:
+
+- The lifecycle view **mixed branch-scoped and document-scoped facts without binding them**. An
+  archive outlives the branch it preserved and a retained disposal of generation N sits beside a
+  live N+1. As bare presence flags a renderer would report the user's current work as preserved
+  when the archive is evidence for work they already disposed of. Every branch-scoped fact now
+  carries its branch and generation.
+- **No destructive control action emitted a `RefreshRequired` notice.** Only `Acknowledge` and
+  `RestorePointer` were classified as changing, so a dispose that rewrote the intent record, or a
+  release that unlinked and then failed its parent sync, left the renderer showing state that is
+  gone.
+- Release's **uncertain outcome was indistinguishable from a clean refusal** at the IPC boundary,
+  although section 12.1 requires such a caller to reconcile rather than resend.
+  `AppError::CommittedButNotDurable`'s Display prefix is now published as
+  `catcoms_app::UNCERTAIN_OUTCOME` and documented as a contract.
+
+Two defects were found by writing tests rather than by review: the lifecycle view did not publish
+the branch content digest a disposal has to echo, so the command surface was complete and
+unusable; and serde's internally tagged representation let a **unit** variant swallow every other
+field, so `{"kind":"preserve","confirmation":"destroy-local-draft"}` deserialised silently.
+
+**A process cost worth recording.** I let a review agent with checkout permissions run while I had
+uncommitted work in its scope, and its byte-exact restore - correct behaviour on its part - took
+the whole of `lifecycle.rs`. That is the fifth time `git checkout --` has destroyed uncommitted
+work in this scope, and the first time it was not my own hand. The rule stands and now has a second
+half: **commit before mutating, and commit before letting anything else mutate.**
 
 **Sections above this point are an append-only ledger and are dated.** Where an earlier entry
 says something is not yet built, read it as the state at that entry's date, not as current
