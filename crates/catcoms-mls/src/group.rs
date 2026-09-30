@@ -152,6 +152,29 @@ impl ServerGroup {
         self.group.members().map(|m| m.index.u32()).min()
     }
 
+    /// The designated committer's leaf index and a digest over its leaf **identity**:
+    /// `blake3(index, signature_key, credential bytes)`.
+    ///
+    /// This exists so an observer can tell an ordinary same-owner commit from a remove-and-re-add of
+    /// the committer. Comparing `DeviceId` and epoch cannot: a device removed and re-added in one
+    /// commit keeps its `DeviceId`, so a witness preserves the old tenure start while the rejoining
+    /// device computes a new one, and the two disagree about who may issue a receipt.
+    ///
+    /// The HPKE `encryption_key` is **deliberately excluded**. An ordinary self-update rotates that
+    /// key while keeping the credential, and a self-update is not a discontinuity: including it would
+    /// make every key rotation look like a new tenure and destroy the knowledge this value exists to
+    /// preserve. The credential is the right discriminator because a joiner's KeyPackage credential is
+    /// bound to `(this group, invite_nonce)`, so a genuine rejoin always presents a different one
+    /// while an update never changes it.
+    pub fn designated_committer_leaf(&self) -> Option<(u32, [u8; 32])> {
+        let member = self.group.members().min_by_key(|m| m.index.u32())?;
+        let mut hash = blake3::Hasher::new_derive_key("catcoms/mls-committer-leaf/v1");
+        hash.update(&member.index.u32().to_be_bytes());
+        hash.update(&member.signature_key);
+        hash.update(member.credential.serialized_content());
+        Some((member.index.u32(), *hash.finalize().as_bytes()))
+    }
+
     /// The leaf index of a current member, by device id.
     pub fn member_leaf_index(&self, device_id: &DeviceId) -> Option<u32> {
         self.group
@@ -481,6 +504,50 @@ impl ServerGroup {
                         || DeviceId::from_public_key_bytes(leaf_pk) != membership.device_id
                     {
                         return Err(InviteError::CredentialMismatch.into());
+                    }
+                }
+                // M-1. A single commit must not both remove the PRE-COMMIT designated committer and
+                // add the same `DeviceId`.
+                //
+                // This is the one commit shape that leaves members provably unable to agree. A
+                // remove-and-re-add in one commit keeps the device's `DeviceId`, so a witness sees
+                // an ordinary same-owner step and preserves the old tenure start, while the rejoining
+                // device knows its membership restarted and computes a new one. They then disagree
+                // about who may issue a receipt, and the disagreement does not self-correct.
+                //
+                // Enforced on the RECEIVE side, on every staged commit, not in the committer's invite
+                // ledger. The ledger is local to the admitting party: every other member can check
+                // only that an Add's credential names this group and matches its leaf key, so a
+                // malicious, modified or merely buggy committer could build this shape and honest
+                // witnesses would merge it. Refusing before the merge means no member ever reaches
+                // the ambiguous position.
+                //
+                // Stated over `DeviceId` rather than leaf index, so it does not depend on whether
+                // OpenMLS happens to recycle the same leaf. What it does NOT forbid: a device
+                // rotating to a new identity (remove A, add A' with a different `DeviceId`), or a
+                // genuine rejoin in a LATER commit. Only the ambiguous shape is excluded.
+                if let Some(committer) = self.designated_committer() {
+                    let removes_committer = staged.remove_proposals().any(|remove| {
+                        self.group
+                            .members()
+                            .find(|m| m.index == remove.remove_proposal().removed())
+                            .is_some_and(|m| {
+                                DeviceId::from_public_key_bytes(&m.signature_key) == committer
+                            })
+                    });
+                    if removes_committer {
+                        let re_adds_committer = staged.add_proposals().any(|add| {
+                            let leaf_pk = add
+                                .add_proposal()
+                                .key_package()
+                                .leaf_node()
+                                .signature_key()
+                                .as_slice();
+                            DeviceId::from_public_key_bytes(leaf_pk) == committer
+                        });
+                        if re_adds_committer {
+                            return Err(InviteError::CredentialMismatch.into());
+                        }
                     }
                 }
                 // Inspect the staged commit for Remove proposals *before* the merge

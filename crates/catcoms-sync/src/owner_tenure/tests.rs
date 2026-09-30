@@ -5,6 +5,23 @@ use rand_chacha::ChaCha20Rng;
 use rand_core::SeedableRng;
 
 type Node = ChannelSync<MemNetwork, ChaCha20Rng>;
+
+/// The start a **fully observed** tenure reports, asserting it is not merely imported.
+///
+/// Every case in this module observes transitions directly or drops the tenure tail entirely, so
+/// every expectation here predates the v1 import path and must come out `Observed` or `Unknown`. This
+/// helper is what stops that assumption being silent: a case that ever starts producing `Imported`
+/// fails loudly here instead of quietly satisfying an `Option` comparison. A test that deliberately
+/// wants an import asserts on `observed_owner_tenure()` directly.
+fn observed_start(node: &Node) -> Option<u64> {
+    match node.observed_owner_tenure() {
+        ObservedOwnerTenure::Observed(start) => Some(start),
+        ObservedOwnerTenure::Unknown => None,
+        ObservedOwnerTenure::Imported(start) => {
+            panic!("this case must be fully observed, not imported from v1 (start {start})")
+        }
+    }
+}
 fn rng() -> ChaCha20Rng {
     ChaCha20Rng::seed_from_u64(1458)
 }
@@ -20,13 +37,13 @@ fn restore(bytes: &[u8]) -> Result<Node, SyncError> {
 #[tokio::test]
 async fn owner_tenure_founder_joiner_and_legacy_snapshot_have_distinct_evidence() {
     let (_, mut nodes, _) = build_members(2).await;
-    assert_eq!(nodes[0].observed_owner_tenure_start(), Some(0));
-    assert_eq!(nodes[1].observed_owner_tenure_start(), None);
+    assert_eq!(observed_start(&nodes[0]), Some(0));
+    assert_eq!(observed_start(&nodes[1]), None);
     for node in &mut nodes {
-        let before = node.observed_owner_tenure_start();
+        let before = observed_start(node);
         let snap = node.snapshot().unwrap();
         let mut reopened = restore(&snap).unwrap();
-        assert_eq!(reopened.observed_owner_tenure_start(), before);
+        assert_eq!(observed_start(&reopened), before);
         // Remove all following extensions and the tenure tail to produce the pre-tenure format.
         let policy_tail = crate::group_policy::encode_pin(node.group_policy.as_ref()).len() + 4;
         let tail = node.owner_tenure.encode(&node.group).unwrap().len() + 4;
@@ -34,9 +51,9 @@ async fn owner_tenure_founder_joiner_and_legacy_snapshot_have_distinct_evidence(
         let pending_tail = node.pending_finalization_snapshot().unwrap().len() + 4;
         let legacy = &snap[..snap.len() - pending_tail - chat_tail - policy_tail - tail];
         let mut upgraded = restore(legacy).unwrap();
-        assert_eq!(upgraded.observed_owner_tenure_start(), None);
+        assert_eq!(observed_start(&upgraded), None);
         let saved = upgraded.snapshot().unwrap();
-        assert_eq!(restore(&saved).unwrap().observed_owner_tenure_start(), None);
+        assert_eq!(observed_start(&restore(&saved).unwrap()), None);
         assert_eq!(reopened.snapshot().unwrap().len(), snap.len());
         // Strict partial/new tails cannot degrade to legacy Unknown.
         for extra in 1..tail {
@@ -59,7 +76,7 @@ async fn owner_tenure_unknown_owner_stays_unknown_after_valid_same_owner_adds() 
         + 4;
     let mut owner = restore(&snap[..snap.len() - tail]).unwrap();
     assert!(owner.is_designated_committer());
-    assert_eq!(owner.observed_owner_tenure_start(), None);
+    assert_eq!(observed_start(&owner), None);
     let joining = MlsDevice::generate().unwrap();
     let invite = owner.mint_invite([5; 16], u64::MAX, vec![]).unwrap();
     let kp = joining
@@ -69,11 +86,9 @@ async fn owner_tenure_unknown_owner_stays_unknown_after_valid_same_owner_adds() 
         .admit_now(&invite, &serialize_key_package(&kp).unwrap(), 1)
         .unwrap();
     assert_eq!(owner.epoch(), 1);
-    assert_eq!(owner.observed_owner_tenure_start(), None);
+    assert_eq!(observed_start(&owner), None);
     assert_eq!(
-        restore(&owner.snapshot().unwrap())
-            .unwrap()
-            .observed_owner_tenure_start(),
+        observed_start(&restore(&owner.snapshot().unwrap()).unwrap()),
         None
     );
 }
@@ -90,7 +105,7 @@ async fn owner_tenure_winning_losing_and_inbound_staged_commits_observe_same_tra
         }
         node.config.max_committer_rank = 2;
         node.config.stage_decision_window_ms = 0;
-        assert_eq!(node.observed_owner_tenure_start(), None);
+        assert_eq!(observed_start(node), None);
     }
     nodes[1].remove(&ids[0]).await.unwrap();
     nodes[2].remove(&ids[0]).await.unwrap();
@@ -103,18 +118,16 @@ async fn owner_tenure_winning_losing_and_inbound_staged_commits_observe_same_tra
             node.contest_commit(candidate.clone());
         }
         assert_eq!(
-            node.observed_owner_tenure_start(),
+            observed_start(node),
             None,
             "staging is not an applied transition"
         );
         assert!(node.resolve_pending_if_expired());
         assert_eq!(node.epoch(), 4);
         assert_eq!(node.designated_committer_id(), Some(ids[1]));
-        assert_eq!(node.observed_owner_tenure_start(), Some(4));
+        assert_eq!(observed_start(node), Some(4));
         assert_eq!(
-            restore(&node.snapshot().unwrap())
-                .unwrap()
-                .observed_owner_tenure_start(),
+            observed_start(&restore(&node.snapshot().unwrap()).unwrap()),
             Some(4)
         );
     }
@@ -131,15 +144,13 @@ async fn owner_tenure_winning_losing_and_inbound_staged_commits_observe_same_tra
         .admit_now(&invite, &serialize_key_package(&kp).unwrap(), 1000)
         .unwrap();
     assert_eq!(nodes[1].designated_committer_id(), Some(ids[0]));
-    assert_eq!(nodes[1].observed_owner_tenure_start(), Some(5));
+    assert_eq!(observed_start(&nodes[1]), Some(5));
     let record = nodes[1].commit_log.back().unwrap().clone();
     for node in nodes.iter_mut().skip(2) {
         assert!(node.apply_commit_in_order(&record));
-        assert_eq!(node.observed_owner_tenure_start(), Some(5));
+        assert_eq!(observed_start(node), Some(5));
         assert_eq!(
-            restore(&node.snapshot().unwrap())
-                .unwrap()
-                .observed_owner_tenure_start(),
+            observed_start(&restore(&node.snapshot().unwrap()).unwrap()),
             Some(5)
         );
     }
@@ -150,19 +161,43 @@ async fn owner_tenure_rejects_malformed_tail_and_unobserved_group_advance() {
     let (_, mut nodes, _) = build_members(1).await;
     let node = &mut nodes[0];
     let bytes = node.owner_tenure.encode(&node.group).unwrap();
-    assert_eq!(bytes.len(), 57);
-    let mut expected = vec![1];
+    // v2. The tail gained the committer's leaf identity - index plus a digest over index, signature
+    // key and credential - and the import flag. Both are load-bearing: the leaf is what lets every
+    // participant see the same discontinuity, and the flag is what stops a save-and-reload laundering
+    // a v1-imported value into a fully observed one.
+    let (leaf_index, leaf_digest) = node.group.designated_committer_leaf().unwrap();
+    let mut expected = vec![2];
     expected.extend_from_slice(&0u64.to_be_bytes());
     expected.extend_from_slice(&32u32.to_be_bytes());
     expected.extend_from_slice(node.device.device_id().as_bytes());
     expected.extend_from_slice(&8u32.to_be_bytes());
     expected.extend_from_slice(&0u64.to_be_bytes());
-    assert_eq!(bytes, expected, "pin every field and length in the v1 tail");
-    for index in [0, 8, 12, 13, 48, 56] {
+    expected.extend_from_slice(&36u32.to_be_bytes());
+    expected.extend_from_slice(&leaf_index.to_be_bytes());
+    expected.extend_from_slice(&leaf_digest);
+    expected.push(0);
+    assert_eq!(bytes, expected, "pin every field and length in the v2 tail");
+    assert_eq!(bytes.len(), 98);
+    for index in [0, 8, 12, 13, 48, 56, 61, 70] {
         let mut corrupt = bytes.clone();
         corrupt[index] ^= 1;
-        assert!(OwnerTenure::decode(&corrupt, &node.group).is_err());
+        assert!(
+            OwnerTenure::decode(&corrupt, &node.group).is_err(),
+            "corrupting byte {index} must refuse"
+        );
     }
+    // The import flag is the one byte that does NOT refuse when flipped, and that is correct rather
+    // than an oversight: setting it can only DOWNGRADE a fully observed value to an imported one,
+    // which removes authoring authority and keeps verification. Refusing would turn a harmless bit
+    // flip into an unopenable vault; accepting it fails closed in the direction that matters.
+    let mut flagged = bytes.clone();
+    flagged[97] ^= 1;
+    let imported = OwnerTenure::decode(&flagged, &node.group).expect("a downgrade must decode");
+    assert_eq!(
+        imported.observed(&node.group),
+        ObservedOwnerTenure::Imported(0),
+        "the persisted flag must be honoured, not ignored"
+    );
     let mut trailing = bytes.clone();
     trailing.push(0);
     assert!(OwnerTenure::decode(&trailing, &node.group).is_err());
@@ -173,7 +208,7 @@ async fn owner_tenure_rejects_malformed_tail_and_unobserved_group_advance() {
             MlsDevice::generate().unwrap().key_package().unwrap(),
         )
         .unwrap();
-    assert_eq!(node.observed_owner_tenure_start(), None);
+    assert_eq!(observed_start(node), None);
     assert!(node.snapshot().is_err());
     assert!(OwnerTenure::decode(&bytes, &node.group).is_err());
 }
@@ -185,7 +220,7 @@ fn owner_tenure_gap_and_noop_never_invent_a_start() {
     let mut state = OwnerTenure::unknown(&group);
     let before = Position::of(&group);
     state.applied(before, &group);
-    assert_eq!(state.start(&group), None);
+    assert_eq!(state.observed(&group), ObservedOwnerTenure::Unknown);
     for _ in 0..2 {
         group
             .add_member(
@@ -195,20 +230,19 @@ fn owner_tenure_gap_and_noop_never_invent_a_start() {
             .unwrap();
     }
     state.applied(before, &group);
-    assert_eq!(state.start(&group), None);
+    assert_eq!(state.observed(&group), ObservedOwnerTenure::Unknown);
     assert!(state.encode(&group).is_ok());
 }
 
 #[tokio::test]
-async fn owner_tenure_new_lowest_leaf_owner_is_unknown_and_ordinary_removal_preserves_known() {
+async fn owner_tenure_joining_lowest_leaf_owner_agrees_with_its_witness_and_removal_preserves_known(
+) {
     let (hub, mut nodes, ids) = build_members(2).await;
     // The local synchronous Remove path advances MLS without changing the founder's tenure.
     nodes[0].commit_remove_now(&ids[1]);
-    assert_eq!(nodes[0].observed_owner_tenure_start(), Some(0));
+    assert_eq!(observed_start(&nodes[0]), Some(0));
     assert_eq!(
-        restore(&nodes[0].snapshot().unwrap())
-            .unwrap()
-            .observed_owner_tenure_start(),
+        observed_start(&restore(&nodes[0].snapshot().unwrap()).unwrap()),
         Some(0)
     );
 
@@ -219,7 +253,7 @@ async fn owner_tenure_new_lowest_leaf_owner_is_unknown_and_ordinary_removal_pres
     nodes[1].config.stage_decision_window_ms = 0;
     nodes[1].remove(&ids[0]).await.unwrap();
     assert!(nodes[1].resolve_pending_if_expired());
-    assert_eq!(nodes[1].observed_owner_tenure_start(), Some(2));
+    assert_eq!(observed_start(&nodes[1]), Some(2));
     let newcomer = MlsDevice::generate().unwrap();
     let invite = nodes[1].mint_invite([9; 16], u64::MAX, vec![]).unwrap();
     let kp = newcomer
@@ -228,7 +262,7 @@ async fn owner_tenure_new_lowest_leaf_owner_is_unknown_and_ordinary_removal_pres
     let (welcome, _, _) = nodes[1]
         .admit_now(&invite, &serialize_key_package(&kp).unwrap(), 1000)
         .unwrap();
-    assert_eq!(nodes[1].observed_owner_tenure_start(), Some(3));
+    assert_eq!(observed_start(&nodes[1]), Some(3));
     let group = ServerGroup::join(&newcomer, &welcome).unwrap();
     // Only tenure construction is under test. Routing transfer is deliberately absent; no
     // file/network operation is performed through this synthetic transport configuration.
@@ -241,12 +275,27 @@ async fn owner_tenure_new_lowest_leaf_owner_is_unknown_and_ordinary_removal_pres
         RoutingState::default(),
     );
     assert!(joined.is_designated_committer());
-    assert_eq!(joined.observed_owner_tenure_start(), None);
+    // **This expectation is inverted from what it was, and the old one was the bug.**
+    //
+    // A device that joins into a recycled low leaf becomes the designated committer. With `unknown`
+    // it held `None` and could never issue a receipt, while every witness already knew the answer -
+    // and the disagreement does not self-correct, because a proof's claimed tenure is accepted when
+    // the local value is absent. `joined` infers from current continuous membership: a tenure is an
+    // uninterrupted run as committer, so this device's current tenure cannot predate its current
+    // membership, which began at this epoch.
+    //
+    // The property worth asserting is therefore agreement, not ignorance: the joiner and the witness
+    // must compute the SAME value.
+    assert_eq!(observed_start(&joined), Some(3));
     assert_eq!(
-        restore(&joined.snapshot().unwrap())
-            .unwrap()
-            .observed_owner_tenure_start(),
-        None
+        observed_start(&joined),
+        observed_start(&nodes[1]),
+        "the joining committer and the admitting witness must agree about the tenure start"
+    );
+    assert_eq!(
+        observed_start(&restore(&joined.snapshot().unwrap()).unwrap()),
+        Some(3),
+        "and the inference must survive a save and reload"
     );
 }
 
@@ -286,16 +335,14 @@ async fn owner_tenure_companion_add_observes_recycled_leaf_only_after_success() 
         .unwrap();
     assert!(bob.admit_device_now(&cert, b"bad-key-package").is_none());
     assert_eq!(bob.epoch(), 2);
-    assert_eq!(bob.observed_owner_tenure_start(), Some(2));
+    assert_eq!(observed_start(bob), Some(2));
     bob.admit_device_now(&cert, &serialize_key_package(&kp).unwrap())
         .unwrap();
     assert_eq!(bob.epoch(), 3);
     assert_eq!(bob.designated_committer_id(), Some(companion.device_id()));
-    assert_eq!(bob.observed_owner_tenure_start(), Some(3));
+    assert_eq!(observed_start(bob), Some(3));
     assert_eq!(
-        restore(&bob.snapshot().unwrap())
-            .unwrap()
-            .observed_owner_tenure_start(),
+        observed_start(&restore(&bob.snapshot().unwrap()).unwrap()),
         Some(3)
     );
 }
@@ -319,11 +366,9 @@ async fn owner_tenure_post_merge_error_observes_actual_state_before_propagation(
         "observation never converts helper failure to success"
     );
     assert_eq!(node.epoch(), 1);
-    assert_eq!(node.observed_owner_tenure_start(), Some(0));
+    assert_eq!(observed_start(node), Some(0));
     assert_eq!(
-        restore(&node.snapshot().unwrap())
-            .unwrap()
-            .observed_owner_tenure_start(),
+        observed_start(&restore(&node.snapshot().unwrap()).unwrap()),
         Some(0)
     );
     let before = node.snapshot().unwrap();
@@ -335,4 +380,109 @@ async fn owner_tenure_post_merge_error_observes_actual_state_before_propagation(
         before,
         "pre-merge failure changes no evidence"
     );
+}
+
+/// The leaf-aware arm: a same-owner step whose committer leaf identity changed is a NEW tenure.
+///
+/// Without it a witness preserves the old start across a remove-and-re-add of the committer while the
+/// rejoining device computes a new one, and the two then disagree about who may issue a receipt. The
+/// disagreement does not self-correct, because a proof's claimed tenure is accepted when the local
+/// value is absent.
+///
+/// Driven at the `Position`/`applied` level because the commit shape that produces it inside ONE
+/// commit is exactly what `catcoms-mls`'s M-1 now refuses; this arm has to keep working for the shapes
+/// M-1 permits, and the two rules protect different things.
+#[tokio::test]
+async fn owner_tenure_same_owner_on_a_new_leaf_identity_starts_a_new_tenure() {
+    let (_, mut nodes, _) = build_members(2).await;
+    let node = &mut nodes[0];
+    assert!(
+        node.epoch() >= 1,
+        "the step below needs a predecessor epoch"
+    );
+
+    // Drive `applied` for real. `before` describes the predecessor epoch with a DIFFERENT committer
+    // leaf identity; the live group is `after`. Fabricating the group itself is not possible, and
+    // `before` is exactly the value the production seam captures, so this is the honest half to vary.
+    let live = Position::of(&node.group);
+    let (index, digest) = live.leaf.expect("a group has a committer");
+    let mut other = digest;
+    other[0] ^= 0xff;
+    let before = Position {
+        owner: live.owner,
+        leaf: Some((index, other)),
+        epoch: live.epoch - 1,
+    };
+
+    // Start from a state that KNOWS an older tenure, so preserving is the visible alternative.
+    let mut state = OwnerTenure::unknown(&node.group);
+    state.position = before;
+    state.start = Some(0);
+    state.applied(before, &node.group);
+    assert_eq!(
+        state.observed(&node.group),
+        ObservedOwnerTenure::Observed(live.epoch),
+        "a changed leaf identity under the same owner is a new tenure, not preserved knowledge"
+    );
+
+    // Guard the guard: the SAME leaf identity across the same step preserves knowledge instead. This
+    // is the self-update case, and it is why the HPKE encryption key is excluded from the digest.
+    let mut preserved = OwnerTenure::unknown(&node.group);
+    let same = Position {
+        owner: live.owner,
+        leaf: live.leaf,
+        epoch: live.epoch - 1,
+    };
+    preserved.position = same;
+    preserved.start = Some(0);
+    preserved.applied(same, &node.group);
+    assert_eq!(
+        preserved.observed(&node.group),
+        ObservedOwnerTenure::Observed(0),
+        "an unchanged leaf identity must preserve the tenure it already knew"
+    );
+}
+
+/// The v1 migration. Only `start == epoch` is provably safe; everything else is imported.
+#[test]
+fn owner_tenure_v1_snapshots_promote_only_the_provably_safe_shape() {
+    let device = MlsDevice::generate().unwrap();
+    let group = ServerGroup::create(&device).unwrap();
+    let epoch = group.epoch();
+
+    // A v1 tail is: [1][u64 epoch][owner bytes][start bytes]. Built here rather than by encoding,
+    // because this build no longer writes v1.
+    let v1 = |start: Option<u64>| {
+        let mut e = Encoder::new();
+        e.put_u8(1);
+        e.put_u64(epoch);
+        e.put_bytes(device.device_id().as_bytes()).unwrap();
+        e.put_bytes(&start.map_or_else(Vec::new, |s| s.to_be_bytes().to_vec()))
+            .unwrap();
+        e.finish()
+    };
+
+    // start == epoch: the most recent applied step was a genuine owner change, visible under BOTH the
+    // old and the new rule, so no hidden discontinuity can lie at that step. Promoted.
+    let promoted = OwnerTenure::decode(&v1(Some(epoch)), &group).expect("a safe v1 must decode");
+    assert_eq!(
+        promoted.observed(&group),
+        ObservedOwnerTenure::Observed(epoch),
+        "start == epoch is provably safe and must be fully observed"
+    );
+
+    // No start at all: nothing to migrate.
+    let unknown = OwnerTenure::decode(&v1(None), &group).expect("a v1 with no start must decode");
+    assert_eq!(unknown.observed(&group), ObservedOwnerTenure::Unknown);
+
+    // A start BELOW the epoch means at least one preserve step, which is exactly where an invisible
+    // discontinuity hides. Imported: still verifies, refuses to author. Discarding it instead would
+    // downgrade every existing server's owner, which on a single-owner server never recovers.
+    if epoch > 0 {
+        let imported = OwnerTenure::decode(&v1(Some(epoch - 1)), &group).unwrap();
+        assert_eq!(
+            imported.observed(&group),
+            ObservedOwnerTenure::Imported(epoch - 1)
+        );
+    }
 }

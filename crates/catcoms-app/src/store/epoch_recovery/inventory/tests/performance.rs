@@ -60,10 +60,12 @@
 //! custody, and not a before/after speedup.
 
 use super::*;
+use crate::store::measure::Spread;
 use catcoms_replication::studio::{FlipnoteOp, StudioEpoch, StudioRecovery, StudioTarget};
 use catcoms_replication::DomainOp;
 use catcoms_rt::SystemClock;
 use catcoms_storage::Cid;
+use rand_core::RngCore;
 use std::collections::BTreeMap;
 
 /// Reference collection refuses anything narrower: a partial inventory must not be allowed to
@@ -74,76 +76,6 @@ const REFERENCE_COVERAGE: EpochInventoryCoverage =
 const REPETITIONS: usize = 64;
 /// Complete scans, so the single-sample phases are summed rather than reported from one tick.
 const TRIALS: usize = 8;
-
-/// Min, **upper median**, max of a sample set, converted to microseconds per unit of work.
-///
-/// A single summary figure carries no information about whether a difference between two cases is
-/// real, and re-measuring identical Recovery fixtures moved 36%, 39% and 86% between runs. The
-/// spread is what makes that visible.
-///
-/// **The middle figure is the upper median**, `sorted[len / 2]`, not an interpolated one: for
-/// eight samples it is the fifth sorted value. For `0,0,0,0,1000,1000,1000,1000` it reports
-/// 1000, where an arithmetic midpoint would be 500. That convention is deliberate - it never
-/// invents a value the clock did not produce - but it must be labelled, because it is not what
-/// "median" unqualified would mean.
-///
-/// `zero_samples` is carried for the same reason: a printed `0/1000/1000` is compatible with
-/// several different zero counts, so the spread alone cannot say how much of the phase fell
-/// below the clock's resolution. The count can.
-///
-/// `per` is how many units of work one sample covers: 1 for a phase timed once per trial,
-/// `REPETITIONS` for the batched validation - in which case each sample is itself a batch mean,
-/// and this is a spread *of means*, not of individual timings.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-struct Spread {
-    min_us: u128,
-    upper_median_us: u128,
-    max_us: u128,
-    samples: usize,
-    /// How many raw samples read exactly zero milliseconds.
-    zero_samples: usize,
-    /// Sum of the raw millisecond samples, so a spread of all-zeros is visibly "below the
-    /// clock's resolution" rather than "free".
-    raw_total_ms: u64,
-}
-
-impl Spread {
-    fn of(samples: &[u64], per: u128) -> Self {
-        if samples.is_empty() {
-            return Self::default();
-        }
-        let mut us: Vec<u128> = samples.iter().map(|ms| *ms as u128 * 1_000 / per).collect();
-        us.sort_unstable();
-        Self {
-            min_us: us[0],
-            upper_median_us: us[us.len() / 2],
-            max_us: us[us.len() - 1],
-            samples: us.len(),
-            zero_samples: samples.iter().filter(|ms| **ms == 0).count(),
-            raw_total_ms: samples.iter().sum(),
-        }
-    }
-    /// Resolved *well enough to take a ratio from*, which is a stronger condition than nonzero.
-    ///
-    /// A phase whose upper median is a single clock tick is not measured to better than 100%:
-    /// the true value lies somewhere in one whole millisecond. Requiring strictly more than one
-    /// tick is what makes the reported fraction mean anything, and it is the condition the
-    /// status ledger states - the earlier implementation only rejected a median of zero, which
-    /// left one-tick medians producing confident-looking fractions.
-    fn resolved_for_ratio(&self) -> bool {
-        self.upper_median_us > 1_000
-    }
-}
-
-impl std::fmt::Display for Spread {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "{}/{}/{}(z{})",
-            self.min_us, self.upper_median_us, self.max_us, self.zero_samples
-        )
-    }
-}
 
 /// One record's per-phase cost, as retained samples rather than a running sum.
 #[derive(Debug, Clone, Default)]
@@ -312,6 +244,35 @@ impl std::fmt::Display for FixtureShape {
     }
 }
 
+/// The exact reference result a timed scan must produce.
+///
+/// Two shapes, because two kinds of case need checking. A fixture that plants CIDs names its group
+/// and its set. A family that collects none - Registry, and the title-only Studio sources - has no
+/// group to name, and the right expectation is that **nothing at all** was collected, which
+/// `CreativeReferences::is_empty` can state directly. Recording the second as an empty set against
+/// some arbitrary group would check nothing.
+#[derive(Debug, Clone)]
+struct ExpectedRefs {
+    /// `None` means no group should hold any reference.
+    group: Option<Vec<u8>>,
+    cids: std::collections::BTreeSet<Cid>,
+}
+
+impl ExpectedRefs {
+    fn none() -> Self {
+        Self {
+            group: None,
+            cids: std::collections::BTreeSet::new(),
+        }
+    }
+    fn group(group: &[u8], cids: std::collections::BTreeSet<Cid>) -> Self {
+        Self {
+            group: Some(group.to_vec()),
+            cids,
+        }
+    }
+}
+
 /// One fixture plus the scan mode to profile it in, carrying its own store.
 ///
 /// Cases exist so trials can be **interleaved**. Running every trial of case A and then every
@@ -329,6 +290,9 @@ struct Case {
     references: bool,
     cache: CachePolicy,
     shape: FixtureShape,
+    /// What a reference-mode case must actually collect, checked on every trial. Required for any
+    /// case with `references` set: see the oracle in [`run_trial`].
+    expected_refs: Option<ExpectedRefs>,
     cost: ScanCost,
 }
 
@@ -343,10 +307,12 @@ fn run_trial(case: &mut Case, clock: &dyn catcoms_rt::Clock) {
         coverage,
         references,
         cache,
+        expected_refs,
         cost,
         ..
     } = case;
     let (coverage, references) = (*coverage, *references);
+    let expected_refs = expected_refs.as_ref();
     if *cache == CachePolicy::Fresh {
         store.inventory_cache.clear_for_test();
     }
@@ -376,7 +342,12 @@ fn run_trial(case: &mut Case, clock: &dyn catcoms_rt::Clock) {
             let (family, size, refs) = parked.classification();
             let t = clock.monotonic_ms();
             for _ in 0..REPETITIONS {
-                parked.revalidate().unwrap();
+                // Pinned on the **input** side. `revalidate` returns `Result<(), AppError>`, so
+                // black-boxing its result pins a unit value and buys nothing - which is what the
+                // first version of this did, while claiming to prevent elision. Pinning the
+                // receiver is what stops the call being hoisted out of the loop or
+                // common-subexpressioned across iterations.
+                std::hint::black_box(&parked).revalidate().unwrap();
             }
             let validation_batch_ms = clock.monotonic_ms().saturating_sub(t);
             let validated = parked.validate().unwrap();
@@ -401,12 +372,138 @@ fn run_trial(case: &mut Case, clock: &dyn catcoms_rt::Clock) {
     cost.reused.push(last.reused_records);
     cost.parked.push(parked_this_trial);
     let t = clock.monotonic_ms();
-    if references {
-        store.finish_cursor_creative_references(cursor).unwrap();
+    let collected = if references {
+        Some(store.finish_cursor_creative_references(cursor).unwrap())
     } else {
         store.finish_epoch_storage_scan(cursor).unwrap();
-    }
+        None
+    };
     cost.finish_ms += clock.monotonic_ms().saturating_sub(t);
+
+    // The reference-result oracle, deliberately **after** the timer stops so checking it cannot
+    // be charged to the phase it is checking.
+    //
+    // Without this the profile timed a reference scan and threw its result away, asserting only
+    // that the *fixture* contained N CIDs - never that the scan returned them. A Studio collector
+    // regression that completed successfully with an empty set would have satisfied every
+    // structural check and produced a fast, meaningless number. "The fixture contains 128
+    // references" and "the profiled scan returned those 128 references" are different claims, and
+    // only the second makes the timing worth anything.
+    if let (Some(collected), Some(expected)) = (collected, expected_refs) {
+        match &expected.group {
+            Some(group) => {
+                let got: std::collections::BTreeSet<_> =
+                    collected.for_group(group).copied().collect();
+                assert_eq!(
+                    &got,
+                    &expected.cids,
+                    "the profiled Studio reference result differs from the fixture's expected \
+                     set: collected {} of {} expected CIDs for this group",
+                    got.len(),
+                    expected.cids.len(),
+                );
+                // And nothing beyond this group, so a collector attributing references to the
+                // wrong document cannot pass by coincidence.
+                assert_eq!(
+                    collected.len(),
+                    expected.cids.len(),
+                    "the profiled reference result holds {} references in total against {} \
+                     expected for the fixture's only group",
+                    collected.len(),
+                    expected.cids.len(),
+                );
+            }
+            None => assert!(
+                collected.is_empty(),
+                "a family that collects no references returned {} of them",
+                collected.len()
+            ),
+        }
+    }
+}
+
+/// How a run schedules its trials across cases.
+///
+/// Both exist so the two can be **compared on one fixed corpus**, which is the only way to say
+/// what the scheduling itself is worth. Earlier work observed a 2.5x shift when moving from
+/// blocked to interleaved and attributed it to ordering; that was not established, because the
+/// change that produced it altered store construction, the summary statistic and the
+/// fixture-to-measurement delay at the same time. Holding everything else fixed and varying only
+/// this is what isolates it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Protocol {
+    /// Every trial of case A, then every trial of case B. Any drift over the run lands entirely
+    /// on whichever cases ran late.
+    Blocked,
+    /// One trial of every case, then the second trial of every case, each round in a fresh
+    /// **seeded permutation** so drift is spread across cases and no case keeps a fixed
+    /// predecessor.
+    Interleaved,
+}
+
+/// Seed for the interleaved rounds' permutations, printed with every result so an order can be
+/// reproduced exactly.
+const ORDER_SEED: u64 = 0x1307_2026;
+
+impl Protocol {
+    fn label(self) -> &'static str {
+        match self {
+            Protocol::Blocked => "blocked",
+            Protocol::Interleaved => "interleaved",
+        }
+    }
+}
+
+/// The interleaved schedule: one seeded permutation of `0..n` per trial.
+///
+/// **This is the single source of the order.** `run_scheduled` consumes it and so does the test
+/// that checks its predecessor property - which matters, because the first version of that test
+/// reimplemented the Fisher-Yates loop itself. Reverting the dispatcher to the broken cyclic
+/// rotation would have left the test shuffling its own private copy and passing. A regression
+/// test for a scheduler has to observe the schedule the scheduler actually uses.
+fn interleaved_rounds(n: usize) -> Vec<Vec<usize>> {
+    if n == 0 {
+        return Vec::new();
+    }
+    let mut rng = ChaCha20Rng::seed_from_u64(ORDER_SEED);
+    (0..TRIALS)
+        .map(|_| {
+            let mut order: Vec<usize> = (0..n).collect();
+            for i in (1..n).rev() {
+                let j = (rng.next_u32() as usize) % (i + 1);
+                order.swap(i, j);
+            }
+            order
+        })
+        .collect()
+}
+
+/// Run `TRIALS` trials of every case under `protocol`.
+///
+/// Under `Interleaved` each round runs the cases in a **fresh seeded permutation**.
+///
+/// Rotating the start index was tried first and does nothing: `(round + offset) % n` emits
+/// `c[r], c[r+1], … c[r+n-1]`, which preserves the cyclic order, so every case except the round's
+/// first still follows exactly the same predecessor it did before. At the profile's real shape
+/// that left most cases with a single predecessor across all eight rounds - which is the very
+/// thing interleaving is supposed to stop mattering. A permutation is what actually varies it.
+fn run_scheduled(cases: &mut [Case], protocol: Protocol, clock: &dyn catcoms_rt::Clock) {
+    match protocol {
+        Protocol::Blocked => {
+            for case in cases.iter_mut() {
+                for _ in 0..TRIALS {
+                    run_trial(case, clock);
+                }
+            }
+        }
+        Protocol::Interleaved => {
+            for round in interleaved_rounds(cases.len()) {
+                for index in round {
+                    run_trial(&mut cases[index], clock);
+                }
+            }
+        }
+    }
 }
 
 /// Run `TRIALS` trials of every case, **round-robin rather than case by case**.
@@ -415,14 +512,14 @@ fn run_trial(case: &mut Case, clock: &dyn catcoms_rt::Clock) {
 /// discipline: it does not make any single figure more accurate, it makes differences *between*
 /// cases in one profile comparable, which the block-ordered version could not claim.
 fn run_interleaved(cases: &mut [Case], clock: &dyn catcoms_rt::Clock) {
-    for _ in 0..TRIALS {
-        for case in cases.iter_mut() {
-            run_trial(case, clock);
-        }
-    }
+    run_scheduled(cases, Protocol::Interleaved, clock);
 }
 
 /// Build a case around a store that has already been populated.
+///
+/// Every parameter is one axis of the fixture matrix these benchmarks sweep, so collapsing them
+/// into a struct would only move the same eight values one line up at each call site.
+#[allow(clippy::too_many_arguments)]
 fn case(
     label: impl Into<String>,
     root: tempfile::TempDir,
@@ -431,6 +528,7 @@ fn case(
     references: bool,
     cache: CachePolicy,
     shape: FixtureShape,
+    expected_refs: Option<ExpectedRefs>,
 ) -> Case {
     Case {
         label: label.into(),
@@ -440,19 +538,23 @@ fn case(
         references,
         cache,
         shape,
+        expected_refs,
         cost: ScanCost::default(),
     }
 }
 
 /// Convenience for the frozen-clock smoke tests, which profile one case and assert structure.
+#[allow(clippy::too_many_arguments)]
 fn profile_scan(
     root: tempfile::TempDir,
     store: ServerStore,
     coverage: EpochInventoryCoverage,
     references: bool,
     cache: CachePolicy,
+    expected_refs: Option<ExpectedRefs>,
     clock: &dyn catcoms_rt::Clock,
 ) -> Case {
+    let cids = expected_refs.as_ref().map(|e| e.cids.len());
     let mut one = [case(
         "smoke",
         root,
@@ -460,12 +562,13 @@ fn profile_scan(
         coverage,
         references,
         cache,
-        // Smoke fixtures have no operation axis; `cids: Some(0)` where a reference mode is used
-        // says so explicitly rather than tripping the shape check.
+        // Smoke fixtures have no operation axis. The CID count comes from the expected set, so the
+        // two cannot disagree.
         FixtureShape {
-            cids: references.then_some(0),
+            cids,
             ..FixtureShape::default()
         },
+        expected_refs,
     )];
     run_interleaved(&mut one, clock);
     one.into_iter().next().expect("one case")
@@ -598,7 +701,7 @@ fn stage_canonical(
 ///
 /// The spread is the part that says whether a difference between two rows is worth reading. A
 /// mean concealed exactly that in the first profiles of this design.
-fn report(case: &Case, profile: &str) {
+fn report(case: &Case, order: &str, profile: &str) {
     let label = &case.label;
     let cost = &case.cost;
     let mut records = cost.records.clone();
@@ -624,8 +727,9 @@ fn report(case: &Case, profile: &str) {
     println!(
         "C3_PROFILE scan={label} {} trials={} visits={} records={} begin_ms={} finish_ms={} \
          step_total_us={} cache_hits_per_trial={:?} parked_per_trial={:?} repetitions={} \
-         interleaved=true build={profile} page_cache=warm_written_immediately_before \
-         units=min/upper_median/max_us_and_zero_sample_count",
+         order={order} order_seed={ORDER_SEED:#x} build={profile} \
+         page_cache=warm_written_immediately_before \
+         units=min/upper_median/max_us_and_zero_sample_count_and_raw_upper_median_ms",
         case.shape,
         cost.trials,
         cost.visits,
@@ -659,6 +763,7 @@ fn recovery_accounting_case(sizes: &[usize]) -> Case {
         // The axis here is bytes of opaque projection, with no operation structure at all - which
         // is exactly why it cannot settle whether cost follows bytes or operations.
         FixtureShape::default(),
+        None,
     )
 }
 
@@ -740,20 +845,175 @@ fn recovery_reference_cases(frames: &[usize], clock: &dyn catcoms_rt::Clock) -> 
                     physical_bytes: None,
                     cids: Some(got.len()),
                 },
+                // The oracle: every timed trial must return exactly this set, not merely finish.
+                Some(ExpectedRefs::group(&group.group_id(), got)),
             )
         })
         .collect()
 }
 
 /// Registry: one of the two families whose expensive typed reconstruction motivated C-3.
+/// One vault holding a record of **five of the six** scanned families, measured in a single scan.
 ///
-/// The axis is **operation count**, not bytes: `save_inventory_fixture_ops` builds a real signed
-/// registry log of `ops` operations at 160 KiB per message, and the reconstruction walks them.
-/// A byte axis alone would not distinguish a large record from a structurally deep one.
+/// The sixth is DraftArchive, which this does not write: `REFERENCE_COVERAGE` would scan it, so
+/// "every family" would be wrong.
 ///
-/// Measured in all three modes, because Registry is cacheable and the modes are not variations
-/// of one number: fresh accounting validation, the accounting cache-hit path, and reference
-/// collection (in which nothing is cacheable at all).
+/// A fixture for two outstanding 13.7 items - it is not itself the measurement, and no
+/// OwnerReceipts or Intents figures are recorded until the profile is run and read. It supplies
+/// records of those two families, which had none at all; and a **realistic scan shape** - visits,
+/// per-visit custody and a per-family breakdown over a vault holding more than one family. Every
+/// earlier case held a single family (though not always a single record), so the visits figure
+/// described the fixture rather than a scan.
+///
+/// Built through the production writers - `prepare_epoch_owner_receipt`, `prepare_epoch_intent`,
+/// `update_epoch_recovery` and the registry and studio fixtures - rather than by widening other
+/// modules' test helpers, which would have meant making their whole test modules reachable.
+fn multi_family_case(cache: CachePolicy, references: bool) -> Case {
+    let root = tempfile::tempdir().unwrap();
+    let mut store = open(root.path());
+    let device = catcoms_mls::MlsDevice::generate().unwrap();
+    let group = catcoms_mls::ServerGroup::create(&device).unwrap();
+    let target = StudioTarget::Flipnote {
+        channel: [7; 16],
+        object: [9; 16],
+    };
+    let studio_doc = target.document(&group.group_id()).unwrap();
+
+    // Studio, and with it a Registry record for the same vault.
+    crate::store::epoch_studio::tests::performance::save_studio_source_fixture_ops(
+        &mut store, 7, &group, &device, target, 3, 160_000,
+    );
+    crate::store::epoch_registry::tests::performance::save_inventory_fixture_ops(&mut store, 2);
+
+    // Recovery, through `stage_canonical` rather than `stage_sized`.
+    //
+    // This vault is scanned in reference mode as well as accounting mode, and `recovery_cids`
+    // runs `inspect_vault_references` for a Studio-typed document - which needs a canonically
+    // valid projection and refuses opaque filler. `stage_sized` plants filler, which is stated
+    // in its own doc comment, and using it here made the reference-mode case fail with "creative
+    // reference scan incomplete, unsupported or over bound". A caveat recorded on a helper is no
+    // use if the next fixture ignores it.
+    let planted = stage_canonical(&mut store, 7, &group, &device, target, 8);
+
+    // OwnerReceipts, through the production writer.
+    let receipt = catcoms_replication::Receipt::sign(
+        studio_doc.clone(),
+        0,
+        [11; 32],
+        [12; 32],
+        group.epoch(),
+        catcoms_replication::InheritedCheckpoint::EpochZero,
+        &device,
+    )
+    .unwrap();
+    let mut owner_budget = family_budget(&mut store, 7, &studio_doc);
+    store
+        .prepare_epoch_owner_receipt(
+            7,
+            receipt,
+            &group,
+            group.epoch(),
+            &mut ChaCha20Rng::seed_from_u64(5),
+            &mut owner_budget,
+        )
+        .expect("owner receipt");
+
+    // Intents, likewise.
+    let mut storage_budget = family_budget(&mut store, 7, &studio_doc);
+    let mut intent_budget = crate::store::epoch_intents::EpochIntentBudget::from_inventory(
+        &collect_with(&mut store, REFERENCE_COVERAGE),
+    )
+    .expect("intent budget");
+    store
+        .prepare_epoch_intent(
+            7,
+            &studio_doc,
+            DomainOp {
+                nonce: [3; 16],
+                doc_type: studio_doc.doc_type,
+                logical_key: studio_doc.logical_key.clone(),
+                body: FlipnoteOp::SetHeader(catcoms_replication::studio::FlipnoteHeader::Title(
+                    "multi family".into(),
+                ))
+                .encode()
+                .unwrap(),
+            },
+            &device,
+            &group,
+            &mut ChaCha20Rng::seed_from_u64(6),
+            &mut storage_budget,
+            &mut intent_budget,
+        )
+        .expect("intent");
+
+    // What the scan actually found, so the case is labelled by observation.
+    let inventory = collect_with(&mut store, REFERENCE_COVERAGE);
+    let families: std::collections::BTreeSet<_> =
+        inventory.records().map(|entry| entry.kind).collect();
+    // The exact set, not a count. `>= 5` is `== 5` in disguise when only five are written, and
+    // it would not say *which* five.
+    assert_eq!(
+        families,
+        [
+            EpochRecordKind::Recovery,
+            EpochRecordKind::OwnerReceipts,
+            EpochRecordKind::Intents,
+            EpochRecordKind::Registry,
+            EpochRecordKind::Studio,
+        ]
+        .into_iter()
+        .collect::<std::collections::BTreeSet<_>>(),
+        "the multi-family vault does not hold the five families it claims"
+    );
+
+    case(
+        format!(
+            "multi_family_{}_{}",
+            if references {
+                "references"
+            } else {
+                "accounting"
+            },
+            if cache == CachePolicy::Fresh {
+                "fresh"
+            } else {
+                "warm"
+            }
+        ),
+        root,
+        store,
+        REFERENCE_COVERAGE,
+        references,
+        cache,
+        FixtureShape {
+            cids: references.then_some(planted.len()),
+            ..FixtureShape::default()
+        },
+        // The canonical Recovery record's pixels are the only references in this vault: the
+        // Studio source is title-only and the Registry arm collects none. So the expectation is
+        // that exact set - checked on every trial like any other reference case, rather than
+        // waved through because this fixture's purpose is scan shape.
+        references
+            .then(|| ExpectedRefs::group(&group.group_id(), planted.iter().copied().collect())),
+    )
+}
+
+/// An `EpochStorageBudget` for one document, from a fresh full-coverage inventory.
+fn family_budget(
+    store: &mut ServerStore,
+    server: u64,
+    doc: &LogicalDocument,
+) -> crate::store::epoch_budget::EpochStorageBudget {
+    let inventory = collect_with(store, REFERENCE_COVERAGE);
+    crate::store::epoch_budget::EpochStorageBudget::from_inventory(
+        StorageScope::new(server, &doc.server_id).unwrap(),
+        inventory
+            .records_for_server(server, &doc.server_id)
+            .unwrap(),
+    )
+    .expect("storage budget")
+}
+
 /// The three modes every cacheable family needs, as separate cases over separate fixtures.
 ///
 /// A `Case` owns its store, so each mode gets its own build of the same fixture shape. That is
@@ -796,9 +1056,11 @@ fn registry_cases(op_counts: &[usize]) -> Vec<Case> {
                     // back here - unlike Studio's, which silently truncates.
                     actual_ops: Some(*ops),
                     physical_bytes: Some(bytes),
-                    // The Registry validator arm collects no CIDs in either mode.
+                    // The Registry validator arm collects no CIDs in either mode. Checked, not
+                    // assumed: the oracle requires the scan to return nothing at all.
                     cids: Some(0),
                 },
+                references.then(ExpectedRefs::none),
             ));
         }
     }
@@ -859,9 +1121,12 @@ fn studio_cases(op_counts: &[usize]) -> Vec<Case> {
                     requested_ops: Some(*ops),
                     actual_ops: Some(persisted),
                     physical_bytes: None,
-                    // Title headers name no CIDs. Stated, not implied.
+                    // Title headers name no CIDs. Stated, not implied - and the oracle requires
+                    // the scan to actually return none, so "these sources have nothing to
+                    // collect" is an observation rather than an assumption about `title_op`.
                     cids: Some(0),
                 },
+                references.then(ExpectedRefs::none),
             ));
         }
     }
@@ -874,8 +1139,30 @@ fn studio_cases(op_counts: &[usize]) -> Vec<Case> {
 /// collection, because their CID set is empty. This builds frames through the same
 /// `edit_or_reseal` path, each naming a distinct blob, and records the count.
 fn studio_frame_cases(frame_counts: &[usize]) -> Vec<Case> {
+    studio_frame_factorial(&frame_counts.iter().map(|n| (*n, *n)).collect::<Vec<_>>())
+}
+
+/// The distinct-reference axis, decoupled from frame count.
+///
+/// **What this does decouple:** `(128, 1)` against `(128, 128)` holds frame count *and* encoded
+/// size fixed - the record carries the same 128 signed operations either way, each naming one
+/// 32-byte CID - and varies only how many of those references are distinct.
+///
+/// **What it does not:** `(16, 1)` against `(128, 1)` holds the reference count fixed but frames
+/// and bytes still move together, because eight times the operations is eight times the signed
+/// history. So frame count is still confounded with encoded size, exactly as the earlier Studio
+/// and Recovery axes were. Separating those needs a payload axis at fixed frame count, which
+/// `build`'s `message` padding could supply and this does not use. An earlier version of this
+/// comment claimed the factorial settled which of the three drives cost; it settles one of the
+/// three.
+///
+/// **A prediction worth recording, so a null result is read correctly:** `blob_cids()` parses
+/// every signed operation regardless of how many distinct CIDs result, so the *validation* figure
+/// should barely move between `(128, 1)` and `(128, 128)`. If the reference count costs anything,
+/// it should appear in `install` and `finish`, where the set is merged.
+fn studio_frame_factorial(shapes: &[(usize, usize)]) -> Vec<Case> {
     let mut cases = Vec::new();
-    for frames in frame_counts {
+    for (frames, distinct) in shapes.iter().copied() {
         for (mode, references, cache) in MODES {
             let root = tempfile::tempdir().unwrap();
             let mut store = open(root.path());
@@ -887,27 +1174,35 @@ fn studio_frame_cases(frame_counts: &[usize]) -> Vec<Case> {
             };
             let (planted, accepted) =
                 crate::store::epoch_studio::tests::performance::save_studio_frame_fixture(
-                    &mut store, 7, &group, &device, target, *frames,
+                    &mut store, 7, &group, &device, target, frames, distinct,
                 );
-            let distinct: std::collections::BTreeSet<_> = planted.iter().copied().collect();
+            let cids: std::collections::BTreeSet<_> = planted.iter().copied().collect();
+            // The distinct count is now a deliberate axis rather than an accident, so it is
+            // checked against what was asked for rather than against the frame count.
             assert_eq!(
-                distinct.len(),
-                *frames,
-                "the frame fixture planted duplicate CIDs, so its reference-count axis is fiction"
+                cids.len(),
+                distinct,
+                "the frame fixture planted {} distinct CIDs where {distinct} were requested, so \
+                 its reference-count axis is fiction",
+                cids.len()
             );
             cases.push(case(
-                format!("studio_frames_{mode}_n{frames}"),
+                format!("studio_frames_{mode}_n{frames}_c{distinct}"),
                 root,
                 store,
                 REFERENCE_COVERAGE,
                 references,
                 cache,
                 FixtureShape {
-                    requested_ops: Some(*frames),
+                    requested_ops: Some(frames),
                     actual_ops: Some(accepted),
                     physical_bytes: None,
-                    cids: Some(distinct.len()),
+                    cids: Some(cids.len()),
                 },
+                // The oracle that was missing: the fixture containing N references and the timed
+                // scan *returning* them are different claims, and only the second makes the
+                // reference-mode timing mean anything.
+                references.then(|| ExpectedRefs::group(&group.group_id(), cids.clone())),
             ));
         }
     }
@@ -967,6 +1262,18 @@ fn check_case_structure(case: &Case) {
             case.shape.cids.is_some(),
             "{label}: a reference-mode case did not record how many CIDs its fixture plants, so \
              its timing cannot be distinguished from the timing of an empty collection"
+        );
+        // And the fixture's contents are not the scan's output. Every reference-mode case must
+        // carry an expected set for `run_trial`'s oracle to check the returned one against;
+        // without it a collector that returned nothing would still produce a clean profile.
+        let expected = case.expected_refs.as_ref().unwrap_or_else(|| {
+            panic!("{label}: a reference-mode case carries no expected CID set")
+        });
+        assert_eq!(
+            expected.cids.len(),
+            case.shape.cids.unwrap(),
+            "{label}: the expected CID set and the recorded fixture CID count disagree, so one of \
+             them is wrong"
         );
     }
 
@@ -1051,6 +1358,7 @@ fn c3_visit_profile_smoke() {
         EpochInventoryCoverage::RecoveryOnly,
         false,
         CachePolicy::Fresh,
+        None,
         &clock,
     );
     let cost = &profiled.cost;
@@ -1187,6 +1495,11 @@ fn c3_canonical_reference_fixture_collects_its_planted_cids() {
         REFERENCE_COVERAGE,
         true,
         CachePolicy::Warm,
+        // The oracle, on the frozen clock too: every trial must return exactly the planted set.
+        Some(ExpectedRefs::group(
+            &group.group_id(),
+            planted.iter().copied().collect(),
+        )),
         &clock,
     );
     check_case_structure(&profiled);
@@ -1280,6 +1593,416 @@ fn c3_cacheable_family_parks_when_fresh_and_hits_cache_when_warm() {
     }
 }
 
+/// The multi-family vault really holds several families, and the scan really visits them.
+///
+/// Without this the "realistic full scan" label rests on the fixture builder having worked. A
+/// vault that silently ended up with one family would still produce a scan, a visits count and a
+/// per-family row - just not the ones the label claims. The builder asserts at least five
+/// families are present; this additionally requires the **scan** to park a record from more than
+/// one of them, which is what makes the visits figure a scan shape rather than an artifact.
+#[test]
+fn c3_multi_family_scan_parks_records_from_several_families() {
+    let clock = ManualClock::new(0);
+    let mut cases = [multi_family_case(CachePolicy::Fresh, false)];
+    run_interleaved(&mut cases, &clock);
+    check_case_structure(&cases[0]);
+
+    let families: std::collections::BTreeSet<_> = cases[0]
+        .cost
+        .records
+        .iter()
+        .filter_map(|r| r.family)
+        .collect();
+    // Named, not counted. A threshold like "at least three" is satisfied by Recovery, Registry
+    // and Studio alone - the three families already measured - so it would pass with the two
+    // this fixture exists for entirely absent. The cache is cleared and `validation_fits`
+    // detaches everything, so every record present must park.
+    for required in [
+        EpochRecordKind::Recovery,
+        EpochRecordKind::OwnerReceipts,
+        EpochRecordKind::Intents,
+        EpochRecordKind::Registry,
+        EpochRecordKind::Studio,
+    ] {
+        assert!(
+            families.contains(&required),
+            "the scan parked no {required:?} record; parked families were {families:?}. \
+             OwnerReceipts and Intents are the two this fixture exists to measure, so a count \
+             threshold would have passed with both missing"
+        );
+    }
+    assert!(
+        cases[0].cost.visits > cases[0].cost.records.len() * TRIALS,
+        "a parked record ends its visit, so a multi-family scan cannot take fewer visits than \
+         records x trials"
+    );
+}
+
+/// 13.7's restart rate under concurrent writes - what an `EpochInventoryJob` does when the vault
+/// will not hold still.
+///
+/// **Deterministic, so it is a structural test rather than a profile.** Restart behaviour is
+/// decided by counting, not by timing: a write either lands between two steps or it does not, and
+/// a restart discards the cursor's progress whatever the machine's speed. That makes this the one
+/// 13.7 item that can assert its result in the ordinary suite instead of printing a number.
+///
+/// `write_every` writes once per that many steps; `None` means an undisturbed scan. Returns the
+/// restarts consumed and whether the job produced an inventory.
+fn restart_rate(records: usize, write_every: Option<usize>) -> (usize, bool) {
+    let root = tempfile::tempdir().unwrap();
+    let mut store = open(root.path());
+    for n in 0..records {
+        let key = format!("restart-{n}");
+        stage_sized(&mut store, 7, &document(b"group", key.as_bytes()), 1024);
+    }
+
+    let mut job = store
+        .begin_epoch_inventory_job(EpochInventoryCoverage::RecoveryOnly)
+        .unwrap();
+    let mut restarts = 0;
+    let mut steps = 0;
+    // A ceiling so a job that can never finish terminates the test rather than the test runner.
+    // `MAX_INVENTORY_RESTARTS` bounds restarts, not steps, and a job that restarts forever would
+    // otherwise spin.
+    let ceiling = (records + 4) * (MAX_INVENTORY_RESTARTS + 2) * 4;
+    loop {
+        if steps >= ceiling {
+            return (restarts, false);
+        }
+        steps += 1;
+        // The interfering write, landing *between* steps, which is exactly the window C-3 exists
+        // to survive: the old scanner held the store for its whole life so this could not happen.
+        if write_every.is_some_and(|every| steps % every == 0) {
+            store.epoch_mutation_guard();
+        }
+        match store.step_epoch_inventory_job(&mut job, 1, None).unwrap() {
+            EpochInventoryStep::Parked => {
+                let parked = store
+                    .take_parked_job_record(&mut job)
+                    .expect("Parked means a record is waiting");
+                let validated = parked.validate().unwrap();
+                if let EpochInventoryStep::Restarted = store
+                    .install_validated_job_record(&mut job, validated)
+                    .unwrap()
+                {
+                    restarts += 1;
+                }
+            }
+            EpochInventoryStep::Restarted => restarts += 1,
+            EpochInventoryStep::Unstable => return (restarts, false),
+            EpochInventoryStep::Stepped(progress) => {
+                if progress.complete {
+                    return match store.finish_epoch_inventory_job(job).unwrap() {
+                        EpochInventoryOutcome::Complete(_) => (restarts, true),
+                        EpochInventoryOutcome::Restarted(next) => {
+                            job = *next;
+                            restarts += 1;
+                            continue;
+                        }
+                        EpochInventoryOutcome::Unstable => (restarts, false),
+                    };
+                }
+            }
+        }
+    }
+}
+
+/// The restart budget bounds retries; it does not make a moving vault scannable.
+///
+/// This is 13.7's last item, and the answer is a shape rather than a rate. An undisturbed scan
+/// completes with no restarts. A vault written to rarely enough completes having spent some of
+/// the budget. A vault written to on every step **never** completes, however large the budget,
+/// because a restart discards all progress - so the scan can never get further than one step
+/// before being overtaken again.
+///
+/// That is what makes L6's "under sustained writes a commit is held and retried" a statement
+/// about liveness rather than latency: the failure is not a slow scan, it is `Unstable` and a
+/// caller that must back off.
+#[test]
+fn c3_restart_budget_bounds_retries_but_does_not_survive_sustained_writes() {
+    // Undisturbed: the control. No restarts, and an inventory.
+    let (restarts, completed) = restart_rate(6, None);
+    assert_eq!(restarts, 0, "an undisturbed scan restarted");
+    assert!(
+        completed,
+        "an undisturbed scan did not produce an inventory"
+    );
+
+    // A write before every step. The scan cannot make progress between interruptions, so the
+    // budget is spent and the job reports Unstable rather than completing slowly.
+    let (restarts, completed) = restart_rate(6, Some(1));
+    assert!(
+        !completed,
+        "a scan interrupted before every step produced an inventory, which would mean a restart \
+         preserved progress it is specified to discard"
+    );
+    assert!(
+        restarts <= MAX_INVENTORY_RESTARTS,
+        "the job consumed {restarts} restarts against a budget of {MAX_INVENTORY_RESTARTS}"
+    );
+
+    // And the bound is real: the budget is spent, not merely large.
+    assert_eq!(
+        restarts, MAX_INVENTORY_RESTARTS,
+        "sustained writes should consume the whole restart budget before giving up"
+    );
+}
+
+/// The reference-mode multi-family vault, in the ordinary suite.
+///
+/// This exists because its absence cost a debugging cycle. The reference-mode case was only
+/// instantiated inside the `#[ignore]`d profile, so when the vault was built with an
+/// opaque-projection Recovery record - which `recovery_cids` refuses, as that helper's own doc
+/// comment says - nothing failed until the profile was run by hand. A frozen-clock case keeps the
+/// CID oracle load-bearing in CI for this fixture as it is for the others.
+#[test]
+fn c3_multi_family_reference_scan_collects_the_vaults_cids() {
+    let clock = ManualClock::new(0);
+    let mut cases = [multi_family_case(CachePolicy::Warm, true)];
+    assert_eq!(
+        cases[0].shape.cids,
+        Some(8),
+        "the canonical Recovery record is the only source of references in this vault"
+    );
+    // `run_trial`'s oracle checks the returned set against the expectation on every trial.
+    run_interleaved(&mut cases, &clock);
+    check_case_structure(&cases[0]);
+}
+
+/// Interleaved rounds must actually vary which case follows which.
+///
+/// This is a regression test for a claim that was false. The first implementation rotated the
+/// start index, `(round + offset) % n`, and its comment said that stopped each case having a fixed
+/// predecessor. It does not: rotating a cyclic sequence preserves the order, so every case except
+/// the round's first keeps exactly the predecessor it had. At 35 cases over 8 rounds most cases
+/// had precisely one predecessor throughout - the scheduling property the interleaved arm is
+/// documented to have was simply absent.
+///
+/// Reproduces the ordering arithmetic rather than driving real cases, because the property is
+/// about the schedule and nothing else: a real run costs minutes and would test the same integers.
+#[test]
+fn c3_interleaved_rounds_vary_each_case_predecessor() {
+    let n = 35;
+    // The generator `run_scheduled` itself consumes. An earlier version of this test built its
+    // own copy of the shuffle, so reverting the dispatcher to the cyclic rotation would have left
+    // this passing against a private permutation - a regression test that could not see the
+    // regression.
+    let orders = interleaved_rounds(n);
+    assert_eq!(orders.len(), TRIALS, "one round per trial");
+
+    // Every case still runs exactly once per round.
+    for order in &orders {
+        let mut seen: Vec<usize> = order.clone();
+        seen.sort_unstable();
+        assert_eq!(
+            seen,
+            (0..n).collect::<Vec<_>>(),
+            "a round is not a permutation"
+        );
+    }
+
+    // The property the rotation failed: collect each case's set of predecessors across rounds.
+    let mut predecessors: Vec<std::collections::BTreeSet<usize>> = vec![Default::default(); n];
+    for order in &orders {
+        for w in order.windows(2) {
+            predecessors[w[1]].insert(w[0]);
+        }
+    }
+    let single = predecessors.iter().filter(|p| p.len() <= 1).count();
+    assert!(
+        single <= 2,
+        "{single} of {n} cases have at most one predecessor across {TRIALS} rounds, so the \
+         schedule is not varying what precedes each case - which is what rotating the start index \
+         wrongly claimed to do"
+    );
+
+    // And the orders are genuinely different from each other, not one permutation repeated.
+    assert!(
+        orders.windows(2).any(|w| w[0] != w[1]),
+        "every round used the same order"
+    );
+}
+
+/// The distinct-CID count is settable at a fixed frame count, and the scan returns that set.
+///
+/// Named for what it establishes. It does **not** show the two axes are independent in any
+/// stronger sense: the cells' timings are never compared, and on a frozen clock they could not be.
+///
+/// What running the cases adds, beyond `studio_frame_factorial`'s own count assertion: a fixture
+/// that planted one CID per frame but *reported* a truncated set would satisfy that assertion and
+/// still fail here, because `run_trial`'s oracle compares the returned set and its total against
+/// the expectation. An earlier comment claimed such a fixture "would pass every other check",
+/// which was wrong - the factorial's own assertion catches the simple case, as its mutation
+/// showed.
+#[test]
+fn c3_distinct_cid_count_is_settable_at_a_fixed_frame_count() {
+    let clock = ManualClock::new(0);
+    // Same frame count, different reference counts: the axis that was previously confounded.
+    let mut cases = studio_frame_factorial(&[(8, 1), (8, 8)]);
+    assert_eq!(cases.len(), 2 * MODES.len());
+
+    let cids_for = |cases: &[Case], suffix: &str| {
+        cases
+            .iter()
+            .find(|c| c.label.ends_with(suffix))
+            .unwrap_or_else(|| panic!("no case ending {suffix}"))
+            .shape
+            .cids
+    };
+    assert_eq!(cids_for(&cases, "n8_c1"), Some(1));
+    assert_eq!(cids_for(&cases, "n8_c8"), Some(8));
+    assert!(
+        cases
+            .iter()
+            .all(|c| c.shape.requested_ops == Some(8) && c.shape.actual_ops == Some(8)),
+        "the frame axis moved when only the reference axis was supposed to"
+    );
+
+    // And the oracle tracks the reference axis, not the frame count: the one-CID case must
+    // collect exactly one.
+    run_interleaved(&mut cases, &clock);
+    for case in &cases {
+        check_case_structure(case);
+    }
+
+    // The fixed-bytes premise, observed rather than argued, through the shared checker the
+    // measured corpus also uses.
+    assert_factorial_premise(&cases, 8, "accounting_fresh");
+}
+
+/// The factorial's premise: two cells differing only in distinct-CID count must hold Studio
+/// records of the **same authenticated size**.
+///
+/// Shared, because the first version of this check lived inside the eight-frame smoke test and so
+/// said nothing about the 16- and 128-frame cells the profile actually measures. A size change
+/// affecting only the larger shapes, or only reference mode, would have gone unseen while the
+/// prose claimed bytes were held fixed. The scan reads each record's authenticated size when it
+/// parks it, so the premise costs nothing to observe - and it is checked **after** the scans,
+/// outside any timed interval.
+fn assert_factorial_premise(cases: &[Case], frames: usize, mode: &str) {
+    let sizes = |distinct: usize| -> Vec<u64> {
+        let suffix = format!("n{frames}_c{distinct}");
+        let case = cases
+            .iter()
+            .find(|c| c.label.ends_with(&suffix) && c.label.contains(mode))
+            .unwrap_or_else(|| panic!("no {mode} case ending {suffix}"));
+        let mut out: Vec<u64> = case
+            .cost
+            .records
+            .iter()
+            .filter(|r| r.family == Some(EpochRecordKind::Studio))
+            .map(|r| r.size)
+            .collect();
+        assert!(
+            !out.is_empty(),
+            "{}: no Studio record was parked, so its size was never observed",
+            case.label
+        );
+        out.sort_unstable();
+        out
+    };
+    assert_eq!(
+        sizes(1),
+        sizes(frames),
+        "the {frames}-frame cells' Studio records differ in authenticated size under {mode}, so \
+         that factorial varies bytes as well as distinct-CID count and cannot attribute a \
+         difference to either"
+    );
+}
+
+/// The Studio frame path, in the ordinary suite, so the reference oracle is load-bearing here and
+/// not only in the `#[ignore]`d profile.
+///
+/// This exists because of a gap found by mutation. `studio_frame_cases` is the only fixture that
+/// reaches the **Studio** arm of `validate_record_body` with references on;
+/// `c3_canonical_reference_fixture_collects_its_planted_cids` stages a *Recovery* record and
+/// exercises a different arm. So replacing `cids.extend(inspected.cids)` with a discard in the
+/// Studio arm left every ordinary test passing, and would have been caught only by someone
+/// running the opt-in profile. Four frames keeps it cheap.
+#[test]
+fn c3_studio_frame_reference_scan_returns_its_planted_cids() {
+    let clock = ManualClock::new(0);
+    let mut cases = studio_frame_cases(&[4]);
+    assert_eq!(cases.len(), MODES.len());
+    let reference_cases = cases.iter().filter(|c| c.references).count();
+    assert_eq!(
+        reference_cases, 1,
+        "exactly one of the three modes collects references; without it this test proves nothing"
+    );
+    assert!(
+        cases
+            .iter()
+            .filter(|c| c.references)
+            .all(|c| c.shape.cids == Some(4)),
+        "the frame fixture did not plant four distinct CIDs"
+    );
+    // The oracle inside `run_trial` is what checks the returned set on every trial.
+    run_interleaved(&mut cases, &clock);
+    for case in &cases {
+        check_case_structure(case);
+    }
+}
+
+/// The blocked-versus-interleaved comparison: one fixed corpus **shape**, four arms, ABBA order.
+///
+/// Earlier work reported a 2.5x shift on moving from blocked to interleaved and attributed it to
+/// ordering. That was withdrawn, because the same patch also changed store construction, the
+/// central statistic and the fixture-to-measurement delay. This holds those fixed - identical
+/// fixture shapes, identical cache rules, identical summary statistic, the same `run_trial` on
+/// both sides - so the schedule is the *intended* variable.
+///
+/// **What still differs between arms, stated rather than glossed.** Each arm builds its own
+/// corpus, because cases cannot be reused without inheriting the previous arm's warm state - so
+/// the corpus *shape* is fixed and the corpus *instance* is not: new temporary directories and,
+/// for the Registry fixtures, freshly generated device keys. Arms also occupy different global
+/// positions, and each follows a different predecessor (arm 1 follows the main run's reporting;
+/// arms 2 to 4 follow the previous arm's teardown of four stores). And the schedules differ by
+/// construction in fixture-to-first-measurement delay: Blocked first measures case *k* after
+/// `8k` trials, Interleaved after *k*. That delay is part of what "the schedule" means here, not
+/// a confound to be removed.
+///
+/// **What the ABBA order can and cannot do.** The order is Blocked, Interleaved, Interleaved,
+/// Blocked, so Blocked holds global slots 1 and 4 and Interleaved slots 2 and 3; the `slot`
+/// labels are within-pair. Averaging the two arms of each protocol cancels a *linear* drift. It
+/// cancels neither a first-arm step nor curvature, and Interleaved never occupies the cold first
+/// slot. With one observation per (protocol, slot) cell there is **no estimate of arm-to-arm
+/// noise**, in a module that has recorded up to 86% movement between identical re-measurements.
+/// So this comparison can only speak to an effect much larger than that; a small difference
+/// between arms is not evidence of anything and must not be read as one. Replicating the arms is
+/// what would fix that, and has not been done.
+fn protocol_comparison(clock: &dyn catcoms_rt::Clock, profile: &str) {
+    // Deliberately small: this measures scheduling, not families, and four corpus builds are the
+    // cost of counterbalancing.
+    let corpus = || {
+        let mut cases = vec![recovery_accounting_case(&[256 * 1024, 4 * 1024 * 1024])];
+        cases.extend(registry_cases(&[8]));
+        cases
+    };
+    println!(
+        "C3_PROFILE block=protocol_comparison arms=4 order=ABBA note=one_observation_per_cell_\
+         so_only_a_large_effect_is_readable"
+    );
+    let mut arm = 0;
+    for (first, second) in [
+        (Protocol::Blocked, Protocol::Interleaved),
+        (Protocol::Interleaved, Protocol::Blocked),
+    ] {
+        for (position, protocol) in [("first", first), ("second", second)] {
+            arm += 1;
+            let mut cases = corpus();
+            run_scheduled(&mut cases, protocol, clock);
+            for case in &cases {
+                check_case_structure(case);
+                report(
+                    case,
+                    protocol.label(),
+                    &format!("{profile} arm={arm} slot={position}"),
+                );
+            }
+        }
+    }
+}
+
 /// Opt-in, real clock, real sizes. Prints; asserts correctness, never machine speed.
 ///
 /// **Every case is built first, then all of them are run round-robin.** Earlier versions ran
@@ -1299,30 +2022,75 @@ fn profile_c3_visit_cost() {
     };
     let clock = &SystemClock;
 
-    let mut cases = vec![recovery_accounting_case(&[
-        1024,
-        16 * 1024,
-        256 * 1024,
-        1024 * 1024,
-        4 * 1024 * 1024,
-    ])];
-    cases.extend(recovery_reference_cases(&[1, 16, 128, 512], clock));
-    cases.extend(registry_cases(&[2, 8, 24]));
-    // 24 and not 32: `build` stops once the epoch is nearly full, and at 160 KiB per message the
-    // 4 MiB epoch fits about 25. The previous run requested 32, silently got fewer, and divided
-    // by 32 anyway. `check_case_structure` now fails rather than letting that recur.
-    cases.extend(studio_cases(&[3, 12, 24]));
-    // Studio with actual pixels, because the title-only sources above collect no CIDs at all.
-    cases.extend(studio_frame_cases(&[16, 128]));
-    println!(
-        "C3_PROFILE run cases={} trials={TRIALS} order=interleaved",
-        cases.len()
-    );
+    // **Every case in one interleaved set.** The lists below are named only to keep the builders
+    // readable; they are concatenated and run together, so any two cases in the profile are
+    // comparable under the same schedule.
+    //
+    // This was briefly split into separately-timed groups, because 37 cases alive at once aborted
+    // the release binary with no panic and that looked like resource exhaustion. It was not: the
+    // cause was **stack size**, and with `RUST_MIN_STACK=33554432` all 37 run to completion
+    // interleaved. Two things wrong with the grouping are worth recording rather than quietly
+    // deleting - it was a fix for a misdiagnosed problem, and it did not even do what its comment
+    // claimed, because every builder ran before the first group was timed, so all 35 stores were
+    // live anyway. Full interleaving also removes the "comparisons across groups are not
+    // comparable" limitation the grouping had introduced.
+    let mut all: Vec<Case> = Vec::new();
+    let groups: Vec<(&str, Vec<Case>)> = vec![
+        (
+            "recovery",
+            vec![recovery_accounting_case(&[
+                1024,
+                16 * 1024,
+                256 * 1024,
+                1024 * 1024,
+                4 * 1024 * 1024,
+            ])],
+        ),
+        (
+            "recovery_references",
+            recovery_reference_cases(&[1, 16, 128, 512], clock),
+        ),
+        ("registry", registry_cases(&[2, 8, 24])),
+        // 24 and not 32: `build` stops once the epoch is nearly full, and at 160 KiB per message
+        // the 4 MiB epoch fits about 25. An earlier run requested 32, silently got fewer, and
+        // divided by 32 anyway. `check_case_structure` now fails rather than letting that recur.
+        ("studio_titles", studio_cases(&[3, 12, 24])),
+        // Studio with actual pixels, because the title-only sources above collect no CIDs at all.
+        // The factorial: (128,1) against (128,128) isolates reference count at fixed frame count;
+        // (16,1) against (128,1) isolates frame count at fixed reference count. Kept in one group
+        // so those two comparisons are interleaved.
+        (
+            "studio_frames",
+            studio_frame_factorial(&[(16, 1), (16, 16), (128, 1), (128, 128)]),
+        ),
+    ];
 
-    run_interleaved(&mut cases, clock);
-
-    for case in &cases {
-        check_case_structure(case);
-        report(case, profile);
+    for (_, cases) in groups {
+        all.extend(cases);
     }
+    all.push(multi_family_case(CachePolicy::Fresh, false));
+    all.push(multi_family_case(CachePolicy::Warm, true));
+    println!(
+        "C3_PROFILE group=all cases={} trials={TRIALS} order=interleaved",
+        all.len()
+    );
+    run_interleaved(&mut all, clock);
+    for case in &all {
+        check_case_structure(case);
+        report(case, Protocol::Interleaved.label(), profile);
+    }
+    // The factorial's fixed-bytes premise, on the cells actually measured rather than only on the
+    // smoke fixture's eight-frame pair, and in every mode the factorial reports. Checked after
+    // the scans so it costs no timed interval, and before the figures are used for anything.
+    for frames in [16, 128] {
+        for mode in ["accounting_fresh", "accounting_warm", "references"] {
+            assert_factorial_premise(&all, frames, mode);
+        }
+    }
+    drop(all);
+
+    // Deliberately after the main run's cases are dropped: the comparison's own stores should not
+    // be competing with 35 live ones, and its labels would otherwise be ambiguous against the
+    // rows above.
+    protocol_comparison(clock, profile);
 }

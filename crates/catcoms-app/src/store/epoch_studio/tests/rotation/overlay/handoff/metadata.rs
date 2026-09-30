@@ -79,17 +79,30 @@ fn studio_overlay_handoff_rollover_floor_rejects_forgotten_retry_after_rewind() 
         .unwrap()
         .is_none());
     // A valid floor-only record retains complete target binding even with no branch or ack.
+    //
+    // **This record is now v3, not v2, and that is correct.** The Save above minted a branch where
+    // none existed - `active` was `None` after the first transfer - which is a generation event, so
+    // this document is on branch generation 2. A generation other than 1 cannot be expressed in v2.
+    // Agent 2's lifecycle slice made that increment happen; before it, a second branch silently
+    // reused generation 1 and would have inherited the transferred branch's identity.
+    //
+    // The consequence for this test is only that the synthesised floor-only record must carry the v3
+    // tail as well: eight bytes of generation, a provenance byte and a disposal-presence byte, all at
+    // the end. They are copied from the original rather than rebuilt, so this test does not restate
+    // the layout it is checking.
     let encoded = metadata.encode_vault(&state.ledger).unwrap();
     let mut d = Decoder::new(&encoded);
-    assert_eq!(d.get_u8().unwrap(), 2);
+    assert_eq!(d.get_u8().unwrap(), 3);
     assert_eq!(d.get_u8().unwrap(), 1);
     d.get_bytes().unwrap();
     d.get_bytes().unwrap();
     assert_eq!(d.get_u64().unwrap(), 2);
     assert_eq!(d.get_u8().unwrap(), 0);
+    const V3_TAIL: usize = 10;
     let completed_offset = encoded.len() - d.remaining();
     let mut floor_only = encoded[..completed_offset].to_vec();
     floor_only.push(0);
+    floor_only.extend_from_slice(&encoded[encoded.len() - V3_TAIL..]);
     let empty = IntentLedger::new(f.logical.clone());
     let floor = StudioOverlayState::decode_vault(&floor_only, &empty).unwrap();
     assert_eq!(floor.target(), f.target);

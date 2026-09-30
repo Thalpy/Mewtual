@@ -102,6 +102,17 @@ impl StudioOverlayState {
         if self.prepared.is_some() {
             return Err(ReplError::EpochClosed);
         }
+        // An `Unconfirmed` branch has no installed source, so it cannot be handed off: there is no
+        // signed close for a recipient to verify against.
+        //
+        // Stated here, explicitly, before any authority work. It was previously enforced only as a
+        // side effect - the size probe below calls `encode_vault`, whose `validate` refuses the
+        // combination - which a review pointed out is a fence that a refactor of the probe would
+        // silently remove, and which in any case fires after the authority has already been captured
+        // and checked live. A rule that matters should be where a reader looks for it.
+        if !matches!(self.provenance(), StudioOverlayProvenance::Closing) {
+            return Err(ReplError::EpochAuthority);
+        }
         let active = self.active.as_ref().ok_or(ReplError::EpochScope)?;
         if self.target != authority.target || active.receipt() != &authority.receipt {
             return Err(ReplError::EpochScope);

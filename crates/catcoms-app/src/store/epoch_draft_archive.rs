@@ -10,9 +10,12 @@
 //! This module began as Agent 1's seam, landed ahead of Agent 2's implementation so that all
 //! three agents rebase onto one enum variant rather than each adding the same conceptual arm.
 //! The seam itself decoded nothing and failed every reference scan closed; the collector below
-//! narrows that refusal to an archive it cannot read, and the writer below persists one. Still
-//! to come on top of this: the release path and the disposal transaction, which is the writer's
-//! first production caller. A vault with no archive file behaves exactly as it did before.
+//! narrows that refusal to an archive it cannot read, the writer below persists one, and the
+//! release below is the only thing that destroys one. Still to come on top of this: the disposal
+//! transaction, which is the writer's first **production** caller - until it lands, both mutating
+//! entry points are exercised only by their own tests, and the sole production consumer of this
+//! family is the inventory arm's reference collection. A vault with no archive file behaves
+//! exactly as it did before.
 
 use std::collections::BTreeSet;
 use std::io::Read;
@@ -250,10 +253,11 @@ impl ServerStore {
         intents.begin_write();
         self.intent_generation = Arc::new(());
         // I-4 and requirement 3 together: rotate before touching disk, and perform the store's
-        // own replacement rather than a caller's. Both this replacement and the exact-retry
-        // flush above are covered. What remains Agent 2's obligation is
-        // `release_studio_draft_archive_with_io`, which does not exist yet and will unlink an
-        // inventoried record when it does.
+        // own replacement rather than a caller's. All three of this family's mutating shapes are
+        // covered: this replacement, the exact-retry flush above, and the unlink in
+        // `release_studio_draft_archive_with_io` below. Each is asserted to rotate by
+        // `every_archive_write_shape_rotates_the_inventory_generation` and
+        // `release_rotates_the_inventory_generation_so_a_scan_cannot_overtake_it`.
         let path = self.epoch_draft_archive_path(&scope);
         let framed = frame(&sealed);
         let mutation = self.epoch_mutation_guard();
@@ -352,17 +356,7 @@ impl ServerStore {
         // archive whose seed is semantically damaged makes reference scanning fail closed, and if
         // release demanded full semantic validation too, that archive could never be removed: the
         // vault would hold evidence it can neither use nor discard.
-        let mut d = Decoder::new(existing.plain.as_slice());
-        if d.get_bytes().map_err(invalid)? != scope {
-            return Err(invalid("wrong sealed scope"));
-        }
-        let body = d.get_bytes().map_err(invalid)?;
-        d.finish().map_err(invalid)?;
-        let archive =
-            catcoms_replication::studio::StudioDraftArchive::decode(body).map_err(invalid)?;
-        if archive.document() != document {
-            return Err(invalid("draft archive names another logical document"));
-        }
+        let archive = decode_archive_plain(&existing.plain, document, &scope)?;
         if archive.archive_id().map_err(invalid)? != expected_archive {
             return Err(invalid(
                 "draft archive changed since it was read; release names a different archive",
@@ -412,6 +406,89 @@ pub(super) struct InspectedDraftArchive {
     pub(super) cids: BTreeSet<ContentId>,
 }
 
+/// One archive as it sits on disk: the decoded evidence plus the physical facts a caller needs.
+///
+/// `id` is [`StudioDraftArchive::archive_id`], the value a release must be given back. It is
+/// computed here rather than left to the caller so that "the identity of the archive I read" and
+/// "the identity I will name when destroying it" cannot become two different derivations.
+/// D4 reads `archive` and `id`; `physical_bytes` is read by the reader's own tests and by the
+/// native read command when it lands. No dead-code expectation is needed any more: the reader has a
+/// production caller, which is what the previous expectation was waiting for. It fired the moment
+/// D4 landed, exactly as the reader review predicted it would.
+pub(in crate::store) struct StudioDraftArchiveRecord {
+    pub(in crate::store) archive: catcoms_replication::studio::StudioDraftArchive,
+    pub(in crate::store) id: [u8; 32],
+    /// Read by this reader's own tests, and by the native read command when it lands: exporting an
+    /// archive means telling the caller how large it is.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "the native read command is this field's production reader and lands later in \
+        this scope"
+        )
+    )]
+    pub(in crate::store) physical_bytes: u64,
+}
+
+/// Unwrap a sealed archive record's plaintext into the evidence it holds.
+///
+/// **One function rather than three.** The sealed-scope check, the body extraction and the
+/// payload's document binding are the same three obligations wherever an archive is read, and the
+/// reference collector and the release path had each grown their own copy. A third was about to be
+/// added for the typed reader below, which is how one of them eventually stops checking the
+/// document while the others still do.
+///
+/// The document binding is the one that is easy to lose and expensive to lose: the scanner installs
+/// the CIDs an archive returns under the **outer** record's group, so an archive for B sealed into
+/// A's record would have B's references protected under A. Deletion is group-scoped, so B's pixels
+/// become reclaimable while the pin set looks complete.
+fn decode_archive_plain(
+    plain: &[u8],
+    document: &LogicalDocument,
+    scope: &[u8],
+) -> Result<catcoms_replication::studio::StudioDraftArchive, AppError> {
+    let mut d = Decoder::new(plain);
+    if d.get_bytes().map_err(invalid)? != scope {
+        return Err(invalid("wrong sealed scope"));
+    }
+    let body = d.get_bytes().map_err(invalid)?;
+    d.finish().map_err(invalid)?;
+    let archive = catcoms_replication::studio::StudioDraftArchive::decode(body).map_err(invalid)?;
+    if archive.document() != document {
+        return Err(invalid("draft archive names another logical document"));
+    }
+    Ok(archive)
+}
+
+impl ServerStore {
+    /// Read the preserved archive for a logical document, decoded and bound to it.
+    ///
+    /// This is what D4 checks a preserving disposal against, and what the read command exports.
+    /// It authenticates and decodes; it grants nothing. An archive is never a basis, a receipt, a
+    /// source or an owner claim, and reading one cannot make it any of those.
+    ///
+    /// A record that will not decode is an **error**, not `None`. `None` means no archive exists;
+    /// collapsing "there is nothing here" into "there is something here I cannot read" would let a
+    /// preserving disposal proceed as though no evidence had ever been required.
+    pub(in crate::store) fn read_studio_draft_archive(
+        &self,
+        server: u64,
+        document: &LogicalDocument,
+    ) -> Result<Option<StudioDraftArchiveRecord>, AppError> {
+        let scope = scope_bytes(server, document)?;
+        let Some(record) = self.read_scoped_draft_archive_plain(&scope)? else {
+            return Ok(None);
+        };
+        let archive = decode_archive_plain(&record.plain, document, &scope)?;
+        Ok(Some(StudioDraftArchiveRecord {
+            id: archive.archive_id().map_err(invalid)?,
+            archive,
+            physical_bytes: record.physical_bytes,
+        }))
+    }
+}
+
 /// Decode an archive body and yield the blob references it protects.
 ///
 /// This is the narrowing of the seam's fail-closed reference arm, not its removal: it no longer
@@ -431,16 +508,7 @@ pub(super) fn inventory_references(
     scope: &[u8],
     bytes: u64,
 ) -> Result<InspectedDraftArchive, AppError> {
-    let mut d = Decoder::new(plain);
-    if d.get_bytes().map_err(invalid)? != scope {
-        return Err(invalid("wrong sealed scope"));
-    }
-    let body = d.get_bytes().map_err(invalid)?;
-    d.finish().map_err(invalid)?;
-    let archive = catcoms_replication::studio::StudioDraftArchive::decode(body).map_err(invalid)?;
-    if archive.document() != document {
-        return Err(invalid("draft archive names another logical document"));
-    }
+    let archive = decode_archive_plain(plain, document, scope)?;
     Ok(InspectedDraftArchive {
         record: storage_record(server, document, scope, bytes)?,
         cids: archive.blob_cids().map_err(invalid)?,
@@ -488,4 +556,48 @@ pub(in crate::store) fn write_draft_archive_for_test(
     let path = store.epoch_draft_archive_path(&scope);
     fs::write(&path, frame(&sealed)).map_err(|e| AppError::Io(e.to_string()))?;
     Ok(path)
+}
+
+/// Test-only fault injection one level deeper: seal an arbitrary **record plaintext** at a chosen
+/// archive path.
+///
+/// The sibling above always seals the scope belonging to the path it writes to, so it cannot reach
+/// the two states [`decode_archive_plain`]'s first and third steps exist for: a record whose inner
+/// scope names a different slot than the file it sits in, and a record with bytes trailing the body.
+///
+/// Those states matter because `seal` carries **no AAD**. Nothing binds the ciphertext to its
+/// filename except the plaintext scope prefix, so a copy of a sealed archive file into another
+/// slot's path is authentic, decrypts cleanly, and is caught only by that comparison. The document
+/// binding does not cover it: [`LogicalDocument`] equality does not include the local `server`, so
+/// the same document under a different server id compares equal.
+#[cfg(test)]
+pub(in crate::store) fn write_draft_archive_plain_for_test(
+    store: &ServerStore,
+    path_server: u64,
+    document: &LogicalDocument,
+    plain: &[u8],
+    rng: &mut impl CryptoRngCore,
+) -> Result<PathBuf, AppError> {
+    if plain.len() > MAX_DRAFT_ARCHIVE_RECORD_BYTES {
+        return Err(invalid("record exceeds its bound"));
+    }
+    let sealed = seal(&store.keys.db_key()?, plain, rng)?;
+    let path = store.epoch_draft_archive_path(&scope_bytes(path_server, document)?);
+    fs::write(&path, frame(&sealed)).map_err(|e| AppError::Io(e.to_string()))?;
+    Ok(path)
+}
+
+/// Test-only: the canonical record plaintext for an archive, so a test can build a deliberately
+/// wrong one from a right one. Sealing is the caller's job.
+#[cfg(test)]
+pub(in crate::store) fn record_plain_for_test(
+    scope_server: u64,
+    document: &LogicalDocument,
+    body: &[u8],
+) -> Result<Vec<u8>, AppError> {
+    let mut e = Encoder::new();
+    e.put_bytes(&scope_bytes(scope_server, document)?)
+        .map_err(invalid)?;
+    e.put_bytes(body).map_err(invalid)?;
+    Ok(e.finish())
 }

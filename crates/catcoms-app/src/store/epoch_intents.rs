@@ -31,6 +31,7 @@ pub const MAX_VAULT_INTENT_BYTES: u64 = 64 * 1024 * 1024;
 /// revisit after measurement, not a consequence of the format.
 pub(in crate::store) const MAX_VAULT_DRAFT_ARCHIVE_BYTES: u64 = 16 * 1024 * 1024;
 
+pub(super) mod disposal;
 pub(super) mod inspection;
 pub(super) mod overlay;
 mod retirement;

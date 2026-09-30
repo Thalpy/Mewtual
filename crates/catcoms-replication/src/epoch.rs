@@ -357,6 +357,26 @@ impl IntentLedger {
         self.remove_ids(operation_ids)
     }
 
+    /// Remove the entries of a local draft branch that is being disposed of. **Asserts neither
+    /// receipt finality nor a recovery copy**, because a disposal has neither.
+    ///
+    /// A third name for the same mechanism is deliberate: in this type the name *is* the assertion,
+    /// and the two existing removals both assert something a disposal cannot. `remove_receipted`
+    /// claims the entries are proven final, which they are not - nobody ever accepted them.
+    /// `remove_to_manual_recovery` claims the bounded recovery policy now owns the remaining copy,
+    /// which is false for a discarded draft, where by the user's explicit instruction no copy
+    /// remains, and misleading for a preserved one, where the copy is a draft archive rather than a
+    /// recovery record. Reaching for either would put a false claim at the call site, which is worse
+    /// than one more one-line wrapper.
+    ///
+    /// What the exclusive store caller must have established first: the requester authored the
+    /// branch, no transfer hold is live, the request names this exact branch and its content, and
+    /// **either** a durable draft archive for this exact branch exists **or** the user supplied the
+    /// typed discard confirmation. This helper performs no I/O and no authorization.
+    pub fn remove_disposed(&mut self, operation_ids: &BTreeSet<Hash32>) -> usize {
+        self.remove_ids(operation_ids)
+    }
+
     fn remove_ids(&mut self, operation_ids: &BTreeSet<Hash32>) -> usize {
         let before = self.intents.len();
         self.intents.retain(|id, intent| {

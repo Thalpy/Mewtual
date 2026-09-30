@@ -11,11 +11,16 @@ const MAX_METADATA: usize = 64 * 1024;
 const MAX_EXTENSION: usize = MAX_CHECKPOINT_BYTES + MAX_METADATA;
 
 pub(in crate::studio) mod archive;
+pub(in crate::studio) mod disposal;
 mod handoff;
 pub use archive::{StudioDraftArchive, StudioOverlayProvenance, MAX_STUDIO_DRAFT_ARCHIVE_BYTES};
+pub use disposal::{
+    StudioDiscardConfirmation, StudioDisposalDecision, StudioDisposalMode, StudioOverlayDisposal,
+};
 pub use handoff::{
     StudioHandoffAuthority, StudioHandoffCandidate, StudioHandoffEvidence, StudioHandoffOutcome,
-    StudioHandoffSigning, StudioOverlaySave, StudioOverlayState,
+    StudioHandoffSigning, StudioOverlayAdmission, StudioOverlayRequestClass, StudioOverlaySave,
+    StudioOverlayState,
 };
 
 #[derive(Clone)]
@@ -188,6 +193,23 @@ impl StudioOverlay {
     }
     pub fn contains(&self, id: &[u8; 32]) -> bool {
         self.entries.iter().any(|e| &e.id == id)
+    }
+    /// How many operations this branch has accepted.
+    ///
+    /// Surfaced because a disposal request carries the count the user was shown, and comparing it is
+    /// a distinct check from comparing the content hash: equal hashes with an unequal count would
+    /// mean the caller and the vault disagree about size despite agreeing about content, which is a
+    /// bug in the caller rather than a race, and it deserves to be reported as one.
+    pub fn accepted(&self) -> usize {
+        self.entries.len()
+    }
+    /// Whether this branch's nested basis carries no installed-source identity.
+    ///
+    /// An `Unconfirmed` branch has no installed source, so these must be canonically zero rather
+    /// than merely unread: the nested v1 basis blob is untouched by the outer v3 record, so a
+    /// nonzero value there would be a source claim nothing had authorised.
+    pub(in crate::studio) fn has_zero_source_identity(&self) -> bool {
+        self.base.source_id == 0 && self.base.source_version == [0; 32]
     }
     /// Exact saved acceptance can be acknowledged after source replacement, without minting
     /// a fresh basis or allowing an append. Full envelope equality is required independently.

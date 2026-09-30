@@ -21,12 +21,26 @@ Review preamble: [preamble 2](GATE4-REVIEW-PREAMBLES.md#review-2-manualprovision
 | Revision 6 base | `f2257b018d396a835529742c40d4b282bbc127d9` |
 | Revision 6 head, **accepted** | `a6d8170f6ab1f0d46287808fc8051ac2a387521c` |
 | Revision 7 head SHA | `7d98baf`. Refinements only; no reviewed decision changes. |
-| Working checkout | main repository tree. Revision 2 was committed on branch `gate4-agent1-runtime`, which a parallel Agent 1 session had checked out; the user asked for no branch change. The design content is branch-independent, but Agent 4 should expect to move these two documents when the branches are integrated. No separate worktree yet; one is taken before any production edit. |
-| Production code | **None written.** |
-| Tests added | **None.** |
-| Cargo commands executed | **None.** No local or CI run exists for this scope. |
-| Measurements | **None.** Every number in the design is an existing bound read from source, not an observation. |
+| Working checkout | `gate4-agent1-runtime`, main repository tree, by the user's decision that everything goes on one branch for now. **No separate worktree**: the shared `target` is ~138 GB and a second one was judged unaffordable at the time. What replaced it is a private `CARGO_TARGET_DIR` at `M:/catcoms-agent2-target`, taken because the other agents' test binaries hold `catcoms_app-*.exe` open and fail the link. Agent 4 should expect to move these two documents at integration. |
+| Production code | **Written, for the archive family only.** The payload codec, the reference collector, the record writer with its accounting and sub-cap, the `archive_bytes` tally, and the release path. Nothing else in this scope exists. |
+| Tests added | 26 in `epoch_studio::tests::rotation::overlay::archive`, 10 in `catcoms-replication`'s archive module, 2 in `epoch_intents::retirement`. |
+| Cargo commands executed | Yes; see the mutation ledgers below. **Every run used `RUST_MIN_STACK=33554432`**, a workaround for a stack regression at HEAD and not a clean default-stack result. |
+| Measurements | Still **none**. Every number in the design remains an existing bound read from source. The mutation ledgers are executed evidence, not measurements. |
+| CI status | **None.** No reviewed commit has an attached GitHub check; all pass/fail evidence in this document is reported local evidence. |
 | Native commands registered | **None by Agent 2.** `studio_overlay_read` remains the only registered overlay command, unchanged. |
+
+**This table was stale and Agent 1 caught it.** It said production code: none, tests: none, cargo
+commands: none, while `0287910`, `6e1551c`, `47bad73`, `2dba8fa`, `28bb73d` and `466a372` were all
+already committed. It had not been revised since the design was accepted, because the implementation
+progress was being appended further down the document instead. Two rows are worth separating
+carefully, because they are different claims and only one was wrong:
+
+- The **P1 to P4 rows** below saying "designed, accepted, unimplemented" are **correct**. The
+  manual lifecycle, the hold-variant mapping, the native results and the tenure contract are not
+  the archive plumbing, and none of them exists.
+- **P5 remains FALSE.** Correcting this table is not permission to promote it. `studio_overlay_save`
+  stays unregistered until the required implementation reviews are complete and this document says
+  so explicitly.
 
 ## Agent 1's registration prerequisites (its section 12.3)
 
@@ -531,16 +545,173 @@ and it appeared with the C-3 parked-cursor work. Agent 2 is not fixing this: it 
 Slice 3's own evidence was taken at `RUST_MIN_STACK=33554432`, and **that is a workaround, not a
 result** - any later claim that this scope is green must say which stack size it used.
 
+### Slice 4A: the disposal manifest and the v3 extension arm
+
+The replication half of the disposal transaction, at `e6f4a0d`. The store transaction enforcing
+D1-D6 is next; this is the state rebuild it calls.
+
+What is worth recording beyond the commit message:
+
+- **The manifest can coexist with a live branch.** `validate` deliberately does **not** require
+  `active` to be absent when `disposed` is set. A new branch started after a disposal is exactly
+  the `Disposed` classification case, where a request is checked against the retained
+  acknowledgement. Requiring absence would have looked tidier and broken that.
+- **The version byte is evidence, not a stamp.** 3 only when a disposal is present, so every vault
+  that never had one re-encodes byte-identically and keeps passing its own canonical re-encode
+  check. Both halves are enforced on decode: v3 must carry a manifest, v2 must not. Without the
+  second half the byte would be advisory and a v2 record with trailing bytes would decode as a
+  disposal.
+- **`dispose` returns the removed ids** rather than letting the store recompute them. Two
+  derivations of "which ids went away" is how an entry ends up charged to a branch that no longer
+  exists.
+- **No test-only constructor was added.** The transfer-hold case drives the real preparation path
+  to get a genuine `Prepared` state; the unreplayable case states its property on the manifest
+  builder, where the structural-entries guarantee actually lives, rather than inventing a way to
+  wrap a bare overlay into a state.
+- **`branch_content` is a production accessor, not a test hook.** A disposal request has to carry
+  the content the user saw, so something has to expose it; making callers re-derive the hash is the
+  second representation that lets a request name work the user never saw.
+
+**Recorded debt from this slice:** `put_target`/`get_target` are now defined **twice**, in
+`handoff.rs` and `archive.rs`, and verified byte-identical. That is one fact stored twice - the
+same shape as two findings already raised in this scope. Disposal deliberately did **not** add a
+third copy (it imports handoff's), but collapsing archive's onto the shared pair is outstanding and
+should be its own small commit so it is independently reviewable.
+
+### Slice 4B reordered, and a gap in 4A found while planning it
+
+**The disposal store transaction is blocked on the lifecycle classifier, so the classifier goes
+first.** D3 requires `request.branch` to equal the **durable** `branch_id()`, which is
+`H(domain, basis fingerprint, branch_generation)` (design 6.6). `branch_generation` has no durable
+home yet: it arrives with `admit_new_branch` in the classifier slice. Without it, D3's branch half
+could only be enforced against a generation supplied by the caller, which is not a check at all -
+a request would be authorising itself. Building an authorization rule with a known hole in it, even
+a documented one, is worse than building the prerequisite first.
+
+**The gap in slice 4A:** design 5.1's extension encoding lists `u64 branch_generation`, and the v3
+arm I just landed does **not** carry it. That is my omission, not a design change. It is currently
+free to fix, because nothing writes a v3 record outside its own tests: there is no production
+caller of the disposal transaction and no native command. So `branch_generation` folds into the v3
+arm during the classifier slice rather than minting a v4. **This must happen before any production
+path can write a v3 record**, or the format is released incomplete and the fix costs a version.
+
+Three invariants from design 5.1 that the classifier slice owes, recorded here so they are not
+rediscovered: `disposed.generation <= branch_generation`; `branch_generation >= 1`; and
+`active.generation > disposed.generation`, which is implied by `branch_id` construction and must
+also be asserted rather than assumed.
+
+**Also landed for 4B, independently:** `IntentLedger::remove_disposed`. A third name over the same
+`remove_ids` mechanism, added deliberately because in that type the name *is* the assertion and both
+existing removals assert something a disposal cannot. `remove_receipted` claims the entries are
+proven final; nobody ever accepted them. `remove_to_manual_recovery` claims the bounded recovery
+policy owns the remaining copy; for a discarded draft no copy remains by the user's explicit
+instruction, and for a preserved one the copy is a draft archive, not a recovery record. Reusing
+either would have put a false claim at the call site.
+
+### Fable adversarial reviews, round 1: slice 4A and the typed reader
+
+Two reviews, at the user's instruction to review each commit.
+
+**Slice 4A (`6eeca185`): CHANGES REQUIRED, nine findings, all correct.** Addressed at `85b394ae`.
+The one behavioural defect: design 5.1 lists three validation additions and I implemented two. The
+missing rule is that **no id may occur in both terminal manifests**, and the reviewer byte-crafted a
+record proving `completed_retry` and `disposed().contains()` can both answer truthfully for the same
+id - the state `classify_request` says cannot exist. `dispose` retaining `completed` is what makes
+the coexistence possible, so the rule belonged in this slice. My comment saying "the same two rules
+the transferred manifest obeys" was accurate about what was copied and silent about what was
+dropped.
+
+The rest were honesty and test-quality failures, each real:
+
+- The v3 layout is narrower than design 5.1's (no `branch_generation`, no provenance byte, mandatory
+  rather than optional disposal block), and a comment asserted a contract I already intended to
+  change. It now says the layout is **provisional**.
+- `dispose` records `branch`, `generation` and `provenance` verbatim and cannot corroborate any of
+  them - a Closing branch could be labelled `Unconfirmed` - and the doc comment claimed the rebuild
+  was validated. Stated plainly now.
+- **Three tests passed for the wrong reason.** The backward-compatibility test asserted one byte, and
+  a symmetric trailing-byte change to the v2 layout left everything green; it now assembles the whole
+  expected sequence. The retired-set oracle could not distinguish the branch's ids from every pending
+  id; a never-appended intent now separates them. And test 7 justified using the manifest builder by
+  claiming a state around a bare overlay needed a test-only constructor - **false**, and worth
+  recording as the second time I have asserted a fixture was expensive without checking:
+  `decode_vault_structural` produces one through production code.
+
+**The typed reader (`b0b28dbb`): PASS, three Lows.** Addressed at `e5bd98d9`. The valuable one: the
+sealed-scope comparison and the trailing-bytes check had no test, and the scope one carries a real
+hazard - `seal` takes no AAD, so nothing binds an archive's ciphertext to its filename except the
+plaintext prefix, and `LogicalDocument` equality excludes the local `server`, so the document binding
+does not cover a cross-slot copy.
+
+Writing that test corrected an assumption of my own: **a reference scan is not defended by this
+guard.** It refuses earlier, by the inventory's filename-against-authenticated-scope rule. My first
+version asserted the scan beside the addressed readers, which would have read as coverage of one
+guard while exercising another. They are now two tests named for what actually refuses each.
+
+### Process fix: commit before mutating
+
+`git checkout -- <file>` ate uncommitted work **three times** this session, most expensively the six
+review fixes to `handoff.rs`, which had to be reapplied from scratch. Mutation testing requires a
+committed baseline; the restore step is not compatible with holding unrelated edits in the same
+file. **Commit the fix, then mutate, then restore.** Both rounds above now follow that order.
+
+### Slice 5 and its review: the classifier, and a High worth understanding
+
+The lifecycle classifier landed at `8ceb23bd`; the disposal store transaction (D1-D6) at the same
+time in the app crate. The fable review of the classifier returned **CHANGES REQUIRED with a genuine
+High**, fixed at `a4156a5a`.
+
+**The High: the generation was caller-supplied and there were two minting paths.**
+`StudioOverlayAdmission` is a public enum with a public field, so any caller can build
+`New { generation }` for any value, and `new_admitted` stored whatever it was handed. The reviewer
+demonstrated both consequences: a skipped generation became durable, and **fabricating generation 1
+on a post-disposal vault produced a live branch sharing the disposed branch's identity**, after
+which `classify_request` answered `Active` for a branch that had been destroyed. That is exactly the
+failure the namespace exists to prevent, reached with no tampering at all.
+
+Separately, `append` minted a branch whenever `active` was `None` and did **not** increment - so the
+first Save after a transfer or a disposal reused the old generation and inherited its identity. That
+one is on the ordinary product path.
+
+Both now route through `next_generation()`, one definition used by all three callers. The increment
+had been written in one place and *trusted* in another, which is the same two-representations shape
+that has produced most of the findings in this scope.
+
+Worth recording the decision on `append`: **refusing was the wrong fix.** The first Save after a
+handoff is an ordinary thing for a user to do and must work; incrementing makes it correct rather
+than impossible, and the id it produces is the one `begin` would have offered the client.
+
+**The same wrong assertion, twice.** Writing these tests I twice asserted that a disposed branch's
+id should classify as `Unmatched` on a later state. It should not: the retained manifest still
+legitimately acknowledges it, and that is what the manifest is *for*. The property is that it must
+not resolve to the **live** branch. The code was right both times.
+
+**Stated as untested, with the reason.** Two of `validate`'s generation rules -
+`disposal.generation <= branch_generation`, and a live branch beside a disposal being strictly later
+- have no test. Both need a record carrying a manifest *and* a mismatched generation, and the
+manifest is a variable-length block after the field, so reaching them means byte surgery that
+restates the layout or a test-only setter on the state. For decode-path defences that no production
+path can violate, an honest gap beats either. The `>= 1` rule *is* tested, because the no-disposal
+v3 shape puts the generation in the last ten bytes and needs no guesswork.
+
+I also abandoned a first attempt at those tests that had drifted into offset arithmetic with dead
+helpers and a `bump_generation_for_test` mutator - the back door this scope has avoided throughout.
+Deleting it was the right call.
+
 ### Built so far
 
 The payload codec, the reference collector that narrows Agent 1's fail-closed arm under I-5, the
 archive record writer with its accounting and sub-cap, the archive tally on `EpochIntentBudget`,
-and **the archive release path** (slice 3).
+**the archive release path** (slice 3), **the disposal manifest with its v3 extension arm** (slice
+4A), the **typed archive reader**, `IntentLedger::remove_disposed`, **the lifecycle classifier**
+(`branch_generation`, `provenance`, `branch_id`, `classify_request`, `admit_new_branch`,
+`new_admitted`, the completed v3 layout) and **the disposal store transaction** with D1-D6.
 
 ### Not yet built
 
-The disposal transaction (which is the writer's first production caller), the v3 record arms, the
-composite copy capture, the lifecycle classifier, the tenure work and every native command.
+The composite copy capture, the tenure work (`OwnerTenure::joined`, the `Position` leaf identity,
+the `catcoms-mls` receive-side M-1 rule, the v1 migration via `Imported`, V1-V8) and every native
+command. The mutation script and the `studio-overlay` `lifecycle` CI job are also still unwritten.
 
 **Sections above this point are an append-only ledger and are dated.** Where an earlier entry
 says something is not yet built, read it as the state at that entry's date, not as current

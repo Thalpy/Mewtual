@@ -427,7 +427,9 @@ impl StudioReceiver {
         // fallback that was meant to catch it, `sign_next` refusing, never runs on a priority
         // turn, because `sign_slice` yields before it signs.
         let live_mls = server.sync.with_registry_context(|g, _, _, _| g.epoch());
-        if server.sync.observed_owner_tenure_start() != Some(tenure) || live_mls != mls {
+        // Authoring: this job exists to SIGN a handoff, so the authority it needs is the authoring
+        // one. An `Imported` tenure must abandon the job rather than let it keep signing.
+        if server.sync.authoring_owner_tenure_start() != Some(tenure) || live_mls != mls {
             self.handoff.abandon(server.runtime_clock().monotonic_ms());
         }
     }
@@ -555,7 +557,7 @@ impl StudioReceiver {
 
         // A transfer needs a live tenure to mint its authority. Without one there is nothing to
         // capture, and the reservation is released by dropping `ownership` on return.
-        let Some(tenure) = server.sync.observed_owner_tenure_start() else {
+        let Some(tenure) = server.sync.authoring_owner_tenure_start() else {
             self.handoff.hold_target(target, now);
             return;
         };
@@ -632,7 +634,7 @@ impl StudioReceiver {
         if self.handoff.remaining() == Some(0) {
             return None;
         }
-        let tenure = server.sync.observed_owner_tenure_start()?;
+        let tenure = server.sync.authoring_owner_tenure_start()?;
         // Per-visit wrapper reauthentication, before the first `sign_next` of the slice.
         //
         // Design 6.1's stage table puts this at H3, and `sign_next`'s live-authority recheck is
@@ -737,7 +739,7 @@ impl StudioReceiver {
         let HandoffStage::Ready(commit, ownership) = job.stage else {
             unreachable!("can_commit checked the stage")
         };
-        let tenure = server.sync.observed_owner_tenure_start();
+        let tenure = server.sync.authoring_owner_tenure_start();
         let committed = server.sync.with_registry_context(|group, device, _, rng| {
             store.commit_studio_handoff(
                 id,

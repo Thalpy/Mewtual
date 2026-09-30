@@ -1854,6 +1854,82 @@ mod tests {
         assert!(!std::sync::Arc::ptr_eq(&before, &third));
     }
 
+    /// A parked cursor refuses on **any** guard rotation, whatever family caused it.
+    ///
+    /// This is what makes N17's per-family matrix a matrix of *writer* obligations rather than of
+    /// cursor ones. `check_not_invalidated` compares one thing - `Arc::ptr_eq` between the
+    /// cursor's captured generation and the store's current one - and that comparison carries no
+    /// family information at all. So a cursor cannot refuse for Recovery and fail to refuse for
+    /// DraftArchive: either the writer rotated the token or it did not.
+    ///
+    /// Driven by the guard alone, with **no family writer involved**, because that is the whole
+    /// point. The other cursor tests each drive a real writer and therefore prove two things at
+    /// once - that the writer rotates, and that the cursor refuses. Separating them says which
+    /// half a new family actually needs: only the first.
+    ///
+    /// Concretely, this retires a gap this ledger recorded wrongly. "DraftArchive is not covered
+    /// by N17" was read as needing a sixth parked-cursor test. It does not. What DraftArchive
+    /// needs is a rotation assertion on its *writer* - its release path already has one - and the
+    /// cursor side follows from here for that family and every future one.
+    #[test]
+    fn a_parked_cursor_refuses_after_a_bare_guard_rotation_with_no_family_writer() {
+        let root = tempfile::tempdir().unwrap();
+        let mut store = open(root.path());
+        let doc = document(b"group", b"agnostic");
+        stage(&mut store, 7, &doc, 1);
+
+        let mut cursor = store
+            .begin_epoch_storage_scan(EpochInventoryCoverage::RecoveryOnly)
+            .unwrap();
+        store
+            .step_epoch_storage_scan(&mut cursor, 1, None)
+            .expect("control: a fresh cursor steps");
+
+        // The rotation, with nothing written. No record changes on disk; only the token moves.
+        store.epoch_mutation_guard();
+
+        let refused = store
+            .step_epoch_storage_scan(&mut cursor, 1, None)
+            .expect_err("a cursor whose token was rotated must refuse to resume");
+        // The invalidation refusal, which is a *different* message from the rail-violation one.
+        // A cursor that hit an accounting rail is poisoned and says "restart required"; a cursor
+        // overtaken by a mutation says this. Asserting the wrong one would let a rail bug
+        // masquerade as an invalidation, and this test would still pass.
+        assert!(
+            refused
+                .to_string()
+                .contains("invalidated by a concurrent record mutation"),
+            "unexpected refusal: {refused}"
+        );
+        // Discriminated, not merely `is_err()`. `finish_with` refuses an incomplete scan whether
+        // or not it was invalidated, and this cursor stepped once over a multi-entry directory -
+        // so a bare `is_err()` here holds with the invalidation check deleted. That is precisely
+        // the "a different refusal masquerading" failure the message assertion above exists to
+        // avoid, and the first version of this test committed it two lines later.
+        let at_finish = store
+            .finish_epoch_storage_scan(cursor)
+            .expect_err("a cursor refused at step must also refuse to issue an inventory");
+        assert!(
+            at_finish.to_string().contains("invalidated"),
+            "finish refused for the wrong reason, so this would pass with the invalidation check \
+             removed: {at_finish}"
+        );
+
+        // And the positive control: without a rotation the same sequence completes, so the
+        // refusal above is attributable to the guard and not to the fixture or the step count.
+        let mut quiet = store
+            .begin_epoch_storage_scan(EpochInventoryCoverage::RecoveryOnly)
+            .unwrap();
+        while !store
+            .step_epoch_storage_scan(&mut quiet, 1, None)
+            .expect("no rotation, so no refusal")
+            .complete
+        {}
+        store
+            .finish_epoch_storage_scan(quiet)
+            .expect("an uninterrupted cursor issues its inventory");
+    }
+
     /// N17's per-family obligation, for the families converted so far.
     ///
     /// The guard test above proves the mechanism; this proves the mechanism is actually *on* the

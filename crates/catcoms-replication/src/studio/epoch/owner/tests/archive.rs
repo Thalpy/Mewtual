@@ -13,7 +13,7 @@ use crate::{IntentLedger, MAX_CHECKPOINT_BYTES};
 /// A real accepted branch: real Closing basis, real ledger, real typed acceptance. Returns the
 /// branch, its ledger, and the authored (body, timestamp) pairs in acceptance order.
 #[allow(clippy::type_complexity)]
-fn branch(
+pub(super) fn branch(
     f: &mut Fixture,
     count: usize,
 ) -> (
@@ -143,7 +143,7 @@ fn draft_archive_base_references_match_the_live_branch() {
 /// rather than shared because `handoff.rs` is a sibling test module whose helpers are private,
 /// and because this branch is rebased often enough that cross-file edits cost more than the
 /// duplication does. If that fixture's framing changes, this one must follow.
-fn unreplayable_branch(f: &mut Fixture) -> (StudioOverlay, IntentLedger) {
+pub(super) fn unreplayable_branch(f: &mut Fixture) -> (StudioOverlay, IntentLedger) {
     f.fill();
     let decision = f.decide(None);
     let _plan = f.plan(&decision);

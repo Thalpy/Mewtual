@@ -20,7 +20,7 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
         basis: [u8; 32],
         budget: &mut EpochStudioBudget,
     ) -> Result<StudioHandoffOutcome, AppError> {
-        let tenure = self.sync.observed_owner_tenure_start();
+        let tenure = self.sync.authoring_owner_tenure_start();
         self.sync.with_registry_context(|group, device, _, rng| {
             store.handoff_studio_overlay(server, group, target, device, basis, tenure, rng, budget)
         })
@@ -34,7 +34,7 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
         close: &CloseRecord,
         budget: &mut EpochStudioBudget,
     ) -> Result<StudioClosingOverlayBasis, AppError> {
-        let tenure = self.sync.observed_owner_tenure_start();
+        let tenure = self.sync.authoring_owner_tenure_start();
         self.sync.with_registry_context(|group, device, _, _| {
             store.prepare_studio_closing_overlay(
                 server, group, target, device, close, tenure, budget,
@@ -54,7 +54,7 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
         operation: DomainOp,
         budget: &mut EpochStudioBudget,
     ) -> Result<StudioOverlaySave, AppError> {
-        let tenure = self.sync.observed_owner_tenure_start();
+        let tenure = self.sync.authoring_owner_tenure_start();
         self.sync
             .with_registry_context(|group, device, clock, rng| {
                 store.save_studio_closing_overlay(

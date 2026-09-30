@@ -49,7 +49,9 @@ pub enum StudioOverlayProvenance {
     },
 }
 impl StudioOverlayProvenance {
-    fn tag(&self) -> u8 {
+    /// Widened for the disposal manifest, which carries the same provenance and must not restate
+    /// the mapping. Its decode side matches the literals explicitly, exactly as this module's does.
+    pub(in crate::studio) fn tag(&self) -> u8 {
         match self {
             Self::Closing => 0,
             Self::Unconfirmed { .. } => 1,
@@ -203,6 +205,39 @@ impl StudioDraftArchive {
     }
     pub fn accepted(&self) -> usize {
         self.entries.len()
+    }
+
+    /// Whether this archive's preserved entries are **exactly** a branch's, compared by id,
+    /// envelope, sequence and timestamp, in saved order.
+    ///
+    /// This is D4's full-envelope match, and it exists because comparing `content()` would not do
+    /// the job. `content` is a field this archive *claims*, not a digest recomputed from the entries
+    /// it actually stores, so an archive whose stored entries had drifted from its own content hash
+    /// would still pass a content comparison. Two representations of the same fact, checked against
+    /// each other rather than one against the branch, is exactly the shape that lets a preserving
+    /// disposal destroy a branch on the strength of evidence that does not contain it.
+    ///
+    /// Compared against `checked_entries`, which is structural, so an unreplayable branch can still
+    /// be matched against its own archive.
+    pub fn matches_branch(
+        &self,
+        active: &StudioOverlay,
+        ledger: &IntentLedger,
+    ) -> Result<bool, ReplError> {
+        let branch = active.checked_entries(ledger)?;
+        if branch.len() != self.entries.len() {
+            return Ok(false);
+        }
+        Ok(branch
+            .iter()
+            .zip(&self.entries)
+            .all(|((entry, intent), archived)| {
+                entry.id == archived.id
+                    && entry.envelope == archived.envelope
+                    && entry.sequence == archived.sequence
+                    && entry.ts == archived.ts
+                    && intent.author == archived.author
+            }))
     }
     /// The exact checkpoint bytes this branch was based on. Local vault content the caller is
     /// already holding as the encoded payload, surfaced because reading an archive back is the
