@@ -578,6 +578,36 @@ same shape as two findings already raised in this scope. Disposal deliberately d
 third copy (it imports handoff's), but collapsing archive's onto the shared pair is outstanding and
 should be its own small commit so it is independently reviewable.
 
+### Slice 4B reordered, and a gap in 4A found while planning it
+
+**The disposal store transaction is blocked on the lifecycle classifier, so the classifier goes
+first.** D3 requires `request.branch` to equal the **durable** `branch_id()`, which is
+`H(domain, basis fingerprint, branch_generation)` (design 6.6). `branch_generation` has no durable
+home yet: it arrives with `admit_new_branch` in the classifier slice. Without it, D3's branch half
+could only be enforced against a generation supplied by the caller, which is not a check at all -
+a request would be authorising itself. Building an authorization rule with a known hole in it, even
+a documented one, is worse than building the prerequisite first.
+
+**The gap in slice 4A:** design 5.1's extension encoding lists `u64 branch_generation`, and the v3
+arm I just landed does **not** carry it. That is my omission, not a design change. It is currently
+free to fix, because nothing writes a v3 record outside its own tests: there is no production
+caller of the disposal transaction and no native command. So `branch_generation` folds into the v3
+arm during the classifier slice rather than minting a v4. **This must happen before any production
+path can write a v3 record**, or the format is released incomplete and the fix costs a version.
+
+Three invariants from design 5.1 that the classifier slice owes, recorded here so they are not
+rediscovered: `disposed.generation <= branch_generation`; `branch_generation >= 1`; and
+`active.generation > disposed.generation`, which is implied by `branch_id` construction and must
+also be asserted rather than assumed.
+
+**Also landed for 4B, independently:** `IntentLedger::remove_disposed`. A third name over the same
+`remove_ids` mechanism, added deliberately because in that type the name *is* the assertion and both
+existing removals assert something a disposal cannot. `remove_receipted` claims the entries are
+proven final; nobody ever accepted them. `remove_to_manual_recovery` claims the bounded recovery
+policy owns the remaining copy; for a discarded draft no copy remains by the user's explicit
+instruction, and for a preserved one the copy is a draft archive, not a recovery record. Reusing
+either would have put a false claim at the call site.
+
 ### Built so far
 
 The payload codec, the reference collector that narrows Agent 1's fail-closed arm under I-5, the
