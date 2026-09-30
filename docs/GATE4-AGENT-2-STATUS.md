@@ -724,7 +724,7 @@ Against the design's own list (design 6.2). No command on this list enables Save
 
 | Command | State |
 |---|---|
-| `studio_overlay_read` | Pre-existing. The section 11 extension is **not** applied |
+| `studio_overlay_read` | Pre-existing. The section 11 extension **is** applied at `bfce900e`, minus `eligibility`/`manualReason`/`unconfirmedState`, which are P2's `StudioOverlayHold` and do not exist in the tree, and `archived`, which `studio_overlay_lifecycle` answers from the record that holds it |
 | `studio_overlay_lifecycle` | **Landed** `35236b0b`, reshaped by review at `d92f8980` |
 | `studio_overlay_export` | **Landed** `9be5a6e7` |
 | `studio_overlay_archive` | **Landed** `d92f8980`. Before it, the Preserve arm of disposal was unreachable from the UI: nothing outside `cfg(test)` could create an archive, so D4 always refused |
@@ -742,7 +742,7 @@ addition.
 
 ### Not yet built
 
-The section 11 `studio_overlay_read` extension, and **V1-V8, the live-tenure contract itself** -
+**V1-V8, the live-tenure contract itself** -
 see the P4 row above for why the slice 7 mechanism is not that contract.
 
 One design deviation, recorded rather than left silent: design 5.3 lists
@@ -883,6 +883,65 @@ fixture at all. The fix is believed correct and is modelled directly on recovery
 destination fixture in the desktop tests or a store-backed copy fixture in the app crate.
 
 That is now the single largest known hole in this scope's evidence, and it guards a durable write.
+
+### The evidence audit: "every guard has a failing mutant" was FALSE
+
+A full per-test audit ran 25 hand mutations over this scope. Its central result overturns a claim
+this document made:
+
+> **"Every guard has a failing mutant" is false at the store disposal layer.** Six guards there can
+> be deleted with the whole 105-test overlay suite still green.
+
+They survive because a *later* guard refuses the same input first. That is not redundancy being
+harmless: it means each of these can be deleted, or silently stop working, and nothing will say so.
+
+| Guard | Mutation that survives | Why it is masked | Severity |
+|---|---|---|---|
+| `disposal.rs:72-77` D1 membership | delete the check | the stranger in its test is also not the author, so D1-authorship refuses | **High** |
+| `disposal.rs:221-229` D4 content/branch/generation | delete the triple | `matches_branch` refuses instead | **High** |
+| `copy.rs:143-165` `probe_copy_object` | force `Ok(true)` | nothing else checks it; no fixture reaches it | **High** |
+| `disposal.rs:81-83` D1 target derivation | delete | document binding refuses | Medium |
+| `disposal.rs:161` D2 store-level transfer hold | delete | replication's own `dispose` refuses | Medium |
+| `disposal.rs:173` D3 content, store level | delete | replication `dispose` refuses with `IntentConflict`; only the **desktop** message test catches it | Medium |
+| `epoch_draft_archive.rs:191` record bound | delete | nothing; 32/32 still pass | Medium |
+| `disposal.rs:256` D6 ledger-count mismatch | delete | no fixture reaches it | Low, defensive |
+| `copy_capture.rs:368-369` `stamp.server`/`target` | delete both | document derivation and a `None` read refuse | Low, redundant |
+
+**The D4 row is the one to fix first.** Its own comment says the generation compare is the only
+thing that catches an archive of a *previous generation* whose entries and content are identical -
+and that case has no test at all. Of the three Highs, it is the one where the masking guard does not
+cover the same ground.
+
+Two more vacuous tests of mine, beyond those already recorded:
+
+- `a_preserving_disposal_refuses_an_archive_for_another_branch` proves `matches_branch`, not the
+  metadata triple it is named for.
+- `d3_refuses_a_wrong_branch_a_wrong_content_and_a_wrong_count_separately` is not "separately" for
+  the content case; only the desktop test's message assertion distinguishes it.
+
+**And a caveat about the harness itself:** it runs each mutation with `--exact`, so siblings never
+execute and the script does **not** check isolation. Isolation rests on the hand-runs behind each
+entry. `release-scope-binding`'s expected string also matches both assertions in its test, and the
+typed reader fires first, so the release path's own scope refusal is never executed under that
+mutation.
+
+The audit's full UNVERIFIED list - archive A4-A13, copy_capture M15-M17, desktop D2-D8, restore
+P1-P12, tenure T1-T3, sync S1-S8, replication R1-R11 - is the queue for whoever picks this up,
+each with the exact mutation to apply.
+
+### Verified at `a0803080`
+
+Run in a detached worktree, because the main tree cannot link (see below).
+
+| Suite | Result |
+|---|---|
+| `cargo test -p catcoms-sync --lib owner_tenure` | **11 passed** |
+| `cargo test -p catcoms-replication --lib studio::` | **136 passed** |
+| `cargo test -p catcoms-app --lib studio` | **317 passed**, 6 ignored |
+
+That discharges the "compiled but unexecuted" caveat on `3cb073bf`, `ed8ab0a8`, `1c1a454d` and
+`a0803080`. The independent audit separately measured 222 app / 45 desktop at `288bb30c` and ran the
+mutation harness end to end: **9 detected, 9 restored runs passing**.
 
 ### Blocked: the app crate cannot link
 
