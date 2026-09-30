@@ -52,7 +52,7 @@ which stopped being true at slice 6. It is now per-row, and no row has reached t
 
 | Prerequisite | State | Where |
 |---|---|---|
-| P1 reviewed manual lifecycle: inspect, export, copy-into-current, explicit disposition, lossless across restart and refusal | **Partially implemented, three verbs of four.** Inspect pre-dates this scope; export and explicit disposition are built end to end, and the preserving arm is reachable now that `studio_overlay_archive` exists. **Copy-into-current does not exist.** "Lossless across restart and refusal" is proven for disposal, archive and release; not for copy, which is not written | design 6.1-6.6, 12 |
+| P1 reviewed manual lifecycle: inspect, export, copy-into-current, explicit disposition, lossless across restart and refusal | **All four verbs implemented; NOT yet reviewed as a lifecycle.** Inspect pre-dates this scope; export, copy-into-current and explicit disposition are built end to end with the archive that makes the preserving arm reachable. What is missing for P1 is not code: "lossless across restart and refusal" is proven for disposal, archive and release by their own tests, and **not** proven for copy across a restart. The fable review of the copy work has not returned | design 6.1-6.6, 12 |
 | P2 every `StudioOverlayHold` variant mapped to a user-visible actionable state | **Design accepted**, unimplemented | design 7, 11 |
 | P3 truthful native results, events and UI-hooks rows | **Partially implemented.** Four of nine commands are registered and their views are truthful about provisionality, non-authority and required reconciliation. The UI-hooks rows are not updated and no row is published as available | design 11 |
 | P4 live-tenure contract, over `verification_owner_tenure_start()` and `authoring_owner_tenure_start()` | **Substrate implemented, contract not started.** Slice 7 built the *mechanism*: `OwnerTenure::joined`, the `Position` leaf identity, `ObservedOwnerTenure`, the M-1 receive rule, the v1 `Imported` migration and the two accessors. P4 names the *contract* over those accessors - V1-V8, with `require_observed_owner_tenure` refusing fail-closed at every authoring entry point. **That function does not exist and no app authoring call site consults either accessor** (verified by grep at `bbef5908`). N-T7b is undischarged | design 9.4 V1-V8, 9.3 part 5 A-1 |
@@ -717,7 +717,7 @@ identity, `ObservedOwnerTenure`, the `catcoms-mls` receive-side M-1 rule, the v1
 **the mutation harness** `.github/scripts/check-studio-overlay-lifecycle-mutations.py` and the
 `studio-overlay` `lifecycle` CI job; and **four of the nine native commands**.
 
-### Native commands: seven of nine
+### Native commands: nine of nine
 
 Against the design's own list (design 6.2). No command on this list enables Save, and
 `studio_overlay_save` remains unregistered.
@@ -730,8 +730,8 @@ Against the design's own list (design 6.2). No command on this list enables Save
 | `studio_overlay_archive` | **Landed** `d92f8980`. Before it, the Preserve arm of disposal was unreachable from the UI: nothing outside `cfg(test)` could create an archive, so D4 always refused |
 | `studio_overlay_archive_read` | **Landed** `35236b0b` |
 | `studio_overlay_archive_release` | **Landed** `35236b0b` |
-| `studio_overlay_copy_preview` | Not built |
-| `studio_overlay_copy_apply` | Not built |
+| `studio_overlay_copy_preview` | **Landed** `c4ce337d` |
+| `studio_overlay_copy_apply` | **Landed** `c4ce337d`, its test corrected at `0b7b6fcc` |
 | `studio_overlay_dispose` | **Landed** `35236b0b`, payload reshaped in `bbef5908` |
 
 **One command exists that the design does not list: `studio_overlay_archive_export`.** It exports
@@ -742,10 +742,39 @@ addition.
 
 ### Not yet built
 
-The composite copy capture (design 5.2) and the two-phase copy (6.3 C1-C4), including `PlanScope`,
-the planner's `source_ops` and `StudioInspectionPurpose::CopyPlan`; the section 11
-`studio_overlay_read` extension; and **V1-V8, the live-tenure contract itself** - see the P4 row
-above for why the slice 7 mechanism is not that contract.
+The section 11 `studio_overlay_read` extension, and **V1-V8, the live-tenure contract itself** -
+see the P4 row above for why the slice 7 mechanism is not that contract.
+
+One design deviation, recorded rather than left silent: design 5.3 lists
+`StudioInspectionPurpose::CopyPlan(choice)`, meaning the copy plan would be produced by the
+inspection rebuild. It is not. The plan is produced by `StudioOverlayCopyCapture::plan`, which owns
+both captures, because the copy plan needs the **destination's** bytes and those are not in the
+inspection capture at all. `StudioInspectionPurpose` exists with `Draft` and `Archive` only. The
+behaviour the design asked for is present; the seam it named is in a different place, for the same
+reason 5.2 itself was rewritten.
+
+### Mutation testing found three vacuous tests I wrote
+
+All three passed while proving nothing about the guard they named, and all three were caught by
+deleting the guard and watching the test stay green:
+
+1. A cross-document copy pointed at an **empty** foreign projection, asserting only `is_err()`. It
+   was failing at "missing recovery title", not at the scope check. With the check deleted the plan
+   comes back `Ready` - a foreign group's content copied into this document.
+2. An apply substituting the literal `"not what was proposed"` as a body. Refused while decoding
+   the operation.
+3. The same case substituting a **frame** body from a second preview. Refused by the blob rail with
+   "publish the frame PIX before saving its reference".
+
+The fix in each case was to make the input reach the guard: a foreign document with a real title of
+its own, and a substitute body that is an independently valid title operation. With the body guard
+deleted that body is now written - `contentSaved: true`, a renderer previewing one value and saving
+another.
+
+Asserting each refusal's **message** is what exposed the second wrong claim in the same test: a
+mismatched `epochId` never reaches the echo check at all, because the preflight that establishes the
+destination is the Open epoch the proposal was built for fires first. Three guards that all refuse
+is not three guards that each refuse for their own reason.
 
 ### Findings from the fable adversarial reviews, and what they cost
 
