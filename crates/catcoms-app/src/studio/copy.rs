@@ -128,6 +128,42 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
         })
     }
 
+    /// An `Object` put must name a Flipnote that actually exists, and only custody can tell.
+    ///
+    /// Recovery already refuses exactly this: an index entry proves nothing about its object, so a
+    /// dangling or differently scoped historical object must not be republished however well formed
+    /// the `PutObject` is. Copy reached `restore::plan` from the detached worker, which has no
+    /// store and therefore cannot probe, and neither C3 nor C4 put the probe back. The result was
+    /// an Index branch retained across Closing whose object had since been cleaned up: `Ready`,
+    /// applied, and a durable Index entry naming a source that does not exist.
+    ///
+    /// Run at C3 **and** C4 rather than once. At C3 it downgrades, so the user is told the target
+    /// is missing instead of being offered a copy that will fail; at C4 it refuses, because the
+    /// object can disappear between the two.
+    fn probe_copy_object(
+        store: &mut ServerStore,
+        server: u64,
+        group: &catcoms_mls::ServerGroup,
+        device: &catcoms_mls::MlsDevice,
+        plan: &StudioOverlayCopyPlan,
+    ) -> Result<bool, AppError> {
+        let StudioRecoveryItem::Object { id } = plan.choice().item else {
+            return Ok(true);
+        };
+        if plan.disposition() != StudioRecoveryDisposition::Ready {
+            return Ok(true);
+        }
+        let object = StudioTarget::Flipnote {
+            channel: plan.destination_target().channel(),
+            object: id,
+        };
+        Ok(store
+            .with_studio_source(server, group, object, device, |s| {
+                Ok(s.op_count() > 0 || s.epoch() > 0)
+            })?
+            .unwrap_or(false))
+    }
+
     /// The destination's scope, decided here rather than accepted from a caller.
     ///
     /// A renderer that could choose `CrossDocument` for a same-document copy would be choosing which
@@ -184,16 +220,20 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
     /// formed it is.
     pub(crate) fn finish_studio_copy_preview(
         &mut self,
-        store: &ServerStore,
+        store: &mut ServerStore,
         server: u64,
         source: StudioTarget,
         prepared: StudioPreparedCopy,
     ) -> Result<StudioOverlayCopyPreview, AppError> {
         let context = self.copy_context(source)?;
+        // The destination's channel is rechecked here too, not only at C1 and C4. A channel this
+        // device has left between the capture and the preview is not a channel it may still be
+        // offered a copy into.
+        self.copy_context(prepared.plan.destination_target())?;
         if !self.sync.matches_registry_instance(&prepared.instance) || context != prepared.context {
             return Err(invalid("overlay copy changed; preview again"));
         }
-        let plan = prepared.plan;
+        let mut plan = prepared.plan;
         let current = self.sync.with_registry_context(|group, device, _, _| {
             store.studio_copy_is_current(server, group, device, &plan)
         })?;
@@ -204,6 +244,11 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
         // Open check alone would let a proposal for one epoch land in its successor.
         if plan.phase() != EpochPhase::Open {
             return Err(invalid("Studio copy requires an Open destination epoch"));
+        }
+        if !self.sync.with_registry_context(|group, device, _, _| {
+            Self::probe_copy_object(store, server, group, device, &plan)
+        })? {
+            plan.hold(StudioRecoveryDisposition::MissingTarget);
         }
         Ok(StudioOverlayCopyPreview {
             source,
@@ -279,6 +324,14 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
                 || plan.body() != Some(&apply.body)
             {
                 return Err(invalid("copy choice is no longer Ready or body differs"));
+            }
+            // Refused rather than downgraded here: at C4 there is nothing left to offer the user,
+            // and an object that vanished between the preview and the apply is exactly the race
+            // this probe exists for.
+            if !Self::probe_copy_object(store, server, group, device, &plan)? {
+                return Err(invalid(
+                    "the object this copy would publish no longer exists; re-preview",
+                ));
             }
             Ok(false)
         })?;

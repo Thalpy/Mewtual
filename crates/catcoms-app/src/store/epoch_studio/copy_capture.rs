@@ -83,6 +83,12 @@ pub struct StudioOverlayCopyChoice {
 pub(crate) struct StudioOverlayCopyPlan {
     pub(in crate::store) source: StudioInspectionStamp,
     pub(in crate::store) destination: StudioDestinationStamp,
+    /// What the plan was asked for.
+    ///
+    /// Carried because C3 and C4 have to re-examine the **item** under custody: an `Object` put
+    /// needs an existence probe the detached worker cannot run, and a plan that did not remember
+    /// what it resolved could not be re-examined at all.
+    pub(in crate::store) choice: StudioOverlayCopyChoice,
     /// The destination's epoch identity at plan time. C3 and C4 require it unchanged and `Open`,
     /// because a proposal for one epoch is not a proposal for its successor.
     pub(in crate::store) epoch_id: u128,
@@ -125,11 +131,24 @@ impl StudioOverlayCopyPlan {
     pub(crate) fn original_author(&self) -> Option<DeviceId> {
         self.plan.original_author
     }
-    /// What the plan resolved. The choice that produced it is deliberately **not** stored: a
-    /// preview reports what it consumed rather than what it was asked for, and keeping the request
-    /// beside the result invites reporting the request when the result is what matters.
+    /// What the plan resolved, which is not the same as what it was asked for. A preview reports
+    /// this rather than the request.
     pub(crate) fn source_ops(&self) -> &[[u8; 32]] {
         &self.plan.source_ops
+    }
+    pub(crate) fn choice(&self) -> StudioOverlayCopyChoice {
+        self.choice
+    }
+    /// Downgrade a plan whose target turned out not to exist.
+    ///
+    /// Taken as a method rather than performed by the caller so the two fields that must move
+    /// together do: a held plan carries no body and no `source_ops`, because reporting ids for a
+    /// proposal that will not be offered would report work read on behalf of a refusal.
+    pub(crate) fn hold(&mut self, disposition: StudioRecoveryDisposition) {
+        self.plan.disposition = disposition;
+        self.plan.body = None;
+        self.plan.original_author = None;
+        self.plan.source_ops.clear();
     }
 }
 
@@ -220,6 +239,7 @@ impl StudioOverlayCopyCapture {
             phase: unit.phase(),
             source: source_stamp,
             destination: stamp,
+            choice,
             plan,
         })
         // No branch identity is carried, deliberately. The source stamp already requires the

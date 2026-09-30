@@ -83,16 +83,29 @@ impl StudioRecoveryPlan {
     }
     /// `source_ops` is taken as a slice at every call site so the ids come from the values the arm
     /// just resolved, in that arm, rather than being reconstructed afterwards from the item.
+    ///
+    /// **Deduplicated here, in order.** An `IndexRegister` with no explicit edit falls back to the
+    /// creating operation's own source, so a `PutObject` whose title and expiry were never
+    /// separately set resolves three registers that are all the birth op. Reporting that id three
+    /// times would say the proposal consumed three operations when it consumed one, and
+    /// `source_ops` claims to name exactly what was resolved. Order is preserved rather than
+    /// sorted, because the order is the order the arm read them in and that is information.
     fn ready(
         body: Result<Vec<u8>, catcoms_replication::ReplError>,
         author: crate::DeviceId,
         source_ops: &[[u8; 32]],
     ) -> Result<Self, AppError> {
+        let mut seen = Vec::with_capacity(source_ops.len());
+        for id in source_ops {
+            if !seen.contains(id) {
+                seen.push(*id);
+            }
+        }
         Ok(Self {
             disposition: StudioRecoveryDisposition::Ready,
             body: Some(body.map_err(invalid)?),
             original_author: Some(author),
-            source_ops: source_ops.to_vec(),
+            source_ops: seen,
         })
     }
 }

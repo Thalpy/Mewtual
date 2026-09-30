@@ -372,19 +372,37 @@ fn studio_restore_copy_count_predicate_matches_local_admission_even_for_a_playab
 /// and a selected expiry.
 #[test]
 fn studio_restore_source_ops_name_exactly_what_the_plan_resolved() {
+    // The frame is INSERTED and then REPLACED, so the pixels register and the insertion record have
+    // different op ids. With a single InsertFrame they coincide and "the pixels, not the insertion"
+    // is not a distinguishable claim - the shape a review caught this test in.
     let f = Fixture::new(false);
-    let old = f.projection(vec![insert(1, None, 1)]);
+    let old = f.projection(vec![
+        insert(1, None, 1),
+        FlipnoteOp::ReplaceFrame {
+            frame: [1; 16],
+            cid: [9; 32],
+            bytes: 21,
+        }
+        .encode()
+        .unwrap(),
+    ]);
     let empty = f.projection(vec![]);
     let StudioProjection::Flipnote(p) = &old else {
         panic!()
     };
-    let op = p.frames[&[1; 16]].pixels.selected.source.op_id;
+    let pixels = p.frames[&[1; 16]].pixels.selected.source.op_id;
+    let insertion = p.frames[&[1; 16]].insertions.first().unwrap().source.op_id;
+    assert_ne!(
+        pixels, insertion,
+        "the fixture must separate the two, or the assertion below is vacuous"
+    );
     let ready = f.plan(&empty, &old, frame(&old, 1), M::Copy);
     assert_eq!(ready.disposition, D::Ready);
     assert_eq!(
         ready.source_ops,
-        vec![op],
-        "a frame copy consumes the pixels register it resolved"
+        vec![pixels],
+        "a frame copy consumes the pixels register it resolved, and not the insertion whose \
+         position it merely read"
     );
 
     // A held plan consumed nothing, and must not report otherwise: carrying ids for a proposal that
@@ -393,17 +411,35 @@ fn studio_restore_source_ops_name_exactly_what_the_plan_resolved() {
     assert_eq!(unchanged.disposition, D::Unchanged);
     assert!(unchanged.source_ops.is_empty());
 
+    // An object whose title and expiry were SEPARATELY set, so the three registers have three
+    // distinct sources. With a bare PutObject they all fall back to the creating operation, and
+    // replacing all three ids with the birth op survives - which is how a review found this test
+    // proving nothing.
     let index = Fixture::new(true);
-    let old = index.projection(vec![IndexOp::PutObject {
-        object: [4; 16],
-        kind: StudioKind::Flipnote,
-        title: "old".into(),
-        created_by: index.device.device_id(),
-        ts: 123,
-        expiry: StudioExpiry::Never,
-    }
-    .encode()
-    .unwrap()]);
+    let old = index.projection(vec![
+        IndexOp::PutObject {
+            object: [4; 16],
+            kind: StudioKind::Flipnote,
+            title: "old".into(),
+            created_by: index.device.device_id(),
+            ts: 123,
+            expiry: StudioExpiry::Never,
+        }
+        .encode()
+        .unwrap(),
+        IndexOp::SetTitle {
+            object: [4; 16],
+            title: "retitled".into(),
+        }
+        .encode()
+        .unwrap(),
+        IndexOp::SetExpiry {
+            object: [4; 16],
+            expiry: StudioExpiry::Never,
+        }
+        .encode()
+        .unwrap(),
+    ]);
     let StudioProjection::Index(p) = &old else {
         panic!()
     };
@@ -413,6 +449,14 @@ fn studio_restore_source_ops_name_exactly_what_the_plan_resolved() {
         entry.title.selected.source.op_id,
         entry.expiry.selected.source.op_id,
     ];
+    assert_eq!(
+        expected
+            .iter()
+            .collect::<std::collections::BTreeSet<_>>()
+            .len(),
+        3,
+        "the fixture must give the three registers three distinct sources"
+    );
     let ready = index.plan(
         &index.projection(vec![]),
         &old,
@@ -423,6 +467,36 @@ fn studio_restore_source_ops_name_exactly_what_the_plan_resolved() {
     assert_eq!(
         ready.source_ops, expected,
         "an object put resolves three values, so it must report three ids"
+    );
+
+    // And when they are NOT separately set, all three registers fall back to the creating
+    // operation and the plan must report that one id once. Reporting it three times would say the
+    // proposal consumed three operations when it consumed one.
+    let bare = index.projection(vec![IndexOp::PutObject {
+        object: [5; 16],
+        kind: StudioKind::Flipnote,
+        title: "bare".into(),
+        created_by: index.device.device_id(),
+        ts: 123,
+        expiry: StudioExpiry::Never,
+    }
+    .encode()
+    .unwrap()]);
+    let StudioProjection::Index(p) = &bare else {
+        panic!()
+    };
+    let birth = p.objects[&[5; 16]].creations.first().unwrap().source.op_id;
+    let ready = index.plan(
+        &index.projection(vec![]),
+        &bare,
+        I::Object { id: [5; 16] },
+        M::Restore,
+    );
+    assert_eq!(ready.disposition, D::Ready);
+    assert_eq!(
+        ready.source_ops,
+        vec![birth],
+        "three registers backed by one operation are one consumed operation"
     );
 }
 
