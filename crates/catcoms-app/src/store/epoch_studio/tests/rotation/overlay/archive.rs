@@ -1346,6 +1346,120 @@ fn a_release_that_fails_after_the_unlink_still_closes_both_budgets() {
     );
 }
 
+/// The typed reader, and the one property that makes it load-bearing: **the identity it reports is
+/// the identity release accepts.**
+///
+/// Those are two derivations of "which archive is this" that a caller has to line up, and the whole
+/// point of computing the id inside the reader is that it cannot drift from the one the destructive
+/// path demands. A reader that returned, say, `content()` would look perfectly reasonable and make
+/// every release refuse.
+#[test]
+fn the_typed_reader_reports_the_identity_release_will_accept() {
+    let root = tempfile::tempdir().unwrap();
+    let f = Fixture::new(true);
+    let mut store = open(root.path());
+    let (close, basis) = closing(&f, &mut store);
+    frame_branch(&f, &mut store, &close, &basis);
+
+    assert!(
+        store
+            .read_studio_draft_archive(SERVER, &f.logical)
+            .unwrap()
+            .is_none(),
+        "no archive means None, not an error"
+    );
+
+    let written = preserve(&f, &mut store).expect("preserve");
+    let read = store
+        .read_studio_draft_archive(SERVER, &f.logical)
+        .unwrap()
+        .expect("the archive must read back");
+
+    assert_eq!(read.archive.document(), &f.logical);
+    assert_eq!(read.archive.accepted(), written.accepted());
+    assert_eq!(
+        read.id,
+        written.archive_id().unwrap(),
+        "the reader's identity must equal the archive's own"
+    );
+    let scope = crate::store::epoch_draft_archive::scope_bytes(SERVER, &f.logical).unwrap();
+    assert_eq!(
+        read.physical_bytes,
+        store
+            .read_scoped_draft_archive_plain(&scope)
+            .unwrap()
+            .unwrap()
+            .physical_bytes,
+        "the reported physical size must be the record's own"
+    );
+
+    // The load-bearing half: hand the reader's id straight to release. If the two derivations ever
+    // diverge, this refuses and nothing else in the suite would notice.
+    release(&f, &mut store, read.id).expect("the identity the reader reported must release");
+    assert!(store
+        .read_scoped_draft_archive_plain(&scope)
+        .unwrap()
+        .is_none());
+}
+
+/// A record that will not decode is an error, never `None`.
+///
+/// Collapsing "there is nothing here" into "there is something here I cannot read" would let a
+/// preserving disposal proceed as though no evidence had ever been required, which is the one
+/// outcome D4 exists to prevent.
+#[test]
+fn the_typed_reader_refuses_a_record_it_cannot_decode_rather_than_reporting_absence() {
+    let root = tempfile::tempdir().unwrap();
+    let f = Fixture::new(true);
+    let mut store = open(root.path());
+    let (close, basis) = closing(&f, &mut store);
+    frame_branch(&f, &mut store, &close, &basis);
+
+    crate::store::epoch_draft_archive::write_draft_archive_for_test(
+        &store,
+        SERVER,
+        &f.logical,
+        b"not a draft archive payload",
+        &mut rng(),
+    )
+    .unwrap();
+
+    let read = store.read_studio_draft_archive(SERVER, &f.logical);
+    assert!(
+        read.is_err(),
+        "an undecodable archive must be an error, not an absence"
+    );
+}
+
+/// The document binding, on the read path too. The shared decode helper is what enforces it for the
+/// collector, the release path and this reader at once; this proves the reader is genuinely on it.
+#[test]
+fn the_typed_reader_refuses_an_archive_naming_another_document() {
+    let root = tempfile::tempdir().unwrap();
+    let a = Fixture::new(true);
+    let b = Fixture::new(true);
+    let mut store = open(root.path());
+    let (close_b, basis_b) = closing(&b, &mut store);
+    frame_branch(&b, &mut store, &close_b, &basis_b);
+    let archive_b = archive_for(&b, &mut store);
+
+    let (close_a, basis_a) = closing(&a, &mut store);
+    frame_branch(&a, &mut store, &close_a, &basis_a);
+    crate::store::epoch_draft_archive::write_draft_archive_for_test(
+        &store,
+        SERVER,
+        &a.logical,
+        &archive_b.encode().unwrap(),
+        &mut rng(),
+    )
+    .unwrap();
+
+    assert!(
+        store.read_studio_draft_archive(SERVER, &a.logical).is_err(),
+        "an archive naming another document must be refused on the read path as well"
+    );
+}
+
 /// I-4 for the archive **writer**, all three of its shapes.
 ///
 /// Agent 1's N17 ledger is a matrix of writer obligations, not of cursor tests: nothing about a

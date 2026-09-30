@@ -356,17 +356,7 @@ impl ServerStore {
         // archive whose seed is semantically damaged makes reference scanning fail closed, and if
         // release demanded full semantic validation too, that archive could never be removed: the
         // vault would hold evidence it can neither use nor discard.
-        let mut d = Decoder::new(existing.plain.as_slice());
-        if d.get_bytes().map_err(invalid)? != scope {
-            return Err(invalid("wrong sealed scope"));
-        }
-        let body = d.get_bytes().map_err(invalid)?;
-        d.finish().map_err(invalid)?;
-        let archive =
-            catcoms_replication::studio::StudioDraftArchive::decode(body).map_err(invalid)?;
-        if archive.document() != document {
-            return Err(invalid("draft archive names another logical document"));
-        }
+        let archive = decode_archive_plain(&existing.plain, document, &scope)?;
         if archive.archive_id().map_err(invalid)? != expected_archive {
             return Err(invalid(
                 "draft archive changed since it was read; release names a different archive",
@@ -416,6 +406,91 @@ pub(super) struct InspectedDraftArchive {
     pub(super) cids: BTreeSet<ContentId>,
 }
 
+/// One archive as it sits on disk: the decoded evidence plus the physical facts a caller needs.
+///
+/// `id` is [`StudioDraftArchive::archive_id`], the value a release must be given back. It is
+/// computed here rather than left to the caller so that "the identity of the archive I read" and
+/// "the identity I will name when destroying it" cannot become two different derivations.
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "read by D4 in the disposal transaction and by the native read command, both of \
+    which land in this scope; its own tests read every field today"
+    )
+)]
+pub(in crate::store) struct StudioDraftArchiveRecord {
+    pub(in crate::store) archive: catcoms_replication::studio::StudioDraftArchive,
+    pub(in crate::store) id: [u8; 32],
+    pub(in crate::store) physical_bytes: u64,
+}
+
+/// Unwrap a sealed archive record's plaintext into the evidence it holds.
+///
+/// **One function rather than three.** The sealed-scope check, the body extraction and the
+/// payload's document binding are the same three obligations wherever an archive is read, and the
+/// reference collector and the release path had each grown their own copy. A third was about to be
+/// added for the typed reader below, which is how one of them eventually stops checking the
+/// document while the others still do.
+///
+/// The document binding is the one that is easy to lose and expensive to lose: the scanner installs
+/// the CIDs an archive returns under the **outer** record's group, so an archive for B sealed into
+/// A's record would have B's references protected under A. Deletion is group-scoped, so B's pixels
+/// become reclaimable while the pin set looks complete.
+fn decode_archive_plain(
+    plain: &[u8],
+    document: &LogicalDocument,
+    scope: &[u8],
+) -> Result<catcoms_replication::studio::StudioDraftArchive, AppError> {
+    let mut d = Decoder::new(plain);
+    if d.get_bytes().map_err(invalid)? != scope {
+        return Err(invalid("wrong sealed scope"));
+    }
+    let body = d.get_bytes().map_err(invalid)?;
+    d.finish().map_err(invalid)?;
+    let archive = catcoms_replication::studio::StudioDraftArchive::decode(body).map_err(invalid)?;
+    if archive.document() != document {
+        return Err(invalid("draft archive names another logical document"));
+    }
+    Ok(archive)
+}
+
+impl ServerStore {
+    /// Read the preserved archive for a logical document, decoded and bound to it.
+    ///
+    /// This is what D4 checks a preserving disposal against, and what the read command exports.
+    /// It authenticates and decodes; it grants nothing. An archive is never a basis, a receipt, a
+    /// source or an owner claim, and reading one cannot make it any of those.
+    ///
+    /// A record that will not decode is an **error**, not `None`. `None` means no archive exists;
+    /// collapsing "there is nothing here" into "there is something here I cannot read" would let a
+    /// preserving disposal proceed as though no evidence had ever been required.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "D4 in the disposal transaction and the native read command are this \
+        reader's production callers; both land in this scope"
+        )
+    )]
+    pub(in crate::store) fn read_studio_draft_archive(
+        &self,
+        server: u64,
+        document: &LogicalDocument,
+    ) -> Result<Option<StudioDraftArchiveRecord>, AppError> {
+        let scope = scope_bytes(server, document)?;
+        let Some(record) = self.read_scoped_draft_archive_plain(&scope)? else {
+            return Ok(None);
+        };
+        let archive = decode_archive_plain(&record.plain, document, &scope)?;
+        Ok(Some(StudioDraftArchiveRecord {
+            id: archive.archive_id().map_err(invalid)?,
+            archive,
+            physical_bytes: record.physical_bytes,
+        }))
+    }
+}
+
 /// Decode an archive body and yield the blob references it protects.
 ///
 /// This is the narrowing of the seam's fail-closed reference arm, not its removal: it no longer
@@ -435,16 +510,7 @@ pub(super) fn inventory_references(
     scope: &[u8],
     bytes: u64,
 ) -> Result<InspectedDraftArchive, AppError> {
-    let mut d = Decoder::new(plain);
-    if d.get_bytes().map_err(invalid)? != scope {
-        return Err(invalid("wrong sealed scope"));
-    }
-    let body = d.get_bytes().map_err(invalid)?;
-    d.finish().map_err(invalid)?;
-    let archive = catcoms_replication::studio::StudioDraftArchive::decode(body).map_err(invalid)?;
-    if archive.document() != document {
-        return Err(invalid("draft archive names another logical document"));
-    }
+    let archive = decode_archive_plain(plain, document, scope)?;
     Ok(InspectedDraftArchive {
         record: storage_record(server, document, scope, bytes)?,
         cids: archive.blob_cids().map_err(invalid)?,
