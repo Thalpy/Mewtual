@@ -5,7 +5,9 @@ on:
     paths:
       - '.github/workflows/studio-overlay.yml'
       - '.github/scripts/check-studio-overlay-mutations.py'
+      - '.github/scripts/check-studio-overlay-lifecycle-mutations.py'
       - 'crates/catcoms-app/**'
+      - 'crates/catcoms-mls/**'
       - 'crates/catcoms-sync/**'
       - 'crates/catcoms-replication/**'
   workflow_dispatch:
@@ -39,4 +41,54 @@ jobs:
           path: |
             logs/gate4-overlay-mutation-*.log
             logs/gate4-overlay-restored-*.log
+          if-no-files-found: ignore
+
+  # The overlay LIFECYCLE: the draft archive and its release, the disposal transaction, the
+  # branch-generation namespace, and the owner-tenure observation rule.
+  #
+  # A separate job rather than more steps on `overlay`, for two reasons. It spans four crates, so a
+  # failure here should not be reported as a failure of the Closing-overlay foundation; and the
+  # mutation harness serialises deliberately, so sharing a job would make the two halves wait on each
+  # other for no benefit.
+  #
+  # RUST_MIN_STACK is set for the suites because they currently need more thread stack than the
+  # default. That is a workaround for a stack regression elsewhere in the tree rather than a property
+  # of this scope, and it is pinned here so a CI run and a local run behave the same instead of one of
+  # them aborting without a test failure to point at.
+  lifecycle:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.89.0
+      - uses: Swatinem/rust-cache@v2
+      - name: Test the archive, release and disposal boundaries
+        run: >-
+          cargo test --locked -j 4 --config 'profile.test.package.catcoms-app.debug=0'
+          -p catcoms-app --lib store::epoch_studio::tests::rotation::overlay::
+          -- --test-threads=4
+        env:
+          RUST_MIN_STACK: '33554432'
+      - name: Test the branch-generation namespace and the disposal manifest
+        run: >-
+          cargo test --locked -j 4 --config 'profile.test.package.catcoms-replication.debug=0'
+          -p catcoms-replication --lib studio::epoch::owner::tests:: -- --test-threads=4
+        env:
+          RUST_MIN_STACK: '33554432'
+      - name: Test owner tenure observation, migration and the accessor split
+        run: >-
+          cargo test --locked -j 4 --config 'profile.test.package.catcoms-sync.debug=0'
+          -p catcoms-sync --lib owner_tenure -- --test-threads=4
+        env:
+          RUST_MIN_STACK: '33554432'
+      - name: Verify isolated lifecycle mutations and restored regressions
+        run: python3 .github/scripts/check-studio-overlay-lifecycle-mutations.py
+      - name: Preserve lifecycle mutation and restoration evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: studio-overlay-lifecycle-mutations
+          path: |
+            logs/gate4-overlay-lifecycle-mutation-*.log
+            logs/gate4-overlay-lifecycle-restored-*.log
           if-no-files-found: ignore
