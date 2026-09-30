@@ -2,7 +2,7 @@
 //! a recovery record is historical content, never permission to install a checkpoint.
 
 use super::*;
-use crate::store::StudioOverlayDisposalRequest;
+use crate::store::{StudioOverlayCopyChoice, StudioOverlayDisposalRequest};
 use catcoms_replication::studio::{
     StudioDisposalMode, StudioDraftArchive, StudioOverlayDisposal, StudioRecovery,
 };
@@ -85,6 +85,16 @@ pub enum StudioControlAction {
     /// Destroy the preserved archive. Separately confirmed, and the only thing in the system that
     /// removes one.
     ReleaseOverlayArchive(Box<StudioArchiveReleaseRequest>),
+    /// Copy one element of the retained draft into a live document. Two visits, then a separate
+    /// apply, mirroring recovery's accepted Preview/Apply shape.
+    ///
+    /// Copy is **never** a precondition for destroying anything and no count of copied items
+    /// establishes that a branch was preserved; only an archive does that.
+    PrepareOverlayCopy(Box<StudioOverlayCopyChoice>),
+    FinishOverlayCopyPreview(Box<StudioPreparedCopy>),
+    /// Intercepted by the receiver before this transaction, exactly as recovery's `Apply` is,
+    /// because it publishes through the ordinary Save path rather than writing here.
+    ApplyOverlayCopy(Box<StudioOverlayCopyApply>),
     /// Drop the live branch, preserving or discarding its bodies. The archive for a preserving
     /// disposal must already be durable: evidence first, removal second.
     DisposeOverlay(Box<StudioOverlayDisposalRequest>),
@@ -234,6 +244,8 @@ pub enum StudioControlResponse {
     OverlayPreparation(StudioInspectionPreparation),
     OverlayInspection(StudioOverlayInspection),
     OverlayLifecycle(Box<StudioOverlayLifecycle>),
+    OverlayCopyPreparation(Box<StudioCopyPreparation>),
+    OverlayCopyPreview(Box<StudioOverlayCopyPreview>),
     /// An archive was just written. A distinct variant from `OverlayArchive` because one of these
     /// changed the vault and the other did not, and a caller that cannot tell them apart cannot
     /// tell a user whether anything happened.
@@ -289,6 +301,8 @@ impl std::fmt::Debug for StudioControlResponse {
             Self::OverlayPreparation(_) => "OverlayPreparation { .. }",
             Self::OverlayInspection(_) => "OverlayInspection { .. }",
             Self::OverlayLifecycle(_) => "OverlayLifecycle { .. }",
+            Self::OverlayCopyPreparation(_) => "OverlayCopyPreparation { .. }",
+            Self::OverlayCopyPreview(_) => "OverlayCopyPreview { .. }",
             Self::OverlayArchived { .. } => "OverlayArchived { .. }",
             Self::OverlayExport { .. } => "OverlayExport { .. }",
             Self::OverlayArchive { .. } => "OverlayArchive { .. }",
@@ -404,6 +418,19 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
             StudioControlAction::FinishOverlayArchive(prepared) => {
                 return self.finish_studio_archive(store, server, target, *prepared);
             }
+            StudioControlAction::PrepareOverlayCopy(choice) => {
+                return self
+                    .begin_studio_copy(store, server, target, *choice)
+                    .map(|job| StudioControlResponse::OverlayCopyPreparation(Box::new(job)))
+            }
+            StudioControlAction::FinishOverlayCopyPreview(prepared) => {
+                return self
+                    .finish_studio_copy_preview(store, server, target, *prepared)
+                    .map(|preview| StudioControlResponse::OverlayCopyPreview(Box::new(preview)))
+            }
+            StudioControlAction::ApplyOverlayCopy(_) => {
+                return Err(invalid("copy Apply requires the ordinary publication path"))
+            }
             StudioControlAction::ExportOverlay => {
                 return self
                     .begin_studio_inspection(store, server, target)
@@ -454,9 +481,12 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
                     | StudioControlAction::ArchiveOverlay
                     | StudioControlAction::FinishOverlayArchive(_)
                     | StudioControlAction::ExportOverlay
-                    | StudioControlAction::FinishOverlayExport(_) => {
+                    | StudioControlAction::FinishOverlayExport(_)
+                    | StudioControlAction::PrepareOverlayCopy(_)
+                    | StudioControlAction::FinishOverlayCopyPreview(_)
+                    | StudioControlAction::ApplyOverlayCopy(_) => {
                         unreachable!(
-                            "inspection, archiving and export route before recovery decoding"
+                            "inspection, archiving, export and copy route before recovery decoding"
                         )
                     }
                     // Read-only. It deliberately does NOT rebuild the branch: the whole point is to

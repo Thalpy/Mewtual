@@ -46,14 +46,6 @@ pub enum StudioRecoveryDisposition {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum PlanScope {
     SameDocument,
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "the copy control actions are this variant's production caller and land next \
-        in this scope; its own tests construct it today"
-        )
-    )]
     CrossDocument,
 }
 

@@ -11,6 +11,10 @@ pub use catcoms_replication::{studio as types, EpochPhase, RecoveryReason, Recov
 use catcoms_rt::{CryptoRngCore, MeshTransport};
 use tokio::sync::{oneshot, OwnedMutexGuard};
 
+mod copy;
+pub use copy::{
+    StudioCopyPreparation, StudioOverlayCopyApply, StudioOverlayCopyPreview, StudioPreparedCopy,
+};
 mod inspection;
 mod overlay;
 pub use inspection::{
@@ -23,7 +27,8 @@ mod publication;
 pub(crate) use publication::StudioSavedTransaction;
 mod control;
 mod replay;
-mod restore;
+/// Crate-visible because copy's detached planner lives in the store and calls `plan` directly.
+pub(crate) mod restore;
 mod settlement;
 pub use control::{
     StudioArchiveReleaseRequest, StudioControlAction, StudioControlReady, StudioControlRequest,

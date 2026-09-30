@@ -77,6 +77,8 @@ pub use epoch_registry::{
     RegistryOwnerRotationOutcome, RegistryPageAdmission, RegistryReplayHold, RegistryReplayOutcome,
     RegistryReplayPass, RegistryReplayProgress, RegistryReplayStep, RegistryReplayTicket,
 };
+pub use epoch_studio::copy_capture::StudioOverlayCopyChoice;
+pub(crate) use epoch_studio::copy_capture::{StudioOverlayCopyCapture, StudioOverlayCopyPlan};
 #[cfg(test)]
 pub(crate) use epoch_studio::source::studio_full_restores_for_test;
 #[cfg(test)]

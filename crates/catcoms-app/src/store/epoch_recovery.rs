@@ -187,7 +187,13 @@ impl EpochRecoveryState {
         Ok(bytes)
     }
 
-    fn decode(bytes: &[u8], scope: &[u8], document: &LogicalDocument) -> Result<Self, AppError> {
+    /// Visible across the store so copy's detached planner can decode the destination's retained
+    /// versions from bytes it captured, without holding the store that read them.
+    pub(in crate::store) fn decode(
+        bytes: &[u8],
+        scope: &[u8],
+        document: &LogicalDocument,
+    ) -> Result<Self, AppError> {
         if bytes.len() > MAX_RECORD_BYTES {
             return Err(invalid("recovery record exceeds its bound"));
         }

@@ -152,6 +152,9 @@ impl StudioReceiver {
         ),
         AppError,
     > {
+        // Both applies publish through the ordinary Save path rather than writing in the control
+        // transaction, so both are intercepted here. Copy's `target` is the SOURCE it copied from;
+        // the request it produces publishes to the destination.
         if let StudioControlAction::Apply(apply) = request.action {
             let (edit, already_saved) =
                 server.prepare_studio_recovery_apply(store, id, request.target, *apply)?;
@@ -161,6 +164,20 @@ impl StudioReceiver {
                 updated,
                 Some(StudioControlResponse::Applied {
                     target: request.target,
+                    already_saved,
+                }),
+            ))
+        } else if let StudioControlAction::ApplyOverlayCopy(apply) = request.action {
+            let destination = apply.destination;
+            let (edit, already_saved) =
+                server.prepare_studio_copy_apply(store, id, request.target, *apply)?;
+            let (saved, updated) = self.run(server, store, id, Some(edit))?;
+            Ok((
+                saved,
+                updated,
+                Some(StudioControlResponse::Applied {
+                    // The destination is what changed, so it is what the caller is told about.
+                    target: destination,
                     already_saved,
                 }),
             ))

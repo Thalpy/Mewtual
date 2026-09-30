@@ -15,6 +15,12 @@ pub(crate) struct StudioInspectionStamp {
     author: DeviceId,
     version: Option<(blake3::Hash, u64)>,
 }
+impl StudioInspectionStamp {
+    /// The target this stamp was taken for, so a currency check cannot be pointed at another.
+    pub(crate) fn target(&self) -> StudioTarget {
+        self.target
+    }
+}
 /// What this rebuild is for. The authorization-shaped checks are identical in every arm; what
 /// differs is whether typed reconstruction is a **requirement** or an **observation**.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
