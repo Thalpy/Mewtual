@@ -59,6 +59,7 @@ impl std::fmt::Debug for StudioOverlayState {
         f.debug_struct("StudioOverlayState")
             .field("prepared", &self.prepared.is_some())
             .field("completed", &self.completed.is_some())
+            .field("disposed", &self.disposed.is_some())
             .finish_non_exhaustive()
     }
 }
@@ -121,9 +122,19 @@ impl StudioOverlayState {
     /// This proves nothing about authorization. The caller has already established membership,
     /// authorship, the absence of a transfer hold, the branch identity, and - for `Preserve` - that
     /// a durable archive for this exact branch exists. All of that needs records this layer cannot
-    /// read. What happens here is only the state rebuild and its validation, which is why a
-    /// `StudioDisposalDecision` is required rather than a mode: the decision carries the evidence
-    /// type, so a destructive disposal cannot be constructed through the preserving path.
+    /// read. What happens here is the state rebuild, its validation, and the two checks this layer
+    /// *can* make: the transfer hold below, and `content` against the branch's own hash. A
+    /// `StudioDisposalDecision` is required rather than a bare mode so that a destructive disposal
+    /// cannot be constructed through the preserving path.
+    ///
+    /// **`branch`, `generation` and `provenance` are recorded verbatim and are NOT corroborated.**
+    /// Nothing here can check them: `branch_id` needs the durable `branch_generation` this state
+    /// does not yet carry, and provenance is a property of how the basis was obtained, which the
+    /// basis alone does not record. A caller that passes the wrong values writes a manifest that
+    /// misdescribes its own branch - it could label a Closing branch `Unconfirmed` - and this layer
+    /// will not notice. The store transaction is where those three become checkable, and until it
+    /// exists the only callers are tests. `content` is the exception and is checked, because
+    /// `branch_hash` is computable from exactly what this layer holds.
     ///
     /// A branch that survives structural validation but cannot be replayed is still disposable.
     /// Refusing here would leave exactly the drafts most in need of disposal undisposable.
@@ -163,6 +174,11 @@ impl StudioOverlayState {
             minimum_new_basis_closed_epoch: self.minimum_new_basis_closed_epoch,
             legacy: false,
         };
+        // Validate and encode the rebuilt state, as `append`, `complete` and `set_prepared` all do.
+        // Returning it unvalidated would make the store the first thing to discover any
+        // inconsistency, at the point where it is already committed to a write. This is also what
+        // enforces the cross-manifest rule when `completed` is retained.
+        next.encode_vault(ledger)?;
         Ok((next, removed))
     }
 
@@ -465,17 +481,34 @@ impl StudioOverlayState {
                 return Err(ReplError::EpochScope);
             }
             disposal.validate()?;
-            // The same two rules the transferred manifest obeys, for the same reasons. A retained
-            // terminal manifest must not claim an id the *current* live branch holds, or a request
-            // naming that id would classify against the wrong event; and where an id is somehow
-            // still in the ledger, its author and envelope must be the ones this manifest recorded,
-            // so a retained acknowledgement cannot be made to describe a different body.
+            // Two rules shared with the transferred manifest, and a third that only exists because
+            // two terminal manifests can now be retained at once.
+            //
+            // The shared pair: a retained manifest must not claim an id the *current* live branch
+            // holds, or a request naming that id would classify against the wrong event; and where
+            // an id is somehow still in the ledger, its author and envelope must be the ones this
+            // manifest recorded, so a retained acknowledgement cannot be made to describe a
+            // different body.
+            //
+            // The third rule is **no id may appear in both terminal manifests**. `classify_request`
+            // answers "which terminal event is this request about" and exactly one arm may match;
+            // an id in both would make `Transferred` and `Disposed` simultaneously true for one
+            // request while saying opposite things about where the work went. This slice is where
+            // the rule becomes necessary, because `dispose` retains `completed` while adding
+            // `disposed`.
             let pending: BTreeMap<_, _> = ledger.pending().collect();
             for entry in &disposal.entries {
                 if self
                     .active
                     .as_ref()
                     .is_some_and(|active| active.contains(&entry.id))
+                {
+                    return Err(ReplError::IntentConflict);
+                }
+                if self
+                    .completed
+                    .as_ref()
+                    .is_some_and(|c| c.entries.iter().any(|e| e.id == entry.id))
                 {
                     return Err(ReplError::IntentConflict);
                 }
@@ -490,9 +523,15 @@ impl StudioOverlayState {
     }
     pub fn encode_vault(&self, ledger: &IntentLedger) -> Result<Vec<u8>, ReplError> {
         self.validate(ledger)?;
+        // `disposed.is_none()` joins the legacy conditions explicitly. It is unreachable today,
+        // because `dispose` clears `legacy`, but the legacy arm writes the v1 single-branch format,
+        // which has nowhere to put a manifest. Without this condition a future caller that set
+        // `disposed` on a legacy state would have it silently dropped on encode, and silently
+        // losing a terminal record is the one failure this family must never have.
         if self.legacy
             && self.prepared.is_none()
             && self.completed.is_none()
+            && self.disposed.is_none()
             && self.minimum_new_basis_closed_epoch == 0
         {
             return self
@@ -663,10 +702,19 @@ impl StudioOverlayState {
             }
             _ => return Err(ReplError::Malformed),
         };
-        // A v3 record must carry a disposal and a v2 record must not. Without both halves the
-        // version byte would be advisory: a v3 record with no manifest would decode as v2 and
-        // then fail the canonical re-encode check with a confusing error, and a v2 record that
-        // happened to have trailing bytes would be accepted as a disposal.
+        // As this slice defines v3, a v3 record carries a disposal and a v2 record must not.
+        // Without both halves the version byte would be advisory: a v3 record with no manifest
+        // would decode as v2 and then fail the canonical re-encode check with a confusing error,
+        // and a v2 record that happened to have trailing bytes would be accepted as a disposal.
+        //
+        // **This layout is PROVISIONAL and narrower than design 5.1's v3.** The design's v3 is the
+        // v2 layout followed by `branch_generation`, a provenance byte, and an *optional* disposal
+        // block, emitted whenever any of the three is non-default. Those first two fields belong to
+        // the lifecycle classifier, which is not built, so they are absent here and the disposal
+        // block is mandatory instead of optional. Completing the layout is scheduled with that
+        // slice, and it is free to do only while nothing outside these tests writes a v3 record:
+        // there is no production caller of a disposal today. Once one exists this becomes a format
+        // change rather than a completion.
         let disposed = match version {
             3 => Some(StudioOverlayDisposal::get(&mut d)?),
             _ => None,

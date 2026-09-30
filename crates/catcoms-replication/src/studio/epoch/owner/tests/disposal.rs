@@ -50,6 +50,22 @@ fn a_disposal_round_trips_and_retires_exactly_the_branch_ids() {
     let live = authored_ids(&f, &ordered);
     assert_eq!(live.len(), ordered.len());
 
+    // A pending intent that was NEVER appended to the branch. Without it the ledger contains
+    // exactly the branch's ids and nothing else, so "the branch's ids" and "every pending id" are
+    // the same set: the review proved that swapping `removed_ids()` for all pending ids passed.
+    // This is what makes the assertion below about the branch rather than about the ledger.
+    let mut ledger = ledger;
+    let foreign = ledger
+        .prepare(
+            f.owner.device_id(),
+            f.domain(f.title_body("never appended")),
+        )
+        .unwrap();
+    assert!(
+        !live.contains(&foreign),
+        "the foreign intent must not be one of the branch's own"
+    );
+
     let (next, removed) = dispose(
         &metadata,
         &ledger,
@@ -61,7 +77,11 @@ fn a_disposal_round_trips_and_retires_exactly_the_branch_ids() {
 
     assert_eq!(
         removed, live,
-        "the retired set must be exactly the branch's own ids, read once rather than recomputed"
+        "the retired set must be exactly the branch's own ids, not every pending id"
+    );
+    assert!(
+        !removed.contains(&foreign),
+        "a disposal must not retire an intent the branch never accepted"
     );
     assert!(
         next.overlay().is_none(),
@@ -95,12 +115,29 @@ fn the_extension_version_is_two_until_a_disposal_exists_and_three_after() {
     let mut f = Fixture::new(true);
     let (metadata, ledger, _ordered, _basis) = branch(&mut f, 2);
 
+    // Assembled, not sampled. An earlier version asserted only the leading byte, and the review
+    // proved that insufficient: adding a trailing marker to the v2 layout and consuming it on
+    // decode left every test green. The whole point of the claim is that the byte *sequence* of a
+    // disposal-free vault is unchanged, so the expectation has to be the whole sequence, built here
+    // from the documented v2 layout rather than read back from the encoder under test.
     let before = metadata.encode_vault(&ledger).unwrap();
+    let mut expected = Encoder::new();
+    expected.put_u8(2);
+    expected.put_u8(1); // Flipnote target tag
+    expected.put_bytes(&metadata.target().channel()).unwrap();
+    if let StudioTarget::Flipnote { object, .. } = metadata.target() {
+        expected.put_bytes(&object).unwrap();
+    }
+    expected.put_u64(0); // minimum_new_basis_closed_epoch
+    expected.put_u8(1); // active present, no prepared
+    expected
+        .put_bytes(&metadata.overlay().unwrap().encode_vault(&ledger).unwrap())
+        .unwrap();
+    expected.put_u8(0); // no completed
     assert_eq!(
-        before.first(),
-        Some(&2),
-        "a branch with no disposal must still encode as v2: this is the byte that proves adding \
-         the field did not rewrite every existing record"
+        before,
+        expected.finish(),
+        "a disposal-free vault must encode to exactly the bytes it did before this field existed"
     );
 
     let (next, _) = dispose(
@@ -194,6 +231,57 @@ fn preserved_and_discarded_disposals_are_distinguishable_on_disk() {
     );
 }
 
+/// A retained manifest must not be able to describe a body other than the one the ledger holds
+/// under that id.
+///
+/// `DomainOp::id` hashes the nonce and author and **not the body**, so a second operation with the
+/// same nonce and different content takes the same id. The entry's envelope is the only thing that
+/// notices, and without that rule a retained acknowledgement could be made to describe work it
+/// never recorded.
+///
+/// This one is reachable entirely through production calls: dispose, then ask the real encoder to
+/// accept the result against a ledger that disagrees.
+///
+/// **The two collision rules beside it are NOT tested here, and deliberately so.** A state holding
+/// `disposed` next to a live `active`, or next to a `completed` sharing an id, has exactly two
+/// producers: `dispose`, which clears `active`, and the decoder. So today those guards defend the
+/// **decode path** against a corrupt or crafted record, and the only way to exercise them is to
+/// hand-assemble bytes, which tests the byte layout more than the rule. `admit_new_branch` is what
+/// legitimately creates a new branch beside a retained disposal; the rules get their natural test
+/// in that slice, and it is recorded as owed there rather than left to be rediscovered.
+#[test]
+fn a_retained_disposal_cannot_be_made_to_describe_a_different_body() {
+    let mut f = Fixture::new(true);
+    let (metadata, ledger, ordered, _basis) = branch(&mut f, 2);
+    let (disposed, _removed) = dispose(
+        &metadata,
+        &ledger,
+        StudioDisposalDecision::Discard(confirmation()),
+    )
+    .expect("dispose");
+
+    // Baseline: against its own ledger the manifest encodes, so the refusal below is about the
+    // disagreement and not about the manifest.
+    assert!(disposed.encode_vault(&ledger).is_ok());
+
+    // The same ids, under different bodies.
+    let mut retitled = IntentLedger::new(ledger.document().clone());
+    for (op, _) in &ordered {
+        let mut other = op.clone();
+        other.body = f.title_body("a different body under the same nonce");
+        let id = retitled.prepare(f.owner.device_id(), other).unwrap();
+        assert!(
+            _removed.contains(&id),
+            "the fixture must reuse the disposed ids, or the envelope rule is never consulted"
+        );
+    }
+
+    assert!(
+        disposed.encode_vault(&retitled).is_err(),
+        "a retained manifest whose entry envelope disagrees with the ledger must be refused"
+    );
+}
+
 /// D2 at this layer. A Prepared branch carries a live transfer hold: someone else may be about to
 /// accept this work, and dropping it here would race that acceptance.
 #[test]
@@ -278,12 +366,14 @@ fn a_disposal_naming_the_wrong_branch_content_refuses() {
 /// Refusing here would leave exactly the drafts most in need of disposal undisposable, which is the
 /// same reasoning that makes the archive build from structural entries.
 ///
-/// Stated on the manifest builder rather than on `dispose`, because wrapping a bare overlay into a
-/// `StudioOverlayState` would need a test-only constructor, and that is the back door the overlay
-/// design forbids. The builder is where the property actually lives: it takes `checked_entries`,
-/// which is structural, so nothing in the manifest path can depend on a replay succeeding.
+/// Driven through `dispose()` itself, not through the manifest builder. An earlier version of this
+/// test used the builder and justified it by claiming a `StudioOverlayState` around a bare overlay
+/// would need a test-only constructor. **That was false**, and the review was right to check:
+/// `decode_vault_structural` on the overlay's own v1 bytes takes the legacy path and yields exactly
+/// such a state, through production code. Going through the builder meant a replay guard added to
+/// `dispose` would not have been caught here, and that is the guard the property is about.
 #[test]
-fn an_unreplayable_branch_still_yields_a_complete_disposal_manifest() {
+fn an_unreplayable_branch_is_still_disposable() {
     let mut f = Fixture::new(true);
     let (overlay, ledger) = unreplayable_branch(&mut f);
 
@@ -292,23 +382,38 @@ fn an_unreplayable_branch_still_yields_a_complete_disposal_manifest() {
         overlay.read(&ledger).is_err(),
         "the fixture must not be replayable, or this proves nothing"
     );
-    // Structural validity needs no separate assertion: `from_branch` goes through
-    // `checked_entries`, so the successful build below is that evidence. Asserting it here would
-    // also need a private method, and reaching for one is how a test starts proving the code's
-    // internals instead of its behaviour.
 
-    let manifest = crate::studio::overlay::disposal::StudioOverlayDisposal::from_branch(
-        &overlay,
+    // A real state holding the unreplayable branch, via the legacy v1 decode path.
+    let state = StudioOverlayState::decode_vault_structural(
+        &overlay.encode_vault(&ledger).unwrap(),
         &ledger,
-        StudioOverlayProvenance::Closing,
-        [0x5b; 32],
-        [0x5c; 32],
-        3,
-        &StudioDisposalDecision::Discard(confirmation()),
-        9,
-        1,
     )
-    .expect("an unreplayable branch must still produce a complete acknowledgement");
-    assert_eq!(manifest.accepted, manifest.removed_ids().len());
-    assert!(manifest.accepted > 0);
+    .expect("a structurally valid branch must decode structurally");
+
+    let content = state.branch_content(&ledger).unwrap();
+    let (next, removed) = state
+        .dispose(
+            &ledger,
+            StudioDisposalDecision::Discard(confirmation()),
+            [0x5b; 32],
+            content,
+            3,
+            StudioOverlayProvenance::Closing,
+            9,
+            1,
+        )
+        .expect("an unreplayable branch must still be disposable");
+
+    assert!(!removed.is_empty());
+    assert_eq!(next.disposed().unwrap().accepted, removed.len());
+    assert!(next.overlay().is_none());
+    // And the result is a real v3 record: a legacy-origin disposal must round trip like any other.
+    let bytes = next.encode_vault(&ledger).unwrap();
+    assert_eq!(bytes.first(), Some(&3));
+    assert_eq!(
+        StudioOverlayState::decode_vault_structural(&bytes, &ledger)
+            .unwrap()
+            .disposed(),
+        next.disposed()
+    );
 }
