@@ -1483,7 +1483,7 @@ overstatement: rail filtering bounds the *scheduling* impact, not the *retained 
 | --- | --- |
 | Scan is an owned `EpochStorageCursor`, store borrowed per call | The property was previously inexpressible: the old scanner held `&mut ServerStore` for its whole life, so no write could land between its steps |
 | Invalidation refused before resuming **and** before issuing | Two mutations, each caught at its own assertion |
-| N17 with the real writers | **Five of the six families** - Recovery, OwnerReceipts, Intents, Registry, Studio - plus the cleanup unlink, which is an operation class and not the sixth family. Also the unchanged exact-retry flush and a failed write; Studio carries the negative half (a budget mint must not invalidate). **DraftArchive: its release path is asserted, its two write shapes are not** - see "The DraftArchive N17 gap was mischaracterised" below, which supersedes the flat "not covered" this row used to carry and explains why no sixth *cursor* test is needed |
+| N17 with the real writers | **All six families**, plus the cleanup unlink, which is an operation class rather than a family. Recovery, OwnerReceipts, Intents, Registry and Studio are mine; **DraftArchive's three write shapes were asserted by Agent 2 at `e60d8315`**, closing the last gap. Also the unchanged exact-retry flush and a failed write; Studio carries the negative half (a budget mint must not invalidate). The cursor side needs no per-family test at all - see "DraftArchive N17: CLOSED" below |
 | Validation extracted as a pure function | Purity is now a signature, not a claim: if it ever needs the store back, the compiler says so |
 | Parked body, detached validation, four rebinding checks | Cursor identity, mount, record id, generation |
 | `MAX_INVENTORY_RESTARTS` with `Unstable` | Mutation: removing the bound fails at "restarted more times than its budget allows" |
@@ -1691,9 +1691,28 @@ Release, isolated of other test work:
 | Index | 32 | 9 794 | 16 ms | 17 ms | 23 ms | **0 ms** | 85 ms |
 | Index | 256 | 70 430 | 523 ms | 459 ms | 495 ms | **2 ms** | 1 113 ms |
 
-**13.1 - custody per stage of Flow H at 1, 32 and 256 operations, with C-3's inventory separated
-from the rest of H5: measured.** That separation was the specific thing 13.1 asked for, and
-`inventory_ms` is exactly it.
+**The mapping of these to 13.1's stages is WITHDRAWN.** An earlier version of this section called
+13.1 "measured" on the strength of the table above. It is not, because the intervals these
+profiles time are not the intervals 13.1 names:
+
+| printed as | what is actually timed |
+|---|---|
+| `decode_ms` | the whole of `load_epoch_intents` |
+| `draft_ms` | an on-demand `local_draft` reconstruction |
+| `candidate_ms` | the **synchronous compatibility** `prepare_handoff` |
+| `inventory_ms` | the external `budget(...)` test helper |
+| `handoff_ms` | the whole synchronous handoff adapter |
+| `max_turn_ms` | one direct core `sign_next` call |
+
+The synchronous adapter performs H1, detached-stage work **inline**, unrestricted signing,
+assembly and H5 under a single call, so its elapsed time is not "the H5 portion". One core
+signature is not a scheduled H3 visit, which may cover several signatures plus application-level
+checks. And `inventory_ms` times a test helper's call, not the inventory on the path a handoff
+takes.
+
+So these are **useful component measurements under their own function boundaries**, and that is
+how they are recorded. 13.1 remains **incomplete**: it needs the actual H1, scheduled-H3-slice and
+H5 intervals at 1/32/256 with the inventory separated on the corresponding path.
 
 **The result is that C-3's inventory is not the dominant term at these shapes - it is about a
 tenth of a percent of the durable handoff.** 2 ms against 2 083 ms at 256 operations.
@@ -1723,28 +1742,58 @@ wall-clock. **Missing: the visit count**, which 13.8 explicitly names and neithe
 says explicitly that this is **not a measured heap ceiling**. So it is arithmetic over the caps,
 not a profile, and it can be completed by reading them.
 
-| term | bound | bytes |
-|---|---|---|
-| Captured intent plaintext | `MAX_INTENT_LEDGER_BYTES + 1024` | 5 243 904 |
-| Captured source plaintext *(dropped after H2 but for digest, size and derived facts)* | `MAX_STUDIO_EPOCH_SNAPSHOT_BYTES + 1024` | 9 528 448 |
-| Decoded state | `MAX_STUDIO_EPOCH_SNAPSHOT_BYTES` | 9 527 424 |
-| Restored private successor | same | 9 527 424 |
-| Signed candidate | same | 9 527 424 |
-| Encoded Prepared record | `MAX_EXTENSION` = `MAX_CHECKPOINT_BYTES + MAX_METADATA` | 2 162 688 |
-| Encoded Completed record | same | 2 162 688 |
-| **C-3's at most one parked record body** | largest family record cap: Recovery's `MAX_RECOVERY_SLOTS_BYTES + 1024` | **18 876 416** |
-| **Sum** | | **66 556 416 (63.5 MiB)** |
+**The first version of this table was wrong in three ways and the 63.5 MiB headline it produced
+is withdrawn.** It charged the *overlay extension* cap to whole Prepared and Completed **records**;
+it charged the Studio snapshot cap to a "decoded state" that is an `EpochIntentState`; and it
+charged two encoded records that the implementation does not retain at all. Rebuilt from the
+retained types, with the currency declared per row:
 
-`MAX_STUDIO_EPOCH_SNAPSHOT_BYTES` itself is `MAX_CHECKPOINT_BYTES` 2 MiB + `MAX_EPOCH_BYTES`
-4 MiB + `MAX_EPOCH_GATE_BYTES` 3 MiB + `MAX_RECEIPT_BOOK_BYTES` 8 KiB + `MAX_RECEIPT_BYTES` 1 KiB
-+ `4 * MAX_EPOCH_OPERATIONS` 80 KB + 1 KiB = 9 527 424.
+| 13.4's term | what is actually retained | bound | copies | bytes |
+|---|---|---|---|---|
+| Captured intent plaintext | `Zeroizing<Vec<u8>>` read from the record | intent record cap `MAX_INTENT_LEDGER_BYTES + 1024` | 1 | 5 243 904 |
+| Captured source plaintext | released after H2; only digest, size and derived facts are carried | Studio record cap `MAX_STUDIO_EPOCH_SNAPSHOT_BYTES + 1024` **while live** | 1, transiently | 9 528 448 |
+| Decoded state | `StudioHandoffPlan::state`, an **`EpochIntentState`** - ledger plus optional overlay, *not* a Studio snapshot | intent record cap, as a **declared proxy** for the decoded object | 1 | 5 243 904 |
+| Restored private successor | a `StudioEpoch` | Studio snapshot cap, **declared proxy** | 1 | 9 527 424 |
+| Signed candidate | a `StudioEpoch` | Studio snapshot cap, **declared proxy** | 1 | 9 527 424 |
+| Encoded Prepared record | **not retained.** `prepared_bytes: u64` is `prepared_state.encode(&scope)?.len() + 40`; the buffer is dropped | 8 bytes of length | 1 | 8 |
+| Encoded Completed record | **not retained**, same shape | 8 bytes of length | 1 | 8 |
+| **C-3's at most one parked record body** | `Zeroizing<Vec<u8>>` inside `ParkedEpochRecord` | largest family record cap: Recovery's `MAX_RECOVERY_SLOTS_BYTES + 1024` | 1 | **18 876 416** |
+| **Sum of accounted allowances** | | | | **58 070 536 (55.4 MiB)** |
+
+`MAX_STUDIO_EPOCH_SNAPSHOT_BYTES` is `MAX_CHECKPOINT_BYTES` 2 MiB + `MAX_EPOCH_BYTES` 4 MiB +
+`MAX_EPOCH_GATE_BYTES` 3 MiB + `MAX_RECEIPT_BOOK_BYTES` 8 KiB + `MAX_RECEIPT_BYTES` 1 KiB +
+`4 * MAX_EPOCH_OPERATIONS` 80 KB + 1 KiB = 9 527 424.
+
+**A discrepancy between design and implementation, in the implementation's favour.** 13.4 lists
+"encoded Prepared and Completed records" among the retained terms, which would be 5 MiB each at
+the record cap. The implementation retains only their **lengths** - it encodes, measures, and
+drops. So the design's own accounting list over-charges by about 10 MiB against what the code
+does. That is worth stating rather than silently using the smaller figure: either the list should
+be corrected, or a future change that starts retaining those buffers would be a 10 MiB regression
+against a bound nobody wrote down.
+
+**The currency, stated once.** Three rows charge an *encoded* cap for a *decoded* object. That is a
+declared proxy, not a measurement, and an automerge document's heap footprint can exceed its
+encoded size. 13.4's "not a measured heap ceiling" licenses accounting in encoded bytes; it does
+not make an encoded cap an upper bound on heap. Where a row is a real byte buffer - the two
+plaintexts and the parked body - the bound is exact.
 
 ### The finding: the parked body is the single biggest contributor
 
-**C-3's one parked record body is 18 MiB - 28% of the whole accounted sum, and the largest single
-term in it.** The reason is that the bound has to be the *largest* family's record cap, and
+**C-3's one parked record body is 18 MiB - the largest single term, and about 32% of the
+rebuilt sum.** The reason is that the bound has to be the *largest* family's record cap, and
 Recovery's is three retained snapshots at 6 MiB each. Every other family is far smaller: Studio
 9.1 MiB, Intents 5.0 MiB, OwnerReceipts 8.25 **KiB**.
+
+It is also the one row whose bound is **exact rather than proxied** - it is a real
+`Zeroizing<Vec<u8>>` of authenticated plaintext - which makes it the most load-bearing figure in
+the table as well as the largest.
+
+**Two qualifications on the 18 MiB.** It is the allowance at the *general full-coverage park
+point*, where no narrower universal Recovery limit applies. Particular scan modes impose their own
+read and cold-byte rails, and the retained-input model should use the effective bounds of the mode
+the runtime actually adopts. And it is a conservative allowance, not a demonstrated reachable
+figure: no valid maximal Recovery fixture has been built to show a single park of that size.
 
 This is the concrete cost of the activation requirement this ledger has been carrying as "the
 parked plaintext's residency is not charged to section 13.4's retained-input sum". Charging it
@@ -1768,29 +1817,51 @@ its residency.
 
 ### What that leaves genuinely unmeasured
 
-| item | state |
-|---|---|
-| 13.1 | **measured** at 1/32/256, inventory separated |
-| 13.2 | **no numbers** - maximal accepted shapes: the 5 MiB + 1024-byte intent record at 256 maximal bodies, a 2 MiB seed, the 64 KiB metadata ceiling, maximal projection widths, a large roster |
-| 13.3 | **partial** - worst single signature is 1 ms, but not at the largest admitted operation or roster |
-| 13.4 | **done** - 63.5 MiB accounted, of which C-3's parked body is 18 MiB and the largest single term. See "Design 13.4" above |
-| 13.5 | **no numbers** - Flow S custody per stage at 1/32/255 |
-| 13.6 | **measured** |
-| 13.7 | **measured**, all items |
-| 13.8 | **partial** - wall-clock measured, visit count not reported |
+**None of the eight is done.** An earlier version of this table put 13.1, 13.4, 13.6 and 13.7 in
+a "done" column; a review rejected all four, and on inspection it was right about each. The
+states below are the four this ledger should have been distinguishing all along:
 
-So of eight: **13.1, 13.4, 13.6 and 13.7 are done**, 13.3 and 13.8 are partial with the missing
-piece named, and **13.2 and 13.5 have no numbers.**
+- **source-correct fixture** - the fixture builds what its label says, verified;
+- **executed measurement** - a run produced figures from that fixture;
+- **supported conclusion** - the figures bear the weight the prose puts on them;
+- **independently closed** - a returned verdict says the obligation is met.
 
-Both remaining gaps are the same kind of work: custody per stage at shapes this suite does not
-currently build. 13.2 needs the maximal accepted shapes (a 5 MiB + 1024-byte intent record filled
-by 256 maximal bodies, a 2 MiB seed, the 64 KiB metadata ceiling, maximal projection widths, a
-large roster); 13.5 needs Flow S at 1/32/255. Neither is blocked on another agent.
+| item | state | what is absent |
+|---|---|---|
+| 13.1 | **component measurements only; stage mapping rejected** | actual H1, scheduled-H3-slice and H5 intervals at 1/32/256, inventory separated on the handoff's own path. What exists times `load_epoch_intents`, an on-demand draft, the synchronous compatibility adapter and a test helper's `budget(...)` |
+| 13.2 | **nothing** | maximal accepted shapes: 5 MiB + 1024-byte intent record at 256 maximal bodies, 2 MiB seed, 64 KiB metadata ceiling, maximal projection widths, a large roster |
+| 13.3 | **small-shape observation** | the largest admitted individual operation and roster, with its authority checks. 1 ms is a sampled maximum over ~100-byte title operations |
+| 13.4 | **calculation submitted, corrections applied, not closed** | the sum has been rebuilt from retained types after a review found three wrong rows. 55.4 MiB, parked body 18 MiB. Still a calculation, not a measurement, and the proxy rows are proxies |
+| 13.5 | **nothing** | Flow S custody per stage at 1/32/255, including S1's structural classification, the S1b and S3 basis derivations and S3's I-3 holds |
+| 13.6 | **executed measurement; obligation partly unaddressed** | `checked_epoch_replay_state` and the five-family inventory over several large retained branches, both named by 13.6. What exists measures the decoder pair and the two load entry points |
+| 13.7 | **source-correct fixtures, executed measurements, narrower conclusions** | accepted-ceiling runs for each family; DraftArchive entirely; a largest-single-step figure at a ceiling rather than at fixture sizes; restart behaviour under a real workload rather than a deterministic guard rotation. OwnerReceipts and Intents are measured only at trivial sizes |
+| 13.8 | **synchronous component evidence** | scheduled end-to-end wall clock and the visit count. `256 x max_turn_ms` is not the sum of the signature durations, and the direct loop excludes receive cadence and queued visits |
+
+**13.2 and 13.5 have nothing at all**, and are the same kind of work: custody per stage at shapes
+this suite does not build. Neither is blocked on another agent.
+
+### The restart test is a liveness result, not a restart rate
+
+Recorded correctly here after a review pointed out the mismatch.
+`c3_restart_budget_bounds_retries_but_does_not_survive_sustained_writes` rotates a bare guard at
+fixed step intervals, drives the job with **`None`** as its budget so nothing ever parks, and
+performs no actual write. It establishes two state-machine outcomes - quiescent completes,
+overtaken-before-every-step exhausts the budget and reports `Unstable` - and that is a
+**deterministic liveness and termination test**.
+
+It is not 13.7's restart *rate*: no workload, no write arrivals independent of scan progress, no
+detached-worker timing, and the `Parked` arm is never exercised because the calls are unbudgeted.
 
 ## Design 13.6: what C-1's structural decode saves
 
-The second of design 13's eight measurements to have numbers. Isolated workspace, release, 8
-trials, pure figures batched 64x and end-to-end figures 16x, all reported as
+**Executed measurement of the decoder pair; the obligation is only partly addressed.** 13.6 names
+`checked_epoch_replay_state` and a five-family inventory over several large retained branches, and
+neither is measured - what follows measures `EpochIntentState::{decode, decode_structural}` and
+the two load entry points. That narrowing was deliberate and is recorded below, but it means 13.6
+is **not** complete, and an earlier version of this ledger's summary said it was.
+
+Isolated workspace, release, 8 trials, pure figures batched 64x and end-to-end figures 16x,
+all reported as
 `min/upper_median/max` microseconds with the raw millisecond median alongside.
 
 | shape | ops | plaintext bytes | full decode | structural decode | ratio |
@@ -2037,7 +2108,57 @@ with "reference scan requires fresh full inventory". That also means nothing is 
 a reference scan - `cacheable` requires `references.is_none()` - so in that mode every record
 parks on every trial, which the fixture now asserts rather than assumes.
 
-### The DraftArchive N17 "gap" was mischaracterised, and is re-described rather than closed
+### DraftArchive N17: CLOSED by Agent 2 at `e60d8315`
+
+The handover was sent and answered. Agent 2 added
+`every_archive_write_shape_rotates_the_inventory_generation`, covering **all three** mutation
+shapes - fresh replacement, the exact-retry flush that changes no bytes but must still rotate,
+and the attempt that fails before placing any bytes. They confirmed the third is the only one
+testing *ordering* rather than presence, and mutation-verified it by moving the guard after the
+refusal: that test fails and only that test, because a writer rotating solely on success
+satisfies the other two while still leaving a scan captured before a failed write believing it
+is current.
+
+**So every one of the six inventoried families now has its N17 writer obligation asserted**, and
+the C-3 table row above is updated accordingly. My part was the family-agnostic cursor test; the
+per-writer assertions were theirs, which is the split the mischaracterisation below had wrong.
+
+They also confirmed, which I could not see from my side: **no production caller of either
+mutating archive entry point exists yet** - both are `expect(dead_code)` outside `cfg(test)`, and
+the disposal transaction will be the writer's first. So the requirement-3 contract confirmation
+had nothing outstanding to chase.
+
+Two things they handed back, both worth keeping:
+
+- **No CI status exists on any of their reviewed commits, and every run of theirs used
+  `RUST_MIN_STACK=33554432`.** That is a workaround rather than a clean result, and it is a
+  shared-environment fact: see "the aborts" below, where it turns out to bear directly on my own
+  unexplained profile failures.
+- **A clippy warning in *my* file**, `performance.rs:1985`, `push` immediately after
+  `Vec::new()`. Mine, introduced by the grouped-profile restructure - and I had reported "clippy
+  clean" from a run made *before* that restructure and never re-ran it. Fixed. The lesson is
+  narrow and repeatable: **a gate result is only evidence for the tree it ran against**, which is
+  the same mistake as the stale build fingerprint in a different coat.
+
+### A test that passes for a reason other than the one it names
+
+Agent 2 asked for this to be in a document rather than a message, and they are right that it is
+worth more than a footnote. Twice in this work a test passed while checking something other than
+its stated claim:
+
+- the bare-guard cursor test asserted the refusal message "restart required". The cursor refused
+  correctly, but that is the **poisoned-rail** message; invalidation reports "invalidated by a
+  concurrent record mutation". The test would have passed with a rail bug masquerading as an
+  invalidation.
+- the same test's finish assertion was `is_err()`, which holds for an incomplete scan whether or
+  not it was invalidated - so it passed with the invalidation check deleted.
+
+Both were caught by reading rather than by failing. The general form: **when a refusal has more
+than one cause, asserting that it refused is not asserting why.** Distinguish the reason, or the
+test covers the union of causes and pins none of them. Agent 2 reports the same failure mode cost
+them two rounds on the intent rails.
+
+### The DraftArchive N17 "gap" was mischaracterised - retained for the record
 
 This ledger has repeatedly said "DraftArchive is the one inventoried family N17 does not cover",
 and offered it to Agent 2 as something owed. On inspection that is the wrong description of the
@@ -2216,11 +2337,21 @@ adoption is its own checkpoint rather than a signature change.
 Mutation-verified: removing the budget check so restarts are unbounded fails the test at its
 budget assertion, then restores byte-exact.
 
-**With this, every item design 13.7 names has been addressed**: maximum continuous custody per
-scan slice, the largest single-record step per family with and without reference collection, how
-often detached validation is needed (always - `validation_fits` returns false), visits per full
-scan, and the restart rate. What remains for 13.7 is not coverage but confidence: single runs,
-frames still confounded with bytes, and DraftArchive unmeasured.
+**Every item design 13.7 names now has *something* against it - which is not the same as being
+measured, and an earlier version of this sentence claimed the latter.** Withdrawn. Item by item:
+
+| 13.7 item | what exists |
+|---|---|
+| maximum continuous custody per scan slice | measured, at fixture sizes |
+| largest single-record step per family, with and without reference collection | measured for Recovery, Registry and Studio **at fixture sizes, not at accepted ceilings**; OwnerReceipts and Intents only at trivial sizes; **DraftArchive not at all** |
+| how often detached validation is needed | trivially always, since `validation_fits` returns false. Not a measurement of anything |
+| visits per full scan | measured, and on one multi-family vault rather than a realistic one |
+| restart rate under concurrent writes | a **deterministic liveness test**, not a rate - see below |
+
+So 13.7 is source-correct fixtures plus executed measurements with narrower conclusions than the
+obligation asks for. What is missing is coverage as well as confidence: accepted-ceiling runs,
+DraftArchive, a real workload for the restart behaviour, and single runs throughout with frames
+still confounded with bytes.
 
 ### The factorial answers the confound: it is the operation axis, not the reference axis
 
@@ -2273,13 +2404,23 @@ schedule. `step_total` upper medians per trial:
 **No detectable difference between the protocols.** Every figure sits within one clock tick of
 every other, blocked and interleaved alike, in both positions.
 
-**This narrows the withdrawn claim further, and in the direction that costs me.** The earlier 2.5x
-shift between the block-ordered and interleaved harnesses was first attributed to ordering, then
-withdrawn as unproven because several variables moved together. This says the scheduling was
-**not** the cause: a 2.5x effect would be far larger than the tick-level agreement above and would
-be plainly readable on this corpus. Whatever produced that shift was one of the other things that
-changed - store construction, the central statistic, or the fixture-to-measurement delay - and
-identifying it is not done.
+**The causal exclusion drawn from this is WITHDRAWN.** An earlier version said "this says the
+scheduling was not the cause" of the 2.5x shift. It does not, for a reason that makes the
+experiment inapplicable rather than merely weak:
+
+**The table compares `step_total`, and the 2.5x shift was in validation time.** `step_total`
+accumulates immediately after `step_epoch_storage_scan` and **before the detached validation
+batch runs**, so it excludes the very phase whose movement the comparison was invoked to explain.
+A schedule that changed validation cost 2.5x while leaving read-and-authenticate unchanged would
+produce exactly the table above. That is a direct counterexample, not a caveat.
+
+The corpus is also wrong for the question: Recovery and Registry at eight operations, not Studio,
+and not the Registry-24 case the earlier headline came from.
+
+So what this supports is only: **no large difference was observed in step totals for these
+small-corpus arms.** The earlier shift's cause remains unidentified, and investigating it needs
+the same *validation* metric on the corresponding shapes, with replicated counterbalanced arms
+and recorded corpus identities and cache conditions.
 
 **What this comparison cannot say.** One observation per (protocol, slot) cell, so there is no
 arm-to-arm noise estimate; the corpus is small and deliberately so; the arms differ in corpus
@@ -3561,13 +3702,11 @@ Through the four design passes no Cargo command was executed. Implementation exe
 under "Executed evidence for C-1" above; every run there used `-j 1` with the per-package test
 debug override and no concurrent Cargo work, as the shared machine requires.
 
-**One of design 13's eight measurements now has numbers: 13.7, partially** - Recovery only,
-accounting-only from 1 KiB to 4 MiB plus a canonical reference-collecting case. See "Design
-13.7, partially delivered" above for what it found, what is extrapolation, what the three
-corrected measurement boundaries were, and what is still uncovered. The other seven are
-outstanding, including the C-1 before-and-after comparison that would quantify what the
-structural decode actually saves: the code is in, the number is not. Performance numbers quoted
-elsewhere in this ledger still come from the existing
+**This paragraph is superseded.** It was written when 13.7 was the only measurement with any
+numbers. Six of the eight now have something against them and **none is complete** - see "What
+that leaves genuinely unmeasured" above for the per-item state in the four categories this ledger
+now distinguishes. Performance numbers quoted elsewhere in this ledger still come from the
+existing
 [P1-PERFORMANCE](P1-PERFORMANCE.md) debug-profile observations.
 
 ## Proposed UI-hooks update (for Agent 4, not yet applicable)

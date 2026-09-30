@@ -454,6 +454,30 @@ impl Protocol {
     }
 }
 
+/// The interleaved schedule: one seeded permutation of `0..n` per trial.
+///
+/// **This is the single source of the order.** `run_scheduled` consumes it and so does the test
+/// that checks its predecessor property - which matters, because the first version of that test
+/// reimplemented the Fisher-Yates loop itself. Reverting the dispatcher to the broken cyclic
+/// rotation would have left the test shuffling its own private copy and passing. A regression
+/// test for a scheduler has to observe the schedule the scheduler actually uses.
+fn interleaved_rounds(n: usize) -> Vec<Vec<usize>> {
+    if n == 0 {
+        return Vec::new();
+    }
+    let mut rng = ChaCha20Rng::seed_from_u64(ORDER_SEED);
+    (0..TRIALS)
+        .map(|_| {
+            let mut order: Vec<usize> = (0..n).collect();
+            for i in (1..n).rev() {
+                let j = (rng.next_u32() as usize) % (i + 1);
+                order.swap(i, j);
+            }
+            order
+        })
+        .collect()
+}
+
 /// Run `TRIALS` trials of every case under `protocol`.
 ///
 /// Under `Interleaved` each round runs the cases in a **fresh seeded permutation**.
@@ -473,19 +497,8 @@ fn run_scheduled(cases: &mut [Case], protocol: Protocol, clock: &dyn catcoms_rt:
             }
         }
         Protocol::Interleaved => {
-            let n = cases.len();
-            if n == 0 {
-                return;
-            }
-            let mut rng = ChaCha20Rng::seed_from_u64(ORDER_SEED);
-            for _ in 0..TRIALS {
-                let mut order: Vec<usize> = (0..n).collect();
-                // Fisher-Yates from the seeded stream, so the order is varied and reproducible.
-                for i in (1..n).rev() {
-                    let j = (rng.next_u32() as usize) % (i + 1);
-                    order.swap(i, j);
-                }
-                for index in order {
+            for round in interleaved_rounds(cases.len()) {
+                for index in round {
                     run_trial(&mut cases[index], clock);
                 }
             }
@@ -1770,19 +1783,12 @@ fn c3_multi_family_reference_scan_collects_the_vaults_cids() {
 #[test]
 fn c3_interleaved_rounds_vary_each_case_predecessor() {
     let n = 35;
-    let orders: Vec<Vec<usize>> = {
-        let mut rng = ChaCha20Rng::seed_from_u64(ORDER_SEED);
-        (0..TRIALS)
-            .map(|_| {
-                let mut order: Vec<usize> = (0..n).collect();
-                for i in (1..n).rev() {
-                    let j = (rng.next_u32() as usize) % (i + 1);
-                    order.swap(i, j);
-                }
-                order
-            })
-            .collect()
-    };
+    // The generator `run_scheduled` itself consumes. An earlier version of this test built its
+    // own copy of the shuffle, so reverting the dispatcher to the cyclic rotation would have left
+    // this passing against a private permutation - a regression test that could not see the
+    // regression.
+    let orders = interleaved_rounds(n);
+    assert_eq!(orders.len(), TRIALS, "one round per trial");
 
     // Every case still runs exactly once per round.
     for order in &orders {
@@ -1858,6 +1864,35 @@ fn c3_distinct_cid_count_is_settable_at_a_fixed_frame_count() {
     for case in &cases {
         check_case_structure(case);
     }
+
+    // The fixed-bytes premise, **observed rather than argued**.
+    //
+    // The factorial's whole claim is that it varies distinct-CID count while holding frame count
+    // and encoded size fixed. Equal-width CID fields do not establish that two complete records
+    // are the same size - and the earlier version asserted it only in a comment, with
+    // `physical_bytes: None`. The scan already reads each record's authenticated size when it
+    // parks it, so the premise is available for free and there is no excuse for arguing it.
+    let observed = |suffix: &str| -> Vec<u64> {
+        let case = cases
+            .iter()
+            .find(|c| c.label.ends_with(suffix) && c.label.contains("accounting_fresh"))
+            .unwrap_or_else(|| panic!("no accounting_fresh case ending {suffix}"));
+        let mut sizes: Vec<u64> = case
+            .cost
+            .records
+            .iter()
+            .filter(|r| r.family == Some(EpochRecordKind::Studio))
+            .map(|r| r.size)
+            .collect();
+        sizes.sort_unstable();
+        sizes
+    };
+    assert_eq!(
+        observed("n8_c1"),
+        observed("n8_c8"),
+        "the two cells' Studio records differ in authenticated size, so this factorial varies \
+         bytes as well as distinct-CID count and cannot attribute a difference to either"
+    );
 }
 
 /// The Studio frame path, in the ordinary suite, so the reference oracle is load-bearing here and
@@ -1972,69 +2007,64 @@ fn profile_c3_visit_cost() {
     };
     let clock = &SystemClock;
 
-    // Run in groups, each interleaved internally and dropped before the next is built.
+    // **Every case in one interleaved set.** The lists below are named only to keep the builders
+    // readable; they are concatenated and run together, so any two cases in the profile are
+    // comparable under the same schedule.
     //
-    // All 37 cases alive at once aborted the release binary with no panic - every case holds an
-    // open `ServerStore` and a temporary directory, and the multi-family ones hold five families
-    // each. Grouping caps how many are live.
-    //
-    // **The cost, stated:** cases are interleaved *within* a group, so a difference between two
-    // cases in the same group is comparable and a difference across groups is not. Groups are
-    // therefore drawn so that the comparisons each measurement actually makes fall inside one -
-    // the whole Studio factorial in one group, the Registry operation sweep in one, and so on.
-    let mut groups: Vec<(&str, Vec<Case>)> = Vec::new();
-    groups.push((
-        "recovery",
-        vec![recovery_accounting_case(&[
-            1024,
-            16 * 1024,
-            256 * 1024,
-            1024 * 1024,
-            4 * 1024 * 1024,
-        ])],
-    ));
-    groups.push((
-        "recovery_references",
-        recovery_reference_cases(&[1, 16, 128, 512], clock),
-    ));
-    groups.push(("registry", registry_cases(&[2, 8, 24])));
-    // 24 and not 32: `build` stops once the epoch is nearly full, and at 160 KiB per message the
-    // 4 MiB epoch fits about 25. The previous run requested 32, silently got fewer, and divided
-    // by 32 anyway. `check_case_structure` now fails rather than letting that recur.
-    groups.push(("studio_titles", studio_cases(&[3, 12, 24])));
-    // Studio with actual pixels, because the title-only sources above collect no CIDs at all.
-    // The factorial: (128,1) against (128,128) isolates reference count at fixed frame count;
-    // (16,1) against (128,1) isolates frame count at fixed reference count. Kept in one group so
-    // those two comparisons are interleaved.
-    groups.push((
-        "studio_frames",
-        studio_frame_factorial(&[(16, 1), (16, 16), (128, 1), (128, 128)]),
-    ));
+    // This was briefly split into separately-timed groups, because 37 cases alive at once aborted
+    // the release binary with no panic and that looked like resource exhaustion. It was not: the
+    // cause was **stack size**, and with `RUST_MIN_STACK=33554432` all 37 run to completion
+    // interleaved. Two things wrong with the grouping are worth recording rather than quietly
+    // deleting - it was a fix for a misdiagnosed problem, and it did not even do what its comment
+    // claimed, because every builder ran before the first group was timed, so all 35 stores were
+    // live anyway. Full interleaving also removes the "comparisons across groups are not
+    // comparable" limitation the grouping had introduced.
+    let mut all: Vec<Case> = Vec::new();
+    let groups: Vec<(&str, Vec<Case>)> = vec![
+        (
+            "recovery",
+            vec![recovery_accounting_case(&[
+                1024,
+                16 * 1024,
+                256 * 1024,
+                1024 * 1024,
+                4 * 1024 * 1024,
+            ])],
+        ),
+        (
+            "recovery_references",
+            recovery_reference_cases(&[1, 16, 128, 512], clock),
+        ),
+        ("registry", registry_cases(&[2, 8, 24])),
+        // 24 and not 32: `build` stops once the epoch is nearly full, and at 160 KiB per message
+        // the 4 MiB epoch fits about 25. An earlier run requested 32, silently got fewer, and
+        // divided by 32 anyway. `check_case_structure` now fails rather than letting that recur.
+        ("studio_titles", studio_cases(&[3, 12, 24])),
+        // Studio with actual pixels, because the title-only sources above collect no CIDs at all.
+        // The factorial: (128,1) against (128,128) isolates reference count at fixed frame count;
+        // (16,1) against (128,1) isolates frame count at fixed reference count. Kept in one group
+        // so those two comparisons are interleaved.
+        (
+            "studio_frames",
+            studio_frame_factorial(&[(16, 1), (16, 16), (128, 1), (128, 128)]),
+        ),
+    ];
 
-    for (name, mut cases) in groups {
-        println!(
-            "C3_PROFILE group={name} cases={} trials={TRIALS} order=interleaved",
-            cases.len()
-        );
-        run_interleaved(&mut cases, clock);
-        for case in &cases {
-            check_case_structure(case);
-            report(case, Protocol::Interleaved.label(), profile);
-        }
+    for (_, cases) in groups {
+        all.extend(cases);
     }
-
-    // OwnerReceipts and Intents, and the only realistic scan shape in the set. Built last and in
-    // their own group: five families per store makes these the heaviest cases in the profile.
-    for (cache, references) in [(CachePolicy::Fresh, false), (CachePolicy::Warm, true)] {
-        let mut cases = [multi_family_case(cache, references)];
-        println!(
-            "C3_PROFILE group=multi_family cases=1 trials={TRIALS} order=interleaved \
-             references={references}"
-        );
-        run_interleaved(&mut cases, clock);
-        check_case_structure(&cases[0]);
-        report(&cases[0], Protocol::Interleaved.label(), profile);
+    all.push(multi_family_case(CachePolicy::Fresh, false));
+    all.push(multi_family_case(CachePolicy::Warm, true));
+    println!(
+        "C3_PROFILE group=all cases={} trials={TRIALS} order=interleaved",
+        all.len()
+    );
+    run_interleaved(&mut all, clock);
+    for case in &all {
+        check_case_structure(case);
+        report(case, Protocol::Interleaved.label(), profile);
     }
+    drop(all);
 
     // Deliberately after the main run's cases are dropped: the comparison's own stores should not
     // be competing with 35 live ones, and its labels would otherwise be ambiguous against the

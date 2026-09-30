@@ -533,13 +533,61 @@ fn c1_structural_and_full_decode_both_refuse_a_tampered_sequence() {
     EpochIntentState::decode_structural(&plain.plain, &scope, &f.logical)
         .expect("control: the untampered record must decode structurally");
 
-    // Each spliced entry is 88 bytes with its sequence at offset 72; the last entry therefore
-    // ends the record. Bump it so the branch is no longer consecutive.
+    // Locate the last entry's `sequence` by **searching for it**, not by indexing back from the
+    // end of the record.
+    //
+    // An earlier version computed `end - 88 + 72`, which was right only while the final 88-byte
+    // entry ended the buffer. Promoting the fixture to v2 appended a Completed-presence byte
+    // after the nested active branch, so that index moved one byte earlier and selected the last
+    // seven bytes of `sequence` plus the **first byte of `ts`**. Adding to it left the sequence at
+    // 8 and turned the timestamp into 0x0700000000000007, far past `MAX_STUDIO_INTEGER` - so both
+    // decoders refused, through timestamp validation, and the test passed while proving nothing
+    // about the consecutive-sequence check it is named for. That is the third masked refusal in
+    // this work, and the second written after the lesson was recorded.
+    //
+    // An entry is `id`(4+32) `envelope`(4+32) `sequence`(8) `ts`(8). The last one carries sequence
+    // 8 and ts 7 for this fixture: seven spliced entries take sequences 1 to 7, the header is
+    // patched to 8, and the promoting append lands there with `ts = spliced`. Searching for that
+    // exact 16-byte pair is specific enough to be unique and fails loudly if the shape changes,
+    // which a fixed offset cannot.
+    let expected_sequence: u64 = 8;
+    let expected_ts: u64 = 7;
+    let mut needle = expected_sequence.to_be_bytes().to_vec();
+    needle.extend_from_slice(&expected_ts.to_be_bytes());
+    let found: Vec<usize> = plain
+        .plain
+        .windows(needle.len())
+        .enumerate()
+        .filter(|(_, w)| *w == needle.as_slice())
+        .map(|(i, _)| i)
+        .collect();
+    assert_eq!(
+        found.len(),
+        1,
+        "expected exactly one (sequence {expected_sequence}, ts {expected_ts}) pair in the \
+         record, found {}. The entry layout or the fixture's shape has changed, and tampering \
+         would corrupt the wrong field",
+        found.len()
+    );
+    let seq = found[0];
+
     let mut tampered = plain.plain.to_vec();
-    let end = tampered.len();
-    let seq = end - 88 + 72;
-    let bumped = u64::from_be_bytes(tampered[seq..seq + 8].try_into().unwrap()).wrapping_add(7);
+    let bumped = expected_sequence.wrapping_add(7);
     tampered[seq..seq + 8].copy_from_slice(&bumped.to_be_bytes());
+
+    // The timestamp must be untouched, or this is not a sequence test. This assertion is the one
+    // that would have caught the defect above.
+    assert_eq!(
+        u64::from_be_bytes(tampered[seq + 8..seq + 16].try_into().unwrap()),
+        expected_ts,
+        "the tamper moved the timestamp, so a refusal could come from timestamp validation \
+         instead of the sequence check"
+    );
+    assert_eq!(
+        tampered.len(),
+        plain.plain.len(),
+        "the tamper changed the record's length"
+    );
     assert_ne!(tampered, plain.plain.to_vec(), "the tamper changed nothing");
 
     assert!(
