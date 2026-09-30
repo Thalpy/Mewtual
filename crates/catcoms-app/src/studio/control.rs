@@ -164,6 +164,9 @@ pub struct StudioOverlayLifecycle {
     pub target: StudioTarget,
     /// `None` when no branch is live: the vault may still hold a terminal manifest.
     pub branch: Option<[u8; 32]>,
+    /// The live branch's content digest, carried so a disposal can be addressed at all. Present
+    /// exactly when `branch` is: they are read together from the same branch on purpose.
+    pub content: Option<[u8; 32]>,
     pub generation: u64,
     pub accepted: usize,
     /// Whether a preserved archive exists for this document, and its identity if so.
@@ -301,19 +304,19 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
                     StudioControlAction::OverlayLifecycle => {
                         let state = store.load_epoch_intents_structural(server, &logical)?;
                         let metadata = state.handoff_metadata();
+                        let live = state.live_branch()?;
                         let archive = store
                             .read_studio_draft_archive_for_app(server, &logical)?
                             .map(|(_, id, _)| id);
                         return Ok(StudioControlResponse::OverlayLifecycle(Box::new(
                             StudioOverlayLifecycle {
                                 target,
-                                branch: metadata.and_then(|m| m.branch_id()),
+                                branch: live.map(|live| live.id),
+                                content: live.map(|live| live.content),
                                 generation: metadata.map_or(0, |m| m.branch_generation()),
                                 accepted: state.overlay().map_or(0, |o| o.accepted()),
                                 archive,
-                                disposed: metadata
-                                    .and_then(|m| m.disposed())
-                                    .map(|d| d.mode.clone()),
+                                disposed: metadata.and_then(|m| m.disposed()).map(|d| d.mode),
                                 transferred: metadata.is_some_and(|m| m.has_completed()),
                             },
                         )));
@@ -321,7 +324,9 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
                     StudioControlAction::ReadOverlayArchive => {
                         let (archive, id, physical_bytes) = store
                             .read_studio_draft_archive_for_app(server, &logical)?
-                            .ok_or_else(|| invalid("no preserved draft archive for this document"))?;
+                            .ok_or_else(|| {
+                                invalid("no preserved draft archive for this document")
+                            })?;
                         return Ok(StudioControlResponse::OverlayArchive {
                             id,
                             physical_bytes,

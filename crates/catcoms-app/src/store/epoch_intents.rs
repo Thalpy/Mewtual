@@ -52,6 +52,17 @@ impl std::fmt::Debug for EpochIntentState {
     }
 }
 
+/// A live branch's identity and the content digest a disposal must echo back.
+///
+/// A struct rather than a pair because both halves are `[u8; 32]`: destructuring a tuple
+/// positionally at the call site would let the two be swapped with nothing to catch it, and
+/// `dispose` checks them separately precisely because they mean different things.
+#[derive(Clone, Copy)]
+pub(crate) struct LiveBranch {
+    pub(crate) id: [u8; 32],
+    pub(crate) content: [u8; 32],
+}
+
 impl EpochIntentState {
     pub fn overlay(&self) -> Option<&catcoms_replication::studio::StudioOverlay> {
         self.overlay.as_ref().and_then(|m| m.overlay())
@@ -60,6 +71,25 @@ impl EpochIntentState {
         &self,
     ) -> Option<&catcoms_replication::studio::StudioOverlayState> {
         self.overlay.as_ref()
+    }
+    /// The live branch's identity and content digest, or `None` when no branch is live.
+    ///
+    /// Read as a pair rather than separately because they are only meaningful together: `dispose`
+    /// checks both against the same `active` branch, and a caller able to obtain one without the
+    /// other could build a request naming a generation whose content it never saw. The native
+    /// lifecycle view is the only place a caller can learn either, and a disposal it cannot
+    /// address is not a disposal.
+    pub(crate) fn live_branch(&self) -> Result<Option<LiveBranch>, AppError> {
+        let Some(metadata) = self.overlay.as_ref() else {
+            return Ok(None);
+        };
+        let Some(id) = metadata.branch_id() else {
+            return Ok(None);
+        };
+        Ok(Some(LiveBranch {
+            id,
+            content: metadata.branch_content(&self.ledger).map_err(invalid)?,
+        }))
     }
     pub(crate) fn handoff_prepared(&self) -> bool {
         self.overlay.as_ref().is_some_and(|m| m.is_prepared())

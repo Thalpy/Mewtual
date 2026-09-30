@@ -1,10 +1,8 @@
 use super::*;
 use catcoms_app as app;
-#[path = "../../../../../../crates/catcoms-app/tests/support/studio_inspection.rs"]
-mod fixture;
 #[path = "../../../../../../crates/catcoms-app/tests/support/studio_inspection_shapes.rs"]
 mod shapes;
-use fixture::InspectionFixture;
+use super::super::tests::fixture::{self, InspectionFixture};
 
 async fn state(f: &InspectionFixture) -> AppState {
     let state = AppState {

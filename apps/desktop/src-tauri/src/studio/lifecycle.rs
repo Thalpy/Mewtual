@@ -69,7 +69,9 @@ pub(crate) async fn studio_overlay_archive_export(
             value["kind"] = "overlayArchiveExport".into();
             value["format"] = "p1-studio-draft-archive-v1".into();
             value["bytes"] = bytes.len().into();
-            value["bytesB64"] = base64::engine::general_purpose::STANDARD.encode(&bytes).into();
+            value["bytesB64"] = base64::engine::general_purpose::STANDARD
+                .encode(&bytes)
+                .into();
             bounded_view(value)
         },
     )
@@ -87,38 +89,57 @@ pub(crate) async fn studio_overlay_archive_release(
     archive: String,
     confirmation: String,
 ) -> Result<Value, String> {
-    let confirmation = StudioReleaseConfirmation::parse(&confirmation).ok_or_else(|| {
+    let request = release_request(&archive, &confirmation)?;
+    recovery::invoke_control(
+        &state,
+        server,
+        target(&channel, object.as_deref())?,
+        Action::ReleaseOverlayArchive(Box::new(request)),
+    )
+    .await
+}
+
+/// Split out so the refusals are reachable without an actor. The confirmation is checked before the
+/// archive id so a caller that typed nothing is told that first, rather than being sent away to fix
+/// a hex string it will then be refused for anyway.
+fn release_request(
+    archive: &str,
+    confirmation: &str,
+) -> Result<StudioArchiveReleaseRequest, String> {
+    let confirmation = StudioReleaseConfirmation::parse(confirmation).ok_or_else(|| {
         format!(
             "releasing a draft archive needs the exact confirmation {:?}",
             StudioReleaseConfirmation::TOKEN
         )
     })?;
-    recovery::invoke_control(
-        &state,
-        server,
-        target(&channel, object.as_deref())?,
-        Action::ReleaseOverlayArchive(Box::new(StudioArchiveReleaseRequest {
-            archive: hash(&archive)?,
-            confirmation,
-        })),
-    )
-    .await
+    Ok(StudioArchiveReleaseRequest {
+        archive: hash(archive)?,
+        confirmation,
+    })
 }
 
-/// How the renderer names a disposal mode. Tagged and `deny_unknown_fields` so a payload that meant
-/// to preserve and forgot its archive is a refusal, never a silent discard.
+/// How the renderer names a disposal mode. Tagged and `deny_unknown_fields` so a payload that is
+/// missing, misspells or half-fills its mode is a refusal rather than whichever arm serde can make
+/// fit.
 #[derive(serde::Deserialize)]
 #[serde(tag = "kind", rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) enum DisposalInput {
     /// The bodies live on in a durable archive the caller has already read back.
-    Preserve,
+    ///
+    /// Spelled `{}` rather than as a unit variant deliberately. Serde's internally tagged
+    /// representation lets a *unit* variant swallow any other fields in the object, so
+    /// `{"kind":"preserve","confirmation":"destroy-local-draft"}` - a caller that meant to discard
+    /// and mis-set its kind - would deserialise silently. As a struct variant
+    /// `deny_unknown_fields` applies and that payload is refused, which is what a contradictory
+    /// request deserves whichever way round the contradiction points.
+    Preserve {},
     /// The bodies are destroyed. Requires the literal the user typed.
     Discard { confirmation: String },
 }
 impl DisposalInput {
     fn checked(self) -> Result<StudioDisposalRequestMode, String> {
         Ok(match self {
-            Self::Preserve => StudioDisposalRequestMode::Preserve,
+            Self::Preserve {} => StudioDisposalRequestMode::Preserve,
             Self::Discard { confirmation } => StudioDisposalRequestMode::Discard(
                 StudioDiscardConfirmation::parse(&confirmation).ok_or_else(|| {
                     format!(
@@ -131,29 +152,47 @@ impl DisposalInput {
     }
 }
 
-/// Drop the live branch. `branch`, `content` and `accepted` all come from the inspection the user
-/// saw; the store checks them separately because they fail for different reasons.
+/// What the renderer echoes back from the lifecycle view and the inspection the user saw.
+///
+/// One payload rather than three loose arguments because the three values only mean anything
+/// together: they all describe the same branch, and the store checks them separately only because
+/// they fail for different reasons.
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct DisposalRequestInput {
+    /// Branch identity, from `studio_overlay_lifecycle`.
+    branch: String,
+    /// The same view's content digest. A disposal naming a branch whose content it never saw is
+    /// the thing this field exists to refuse.
+    content: String,
+    accepted: usize,
+    mode: DisposalInput,
+}
+impl DisposalRequestInput {
+    fn checked(self) -> Result<StudioOverlayDisposalRequest, String> {
+        Ok(StudioOverlayDisposalRequest {
+            branch: hash(&self.branch)?,
+            content: hash(&self.content)?,
+            accepted: self.accepted,
+            mode: self.mode.checked()?,
+        })
+    }
+}
+
+/// Drop the live branch.
 #[tauri::command]
 pub(crate) async fn studio_overlay_dispose(
     state: State<'_, AppState>,
     server: u64,
     channel: String,
     object: Option<String>,
-    branch: String,
-    content: String,
-    accepted: usize,
-    mode: DisposalInput,
+    disposal: DisposalRequestInput,
 ) -> Result<Value, String> {
     recovery::invoke_control(
         &state,
         server,
         target(&channel, object.as_deref())?,
-        Action::DisposeOverlay(Box::new(StudioOverlayDisposalRequest {
-            branch: hash(&branch)?,
-            content: hash(&content)?,
-            accepted,
-            mode: mode.checked()?,
-        })),
+        Action::DisposeOverlay(Box::new(disposal.checked()?)),
     )
     .await
 }
@@ -220,17 +259,20 @@ fn archive_value(
     id: [u8; 32],
     physical_bytes: u64,
 ) -> Result<Value, String> {
-    Ok(json!({"v":1,"kind":"overlayArchive","archive":hex::encode(id),
+    Ok(
+        json!({"v":1,"kind":"overlayArchive","archive":hex::encode(id),
         "basis":hex::encode(archive.basis()),"content":hex::encode(archive.content()),
         "author":hex::encode(archive.author().as_bytes()),"accepted":archive.accepted(),
         "physicalBytes":physical_bytes.to_string(),
-        "readOnly":true,"authority":false,"provisional":true}))
+        "readOnly":true,"authority":false,"provisional":true}),
+    )
 }
 
 fn lifecycle_value(v: &StudioOverlayLifecycle) -> Result<Value, String> {
     Ok(json!({"v":1,"kind":"overlayLifecycle",
         "channel":channel_of(v.target),"object":object_of(v.target),
-        "branch":v.branch.map(hex::encode),"generation":v.generation.to_string(),
+        "branch":v.branch.map(hex::encode),"content":v.content.map(hex::encode),
+        "generation":v.generation.to_string(),
         "accepted":v.accepted,"archive":v.archive.map(hex::encode),
         "disposed":v.disposed.map(disposal_mode_value),
         "transferred":v.transferred,"provisional":true}))
