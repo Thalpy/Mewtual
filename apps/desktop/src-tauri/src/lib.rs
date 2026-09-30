@@ -16464,6 +16464,8 @@ pub fn run() {
             studio::lifecycle::studio_overlay_archive_export,
             studio::lifecycle::studio_overlay_archive_release,
             studio::lifecycle::studio_overlay_dispose,
+            studio::copy::studio_overlay_copy_preview,
+            studio::copy::studio_overlay_copy_apply,
             post_status,
             get_statuses,
             edit_status,

@@ -5,6 +5,7 @@ use catcoms_app::studio::{
     types::*, EpochPhase, StudioRead, StudioRequest, StudioVaultLease, StudioView,
 };
 use serde_json::{json, Value};
+pub(crate) mod copy;
 pub(crate) mod inspection;
 pub(crate) mod lifecycle;
 pub(crate) mod recovery;

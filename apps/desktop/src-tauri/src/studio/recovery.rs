@@ -300,6 +300,12 @@ pub(super) fn response_value(response: Response) -> Result<Value, String> {
         | Response::OverlayArchive { .. }
         | Response::OverlayArchiveReleased
         | Response::OverlayDisposed(_)) => return super::lifecycle::response_value(response),
+        // Copy's two-visit preview converts at its own call site, which holds the context needed to
+        // name both the source and the destination. Reaching here means a copy response arrived
+        // through a path that cannot describe it.
+        Response::OverlayCopyPreparation(_) | Response::OverlayCopyPreview(_) => {
+            return Err("mismatched overlay copy response".into());
+        }
         Response::PointerRestored {
             target,
             epoch,
