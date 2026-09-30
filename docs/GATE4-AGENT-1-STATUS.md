@@ -1971,7 +1971,7 @@ four this ledger should have been distinguishing all along:
 | item | state | what is absent |
 |---|---|---|
 | 13.1 | **component measurements only; stage mapping rejected** | actual H1, scheduled-H3-slice and H5 intervals at 1/32/256, inventory separated on the handoff's own path. What exists times `load_epoch_intents`, an on-demand draft, the synchronous compatibility adapter and a test helper's `budget(...)` |
-| 13.2 | **nothing** | maximal accepted shapes: 5 MiB + 1024-byte intent record at 256 maximal bodies, 2 MiB seed, 64 KiB metadata ceiling, maximal projection widths, a large roster |
+| 13.2 | **scoped, nothing measured** | maximal accepted shapes. The axes are enumerated with their caps and all but one shown reachable; "256 maximal-body operations" is **not satisfiable as worded** and needs the 16 384-byte reading, since `MAX_DOMAIN_OP_BYTES` at 256 exceeds every relevant cap; "a large roster" has no figure in the design. No fixture exists |
 | 13.3 | **small-shape observation** | the largest admitted individual operation and roster, with its authority checks. 1 ms is a sampled maximum over ~100-byte title operations |
 | 13.4 | **complete as the arithmetic 13.4 asks for; not a measurement** | scope declared (one permit, sum of accounted bounds), stage/lifetime table with moves distinguished from clones, **64.18 MiB** over 13.4's eight items plus 18.09 MiB retained beyond its list. The largest simultaneous accounted set is H5's source write at 59.52 MiB under a declared document proxy; H4 is the smallest of the three priced stages. Five earlier attempts at this section were each refuted by review |
 | 13.5 | **source-correct fixture on the operation-count axis; one clause uncovered** | the three real production seams are timed at every depth 1 to 255, with custody separated from the detached plan, depth read back through `local_draft()` and the 255/256 premise asserted. "Against a maximal Closing source and seed" is **not** covered - the source is at rotation eligibility, not the byte ceiling - and S3's I-3 hold is bracketed rather than measured |
@@ -1993,6 +1993,59 @@ overtaken-before-every-step exhausts the budget and reports `Unstable` - and tha
 
 It is not 13.7's restart *rate*: no workload, no write arrivals independent of scan progress, no
 detached-worker timing, and the `Parked` arm is never exercised because the calls are unbudgeted.
+
+## Design 13.2: scoped, not measured, and one clause needs a reading
+
+**Nothing is measured.** What follows is the reachability analysis, recorded because 13.2 is the
+section both 13.5's and 13.7's uncovered clauses defer to, which makes it load-bearing rather than
+merely empty, and because one of its axes is not satisfiable as literally worded.
+
+13.2 asks for requirement 1's per-stage Flow H custody - H1, one H3 slice, H5, with C-3's
+inventory separated - at maximal accepted shapes: "the 5 MiB plus 1024-byte intent record filled
+by 256 maximal-body operations, a 2 MiB seed, the 64 KiB combined metadata ceiling, the maximal
+accepted projection widths used by the inspection tests, and a large roster."
+
+### The one clause that does not work as written
+
+"**256 maximal-body operations**" cannot mean bodies at `MAX_DOMAIN_OP_BYTES`. That cap is 64 KiB,
+and 256 of them is 16 777 216 bytes - over three times the intent record cap the same sentence
+names, and four times `MAX_INTENT_BYTES_PER_DOCUMENT`, which is the aggregate canonical
+domain-operation bound at 4 MiB. The binding constraint is the aggregate, not the per-operation
+cap:
+
+| bound | value | per operation at 256 operations |
+|---|---|---|
+| `MAX_DOMAIN_OP_BYTES` | 65 536 | not binding |
+| `MAX_INTENT_BYTES_PER_DOCUMENT` | 4 194 304 | **16 384** |
+| intent record cap | 5 243 904 | 20 484, but this includes framing and author ids |
+
+So "maximal-body" has to mean **16 384 bytes per operation** - maximal subject to filling the
+ledger with 256 of them - and the record reaches its 5 243 904 cap only with per-entry framing and
+author ids making up the remaining 1 049 600. A fixture built to the 20 484 figure would refuse at
+`IntentLedger::prepare`; one built to 65 536 would refuse on the fourth operation. This is the
+reading the fixture should adopt, and it is recorded here rather than chosen silently, because
+either of the other two readings produces a fixture that cannot exist and would look like an
+implementation defect.
+
+### The axes, with their caps and reachability
+
+| axis | cap | reachable | note |
+|---|---|---|---|
+| intent record filled by 256 operations | 5 243 904 record, 16 384 per op | yes, on the reading above | |
+| seed | `MAX_CHECKPOINT_BYTES` 2 097 152 | yes | |
+| combined metadata ceiling | `MAX_METADATA` 64 KiB | yes | private to `studio/overlay.rs`; the operative bound on `encode_vault` |
+| maximal projection width, Flipnote | `FLIPNOTE_MAX_FRAMES` 999 | yes | |
+| maximal projection width, Index | `MAX_INDEX_OBJECTS` 64 | yes | also `MAX_INDEX_PRIMITIVES` on the change path |
+| large roster | no constant named | **undefined** | 13.2 says "a large roster" without a figure, so the fixture has to pick one and say so |
+
+### What this is not
+
+It is not a fixture, not a run, and not an estimate of either. `fill_studio_epoch_fixture` - the
+source every existing Flow H and Flow S measurement is built on - fills to
+`close_candidate_ready()`, which is rotation eligibility at roughly half of `MAX_EPOCH_BYTES`, on
+a single-member group with a small projection. None of the five axes above is exercised by it. Any
+figure in this ledger that came from that fixture describes a small-shape document, and the
+sections that depend on a maximal one say so in their own text rather than relying on this one.
 
 ## Design 13.5: Flow S custody per stage, on the operation-count axis only
 
