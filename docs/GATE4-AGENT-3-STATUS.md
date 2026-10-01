@@ -51,8 +51,9 @@ refuses any tag 3, so ordinary rotation for that document waits for the decision
 
 Not implemented: historical admission (CORE-005), the detached S1-S4 split (every step is one
 custody visit), and Imported coverage at the app boundary (no migrated-v1 Server fixture; the seam's
-own `require` anchor covers it). Runtime-level tests of the catch-up repair step are still missing;
-its store predicates and transactions are tested directly.
+own `require` anchor covers it). Runtime-level tests of the catch-up repair step, including the
+install router, are still missing; its store predicates, transactions and the sync selection are
+tested directly.
 
 ### Adversarial review of `90dca2c2`: REQUEST CHANGES, all findings addressed
 
@@ -72,6 +73,28 @@ its store predicates and transactions are tested directly.
 | P3 Registry `waiting` count | Fixed to exclude the decidable pair. |
 
 Mutations: `scripts/check-agent3-store-mutations.py` now carries twenty guards (six original).
+
+### Adversarial re-review of `7943ee04`: REQUEST CHANGES, findings addressed
+
+One change resolves most of these: a source that **owes** a repair (B2 crossed, replacement
+pending) installs through the repair transaction itself, using the fetched seed. A single router,
+`route_checkpoint_install`, runs before both seed installers.
+
+| Finding | Disposition |
+|---|---|
+| P1 livelock: a fresh proof pass overwrote the repaired seed pass | Fixed. A proof pass is kept only when it already names the repair's selected receipt; otherwise it is dropped and the repaired pass minted instead. Discovery cannot relaunch while a pass is set. |
+| P2 no re-mint after B2 | Fixed. `owed_studio_repair`/`owed_registry_repair` read the repair and full pair from the warm source's committed evidence, so any pass for that target re-mints the selected seed without the owner resending anything. |
+| P2 deferral pushed the global `next_at` out 60 s | Fixed. Deferral and failure use the ordinary 5 s `retry_discovery`, which rotates to the next target. |
+| P2 `StorageRefused` unreachable through adoption | Fixed. The owed install goes through `install_repaired_*_seed` and then `apply_*_repair`, giving typed `Installed`/`RecoveryPending`/`StorageRefused` and owner recycling in the same step. |
+| P2 no tests for the repaired selection | Added `registry_seed::tests::repaired`, covering newcomer `Unknown` (N16), `Imported` (N42), wrong target, unselected sibling, member-signed repair or receipt, other issuer tenure, then success, seed fetch and supersession. Verified by breaking the code: swapping in the verification accessor and dropping the selected-hash check each fail it. The store test now asserts the owed repair and pair after B2, and none after install. |
+| P3 defer errors were silent | Fixed. Surfaced through `owner_failure`, and the target defers rather than installs. |
+| P3 repeated Registry restores for the same repair | Fixed. A terminal memo per (bucket, repair), plus a tri-state `OfferedRepairEvidence` (Terminal, Unverifiable, Pair). |
+| P3 seed always requested from one peer | Fixed. Rotates over the current page peers. |
+
+Owner change while a source owes a previous owner's repair (not flagged by the review): the
+repaired pass no longer verifies under the current owner, so the target holds. This is CORE-007's
+accepted fail-closed limitation. The runtime surfaces the failure and retries on the rotating 5 s
+cadence. It does not install the new owner's checkpoint over the owed replacement.
 
 ## Base re-merge and the V5 tenure seam, 2026-10-01
 

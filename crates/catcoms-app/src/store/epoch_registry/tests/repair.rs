@@ -164,8 +164,13 @@ fn a_held_bucket_decision_fences_adoption_defers_installs_and_resumes_to_ordinar
             .is_err(),
         "ordinary adoption must not bypass a held bucket decision"
     );
+    // Before B2 the bucket owes nothing, so only the held decision defers the install.
     assert!(store
-        .registry_install_deferred_by_repair(SERVER, &f.group, f.key.bucket(), &f.device, &other)
+        .owed_registry_repair(SERVER, &f.group, f.key.bucket(), &f.device)
+        .unwrap()
+        .is_none());
+    assert!(store
+        .registry_install_deferred_by_repair(SERVER, &f.group, f.key.bucket(), None, &other)
         .unwrap());
     // Legacy maintenance does not run against the held bucket.
     assert!(!store.epoch_owner_is_ordinary(SERVER, &f.document).unwrap());
@@ -175,7 +180,7 @@ fn a_held_bucket_decision_fences_adoption_defers_installs_and_resumes_to_ordinar
     assert_eq!(state.phase(), EpochPhase::Closing);
     assert!(store.load_epoch_owner_receipts(SERVER, &f.document).is_ok());
     assert!(!store
-        .registry_install_deferred_by_repair(SERVER, &f.group, f.key.bucket(), &f.device, &other)
+        .registry_install_deferred_by_repair(SERVER, &f.group, f.key.bucket(), None, &other)
         .unwrap());
 }
 

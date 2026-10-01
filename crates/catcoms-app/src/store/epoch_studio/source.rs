@@ -305,6 +305,28 @@ impl ServerStore {
         .flatten()
     }
 
+    /// The committed repair this warm source still owes a replacement for, with its complete
+    /// pair from the source's own resolved evidence. Lets a peer re-request the selected seed
+    /// after B2 without the owner resending anything; a cold source answers `None`.
+    pub(crate) fn owed_studio_repair(
+        &self,
+        server: u64,
+        group: &ServerGroup,
+        target: StudioTarget,
+        device: &MlsDevice,
+    ) -> Option<(catcoms_replication::ReceiptRepair, [Receipt; 2])> {
+        self.warm_studio_unit(server, group, target, device, |unit| {
+            unit.repair_state()
+                .filter(|state| state.install_pending)
+                .map(|state| {
+                    let mut pair = [state.selected, state.losing];
+                    pair.sort_by_key(Receipt::hash);
+                    (state.repair, pair)
+                })
+        })
+        .flatten()
+    }
+
     /// Whether a repair hold, not storage, must defer installing `selected` into this target: a
     /// held owner decision for another receipt (or not yet applied), or a source that owes a
     /// different replacement. Deferring keeps the hold per target; an error here would pause all

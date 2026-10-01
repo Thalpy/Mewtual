@@ -444,6 +444,11 @@ pub(super) struct CatchupRuntime {
     repair_next_at: u64,
     repair_selection: usize,
     registry_repair_next_at: u64,
+    // Rotates which peer a repaired seed is requested from.
+    repair_seed_peer: usize,
+    // Terminal Registry repairs already applied here, so repeated answers carrying one cost no
+    // further Registry restores. Bounded; forgetting one only costs a reload.
+    registry_repairs_seen: std::collections::BTreeSet<(u8, [u8; 32])>,
 }
 impl CatchupRuntime {
     /// Never evict the source of a ready/active page or checkpoint just to start replay.

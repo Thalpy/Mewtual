@@ -316,6 +316,102 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
             })
     }
 
+    /// Install a fetched selected seed for a repair this source owes, through the repair
+    /// transaction itself so the outcome is typed (Installed, RecoveryPending, StorageRefused)
+    /// and an owner's record is recycled in the same step. The seed is the one the current pass
+    /// verified against exactly the repair's selected receipt; nothing else is installable.
+    pub(crate) fn install_repaired_studio_seed(
+        &mut self,
+        store: &mut ServerStore,
+        server: u64,
+        pass: &crate::studio_exchange::discovery::ServerCheckpointFetch,
+        repair: &ReceiptRepair,
+        pair: &[Receipt; 2],
+        budget: &mut EpochStudioBudget,
+    ) -> Result<(StudioRepairOutcome, EpochStudioState), AppError> {
+        let catcoms_sync::checkpoint_exchange::CheckpointTarget::Studio(target) =
+            pass.inner.target()
+        else {
+            return Err(AppError::Invalid(
+                "a Studio repair needs a Studio seed".into(),
+            ));
+        };
+        self.check_studio_fault_channel(target)?;
+        if pass.server != server || !Arc::ptr_eq(&pass.mount, &store.registry_mount()) {
+            return Err(AppError::Invalid(
+                "seed pass belongs to a replaced mount".into(),
+            ));
+        }
+        let clock = self.runtime_clock();
+        self.sync
+            .with_checkpoint_seed_selection(&pass.inner, |group, device, rng, selected| {
+                let seed = selected
+                    .checkpoint
+                    .filter(|_| selected.receipt.hash() == repair.selected_receipt_hash)
+                    .ok_or_else(|| AppError::Invalid("no verified seed for this repair".into()))?;
+                store.apply_studio_repair(
+                    server,
+                    group,
+                    target,
+                    device,
+                    repair,
+                    pair,
+                    selected.tenure,
+                    Some(seed.bytes()),
+                    clock.as_ref(),
+                    rng,
+                    budget,
+                )
+            })?
+    }
+
+    /// The Registry counterpart of [`Self::install_repaired_studio_seed`].
+    pub(crate) fn install_repaired_registry_seed(
+        &mut self,
+        store: &mut ServerStore,
+        server: u64,
+        pass: &crate::studio_exchange::discovery::ServerCheckpointFetch,
+        repair: &ReceiptRepair,
+        pair: &[Receipt; 2],
+        budget: &mut EpochStudioBudget,
+    ) -> Result<(StudioRepairOutcome, EpochRegistryState), AppError> {
+        let catcoms_sync::checkpoint_exchange::CheckpointTarget::Registry(bucket) =
+            pass.inner.target()
+        else {
+            return Err(AppError::Invalid(
+                "a bucket repair needs a Registry seed".into(),
+            ));
+        };
+        if pass.server != server || !Arc::ptr_eq(&pass.mount, &store.registry_mount()) {
+            return Err(AppError::Invalid(
+                "seed pass belongs to a replaced mount".into(),
+            ));
+        }
+        let clock = self.runtime_clock();
+        self.sync
+            .with_checkpoint_seed_selection(&pass.inner, |group, device, rng, selected| {
+                let seed = selected
+                    .checkpoint
+                    .filter(|_| selected.receipt.hash() == repair.selected_receipt_hash)
+                    .ok_or_else(|| AppError::Invalid("no verified seed for this repair".into()))?;
+                store.with_studio_protocol_budget(server, group, budget, |store, storage| {
+                    store.apply_registry_repair(
+                        server,
+                        group,
+                        bucket,
+                        device,
+                        repair,
+                        pair,
+                        selected.tenure,
+                        Some(seed.bytes()),
+                        clock.as_ref(),
+                        rng,
+                        storage,
+                    )
+                })
+            })?
+    }
+
     /// The Registry bucket a Studio target's pointer lives in, the scope of its discoverability.
     pub(crate) fn studio_registry_bucket(&self, target: StudioTarget) -> Result<u8, AppError> {
         let logical = target

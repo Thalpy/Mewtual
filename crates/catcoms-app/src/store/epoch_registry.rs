@@ -54,6 +54,7 @@ mod seed;
 pub use receive::RegistryPageAdmission;
 mod recovery;
 mod repair;
+pub(crate) use repair::OfferedRepairEvidence;
 mod replay;
 pub use installation::RegistryInstallOutcome;
 pub use pass::{

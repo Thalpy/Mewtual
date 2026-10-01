@@ -543,6 +543,10 @@ impl ServerStore {
             }
             held.extend(unit.opening().cloned());
             held.extend(offered.cloned());
+            // After B2 the fault is gone; the source's own resolved evidence still holds both.
+            if let Some(state) = unit.repair_state() {
+                held.extend([state.selected, state.losing]);
+            }
             let find = |hash: &[u8; 32]| held.iter().find(|r| r.hash() == *hash).cloned();
             match repair.receipt_hashes.each_ref().map(find) {
                 [Some(a), Some(b)] => Some([a, b]),

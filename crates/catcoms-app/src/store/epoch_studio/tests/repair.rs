@@ -486,6 +486,13 @@ fn head_service_serves_an_applied_repair_but_never_proves_while_it_is_held() {
         !defers(&store, &chosen),
         "the decision's own replacement may proceed"
     );
+    // The warm source names the repair it owes and its full pair, so the runtime can fetch the
+    // selected seed itself instead of waiting for an owner that may never prove it again.
+    let (owed, owed_pair) = store
+        .owed_studio_repair(SERVER, &f.group, f.target, &f.device)
+        .expect("B2 crossed, replacement pending");
+    assert_eq!(owed, repair);
+    assert_eq!(owed_pair, pair);
     // A repaired seed pass installs the selected checkpoint through ordinary adoption, whose
     // install half still preserves the losing version as Repair recovery first.
     let mut b = budget(&mut store, &f);
@@ -515,6 +522,12 @@ fn head_service_serves_an_applied_repair_but_never_proves_while_it_is_held() {
         RecoveryReason::Repair
     );
     store.retain_studio_source(&f.group, &f.device, state);
+    assert!(
+        store
+            .owed_studio_repair(SERVER, &f.group, f.target, &f.device)
+            .is_none(),
+        "an installed replacement is owed by nobody"
+    );
     assert!(!owner_is_ordinary(&f, &store), "the decision is still held");
     // The owner's next resume finds the replacement done and recycles its record.
     let (outcome, state) = apply(&f, &mut store, &repair, &pair, None).unwrap();

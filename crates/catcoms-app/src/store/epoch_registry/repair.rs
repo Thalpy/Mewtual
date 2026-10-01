@@ -11,6 +11,17 @@ use catcoms_replication::{
 };
 use catcoms_rt::Clock;
 
+/// What a bucket can do with a repair an answer offered.
+#[derive(Debug)]
+pub(crate) enum OfferedRepairEvidence {
+    /// This exact repair is already terminal here: nothing to apply, now or later.
+    Terminal,
+    /// This device does not hold both receipts. That can change once it faults on the pair.
+    Unverifiable,
+    /// The complete pair, from evidence held plus the offered receipt.
+    Pair(Box<[Receipt; 2]>),
+}
+
 impl ServerStore {
     /// The checked saved bucket, authenticated against the live budget. A repair never creates
     /// a source, so absence is an error rather than a fresh epoch zero.
@@ -405,8 +416,8 @@ impl ServerStore {
     }
 
     /// Flow D pair assembly for a bucket, from evidence this device already holds plus the
-    /// receipt the same authenticated answer offered. `None` means nothing to do: terminal here,
-    /// or unverifiable, which is never a reason to invent the missing receipt.
+    /// receipt the same authenticated answer offered. Unverifiable is never a reason to invent
+    /// the missing receipt; it may become verifiable later, unlike a terminal repair.
     pub(crate) fn registry_repair_evidence(
         &self,
         server: u64,
@@ -415,16 +426,16 @@ impl ServerStore {
         device: &MlsDevice,
         repair: &ReceiptRepair,
         offered: Option<&Receipt>,
-    ) -> Result<Option<[Receipt; 2]>, AppError> {
+    ) -> Result<OfferedRepairEvidence, AppError> {
         let Some(state) = self.load_registry_epoch(server, group, bucket, device)? else {
-            return Ok(None);
+            return Ok(OfferedRepairEvidence::Unverifiable);
         };
         let unit = &state.unit;
         if unit
             .repair_state()
             .is_some_and(|s| s.repair == *repair && !s.install_pending)
         {
-            return Ok(None);
+            return Ok(OfferedRepairEvidence::Terminal);
         }
         let mut held: Vec<Receipt> = Vec::new();
         if let Some((a, b)) = unit.fault_evidence() {
@@ -435,10 +446,14 @@ impl ServerStore {
         }
         held.extend(unit.opening().cloned());
         held.extend(offered.cloned());
+        // After B2 the fault is gone; the bucket's own resolved evidence still holds both.
+        if let Some(state) = unit.repair_state() {
+            held.extend([state.selected, state.losing]);
+        }
         let find = |hash: &[u8; 32]| held.iter().find(|r| r.hash() == *hash).cloned();
         Ok(match repair.receipt_hashes.each_ref().map(find) {
-            [Some(a), Some(b)] => Some([a, b]),
-            _ => None,
+            [Some(a), Some(b)] => OfferedRepairEvidence::Pair(Box::new([a, b])),
+            _ => OfferedRepairEvidence::Unverifiable,
         })
     }
 
@@ -510,23 +525,38 @@ impl ServerStore {
         }))
     }
 
-    /// Whether a repair hold, not storage, must defer installing `selected` into this bucket.
-    /// Deferring keeps the hold per bucket; an installer error would pause all catch-up.
-    pub(crate) fn registry_install_deferred_by_repair(
+    /// The committed repair this bucket still owes a replacement for, with its complete pair.
+    pub(crate) fn owed_registry_repair(
         &self,
         server: u64,
         group: &ServerGroup,
         bucket: u8,
         device: &MlsDevice,
+    ) -> Result<Option<(ReceiptRepair, [Receipt; 2])>, AppError> {
+        Ok(self
+            .load_registry_epoch(server, group, bucket, device)?
+            .and_then(|state| state.unit.repair_state())
+            .filter(|state| state.install_pending)
+            .map(|state| {
+                let mut pair = [state.selected, state.losing];
+                pair.sort_by_key(Receipt::hash);
+                (state.repair, pair)
+            }))
+    }
+
+    /// Whether a repair hold, not storage, must defer installing `selected` into this bucket.
+    /// `owed` is the bucket's own owed replacement, which the caller has already read, so this
+    /// costs one small owner-record read rather than another full Registry restore.
+    pub(crate) fn registry_install_deferred_by_repair(
+        &self,
+        server: u64,
+        group: &ServerGroup,
+        bucket: u8,
+        owed: Option<[u8; 32]>,
         selected: &Receipt,
     ) -> Result<bool, AppError> {
         let document = registry_document(&group.group_id(), bucket).map_err(invalid)?;
         let held = self.epoch_owner_held_selection(server, &document)?;
-        let owed = self
-            .load_registry_epoch(server, group, bucket, device)?
-            .and_then(|state| state.unit.repair_state())
-            .filter(|state| state.install_pending)
-            .map(|state| state.selected.hash());
         Ok(super::super::epoch_owner::repair_defers_install(
             held,
             owed,

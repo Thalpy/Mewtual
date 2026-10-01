@@ -4,9 +4,12 @@
 //! round-robin over watched targets, with a 5 s cadence that backs off to 60 s on any hold. A
 //! hold is always a per-target wait: nothing here returns an error that would pause catch-up.
 use super::*;
-use crate::store::{StudioRepairOutcome, StudioRepairRequest};
+use crate::store::{OfferedRepairEvidence, StudioRepairOutcome, StudioRepairRequest};
 use crate::studio::StudioFaultScope;
 use catcoms_replication::{Receipt, ReceiptRepair};
+
+/// Remembered terminal Registry repairs, bounded; forgetting one only costs a reload.
+const MAX_REMEMBERED_REGISTRY_REPAIRS: usize = 64;
 
 impl CatchupRuntime {
     /// The visible exit (Flow X): `Repairing` has exactly this producer, after the application
@@ -46,12 +49,19 @@ impl CatchupRuntime {
         self.owner_failure = Some((target, error.to_string().chars().take(256).collect()));
     }
 
+    fn remember_registry_repair(&mut self, bucket: u8, repair: &ReceiptRepair) {
+        if self.registry_repairs_seen.len() >= MAX_REMEMBERED_REGISTRY_REPAIRS {
+            self.registry_repairs_seen.clear();
+        }
+        self.registry_repairs_seen.insert((bucket, repair.hash()));
+    }
+
     /// A repair that owes its replacement needs the selected checkpoint's seed. No fresh owner
     /// proof will name that receipt while a decision is held or after the owner moved on, so
     /// mint the seed pass from the locally verified repair and let the existing checkpoint
-    /// machinery fetch it. Installing it then crosses Repair recovery inside adoption.
+    /// machinery fetch it. `route_checkpoint_install` then installs it through the repair itself.
     #[allow(clippy::too_many_arguments)]
-    fn await_repaired_seed<T: MeshTransport, R: CryptoRngCore>(
+    pub(super) fn await_repaired_seed<T: MeshTransport, R: CryptoRngCore>(
         &mut self,
         server: &mut Server<T, R>,
         store: &ServerStore,
@@ -71,9 +81,14 @@ impl CatchupRuntime {
         else {
             return;
         };
-        let Some(peer) = server.sync.studio_page_peers().first().copied() else {
+        // Any member that installed the selected checkpoint can serve its seed, the owner
+        // included; rotate so one peer without it cannot be asked forever.
+        let peers = server.sync.studio_page_peers();
+        if peers.is_empty() {
             return;
-        };
+        }
+        let peer = peers[self.repair_seed_peer % peers.len()];
+        self.repair_seed_peer = self.repair_seed_peer.wrapping_add(1);
         match server.select_repaired_checkpoint(store, id, target, repair, selected) {
             Ok(pass) => {
                 self.pass = None;
@@ -200,6 +215,8 @@ impl CatchupRuntime {
     /// fault status; which case it lands in is the core's classification alone. The owner never
     /// re-applies a decision from an answer: its own are resumed by `repair_owner`. The source is
     /// prepared through the detached pool first, so evidence is read warm, never rebuilt here.
+    /// The caller decides what an `AwaitingSeed` needs: a proof pass for the selected receipt
+    /// already supplies its seed, so a repaired pass is minted only when none does.
     pub(super) fn apply_offered_repair<T: MeshTransport, R: CryptoRngCore>(
         &mut self,
         server: &mut Server<T, R>,
@@ -208,7 +225,7 @@ impl CatchupRuntime {
         target: StudioTarget,
         repair: &ReceiptRepair,
         offered: Option<&Receipt>,
-    ) -> Result<Option<StudioRepairOutcome>, AppError> {
+    ) -> Result<Option<(StudioRepairOutcome, [Receipt; 2])>, AppError> {
         let owner = server
             .sync
             .with_registry_context(|g, d, _, _| g.designated_committer() == Some(d.device_id()));
@@ -231,18 +248,7 @@ impl CatchupRuntime {
                     .sync
                     .with_registry_context(|g, d, _, _| store.retain_studio_source(g, d, state));
                 self.note_repair(target, outcome, phase);
-                if outcome == StudioRepairOutcome::AwaitingSeed {
-                    self.await_repaired_seed(
-                        server,
-                        store,
-                        id,
-                        CheckpointTarget::Studio(target),
-                        target,
-                        repair,
-                        &pair,
-                    );
-                }
-                Ok(Some(outcome))
+                Ok(Some((outcome, pair)))
             }
             Err(error) => {
                 self.note_repair_failure(target, &error);
@@ -262,11 +268,14 @@ impl CatchupRuntime {
         bucket: u8,
         repair: &ReceiptRepair,
         offered: Option<&Receipt>,
-    ) -> Result<Option<StudioRepairOutcome>, AppError> {
+    ) -> Result<Option<(StudioRepairOutcome, [Receipt; 2])>, AppError> {
         let owner = server
             .sync
             .with_registry_context(|g, d, _, _| g.designated_committer() == Some(d.device_id()));
         if owner
+            || self
+                .registry_repairs_seen
+                .contains(&(bucket, repair.hash()))
             || (!store.registry_receive_source_fits(id, &server.group_id(), bucket)?
                 && !self.prepare_registry_inventory(server, store, id, bucket)?)
         {
@@ -275,8 +284,21 @@ impl CatchupRuntime {
         let pair = server.sync.with_registry_context(|g, d, _, _| {
             store.registry_repair_evidence(id, g, bucket, d, repair, offered)
         });
-        let Ok(Some(pair)) = pair else {
-            return Ok(None);
+        let pair = match pair {
+            Ok(OfferedRepairEvidence::Pair(pair)) => *pair,
+            // Terminal here: remember it so later answers carrying the same repair cost no
+            // further Registry restores on the actor. Unverifiable may change, so it is not.
+            Ok(OfferedRepairEvidence::Terminal) => {
+                self.remember_registry_repair(bucket, repair);
+                return Ok(None);
+            }
+            Ok(OfferedRepairEvidence::Unverifiable) => return Ok(None),
+            Err(error) => {
+                if let Some(target) = self.target {
+                    self.note_repair_failure(target, &error);
+                }
+                return Ok(None);
+            }
         };
         let mut budget = Self::inventory_budget(server, store, id)?;
         self.registry_provider = None;
@@ -290,18 +312,10 @@ impl CatchupRuntime {
             &mut budget,
         ) {
             Ok((outcome, _)) => {
-                if let (StudioRepairOutcome::AwaitingSeed, Some(target)) = (outcome, self.target) {
-                    self.await_repaired_seed(
-                        server,
-                        store,
-                        id,
-                        CheckpointTarget::Registry(bucket),
-                        target,
-                        repair,
-                        &pair,
-                    );
+                if outcome.is_terminal() {
+                    self.remember_registry_repair(bucket, repair);
                 }
-                Ok(Some(outcome))
+                Ok(Some((outcome, pair)))
             }
             Err(error) => {
                 if let Some(target) = self.target {
@@ -454,34 +468,132 @@ impl CatchupRuntime {
         }
     }
 
-    /// A repair hold, not storage, must defer this install: deferring keeps the hold per target
-    /// where an installer error would pause all catch-up. The pass is dropped and retried later.
-    pub(super) fn repair_defers_install<T: MeshTransport, R: CryptoRngCore>(
+    /// Route a fetched checkpoint pass before the ordinary installer, so a repair is never an
+    /// installer error that pauses all catch-up:
+    /// - the source owes a repair whose selected receipt is this pass's: install through the
+    ///   repair transaction itself, with typed RecoveryPending/StorageRefused and owner recycling;
+    /// - the source owes a different replacement: drop this pass and fetch that repair's own
+    ///   selected seed instead, from the source's committed evidence (a peer self-heals here);
+    /// - a held owner decision owns the target: defer this target only;
+    /// - otherwise the ordinary installer proceeds (`Ok(None)`).
+    pub(super) fn route_checkpoint_install<T: MeshTransport, R: CryptoRngCore>(
         &mut self,
         server: &mut Server<T, R>,
-        store: &ServerStore,
+        store: &mut ServerStore,
         id: u64,
-        target: CheckpointTarget,
-        selected: &Receipt,
-    ) -> bool {
+        failure_target: StudioTarget,
+    ) -> Result<Option<Option<StudioTarget>>, AppError> {
+        let Some(pass) = self.checkpoint.as_ref() else {
+            return Ok(None);
+        };
+        let target = pass.inner.target();
+        let selected = pass.inner.selected_receipt().clone();
+        let now = server.runtime_clock().monotonic_ms();
+        let owed = server
+            .sync
+            .with_registry_context(|g, d, _, _| match target {
+                CheckpointTarget::Studio(studio) => Ok(store.owed_studio_repair(id, g, studio, d)),
+                CheckpointTarget::Registry(bucket) => store.owed_registry_repair(id, g, bucket, d),
+            });
+        let owed = match owed {
+            Ok(owed) => owed,
+            Err(error) => {
+                self.note_repair_failure(failure_target, &error);
+                self.retry_discovery(now);
+                return Ok(Some(None));
+            }
+        };
+        if let Some((repair, pair)) = owed {
+            if selected.hash() != repair.selected_receipt_hash {
+                self.checkpoint = None;
+                self.await_repaired_seed(server, store, id, target, failure_target, &repair, &pair);
+                if self.checkpoint.is_none() {
+                    // No seed pass (CORE-007: a previous owner's repair no longer verifies, or no
+                    // peer is reachable): hold this target on the ordinary rotating cadence.
+                    self.retry_discovery(now);
+                }
+                return Ok(Some(None));
+            }
+            let pass = self.checkpoint.take().expect("pass");
+            let mut budget = Self::budget(server, store, id)?;
+            self.settlement
+                .note(failure_target, StudioSettlementState::RefreshRequired);
+            let installed = match target {
+                CheckpointTarget::Studio(studio) => server
+                    .install_repaired_studio_seed(store, id, &pass, &repair, &pair, &mut budget)
+                    .map(|(outcome, state)| {
+                        let (phase, doc_id) = (state.phase(), state.doc_id());
+                        server.sync.with_registry_context(|g, d, _, _| {
+                            store.retain_received_studio_source(g, d, state)
+                        });
+                        self.note_repair(studio, outcome, phase);
+                        if outcome.is_terminal() {
+                            self.binding = Some((studio, doc_id));
+                        }
+                        outcome
+                    }),
+                CheckpointTarget::Registry(_) => {
+                    self.registry_provider = None;
+                    server
+                        .install_repaired_registry_seed(
+                            store,
+                            id,
+                            &pass,
+                            &repair,
+                            &pair,
+                            &mut budget,
+                        )
+                        .map(|(outcome, _)| outcome)
+                }
+            };
+            return Ok(Some(match installed {
+                Ok(outcome) if outcome.is_terminal() => {
+                    if let CheckpointTarget::Registry(_) = target {
+                        self.discovery_plan = self.after_registry.take();
+                        None
+                    } else {
+                        self.discovery_needed = None;
+                        self.discovery_watch = None;
+                        self.next_at = now;
+                        Some(failure_target)
+                    }
+                }
+                Ok(_) => {
+                    // Recovery warning, storage refusal or a hold: everything is retained and
+                    // this target retries on the ordinary discovery cadence.
+                    self.retry_discovery(now);
+                    None
+                }
+                Err(error) => {
+                    self.note_repair_failure(failure_target, &error);
+                    self.retry_discovery(now);
+                    None
+                }
+            }));
+        }
         let deferred = server
             .sync
             .with_registry_context(|g, d, _, _| match target {
                 CheckpointTarget::Studio(studio) => {
-                    store.studio_install_deferred_by_repair(id, g, studio, d, selected)
+                    store.studio_install_deferred_by_repair(id, g, studio, d, &selected)
                 }
+                // The bucket owes nothing (checked above), so only a held decision can defer it.
                 CheckpointTarget::Registry(bucket) => {
-                    store.registry_install_deferred_by_repair(id, g, bucket, d, selected)
+                    store.registry_install_deferred_by_repair(id, g, bucket, None, &selected)
                 }
             });
-        // An unreadable owner record is not a reason to install; defer and let the repair step,
-        // which reads it in context, surface the error.
-        if deferred.unwrap_or(true) {
-            let now = server.runtime_clock().monotonic_ms();
-            self.retry_discovery(now);
-            self.next_at = now.saturating_add(60_000);
-            return true;
+        match deferred {
+            Ok(false) => Ok(None),
+            Ok(true) => {
+                self.retry_discovery(now);
+                Ok(Some(None))
+            }
+            Err(error) => {
+                // An unreadable owner record is not a reason to install, and not silent either.
+                self.note_repair_failure(failure_target, &error);
+                self.retry_discovery(now);
+                Ok(Some(None))
+            }
         }
-        false
     }
 }
