@@ -4,6 +4,8 @@ use catcoms_rt::{Hub, ManualClock, MemNetwork};
 use rand_chacha::ChaCha20Rng;
 use rand_core::SeedableRng;
 
+mod archive;
+
 type Node = ChannelSync<MemNetwork, ChaCha20Rng>;
 
 /// The start a **fully observed** tenure reports, asserting it is not merely imported.
@@ -157,7 +159,7 @@ async fn owner_tenure_winning_losing_and_inbound_staged_commits_observe_same_tra
 }
 
 /// CORE-005 witness, requested by Agent 3: the SAME `DeviceId` rejoining in a LATER commit is a new
-/// tenure on every node - including the rejoining device's own.
+/// tenure on every witness, and the tenure that rejoin ends is archived, not resumed.
 ///
 /// This is the two-commit shape, and it is deliberately separate from the one-commit
 /// remove-and-re-add that `catcoms-mls`'s M-1 refuses. Here the removal and the re-admission are
@@ -250,6 +252,72 @@ async fn owner_tenure_same_device_rejoin_in_a_later_commit_is_a_new_tenure_on_ev
             "{who} resumed A's first tenure; a record signed in it would then still verify"
         );
         assert_ne!(start, b_tenure, "{who} confused A's return with B's tenure");
+    }
+
+    // CORE-005, the archive half. The tenure the rejoin commit ENDED is B's, and every witness
+    // watched it begin, so every witness archives exactly it.
+    //
+    // A's FIRST tenure is not archived anywhere among them, and that is the bounded design rather
+    // than a gap: these witnesses joined by Welcome and never saw it begin, so for them it was
+    // `Unknown`, and an Unknown departure mints nothing.
+    let b_key: [u8; 32] = nodes[1].device.public_key_bytes().try_into().unwrap();
+    let b_start = b_tenure.unwrap();
+    let returned_at = witness_start.unwrap();
+    let a_key: [u8; 32] = nodes[0].device.public_key_bytes().try_into().unwrap();
+    let group_id = nodes[1].group.group_id();
+    for node in nodes.iter_mut().skip(1) {
+        let archived = node
+            .owner_tenure
+            .archived(&node.group)
+            .expect("B's tenure was observed start to finish");
+        assert_eq!(
+            (
+                archived.owner_key(),
+                archived.start(),
+                archived.retired_at()
+            ),
+            (&b_key, b_start, returned_at)
+        );
+        assert_eq!(
+            restore(&node.snapshot().unwrap())
+                .unwrap()
+                .owner_tenure
+                .archived(&node.group),
+            Some(archived),
+            "and keeps it across a save and reload"
+        );
+    }
+
+    // Commit three: A leaves AGAIN. Now the witnesses archive A's SECOND tenure, which they did
+    // observe. Same key as the first, different start, so a different tenure id: a pair signed in
+    // A's first tenure can never match this witness.
+    remove_through_contest_by(&mut nodes, &ids[0]).await;
+    for node in &nodes[1..] {
+        let archived = node.owner_tenure.archived(&node.group).unwrap();
+        assert_eq!(archived.owner_key(), &a_key);
+        assert_eq!(archived.start(), returned_at);
+        assert_eq!(archived.retired_at(), node.epoch());
+        assert_ne!(
+            archived.tenure_id(),
+            &catcoms_replication::tenure_id(&group_id, &a_key, first_tenure.unwrap()),
+            "A's second tenure must not be mistaken for its first"
+        );
+    }
+}
+
+/// Remove `leaving` through the contested path, committed by nodes 1 and 2 and applied by 1..4.
+async fn remove_through_contest_by(nodes: &mut [Node], leaving: &DeviceId) {
+    nodes[1].remove(leaving).await.unwrap();
+    nodes[2].remove(leaving).await.unwrap();
+    let candidates = [
+        nodes[1].pending.as_ref().unwrap().best.clone(),
+        nodes[2].pending.as_ref().unwrap().best.clone(),
+    ];
+    for node in nodes.iter_mut().skip(1) {
+        for candidate in &candidates {
+            node.contest_commit(candidate.clone());
+        }
+        assert!(node.resolve_pending_if_expired());
     }
 }
 
@@ -508,6 +576,7 @@ async fn owner_tenure_same_owner_on_a_new_leaf_identity_starts_a_new_tenure() {
     let before = Position {
         owner: live.owner,
         leaf: Some((index, other)),
+        owner_key: live.owner_key,
         epoch: live.epoch - 1,
     };
 
@@ -528,6 +597,7 @@ async fn owner_tenure_same_owner_on_a_new_leaf_identity_starts_a_new_tenure() {
     let same = Position {
         owner: live.owner,
         leaf: live.leaf,
+        owner_key: live.owner_key,
         epoch: live.epoch - 1,
     };
     preserved.position = same;
@@ -607,6 +677,7 @@ async fn owner_tenure_v1_snapshots_promote_only_the_provably_safe_shape() {
     let before = Position {
         owner: live.owner,
         leaf: live.leaf,
+        owner_key: live.owner_key,
         epoch: live.epoch - 1,
     };
     imported.position = before;

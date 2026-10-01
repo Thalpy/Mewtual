@@ -102,6 +102,10 @@ pub struct DurableOwnerSnapshot {
     epoch: u64,
     owner: DeviceId,
     tenure: u64,
+    /// The archived witness in the snapshot this permit vouches for (CORE-005). Captured with the
+    /// save, so a witness minted after it, or held only in memory, is never handed out. Boxed
+    /// because this permit rides inside `ReceiptHeadServed::Owner`, which must stay small.
+    archive: Option<Box<ArchivedOwnerTenure>>,
 }
 impl fmt::Debug for DurableOwnerSnapshot {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -220,6 +224,8 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         {
             return Err(SyncError::Unauthorized);
         }
+        // Read before serializing, from the same state `snapshot()` writes.
+        let archive = self.owner_tenure.archived(&self.group).map(Box::new);
         let snapshot = self.snapshot()?;
         if let Err(error) = save(&snapshot, &mut self.rng) {
             return Ok(Err(error));
@@ -229,6 +235,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             epoch: self.group.epoch(),
             owner: self.device.device_id(),
             tenure,
+            archive,
         }))
     }
     fn head_snapshot_is_current(&self, permit: &DurableOwnerSnapshot) -> bool {
@@ -240,6 +247,37 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             // authoring accessor, so either would be correct today; authoring is the semantics that
             // stays correct if permit minting ever moves.
             && self.authoring_owner_tenure_start() == Some(permit.tenure)
+            // A witness only changes on an MLS transition, which the epoch check already catches.
+            // Compared anyway, so the permit never vouches for a witness it was not saved with.
+            && self.owner_tenure.archived(&self.group).as_ref() == permit.archive.as_deref()
+    }
+
+    /// [`Self::with_durable_owner_snapshot`] plus the archived Observed-tenure witness that the
+    /// permit's durable snapshot carried, for CORE-005 historical report admission.
+    ///
+    /// The witness is local evidence that this device watched that tenure begin and end. It is
+    /// **not** current authority (the caller still gets `tenure` for that), not transferable, and
+    /// not proof that any particular receipt was signed during it: the caller must match a pair's
+    /// full `(owner key, start, tenure id)` against it, and seal its own admission attestation.
+    /// `None` means there is no positively observed history to offer, which is a refusal for a
+    /// historical pair, never a fallback to the receipts' own claim.
+    pub fn with_durable_owner_history<V>(
+        &mut self,
+        permit: &DurableOwnerSnapshot,
+        use_owner: impl FnOnce(&ServerGroup, &MlsDevice, &mut R, u64, Option<&ArchivedOwnerTenure>) -> V,
+    ) -> Result<V, SyncError> {
+        if !self.head_snapshot_is_current(permit)
+            || !self.head_member(&self.device.public_key_bytes())
+        {
+            return Err(SyncError::Unauthorized);
+        }
+        Ok(use_owner(
+            &self.group,
+            &self.device,
+            &mut self.rng,
+            permit.tenure,
+            permit.archive.as_deref(),
+        ))
     }
     /// Admit a finite local owner transaction under the exact persisted MLS/tenure snapshot.
     /// An observed tenure alone is insufficient: a restart must not restore authority behind

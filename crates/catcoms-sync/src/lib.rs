@@ -71,7 +71,9 @@ pub mod epoch_service;
 mod group_policy;
 mod owner_tenure;
 pub use catcoms_mls::{GroupMode, GroupPolicy, PolicyError};
-pub use owner_tenure::ObservedOwnerTenure;
+pub use owner_tenure::{
+    ArchivedOwnerTenure, ObservedOwnerTenure, MAX_HISTORICAL_OWNER_WITNESS_BYTES,
+};
 pub mod receipt_head;
 #[cfg(test)]
 mod reconciliation_tests;

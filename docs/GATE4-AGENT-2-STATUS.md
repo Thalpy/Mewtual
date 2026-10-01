@@ -42,6 +42,32 @@ carefully, because they are different claims and only one was wrong:
   stays unregistered until the required implementation reviews are complete and this document says
   so explicitly.
 
+## CORE-005 archived Observed-tenure witness, 2026-10-01
+
+Agent 3's accepted CORE-005 contract ([authority follow-up](GATE4-AGENT-3-AUTHORITY-FOLLOWUP.md),
+"Chosen mechanism and Agent 2 dependency") needed a seam extension in `catcoms-sync`, which is this
+scope's. `94af29df` was a rejoin test, not that seam; Agent 3 was right to keep N17 blocked on it.
+
+**Implemented (sync half):**
+
+- `ArchivedOwnerTenure`: owner key, Observed start, `tenure_id(group id, key, start)` and
+  retirement epoch. No public constructor, no wire form, no import path. One per group.
+- Minted only in `OwnerTenure::applied`, when a contiguous step derives a new tenure and the one it
+  ends was held as `Observed` at exactly the pre-step position. Imported, Unknown, gap, stale-position
+  and same-owner steps neither mint nor replace. The departing key is captured in `Position` before
+  the MLS call, because a Remove takes it out of the group.
+- Persisted in the owner-tenure tail of the same sync snapshot, so it is atomic with MLS and current
+  tenure. v3 is written only when a witness exists; every other state keeps its exact v2 bytes.
+  Restore checks framing, the derived id (binding group, key and start) and
+  `start < retired_at <= epoch`, and refuses the whole tail on failure. Legacy records have none.
+- Reached only through `with_durable_owner_history`, under a `DurableOwnerSnapshot` that captures
+  the witness with the successful save and is current only while the witness is unchanged.
+
+**Not done here:** the app-side admission attestation, report admission, N49 and N50 as production
+consumer tests. Those are Agent 3's. `retired_at` is range-checked but not bound by the derived id,
+so an in-range corruption of that field is caught only by the vault's authentication of the whole
+snapshot.
+
 ## Agent 1's registration prerequisites (its section 12.3)
 
 **Authoritative statement: P5 is FALSE. `studio_overlay_save` must not be registered.**

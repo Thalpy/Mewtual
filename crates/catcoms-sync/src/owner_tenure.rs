@@ -16,15 +16,109 @@ pub(super) struct Position {
     /// that commit shape outright; this is the other half, so every participant computes the same
     /// value for every shape that IS allowed.
     leaf: Option<(u32, [u8; 32])>,
+    /// The committer's full signature key, captured here because a Remove takes it out of the
+    /// group: after the transition there is nothing left to read it from, and an archived witness
+    /// (CORE-005) needs the key itself, not the `DeviceId` hashed from it. Never persisted; a
+    /// restored position reads it from the same live group it is checked against.
+    owner_key: Option<[u8; 32]>,
     epoch: u64,
 }
 impl Position {
     pub(super) fn of(group: &ServerGroup) -> Self {
+        let owner = group.designated_committer();
         Self {
-            owner: group.designated_committer(),
+            owner,
             leaf: group.designated_committer_leaf(),
+            owner_key: owner.and_then(|id| committer_key(group, &id)),
             epoch: group.epoch(),
         }
+    }
+}
+
+fn committer_key(group: &ServerGroup, owner: &DeviceId) -> Option<[u8; 32]> {
+    group.member_signature_key(owner)?.try_into().ok()
+}
+
+/// The CORE-005 cap on one archived witness, framing included. The encoding below is a fixed 80
+/// bytes behind a four-byte length, and the assertion keeps any future field honest about it.
+pub const MAX_HISTORICAL_OWNER_WITNESS_BYTES: usize = 128;
+const WITNESS_BYTES: usize = 32 + 8 + 32 + 8;
+const _: () = assert!(4 + WITNESS_BYTES <= MAX_HISTORICAL_OWNER_WITNESS_BYTES);
+
+/// One owner tenure this device **positively observed** from start to retirement (CORE-005).
+///
+/// Agent 3's historical report admission needs to know that a removed owner really held office,
+/// and when. A self-signed receipt cannot say so, and neither can anything this device only
+/// imported or inferred. So a witness is minted in exactly one place, `OwnerTenure::applied`, and
+/// only when a contiguous MLS step ends a tenure whose start this device held as `Observed` and
+/// begins a different one. There is no public constructor, no wire form and no import path.
+///
+/// One per group. A later positively observed retirement replaces it; a gap, an `Imported` or
+/// `Unknown` departure, or an ordinary same-owner commit leaves it alone. That is the bounded
+/// history the CORE-005 review accepted, not an audit trail.
+///
+/// The application must not read this off a live `ChannelSync`. It reaches it only through
+/// [`ChannelSync::with_durable_owner_history`], under a [`DurableOwnerSnapshot`] that exists only
+/// after the snapshot carrying this witness was durably saved.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ArchivedOwnerTenure {
+    owner_key: [u8; 32],
+    start: u64,
+    tenure_id: [u8; 32],
+    retired_at: u64,
+}
+
+impl ArchivedOwnerTenure {
+    fn mint(group: &ServerGroup, owner_key: [u8; 32], start: u64, retired_at: u64) -> Self {
+        Self {
+            owner_key,
+            start,
+            tenure_id: catcoms_replication::tenure_id(&group.group_id(), &owner_key, start),
+            retired_at,
+        }
+    }
+    /// The retired owner's full signature key.
+    pub fn owner_key(&self) -> &[u8; 32] {
+        &self.owner_key
+    }
+    /// The MLS epoch the tenure began at, as this device observed it.
+    pub fn start(&self) -> u64 {
+        self.start
+    }
+    /// `tenure_id(group id, owner key, start)`: what that owner's receipts carry.
+    pub fn tenure_id(&self) -> &[u8; 32] {
+        &self.tenure_id
+    }
+    /// The first MLS epoch at which the owner no longer held office.
+    pub fn retired_at(&self) -> u64 {
+        self.retired_at
+    }
+    fn encode(&self) -> Vec<u8> {
+        let mut bytes = Vec::with_capacity(WITNESS_BYTES);
+        bytes.extend_from_slice(&self.owner_key);
+        bytes.extend_from_slice(&self.start.to_be_bytes());
+        bytes.extend_from_slice(&self.tenure_id);
+        bytes.extend_from_slice(&self.retired_at.to_be_bytes());
+        bytes
+    }
+    /// Restore checks everything that can be checked against the live group: framing, the
+    /// derived id (which binds the group, the key and the start together), and
+    /// `start < retired_at <= epoch`. Any failure refuses the whole tail rather than dropping the
+    /// witness, so corruption cannot pass for "no history".
+    fn decode(bytes: &[u8], group: &ServerGroup, epoch: u64) -> Result<Self, SyncError> {
+        if bytes.len() != WITNESS_BYTES {
+            return Err(SyncError::Malformed);
+        }
+        let owner_key: [u8; 32] = bytes[..32].try_into().map_err(|_| SyncError::Malformed)?;
+        let start = u64::from_be_bytes(bytes[32..40].try_into().map_err(|_| SyncError::Malformed)?);
+        let tenure_id: [u8; 32] = bytes[40..72].try_into().map_err(|_| SyncError::Malformed)?;
+        let retired_at =
+            u64::from_be_bytes(bytes[72..80].try_into().map_err(|_| SyncError::Malformed)?);
+        let witness = Self::mint(group, owner_key, start, retired_at);
+        if witness.tenure_id != tenure_id || start >= retired_at || retired_at > epoch {
+            return Err(SyncError::Malformed);
+        }
+        Ok(witness)
     }
 }
 
@@ -35,6 +129,9 @@ pub(super) struct OwnerTenure {
     /// cannot establish. Persisted, so a save/reload cycle cannot launder it into a fully observed
     /// value and silently grant the authoring authority the migration withheld.
     imported: bool,
+    /// The last positively observed retirement (CORE-005). Saved in this same tail, so it is
+    /// atomic with the MLS state and the current tenure by construction.
+    archive: Option<ArchivedOwnerTenure>,
 }
 
 /// What is known about the current owner's tenure start, and how well.
@@ -72,6 +169,7 @@ impl OwnerTenure {
             position: Position::of(group),
             start: None,
             imported: false,
+            archive: None,
         }
     }
 
@@ -138,6 +236,15 @@ impl OwnerTenure {
         } else {
             (None, false)
         };
+        // CORE-005. Archive the departing tenure only when this step DERIVED a new one AND the
+        // tenure it ends was fully observed here: the saved position is exactly `before`, a start
+        // is held, and it was not imported. Anything less - a gap, an import, no start - neither
+        // mints nor replaces, so an earlier witness survives it.
+        if computed && self.position == before && !self.imported {
+            if let (Some(key), Some(start)) = (before.owner_key, self.start) {
+                self.archive = Some(ArchivedOwnerTenure::mint(group, key, start, after.epoch));
+            }
+        }
         self.position = after;
         self.start = start;
         // The flag survives everything except a start this call derived itself, and cannot survive
@@ -148,6 +255,14 @@ impl OwnerTenure {
         // gap would serialise into a snapshot this build cannot reopen - the whole server, not just
         // the tenure. Clearing it here keeps the two consistent by construction.
         self.imported = self.imported && !computed && start.is_some();
+    }
+
+    /// The archived witness, under the same stale-position refusal as `observed`.
+    pub(super) fn archived(&self, group: &ServerGroup) -> Option<ArchivedOwnerTenure> {
+        if self.position != Position::of(group) {
+            return None;
+        }
+        self.archive
     }
 
     pub(super) fn observed(&self, group: &ServerGroup) -> ObservedOwnerTenure {
@@ -172,7 +287,11 @@ impl OwnerTenure {
         let mut e = Encoder::new();
         // v2 carries the committer's leaf identity and the import flag. v1 carried neither, and a v1
         // record cannot be upgraded in place: see `decode`.
-        e.put_u8(2);
+        //
+        // v3 is v2 plus one archived witness, and it is written ONLY when a witness exists. Every
+        // state without one keeps its exact v2 bytes, so no existing snapshot changes, and each
+        // state still has a single encoding: v3 never carries an empty witness.
+        e.put_u8(if self.archive.is_some() { 3 } else { 2 });
         e.put_u64(self.position.epoch);
         e.put_bytes(
             self.position
@@ -197,6 +316,10 @@ impl OwnerTenure {
         })
         .map_err(|_| SyncError::Malformed)?;
         e.put_u8(u8::from(self.imported));
+        if let Some(archive) = &self.archive {
+            e.put_bytes(&archive.encode())
+                .map_err(|_| SyncError::Malformed)?;
+        }
         Ok(e.finish())
     }
 
@@ -230,13 +353,14 @@ impl OwnerTenure {
         // 98 is the exact maximum valid v2 tail: version, epoch, a 32-byte owner, an 8-byte start, a
         // 36-byte leaf and the flag, with this encoder's framing. A loose cap was a silent deviation
         // from the design's number and bought nothing - `finish()` already refuses trailing bytes -
-        // so the tight one is both correct and self-documenting.
-        if bytes.len() > 98 {
+        // so the tight one is both correct and self-documenting. v3 adds exactly one framed
+        // 80-byte witness.
+        if bytes.len() > 98 + 4 + WITNESS_BYTES {
             return Err(SyncError::Malformed);
         }
         let mut d = Decoder::new(bytes);
         let version = d.get_u8().map_err(|_| SyncError::Malformed)?;
-        if version != 1 && version != 2 {
+        if !(1..=3).contains(&version) {
             return Err(SyncError::Malformed);
         }
         let epoch = d.get_u64().map_err(|_| SyncError::Malformed)?;
@@ -257,7 +381,7 @@ impl OwnerTenure {
         // A v1 record carries none, so the live value is used, which is sound ONLY because such a
         // record is either promoted on the provably safe `start == epoch` path or imported, never
         // treated as fully observed on the strength of a digest it never recorded.
-        let (leaf, imported) = if version == 2 {
+        let (leaf, imported) = if version >= 2 {
             let leaf = match d.get_bytes().map_err(|_| SyncError::Malformed)? {
                 [] => None,
                 bytes if bytes.len() == 36 => {
@@ -282,8 +406,24 @@ impl OwnerTenure {
                 start.is_some_and(|start| start != epoch),
             )
         };
+        // Legacy records have no witness, and nothing upgrades them into one: CORE-005's history
+        // starts at the first retirement this build observes.
+        let archive = if version == 3 {
+            let bytes = d.get_bytes().map_err(|_| SyncError::Malformed)?;
+            Some(ArchivedOwnerTenure::decode(bytes, group, epoch)?)
+        } else {
+            None
+        };
         d.finish().map_err(|_| SyncError::Malformed)?;
-        let position = Position { owner, leaf, epoch };
+        // The key is not persisted: it is read from the live group, which is sound because the
+        // position must equal the live one anyway, and a `DeviceId` is a hash of that key.
+        let owner_key = owner.and_then(|id| committer_key(group, &id));
+        let position = Position {
+            owner,
+            leaf,
+            owner_key,
+            epoch,
+        };
         if position != Position::of(group)
             || start.is_some_and(|start| owner.is_none() || start > epoch)
             || (imported && start.is_none())
@@ -294,6 +434,7 @@ impl OwnerTenure {
             position,
             start,
             imported,
+            archive,
         })
     }
 }
