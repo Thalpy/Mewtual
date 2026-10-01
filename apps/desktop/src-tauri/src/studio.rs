@@ -5,8 +5,15 @@ use catcoms_app::studio::{
     types::*, EpochPhase, StudioRead, StudioRequest, StudioVaultLease, StudioView,
 };
 use serde_json::{json, Value};
+// The overlay lifecycle and copy commands are built and tested but NOT registered: native command
+// and security registration is Agent 4's, and registering them without their policy rows,
+// capability grants and session-gate review failed the frontend security gate. They also carry no
+// `#[tauri::command]` yet, because that gate requires every annotated function to be registered.
+// Registration restores the attributes and removes these expectations in the same change.
+#[expect(dead_code, reason = "registered by Agent 4 with its security rows")]
 pub(crate) mod copy;
 pub(crate) mod inspection;
+#[expect(dead_code, reason = "registered by Agent 4 with its security rows")]
 pub(crate) mod lifecycle;
 pub(crate) mod recovery;
 mod requests;

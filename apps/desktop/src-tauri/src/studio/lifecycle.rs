@@ -17,7 +17,6 @@ use catcoms_app::studio::{
 };
 use recovery::{named_hash, target};
 
-#[tauri::command]
 pub(crate) async fn studio_overlay_lifecycle(
     state: State<'_, AppState>,
     server: u64,
@@ -33,7 +32,6 @@ pub(crate) async fn studio_overlay_lifecycle(
     .await
 }
 
-#[tauri::command]
 pub(crate) async fn studio_overlay_archive_read(
     state: State<'_, AppState>,
     server: u64,
@@ -52,7 +50,6 @@ pub(crate) async fn studio_overlay_archive_read(
 /// The same read, converted to carry the canonical envelope bytes. A separate command rather than a
 /// flag on the read: exporting hands the caller the whole archive, and that is a different thing to
 /// ask for than looking at what one is.
-#[tauri::command]
 pub(crate) async fn studio_overlay_archive_export(
     state: State<'_, AppState>,
     server: u64,
@@ -77,7 +74,6 @@ pub(crate) async fn studio_overlay_archive_export(
 /// The same two visits and the same rebuild as archiving. That sharing is the point rather than an
 /// economy: a draft that cannot be replayed must still be exportable, and two serializers would
 /// drift, with the one that drifted being the one a user reaches for when their work will not open.
-#[tauri::command]
 pub(crate) async fn studio_overlay_export(
     state: State<'_, AppState>,
     server: u64,
@@ -101,7 +97,6 @@ pub(crate) async fn studio_overlay_export(
 ///
 /// Not confirmed: this only ever adds evidence. The confirmations in this module guard the two
 /// commands that remove it.
-#[tauri::command]
 pub(crate) async fn studio_overlay_archive(
     state: State<'_, AppState>,
     server: u64,
@@ -169,7 +164,6 @@ async fn two_visit_archive(
 
 /// Destroy the preserved archive. `archive` is the id from the read that populated the dialog, so a
 /// confirmation typed against one archive cannot destroy a different one.
-#[tauri::command]
 pub(crate) async fn studio_overlay_archive_release(
     state: State<'_, AppState>,
     server: u64,
@@ -290,7 +284,6 @@ impl DisposalRequestInput {
 }
 
 /// Drop the live branch.
-#[tauri::command]
 pub(crate) async fn studio_overlay_dispose(
     state: State<'_, AppState>,
     server: u64,
