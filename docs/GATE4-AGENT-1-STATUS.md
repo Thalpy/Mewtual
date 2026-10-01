@@ -4170,6 +4170,41 @@ scheduled runtime already holds a target with no tenure rather than surfacing a 
 refuses correctly with the generic text. Recorded as a separate, small follow-up rather than
 silently dropped from the plan Agent 2 agreed to.
 
+### CI: the handoff mutation harness went dark at `baf8a9cf`, and that was mine
+
+Reported to me as "the studio-handoff completed-target failure, inherited from the base". **It was
+not inherited.** The "Studio Closing overlay handoff" workflow passed at `e5205318` and has failed on
+every commit from `baf8a9cf` on, with
+`mutation did not fail at its intended assertion: completed-target`.
+
+The cause is the S1 ordering this work introduced. The `completed-target` mutation removes
+`check_target` from `completed_retry` and expects a retry for another channel to be wrongly
+acknowledged. Since `baf8a9cf`, S1 classifies through `classify_request` first, which runs its own
+`check_target` and refuses that retry before `completed_retry` is ever reached - the fallback runs
+only after classification has passed on the same target. So the old anchor became a guard no Save
+can observe removing: an equivalent mutant. The entry now mutates `classify_request`'s check, the
+one that actually stands in the way; it is detected at the intended assertion
+("completed retry acknowledged a different channel") and the restored regression passes.
+
+**The worse half: every other entry has been unchecked since.** The harness raises on the first
+undetected mutation, and `completed-target` is first in the list, so from `baf8a9cf` to now none of
+the other handoff mutations has run in CI. Re-running the full harness after the fix found exactly
+that: **a second entry, `retry-floor`, was also failing, invisibly.** It disables the rollover floor
+and expected the old assertion text of the rollover test I split. The mutation *is* detected - the
+split test fails at its floor half, and with the request **accepted**, `Ok(Local(..))`, which is the
+evidence that the floor is now independently load-bearing - but the harness was matching a message
+the test no longer prints. Entry updated to the new assertion.
+
+**Full harness after both fixes, at `b7b7a1d0` (which includes Agent 2's `append` refusal): all 10
+mutations detected at their intended assertions, all 10 restored regressions pass.** The first
+complete pass since `baf8a9cf`.
+
+**Why my gate missed it.** The owned-surface run I adopted after the earlier scope failure runs the
+test trees; it does not run this workflow's mutation harness, which changes source and expects
+specific tests to fail. A change to *which check guards a path* passes every test and breaks the
+harness, and only the harness can see it. Mutation harnesses for code I touch are now part of the
+gate, not something CI tells me about afterwards.
+
 ### Review of `baf8a9cf`: PASS WITH FINDINGS, one of them a regression of mine
 
 A fable review, read-only against the committed blobs. It confirmed the hazard closed: it traced
