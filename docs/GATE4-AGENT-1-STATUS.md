@@ -4028,6 +4028,77 @@ Implementation, on `gate4-agent1-runtime` only: the production and test files li
 and no frontend file has been changed, and nothing is merged to `Create-suite-2`. The remaining
 planned files are in design 5 and 15.
 
+## Agent 2's two Save-path requests: tenure done at preparation, branch identity blocked
+
+Agent 2 raised two items against my Save path. Both claims verified in source before acting.
+
+### Branch identity in Flow S - verified, and blocked on one accessor
+
+**Claim, verified:** `classify_request`, `admit_new_branch` and `new_admitted` in
+`catcoms-replication/src/studio/overlay/handoff.rs` have **no production callers** - every
+reference outside their own definitions is a doc comment. Flow S carries `basis` only, so the
+branch-generation namespace Agent 2 built never runs on the real Save path. That is a P1/P5
+blocker, and it is mine.
+
+**Why it is not implemented here.** A new-authoring request has to *name* the branch it intends to
+open, and the only valid name is `branch_identity(fresh.fingerprint(), next_generation()?)`. Both of
+those are private to `handoff.rs`, and `admit_new_branch` only *checks* a candidate - it never
+produces one. So no caller anywhere can construct a valid branch id for a new branch. Plumbing
+`branch` into the Save request today would make every new-authoring request `Stale`.
+
+Computing the hash on my side is not an option: it would be a second definition of the identity,
+which is exactly the failure Agent 2's comments on `next_generation` record ("written in one place
+and trusted in another"). The ask is one public accessor that derives through `next_generation`,
+so the definition stays single.
+
+**What lands once it exists:** preparation returns the prospective branch beside the basis; the
+Save request carries `branch`; S1 calls `classify_request` - `Active` to the existing exact-retry
+and append path, `Transferred` to the existing `HandedOff` acknowledgement, `Disposed` to the
+disposal acknowledgement, `Unmatched` on to S1b - where `admit_new_branch` resolves `New` or
+`Stale` after the basis is re-derived, and the write goes through `new_admitted`. Terminal
+acknowledgements stay ahead of every authority check; nothing is hoisted. Agent 2's acceptance
+sequence - accept G1, dispose it, accept a disjoint G2 on the same basis, dispose it, then a
+delayed G1 request - is tested through the real Flow S entry point, not the core classifier.
+
+### Live tenure at my V1 sites - done at preparation, deferred elsewhere on purpose
+
+**Preparation now requires tenure through the typed seam.** `Server::prepare_studio_closing_overlay`
+calls `require_observed_owner_tenure()` first, and that function's `expect(dead_code)` is gone, as
+Agent 2 asked for its first caller. Preparation is the one V1 site where requiring first is
+correct: it mints a fresh basis and has no terminal path, so nothing V8 protects can be stranded by
+refusing before it.
+
+Acceptance is unchanged - both the old accessor and the seam admit `Known` alone. What changes is
+that `Imported` and `Unknown` are refused **apart**, which matters to whoever reads the refusal: one
+is fixed by observing the owner take office, the other is not fixed by waiting.
+
+**Tested on a real joiner, with the founder as control** -
+`preparation_refuses_a_member_with_no_observed_tenure_and_says_which_case`. A plain joiner's
+`Unknown` is asserted as a precondition rather than assumed, so if joiners ever start observing
+tenure the test fails on that instead of passing vacuously. Both servers get identical arguments
+that would refuse either one; the founder must get past the requirement and refuse for a
+non-tenure reason, the joiner must refuse at it. **Two mutations, both killed:** reverting to
+`authoring_owner_tenure_start()` yields the store's generic "needs observed owner tenure"; removing
+the requirement lets the joiner through to "source missing; fetch before sealing".
+
+**V8 holds structurally on both flows**, verified by reading the order rather than assumed: Save
+returns exact retries and completed acknowledgements before S1b's requirement, and H1 acknowledges
+a completed branch and resolves a durable Prepared record - `resolve_studio_handoff_with_io` takes
+no tenure at all - before it requires one. One V8 case is anchored by an existing test (a Save
+retry with no tenure after handoff returns `HandedOff`). **Not yet anchored:** an exact Save retry
+and a durable-Prepared resolution, each under absent tenure.
+
+**Deferred, deliberately: Save S1b, S3's commit and H1.** All three still refuse correctly but with
+the generic message, because the store receives `Option<u64>`, which is precisely the lossy shape
+that collapses the two cases. Fixing it means changing the store parameter across roughly 45 call
+sites in nine files, several of them Agent 2's active test files - and the branch-identity change
+above rewrites the same Save signature anyway. Doing tenure now would churn those sites twice. The
+plan for the single change: the Server computes `require_observed_owner_tenure()` as a `Result`
+without applying `?`, passes it down, and each stage applies `?` at its own point after
+classification. That keeps the refusal at the stage (A-1), keeps V8's ordering, and cannot launder
+`Imported` into `Known`, because the only producer of the value is Agent 2's exhaustive `require`.
+The two missing V8 anchors land with it.
+
 ## A verification-scope failure of mine, recorded because the fix alone would hide it
 
 **`origin/gate4-agent1-runtime` was red for six of my commits and I did not notice.**

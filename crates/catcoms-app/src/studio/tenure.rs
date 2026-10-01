@@ -89,12 +89,9 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
     /// issuance and holds on both fail-closed values (V5); an exact retry, an acknowledgement or
     /// the resolution of an already durable handoff must keep working and so must read the value
     /// rather than require it (V8).
-    #[expect(
-        dead_code,
-        reason = "the same seam contract: V5's consumer is Agent 3's issuance and V1's refusals \
-    belong at the stages Agent 1 owns. This scope provides the accessor and must not also spend \
-    it, because a wrapper that refused here is exactly what A-1 forbids"
-    )]
+    ///
+    /// First spent by Agent 1 at Closing-overlay preparation, which is pure authoring with no
+    /// terminal path to strand.
     pub(crate) fn require_observed_owner_tenure(&self) -> Result<u64, AppError> {
         require(self.observed_owner_tenure())
     }

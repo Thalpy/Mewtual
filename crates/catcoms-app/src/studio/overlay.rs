@@ -9,6 +9,9 @@ use catcoms_replication::{CloseRecord, DomainOp};
 mod admission;
 pub(crate) use admission::{OverlayAdmission, OverlayOwnership};
 
+#[cfg(test)]
+mod tests;
+
 impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
     /// Explicit internal handoff. Caller owns exclusive store/runtime custody; no actor or
     /// native command schedules this batch. Live tenure comes only from this sync instance.
@@ -26,6 +29,18 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
         })
     }
     /// Prepare against actual observed tenure. Request data cannot supply its own authority.
+    ///
+    /// **A V1 refusal site, and the one place it is right to require tenure before anything
+    /// else.** Preparation mints a fresh basis and has no terminal path: there is no retry to
+    /// recognise, no acknowledgement owed and no durable Prepared record to resolve, so nothing V8
+    /// protects runs here, and refusing first cannot strand one. That is what distinguishes it from
+    /// Save and handoff, which must classify and acknowledge before they require anything and so
+    /// still read the value instead (see `save_studio_closing_overlay` below and H1).
+    ///
+    /// Requiring through the typed seam rather than `authoring_owner_tenure_start()` changes no
+    /// acceptance - both admit `Known` alone - but it keeps `Imported` and `Unknown` apart in the
+    /// refusal, because they are different situations for whoever reads it: one is fixed by
+    /// observing the owner take office, the other is not fixed by waiting at all.
     pub fn prepare_studio_closing_overlay(
         &mut self,
         store: &mut ServerStore,
@@ -34,10 +49,16 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
         close: &CloseRecord,
         budget: &mut EpochStudioBudget,
     ) -> Result<StudioClosingOverlayBasis, AppError> {
-        let tenure = self.sync.authoring_owner_tenure_start();
+        let tenure = self.require_observed_owner_tenure()?;
         self.sync.with_registry_context(|group, device, _, _| {
             store.prepare_studio_closing_overlay(
-                server, group, target, device, close, tenure, budget,
+                server,
+                group,
+                target,
+                device,
+                close,
+                Some(tenure),
+                budget,
             )
         })
     }

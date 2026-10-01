@@ -156,6 +156,103 @@ async fn owner_tenure_winning_losing_and_inbound_staged_commits_observe_same_tra
     }
 }
 
+/// CORE-005 witness, requested by Agent 3: the SAME `DeviceId` rejoining in a LATER commit is a new
+/// tenure on every node - including the rejoining device's own.
+///
+/// This is the two-commit shape, and it is deliberately separate from the one-commit
+/// remove-and-re-add that `catcoms-mls`'s M-1 refuses. Here the removal and the re-admission are
+/// different commits, M-1 must let both through, and the result must still be unambiguous.
+///
+/// Agent 3's N17 requires that a v2 record signed in A's FIRST tenure is refused after A returns,
+/// which holds only if no node still believes A's first tenure is current.
+///
+/// **What this proves, and the half it does not.** It proves the two-commit rejoin is ADMITTED (so
+/// M-1 is scoped to the one-commit shape), and that every witness - the admitting one and the ones
+/// that apply the commit - observes a new start that is neither A's first tenure nor B's.
+///
+/// It does NOT prove the rejoining device's own view. Constructing that device fails here: a
+/// same-identity device made with `MlsDevice::duplicate` carries A's old group in its provider, and
+/// `ServerGroup::join` then refuses with "A group with this GroupId already exists". That may be
+/// more than a harness limit: if a genuinely removed device also keeps its old group state, a
+/// same-`DeviceId` rejoin by Welcome would fail the same way in production. Whether removal discards
+/// the group, or a rejoin must, is recorded as an open question rather than assumed here.
+#[tokio::test]
+async fn owner_tenure_same_device_rejoin_in_a_later_commit_is_a_new_tenure_on_every_witness() {
+    let (_hub, mut nodes, ids) = build_members(4).await;
+    let initial: Vec<_> = nodes[0].commit_log.iter().cloned().collect();
+    for node in nodes.iter_mut().skip(1) {
+        for record in &initial {
+            if record.commit_epoch == node.epoch() {
+                assert!(node.apply_commit_in_order(record));
+            }
+        }
+        node.config.max_committer_rank = 2;
+        node.config.stage_decision_window_ms = 0;
+    }
+    let first_tenure = observed_start(&nodes[0]);
+    assert!(
+        first_tenure.is_some(),
+        "the founder must know its first tenure, or 'differs from it' proves nothing"
+    );
+
+    // Commit one: A leaves. B takes office.
+    nodes[1].remove(&ids[0]).await.unwrap();
+    nodes[2].remove(&ids[0]).await.unwrap();
+    let candidates = [
+        nodes[1].pending.as_ref().unwrap().best.clone(),
+        nodes[2].pending.as_ref().unwrap().best.clone(),
+    ];
+    for node in nodes.iter_mut().skip(1) {
+        for candidate in &candidates {
+            node.contest_commit(candidate.clone());
+        }
+        assert!(node.resolve_pending_if_expired());
+        assert_eq!(node.designated_committer_id(), Some(ids[1]));
+    }
+    let b_tenure = observed_start(&nodes[1]);
+
+    // Commit two, separate from commit one: the SAME A identity is re-admitted. `duplicate` keeps
+    // A's signature key, so this is the same `DeviceId`, not a rotated one.
+    let returning = nodes[0].device.duplicate().unwrap();
+    assert_eq!(returning.device_id(), ids[0]);
+    let invite = nodes[1].mint_invite([7; 16], u64::MAX, vec![]).unwrap();
+    let kp = returning
+        .key_package_for_invite(&invite.group_id, invite.invite_nonce)
+        .unwrap();
+    let _ = nodes[1]
+        .admit_now(&invite, &serialize_key_package(&kp).unwrap(), 1000)
+        .expect("a rejoin in a LATER commit is not the shape M-1 refuses, and must be admitted");
+    assert_eq!(
+        nodes[1].designated_committer_id(),
+        Some(ids[0]),
+        "the same DeviceId is the designated committer again"
+    );
+    let witness_start = observed_start(&nodes[1]);
+
+    // The departing tenure is archived, not resumed - on the admitting witness and on every witness
+    // that applies the commit.
+    let record = nodes[1].commit_log.back().unwrap().clone();
+    let mut starts = vec![("the admitting witness", witness_start)];
+    for node in nodes.iter_mut().skip(2) {
+        assert!(node.apply_commit_in_order(&record));
+        starts.push(("an applying witness", observed_start(node)));
+        assert_eq!(
+            observed_start(&restore(&node.snapshot().unwrap()).unwrap()),
+            witness_start,
+            "a witness keeps the new tenure across a save and reload"
+        );
+    }
+    for (who, start) in starts {
+        assert!(start.is_some(), "{who} lost track of the tenure entirely");
+        assert_eq!(start, witness_start, "{who} disagrees about the new tenure");
+        assert_ne!(
+            start, first_tenure,
+            "{who} resumed A's first tenure; a record signed in it would then still verify"
+        );
+        assert_ne!(start, b_tenure, "{who} confused A's return with B's tenure");
+    }
+}
+
 #[tokio::test]
 async fn owner_tenure_rejects_malformed_tail_and_unobserved_group_advance() {
     let (_, mut nodes, _) = build_members(1).await;
