@@ -41,6 +41,10 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
     /// acceptance - both admit `Known` alone - but it keeps `Imported` and `Unknown` apart in the
     /// refusal, because they are different situations for whoever reads it: one is fixed by
     /// observing the owner take office, the other is not fixed by waiting at all.
+    ///
+    /// Returns the branch the Save must name alongside the basis, both from the one fresh basis and
+    /// in the one custody visit, so a caller cannot hold one without the other or compute the
+    /// branch itself.
     pub fn prepare_studio_closing_overlay(
         &mut self,
         store: &mut ServerStore,
@@ -48,10 +52,10 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
         target: StudioTarget,
         close: &CloseRecord,
         budget: &mut EpochStudioBudget,
-    ) -> Result<StudioClosingOverlayBasis, AppError> {
+    ) -> Result<StudioOverlaySaveTicket, AppError> {
         let tenure = self.require_observed_owner_tenure()?;
         self.sync.with_registry_context(|group, device, _, _| {
-            store.prepare_studio_closing_overlay(
+            let basis = store.prepare_studio_closing_overlay(
                 server,
                 group,
                 target,
@@ -59,11 +63,19 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
                 close,
                 Some(tenure),
                 budget,
-            )
+            )?;
+            let branch =
+                store.studio_overlay_request_branch(server, group, target, &basis, budget)?;
+            Ok(StudioOverlaySaveTicket { basis, branch })
         })
     }
     /// Save local draft data only. Exact acceptance retry survives source/tenure changes;
     /// new writes still require the actual independently observed current tenure and source.
+    ///
+    /// `branch` is the one the request was prepared with - from a [`StudioOverlaySaveTicket`] for
+    /// a new Save, or the original request's for a retry. The tenure is **read** here and passed
+    /// down rather than required, because a retry or an acknowledgement must still succeed under
+    /// `Imported` and `Unknown` (V8); S1b and S3 require it at their own points.
     #[allow(clippy::too_many_arguments)]
     pub fn save_studio_closing_overlay(
         &mut self,
@@ -72,10 +84,11 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
         target: StudioTarget,
         close: &CloseRecord,
         basis: [u8; 32],
+        branch: [u8; 32],
         operation: DomainOp,
         budget: &mut EpochStudioBudget,
     ) -> Result<StudioOverlaySave, AppError> {
-        let tenure = self.sync.authoring_owner_tenure_start();
+        let tenure = self.observed_owner_tenure();
         self.sync
             .with_registry_context(|group, device, clock, rng| {
                 store.save_studio_closing_overlay(
@@ -86,11 +99,29 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
                     close,
                     tenure,
                     basis,
+                    branch,
                     operation,
                     clock.now_ms(),
                     rng,
                     budget,
                 )
             })
+    }
+}
+
+/// What a Closing-overlay Save must carry back: the basis it was prepared against and the branch
+/// it names.
+///
+/// Both are derived from one fresh basis in one custody visit. The branch comes from
+/// `StudioOverlayState::request_branch_id`, never from the caller: it is the live branch when one
+/// exists, and otherwise the branch the next admission would open.
+pub struct StudioOverlaySaveTicket {
+    pub basis: StudioClosingOverlayBasis,
+    pub branch: [u8; 32],
+}
+
+impl std::fmt::Debug for StudioOverlaySaveTicket {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("StudioOverlaySaveTicket { .. }")
     }
 }

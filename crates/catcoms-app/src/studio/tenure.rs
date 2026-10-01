@@ -12,9 +12,10 @@
 //! That is why this module offers two different things - a value anyone may read, and a
 //! requirement only new authoring should call - rather than one function that refuses.
 //!
-//! **This module does not refuse anything itself, by design (A-1).** The nine app wrappers that
-//! already read `authoring_owner_tenure_start()` pass the `Option<u64>` through unchanged so the
-//! store can refuse at the stage that needs it. A wrapper that refused early would move the
+//! **This module does not refuse anything itself, by design (A-1).** The app wrappers that read
+//! `authoring_owner_tenure_start()` pass the `Option<u64>` through unchanged, and the Flow S
+//! wrappers pass the typed [`StudioOwnerTenure`] instead, so the store can refuse at the stage that
+//! needs it. A wrapper that refused early would move the
 //! decision away from the code that knows whether this particular call is new authoring or a
 //! retry, and V8 is the list of things that would then break.
 use super::*;
@@ -59,7 +60,12 @@ fn convert(observed: ObservedOwnerTenure) -> StudioOwnerTenure {
 }
 
 /// The requirement, likewise free-standing and likewise exhaustive.
-fn require(tenure: StudioOwnerTenure) -> Result<u64, AppError> {
+///
+/// `pub(crate)` so each Flow S authoring stage can apply it at its own point (A-1): the Server
+/// passes the `Copy` value down, and S1b and S3 each call this after classification. A single
+/// `Result` could not be carried instead, because `AppError` is not `Clone` and both stages need
+/// the value.
+pub(crate) fn require(tenure: StudioOwnerTenure) -> Result<u64, AppError> {
     match tenure {
         StudioOwnerTenure::Known(start) => Ok(start),
         StudioOwnerTenure::Imported(_) => Err(invalid(

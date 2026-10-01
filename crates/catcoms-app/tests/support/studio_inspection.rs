@@ -182,17 +182,17 @@ impl InspectionFixture {
                 )
             });
         drop(context);
-        let basis = server
+        let ticket = server
             .prepare_studio_closing_overlay(&mut store, SERVER, target, &close, &mut budget)
-            .unwrap()
-            .fingerprint();
+            .unwrap();
         let StudioOverlaySave::Local(draft) = server
             .save_studio_closing_overlay(
                 &mut store,
                 SERVER,
                 target,
                 &close,
-                basis,
+                ticket.basis.fingerprint(),
+                ticket.branch,
                 title,
                 &mut budget,
             )
@@ -211,7 +211,7 @@ impl InspectionFixture {
             clock,
             target,
             expected,
-            basis,
+            basis: ticket.basis.fingerprint(),
             group,
             device,
             root,

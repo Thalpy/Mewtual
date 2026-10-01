@@ -355,6 +355,9 @@ fn studio_overlay_handoff_signs_the_whole_branch_once_and_keeps_pending_intents(
         let f = Fixture::new(art);
         let mut store = open(root.path());
         let (close, basis, expected) = prepare(&f, &mut store);
+        // The branch the accepted Save named, held as its client would hold it. After the transfer
+        // a fresh derivation would name the *next* branch, so the retry below must resend this.
+        let branch = live_branch(&f, &store);
         let before_intents = store
             .load_epoch_intents(SERVER, &f.logical)
             .unwrap()
@@ -421,6 +424,7 @@ fn studio_overlay_handoff_signs_the_whole_branch_once_and_keeps_pending_intents(
         let mut store = open(root.path());
         assert_eq!(transfer(&f, &mut store, basis), outcome);
         assert_eq!(fs::read(f.path(&store)).unwrap(), source_bytes);
+        // V8: the acknowledgement is owed without any tenure at all.
         let mut b = budget(&mut store, &f);
         let retry = store
             .save_studio_closing_overlay(
@@ -429,8 +433,9 @@ fn studio_overlay_handoff_signs_the_whole_branch_once_and_keeps_pending_intents(
                 f.target,
                 &f.device,
                 &close,
-                None,
+                StudioOwnerTenure::Unknown,
                 basis,
+                branch,
                 f.title(),
                 999,
                 &mut rng(),
@@ -581,6 +586,150 @@ fn studio_overlay_handoff_crash_barriers_reopen_without_signed_prefixes_or_dupli
     }
 }
 
+/// Interrupt a handoff by failing the write tagged `crash_at`, reopen, and confirm it left a
+/// durable Prepared record behind. Returns the branch's basis and the expected projection.
+fn interrupted_handoff(
+    f: &Fixture,
+    root: &Path,
+    crash_at: WriteTag,
+) -> ([u8; 32], StudioProjection) {
+    let mut store = open(root);
+    let (_, basis, expected) = prepare(f, &mut store);
+    let mut b = budget(&mut store, f);
+    let interrupted = store.handoff_studio_overlay_with_io(
+        SERVER,
+        &f.group,
+        f.target,
+        &f.device,
+        basis,
+        Some(0),
+        &mut rng(),
+        &mut b,
+        &mut WriteHooks::fail_before_write(FailError::Io("injected crash")).at(crash_at),
+    );
+    assert!(
+        matches!(interrupted, Err(ref e) if e.to_string().contains("injected crash")),
+        "the handoff was not interrupted where the fixture meant it to be: {interrupted:?}"
+    );
+    drop(store);
+    assert!(
+        open(root)
+            .load_epoch_intents(SERVER, &f.logical)
+            .unwrap()
+            .handoff_prepared(),
+        "the interruption did not leave a durable Prepared record to resolve"
+    );
+    (basis, expected)
+}
+
+/// V8: resolving an already durable `Prepared` handoff needs no tenure, in both of the outcomes
+/// resolution can reach.
+///
+/// **`Complete` - the crash came after the source landed.** The source holds every signed change,
+/// so resolution completes the handoff from durable evidence alone and settles. The vault is
+/// copied and resolved twice, with a known tenure as the control and with **none**; both must
+/// settle to the same outcome and leave byte-identical sources, so the absent tenure changed
+/// nothing rather than merely failing to stop something.
+///
+/// **`Absent` - the crash came before the source landed.** There is no signed evidence to complete
+/// from, so resolution returns the branch to Active, durably, which is also tenure-free. What
+/// follows is a *new* handoff, and that is new authoring: it is refused without tenure, and it
+/// should be. So the claim here is narrower and stated exactly: the call is refused for its tenure,
+/// **and** the Prepared record is resolved anyway, with the draft intact.
+///
+/// The first version of this test crashed before the source and expected a settled outcome. It
+/// failed, and the failure was the test's, not V8's: it had conflated resolution with the new
+/// handoff that follows an `Absent` one. Reading `resolve_studio_handoff_with_io` is what showed the
+/// two outcomes and which of them settles.
+///
+/// This anchors V8's third case. The other two are anchored under absent tenure elsewhere: an exact
+/// Save retry (`studio_overlay_store_uncertain_writes_and_changed_source_retry_at_physical_cap`)
+/// and a completed-handoff acknowledgement (`..._signs_the_whole_branch_once_...`,
+/// `..._completed_retry_keeps_channel_...`). Until this, every resolution ran with `Some(0)`, so a
+/// tenure requirement hoisted above it would have passed every test.
+#[test]
+fn a_durable_prepared_handoff_is_resolved_with_no_observed_tenure() {
+    for art in [false, true] {
+        let f = Fixture::new(art);
+
+        // Complete: settles identically with and without tenure.
+        let root = tempfile::tempdir().unwrap();
+        let (basis, expected) = interrupted_handoff(&f, root.path(), WriteTag::Completed);
+        let control = tempfile::tempdir().unwrap();
+        copy_vault(root.path(), control.path());
+        let resolve = |path: &Path, tenure: Option<u64>| {
+            let mut store = open(path);
+            let mut b = budget(&mut store, &f);
+            let outcome = store
+                .handoff_studio_overlay(
+                    SERVER,
+                    &f.group,
+                    f.target,
+                    &f.device,
+                    basis,
+                    tenure,
+                    &mut rng(),
+                    &mut b,
+                )
+                .unwrap_or_else(|e| panic!("resolution refused with tenure {tenure:?}: {e}"));
+            (
+                outcome,
+                fs::read(f.path(&store)).unwrap(),
+                f.load(&store).unwrap(),
+            )
+        };
+        let (known, known_source, _) = resolve(control.path(), Some(0));
+        let (absent, absent_source, resolved) = resolve(root.path(), None);
+        assert_eq!(
+            absent, known,
+            "resolution without tenure settled differently"
+        );
+        assert_eq!(
+            absent_source, known_source,
+            "resolution without tenure wrote a different source"
+        );
+        assert_eq!(resolved.projection().unwrap(), expected);
+        assert!(!open(root.path())
+            .load_epoch_intents(SERVER, &f.logical)
+            .unwrap()
+            .handoff_prepared());
+
+        // Absent: resolved to Active without tenure; only the new handoff after it is refused.
+        let root = tempfile::tempdir().unwrap();
+        let (basis, expected) = interrupted_handoff(&f, root.path(), WriteTag::Source);
+        let mut store = open(root.path());
+        let mut b = budget(&mut store, &f);
+        let refused = store.handoff_studio_overlay(
+            SERVER,
+            &f.group,
+            f.target,
+            &f.device,
+            basis,
+            None,
+            &mut rng(),
+            &mut b,
+        );
+        assert!(
+            matches!(refused, Err(ref e) if e.to_string().contains("owner tenure")),
+            "the new handoff after an Absent resolution was not refused for its tenure: \
+             {refused:?}"
+        );
+        drop(store);
+        let after = open(root.path())
+            .load_epoch_intents(SERVER, &f.logical)
+            .unwrap();
+        assert!(
+            !after.handoff_prepared(),
+            "the Prepared record was not resolved without tenure"
+        );
+        assert_eq!(
+            after.local_draft().unwrap().unwrap().projection(),
+            &expected,
+            "resolution did not return the branch to Active intact"
+        );
+    }
+}
+
 /// Reach a real subsequent receipt, preserving the transferred operation in its signed closure.
 fn grow(f: &Fixture, store: &mut ServerStore) {
     let mut b = budget(store, f);
@@ -641,6 +790,8 @@ fn studio_overlay_handoff_completed_retry_keeps_channel_after_real_receipt_retir
     let f = Fixture::new(true);
     let mut store = open(root.path());
     let (close, basis, _) = prepare(&f, &mut store);
+    // The accepted Save's branch, held across the transfer and the rotation as its client would.
+    let branch = live_branch(&f, &store);
     let outcome = transfer(&f, &mut store, basis);
     assert!(store
         .load_epoch_intents(SERVER, &f.logical)
@@ -671,8 +822,9 @@ fn studio_overlay_handoff_completed_retry_keeps_channel_after_real_receipt_retir
             f.target,
             &f.device,
             &close,
-            None,
+            StudioOwnerTenure::Unknown,
             basis,
+            branch,
             f.title(),
             999,
             &mut rng(),
@@ -708,8 +860,9 @@ fn studio_overlay_handoff_completed_retry_keeps_channel_after_real_receipt_retir
         wrong,
         &f.device,
         &close,
-        None,
+        StudioOwnerTenure::Unknown,
         basis,
+        branch,
         f.title(),
         999,
         &mut rng(),

@@ -714,12 +714,20 @@ async fn studio_replay_evidence_excludes_accepted_overlay_ids_and_keeps_ordinary
     let annotated = domain(put([6; 16], "accepted overlay", server.device_id()), 3);
     let annotated_id = annotated.id(&server.device_id());
     let mut b = budget(&mut store, &mut server);
-    let basis = server
+    let ticket = server
         .prepare_studio_closing_overlay(&mut store, SERVER, target, &close, &mut b)
-        .unwrap()
-        .fingerprint();
+        .unwrap();
     let StudioOverlaySave::Local(draft) = server
-        .save_studio_closing_overlay(&mut store, SERVER, target, &close, basis, annotated, &mut b)
+        .save_studio_closing_overlay(
+            &mut store,
+            SERVER,
+            target,
+            &close,
+            ticket.basis.fingerprint(),
+            ticket.branch,
+            annotated,
+            &mut b,
+        )
         .unwrap()
     else {
         panic!("expected actual local acceptance")

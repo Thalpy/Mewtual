@@ -8,6 +8,8 @@ fn studio_overlay_handoff_rollover_floor_rejects_forgotten_retry_after_rewind() 
     let f = Fixture::new(true);
     let mut store = open(root.path());
     let (first_close, first_basis) = closing(&f, &mut store);
+    // The branch the first Save's ticket named, kept as its client would keep it.
+    let first_branch = request_branch(&f, &mut store, &first_close);
     let rewind = f.load(&store).unwrap().unit.snapshot().unwrap();
     save(
         &f,
@@ -148,22 +150,64 @@ fn studio_overlay_handoff_rollover_floor_rejects_forgotten_retry_after_rewind() 
     );
     let scope = crate::store::epoch_intents::scope_bytes(SERVER, &f.logical).unwrap();
     let original = fs::read(store.epoch_intent_path(&scope)).unwrap();
+
+    // Two independent defences now stand in front of the forgotten retry, and each is proved on
+    // its own rather than letting either one's refusal stand in for the other.
+    //
+    // The first is the branch namespace. The forgotten request resends the branch its own ticket
+    // named, generation 1 of the first basis. Both branches since have been transferred and the
+    // document is on generation 2, so that identity names nothing and S1b refuses it as stale -
+    // before any media work, and before the plan where the floor lives.
     let result = store.save_studio_closing_overlay(
         SERVER,
         &f.group,
         f.target,
         &f.device,
         &first_close,
-        Some(0),
+        StudioOwnerTenure::Known(0),
         first_basis.fingerprint(),
+        first_branch,
         f.title(),
         123,
         &mut rng(),
         &mut b,
     );
     assert!(
-        matches!(result,Err(AppError::Invalid(ref s)) if s.contains(&ReplError::EpochScope.to_string())),
-        "forgotten overlay retry crossed persisted floor: {result:?}"
+        matches!(result, Err(AppError::Invalid(ref s)) if s.contains("stale branch")),
+        "a forgotten retry naming a long-gone branch was not refused by the namespace: {result:?}"
+    );
+    assert_eq!(fs::read(store.epoch_intent_path(&scope)).unwrap(), original);
+
+    // The second is the rollover floor, now isolated. A request prepared *after* the rewind is
+    // handed the branch the next admission would open, so the namespace admits it, and the only
+    // thing between it and a new branch on a basis the document has legitimately moved past is
+    // `minimum_new_basis_closed_epoch`. Design 6.3 step 3: the detached plan refuses it with
+    // `EpochScope` before any write. Before the namespace existed the floor was reachable only
+    // because nothing refused earlier; this is the first version of the test that shows it holding
+    // on its own.
+    let fresh_branch = request_branch(&f, &mut store, &first_close);
+    assert_ne!(
+        fresh_branch, first_branch,
+        "the rewound document handed out the forgotten branch again"
+    );
+    let mut b = budget(&mut store, &f);
+    let result = store.save_studio_closing_overlay(
+        SERVER,
+        &f.group,
+        f.target,
+        &f.device,
+        &first_close,
+        StudioOwnerTenure::Known(0),
+        first_basis.fingerprint(),
+        fresh_branch,
+        f.title(),
+        124,
+        &mut rng(),
+        &mut b,
+    );
+    assert!(
+        matches!(result, Err(AppError::Invalid(ref s)) if s.contains(&ReplError::EpochScope.to_string())),
+        "a freshly prepared request on a rewound basis crossed the persisted floor: {result:?}"
     );
     assert_eq!(fs::read(store.epoch_intent_path(&scope)).unwrap(), original);
 }
@@ -174,6 +218,8 @@ fn studio_overlay_handoff_capacity_preflight_and_full_cap_completed_sync_retry()
     let f = Fixture::new(true);
     let mut store = open(root.path());
     let (close, basis, _) = prepare(&f, &mut store);
+    // The accepted Save's branch, which both completed retries below resend.
+    let branch = live_branch(&f, &store);
     let scope = crate::store::epoch_intents::scope_bytes(SERVER, &f.logical).unwrap();
     let path = store.epoch_intent_path(&scope);
     let staging = path.with_file_name(format!(
@@ -237,8 +283,9 @@ fn studio_overlay_handoff_capacity_preflight_and_full_cap_completed_sync_retry()
         f.target,
         &f.device,
         &close,
-        None,
+        StudioOwnerTenure::Unknown,
         basis,
+        branch,
         f.title(),
         999,
         &mut rng(),
@@ -268,8 +315,9 @@ fn studio_overlay_handoff_capacity_preflight_and_full_cap_completed_sync_retry()
             f.target,
             &f.device,
             &close,
-            None,
+            StudioOwnerTenure::Unknown,
             basis,
+            branch,
             f.title(),
             999,
             &mut rng(),

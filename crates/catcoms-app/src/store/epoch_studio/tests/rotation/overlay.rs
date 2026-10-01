@@ -1,9 +1,11 @@
 use super::*;
+use crate::studio::StudioOwnerTenure;
 use catcoms_replication::studio::{StudioClosingOverlayBasis, StudioLocalDraft};
 use catcoms_replication::CloseRecord;
 use std::collections::{BTreeMap, BTreeSet};
 
 mod archive;
+mod branch_namespace;
 mod copy_capture;
 mod disposal;
 mod handoff;
@@ -63,6 +65,13 @@ fn seal_source(f: &Fixture, store: &mut ServerStore) -> (CloseRecord, StudioClos
         .unwrap();
     (close, basis)
 }
+/// A successful Save, made the way a real client makes one: prepare, take the branch the ticket
+/// names, save. Every caller expects success with the current basis, so the branch is derived
+/// fresh each time - the live branch while one exists, the next one after a transfer or disposal.
+///
+/// **Not for retries after a transfer or disposal.** Those must resend the branch the original
+/// request named, and a fresh derivation would name the next branch instead; such tests call the
+/// store directly and carry the branch themselves.
 fn save(
     f: &Fixture,
     store: &mut ServerStore,
@@ -71,6 +80,7 @@ fn save(
     op: DomainOp,
     ts: u64,
 ) -> StudioLocalDraft {
+    let branch = request_branch(f, store, close);
     let mut b = budget(store, f);
     local(
         store
@@ -80,8 +90,9 @@ fn save(
                 f.target,
                 &f.device,
                 close,
-                Some(0),
+                StudioOwnerTenure::Known(0),
                 basis,
+                branch,
                 op,
                 ts,
                 &mut rng(),
@@ -89,6 +100,61 @@ fn save(
             )
             .unwrap(),
     )
+}
+
+/// The branch and S1b decision for the first Save of a document that has no overlay record yet,
+/// through the same core functions S1b calls. For tests that assemble a capture by hand.
+///
+/// Handing a capture a decision is not trusting it: the detached plan rechecks the pair against
+/// the record it decodes, and a pair that does not fit that record is refused there.
+fn first_branch(
+    basis: &StudioClosingOverlayBasis,
+) -> (
+    [u8; 32],
+    crate::store::epoch_studio::overlay_capture::OverlayBranch,
+) {
+    use catcoms_replication::studio::{StudioOverlayAdmission, StudioOverlayState};
+    let branch = StudioOverlayState::request_branch_id(None, basis).unwrap();
+    let admission = StudioOverlayState::admit_first_branch(branch, basis);
+    assert_eq!(admission, StudioOverlayAdmission::New { generation: 1 });
+    (
+        branch,
+        crate::store::epoch_studio::overlay_capture::OverlayBranch::Admitted(admission),
+    )
+}
+
+/// The id of the live branch, read from the record: what the client of the Save that opened it
+/// holds. Mints no basis, so unlike `request_branch` it still works once the document has moved
+/// on to a successor - which is exactly when a retry after a transfer needs it.
+fn live_branch(f: &Fixture, store: &ServerStore) -> [u8; 32] {
+    store
+        .load_epoch_intents(SERVER, &f.logical)
+        .unwrap()
+        .handoff_metadata()
+        .expect("no overlay record")
+        .branch_id()
+        .expect("no live branch")
+}
+
+/// The branch a Save prepared now would be handed: mint a fresh basis and ask the store, exactly
+/// as `Server::prepare_studio_closing_overlay` does. Never computed here.
+fn request_branch(f: &Fixture, store: &mut ServerStore, close: &CloseRecord) -> [u8; 32] {
+    let mut b = budget(store, f);
+    let fresh = store
+        .prepare_studio_closing_overlay(
+            SERVER,
+            &f.group,
+            f.target,
+            &f.device,
+            close,
+            Some(0),
+            &mut b,
+        )
+        .unwrap();
+    let mut b = budget(store, f);
+    store
+        .studio_overlay_request_branch(SERVER, &f.group, f.target, &fresh, &mut b)
+        .unwrap()
 }
 /// Publish a real PIX and return the reference a frame operation must carry. A local acceptance
 /// may not name pixels the vault does not hold, so frame fixtures publish genuine bytes rather
@@ -272,6 +338,9 @@ fn studio_overlay_store_uncertain_writes_and_changed_source_retry_at_physical_ca
         let f = Fixture::new(art);
         let mut store = open(root.path());
         let (close, basis) = closing(&f, &mut store);
+        // One request's branch, carried through every attempt below: the first is the generation-1
+        // branch this Save opens, and each retry resends it, as a real retry would.
+        let branch = request_branch(&f, &mut store, &close);
         let before = canonical(&store);
         let mut b = budget(&mut store, &f);
         let error = store
@@ -281,8 +350,9 @@ fn studio_overlay_store_uncertain_writes_and_changed_source_retry_at_physical_ca
                 f.target,
                 &f.device,
                 &close,
-                Some(0),
+                StudioOwnerTenure::Known(0),
                 basis.fingerprint(),
+                branch,
                 f.title(),
                 123,
                 &mut rng(),
@@ -307,8 +377,9 @@ fn studio_overlay_store_uncertain_writes_and_changed_source_retry_at_physical_ca
                 f.target,
                 &f.device,
                 &close,
-                Some(0),
+                StudioOwnerTenure::Known(0),
                 basis.fingerprint(),
+                branch,
                 f.title(),
                 123,
                 &mut rng(),
@@ -353,8 +424,9 @@ fn studio_overlay_store_uncertain_writes_and_changed_source_retry_at_physical_ca
                 f.target,
                 &f.device,
                 &close,
-                None,
+                StudioOwnerTenure::Unknown,
                 basis.fingerprint(),
+                branch,
                 f.title(),
                 999,
                 &mut rng(),
@@ -381,8 +453,9 @@ fn studio_overlay_store_uncertain_writes_and_changed_source_retry_at_physical_ca
                 f.target,
                 &f.device,
                 &close,
-                None,
+                StudioOwnerTenure::Unknown,
                 basis.fingerprint(),
+                branch,
                 f.title(),
                 999,
                 &mut rng(),
@@ -400,8 +473,9 @@ fn studio_overlay_store_uncertain_writes_and_changed_source_retry_at_physical_ca
                 f.target,
                 &f.device,
                 &close,
-                Some(0),
+                StudioOwnerTenure::Known(0),
                 basis.fingerprint(),
+                branch,
                 changed,
                 999,
                 &mut rng(),
@@ -450,6 +524,7 @@ fn studio_overlay_store_failed_ordinary_intent_is_not_acceptance_and_ordinary_ap
             .contains_exact_operation(f.device.device_id(), &f.title())
             .unwrap());
         let (close, basis) = seal_source(&f, &mut store);
+        let branch = request_branch(&f, &mut store, &close);
         let mut b = budget(&mut store, &f);
         let error = store
             .save_studio_closing_overlay(
@@ -458,8 +533,9 @@ fn studio_overlay_store_failed_ordinary_intent_is_not_acceptance_and_ordinary_ap
                 f.target,
                 &f.device,
                 &close,
-                Some(0),
+                StudioOwnerTenure::Known(0),
                 basis.fingerprint(),
+                branch,
                 f.title(),
                 100,
                 &mut rng(),
@@ -516,6 +592,7 @@ fn studio_overlay_store_basis_scope_and_semantics_reject_before_acceptance() {
         let f = Fixture::new(art);
         let mut store = open(root.path());
         let (close, basis) = closing(&f, &mut store);
+        let branch = request_branch(&f, &mut store, &close);
         let mut b = budget(&mut store, &f);
         let missing = store
             .prepare_studio_closing_overlay(
@@ -532,8 +609,9 @@ fn studio_overlay_store_basis_scope_and_semantics_reject_before_acceptance() {
                 f.target,
                 &f.device,
                 &close,
-                Some(0),
+                StudioOwnerTenure::Known(0),
                 stale,
+                branch,
                 f.title(),
                 123,
                 &mut rng(),
@@ -550,8 +628,9 @@ fn studio_overlay_store_basis_scope_and_semantics_reject_before_acceptance() {
                 f.target,
                 &f.device,
                 &close,
-                Some(0),
+                StudioOwnerTenure::Known(0),
                 basis.fingerprint(),
+                branch,
                 bad,
                 123,
                 &mut rng(),
@@ -594,8 +673,9 @@ fn studio_overlay_store_basis_scope_and_semantics_reject_before_acceptance() {
                 f.target,
                 &f.device,
                 &close,
-                Some(0),
+                StudioOwnerTenure::Known(0),
                 basis.fingerprint(),
+                branch,
                 changed,
                 123,
                 &mut rng(),
@@ -622,8 +702,9 @@ fn studio_overlay_store_basis_scope_and_semantics_reject_before_acceptance() {
                     wrong,
                     &f.device,
                     &close,
-                    Some(0),
+                    StudioOwnerTenure::Known(0),
                     basis.fingerprint(),
+                    branch,
                     op,
                     123,
                     &mut rng(),
@@ -941,6 +1022,8 @@ fn studio_overlay_store_replacement_counts_base_and_orphans_without_refunding_ol
     let mut store = open(root.path());
     let (close, basis) = closing(&f, &mut store);
     let view = save(&f, &mut store, &close, basis.fingerprint(), f.title(), 123);
+    // The live branch the first Save opened; the second operation below appends to it.
+    let branch = request_branch(&f, &mut store, &close);
     let scope = crate::store::epoch_intents::scope_bytes(SERVER, &f.logical).unwrap();
     let path = store
         .dir
@@ -976,8 +1059,9 @@ fn studio_overlay_store_replacement_counts_base_and_orphans_without_refunding_ol
             f.target,
             &f.device,
             &close,
-            Some(0),
+            StudioOwnerTenure::Known(0),
             basis.fingerprint(),
+            branch,
             op.clone(),
             124,
             &mut rng(),
@@ -1072,6 +1156,9 @@ fn studio_overlay_uncertain_acceptance_still_protects_its_pixels() {
         let mut store = open(root.path());
         let f = Fixture::new(true);
         let (close, basis) = closing(&f, &mut store);
+        // Derived first, before anything this test arranges, so the fixture's own order - pin set,
+        // budget, then the Save - is exactly what it was before branches existed.
+        let branch = request_branch(&f, &mut store, &close);
         let group = hex::encode(f.group.group_id());
         let mut blobs = store.blob_store(&group).unwrap();
         let payload = pix();
@@ -1118,15 +1205,26 @@ fn studio_overlay_uncertain_acceptance_still_protects_its_pixels() {
             f.target,
             &f.device,
             &close,
-            Some(0),
+            StudioOwnerTenure::Known(0),
             basis.fingerprint(),
+            branch,
             op,
             300,
             &mut rng(),
             &mut b,
             &mut hooks,
         );
-        assert!(failed.is_err(), "the injected writer must fail the save");
+        // The injected failure specifically. `is_err()` alone was satisfied by a Save refused for
+        // any reason at all - including one that never reached the protection transfer this test
+        // exists to exercise, which is exactly how a misplaced fixture step once passed through it.
+        match failed {
+            Err(error) => assert!(
+                error.to_string().contains("interrupted"),
+                "the Save failed before the injected write, so the transfer was never reached: \
+                 {error}"
+            ),
+            Ok(_) => panic!("the injected writer must fail the save"),
+        }
 
         let mut blobs = store.blob_store(&group).unwrap();
         assert!(
@@ -1166,6 +1264,8 @@ fn studio_overlay_exact_retry_is_acknowledged_without_media_admission() {
     );
     let first = save(&f, &mut store, &close, basis.fingerprint(), op.clone(), 300);
     assert_eq!(first.accepted(), 1);
+    // The branch that Save opened, which its retry resends.
+    let branch = request_branch(&f, &mut store, &close);
     let records = canonical(&store);
 
     // Occupy every job-owned hold slot with unrelated legitimate work, so any attempt at media
@@ -1191,8 +1291,9 @@ fn studio_overlay_exact_retry_is_acknowledged_without_media_admission() {
         f.target,
         &f.device,
         &close,
-        Some(0),
+        StudioOwnerTenure::Known(0),
         basis.fingerprint(),
+        branch,
         op,
         301,
         &mut rng(),
@@ -1257,8 +1358,11 @@ fn studio_overlay_detached_acceptance_survives_a_complete_scan_between_capture_a
     let authoring = store
         .admit_studio_overlay_authoring(f.target, &f.logical, &f.device, op)
         .unwrap();
+    let (branch, joins) = first_branch(&basis);
     let capture = store
-        .capture_studio_overlay_save(SERVER, &f.group, f.target, &f.device, basis, authoring, 300)
+        .capture_studio_overlay_save(
+            SERVER, &f.group, f.target, &f.device, basis, branch, joins, authoring, 300,
+        )
         .unwrap();
 
     // The detached stage. Custody is genuinely released here: `plan` owns authenticated plaintext
@@ -1286,7 +1390,7 @@ fn studio_overlay_detached_acceptance_survives_a_complete_scan_between_capture_a
             f.target,
             &f.device,
             &close,
-            Some(0),
+            StudioOwnerTenure::Known(0),
             plan,
             &mut rng(),
             &mut b,
@@ -1318,8 +1422,11 @@ fn studio_overlay_detached_plan_is_refused_when_the_record_changed() {
     let authoring = store
         .admit_studio_overlay_authoring(f.target, &f.logical, &f.device, f.title())
         .unwrap();
+    let (branch, joins) = first_branch(&basis);
     let capture = store
-        .capture_studio_overlay_save(SERVER, &f.group, f.target, &f.device, basis, authoring, 300)
+        .capture_studio_overlay_save(
+            SERVER, &f.group, f.target, &f.device, basis, branch, joins, authoring, 300,
+        )
         .unwrap();
     let plan = capture.plan().unwrap();
 
@@ -1344,7 +1451,7 @@ fn studio_overlay_detached_plan_is_refused_when_the_record_changed() {
         f.target,
         &f.device,
         &close,
-        Some(0),
+        StudioOwnerTenure::Known(0),
         plan,
         &mut rng(),
         &mut b,
@@ -1391,6 +1498,9 @@ fn studio_overlay_new_acceptance_requires_pixels_at_admission_and_again_before_t
         .unwrap(),
         7,
     );
+    // The correct branch, so the refusal below can only come from media admission and not from a
+    // stale branch.
+    let branch = request_branch(&f, &mut store, &close);
     let mut b = budget(&mut store, &f);
     let refused = store.save_studio_closing_overlay(
         SERVER,
@@ -1398,8 +1508,9 @@ fn studio_overlay_new_acceptance_requires_pixels_at_admission_and_again_before_t
         f.target,
         &f.device,
         &close,
-        Some(0),
+        StudioOwnerTenure::Known(0),
         basis.fingerprint(),
+        branch,
         absent,
         300,
         &mut rng(),
@@ -1443,8 +1554,11 @@ fn studio_overlay_new_acceptance_requires_pixels_at_admission_and_again_before_t
     let authoring = store
         .admit_studio_overlay_authoring(f.target, &f.logical, &f.device, op)
         .unwrap();
+    let (branch, joins) = first_branch(&basis);
     let capture = store
-        .capture_studio_overlay_save(SERVER, &f.group, f.target, &f.device, basis, authoring, 300)
+        .capture_studio_overlay_save(
+            SERVER, &f.group, f.target, &f.device, basis, branch, joins, authoring, 300,
+        )
         .unwrap();
     let plan = capture.plan().unwrap();
 
@@ -1469,7 +1583,7 @@ fn studio_overlay_new_acceptance_requires_pixels_at_admission_and_again_before_t
         f.target,
         &f.device,
         &close,
-        Some(0),
+        StudioOwnerTenure::Known(0),
         plan,
         &mut rng(),
         &mut b,
@@ -1570,8 +1684,10 @@ fn admitted_media_cannot_be_paired_with_another_operation() {
         crate::store::epoch_studio::overlay_capture::AdmittedOverlayAuthoring::mismatched_for_test(
             intent, a,
         );
-    let refused = store
-        .capture_studio_overlay_save(SERVER, &f.group, f.target, &f.device, basis, swapped, 300);
+    let (branch, joins) = first_branch(&basis);
+    let refused = store.capture_studio_overlay_save(
+        SERVER, &f.group, f.target, &f.device, basis, branch, joins, swapped, 300,
+    );
     match refused {
         Err(error) => assert!(
             error
@@ -1589,8 +1705,19 @@ fn admitted_media_cannot_be_paired_with_another_operation() {
 
     // Positive control: the same capture with B's own admitted authoring is accepted and reaches a
     // plan, so the refusal above is the binding and not the fixture.
+    let (branch, joins) = first_branch(&control_basis);
     let capture = store
-        .capture_studio_overlay_save(SERVER, &f.group, f.target, &f.device, control_basis, b, 300)
+        .capture_studio_overlay_save(
+            SERVER,
+            &f.group,
+            f.target,
+            &f.device,
+            control_basis,
+            branch,
+            joins,
+            b,
+            300,
+        )
         .expect("a correctly paired request was refused");
     let plan = capture.plan().unwrap();
     let mut budget = budget(&mut store, &f);
@@ -1601,7 +1728,7 @@ fn admitted_media_cannot_be_paired_with_another_operation() {
             f.target,
             &f.device,
             &close,
-            Some(0),
+            StudioOwnerTenure::Known(0),
             plan,
             &mut rng(),
             &mut budget,
@@ -1713,7 +1840,14 @@ fn studio_overlay_stale_basis_is_refused_before_any_media_admission() {
         .join(format!("{}.intents", blake3::hash(&scope).to_hex()));
     let intents_before = fs::read(&intent_path).ok();
 
-    let attempt = |store: &mut ServerStore, basis: [u8; 32], op: DomainOp| {
+    // Each request carries the branch its own ticket would have named. The document has no overlay
+    // record yet, so that is the generation-1 identity of the basis the request was prepared
+    // against - which is what lets the fresh-basis controls get past admission to the media check
+    // they exist to reach.
+    let attempt = |store: &mut ServerStore, basis: &StudioClosingOverlayBasis, op: DomainOp| {
+        let branch =
+            catcoms_replication::studio::StudioOverlayState::request_branch_id(None, basis)
+                .unwrap();
         let mut b = budget(store, &f);
         store
             .save_studio_closing_overlay(
@@ -1722,8 +1856,9 @@ fn studio_overlay_stale_basis_is_refused_before_any_media_admission() {
                 f.target,
                 &f.device,
                 &close,
-                Some(0),
-                basis,
+                StudioOwnerTenure::Known(0),
+                basis.fingerprint(),
+                branch,
                 op,
                 456,
                 &mut rng(),
@@ -1751,7 +1886,7 @@ fn studio_overlay_stale_basis_is_refused_before_any_media_admission() {
     let live = store.live_transient_holds_for_test();
     let blobs_before = blob_namespace(&store, &f);
     assert_eq!(
-        attempt(&mut store, stale.fingerprint(), absent.clone()),
+        attempt(&mut store, &stale, absent.clone()),
         invalid("Closing overlay basis changed").to_string(),
         "a stale request was classified by its media instead of its basis"
     );
@@ -1769,7 +1904,7 @@ fn studio_overlay_stale_basis_is_refused_before_any_media_admission() {
     // Positive control: with the current basis this identical request does reach media admission,
     // and is refused there. The stale refusal above was ordering, not an inert request.
     assert!(
-        attempt(&mut store, fresh.fingerprint(), absent).contains("publish the frame PIX"),
+        attempt(&mut store, &fresh, absent).contains("publish the frame PIX"),
         "the absent-pixel hazard was not reachable, so the stale case proves nothing"
     );
 
@@ -1798,7 +1933,7 @@ fn studio_overlay_stale_basis_is_refused_before_any_media_admission() {
     let live = store.live_transient_holds_for_test();
     let blobs_before = blob_namespace(&store, &f);
     assert_eq!(
-        attempt(&mut store, stale.fingerprint(), held.clone()),
+        attempt(&mut store, &stale, held.clone()),
         invalid("Closing overlay basis changed").to_string(),
         "a stale request consulted the reference rails before its basis"
     );
@@ -1815,7 +1950,7 @@ fn studio_overlay_stale_basis_is_refused_before_any_media_admission() {
     assert_eq!(fs::read(&intent_path).ok(), intents_before);
     // Positive control: the saturated rail does refuse this request once its basis is current.
     assert_eq!(
-        attempt(&mut store, fresh.fingerprint(), held),
+        attempt(&mut store, &fresh, held),
         AppError::Invalid("creative reference scan incomplete, unsupported or over bound".into())
             .to_string(),
         "the saturated-rail hazard was not reachable, so the stale case proves nothing"
