@@ -81,11 +81,15 @@ mod catchup_page_tests;
 pub mod registry_catchup;
 mod registry_ingress;
 mod registry_publication;
+#[cfg(test)]
+mod response_budget_tests;
 mod studio_exchange;
 pub use studio_exchange::StudioWatch;
 pub mod registry_seed;
 mod roles;
-pub use blob_fetch::{CompletedBlobFetch, PendingBlobFetch, MAX_BLOB_FETCH_PEERS};
+pub use blob_fetch::{
+    BlobPage, BlobPageOutcome, CompletedBlobFetch, PendingBlobFetch, MAX_BLOB_FETCH_PEERS,
+};
 pub use registry_ingress::RegistryWatch;
 pub use registry_publication::RegistrySyncInstance;
 // Re-export the role-authority logic so the product/UI layer (catcoms-app) reuses this exact,
@@ -193,6 +197,15 @@ const KIND_STUDIO_PAGE: u8 = 23;
 // Additive Studio logical-head and expected-hash checkpoint routes; Registry 21/22 stay v1.
 const KIND_STUDIO_HEAD: u8 = 24;
 const KIND_STUDIO_SEED: u8 = 25;
+/// Request kind: a **byte range** of a content-addressed blob, the paged companion to
+/// [`KIND_BLOB_FETCH`] (26 is `KIND_MEMBER_FINALIZE`).
+///
+/// A separate kind rather than an extra field on the whole-blob request, for the reason the
+/// catch-up paging note gives: `decode_blob_fetch_req` calls `finish()` and rejects trailing
+/// bytes, so an older peer handed a longer request answers *empty*, which on that kind means
+/// "not held". A silent wrong answer is worse than no paging. On this kind, empty means only
+/// "I do not know this request", and the requester falls back to the whole-blob grammar.
+const KIND_BLOB_PAGE: u8 = 27;
 /// Frontier entries one incremental catch-up may name. A document's frontier is one hash per
 /// concurrent writer, so it is one or two in ordinary use and as many as the group is wide after
 /// a partition in which everybody wrote.
@@ -528,6 +541,36 @@ const SIGNED_BLOB_OVERHEAD: usize = 3 * 4 + 32 + 64;
 /// boundary. That doesn't change the asymptotic bound and the absolute burst is modest.
 const BLOB_BUDGET_BYTES: u64 = 96 * 1024 * 1024;
 const BLOB_BUDGET_WINDOW_MS: u64 = 1_000;
+
+/// Bytes of blob one **paged** fetch response may carry, and the matching receive-side bound.
+///
+/// Deliberately the same number as [`MAX_CATCHUP_CHUNK`], and for exactly the reason written
+/// there: a deadline is only safe if a legal response can always fit inside it. The document
+/// layer learned that and the blob layer did not, so a file chunk travelled as one 8 MiB
+/// request/response against libp2p's default ten-second request timeout. That is a throughput
+/// requirement of roughly 8 Mb/s dressed up as a deadline: below it a transfer does not get
+/// slow, it fails outright and retries into the same wall, while chat over the same connection
+/// is fine because a chat op is under a kilobyte. A NAT-punched path, which is what two
+/// otherwise-unreachable members end up on, is nowhere near that rate on a burst.
+///
+/// At this size the same ten seconds asks for about 0.2 Mb/s, and every exchange that lands is
+/// progress a retry keeps rather than work a retry repeats.
+pub const MAX_BLOB_PAGE: usize = 256 * 1024;
+
+/// The page size a fetch opens with on a path that is punched, relayed, or otherwise not a
+/// plain direct dial. Small first, grown by the requester as pages land.
+pub const MIN_BLOB_PAGE: usize = 64 * 1024;
+
+/// The serving peer understands [`KIND_BLOB_PAGE`] and does not hold this blob.
+///
+/// Distinct from an empty response, which on this kind means "I am a build that predates
+/// paging" and sends the requester back to the whole-blob grammar. Conflating them would make
+/// every fetch from a peer that simply lacks the file take the slowest path in the protocol.
+const BLOB_PAGE_ABSENT: u8 = 1;
+/// A page, and the blob continues past it: ask again from `offset + len`.
+const BLOB_PAGE_MORE: u8 = 2;
+/// A page, and it reaches the end of the blob.
+const BLOB_PAGE_LAST: u8 = 3;
 /// Cap on peer records returned in one PEX **response**, and the matching receive-side bound.
 /// A wire quantity: both sides of `decode_pex_bundle` depend on it, so it is not the knob for how
 /// many records a node may keep.
@@ -740,6 +783,16 @@ const PEER_RECORD_DOMAIN: &str = "catcoms/peer-record/v1";
 /// Domain separator for a **responder's** signature over a blob-fetch response (8l);
 /// same binding shape as the catch-up/PEX responses, distinct domain.
 const BLOB_FETCH_RESP_DOMAIN: &str = "catcoms/blob-fetch-resp/v1";
+/// Domain separator for a **responder's** signature over one blob *page*.
+///
+/// Its own domain, and the transcript below binds the window as well as the bytes. A whole-blob
+/// response is self-authenticating because the requester re-hashes it to the content address it
+/// asked for; a page cannot be, since the address only exists for the whole. So the page's
+/// standing is entirely "a current member signed these exact bytes, at this exact offset, of
+/// this exact blob, for this exact request", and the content address is re-checked once over
+/// the reassembly. Leaving the offset or the total out would let a member that is allowed to
+/// serve the blob reorder or truncate it undetectably up to that final hash.
+const BLOB_PAGE_RESP_DOMAIN: &str = "catcoms/blob-page-resp/v1";
 
 /// Tunable bounds for the recovery/key-window machinery. Every field is a hard
 /// cap on memory the node will spend on out-of-order recovery, so a peer cannot
@@ -1212,6 +1265,9 @@ fn kind_binds_requester_peer(kind: u8) -> bool {
             | KIND_STUDIO_HEAD
             | KIND_STUDIO_SEED
             | KIND_MEMBER_FINALIZE
+            // New kind, so there is no released transcript to preserve: it takes the stronger
+            // both-ends binding from the start rather than inheriting the blob path's weaker one.
+            | KIND_BLOB_PAGE
     )
 }
 
@@ -1330,6 +1386,112 @@ fn blob_fetch_resp_transcript(
         req_epoch,
         blob,
     )
+}
+
+/// The responder transcript for one blob page.
+///
+/// `offset` and `total` are inside the signature, not merely beside it: see
+/// [`BLOB_PAGE_RESP_DOMAIN`] for why a page, unlike a whole blob, is not self-authenticating.
+#[allow(clippy::too_many_arguments)]
+fn blob_page_resp_transcript(
+    group_id: &[u8],
+    requester_pubkey: &[u8],
+    request_ts_ms: u64,
+    nonce: &[u8; 16],
+    req_epoch: u64,
+    cid: &Cid,
+    offset: u32,
+    total: u32,
+    page: &[u8],
+) -> Vec<u8> {
+    let mut e = Encoder::new();
+    e.put_str(BLOB_PAGE_RESP_DOMAIN).expect("label fits");
+    e.put_bytes(group_id).expect("group id fits");
+    e.put_bytes(requester_pubkey).expect("pubkey fits");
+    e.put_u64(request_ts_ms);
+    e.put_bytes(nonce).expect("16 fits");
+    e.put_u64(req_epoch);
+    e.put_bytes(cid.as_bytes()).expect("32 fits");
+    e.put_u32(offset);
+    e.put_u32(total);
+    e.put_bytes(page).expect("page fits");
+    e.finish()
+}
+
+/// Encode a blob-page request inner body: content address, window start, window limit.
+fn encode_blob_page_req(cid: &Cid, offset: u32, max_bytes: u32) -> Vec<u8> {
+    let mut e = Encoder::new();
+    e.put_bytes(cid.as_bytes()).expect("32 fits");
+    e.put_u32(offset);
+    e.put_u32(max_bytes);
+    e.finish()
+}
+
+/// Decode a blob-page request inner body into `(cid, offset, max_bytes)`.
+fn decode_blob_page_req(bytes: &[u8]) -> Result<(Cid, u32, u32), SyncError> {
+    let mut d = Decoder::new(bytes);
+    let cid_bytes: [u8; 32] = d
+        .get_bytes()
+        .map_err(|_| SyncError::Malformed)?
+        .try_into()
+        .map_err(|_| SyncError::Malformed)?;
+    let offset = d.get_u32().map_err(|_| SyncError::Malformed)?;
+    let max_bytes = d.get_u32().map_err(|_| SyncError::Malformed)?;
+    d.finish().map_err(|_| SyncError::Malformed)?;
+    Ok((Cid::from_bytes(cid_bytes), offset, max_bytes))
+}
+
+/// Frame a signed blob page: `marker ‖ responder_pubkey ‖ sig ‖ offset ‖ total ‖ page`.
+fn encode_blob_page_resp(
+    marker: u8,
+    responder_pubkey: &[u8],
+    signature: &[u8; 64],
+    offset: u32,
+    total: u32,
+    page: &[u8],
+) -> Vec<u8> {
+    let mut e = Encoder::new();
+    e.put_bytes(responder_pubkey).expect("pubkey fits");
+    e.put_bytes(signature).expect("64 fits");
+    e.put_u32(offset);
+    e.put_u32(total);
+    e.put_bytes(page).expect("page fits");
+    let mut out = Vec::with_capacity(1 + e.len());
+    out.push(marker);
+    out.extend_from_slice(&e.finish());
+    out
+}
+
+/// A parsed blob page: `(marker, responder pubkey, signature, offset, total, page)`.
+type BorrowedBlobPage<'a> = (u8, &'a [u8], [u8; 64], u32, u32, &'a [u8]);
+
+/// Borrow a page body only after checking framing and size, as `decode_blob_response` does.
+fn decode_blob_page_resp(
+    bytes: &[u8],
+    max_bytes: usize,
+) -> Result<BorrowedBlobPage<'_>, SyncError> {
+    let (marker, rest) = bytes.split_first().ok_or(SyncError::Malformed)?;
+    if rest.len() > max_bytes.saturating_add(SIGNED_BLOB_OVERHEAD) + 8 {
+        return Err(SyncError::Malformed);
+    }
+    let mut d = Decoder::new(rest);
+    let pubkey = d.get_bytes().map_err(|_| SyncError::Malformed)?;
+    if pubkey.len() != 32 {
+        return Err(SyncError::Malformed);
+    }
+    let signature = d
+        .get_bytes()
+        .map_err(|_| SyncError::Malformed)?
+        .try_into()
+        .map_err(|_| SyncError::Malformed)?;
+    let offset = d.get_u32().map_err(|_| SyncError::Malformed)?;
+    let total = d.get_u32().map_err(|_| SyncError::Malformed)?;
+    let page = d.get_bytes().map_err(|_| SyncError::Malformed)?;
+    if page.len() > max_bytes {
+        return Err(SyncError::Malformed);
+    }
+    d.finish().map_err(|_| SyncError::Malformed)?;
+    Ok((*marker, pubkey, signature, offset, total, page))
 }
 
 /// Encode a blob-fetch request inner body: just the 32-byte content address.
@@ -5613,6 +5775,23 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             }
         }
         evidence.updated_at_ms = now;
+        // How a peer is reachable is the first question any "chat works but bulk transfer does
+        // not" report raises, and it used to be unanswerable from a shared debug log: the
+        // transport's own `connection established` line carries it, but `catcoms_net` sits at
+        // `info` in `APP_FILE_FILTER` (deliberately, because that crate at `debug` narrates every
+        // address the node ever sees). `ConnectionPath` was built to cross this seam with no IP
+        // or connection id in it, so logging it from the product layer costs nothing the filter
+        // was protecting. A punched QUIC path, a plain TCP dial and a relay circuit want three
+        // different transfer policies, and previously the log could not tell them apart.
+        if projection_changed {
+            tracing::debug!(
+                ?peer,
+                paths = ?evidence.active_paths,
+                established = ?coherent_success,
+                claimed_by_member = claimed_by_current_member,
+                "peer paths changed"
+            );
+        }
         self.bound_pairwise_reachability();
         if claimed_by_current_member && projection_changed {
             self.touch_member_routes();
@@ -12631,6 +12810,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
                 Vec::new()
             }
             Some((&KIND_BLOB_FETCH, rest)) => self.serve_blob_fetch(from, rest).unwrap_or_default(),
+            Some((&KIND_BLOB_PAGE, rest)) => self.serve_blob_page(from, rest).unwrap_or_default(),
             Some((&KIND_ADMIT_RESULT, rest)) => {
                 // Admin invites (Option C): the owner delivered a finalized admission; re-sign +
                 // relay the Welcome to the joiner. Empty ack response.
@@ -12731,6 +12911,94 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             &self.device.public_key_bytes(),
             &signature,
             &blob,
+        ))
+    }
+
+    /// Serve one **window** of a content-addressed blob, on the same members-only, signed,
+    /// rate-limited terms as [`Self::serve_blob_fetch`].
+    ///
+    /// The whole-blob path stays exactly as it was for older peers. What changes here is that
+    /// the responder, not the requester, decides how much to send: the window is clamped to
+    /// [`MAX_BLOB_PAGE`] whatever was asked for, so a legal answer always fits comfortably
+    /// inside the transport's request deadline. That is the property the document layer has had
+    /// since paging landed and this layer never did.
+    fn serve_blob_page(&mut self, from: PeerId, data: &[u8]) -> Option<Vec<u8>> {
+        let (inner, req_pubkey, req_auth) =
+            self.authenticate_request(KIND_BLOB_PAGE, data, from)?;
+        let requester = DeviceId::from_public_key_bytes(&req_pubkey);
+        let now = self.clock.now_ms();
+        let (cid, offset, asked) = decode_blob_page_req(&inner).ok()?;
+        // "Not held" is answered, not left silent: an empty response on this kind is reserved
+        // for "I do not know this request kind", and a requester reading absence as that would
+        // fall back to the whole-blob grammar against a peer that simply lacks the file.
+        let Ok(Some(blob)) = self.blobs.get(&cid) else {
+            return self.sign_blob_page(
+                &req_pubkey,
+                &req_auth,
+                &cid,
+                BLOB_PAGE_ABSENT,
+                offset,
+                0,
+                &[],
+            );
+        };
+        let Ok(total) = u32::try_from(blob.len()) else {
+            return None; // unrepresentable length; nothing in the product reaches 4 GiB
+        };
+        if offset > total {
+            return None; // a window past the end is a malformed request, not an empty page
+        }
+        let end = offset
+            .saturating_add(asked.min(MAX_BLOB_PAGE as u32))
+            .min(total);
+        let slice = &blob[offset as usize..end as usize];
+        // Charged per page on a hit, so the window budget still bounds a flooder in bytes and a
+        // paged download costs exactly what the same bytes cost unpaged.
+        if !self.charge_blob_budget(requester, now, slice.len() as u64) {
+            tracing::trace!("blob page over byte budget; serving empty");
+            return Some(Vec::new());
+        }
+        let marker = if end < total {
+            BLOB_PAGE_MORE
+        } else {
+            BLOB_PAGE_LAST
+        };
+        tracing::debug!(bytes = slice.len(), offset, total, "serving blob page");
+        self.sign_blob_page(&req_pubkey, &req_auth, &cid, marker, offset, total, slice)
+    }
+
+    /// Sign and frame one blob page. Separate from [`Self::serve_blob_page`] only so the
+    /// byte-budget charge, which needs `&mut self`, is not fighting a borrow held for signing.
+    #[allow(clippy::too_many_arguments)]
+    fn sign_blob_page(
+        &self,
+        req_pubkey: &[u8],
+        req_auth: &RequestAuth,
+        cid: &Cid,
+        marker: u8,
+        offset: u32,
+        total: u32,
+        page: &[u8],
+    ) -> Option<Vec<u8>> {
+        let transcript = blob_page_resp_transcript(
+            &self.group.group_id(),
+            req_pubkey,
+            req_auth.ts,
+            &req_auth.nonce,
+            req_auth.epoch,
+            cid,
+            offset,
+            total,
+            page,
+        );
+        let signature = self.device.sign(&transcript).ok()?;
+        Some(encode_blob_page_resp(
+            marker,
+            &self.device.public_key_bytes(),
+            &signature,
+            offset,
+            total,
+            page,
         ))
     }
 

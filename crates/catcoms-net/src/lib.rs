@@ -108,6 +108,7 @@ mod publication;
 
 /// Max request/response frame size.
 const MAX_FRAME: usize = 16 * 1024 * 1024;
+
 /// Cap on discovered records surfaced from a single rendezvous Discover response, so a
 /// hostile rendezvous cannot flood the never-dropping discovered queue (the higher
 /// layer ranks/dials with its own bounds, but those sit downstream of this queue).
@@ -557,7 +558,7 @@ impl MeshBehaviour {
                 StreamProtocol::new(RR_PROTOCOL),
                 request_response::ProtocolSupport::Full,
             )],
-            request_response::Config::default(),
+            request_response::Config::default().with_request_timeout(catcoms_rt::REQUEST_TIMEOUT),
         );
         let dcutr = dcutr::Behaviour::new(key.public().to_peer_id());
         let identify = identify::Behaviour::new(identify_config(key));
@@ -3292,6 +3293,15 @@ struct PendingRequest {
     /// Deliberately unread: ownership is the accounting action. It survives a dropped waiter and
     /// is released only by the matching response/failure event.
     _keepalive: Option<SharedRequestKeepalive>,
+    /// First byte of the request frame and its length, retained only to describe a failure.
+    ///
+    /// This layer deliberately does not know what the byte *means*; the sync layer's request
+    /// kinds are its own business. But "outbound request failed" with no discriminator at all
+    /// made a real report unattributable: twenty-four identical timeouts, and the only way to
+    /// tell a blob fetch from a PEX round was to notice which *other* log lines were missing.
+    /// One opaque number and a length turn that into a reading.
+    kind: Option<u8>,
+    bytes: usize,
 }
 
 struct Actor {
@@ -3965,6 +3975,8 @@ impl Actor {
                                 PendingRequest {
                                     reply,
                                     _keepalive: keepalive,
+                                    kind: data.first().copied(),
+                                    bytes: data.len(),
                                 },
                             );
                         }
@@ -4012,6 +4024,8 @@ impl Actor {
                             PendingRequest {
                                 reply,
                                 _keepalive: keepalive,
+                                kind: data.first().copied(),
+                                bytes: data.len(),
                             },
                         );
                     }
@@ -4901,8 +4915,19 @@ impl Actor {
                 // which reads as a local shutdown; a dial that never landed, a peer that went away
                 // mid-request and a request that simply timed out are three different problems and
                 // a log that spells them all the same way sends you looking in the wrong place.
-                tracing::warn!(peer = %peer, error = %error, "outbound request failed");
-                if let Some(pending) = self.pending_req.remove(&request_id) {
+                //
+                // The kind/size come from the pending entry, so the removal happens first: which
+                // request failed is as load-bearing as why, and a bare peer+reason line cannot
+                // separate a bulk transfer from a control round on the same connection.
+                let pending = self.pending_req.remove(&request_id);
+                tracing::warn!(
+                    peer = %peer,
+                    error = %error,
+                    kind = ?pending.as_ref().and_then(|entry| entry.kind),
+                    request_bytes = ?pending.as_ref().map(|entry| entry.bytes),
+                    "outbound request failed"
+                );
+                if let Some(pending) = pending {
                     let _ = pending.reply.send(Err(match error {
                         request_response::OutboundFailure::Timeout => {
                             TransportError::Timeout(to_peer(&peer))
