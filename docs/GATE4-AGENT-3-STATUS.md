@@ -4,6 +4,33 @@ Owner: Agent 3 ([assignment](GATE4-AGENT-HANDOFFS.md#agent-3-runtime-signed-faul
 Proposal: [GATE4-AGENT-3-DESIGN](GATE4-AGENT-3-DESIGN.md), revision 16 follow-up.
 Review preamble: 3. Current entries override older ones.
 
+## Base re-merge and the V5 tenure seam, 2026-10-01
+
+Merges: `b0b73453` (base `b15ce314`) then `d35b1836` (base `1f8a11d9`), both clean with no file
+overlap. Agent 2's rustfmt break (`d4ba216c`) and `release-identity` mutant/`RUSTFLAGS` harness fix
+are on base, so nothing of another agent's was taken locally. Local at `d35b1836`: `cargo fmt --all
+-- --check`, `bash scripts/check-no-ambient.sh` and strict workspace Clippy (`-j 1 --all-targets
+--all-features -D warnings`, zero warnings) PASS. At `b0b73453` all six store mutations failed at
+their named assertions and restored byte-exact. No test suite was run at `d35b1836`; CI is the
+evidence for that head. At `b0b73453`, Windows `repair-core` again passed its library tests and then
+hit the 30-minute job limit during mutations, so Windows mutation evidence is still missing.
+
+**V5 is implemented** (`23465a17`, `catcoms-app/src/studio/tenure.rs`):
+`Server::require_observed_owner_tenure()` returns the start for `Known` alone and refuses
+`Imported` and `Unknown` with different messages; `observed_owner_tenure()` keeps `Imported(S)`
+visible for verification. This is the T1/T2 contract of design 13.2 at the app boundary. It is
+`#[expect(dead_code)]` until issuance consumes it, so the first consumer must remove that attribute.
+The existing `with_durable_owner_snapshot` permit is already minted and rechecked through
+`authoring_owner_tenure_start()`, so it refuses both fail-closed values too, but as one
+undifferentiated `Unauthorized`. Planned issuance shape (not implemented): take V5 for the
+diagnostic, then require its start to equal the permit's tenure inside the same custody visit and
+refuse on any difference, so the two sources cannot silently disagree.
+
+**Still blocked:** N17, the gating case, needs CORE-005's archived Observed witness, which V5 does not
+supply. Only current-tenure (origin 0) issuance is now constructible. M-1 (Agent 2, `22758646`) is
+relied on only indirectly: repair compares derived `tenure_id`, never `DeviceId`, and M-1's
+pre-merge refusal keeps members agreeing on the start that feeds it. Its missing test is Agent 2's.
+
 ## Empty fault-section correction, 2026-09-28
 
 Code: `ddedbba31709ea43607bfb3f7af25320b3fd8526`. AG3-IMP-002 rejects an entirely empty tag 3;
@@ -900,7 +927,8 @@ design section 10.1 are **unverified**.
 |---|---|---|---|
 | Design verdict on revision 2 | user / independent reviewer | requested | no implementation starts |
 | Core handoff signing split `e65bfd8` | Agent 1 / core | unreviewed | unaffected: no repair path uses it |
-| Live tenure contract T1 to T5 (design 13.2) | Agent 2 | design **PASSED** adversarial review; no implementation. Its accepted shape **removes** `observed_owner_tenure_start` for `verification_owner_tenure_start` / `authoring_owner_tenure_start` over `Observed \| Imported(u64) \| Unknown` | accepted on paper but not available; only the single accessor exists in the tree today. Repair issuance, application and drain bind to the **authoring** accessor, where `Imported` and `Unknown` are holds |
+| Live tenure contract T1 to T5 (design 13.2) | Agent 2 | **implemented on base**: sync split (`verification_`/`authoring_owner_tenure_start`) and the app seam `require_observed_owner_tenure()` / `observed_owner_tenure()` (`23465a17`, V5) | available; no Agent 3 consumer yet. Repair issuance, application and drain bind to the **authoring** side, where `Imported` and `Unknown` are holds |
+| CORE-005 archived Observed-tenure witness | Agent 2 | not implemented | historical report admission and N17 stay blocked; only current-tenure issuance is constructible |
 | Prepared overlay fence and source custody (design 13.1) | Agent 1 | design revision 3, unreviewed | repair relies only on the existing `resolve_studio_handoff` and `save_studio_source_checked`; if `inventory_generation` lands, rotating it becomes mandatory over the full list in design 10.3 |
 | Native registration, UI hooks, INTERFACES rows | Agent 4 | not started | commands stay unregistered and nothing is callable from the renderer |
 
