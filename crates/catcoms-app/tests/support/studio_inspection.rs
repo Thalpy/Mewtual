@@ -1,4 +1,9 @@
 //! Genuine accepted Closing draft; no ready result, stamp or delivery guard is injected.
+//!
+//! Visibility is `pub(crate)` rather than `pub(super)` because more than one test module needs
+//! this fixture and they are not in the same parent. `#[path]`-including the file a second time
+//! instead would compile two unrelated copies of `InspectionFixture`, so it is declared once and
+//! reached by path.
 use super::app;
 use app::{store::ServerStore, studio::*, Server, ServerActor};
 use catcoms_mls::MlsDevice;
@@ -10,28 +15,28 @@ use rand_core::SeedableRng;
 use std::{sync::Arc, time::Duration};
 use tokio::{sync::Mutex, task::JoinHandle};
 
-pub(super) const SERVER: u64 = 7;
-pub(super) const ELEMENT: [u8; 16] = [4; 16];
-pub(super) const TITLE: &str = "retained local draft";
+pub(crate) const SERVER: u64 = 7;
+pub(crate) const ELEMENT: [u8; 16] = [4; 16];
+pub(crate) const TITLE: &str = "retained local draft";
 fn rng() -> ChaCha20Rng {
     ChaCha20Rng::seed_from_u64(913)
 }
 
-pub(super) struct InspectionFixture {
-    pub(super) store: Arc<Mutex<Option<ServerStore>>>,
-    pub(super) actor: ServerActor,
-    pub(super) clock: ManualClock,
-    pub(super) target: StudioTarget,
-    pub(super) expected: StudioProjection,
-    pub(super) basis: [u8; 32],
-    pub(super) group: Vec<u8>,
-    pub(super) device: app::DeviceId,
+pub(crate) struct InspectionFixture {
+    pub(crate) store: Arc<Mutex<Option<ServerStore>>>,
+    pub(crate) actor: ServerActor,
+    pub(crate) clock: ManualClock,
+    pub(crate) target: StudioTarget,
+    pub(crate) expected: StudioProjection,
+    pub(crate) basis: [u8; 32],
+    pub(crate) group: Vec<u8>,
+    pub(crate) device: app::DeviceId,
     root: tempfile::TempDir,
     task: JoinHandle<()>,
     drain: JoinHandle<()>,
 }
 impl InspectionFixture {
-    pub(super) async fn new(art: bool) -> Self {
+    pub(crate) async fn new(art: bool) -> Self {
         // Setup uses real large signed operations to reach the production rotation threshold.
         let hub = Hub::new();
         let clock = ManualClock::new(1000);
@@ -214,7 +219,7 @@ impl InspectionFixture {
             drain,
         }
     }
-    pub(super) async fn capture(&self) -> StudioInspectionPreparation {
+    pub(crate) async fn capture(&self) -> StudioInspectionPreparation {
         let StudioControlResponse::OverlayPreparation(job) = self
             .control(StudioControlAction::InspectOverlay)
             .await
@@ -224,7 +229,7 @@ impl InspectionFixture {
         };
         job
     }
-    pub(super) async fn control(
+    pub(crate) async fn control(
         &self,
         action: StudioControlAction,
     ) -> Result<StudioControlResponse, String> {
@@ -245,7 +250,7 @@ impl InspectionFixture {
         .await
         .expect("inspection custody stalled")
     }
-    pub(super) fn records(&self) -> std::collections::BTreeMap<String, Vec<u8>> {
+    pub(crate) fn records(&self) -> std::collections::BTreeMap<String, Vec<u8>> {
         std::fs::read_dir(self.root.path().join("servers"))
             .unwrap()
             .map(|e| {
@@ -257,7 +262,7 @@ impl InspectionFixture {
             })
             .collect()
     }
-    pub(super) async fn shutdown(self) {
+    pub(crate) async fn shutdown(self) {
         self.actor.shutdown().await;
         self.task.await.unwrap();
         self.drain.await.unwrap();

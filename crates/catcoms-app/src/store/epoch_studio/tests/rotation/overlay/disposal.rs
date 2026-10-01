@@ -83,6 +83,219 @@ fn preserve_archive(f: &Fixture, store: &mut ServerStore) -> StudioDraftArchive 
     archive
 }
 
+/// The loop the two halves of this scope were missing: the archive the **production rebuild**
+/// produces is the one D4 accepts.
+///
+/// Every other test here builds its archive by calling `from_branch` directly, which proves D4 and
+/// proves nothing about the path a user actually takes. Until `StudioInspectionPurpose::Archive`
+/// landed there was no such path at all, so a preserving disposal could only ever refuse outside
+/// `cfg(test)`. This asserts the two agree, and it is the only test that would fail if
+/// `rebuild_for` built a correct-looking archive of the wrong branch, the wrong generation or the
+/// wrong content.
+#[test]
+fn the_rebuilt_archive_is_the_one_a_preserving_disposal_accepts() {
+    let root = tempfile::tempdir().unwrap();
+    let f = Fixture::new(true);
+    let mut store = open(root.path());
+    let (close, basis) = closing(&f, &mut store);
+    frame_branch(&f, &mut store, &close, &basis);
+
+    let (_stamp, built) = store
+        .capture_studio_inspection(SERVER, &f.group.group_id(), f.target, f.device.device_id())
+        .unwrap()
+        .rebuild_for(crate::store::StudioInspectionPurpose::Archive)
+        .expect("the archive rebuild must succeed for a real branch");
+    let archive = built
+        .archive
+        .expect("a live branch must produce an archive");
+    assert_eq!(
+        built.replayable,
+        Ok(()),
+        "this branch is replayable, so the label must say so"
+    );
+    assert!(
+        archive.replayable(),
+        "the label must be carried into the archive, not just reported beside it"
+    );
+
+    // The same rebuild under Draft yields no archive at all. That is what makes finishing an
+    // archive against a Draft rebuild a distinguishable mistake rather than a silent one.
+    let (_stamp, draft_only) = store
+        .capture_studio_inspection(SERVER, &f.group.group_id(), f.target, f.device.device_id())
+        .unwrap()
+        .rebuild_for(crate::store::StudioInspectionPurpose::Draft)
+        .unwrap();
+    assert!(draft_only.archive.is_none());
+
+    let mut b = budget(&mut store, &f);
+    store
+        .write_studio_draft_archive_with_io(
+            SERVER,
+            &f.logical,
+            &archive,
+            &mut rng(),
+            &mut b.storage,
+            &mut b.intents,
+            &mut WriteHooks::None,
+        )
+        .expect("the rebuilt archive must persist");
+    drop(b);
+
+    let request = honest_request(&f, &mut store, StudioDisposalRequestMode::Preserve);
+    let manifest = dispose(&f, &mut store, request)
+        .expect("D4 must accept the archive the production rebuild produced");
+    assert_eq!(
+        manifest.mode,
+        StudioDisposalMode::Preserved {
+            archive: archive.archive_id().unwrap()
+        },
+        "the manifest must name the rebuilt archive"
+    );
+}
+
+/// Every persisted record, by filename, so "nothing changed" is a comparison rather than a belief.
+fn on_disk(root: &std::path::Path) -> std::collections::BTreeMap<String, Vec<u8>> {
+    std::fs::read_dir(root.join("servers"))
+        .unwrap()
+        .map(|entry| {
+            let path = entry.unwrap().path();
+            (
+                path.file_name().unwrap().to_string_lossy().into_owned(),
+                std::fs::read(&path).unwrap(),
+            )
+        })
+        .collect()
+}
+
+/// A preserving disposal syncs the matching archive BEFORE it replaces the intent record.
+///
+/// This is the ordering half of the preservation guarantee. Matching proves the archive is this
+/// branch's; it does not prove it is durable. Without an explicit barrier, the first flush to cover
+/// an archive whose own parent sync failed would be the replacement's - which runs after the
+/// branch-removing rename, so the evidence would become durable no earlier than the removal.
+///
+/// Observed through the transaction's own hooks rather than inferred from the result, because the
+/// result is identical whether or not the archive was synced first. That is exactly why a
+/// result-only test of this could never have caught the gap.
+#[test]
+fn a_preserving_disposal_syncs_its_archive_before_it_removes_the_branch() {
+    let root = tempfile::tempdir().unwrap();
+    let f = Fixture::new(true);
+    let mut store = open(root.path());
+    let (close, basis) = closing(&f, &mut store);
+    frame_branch(&f, &mut store, &close, &basis);
+    preserve_archive(&f, &mut store);
+    let request = honest_request(&f, &mut store, StudioDisposalRequestMode::Preserve);
+
+    let events = std::cell::RefCell::new(Vec::new());
+    // An inner scope rather than `drop(hooks)`: `WriteHooks` has no `Drop`, so dropping it only to
+    // end the closures' borrow of `events` is `clippy::drop_non_drop`, which failed the workspace
+    // gate. Ending the scope ends the borrow without pretending a destructor runs.
+    {
+        let mut on_write = |tag: WriteTag, _p: &std::path::Path, _b: &[u8]| {
+            events.borrow_mut().push(("write", tag));
+            Intercept::Continue
+        };
+        let mut on_sync = |tag: WriteTag, _p: &std::path::Path, _n: u64| {
+            events.borrow_mut().push(("sync", tag));
+            AfterIntercept::Continue
+        };
+        let mut hooks = WriteHooks::Hooked {
+            before: Some(&mut on_write),
+            before_sync: Some(&mut on_sync),
+            before_unlink: None,
+            after: None,
+        };
+        let mut b = budget(&mut store, &f);
+        store
+            .dispose_studio_overlay_with_io(
+                SERVER,
+                &f.logical,
+                f.target,
+                &f.group,
+                &f.device,
+                request,
+                4242,
+                &mut rng(),
+                &mut b.storage,
+                &mut b.intents,
+                &mut hooks,
+            )
+            .expect("a preserving disposal with a durable archive must succeed");
+    }
+
+    let events = events.into_inner();
+    let archive_sync = events
+        .iter()
+        .position(|e| *e == ("sync", WriteTag::Archive))
+        .expect("the matching archive must be explicitly synced");
+    let removal = events
+        .iter()
+        .position(|e| *e == ("write", WriteTag::Intents))
+        .expect("the disposal must replace the intent record");
+    assert!(
+        archive_sync < removal,
+        "the archive must be durably established BEFORE the branch is removed, saw {events:?}"
+    );
+}
+
+/// And if establishing the archive's durability fails, the branch is NOT removed.
+///
+/// Injected at the sync boundary itself, between "the archive is in place" and "the archive is
+/// durable". An outer after-write failure would not reach this case: it fires once the physical
+/// write has completed, so it describes a durable-but-unaccounted record rather than an
+/// unconfirmed one.
+#[test]
+fn a_preserving_disposal_whose_archive_cannot_be_made_durable_removes_nothing() {
+    let root = tempfile::tempdir().unwrap();
+    let f = Fixture::new(true);
+    let mut store = open(root.path());
+    let (close, basis) = closing(&f, &mut store);
+    frame_branch(&f, &mut store, &close, &basis);
+    preserve_archive(&f, &mut store);
+    let request = honest_request(&f, &mut store, StudioDisposalRequestMode::Preserve);
+    let before = on_disk(root.path());
+
+    let mut b = budget(&mut store, &f);
+    let error = store
+        .dispose_studio_overlay_with_io(
+            SERVER,
+            &f.logical,
+            f.target,
+            &f.group,
+            &f.device,
+            request,
+            4242,
+            &mut rng(),
+            &mut b.storage,
+            &mut b.intents,
+            &mut WriteHooks::fail_before_sync(FailError::Io("archive flush did not complete")),
+        )
+        .expect_err("an archive that cannot be made durable must not authorise a removal");
+    drop(b);
+    assert!(
+        error
+            .to_string()
+            .contains("could not establish its archive durably"),
+        "the refusal must be the durability barrier's, said: {error}"
+    );
+
+    // Nothing was removed, and nothing was rewritten.
+    assert!(
+        store
+            .load_epoch_intents(SERVER, &f.logical)
+            .unwrap()
+            .overlay()
+            .is_some(),
+        "the branch must survive a disposal that could not secure its evidence"
+    );
+    assert_eq!(
+        on_disk(root.path()),
+        before,
+        "no record may change when the durability barrier fails"
+    );
+}
+
 /// The whole transaction, discarding: the branch goes, its entries go, the manifest stays, and all
 /// three land in one replacement.
 #[test]

@@ -484,6 +484,21 @@ impl ServerGroup {
             .group
             .process_message(device.provider(), protocol)
             .map_err(proto)?;
+        // M-1's other half: refuse an EXTERNAL commit outright.
+        //
+        // An external (resync) commit can remove a member and seat its sender at the vacated leaf
+        // through the commit's own path leaf, with **no Add proposal at all**. Both the
+        // credential-binding loop and M-1 below walk `add_proposals()`, so neither would see it: an
+        // external commit is a way to produce exactly the remove-and-re-add shape M-1 exists to
+        // forbid, while stepping around the check. MLS also exempts external senders from the
+        // wire-format rule, so the ciphertext-only policy does not block it either.
+        //
+        // Refusing is safe because this product has no external-join flow: every member arrives by
+        // Welcome after an Add. If one is ever introduced, the joiner's path leaf has to be bound and
+        // checked the way an Add's credential already is, and M-1 restated over it.
+        if matches!(processed.sender(), Sender::NewMemberCommit) {
+            return Err(InviteError::CredentialMismatch.into());
+        }
         match processed.into_content() {
             ProcessedMessageContent::ApplicationMessage(app) => {
                 Ok(Incoming::Application(app.into_bytes()))
@@ -526,6 +541,45 @@ impl ServerGroup {
                 // OpenMLS happens to recycle the same leaf. What it does NOT forbid: a device
                 // rotating to a new identity (remove A, add A' with a different `DeviceId`), or a
                 // genuine rejoin in a LATER commit. Only the ambiguous shape is excluded.
+                //
+                // **UNTESTED, and the reason is worth recording rather than leaving to be
+                // rediscovered.** An adversarial review found this rule unanchored, and an attempt to
+                // anchor it established that the shape cannot be delivered to a witness by any path
+                // this crate supports. Three layers each block it independently:
+                //
+                //  - every production builder here commits a single INLINE proposal (`add_member`,
+                //    `stage_add`, `remove_member`, `stage_remove`), so none can express remove+add;
+                //  - a by-reference commit, which is the only way to combine two proposals, cannot be
+                //    processed by a witness at all, because `process_incoming` drops proposal messages
+                //    into the `Other` arm without calling `store_pending_proposal`, so the queue is
+                //    always empty and MLS refuses the commit before reaching here;
+                //  - an external commit, which could seat a rejoining sender at the vacated leaf with
+                //    no Add proposal, is refused above.
+                //
+                // A test written against the by-reference path therefore PASSES with this rule
+                // deleted, for the second reason rather than this one - which is exactly the kind of
+                // test that is worse than none, so the attempt was removed rather than kept.
+                //
+                // **WITHDRAWN: the reasoning above does not establish that this rule is unreachable,
+                // and an adversarial review was right to reject it.**
+                //
+                // Every clause above is a statement about what *our* builder emits. An MLS commit
+                // carries a list of `ProposalOrRef`, and a proposal included **by value** needs no
+                // entry in anyone's proposal store - so a hostile or merely modified existing member
+                // can send a single commit carrying an inline Remove of the designated committer and
+                // an inline Add of the same `DeviceId`. That sender is not the removed member, so it
+                // is not the self-removal case, and it is not an external commit either, so the
+                // refusal above does not cover it. "Our builder cannot produce this shape" was never
+                // evidence that a peer cannot submit it, and treating the two as the same thing is
+                // the error this comment used to make.
+                //
+                // The rule is present and correctly placed - before the merge - so there is no known
+                // bypass. What is missing is the test. It is constructible: build the two proposals
+                // inline against OpenMLS directly rather than through this wrapper's single-proposal
+                // helpers, and feed the resulting bytes to this function. It must refuse with the
+                // receiver's epoch and state unchanged, and deleting this rule must then either allow
+                // the forbidden transition or reveal the specific earlier validation that genuinely
+                // makes it redundant.
                 if let Some(committer) = self.designated_committer() {
                     let removes_committer = staged.remove_proposals().any(|remove| {
                         self.group
@@ -615,5 +669,36 @@ impl fmt::Debug for ServerGroup {
             .field("epoch", &self.epoch())
             .field("members", &self.member_count())
             .finish()
+    }
+}
+
+#[cfg(test)]
+mod m1_tests {
+    use super::*;
+
+    /// The leaf identity excludes the HPKE encryption key, so a key rotation is not a discontinuity.
+    ///
+    /// Without that exclusion every self-update would look like a new tenure and destroy the very
+    /// knowledge the value exists to preserve. Asserted on the digest's inputs rather than by
+    /// performing an update, because no self-update path is exposed here: the digest must be stable
+    /// across two groups whose committer has the same index, signature key and credential.
+    #[test]
+    fn the_committer_leaf_digest_is_stable_for_one_identity() {
+        let alice = MlsDevice::generate().unwrap();
+        let one = ServerGroup::create(&alice).unwrap();
+        let two = ServerGroup::create(&alice).unwrap();
+        assert_eq!(
+            one.designated_committer_leaf(),
+            two.designated_committer_leaf(),
+            "the same identity at the same index must hash the same, whatever else differs"
+        );
+
+        let bob = MlsDevice::generate().unwrap();
+        let other = ServerGroup::create(&bob).unwrap();
+        assert_ne!(
+            one.designated_committer_leaf(),
+            other.designated_committer_leaf(),
+            "a different identity must not"
+        );
     }
 }

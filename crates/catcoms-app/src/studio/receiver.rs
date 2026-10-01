@@ -152,6 +152,9 @@ impl StudioReceiver {
         ),
         AppError,
     > {
+        // Both applies publish through the ordinary Save path rather than writing in the control
+        // transaction, so both are intercepted here. Copy's `target` is the SOURCE it copied from;
+        // the request it produces publishes to the destination.
         if let StudioControlAction::Apply(apply) = request.action {
             let (edit, already_saved) =
                 server.prepare_studio_recovery_apply(store, id, request.target, *apply)?;
@@ -164,11 +167,35 @@ impl StudioReceiver {
                     already_saved,
                 }),
             ))
+        } else if let StudioControlAction::ApplyOverlayCopy(apply) = request.action {
+            let destination = apply.destination;
+            let (edit, already_saved) =
+                server.prepare_studio_copy_apply(store, id, request.target, *apply)?;
+            let (saved, updated) = self.run(server, store, id, Some(edit))?;
+            Ok((
+                saved,
+                updated,
+                Some(StudioControlResponse::Applied {
+                    // The destination is what changed, so it is what the caller is told about.
+                    target: destination,
+                    already_saved,
+                }),
+            ))
         } else {
             let target = request.target;
+            // Every action that can leave the vault different from what the renderer last read.
+            // Release and dispose are here for the reason the comment below gives and more
+            // sharply: release closes both budgets and unlinks a record, and a failure *after*
+            // the unlink is precisely the case where the caller must reconcile rather than
+            // resend. A destructive action that emitted no refresh would leave the renderer
+            // showing an archive that is gone.
             let changing = matches!(
                 request.action,
-                StudioControlAction::Acknowledge { .. } | StudioControlAction::RestorePointer
+                StudioControlAction::Acknowledge { .. }
+                    | StudioControlAction::RestorePointer
+                    | StudioControlAction::FinishOverlayArchive(_)
+                    | StudioControlAction::ReleaseOverlayArchive(_)
+                    | StudioControlAction::DisposeOverlay(_)
             );
             let result = server.studio_control_transaction(store, id, request);
             if changing {

@@ -105,10 +105,18 @@ impl OwnerTenure {
         if after == before {
             return;
         }
-        let start = if after.owner.is_none() || before.epoch.checked_add(1) != Some(after.epoch) {
-            None // an unobserved gap might include A -> B -> A
+        // `computed` distinguishes a start this call DERIVED from one it merely carried forward.
+        // Only a derived start may clear the import flag, and getting that wrong is how an
+        // unverifiable v1 tenure would launder itself into a fully observed one: the preserve arm
+        // returns `self.start`, which is `Some`, so treating "start is present" as "start is fresh"
+        // promoted every `Imported` server on its next same-owner commit. An adversarial review
+        // demonstrated exactly that, one member-add after the upgrade.
+        let (start, computed) = if after.owner.is_none()
+            || before.epoch.checked_add(1) != Some(after.epoch)
+        {
+            (None, false) // an unobserved gap might include A -> B -> A
         } else if before.owner.is_some() && after.owner.is_some() && before.owner != after.owner {
-            Some(after.epoch)
+            (Some(after.epoch), true)
         } else if before.owner.is_some() && before.owner == after.owner && before.leaf != after.leaf
         {
             // The same `DeviceId` on a DIFFERENT leaf identity across one contiguous step: the
@@ -124,19 +132,22 @@ impl OwnerTenure {
             //
             // A self-update does NOT reach here: `designated_committer_leaf` excludes the HPKE
             // encryption key, so rotating keys while keeping the credential leaves the digest equal.
-            Some(after.epoch)
+            (Some(after.epoch), true)
         } else if self.position == before {
-            self.start // same owner preserves knowledge OR the lack of it
+            (self.start, false) // same owner preserves knowledge OR the lack of it
         } else {
-            None
+            (None, false)
         };
         self.position = after;
         self.start = start;
-        // An observed transition supersedes an import: the value is now this build's own, computed
-        // under the leaf-aware rule, whatever it was migrated from.
-        if start.is_some() {
-            self.imported = false;
-        }
+        // The flag survives everything except a start this call derived itself, and cannot survive
+        // the start disappearing.
+        //
+        // The second half is not cosmetic: `encode` writes the flag beside an empty start, and
+        // `decode` refuses that combination, so an `Imported` state that lost its start through a
+        // gap would serialise into a snapshot this build cannot reopen - the whole server, not just
+        // the tenure. Clearing it here keeps the two consistent by construction.
+        self.imported = self.imported && !computed && start.is_some();
     }
 
     pub(super) fn observed(&self, group: &ServerGroup) -> ObservedOwnerTenure {
@@ -216,7 +227,11 @@ impl OwnerTenure {
     /// a genuine owner change re-establishes a start. `Imported` keeps such a server verifying while
     /// refusing to let it author on evidence this build cannot check.
     pub(super) fn decode(bytes: &[u8], group: &ServerGroup) -> Result<Self, SyncError> {
-        if bytes.len() > 128 {
+        // 98 is the exact maximum valid v2 tail: version, epoch, a 32-byte owner, an 8-byte start, a
+        // 36-byte leaf and the flag, with this encoder's framing. A loose cap was a silent deviation
+        // from the design's number and bought nothing - `finish()` already refuses trailing bytes -
+        // so the tight one is both correct and self-documenting.
+        if bytes.len() > 98 {
             return Err(SyncError::Malformed);
         }
         let mut d = Decoder::new(bytes);

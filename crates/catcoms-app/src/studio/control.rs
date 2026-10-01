@@ -2,7 +2,10 @@
 //! a recovery record is historical content, never permission to install a checkpoint.
 
 use super::*;
-use catcoms_replication::studio::StudioRecovery;
+use crate::store::{StudioOverlayCopyChoice, StudioOverlayDisposalRequest};
+use catcoms_replication::studio::{
+    StudioDisposalMode, StudioDraftArchive, StudioOverlayDisposal, StudioRecovery,
+};
 use catcoms_replication::{RecoveryReason, RecoveryTransition};
 
 /// The renderer names a saved version, never supplies a recovery payload. Apply echoes one
@@ -58,6 +61,43 @@ pub enum StudioControlAction {
     /// Trusted-local two-visit inspection. Renderer input never contains a prepared result.
     InspectOverlay,
     FinishOverlayInspection(Box<StudioPreparedInspection>),
+    /// Classify the retained draft without rebuilding it: which generation is live, whether a
+    /// terminal manifest is retained, and whether an archive exists. Reads only.
+    OverlayLifecycle,
+    /// Build the archive payload and write the durable archive record. Two visits, like inspection,
+    /// because the rebuild is detached work and the write is not.
+    ///
+    /// This is the only path that creates an archive, and therefore the only way a preserving
+    /// disposal can ever have something to point at.
+    ArchiveOverlay,
+    FinishOverlayArchive(Box<StudioPreparedInspection>),
+    /// Hand the caller the canonical payload of the **live** draft without writing anything.
+    ///
+    /// The same rebuild as archiving, deliberately: design 5.3 requires export and the archive to
+    /// share one serializer, and the reason is that a draft which cannot be replayed must still be
+    /// exportable. Two serializers would drift, and the one that drifted would be the one a user
+    /// reaches for when their work will not open.
+    ExportOverlay,
+    FinishOverlayExport(Box<StudioPreparedInspection>),
+    /// Read the preserved archive back. Never a basis, a source or an owner claim: reading evidence
+    /// cannot turn it into authority.
+    ReadOverlayArchive,
+    /// Destroy the preserved archive. Separately confirmed, and the only thing in the system that
+    /// removes one.
+    ReleaseOverlayArchive(Box<StudioArchiveReleaseRequest>),
+    /// Copy one element of the retained draft into a live document. Two visits, then a separate
+    /// apply, mirroring recovery's accepted Preview/Apply shape.
+    ///
+    /// Copy is **never** a precondition for destroying anything and no count of copied items
+    /// establishes that a branch was preserved; only an archive does that.
+    PrepareOverlayCopy(Box<StudioOverlayCopyChoice>),
+    FinishOverlayCopyPreview(Box<StudioPreparedCopy>),
+    /// Intercepted by the receiver before this transaction, exactly as recovery's `Apply` is,
+    /// because it publishes through the ordinary Save path rather than writing here.
+    ApplyOverlayCopy(Box<StudioOverlayCopyApply>),
+    /// Drop the live branch, preserving or discarding its bodies. The archive for a preserving
+    /// disposal must already be durable: evidence first, removal second.
+    DisposeOverlay(Box<StudioOverlayDisposalRequest>),
     /// Separately retryable discoverability step after restoring content; never guesses an
     /// epoch from the UI or rewinds a pointer to a newer checkpoint.
     RestorePointer,
@@ -118,9 +158,122 @@ pub struct StudioRecoveryVersion {
     pub projection: StudioProjection,
 }
 
+/// What a release must name, so a confirmation cannot be spent on an archive the user never saw.
+#[derive(Debug)]
+pub struct StudioArchiveReleaseRequest {
+    /// `StudioDraftArchive::archive_id`, from the read that populated the dialog.
+    pub archive: [u8; 32],
+    /// The typed confirmation. Its presence is the proof; the literal cannot be defaulted.
+    pub confirmation: StudioReleaseConfirmation,
+}
+
+/// Proof that a human was shown a destructive choice and took it, for the release path.
+///
+/// Mirrors `StudioDiscardConfirmation`'s shape and for the same reason: a `bool` that happens to be
+/// true, or a field a caller forgot to set, must not be able to destroy preserved evidence.
+#[derive(Debug)]
+pub struct StudioReleaseConfirmation(());
+
+impl StudioReleaseConfirmation {
+    pub const TOKEN: &'static str = "release-local-archive";
+
+    /// Exact match only. A near miss is a caller that built the string rather than echoing the user.
+    pub fn parse(value: &str) -> Option<Self> {
+        (value == Self::TOKEN).then_some(Self(()))
+    }
+}
+
+/// How a retained draft stands right now, without rebuilding it.
+///
+/// **Every branch-scoped fact here carries the branch it is about.** The three facts are about
+/// different generations more often than not: a retained disposal of generation N sits happily
+/// beside a live generation N+1, and an archive outlives the branch it preserved until someone
+/// releases it. A view that reported "archived" and "live branch" as two bare booleans would let a
+/// renderer tell the user their current work is preserved when the archive is evidence for work
+/// they already disposed of, and the preserving disposal they then ask for is refused at D4. The
+/// generations are the only thing that distinguishes those states, so they are not optional.
+#[derive(Debug)]
+pub struct StudioOverlayLifecycle {
+    pub target: StudioTarget,
+    /// The live branch, `None` when none is live. The vault may still hold terminal records.
+    pub branch: Option<StudioLifecycleBranch>,
+    /// A transfer is staged on the live branch. D2 refuses a disposal while this holds, and it is
+    /// here because deciding that without paying for an inspection is what this action is for.
+    pub prepared: bool,
+    /// The preserved archive, if this document has one. It is evidence for the branch it names,
+    /// which need not be the live one.
+    pub archive: Option<StudioLifecycleArchive>,
+    /// The retained terminal disposal, if one was recorded. Retained alongside a `Completed`
+    /// transfer rather than replacing it: both are terminal records and both are surfaced.
+    pub disposed: Option<StudioLifecycleDisposal>,
+    /// A branch was transferred away. Independent of `disposed`; both can be set.
+    pub transferred: bool,
+}
+
+/// The live branch, and the two values a disposal has to echo back.
+#[derive(Debug)]
+pub struct StudioLifecycleBranch {
+    pub id: [u8; 32],
+    /// Read from the same `active` branch as `id`, never derived separately.
+    pub content: [u8; 32],
+    pub generation: u64,
+    pub accepted: usize,
+}
+
+/// The preserved archive and the branch it is evidence for.
+#[derive(Debug)]
+pub struct StudioLifecycleArchive {
+    /// `StudioDraftArchive::archive_id`, the value a release must name.
+    pub id: [u8; 32],
+    pub branch: [u8; 32],
+    pub generation: u64,
+    /// Whether typed reconstruction succeeded when this was written. `false` does not mean the
+    /// archive is damaged; it means the branch was already unreplayable when it was preserved.
+    pub replayable: bool,
+}
+
+/// A terminal disposal and the branch it ended.
+#[derive(Debug)]
+pub struct StudioLifecycleDisposal {
+    pub mode: StudioDisposalMode,
+    pub branch: [u8; 32],
+    pub generation: u64,
+}
+
 pub enum StudioControlResponse {
     OverlayPreparation(StudioInspectionPreparation),
     OverlayInspection(StudioOverlayInspection),
+    OverlayLifecycle(Box<StudioOverlayLifecycle>),
+    OverlayCopyPreparation(Box<StudioCopyPreparation>),
+    OverlayCopyPreview(Box<StudioOverlayCopyPreview>),
+    /// An archive was just written. A distinct variant from `OverlayArchive` because one of these
+    /// changed the vault and the other did not, and a caller that cannot tell them apart cannot
+    /// tell a user whether anything happened.
+    OverlayArchived {
+        archive: Box<StudioDraftArchive>,
+        id: [u8; 32],
+        physical_bytes: u64,
+        /// What typed reconstruction found at archive time. `Err` is not a failure of the archive:
+        /// the branch was already unreplayable and the archive records that it was.
+        replayable: Result<(), String>,
+    },
+    /// The live draft's canonical payload. **Nothing was written**, which is why this carries no
+    /// physical size: there is no record to have one.
+    OverlayExport {
+        archive: Box<StudioDraftArchive>,
+        id: [u8; 32],
+        replayable: Result<(), String>,
+    },
+    /// The decoded archive and its identity. Reading is not authority.
+    OverlayArchive {
+        archive: Box<StudioDraftArchive>,
+        id: [u8; 32],
+        physical_bytes: u64,
+    },
+    /// The archive is gone. Both budgets are closed; the caller reconciles before its next write.
+    OverlayArchiveReleased,
+    /// The branch is gone and this is the terminal record of it.
+    OverlayDisposed(Box<StudioOverlayDisposal>),
     PointerRestored {
         target: StudioTarget,
         epoch: u64,
@@ -147,6 +300,14 @@ impl std::fmt::Debug for StudioControlResponse {
         f.write_str(match self {
             Self::OverlayPreparation(_) => "OverlayPreparation { .. }",
             Self::OverlayInspection(_) => "OverlayInspection { .. }",
+            Self::OverlayLifecycle(_) => "OverlayLifecycle { .. }",
+            Self::OverlayCopyPreparation(_) => "OverlayCopyPreparation { .. }",
+            Self::OverlayCopyPreview(_) => "OverlayCopyPreview { .. }",
+            Self::OverlayArchived { .. } => "OverlayArchived { .. }",
+            Self::OverlayExport { .. } => "OverlayExport { .. }",
+            Self::OverlayArchive { .. } => "OverlayArchive { .. }",
+            Self::OverlayArchiveReleased => "OverlayArchiveReleased",
+            Self::OverlayDisposed(_) => "OverlayDisposed { .. }",
             Self::PointerRestored { .. } => "PointerRestored { .. }",
             Self::Preview(_) => "Preview { .. }",
             Self::Applied { .. } => "Applied { .. }",
@@ -175,6 +336,50 @@ impl StudioControlReady {
 }
 
 impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
+    /// Second visit of an archive: revalidate the capture, then write the record.
+    ///
+    /// The currency check is `finish_studio_inspection`'s, unchanged. What it buys here is the same
+    /// thing it buys a read - that the branch did not change under the detached rebuild - but the
+    /// consequence is larger, because this visit writes. An archive of a branch that has moved on
+    /// would be evidence for work nobody did.
+    ///
+    /// The durable read at the end is not decoration: it is how the caller learns the physical size
+    /// that its storage budget was just charged, and it proves the record is actually there rather
+    /// than reporting success from the value that was written.
+    fn finish_studio_archive(
+        &mut self,
+        store: &mut ServerStore,
+        server: u64,
+        target: StudioTarget,
+        prepared: StudioPreparedInspection,
+    ) -> Result<StudioControlResponse, AppError> {
+        let inspection = self.finish_studio_inspection(store, server, target, prepared)?;
+        let replayable = inspection.replayable();
+        self.sync.with_registry_context(|group, device, _, rng| {
+            if group.member_signature_key(&device.device_id()).as_deref()
+                != Some(device.public_key_bytes().as_slice())
+            {
+                return Err(invalid("Studio requires current membership"));
+            }
+            let logical = target.document(&group.group_id()).map_err(invalid)?;
+            let archive = inspection.archive()?;
+            let mut scan = store.scan_epoch_storage_with_studio()?;
+            while !scan.step()?.complete {}
+            let inventory = scan.finish()?;
+            let mut budget = store.studio_storage_budget(server, group, &inventory)?;
+            store.write_studio_draft_archive(server, &logical, archive, rng, &mut budget)?;
+            let (archive, id, physical_bytes) = store
+                .read_studio_draft_archive_for_app(server, &logical)?
+                .ok_or_else(|| invalid("the draft archive did not survive its own write"))?;
+            Ok(StudioControlResponse::OverlayArchived {
+                archive: Box::new(archive),
+                id,
+                physical_bytes,
+                replayable,
+            })
+        })
+    }
+
     /// Exclusive trusted-local custody only. All slots are authenticated and typed before any
     /// action, including ack. Corruption is never an empty recovery rail or an eviction permit.
     pub(crate) fn studio_control_transaction(
@@ -203,6 +408,56 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
                     .finish_studio_inspection(store, server, target, *prepared)
                     .map(StudioControlResponse::OverlayInspection)
             }
+            // Archiving takes the same two visits as inspection and the same capture; only the
+            // rebuild differs, which is why the first visit is literally the inspection's.
+            StudioControlAction::ArchiveOverlay => {
+                return self
+                    .begin_studio_inspection(store, server, target)
+                    .map(StudioControlResponse::OverlayPreparation)
+            }
+            StudioControlAction::FinishOverlayArchive(prepared) => {
+                return self.finish_studio_archive(store, server, target, *prepared);
+            }
+            StudioControlAction::PrepareOverlayCopy(choice) => {
+                return self
+                    .begin_studio_copy(store, server, target, *choice)
+                    .map(|job| StudioControlResponse::OverlayCopyPreparation(Box::new(job)))
+            }
+            StudioControlAction::FinishOverlayCopyPreview(prepared) => {
+                return self
+                    .finish_studio_copy_preview(store, server, target, *prepared)
+                    .map(|preview| StudioControlResponse::OverlayCopyPreview(Box::new(preview)))
+            }
+            StudioControlAction::ApplyOverlayCopy(_) => {
+                return Err(invalid("copy Apply requires the ordinary publication path"))
+            }
+            StudioControlAction::ExportOverlay => {
+                return self
+                    .begin_studio_inspection(store, server, target)
+                    .map(StudioControlResponse::OverlayPreparation)
+            }
+            // Read-only: no budget, no registry write context, no record. Export is the one member
+            // of this family that changes nothing at all.
+            StudioControlAction::FinishOverlayExport(prepared) => {
+                let inspection = self.finish_studio_inspection(store, server, target, *prepared)?;
+                let replayable = inspection.replayable();
+                let archive = inspection.archive()?;
+                let id = archive.archive_id().map_err(invalid)?;
+                // Decoded back from its own bytes rather than cloned. `StudioDraftArchive` is
+                // deliberately not `Clone` - copies of evidence invite treating it as a live
+                // object - and the round trip is the one property an export actually owes its
+                // caller: what is handed out is what can be read back.
+                let payload = archive.encode().map_err(invalid)?;
+                let archive = StudioDraftArchive::decode(&payload).map_err(invalid)?;
+                if archive.archive_id().map_err(invalid)? != id {
+                    return Err(invalid("the exported payload does not round-trip"));
+                }
+                return Ok(StudioControlResponse::OverlayExport {
+                    archive: Box::new(archive),
+                    id,
+                    replayable,
+                });
+            }
             action => StudioControlRequest { target, action },
         };
         self.sync
@@ -222,8 +477,110 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
                 }
                 match request.action {
                     StudioControlAction::InspectOverlay
-                    | StudioControlAction::FinishOverlayInspection(_) => {
-                        unreachable!("inspection routed before recovery decoding")
+                    | StudioControlAction::FinishOverlayInspection(_)
+                    | StudioControlAction::ArchiveOverlay
+                    | StudioControlAction::FinishOverlayArchive(_)
+                    | StudioControlAction::ExportOverlay
+                    | StudioControlAction::FinishOverlayExport(_)
+                    | StudioControlAction::PrepareOverlayCopy(_)
+                    | StudioControlAction::FinishOverlayCopyPreview(_)
+                    | StudioControlAction::ApplyOverlayCopy(_) => {
+                        unreachable!(
+                            "inspection, archiving, export and copy route before recovery decoding"
+                        )
+                    }
+                    // Read-only. It deliberately does NOT rebuild the branch: the whole point is to
+                    // tell a caller what it is looking at cheaply enough to do before deciding
+                    // whether to pay for an inspection.
+                    StudioControlAction::OverlayLifecycle => {
+                        let state = store.load_epoch_intents_structural(server, &logical)?;
+                        let metadata = state.handoff_metadata();
+                        // The live branch's generation comes from the branch, not from the record:
+                        // `branch_generation` is the last generation this vault used, which
+                        // survives the branch that used it. Reading it beside `branch: None` would
+                        // report a generation nothing is at.
+                        let branch = state.live_branch()?.map(|live| StudioLifecycleBranch {
+                            id: live.id,
+                            content: live.content,
+                            generation: metadata.map_or(0, |m| m.branch_generation()),
+                            accepted: state.overlay().map_or(0, |o| o.accepted()),
+                        });
+                        let archive = store
+                            .read_studio_draft_archive_for_app(server, &logical)?
+                            .map(|(archive, id, _)| StudioLifecycleArchive {
+                                id,
+                                branch: archive.branch(),
+                                generation: archive.generation(),
+                                replayable: archive.replayable(),
+                            });
+                        return Ok(StudioControlResponse::OverlayLifecycle(Box::new(
+                            StudioOverlayLifecycle {
+                                target,
+                                branch,
+                                prepared: metadata.is_some_and(|m| m.is_prepared()),
+                                archive,
+                                disposed: metadata.and_then(|m| m.disposed()).map(|d| {
+                                    StudioLifecycleDisposal {
+                                        mode: d.mode,
+                                        branch: d.branch,
+                                        generation: d.generation,
+                                    }
+                                }),
+                                transferred: metadata.is_some_and(|m| m.has_completed()),
+                            },
+                        )));
+                    }
+                    StudioControlAction::ReadOverlayArchive => {
+                        let (archive, id, physical_bytes) = store
+                            .read_studio_draft_archive_for_app(server, &logical)?
+                            .ok_or_else(|| {
+                                invalid("no preserved draft archive for this document")
+                            })?;
+                        return Ok(StudioControlResponse::OverlayArchive {
+                            id,
+                            physical_bytes,
+                            archive: Box::new(archive),
+                        });
+                    }
+                    StudioControlAction::ReleaseOverlayArchive(request) => {
+                        // Destructured rather than field-accessed so the confirmation is visibly
+                        // spent here. Release has no mode to match on, so the confirmation is
+                        // purely a construction gate: naming it is what stops a later edit from
+                        // deleting the field without a single compiler error.
+                        let StudioArchiveReleaseRequest {
+                            archive,
+                            confirmation,
+                        } = *request;
+                        let StudioReleaseConfirmation(()) = confirmation;
+                        let mut scan = store.scan_epoch_storage_with_studio()?;
+                        while !scan.step()?.complete {}
+                        let inventory = scan.finish()?;
+                        let mut budget = store.studio_storage_budget(server, group, &inventory)?;
+                        store.release_studio_draft_archive(
+                            server,
+                            &logical,
+                            archive,
+                            &mut budget,
+                        )?;
+                        return Ok(StudioControlResponse::OverlayArchiveReleased);
+                    }
+                    StudioControlAction::DisposeOverlay(request) => {
+                        let mut scan = store.scan_epoch_storage_with_studio()?;
+                        while !scan.step()?.complete {}
+                        let inventory = scan.finish()?;
+                        let mut budget = store.studio_storage_budget(server, group, &inventory)?;
+                        let manifest = store.dispose_studio_overlay(
+                            server,
+                            &logical,
+                            target,
+                            group,
+                            device,
+                            *request,
+                            clock.now_ms(),
+                            rng,
+                            &mut budget,
+                        )?;
+                        return Ok(StudioControlResponse::OverlayDisposed(Box::new(manifest)));
                     }
                     StudioControlAction::RestorePointer => {
                         let mut scan = store.scan_epoch_storage_with_studio()?;
@@ -407,6 +764,9 @@ fn preview(
         item,
         mode,
         device.device_id(),
+        // Recovery is always same-document: a historical version of a document can only be
+        // restored into that document. Copy is the only caller that passes CrossDocument.
+        super::restore::PlanScope::SameDocument,
     )?;
     if plan.disposition == StudioRecoveryDisposition::Ready {
         if let StudioRecoveryItem::Object { id } = item {
@@ -426,6 +786,9 @@ fn preview(
                     disposition: StudioRecoveryDisposition::MissingTarget,
                     body: None,
                     original_author: None,
+                    // Held, so nothing was consumed. Carrying the ids of a proposal that is not
+                    // going to be offered would report work read on behalf of a refusal.
+                    source_ops: Vec::new(),
                 };
             }
         }

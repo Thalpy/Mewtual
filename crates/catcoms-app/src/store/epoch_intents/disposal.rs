@@ -30,25 +30,19 @@ use catcoms_rt::CryptoRngCore;
 /// deserves to know which: a wrong `branch` means the request names another generation, a wrong
 /// `content` means the branch changed under the dialog, and a wrong `accepted` means the caller and
 /// the vault disagree about size even though the hashes matched, which is a bug rather than a race.
-pub(in crate::store) struct StudioOverlayDisposalRequest {
+#[derive(Debug)]
+pub struct StudioOverlayDisposalRequest {
     /// Branch identity including its generation.
-    pub(in crate::store) branch: [u8; 32],
+    pub branch: [u8; 32],
     /// `branch_content` from the inspection the user saw.
-    pub(in crate::store) content: [u8; 32],
-    pub(in crate::store) accepted: usize,
-    pub(in crate::store) mode: StudioDisposalRequestMode,
+    pub content: [u8; 32],
+    pub accepted: usize,
+    pub mode: StudioDisposalRequestMode,
 }
 
 /// The mode, with D5's confirmation as a required typed field on the destructive arm.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "constructed by the native dispose command, which lands later in this scope; its \
-    own tests construct both arms today"
-    )
-)]
-pub(in crate::store) enum StudioDisposalRequestMode {
+#[derive(Debug)]
+pub enum StudioDisposalRequestMode {
     Preserve,
     Discard(StudioDiscardConfirmation),
 }
@@ -59,14 +53,6 @@ impl ServerStore {
     /// Every precondition is checked before any write, so a refusal costs nothing and leaves the
     /// branch, its ledger entries and any existing archive exactly as they were.
     #[allow(clippy::too_many_arguments)]
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "the native dispose command is this transaction's production caller and lands \
-        later in this scope; its own tests exercise it today"
-        )
-    )]
     pub(in crate::store) fn dispose_studio_overlay_with_io(
         &mut self,
         server: u64,
@@ -119,7 +105,16 @@ impl ServerStore {
         if state.overlay().is_none() {
             let existing = metadata
                 .disposed()
-                .filter(|d| d.branch == request.branch && d.content == request.content)
+                // All three of D3's values, not two. D3 checks `accepted` as well and calls a
+                // mismatch "a bug rather than a race"; acknowledging a retry that disagrees about
+                // the count would hand back a manifest describing a different amount of work than
+                // the caller thinks it disposed of, and would do it on the path whose whole purpose
+                // is to tell a caller what already happened.
+                .filter(|d| {
+                    d.branch == request.branch
+                        && d.content == request.content
+                        && d.accepted == request.accepted
+                })
                 .filter(|d| {
                     matches!(
                         (&d.mode, &request.mode),
@@ -232,9 +227,73 @@ impl ServerStore {
                         )
                     })?;
                 let archive = &record.archive;
+                // **PARTLY CLOSED. The ORDERING half is now established by the explicit barrier
+                // below; the platform half is not. Read both paragraphs.**
+                //
+                // The history matters because this comment was wrong twice before it was right.
+                //
+                // The read below authenticates and decodes but syncs nothing. A review asked what
+                // stops a preserving disposal destroying the branch on the strength of an archive
+                // whose rename landed while its own parent-directory barrier failed. The answer this
+                // comment used to give was: the archive record and the intent record are entries in
+                // the same `servers/` directory, the replacement goes through `atomic_write` which
+                // ends in `sync_directory` on that parent, so one barrier covers both.
+                //
+                // That argument is wrong in two ways, and a re-review was right about both.
+                //
+                // 1. **`sync_directory` is `Ok(())` on `not(unix)`** (see `store.rs`). On Windows -
+                //    the platform this scope is developed on - there is no parent barrier at all, so
+                //    there is no shared barrier to rely on. `fs::rename` does not supply one either:
+                //    the pinned toolchain's `MoveFileExW` call does not request write-through.
+                // 2. It said "either the shared fsync succeeds and both are durable, or it fails and
+                //    neither is". The second half is not a property of `fsync`. A failed flush means
+                //    completion is *not guaranteed*, not that nothing reached stable storage - and
+                //    this family's own tests already treat a post-rename sync failure as **committed,
+                //    not rolled back**.
+                //
+                // So what holds today is narrower than the preservation guarantee this scope claims:
+                // on Unix, a *successfully completed* replacement does make both namespace changes
+                // durable, because the archive's contents were synced before its rename and the final
+                // directory flush covers both entries. Interrupted executions, and every execution on
+                // a platform where the barrier is a no-op, are not covered.
+                //
+                // A second review then separated two obligations that this comment had run together:
+                // a real barrier, and the ORDER in which it runs. Fixing `sync_directory` alone would
+                // not prove the ordering, because the first barrier covering the archive would still
+                // be the replacement's - after the removal. The ordering is this transaction's to fix,
+                // and it now does: the explicit sync-only repair below runs after matching and before
+                // anything is removed, and refuses if it cannot complete.
+                //
+                // **What remains open is the platform barrier itself.** `sync_directory` is shared by
+                // every record family rather than owned here, and on `not(unix)` it is still a no-op,
+                // so the repair below establishes the archive's file contents but not its directory
+                // entry there. The decision - implement a real Windows barrier, refuse a preserving
+                // disposal before removal where none exists, or narrow the stated guarantee - belongs
+                // to whoever owns persistence.
+                //
+                // The assertion below is kept for what it does prove - that the two families are
+                // co-located, so a later move cannot silently invalidate the Unix half of the
+                // argument. It proves nothing about durability, and must not be read as doing so.
+                debug_assert_eq!(
+                    self.epoch_draft_archive_path(&super::super::epoch_draft_archive::scope_bytes(
+                        server, document
+                    )?)
+                    .parent(),
+                    self.epoch_intent_path(&scope).parent(),
+                    "preserving disposal relies on the archive and the intent record sharing one \
+                     directory fsync; they no longer do"
+                );
+                // `target` and `provenance` are compared explicitly rather than left to the
+                // document binding and the sealed key to imply. Both are bound transitively today,
+                // which is exactly the kind of guarantee that quietly stops holding when a record
+                // gains a field or a scope is widened; and provenance in particular is the
+                // difference between preserved Closing work and an unconfirmed preview, which a
+                // terminal manifest must never misreport.
                 if archive.content() != request.content
                     || Some(archive.branch()) != metadata.branch_id()
                     || archive.generation() != metadata.branch_generation()
+                    || archive.target() != target
+                    || archive.provenance() != metadata.provenance()
                 {
                     return Err(invalid(
                         "the preserved archive is for a different branch than the one being \
@@ -251,6 +310,47 @@ impl ServerStore {
                         "the preserved archive's entries are not this branch's entries",
                     ));
                 }
+                // **Establish the matching archive's durability BEFORE anything is removed.**
+                //
+                // Reading and matching proves the archive is present and is this branch's; it does
+                // not prove the archive is durable. An archive whose rename landed while its own
+                // parent barrier failed is exactly that case, and the writer reported it as
+                // uncertain. Without this step, the first barrier to cover it would be the
+                // replacement's own parent sync below - which runs *after* the branch-removing
+                // rename, so evidence would become durable no earlier than the removal, and an
+                // interrupted execution could leave either one without the other.
+                //
+                // The archive writer already knows how to do this for the archive that is on disk:
+                // handed the identical payload, it takes its exact-retry branch and performs a
+                // guarded, accounted, sync-only repair - file contents, then parent directory -
+                // changing no bytes. Reusing it rather than adding a "durable" flag means there is
+                // one definition of "this archive is durably established", and it is the writer's.
+                //
+                // A failure here refuses BEFORE removal: no bytes change, and the branch, its ledger
+                // entries and the archive are all exactly as they were. It is not free, though - the
+                // writer closed both budgets before its I/O, as every write in this family does, so
+                // the caller must reconcile before its next write. That is the correct cost of an
+                // uncertain flush, and it is paid without anything having been destroyed.
+                //
+                // **Limit, stated rather than hidden:** on a platform where the parent-directory
+                // barrier is a no-op (`sync_directory` on `not(unix)`), this establishes the file
+                // contents but not the directory entry, so it narrows the gap without closing it
+                // there. That half is a shared persistence decision and is recorded as such.
+                self.write_studio_draft_archive_with_io(
+                    server,
+                    document,
+                    &record.archive,
+                    rng,
+                    budget,
+                    intents,
+                    hooks,
+                )
+                .map_err(|error| {
+                    invalid(format!(
+                        "a preserving disposal could not establish its archive durably, so the \
+                         branch was not removed: {error}"
+                    ))
+                })?;
                 StudioDisposalDecision::Preserve { archive: record.id }
             }
         };

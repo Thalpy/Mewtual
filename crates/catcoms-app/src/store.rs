@@ -37,6 +37,7 @@ use crate::AppError;
 mod creative_references;
 mod epoch_draft_archive;
 mod epoch_intents;
+pub use epoch_intents::disposal::{StudioDisposalRequestMode, StudioOverlayDisposalRequest};
 mod epoch_owner;
 mod epoch_recovery;
 mod epoch_registry;
@@ -51,7 +52,7 @@ pub(crate) use epoch_registry::{RegistrySourceCapture, RegistrySourceStamp};
 mod epoch_studio;
 pub use creative_references::{CreativeReferences, MAX_CREATIVE_REFERENCES};
 pub(crate) use epoch_intents::inspection::{
-    StudioInspectedDraft, StudioInspectionCapture, StudioInspectionStamp,
+    StudioInspectedDraft, StudioInspectionCapture, StudioInspectionPurpose, StudioInspectionStamp,
 };
 pub use epoch_intents::{EpochIntentBudget, EpochIntentState, MAX_VAULT_INTENT_BYTES};
 pub use epoch_owner::EpochOwnerReceiptState;
@@ -76,6 +77,8 @@ pub use epoch_registry::{
     RegistryOwnerRotationOutcome, RegistryPageAdmission, RegistryReplayHold, RegistryReplayOutcome,
     RegistryReplayPass, RegistryReplayProgress, RegistryReplayStep, RegistryReplayTicket,
 };
+pub use epoch_studio::copy_capture::StudioOverlayCopyChoice;
+pub(crate) use epoch_studio::copy_capture::{StudioOverlayCopyCapture, StudioOverlayCopyPlan};
 #[cfg(test)]
 pub(crate) use epoch_studio::source::studio_full_restores_for_test;
 #[cfg(test)]

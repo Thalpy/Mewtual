@@ -360,7 +360,7 @@ impl StudioOverlayState {
     /// to re-derive the hash, which is precisely the second representation that lets a request
     /// name work the user never saw.
     pub fn branch_content(&self, ledger: &IntentLedger) -> Result<[u8; 32], ReplError> {
-        branch_hash(self.active.as_ref().ok_or(ReplError::Malformed)?, ledger)
+        branch_content_hash(self.active.as_ref().ok_or(ReplError::Malformed)?, ledger)
     }
 
     /// Drop the active branch without transferring it.
@@ -404,7 +404,7 @@ impl StudioOverlayState {
         if self.prepared.is_some() {
             return Err(ReplError::IntentConflict);
         }
-        if content != branch_hash(active, ledger)? {
+        if content != branch_content_hash(active, ledger)? {
             return Err(ReplError::IntentConflict);
         }
         let manifest = StudioOverlayDisposal::from_branch(
@@ -1087,12 +1087,43 @@ fn nested_seed_len(raw: &[u8]) -> Result<usize, ReplError> {
     }
     Ok(seed.len())
 }
+/// The **document-wide** hash: this branch and the whole intent ledger around it.
+///
+/// Used only for `Prepared.branch`, where document-wide is the right scope. A transfer hold is a
+/// signing commitment made against a state, so any change to that state should invalidate it, and
+/// being conservative there costs a re-preparation rather than any evidence.
 fn branch_hash(active: &StudioOverlay, ledger: &IntentLedger) -> Result<[u8; 32], ReplError> {
     let mut hash = blake3::Hasher::new_derive_key("catcoms/studio-overlay-branch-ledger/v1");
     for bytes in [active.encode_vault(ledger)?, ledger.encode()?] {
         hash.update(&(bytes.len() as u64).to_be_bytes());
         hash.update(&bytes);
     }
+    Ok(*hash.finalize().as_bytes())
+}
+
+/// The **branch's own** content identity: its base, and its entries' ids, accepted envelopes, order
+/// and timestamps. `encode_vault` already carries exactly that, and `checked_entries` inside it
+/// still verifies every entry against the ledger, so the ledger remains a validator without
+/// becoming part of the value.
+///
+/// **This deliberately does not hash the ledger, and that is a fix rather than an omission.**
+/// `content` answers "is this the same branch I was shown". Hashing the whole ledger made it answer
+/// "is this the same document", so an ordinary Save into the document - a copy landing an intent, a
+/// receipt retiring one - changed a branch nobody had touched. The consequence was specific: an
+/// archive written at one moment could no longer satisfy D4 at the next, and a preserving disposal
+/// refused with "the preserved archive is for a different branch" while holding an archive of
+/// exactly that branch. The user's only recourse was to release verified evidence and re-archive.
+///
+/// A distinct derive key, so a value computed under one definition can never be mistaken for the
+/// other.
+fn branch_content_hash(
+    active: &StudioOverlay,
+    ledger: &IntentLedger,
+) -> Result<[u8; 32], ReplError> {
+    let mut hash = blake3::Hasher::new_derive_key("catcoms/studio-overlay-branch-content/v1");
+    let bytes = active.encode_vault(ledger)?;
+    hash.update(&(bytes.len() as u64).to_be_bytes());
+    hash.update(&bytes);
     Ok(*hash.finalize().as_bytes())
 }
 pub(super) fn validate_manifest(entries: &[Entry]) -> Result<(), ReplError> {

@@ -1,4 +1,9 @@
-"""Require the overlay-lifecycle regressions to catch isolated guard removals.
+"""Require the overlay-lifecycle regressions to catch guard removals at their named assertions.
+
+**Scope, stated precisely because it used to be overstated:** each entry runs ONE test with
+`--exact`, so this script establishes "detected at the named assertion, and the restored source
+passes". It does not establish isolation - no sibling test is selected, so a mutant that also breaks
+one would go unnoticed here. Isolation rests on the hand-runs behind each entry.
 
 Covers Agent 2's scope: the draft archive and its release, the disposal transaction, the
 branch-generation namespace, and the owner-tenure observation rule.
@@ -34,7 +39,12 @@ MUTATIONS = [
         "release-identity", "catcoms-app", APP_TESTS,
         f"{APP}/epoch_draft_archive.rs",
         "if archive.archive_id().map_err(invalid)? != expected_archive {",
-        "if false {",
+        # Inverted rather than short-circuited. `if false {` drops the only use of both `archive`
+        # and `expected_archive`, and under the `-D warnings` this script now sets, two unused
+        # variables are compile ERRORS. A mutant that does not build proves nothing about the guard
+        # it names, and the harness correctly refused to call that a detection. Inverting keeps both
+        # bindings live and negates exactly the identity comparison. Found by Agent 3 in CI.
+        "if archive.archive_id().map_err(invalid)? == expected_archive {",
         "archive::release_refuses_an_archive_other_than_the_one_it_names",
         "release must refuse a content it was not asked to destroy",
     ),
@@ -79,6 +89,26 @@ MUTATIONS = [
         "disposal::a_preserving_disposal_refuses_an_archive_whose_entries_are_not_the_branchs",
         "must not authorise destroying it",
     ),
+    # --- evidence before removal: a preserving disposal must establish its archive durably first ---
+    #
+    # Swallowing the barrier's error is caught, but read what catches it. The disposal is STILL
+    # refused - by the budget, because the failed sync closed both budgets before its I/O and the
+    # removal write then demands reconciliation. So "nothing is removed" is defended twice, and only
+    # the test's assertion on the refusal MESSAGE distinguishes the barrier's own refusal from the
+    # budget's. That is why the expected text below is the message assertion and not the expect_err.
+    #
+    # Skipping the barrier call entirely is the more alarming mutant - the disposal then SUCCEEDS and
+    # records `Preserved` without the archive ever being made durable - but it cannot be expressed as
+    # one string replacement, so it rests on the hand-run recorded in the status doc, where it failed
+    # both ordering tests at their own assertions with the other ten disposal tests green.
+    (
+        "dispose-archive-durability-propagates", "catcoms-app", APP_TESTS,
+        f"{APP}/epoch_intents/disposal.rs",
+        "                })?;\n                StudioDisposalDecision::Preserve { archive: record.id }",
+        "                }).ok();\n                StudioDisposalDecision::Preserve { archive: record.id }",
+        "disposal::a_preserving_disposal_whose_archive_cannot_be_made_durable_removes_nothing",
+        "the refusal must be the durability barrier's",
+    ),
     # --- the branch-generation namespace ---
     (
         "admission-not-trusted", "catcoms-replication", REPL_TESTS,
@@ -88,13 +118,26 @@ MUTATIONS = [
         "lifecycle::a_fabricated_admission_cannot_mint_a_branch_at_a_chosen_generation",
         "would give a new branch its identity",
     ),
+    # The expected assertion here is NOT the test's generation assertion, and the difference is
+    # worth reading rather than fixing away.
+    #
+    # When this mutation was written by hand it failed at "must take the next generation". It no
+    # longer reaches that line: the disposal work later added a structural rule to `validate` - a
+    # live branch beside a retained disposal must be a strictly later generation - and `append`
+    # now refuses outright, so the test dies at its `expect` several lines earlier.
+    #
+    # The guard is therefore anchored twice and the stronger one fires first, which is the right
+    # outcome and not a reason to weaken either. What it does mean is that under THIS mutation the
+    # test's own generation assertions are unreachable and so have no mutant of their own; they are
+    # anchored by `a_fabricated_admission_cannot_mint_a_branch_at_a_chosen_generation` above, which
+    # reaches the same namespace through the admission path where no disposal exists to catch it.
     (
         "append-mints-next-generation", "catcoms-replication", REPL_TESTS,
         f"{REPL}/overlay/handoff.rs",
         "if minting {\n            next.branch_generation = self.next_generation()?;\n        }",
         "let _ = minting;",
         "lifecycle::appending_where_no_branch_exists_takes_the_next_generation",
-        "must take the next generation",
+        "the first Save after a disposal is ordinary and must work",
     ),
     # --- the owner-tenure observation rule ---
     (
@@ -112,6 +155,14 @@ def run(package, prefix, test):
     env = os.environ.copy()
     env["CARGO_INCREMENTAL"] = "0"
     env["RUST_MIN_STACK"] = "33554432"
+    # Set here rather than inherited, because inheriting it is exactly what went wrong.
+    #
+    # The workflow sets `-D warnings` at job level, so CI built every mutant with it while a local
+    # run built them without. One mutant then behaved differently in the two places: it left two
+    # bindings unused, which is a warning locally and an error in CI, so it passed here and failed
+    # there. A harness whose result depends on the caller's environment is not evidence, and the
+    # divergence let this script report nine detections while the job was red.
+    env["RUSTFLAGS"] = "-D warnings"
     if os.name == "nt":
         env["_LINK_"] = "/DEBUG:NONE"
     command = [
@@ -141,9 +192,17 @@ def main():
             (log_dir / f"gate4-overlay-lifecycle-mutation-{name}.log").write_text(
                 result.stdout, encoding="utf-8"
             )
-            # The mutation must fail THIS test, at THIS assertion, and alone. "0 passed; 1 failed"
-            # is what makes it alone: a mutation that also breaks a sibling is not isolated, and an
-            # isolated guard is the whole claim.
+            # The mutation must fail THIS test, at THIS assertion.
+            #
+            # **This script does NOT check isolation, and an earlier version of this comment claimed
+            # it did.** The run below is `--exact` on one fully qualified test, so no sibling is ever
+            # selected; "0 passed; 1 failed" therefore describes only that one test and says nothing
+            # about whether the mutant also breaks others. A review pointed this out and was right.
+            #
+            # Isolation for these entries rests on the hand-runs recorded behind each of them, not on
+            # anything this script observes. Do not report a passing run here as "the mutation is
+            # isolated" - the supported claim is "the mutation was detected at its named assertion
+            # and the restored source passes".
             if not (
                 result.returncode != 0
                 and assertion in result.stdout

@@ -444,11 +444,21 @@ async fn owner_tenure_same_owner_on_a_new_leaf_identity_starts_a_new_tenure() {
 }
 
 /// The v1 migration. Only `start == epoch` is provably safe; everything else is imported.
-#[test]
-fn owner_tenure_v1_snapshots_promote_only_the_provably_safe_shape() {
-    let device = MlsDevice::generate().unwrap();
-    let group = ServerGroup::create(&device).unwrap();
+#[tokio::test]
+async fn owner_tenure_v1_snapshots_promote_only_the_provably_safe_shape() {
+    // A group at epoch > 0. The previous version of this test used `ServerGroup::create`, which sits
+    // at epoch 0, so its `start < epoch` case was guarded by `if epoch > 0` and **never ran** - the
+    // entire Imported path had no executable coverage, and a mutation forcing every v1 record to
+    // `Observed` passed the suite. The review caught it.
+    let (_, mut nodes, _) = build_members(2).await;
+    let node = &mut nodes[0];
+    let device = &node.device;
+    let group = &node.group;
     let epoch = group.epoch();
+    assert!(
+        epoch > 0,
+        "this fixture must have advanced, or the unsafe case is unreachable again"
+    );
 
     // A v1 tail is: [1][u64 epoch][owner bytes][start bytes]. Built here rather than by encoding,
     // because this build no longer writes v1.
@@ -464,25 +474,112 @@ fn owner_tenure_v1_snapshots_promote_only_the_provably_safe_shape() {
 
     // start == epoch: the most recent applied step was a genuine owner change, visible under BOTH the
     // old and the new rule, so no hidden discontinuity can lie at that step. Promoted.
-    let promoted = OwnerTenure::decode(&v1(Some(epoch)), &group).expect("a safe v1 must decode");
+    let promoted = OwnerTenure::decode(&v1(Some(epoch)), group).expect("a safe v1 must decode");
     assert_eq!(
-        promoted.observed(&group),
+        promoted.observed(group),
         ObservedOwnerTenure::Observed(epoch),
         "start == epoch is provably safe and must be fully observed"
     );
 
     // No start at all: nothing to migrate.
-    let unknown = OwnerTenure::decode(&v1(None), &group).expect("a v1 with no start must decode");
-    assert_eq!(unknown.observed(&group), ObservedOwnerTenure::Unknown);
+    let unknown = OwnerTenure::decode(&v1(None), group).expect("a v1 with no start must decode");
+    assert_eq!(unknown.observed(group), ObservedOwnerTenure::Unknown);
 
     // A start BELOW the epoch means at least one preserve step, which is exactly where an invisible
     // discontinuity hides. Imported: still verifies, refuses to author. Discarding it instead would
     // downgrade every existing server's owner, which on a single-owner server never recovers.
-    if epoch > 0 {
-        let imported = OwnerTenure::decode(&v1(Some(epoch - 1)), &group).unwrap();
+    let mut imported = OwnerTenure::decode(&v1(Some(epoch - 1)), group).unwrap();
+    assert_eq!(
+        imported.observed(group),
+        ObservedOwnerTenure::Imported(epoch - 1)
+    );
+
+    // **And the import must not launder itself away on an ordinary commit.** The preserve arm carries
+    // the start forward rather than deriving one, so treating "a start is present" as "a start is
+    // fresh" promoted every imported server on its next same-owner step - which is precisely the
+    // authority the migration withheld, handed back by an unrelated member add. A review demonstrated
+    // it; this is the regression.
+    //
+    // The step has to REACH the preserve arm to prove anything. An earlier version of this passed
+    // `Position::of(group)` as `before`, so `applied` returned at its own `if after == before`
+    // no-op guard and never touched the flag: a review showed that mutating the flag line to
+    // `self.imported = false` left this and every other sync test green. The synthetic `before` one
+    // epoch back with the same owner and the same leaf is what the preserve arm actually looks
+    // like, and it is the shape an ordinary member add produces.
+    let live = Position::of(group);
+    let before = Position {
+        owner: live.owner,
+        leaf: live.leaf,
+        epoch: live.epoch - 1,
+    };
+    imported.position = before;
+    imported.applied(before, group);
+    assert_eq!(
+        imported.observed(group),
+        ObservedOwnerTenure::Imported(epoch - 1),
+        "a step that only PRESERVES a start must not promote an imported tenure"
+    );
+
+    // It must also survive a round trip, or a save and reload would do the laundering instead.
+    let bytes = imported.encode(group).unwrap();
+    assert_eq!(
+        OwnerTenure::decode(&bytes, group).unwrap().observed(group),
+        ObservedOwnerTenure::Imported(epoch - 1)
+    );
+}
+
+/// The accessor split, which had no test: swapping authoring for verification at the signing site
+/// passed the entire suite.
+///
+/// The two have **opposite failure directions**, so a single `Option` could not serve both.
+/// Verification wants the value present wherever it is sound, because
+/// `complete_checkpoint_head_scoped` accepts a proof's own claimed tenure when the local value is
+/// absent - so surfacing an imported one can only add refusals. Authoring wants it absent unless
+/// fully observed, because signing as the owner on a tenure this build cannot verify is the failure
+/// the distinction exists to prevent.
+///
+/// An `Imported` node is the only state where they differ, which is why this needs the v1 migration
+/// to construct one.
+#[tokio::test]
+async fn owner_tenure_imported_verifies_but_cannot_author() {
+    let (_, mut nodes, _) = build_members(2).await;
+    let node = &mut nodes[0];
+    let epoch = node.group.epoch();
+    assert!(epoch > 0);
+
+    // A v1 tail with `start < epoch`: the shape whose continuity this build cannot establish.
+    let mut e = Encoder::new();
+    e.put_u8(1);
+    e.put_u64(epoch);
+    e.put_bytes(node.device.device_id().as_bytes()).unwrap();
+    e.put_bytes((epoch - 1).to_be_bytes().as_ref()).unwrap();
+    node.owner_tenure = OwnerTenure::decode(&e.finish(), &node.group).unwrap();
+
+    assert_eq!(
+        node.observed_owner_tenure(),
+        ObservedOwnerTenure::Imported(epoch - 1)
+    );
+    assert_eq!(
+        node.verification_owner_tenure_start(),
+        Some(epoch - 1),
+        "verification must see it: hiding it would let a proof's own claim be accepted instead"
+    );
+    assert_eq!(
+        node.authoring_owner_tenure_start(),
+        None,
+        "authoring must not: this build cannot verify the tenure it would be signing under"
+    );
+
+    // And the two agree again once the tenure is fully observed, so the split is about evidence
+    // quality rather than a permanent divergence.
+    let observed = ObservedOwnerTenure::Observed(epoch);
+    let _ = observed;
+    node.owner_tenure = OwnerTenure::new(&node.group);
+    if node.observed_owner_tenure() != ObservedOwnerTenure::Unknown {
         assert_eq!(
-            imported.observed(&group),
-            ObservedOwnerTenure::Imported(epoch - 1)
+            node.verification_owner_tenure_start(),
+            node.authoring_owner_tenure_start(),
+            "a fully observed tenure must look the same to both consumers"
         );
     }
 }

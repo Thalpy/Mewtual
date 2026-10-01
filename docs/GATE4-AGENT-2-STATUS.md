@@ -44,24 +44,26 @@ carefully, because they are different claims and only one was wrong:
 
 ## Agent 1's registration prerequisites (its section 12.3)
 
-**Authoritative statement: P1 to P4 are DESIGNED AND THE DESIGN IS REVIEWED, but NONE OF THEM IS
-IMPLEMENTED. P5 is FALSE. `studio_overlay_save` must not be registered.**
+**Authoritative statement: P5 is FALSE. `studio_overlay_save` must not be registered.**
 
-P1's wording is "a reviewed manual lifecycle". The design of that lifecycle is now reviewed and
-accepted; the lifecycle itself does not exist. P5 asks whether P1 to P4 are **implemented** and
-reviewed, and no line of production code has been written for any of them.
+*Table updated 2026-09-30 at `bbef5908`, in answer to Agent 1's question of whether it had gone
+stale. It had: the table still read "no line of production code has been written for any of them",
+which stopped being true at slice 6. It is now per-row, and no row has reached true.*
 
 | Prerequisite | State | Where |
 |---|---|---|
-| P1 reviewed manual lifecycle: inspect, export, copy-into-current, explicit disposition, lossless across restart and refusal | **Design accepted**, unimplemented | design 6.1-6.6, 12 |
+| P1 reviewed manual lifecycle: inspect, export, copy-into-current, explicit disposition, lossless across restart and refusal | **All four verbs implemented; NOT yet reviewed as a lifecycle.** Inspect pre-dates this scope; export, copy-into-current and explicit disposition are built end to end with the archive that makes the preserving arm reachable. What is missing for P1 is not code: "lossless across restart and refusal" is proven for disposal, archive and release by their own tests, and **not** proven for copy across a restart. The fable review of the copy work has not returned | design 6.1-6.6, 12 |
 | P2 every `StudioOverlayHold` variant mapped to a user-visible actionable state | **Design accepted**, unimplemented | design 7, 11 |
-| P3 truthful native results, events and UI-hooks rows | **Design accepted**, unimplemented; no row is published as available and no command is registered | design 11 |
-| P4 live-tenure contract, over `verification_owner_tenure_start()` and `authoring_owner_tenure_start()` | **Design accepted**, unimplemented | design 9.4 V1-V8, 9.3 part 5 A-1 |
+| P3 truthful native results, events and UI-hooks rows | **Partially implemented.** Four of nine commands are registered and their views are truthful about provisionality, non-authority and required reconciliation. The UI-hooks rows are not updated and no row is published as available | design 11 |
+| P4 live-tenure contract, over `verification_owner_tenure_start()` and `authoring_owner_tenure_start()` | **Substrate implemented; the contract is partly implemented and unverified.** Slice 7 built the mechanism. **CORRECTION, 2026-09-30:** an earlier version of this row said "no app authoring call site consults either accessor". That was wrong and I told Agent 1 so. **Nine non-test app call sites consult `authoring_owner_tenure_start()`** - three in `studio/overlay.rs`, four in `studio/receiver/handoff.rs`, two in `studio/receiver.rs` - and they follow A-1 exactly: the wrapper reads the `Option<u64>` and passes it through unchanged for the store to refuse at the stage that needs it. What is genuinely missing is the app seam V5 and V7 name: **`StudioOwnerTenure`, `Server::observed_owner_tenure()` and `Server::require_observed_owner_tenure()` do not exist**, so Agent 3 has nothing to take, and V7's app-boundary conversion has no anchor. V1's coverage of all nine named stages and V8's reachability are also unverified by me. N-T7b is undischarged | design 9.4 V1-V8, 9.3 part 5 A-1 |
 | P5 explicit statement that P1-P4 are implemented and reviewed | **No** | this table |
 
 This row is the single authoritative source for P5. It changes only after implementation exists and
-review 2 returns PASS for the corresponding boundary. Revision 1 returned CHANGES REQUIRED on all
-three boundaries, so the design itself is not yet accepted.
+review 2 returns PASS for the corresponding boundary.
+
+**To Agent 1's framing directly: the landed slices are prerequisites, not the prerequisites.** Slice
+6 implements one of P1's four verbs; slice 7 implements the substrate P4's contract will be written
+over, not the contract. Reasoning from either row as FALSE remains correct today.
 
 ## Review history
 
@@ -700,6 +702,8 @@ Deleting it was the right call.
 
 ### Built so far
 
+*Current as of 2026-09-30, through `bbef5908`.*
+
 The payload codec, the reference collector that narrows Agent 1's fail-closed arm under I-5, the
 archive record writer with its accounting and sub-cap, the archive tally on `EpochIntentBudget`,
 **the archive release path** (slice 3), **the disposal manifest with its v3 extension arm** (slice
@@ -707,11 +711,367 @@ archive record writer with its accounting and sub-cap, the archive tally on `Epo
 (`branch_generation`, `provenance`, `branch_id`, `classify_request`, `admit_new_branch`,
 `new_admitted`, the completed v3 layout) and **the disposal store transaction** with D1-D6.
 
+Since then: **the tenure mechanism** (slice 7) - `OwnerTenure::joined`, the `Position` leaf
+identity, `ObservedOwnerTenure`, the `catcoms-mls` receive-side M-1 rule, the v1 migration via
+`Imported`, and the `verification_owner_tenure_start()` / `authoring_owner_tenure_start()` split;
+**the mutation harness** `.github/scripts/check-studio-overlay-lifecycle-mutations.py` and the
+`studio-overlay` `lifecycle` CI job; and **four of the nine native commands**.
+
+### Native commands: nine of nine
+
+Against the design's own list (design 6.2). No command on this list enables Save, and
+`studio_overlay_save` remains unregistered.
+
+| Command | State |
+|---|---|
+| `studio_overlay_read` | Pre-existing. The section 11 extension **is** applied at `bfce900e`, minus `eligibility`/`manualReason`/`unconfirmedState`, which are P2's `StudioOverlayHold` and do not exist in the tree, and `archived`, which `studio_overlay_lifecycle` answers from the record that holds it |
+| `studio_overlay_lifecycle` | **Landed** `35236b0b`, reshaped by review at `d92f8980` |
+| `studio_overlay_export` | **Landed** `9be5a6e7` |
+| `studio_overlay_archive` | **Landed** `d92f8980`. Before it, the Preserve arm of disposal was unreachable from the UI: nothing outside `cfg(test)` could create an archive, so D4 always refused |
+| `studio_overlay_archive_read` | **Landed** `35236b0b` |
+| `studio_overlay_archive_release` | **Landed** `35236b0b` |
+| `studio_overlay_copy_preview` | **Landed** `c4ce337d` |
+| `studio_overlay_copy_apply` | **Landed** `c4ce337d`, its test corrected at `0b7b6fcc` |
+| `studio_overlay_dispose` | **Landed** `35236b0b`, payload reshaped in `bbef5908` |
+
+**One command exists that the design does not list: `studio_overlay_archive_export`.** It exports
+the canonical envelope of an already-preserved archive record, where `studio_overlay_export`
+exports the *live* draft. Both emit the same `p1-studio-draft-archive-v1` payload through one
+helper, and a test asserts the two agree byte for byte. Recorded here rather than left as a silent
+addition.
+
 ### Not yet built
 
-The composite copy capture, the tenure work (`OwnerTenure::joined`, the `Position` leaf identity,
-the `catcoms-mls` receive-side M-1 rule, the v1 migration via `Imported`, V1-V8) and every native
-command. The mutation script and the `studio-overlay` `lifecycle` CI job are also still unwritten.
+**V1-V8, the live-tenure contract itself** -
+see the P4 row above for why the slice 7 mechanism is not that contract.
+
+One design deviation, recorded rather than left silent: design 5.3 lists
+`StudioInspectionPurpose::CopyPlan(choice)`, meaning the copy plan would be produced by the
+inspection rebuild. It is not. The plan is produced by `StudioOverlayCopyCapture::plan`, which owns
+both captures, because the copy plan needs the **destination's** bytes and those are not in the
+inspection capture at all. `StudioInspectionPurpose` exists with `Draft` and `Archive` only. The
+behaviour the design asked for is present; the seam it named is in a different place, for the same
+reason 5.2 itself was rewritten.
+
+### The copy review: one High, and what is still outstanding
+
+A fable adversarial review of the copy work returned CHANGES REQUIRED. It ran its mutations in a
+detached worktree rather than my tree, which is the right way to do it and the fix for the hazard
+recorded below.
+
+**Addressed at `d4531b17`:**
+
+- **High. A same-document Index `Object` copy could publish a dangling entry.** Recovery refuses
+  exactly this and says why; copy reached `restore::plan` from the detached worker, which has no
+  store and cannot probe, and neither C3 nor C4 put the probe back. The Save path has no equivalent
+  guard - `local_policy` checks only `MAX_INDEX_OBJECTS`, `index::prepare` only decodes, and
+  `check_index_object_sources` runs only at handoff. An Index branch retained across Closing whose
+  object was later cleaned up gave `Ready`, applied, and a durable entry naming a source that does
+  not exist. The probe now runs at C3 (downgrade) and C4 (refuse).
+- **Medium. `source_ops` over-reported.** An `IndexRegister` with no explicit edit falls back to the
+  creating operation's source, so a bare `PutObject` reported one id three times while claiming to
+  name exactly what it resolved. Deduplicated in order. Its test could not see it because the
+  fixture had no `SetTitle`/`SetExpiry`.
+- **Medium (part).** The destination channel was checked at C1 and C4 but not C3.
+
+**Outstanding, not yet addressed:**
+
+| Finding | What |
+|---|---|
+| M2 | No test catches a *changed* destination recovery record. The implementation is correct; the guard is unanchored, and a mutation comparing `is_some()` equality survives |
+| M3 | No test exercises a **successful** copy apply or the exact retry. The reviewer verified the behaviour is right in its own worktree; an equivalent test is not committed |
+| M4 | C1' ("refused while a transfer hold exists on the destination") is refused only at C4, so a preview returns `Ready` and the apply fails. Not a correctness hole, but the design says C1 |
+| L2 | A pre-existing vacuous test (`studio_restore_preview_fingerprint_tracks_provenance...`) asserts only `is_err()` and fails at "missing recovery title" - the same class I fixed elsewhere |
+| L4 | The exact-retry shortcut reports **any** prior `(nonce, body)` this device saved into the destination as a copy `Applied {already_saved:true}`, including an ordinary non-copy Save. No write; a misreport of kind. Re-confirmed by the correctness review; nonce replay itself is safe, since an old nonce with a different body hits `IntentConflict` |
+| Low (new) | `probe_copy_object` surfaces a wrong-object-channel record as an error rather than a `MissingTarget` hold, so at C3 it is a preview failure. Matches recovery's existing behaviour, which is why it is not being changed unilaterally |
+| Low (new) | The tenure seam has two doors: `require_observed_owner_tenure` is expected-dead while nine sites read `authoring_owner_tenure_start()` directly. Correct today, but V5/V7's anchoring is only worth what the callers make it |
+| L5 | The same-document copy path is untested, because this fixture's document is Closing. N6's "no byte of the branch's record" is verified only cross-document |
+
+### The comprehensive review: verdict, and the verification debt cleared
+
+Two comprehensive adversarial reviews were run over the whole scope at `288bb30c`, one on
+correctness and one on test evidence. The correctness review returned **CHANGES REQUIRED, no High**,
+and confirmed the hard invariants directly: P5 holds (ten `studio_overlay_*` commands registered,
+none a save, and no composition writes into a Closing branch); evidence precedes removal; both
+confirmations are unforgeable and non-transferable; the detached worker carries no live authority;
+and M-1's unreachability claim survives attack.
+
+**It also executed the two test sets I could not**, in a worktree that excludes the other agent's
+uncommitted work:
+
+| Run | Result |
+|---|---|
+| `studio::tenure` (`23465a17`) | **3 passed** |
+| `studio::restore` (`d4531b17`) | **8 passed** |
+| `cargo test -p catcoms-app --lib studio::` | **222 passed**, 0 failed, 5 ignored |
+| desktop `--lib studio::` | **45 passed**, 0 failed |
+
+So both commits' claims now hold, and the "compiled but unrun" caveat in their messages is
+discharged.
+
+Fixed in response: the `branch_content` defect below, the row-6 retry arm now comparing `accepted`
+as D3 does, and D4 comparing `target` and `provenance` explicitly rather than relying on the
+document binding to imply them.
+
+### `content` was a property of the document, not of the branch
+
+The review's Medium 1, and the one with a user-visible consequence. `branch_hash` folded
+`ledger.encode()` into the value, so an ordinary intent belonging to nobody's branch changed the
+identity of a branch nobody had touched. An archive written at one moment then stopped satisfying D4
+at the next, and a preserving disposal refused with "the preserved archive is for a different
+branch" **while holding an archive of exactly that branch**. The only recourse was to release
+verified evidence and archive again. Reachable in the design's primary same-document copy case,
+where the copy itself lands the intent that breaks it.
+
+`branch_content_hash` covers the branch alone, under its own derive key. `Prepared.branch` keeps the
+document-wide hash deliberately: a transfer hold is a signing commitment against a state and should
+go stale on any change to it.
+
+### P1 BLOCKER: the generation namespace is built and unwired
+
+Found by the comprehensive correctness review, and it is the most important thing in this document.
+
+`classify_request`, `admit_new_branch` and `new_admitted` have **zero non-test callers anywhere in
+`crates/catcoms-app/src`**. The Save seam carries `basis` only (`studio/receiver.rs`,
+`store/epoch_studio/overlay.rs`) and never a `branch`, so the two-stage classification design 6.6
+specifies is never consulted by production code.
+
+**CORRECTED: the short trace this row used to give was wrong, and a review caught it.** It said
+"dispose G1, admit G2, deliver a delayed G1 request" and claimed the request appends onto G2. It does
+not. The retained G1 disposal manifest still remembers G1's operation ids, and `validate` refuses any
+state where an id appears both in the live branch and in the retained manifest - so the overlap is
+rejected. That existing defence is real and I had written past it. My own replication test
+(`an_old_generation_request_is_stale_after_the_namespace_has_moved_on`) uses the correct sequence; the
+prose here did not.
+
+The reachable trace needs the manifest to be **replaced**, because `dispose` overwrites the previous
+`disposed` record and does not advance the basis floor:
+
+1. Accept G1 containing operations X; dispose G1.
+2. Accept G2 containing **disjoint** operations Y on the still-eligible basis.
+3. Dispose G2 - which replaces G1's retained manifest.
+4. Deliver a delayed G1 request naming an operation from X.
+
+Now the id is not pending, not in the retained manifest, and not a completed or exact retry, while
+the basis fingerprint still matches. With a Save seam that carries only `basis` and no branch
+identity, there is nothing left to distinguish the delayed request from new work. That is the case
+6.6 says must return `Stale`.
+
+It is not reachable today, for one reason only: `studio_overlay_save` is unregistered. That makes it
+a **P5 and P1 blocker rather than a live defect**, and it is the honest reason P1 cannot be called
+reviewed:
+
+> "lossless across restart and refusal" cannot be claimed for a lifecycle whose rollover defence
+> has no production caller.
+
+The integration is Flow S's: S1 must carry `branch` and call `classify_request`, S1b must call
+`admit_new_branch`. That is Agent 1's seam to wire; stating the obligation is mine, and this entry
+is that statement. I have not reached into the Save ordering to do it, for the same A-1 reason the
+tenure refusals are not mine either.
+
+### The evidence review: two more vacuous tests of mine, and one gap still open
+
+The evidence review's lens is "does the evidence prove what it claims", and it found three more.
+
+**1. The `Imported` preserve regression was vacuous, and it guarded a High.** The step in
+`owner_tenure_v1_snapshots_promote_only_the_provably_safe_shape` passed `Position::of(group)` as
+`before`, so `applied` returned at its own `if after == before` no-op guard and never reached the
+flag line at all. Mutating `self.imported = self.imported && !computed && start.is_some()` to
+`self.imported = false` left **all eleven sync tests green**. That flag is the `computed` fix from an
+earlier review - the one that stopped an unverifiable v1 tenure laundering itself into a fully
+observed one on its next member add - so the fix was real and its anchor was not. Fixed by using a
+synthetic `before` one epoch back with the same owner and leaf, which is the shape the preserve arm
+actually takes.
+
+**2. The `RefreshRequired` notice had no test.** `DisposeOverlay`, `ReleaseOverlayArchive` and
+`FinishOverlayArchive` are in the receiver's `changing` list and nothing named them as emitters, so
+the list could have lost any of them silently. Anchored now, with every action in the new test
+deliberately **failing**: the notice follows the action rather than its outcome, because the case
+that matters is a release whose unlink succeeded and whose parent sync did not.
+
+**3. STILL OPEN: `probe_copy_object` has no test.** The H1 fix from `d4531b17` - the one that stops a
+copy publishing an Index entry naming an object that does not exist - is unanchored. Forcing it to
+`Ok(true)` leaves all five desktop copy tests green, and the app crate has no store-backed copy
+fixture at all. The fix is believed correct and is modelled directly on recovery's equivalent, but
+**believed correct is what every vacuous test on this list also was**. It needs either an Index
+destination fixture in the desktop tests or a store-backed copy fixture in the app crate.
+
+That is now the single largest known hole in this scope's evidence, and it guards a durable write.
+
+### Preserving-disposal crash ordering: ordering CLOSED, platform barrier OPEN
+
+**Update.** A second re-review separated a real barrier from the order it runs in; fixing the
+Windows primitive alone would not have proved the ordering. The ordering is now this transaction's:
+after D4 matches and before anything is removed, disposal hands the on-disk archive back to the
+writer, whose exact-retry branch performs a guarded sync-only repair. A failure refuses with nothing
+removed. Anchored by two hook-observed tests and a tenth harness entry; skipping the barrier makes the
+disposal succeed and record `Preserved` with no durable archive, which is the defect demonstrated.
+
+Still open: `sync_directory` is `Ok(())` on `not(unix)`, so on Windows the repair establishes file
+contents and not the directory entry. Shared primitive; decision above this scope.
+
+*Original entry follows.*
+
+### (Superseded) OPEN, and not an evidence gap: the preserving-disposal crash ordering
+
+The most serious item in this scope, and the only one that is a missing *guarantee* rather than a
+missing test. Raised by an external review, disputed by me, and the review was right.
+
+D4 authenticates and decodes the archive and syncs nothing. I argued that was safe because the archive
+and intent records share a `servers/` directory and the replacement's `atomic_write` ends in
+`sync_directory` on that parent, so one barrier covers both. That fails twice:
+
+1. **`sync_directory` is `Ok(())` on `not(unix)`.** On Windows there is no parent barrier at all.
+   `fs::rename` does not supply one: the pinned toolchain's `MoveFileExW` does not request
+   write-through. My own note about cfg-gated blindness on this host says exactly why I should have
+   checked this before claiming closure.
+2. **"If the fsync fails, neither is durable" is not a property of `fsync`.** A failed flush means
+   completion is not guaranteed, not that nothing persisted - and this family's own tests already
+   treat a post-rename sync failure as **committed, not rolled back**.
+
+What holds is narrower than the preservation guarantee this scope claims: on Unix, a *successfully
+completed* replacement makes both namespace changes durable. Interrupted executions, and every
+execution where the barrier is a no-op, are not covered.
+
+**Not fixed here, deliberately.** `sync_directory` is shared by every record family, so the choice is
+above this scope: implement a real Windows barrier, refuse a preserving disposal before removal where
+none can be provided, or narrow the stated guarantee. Whoever owns persistence should decide. The
+`debug_assert` at the D4 site is kept only for co-location and now says so.
+
+### The evidence audit: "every guard has a failing mutant" was FALSE
+
+A full per-test audit ran 25 hand mutations over this scope. Its central result overturns a claim
+this document made:
+
+> **"Every guard has a failing mutant" is false at the store disposal layer.** Six guards there can
+> be deleted with the whole 105-test overlay suite still green.
+
+They survive because a *later* guard refuses the same input first. That is not redundancy being
+harmless: it means each of these can be deleted, or silently stop working, and nothing will say so.
+
+| Guard | Mutation that survives | Why it is masked | Severity |
+|---|---|---|---|
+| `disposal.rs:72-77` D1 membership | delete the check | the stranger in its test is also not the author, so D1-authorship refuses | **High** |
+| `disposal.rs:221-229` D4 content/branch/generation | delete the triple | `matches_branch` refuses instead | **High** |
+| `copy.rs:143-165` `probe_copy_object` | force `Ok(true)` | nothing else checks it; no fixture reaches it | **High** |
+| `disposal.rs:81-83` D1 target derivation | delete | document binding refuses | Medium |
+| `disposal.rs:161` D2 store-level transfer hold | delete | replication's own `dispose` refuses | Medium |
+| `disposal.rs:173` D3 content, store level | delete | replication `dispose` refuses with `IntentConflict`; only the **desktop** message test catches it | Medium |
+| `epoch_draft_archive.rs:191` record bound | delete | nothing; 32/32 still pass | Medium |
+| `disposal.rs:256` D6 ledger-count mismatch | delete | no fixture reaches it | Low, defensive |
+| `copy_capture.rs:368-369` `stamp.server`/`target` | delete both | document derivation and a `None` read refuse | Low, redundant |
+
+**The D4 row is the one to fix first.** Its own comment says the generation compare is the only
+thing that catches an archive of a *previous generation* whose entries and content are identical -
+and that case has no test at all. Of the three Highs, it is the one where the masking guard does not
+cover the same ground.
+
+Two more vacuous tests of mine, beyond those already recorded:
+
+- `a_preserving_disposal_refuses_an_archive_for_another_branch` proves `matches_branch`, not the
+  metadata triple it is named for.
+- `d3_refuses_a_wrong_branch_a_wrong_content_and_a_wrong_count_separately` is not "separately" for
+  the content case; only the desktop test's message assertion distinguishes it.
+
+**And a caveat about the harness itself:** it runs each mutation with `--exact`, so siblings never
+execute and the script does **not** check isolation. Isolation rests on the hand-runs behind each
+entry. `release-scope-binding`'s expected string also matches both assertions in its test, and the
+typed reader fires first, so the release path's own scope refusal is never executed under that
+mutation.
+
+The audit's full UNVERIFIED list - archive A4-A13, copy_capture M15-M17, desktop D2-D8, restore
+P1-P12, tenure T1-T3, sync S1-S8, replication R1-R11 - is the queue for whoever picks this up,
+each with the exact mutation to apply.
+
+### Verified at `a0803080`
+
+Run in a detached worktree, because the main tree cannot link (see below).
+
+| Suite | Result |
+|---|---|
+| `cargo test -p catcoms-sync --lib owner_tenure` | **11 passed** |
+| `cargo test -p catcoms-replication --lib studio::` | **136 passed** |
+| `cargo test -p catcoms-app --lib studio` | **317 passed**, 6 ignored |
+
+That discharges the "compiled but unexecuted" caveat on `3cb073bf`, `ed8ab0a8`, `1c1a454d` and
+`a0803080`. The independent audit separately measured 222 app / 45 desktop at `288bb30c` and ran the
+mutation harness end to end: **9 detected, 9 restored runs passing**.
+
+### Blocked: the app crate cannot link
+
+`cargo test -p catcoms-app` has been failing for an extended stretch on **another agent's in-flight
+work**, not mine: `crates/catcoms-app/src/actor/file_transfers.rs` references
+`catcoms_sync::BlobPageOutcome`, `catcoms_sync::MIN_BLOB_PAGE` and `catcoms_rt::REQUEST_TIMEOUT_MS`,
+none of which exist yet in those crates.
+
+`cargo check -p catcoms-app --lib --all-targets` is clean, so everything below compiles, including
+the test targets. What has **not** run:
+
+- the `studio::tenure` seam tests (`23465a17`)
+- the corrected `studio::restore` tests and the H1 fix (`d4531b17`)
+
+Both commits say so in their own messages. I have not claimed a pass for either and will report the
+result when the tree links rather than assume it.
+
+### Mutation testing found three vacuous tests I wrote
+
+All three passed while proving nothing about the guard they named, and all three were caught by
+deleting the guard and watching the test stay green:
+
+1. A cross-document copy pointed at an **empty** foreign projection, asserting only `is_err()`. It
+   was failing at "missing recovery title", not at the scope check. With the check deleted the plan
+   comes back `Ready` - a foreign group's content copied into this document.
+2. An apply substituting the literal `"not what was proposed"` as a body. Refused while decoding
+   the operation.
+3. The same case substituting a **frame** body from a second preview. Refused by the blob rail with
+   "publish the frame PIX before saving its reference".
+
+The fix in each case was to make the input reach the guard: a foreign document with a real title of
+its own, and a substitute body that is an independently valid title operation. With the body guard
+deleted that body is now written - `contentSaved: true`, a renderer previewing one value and saving
+another.
+
+Asserting each refusal's **message** is what exposed the second wrong claim in the same test: a
+mismatched `epochId` never reaches the echo check at all, because the preflight that establishes the
+destination is the Open epoch the proposal was built for fires first. Three guards that all refuse
+is not three guards that each refuse for their own reason.
+
+### Findings from the fable adversarial reviews, and what they cost
+
+Two rounds on the native surface. The second is worth recording because of *how* it landed: the
+reviewer did not argue that a test was weak, it **deleted two D3 guards and showed all eleven of my
+tests still passed**. Every case in `a_live_branch_survives_every_refused_disposal` used
+`mode: preserve` against a fixture with no archive, so D4 refused all four whichever D3 check was
+removed. The test was green for a reason unrelated to what it claimed. Fixed by sending the first
+three as confirmed discards, which have nothing left to stop them, and by asserting each refusal's
+own message; the reviewer's exact mutation now fails, and only in that test.
+
+Three more, all real:
+
+- The lifecycle view **mixed branch-scoped and document-scoped facts without binding them**. An
+  archive outlives the branch it preserved and a retained disposal of generation N sits beside a
+  live N+1. As bare presence flags a renderer would report the user's current work as preserved
+  when the archive is evidence for work they already disposed of. Every branch-scoped fact now
+  carries its branch and generation.
+- **No destructive control action emitted a `RefreshRequired` notice.** Only `Acknowledge` and
+  `RestorePointer` were classified as changing, so a dispose that rewrote the intent record, or a
+  release that unlinked and then failed its parent sync, left the renderer showing state that is
+  gone.
+- Release's **uncertain outcome was indistinguishable from a clean refusal** at the IPC boundary,
+  although section 12.1 requires such a caller to reconcile rather than resend.
+  `AppError::CommittedButNotDurable`'s Display prefix is now published as
+  `catcoms_app::UNCERTAIN_OUTCOME` and documented as a contract.
+
+Two defects were found by writing tests rather than by review: the lifecycle view did not publish
+the branch content digest a disposal has to echo, so the command surface was complete and
+unusable; and serde's internally tagged representation let a **unit** variant swallow every other
+field, so `{"kind":"preserve","confirmation":"destroy-local-draft"}` deserialised silently.
+
+**A process cost worth recording.** I let a review agent with checkout permissions run while I had
+uncommitted work in its scope, and its byte-exact restore - correct behaviour on its part - took
+the whole of `lifecycle.rs`. That is the fifth time `git checkout --` has destroyed uncommitted
+work in this scope, and the first time it was not my own hand. The rule stands and now has a second
+half: **commit before mutating, and commit before letting anything else mutate.**
 
 **Sections above this point are an append-only ledger and are dated.** Where an earlier entry
 says something is not yet built, read it as the state at that entry's date, not as current
@@ -719,15 +1079,24 @@ state; this pair of lists is the current one.
 
 ## Test and CI evidence
 
+*Current as of 2026-09-30, through `bbef5908`. Local runs on this Windows host, no GitHub run
+URLs yet.*
+
 | Item | State |
 |---|---|
-| Focused core/store/actor suites | Not written, not run |
-| Mutation script and restored regressions | Not written, not run |
-| `studio-overlay` `lifecycle` job | Proposed in design 17.3; not added to any workflow |
+| `cargo test -p catcoms-app --lib studio::` | **211 passed, 0 failed, 5 ignored** at `bbef5908`, `RUST_MIN_STACK=33554432` |
+| `cargo test --lib studio::` in `apps/desktop/src-tauri` | **36 passed, 0 failed** at `bbef5908` |
+| `cargo clippy -p catcoms-app --lib --all-targets` | Clean at `bbef5908` |
+| `cargo clippy --lib --all-targets` (desktop) | Clean at `bbef5908` |
+| Mutation script and restored regressions | Script written (9 mutations, 4 crates). **Not yet re-run end to end on a quiet tree** |
+| `studio-overlay` `lifecycle` job | Added to `.github/workflows/studio-overlay.yml`. No run URL observed yet |
 | GitHub run URLs and checkout SHAs | None |
 
-Nothing in this scope has been executed. Any later claim of a pass must name the exact command, the
-executed test count, the ignored cases, the run URL and the actual checkout SHA.
+`RUST_MIN_STACK=33554432` is a **workaround, not a result**: without it these suites abort with
+`0xffffffff` from stack exhaustion. The cause is not in this scope.
+
+Any later claim of a pass must name the exact command, the executed test count, the ignored cases,
+the run URL and the actual checkout SHA.
 
 ## Implementation prerequisites, in order
 

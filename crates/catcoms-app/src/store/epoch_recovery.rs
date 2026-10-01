@@ -187,7 +187,13 @@ impl EpochRecoveryState {
         Ok(bytes)
     }
 
-    fn decode(bytes: &[u8], scope: &[u8], document: &LogicalDocument) -> Result<Self, AppError> {
+    /// Visible across the store so copy's detached planner can decode the destination's retained
+    /// versions from bytes it captured, without holding the store that read them.
+    pub(in crate::store) fn decode(
+        bytes: &[u8],
+        scope: &[u8],
+        document: &LogicalDocument,
+    ) -> Result<Self, AppError> {
         if bytes.len() > MAX_RECORD_BYTES {
             return Err(invalid("recovery record exceeds its bound"));
         }
@@ -512,6 +518,18 @@ impl ServerStore {
                 Some(bytes.physical_bytes),
             )),
         }
+    }
+
+    /// The same bounded authenticated read through the canonical path, without decoding.
+    ///
+    /// Copy's composite capture needs the recovery record's *bytes and identity* rather than a
+    /// decoded state: it stamps them under custody and rechecks them later, and decoding is the
+    /// detached worker's job.
+    pub(in crate::store) fn read_scoped_recovery_plain(
+        &self,
+        scope: &[u8],
+    ) -> Result<Option<AuthenticatedEpochFileBytes>, AppError> {
+        self.read_epoch_recovery_plain(&self.epoch_recovery_path(scope))
     }
 
     // Shared bounded authentication path for addressed reads and inventory discovery. Absence
