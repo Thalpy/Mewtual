@@ -242,6 +242,49 @@ impl StudioOverlayState {
             .ok_or(ReplError::EpochBound)
     }
 
+    /// The branch a Save prepared from `fresh` here and now must name: the live branch if there is
+    /// one, otherwise the branch the next admission would mint. `state` is `None` when the document
+    /// has no overlay record yet, which is generation 1, the same number [`Self::new`] stores.
+    ///
+    /// Derived and never reserved. Preparation computes it and S1 and S1b check it again. If the
+    /// branch it named is disposed or transferred in between, or a branch on another basis is
+    /// admitted, the id names nothing and the request is `Stale`: the user prepares again, and no
+    /// delayed request can claim a namespace it was not handed. If a branch on the **same** basis
+    /// is admitted in between, the id is that branch's, because the derivation is a pure function
+    /// of basis and generation, and the request joins it as `Active`. That is the outcome
+    /// preparing after the admission would have produced, so it is not a hole.
+    ///
+    /// Exposed so that callers outside this file never compute [`branch_identity`] themselves. A
+    /// second copy of the derivation is the defect `next_generation` records.
+    pub fn request_branch_id(
+        state: Option<&Self>,
+        fresh: &StudioClosingOverlayBasis,
+    ) -> Result<[u8; 32], ReplError> {
+        Ok(match state {
+            Some(state) => match state.branch_id() {
+                Some(live) => live,
+                None => branch_identity(fresh.fingerprint(), state.next_generation()?),
+            },
+            None => branch_identity(fresh.fingerprint(), 1),
+        })
+    }
+
+    /// [`Self::admit_new_branch`] for a document with no overlay record at all.
+    ///
+    /// `New { generation: 1 }` exactly when `branch` is the generation-1 identity of `fresh`, and
+    /// the caller then builds the state with [`Self::new`]. There is no retained manifest to
+    /// classify against, so every other id is `Stale`.
+    pub fn admit_first_branch(
+        branch: [u8; 32],
+        fresh: &StudioClosingOverlayBasis,
+    ) -> StudioOverlayAdmission {
+        if branch_identity(fresh.fingerprint(), 1) == branch {
+            StudioOverlayAdmission::New { generation: 1 }
+        } else {
+            StudioOverlayAdmission::Stale
+        }
+    }
+
     /// The identity every request must carry, or `None` when there is no live branch to name.
     pub fn branch_id(&self) -> Option<[u8; 32]> {
         self.active

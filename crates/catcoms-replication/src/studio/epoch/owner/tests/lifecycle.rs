@@ -382,6 +382,108 @@ fn admission_refuses_a_live_branch_a_skipped_generation_and_an_unrelated_basis()
     );
 }
 
+/// The id preparation hands out is the id admission accepts, in all three states a Save can find:
+/// no record, a live branch, and no live branch after a disposal. Checked against the documented
+/// derivation, not against `branch_id`, so a second definition drifting would show here.
+#[test]
+fn the_requested_branch_id_is_the_one_admission_accepts_in_every_state() {
+    let mut f = Fixture::new(true);
+    let (g1, ledger, ordered, basis) = branch(&mut f, 2);
+    let fresh = &basis;
+
+    // No record: generation 1, and only that id is admitted.
+    let first = StudioOverlayState::request_branch_id(None, fresh).unwrap();
+    assert_eq!(first, derived_branch_id(fresh.fingerprint(), 1));
+    assert_eq!(
+        StudioOverlayState::admit_first_branch(first, fresh),
+        StudioOverlayAdmission::New { generation: 1 }
+    );
+    assert_eq!(
+        StudioOverlayState::admit_first_branch(derived_branch_id(fresh.fingerprint(), 2), fresh),
+        StudioOverlayAdmission::Stale,
+        "a first branch must not be admitted at any generation but 1"
+    );
+    assert_eq!(
+        StudioOverlayState::admit_first_branch(
+            derived_branch_id(unrelated_basis().fingerprint(), 1),
+            fresh
+        ),
+        StudioOverlayAdmission::Stale,
+        "nor from another basis"
+    );
+    // And the state `new` builds carries exactly that id.
+    assert_eq!(g1.branch_id(), Some(first));
+
+    // A live branch: the request names it, and it classifies as Active.
+    let live = StudioOverlayState::request_branch_id(Some(&g1), fresh).unwrap();
+    assert_eq!(live, first);
+    assert_eq!(
+        g1.classify_request(f.source.target, live, &intent(&f, ordered[0].0.clone()))
+            .unwrap(),
+        StudioOverlayRequestClass::Active
+    );
+
+    // No live branch after a disposal: the next generation, which admission accepts.
+    let (after, _) = g1
+        .dispose(
+            &ledger,
+            StudioDisposalDecision::Discard(confirmation()),
+            g1.branch_content(&ledger).unwrap(),
+            1,
+            1,
+        )
+        .unwrap();
+    let next = StudioOverlayState::request_branch_id(Some(&after), fresh).unwrap();
+    assert_eq!(next, derived_branch_id(fresh.fingerprint(), 2));
+    assert_eq!(
+        after
+            .admit_new_branch(f.source.target, next, fresh)
+            .unwrap(),
+        StudioOverlayAdmission::New { generation: 2 }
+    );
+
+    // Two visits prepared against `after` race. The id is a pure function of basis and generation,
+    // so a winner on the SAME basis mints exactly the id the loser holds, and the loser joins that
+    // branch as Active - which is what preparing after the admission would have handed it anyway.
+    let request = intent(&f, ordered[1].0.clone());
+    let same = after
+        .new_admitted(
+            fresh,
+            StudioOverlayAdmission::New { generation: 2 },
+            StudioOverlayProvenance::Closing,
+        )
+        .unwrap();
+    assert_eq!(
+        same.classify_request(f.source.target, next, &request)
+            .unwrap(),
+        StudioOverlayRequestClass::Active,
+        "a racing admission on the same basis is the branch the loser named"
+    );
+    // A winner on ANY other basis takes generation 2 under a different id, so the loser's id
+    // names nothing and admission refuses it.
+    let other = unrelated_basis();
+    let different = after
+        .new_admitted(
+            &other,
+            StudioOverlayAdmission::New { generation: 2 },
+            StudioOverlayProvenance::Closing,
+        )
+        .unwrap();
+    assert_eq!(
+        different
+            .classify_request(f.source.target, next, &request)
+            .unwrap(),
+        StudioOverlayRequestClass::Unmatched
+    );
+    assert_eq!(
+        different
+            .admit_new_branch(f.source.target, next, fresh)
+            .unwrap(),
+        StudioOverlayAdmission::Stale,
+        "an id prepared before another basis was admitted must not be admitted after it"
+    );
+}
+
 /// A terminal arm acknowledges only the exact operation its manifest recorded.
 ///
 /// The right branch with a body it never held is `Unmatched`, not acknowledged. Without this a
