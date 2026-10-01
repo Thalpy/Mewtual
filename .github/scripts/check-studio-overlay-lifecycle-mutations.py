@@ -89,6 +89,26 @@ MUTATIONS = [
         "disposal::a_preserving_disposal_refuses_an_archive_whose_entries_are_not_the_branchs",
         "must not authorise destroying it",
     ),
+    # --- evidence before removal: a preserving disposal must establish its archive durably first ---
+    #
+    # Swallowing the barrier's error is caught, but read what catches it. The disposal is STILL
+    # refused - by the budget, because the failed sync closed both budgets before its I/O and the
+    # removal write then demands reconciliation. So "nothing is removed" is defended twice, and only
+    # the test's assertion on the refusal MESSAGE distinguishes the barrier's own refusal from the
+    # budget's. That is why the expected text below is the message assertion and not the expect_err.
+    #
+    # Skipping the barrier call entirely is the more alarming mutant - the disposal then SUCCEEDS and
+    # records `Preserved` without the archive ever being made durable - but it cannot be expressed as
+    # one string replacement, so it rests on the hand-run recorded in the status doc, where it failed
+    # both ordering tests at their own assertions with the other ten disposal tests green.
+    (
+        "dispose-archive-durability-propagates", "catcoms-app", APP_TESTS,
+        f"{APP}/epoch_intents/disposal.rs",
+        "                })?;\n                StudioDisposalDecision::Preserve { archive: record.id }",
+        "                }).ok();\n                StudioDisposalDecision::Preserve { archive: record.id }",
+        "disposal::a_preserving_disposal_whose_archive_cannot_be_made_durable_removes_nothing",
+        "the refusal must be the durability barrier's",
+    ),
     # --- the branch-generation namespace ---
     (
         "admission-not-trusted", "catcoms-replication", REPL_TESTS,

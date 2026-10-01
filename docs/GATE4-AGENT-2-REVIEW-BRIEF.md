@@ -131,7 +131,39 @@ jobs on the merge checkout - 106 app overlay, 47 replication, 11 sync, and 9 mut
 
 ## 5. The open issues
 
-### Issue 0 - the preserving-disposal crash-ordering guarantee is not established (NEW, and the most serious)
+### Issue 0 - preserving-disposal crash ordering: ORDERING CLOSED, PLATFORM BARRIER OPEN
+
+**Update, after a second re-review.** It separated two obligations I had run together: a real
+directory barrier, and the *order* in which it runs. Fixing `sync_directory` on Windows alone would
+not have proved the ordering, because the first barrier covering the archive would still have been
+the replacement's own - after the branch-removing rename.
+
+**The ordering half is now fixed and anchored.** After D4 matches the archive and before anything is
+removed, disposal hands the on-disk archive back to the archive writer, which takes its exact-retry
+branch and performs a guarded, accounted, sync-only repair - file contents, then parent directory -
+changing no bytes. One definition of "durably established", and it is the writer's. If it cannot
+complete, disposal refuses with nothing removed.
+
+Two tests, both observed through the transaction's own hooks rather than inferred from the result
+(the result is identical either way, which is why a result-only test could never catch this):
+
+- the archive's sync event strictly precedes the intent write;
+- injecting failure **at the sync boundary itself** - not an after-write hook, which describes a
+  durable-but-unaccounted record - refuses, and every persisted record is byte-identical afterwards.
+
+**Mutation evidence:** skipping the barrier call entirely makes both tests fail at their own
+assertions with the other ten disposal tests green - and, more tellingly, the disposal then
+**succeeds** and records `Preserved` without the archive ever having been made durable. That is the
+defect the review described, demonstrated. Swallowing the barrier's error is caught too, but by a
+second defence: the failed sync has already closed both budgets, so the removal write is refused for
+reconciliation. Only the test's assertion on the refusal *message* tells the two apart, which is now
+the tenth harness entry.
+
+**What remains open:** on `not(unix)`, `sync_directory` is still `Ok(())`, so the repair establishes
+the archive's file contents but not its directory entry. That primitive is shared by every record
+family and the decision is above this scope.
+
+*Original entry, kept for the record:*
 
 This is the one issue here that is **not** merely an evidence gap. The others are guards that work
 and are untested; this is a guarantee this scope claims and does not have.

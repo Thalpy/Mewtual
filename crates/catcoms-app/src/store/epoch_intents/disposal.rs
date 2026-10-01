@@ -227,8 +227,10 @@ impl ServerStore {
                         )
                     })?;
                 let archive = &record.archive;
-                // **OPEN: the crash-ordering guarantee for a preserving disposal is NOT established
-                // here, and an earlier version of this comment wrongly claimed it was.**
+                // **PARTLY CLOSED. The ORDERING half is now established by the explicit barrier
+                // below; the platform half is not. Read both paragraphs.**
+                //
+                // The history matters because this comment was wrong twice before it was right.
                 //
                 // The read below authenticates and decodes but syncs nothing. A review asked what
                 // stops a preserving disposal destroying the branch on the strength of an archive
@@ -255,11 +257,19 @@ impl ServerStore {
                 // directory flush covers both entries. Interrupted executions, and every execution on
                 // a platform where the barrier is a no-op, are not covered.
                 //
-                // Closing this needs a decision above this function, because `sync_directory` is
-                // shared by every record family rather than owned here: either implement a real
-                // Windows directory barrier, or have a preserving disposal refuse before removal on a
-                // platform that cannot provide one, or narrow the product's stated guarantee. Calling
-                // the existing helper again would change nothing.
+                // A second review then separated two obligations that this comment had run together:
+                // a real barrier, and the ORDER in which it runs. Fixing `sync_directory` alone would
+                // not prove the ordering, because the first barrier covering the archive would still
+                // be the replacement's - after the removal. The ordering is this transaction's to fix,
+                // and it now does: the explicit sync-only repair below runs after matching and before
+                // anything is removed, and refuses if it cannot complete.
+                //
+                // **What remains open is the platform barrier itself.** `sync_directory` is shared by
+                // every record family rather than owned here, and on `not(unix)` it is still a no-op,
+                // so the repair below establishes the archive's file contents but not its directory
+                // entry there. The decision - implement a real Windows barrier, refuse a preserving
+                // disposal before removal where none exists, or narrow the stated guarantee - belongs
+                // to whoever owns persistence.
                 //
                 // The assertion below is kept for what it does prove - that the two families are
                 // co-located, so a later move cannot silently invalidate the Unix half of the
@@ -300,6 +310,47 @@ impl ServerStore {
                         "the preserved archive's entries are not this branch's entries",
                     ));
                 }
+                // **Establish the matching archive's durability BEFORE anything is removed.**
+                //
+                // Reading and matching proves the archive is present and is this branch's; it does
+                // not prove the archive is durable. An archive whose rename landed while its own
+                // parent barrier failed is exactly that case, and the writer reported it as
+                // uncertain. Without this step, the first barrier to cover it would be the
+                // replacement's own parent sync below - which runs *after* the branch-removing
+                // rename, so evidence would become durable no earlier than the removal, and an
+                // interrupted execution could leave either one without the other.
+                //
+                // The archive writer already knows how to do this for the archive that is on disk:
+                // handed the identical payload, it takes its exact-retry branch and performs a
+                // guarded, accounted, sync-only repair - file contents, then parent directory -
+                // changing no bytes. Reusing it rather than adding a "durable" flag means there is
+                // one definition of "this archive is durably established", and it is the writer's.
+                //
+                // A failure here refuses BEFORE removal: no bytes change, and the branch, its ledger
+                // entries and the archive are all exactly as they were. It is not free, though - the
+                // writer closed both budgets before its I/O, as every write in this family does, so
+                // the caller must reconcile before its next write. That is the correct cost of an
+                // uncertain flush, and it is paid without anything having been destroyed.
+                //
+                // **Limit, stated rather than hidden:** on a platform where the parent-directory
+                // barrier is a no-op (`sync_directory` on `not(unix)`), this establishes the file
+                // contents but not the directory entry, so it narrows the gap without closing it
+                // there. That half is a shared persistence decision and is recorded as such.
+                self.write_studio_draft_archive_with_io(
+                    server,
+                    document,
+                    &record.archive,
+                    rng,
+                    budget,
+                    intents,
+                    hooks,
+                )
+                .map_err(|error| {
+                    invalid(format!(
+                        "a preserving disposal could not establish its archive durably, so the \
+                         branch was not removed: {error}"
+                    ))
+                })?;
                 StudioDisposalDecision::Preserve { archive: record.id }
             }
         };

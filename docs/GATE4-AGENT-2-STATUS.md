@@ -898,7 +898,21 @@ destination fixture in the desktop tests or a store-backed copy fixture in the a
 
 That is now the single largest known hole in this scope's evidence, and it guards a durable write.
 
-### OPEN, and not an evidence gap: the preserving-disposal crash ordering
+### Preserving-disposal crash ordering: ordering CLOSED, platform barrier OPEN
+
+**Update.** A second re-review separated a real barrier from the order it runs in; fixing the
+Windows primitive alone would not have proved the ordering. The ordering is now this transaction's:
+after D4 matches and before anything is removed, disposal hands the on-disk archive back to the
+writer, whose exact-retry branch performs a guarded sync-only repair. A failure refuses with nothing
+removed. Anchored by two hook-observed tests and a tenth harness entry; skipping the barrier makes the
+disposal succeed and record `Preserved` with no durable archive, which is the defect demonstrated.
+
+Still open: `sync_directory` is `Ok(())` on `not(unix)`, so on Windows the repair establishes file
+contents and not the directory entry. Shared primitive; decision above this scope.
+
+*Original entry follows.*
+
+### (Superseded) OPEN, and not an evidence gap: the preserving-disposal crash ordering
 
 The most serious item in this scope, and the only one that is a missing *guarantee* rather than a
 missing test. Raised by an external review, disputed by me, and the review was right.
