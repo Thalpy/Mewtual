@@ -2,6 +2,135 @@ use super::*;
 use catcoms_replication::studio::{StudioOverlay, StudioOverlayState};
 use catcoms_replication::IntentLedger;
 
+/// V8, and a regression the branch wiring first introduced: a transferred branch's acknowledgement
+/// stays owed after a **newer** branch has been admitted, and it needs no tenure.
+///
+/// `classify_request` derives the transferred branch's identity from the *current* generation, so
+/// it can only recognise it until the next admission moves the generation on. The bare
+/// `completed_retry` that S1 used to call keyed the same acknowledgement on basis and operation
+/// instead, so it survived that. Replacing it outright made the delayed retry `Unmatched`: refused
+/// as stale under a known tenure, and refused for its tenure under `Imported` or `Unknown` - which
+/// for `Imported` is permanent. An acknowledgement is not an acceptance, so nothing about the
+/// namespace requires giving it up.
+///
+/// Sequence: G1 accepted and transferred; a new Closing basis; G2 admitted and live at generation
+/// 2; then G1's own delayed request, with **no** tenure. It must be acknowledged with G1's outcome,
+/// write nothing new and leave G2 untouched.
+#[test]
+fn a_transferred_branch_is_still_acknowledged_after_a_newer_branch_is_admitted() {
+    let root = tempfile::tempdir().unwrap();
+    let f = Fixture::new(true);
+    let mut store = open(root.path());
+    let (first_close, first_basis) = closing(&f, &mut store);
+    let first_branch = request_branch(&f, &mut store, &first_close);
+    save(
+        &f,
+        &mut store,
+        &first_close,
+        first_basis.fingerprint(),
+        f.title(),
+        123,
+    );
+    install(&f, &mut store, &first_close);
+    let first_outcome = transfer(&f, &mut store, first_basis.fingerprint());
+
+    // A new Closing basis, and G2 admitted on it.
+    grow(&f, &mut store);
+    let mut source = f.load(&store).unwrap();
+    let previous = source.unit.receipt_head().unwrap().cloned().unwrap();
+    let decision = source
+        .unit
+        .new_owner_decision(&f.group, &f.device, 0, Some(&previous))
+        .unwrap();
+    let close = decision.close().clone();
+    let mut b = budget(&mut store, &f);
+    store
+        .seal_studio_epoch(
+            SERVER,
+            &f.group,
+            f.target,
+            &f.device,
+            decision.receipt().clone(),
+            0,
+            &mut rng(),
+            &mut b,
+        )
+        .unwrap();
+    let basis = store
+        .prepare_studio_closing_overlay(
+            SERVER,
+            &f.group,
+            f.target,
+            &f.device,
+            &close,
+            Some(0),
+            &mut b,
+        )
+        .unwrap();
+    let mut second = f.title();
+    second.nonce = [77; 16];
+    save(&f, &mut store, &close, basis.fingerprint(), second, 300);
+    let state = store.load_epoch_intents(SERVER, &f.logical).unwrap();
+    let metadata = state.handoff_metadata().unwrap();
+    assert_eq!(
+        metadata.branch_generation(),
+        2,
+        "G2 must be live at a newer generation, or this is not the case under test"
+    );
+    assert!(
+        metadata.has_completed(),
+        "G1's transfer manifest must still be retained"
+    );
+    let live = metadata.branch_id();
+    drop(state);
+    let before =
+        fs::read(store.epoch_intent_path(
+            &crate::store::epoch_intents::scope_bytes(SERVER, &f.logical).unwrap(),
+        ))
+        .unwrap();
+
+    // G1's delayed request, exactly as its client sent it, with no tenure at all.
+    let mut b = budget(&mut store, &f);
+    let retried = store
+        .save_studio_closing_overlay(
+            SERVER,
+            &f.group,
+            f.target,
+            &f.device,
+            &first_close,
+            StudioOwnerTenure::Unknown,
+            first_basis.fingerprint(),
+            first_branch,
+            f.title(),
+            999,
+            &mut rng(),
+            &mut b,
+        )
+        .unwrap_or_else(|e| panic!("the transferred branch's acknowledgement was refused: {e}"));
+    assert!(
+        matches!(retried, StudioOverlaySave::HandedOff(ref value) if value == &first_outcome),
+        "acknowledged with the wrong outcome: {retried:?}"
+    );
+    assert_eq!(
+        fs::read(store.epoch_intent_path(
+            &crate::store::epoch_intents::scope_bytes(SERVER, &f.logical).unwrap()
+        ))
+        .unwrap(),
+        before,
+        "an acknowledgement wrote new content"
+    );
+    assert_eq!(
+        store
+            .load_epoch_intents(SERVER, &f.logical)
+            .unwrap()
+            .handoff_metadata()
+            .unwrap()
+            .branch_id(),
+        live,
+        "acknowledging G1 disturbed the live G2 branch"
+    );
+}
+
 #[test]
 fn studio_overlay_handoff_rollover_floor_rejects_forgotten_retry_after_rewind() {
     let root = tempfile::tempdir().unwrap();
