@@ -656,7 +656,24 @@ fn a_current_tenure_report_stages_suppresses_proof_and_is_decided_from_the_reser
     );
 
     // The reporter retries; the freed slot takes the pair and its fingerprint is released.
+    let overflow = |store: &ServerStore| {
+        store
+            .load_epoch_owner_repair_state(SERVER, &f.logical, &f.device.device_id(), 0)
+            .unwrap()
+            .0
+            .fault_overflow_fingerprints()
+    };
+    assert_eq!(
+        overflow(&store),
+        Some(1),
+        "only the second pair's fingerprint is held"
+    );
     assert!(!head(&f, &mut store, Some(&second)).prove);
+    assert_eq!(
+        overflow(&store),
+        None,
+        "a stored pair releases its fingerprint and an empty hold canonicalises away"
+    );
     let (repair, outcome, state) =
         issue(&f, &mut store, request([&second[0], &second[1]], &r1), None).unwrap();
     assert_eq!(outcome, StudioRepairOutcome::Screened);

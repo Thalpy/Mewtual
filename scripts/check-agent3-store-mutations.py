@@ -100,7 +100,9 @@ core.MUTATIONS = [
         "REPAIR-contextual-observer", FAULT,
         "            pair.attestation.observer != *observer.as_bytes()\n"
         "                || pair.attestation.admission_epoch > durable_epoch",
-        "            pair.attestation.admission_epoch > durable_epoch",
+        # Keeps `observer` used so the mutant builds under CI's -D warnings.
+        "            (pair.attestation.observer != *observer.as_bytes() && false)\n"
+        "                || pair.attestation.admission_epoch > durable_epoch",
         "contextual_restore_refuses_another_observer_or_an_uncovered_admission_epoch",
         "another observer's attestation is not this device's evidence",
     ),
@@ -140,7 +142,9 @@ core.MUTATIONS = [
         "current.is_none_or(|c| c == r.hash() && journal.fault_retains_member(c))",
         REPAIR_TESTS
         + "a_current_tenure_report_stages_suppresses_proof_and_is_decided_from_the_reserved_slot",
-        "a staged live pair suppresses proof in the same answer",
+        # The member filter also hides the first report's receipt; live overflow over a
+        # receipt that is NOT a retained member is what only the gate itself can suppress.
+        "live overflow still suppresses",
     ),
     (
         "REPAIR-hint-filter", STUDIO_HEAD,
@@ -156,7 +160,8 @@ core.MUTATIONS = [
         "            record.reserved = Some(admission.pair);\n",
         REPAIR_TESTS
         + "a_current_tenure_report_stages_suppresses_proof_and_is_decided_from_the_reserved_slot",
-        "nothing retained: tag 3 omitted",
+        # Recycling would also drop it later; the release must happen when the pair is stored.
+        "a stored pair releases its fingerprint",
     ),
     (
         "REPAIR-v5-issuance", APP_FAULT,

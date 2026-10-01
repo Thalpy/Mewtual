@@ -648,6 +648,12 @@ impl InertFaultRecord {
             || self.retains_member(receipt_hash)
     }
 
+    /// How many fingerprints the overflow hold carries, for regressions on its canonical form.
+    #[cfg(test)]
+    pub(in crate::store) fn overflow_fingerprints(&self) -> Option<usize> {
+        self.overflow.as_ref().map(|hold| hold.fingerprints.len())
+    }
+
     /// Whether any retained pair includes this receipt; such a receipt is never served as a hint.
     pub(in crate::store) fn retains_member(&self, receipt_hash: [u8; 32]) -> bool {
         self.all_pairs()

@@ -76,6 +76,14 @@ impl EpochOwnerReceiptState {
             .is_some_and(|r| r.suppresses_proof(receipt_hash, current_tenure))
     }
 
+    /// The overflow hold's fingerprint count, for regressions on its canonical lifecycle.
+    #[cfg(test)]
+    pub(in crate::store) fn fault_overflow_fingerprints(&self) -> Option<usize> {
+        self.fault_record
+            .as_ref()
+            .and_then(|r| r.overflow_fingerprints())
+    }
+
     /// Whether a retained pair includes this receipt, so it must not be served even as a hint.
     pub(in crate::store) fn fault_retains_member(&self, receipt_hash: [u8; 32]) -> bool {
         self.fault_record

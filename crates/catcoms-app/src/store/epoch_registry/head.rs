@@ -248,18 +248,18 @@ impl ServerStore {
         });
         let gated = selected
             .is_some_and(|r| current.is_none_or(|c| journal.fault_suppresses_proof(r.hash(), c)));
+        // A disputed receipt is not even offered as a hint, and nothing unserved is proved.
+        let receipt = selected
+            .filter(|r| !journal.fault_retains_member(r.hash()))
+            .cloned();
         let prove = is_owner
             && !gated
-            && selected.is_some()
+            && receipt.is_some()
             && selected == held
             && selected == own_choice
             && durable_tenure.is_some_and(|t| {
                 selected.is_some_and(|r| r.verify_current_owner(group, t).is_ok())
             });
-        // A disputed receipt is not even offered as a hint.
-        let receipt = selected
-            .filter(|r| !journal.fault_retains_member(r.hash()))
-            .cloned();
         if prove {
             let record = record.ok_or_else(|| invalid("proof source missing"))?;
             let reservation = budget
