@@ -12,6 +12,7 @@ use catcoms_rt::{CryptoRngCore, MeshTransport};
 use tokio::sync::{oneshot, OwnedMutexGuard};
 
 mod tenure;
+pub(crate) use tenure::require as require_owner_tenure;
 pub use tenure::StudioOwnerTenure;
 mod copy;
 pub use copy::{
@@ -23,6 +24,7 @@ pub use inspection::{
     StudioInspectionDelivery, StudioInspectionPreparation, StudioOverlayInspection,
     StudioPreparedInspection,
 };
+pub use overlay::StudioOverlaySaveTicket;
 mod preview;
 pub use preview::{StudioPreview, StudioPreviewDelivery, StudioRead};
 mod publication;

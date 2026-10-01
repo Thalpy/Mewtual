@@ -18,6 +18,9 @@ pub(super) fn check(accepted: bool) {
             .edit_or_reseal(&f.device, &f.group, &mut rng(), &late, 100)
             .unwrap();
         let (close, basis) = seal_source(&f, &mut store);
+        // The branch a ticket for this (soon stale) basis named: generation 1, which is also the
+        // live branch once the first Save below opens it.
+        let branch = request_branch(&f, &mut store, &close);
         let saved =
             accepted.then(|| save(&f, &mut store, &close, basis.fingerprint(), f.title(), 123));
         let mut before = f.load(&store).unwrap();
@@ -105,8 +108,9 @@ pub(super) fn check(accepted: bool) {
             f.target,
             &f.device,
             &close,
-            Some(0),
+            StudioOwnerTenure::Known(0),
             basis.fingerprint(),
+            branch,
             new_request.clone(),
             456,
             &mut rng(),

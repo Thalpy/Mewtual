@@ -489,6 +489,13 @@ pub(crate) fn studio_closing_capture_fixture(
         let inv = inventory(store);
         store.studio_storage_budget(server, group, &inv).unwrap()
     };
+    let branch = store
+        .studio_overlay_request_branch(server, group, target, &basis, &mut b)
+        .unwrap();
+    let mut b = {
+        let inv = inventory(store);
+        store.studio_storage_budget(server, group, &inv).unwrap()
+    };
     let mut op = title_op(target, 9_000);
     op.nonce = [77; 16];
     match store
@@ -498,8 +505,9 @@ pub(crate) fn studio_closing_capture_fixture(
             target,
             device,
             &close,
-            Some(0),
+            crate::studio::StudioOwnerTenure::Known(0),
             basis.fingerprint(),
+            branch,
             op,
             300,
             &mut ChaCha20Rng::seed_from_u64(13),
@@ -549,6 +557,10 @@ pub(crate) fn studio_handoff_ready_fixture(
     let basis = store
         .prepare_studio_closing_overlay(server, group, target, device, &close, Some(0), &mut b)
         .unwrap();
+    // The generation-1 branch the first Save opens; every later one appends to it.
+    let branch = store
+        .studio_overlay_request_branch(server, group, target, &basis, &mut b)
+        .unwrap();
     // `operations` accepted entries, so a caller can build a branch long enough for H3 to page
     // across background turns rather than finishing in one slice.
     for n in 0..operations {
@@ -561,8 +573,9 @@ pub(crate) fn studio_handoff_ready_fixture(
                 target,
                 device,
                 &close,
-                Some(0),
+                crate::studio::StudioOwnerTenure::Known(0),
                 basis.fingerprint(),
+                branch,
                 op,
                 300 + n as u64,
                 &mut ChaCha20Rng::seed_from_u64(22),
@@ -753,7 +766,10 @@ fn assert_overlay_headroom(depths: &[usize]) {
 ///
 /// The same sequence as `studio_closing_capture_fixture`, which cannot be reused here because it
 /// consumes the first accept into a capture and this needs accepts to accumulate.
-fn flow_s_closing(store: &mut ServerStore, f: &Fixture) -> (CloseRecord, [u8; 32], u64) {
+///
+/// Returns the close, the basis fingerprint, the branch every accept in a curve names - the
+/// generation-1 branch the first one opens and the rest append to - and the source's size.
+fn flow_s_closing(store: &mut ServerStore, f: &Fixture) -> (CloseRecord, [u8; 32], [u8; 32], u64) {
     fill_studio_epoch_fixture(store, SERVER, &f.group, &f.device, f.target);
     let decision =
         studio_owner_decision_fixture(store, SERVER, &f.group, &f.device, f.target, None);
@@ -773,7 +789,7 @@ fn flow_s_closing(store: &mut ServerStore, f: &Fixture) -> (CloseRecord, [u8; 32
         .unwrap();
     let source_bytes = fs::metadata(f.path(store)).unwrap().len();
     let mut b = budget(store, f);
-    let fingerprint = store
+    let basis = store
         .prepare_studio_closing_overlay(
             SERVER,
             &f.group,
@@ -783,9 +799,11 @@ fn flow_s_closing(store: &mut ServerStore, f: &Fixture) -> (CloseRecord, [u8; 32
             Some(0),
             &mut b,
         )
-        .unwrap()
-        .fingerprint();
-    (close, fingerprint, source_bytes)
+        .unwrap();
+    let branch = store
+        .studio_overlay_request_branch(SERVER, &f.group, f.target, &basis, &mut b)
+        .unwrap();
+    (close, basis.fingerprint(), branch, source_bytes)
 }
 
 /// Accepted operations as the production reader sees them, not as the writer counted them.
@@ -804,7 +822,7 @@ fn flow_s_curve(max_depth: usize, clock: &dyn Clock) -> (Vec<FlowSAccept>, u64) 
     let root = tempfile::tempdir().unwrap();
     let f = Fixture::new(true);
     let mut store = open(root.path());
-    let (close, fingerprint, source_bytes) = flow_s_closing(&mut store, &f);
+    let (close, fingerprint, branch, source_bytes) = flow_s_closing(&mut store, &f);
     let mut curve = Vec::with_capacity(max_depth);
     for n in 0..max_depth {
         let mut b = budget(&mut store, &f);
@@ -816,8 +834,9 @@ fn flow_s_curve(max_depth: usize, clock: &dyn Clock) -> (Vec<FlowSAccept>, u64) 
                 f.target,
                 &f.device,
                 &close,
-                Some(0),
+                crate::studio::StudioOwnerTenure::Known(0),
                 fingerprint,
+                branch,
                 flow_s_op(&f, n),
                 300 + n as u64,
                 &mut rng(),
@@ -848,7 +867,7 @@ fn flow_s_curve(max_depth: usize, clock: &dyn Clock) -> (Vec<FlowSAccept>, u64) 
                 f.target,
                 &f.device,
                 &close,
-                Some(0),
+                crate::studio::StudioOwnerTenure::Known(0),
                 plan,
                 &mut rng(),
                 &mut b,
@@ -900,7 +919,7 @@ fn flow_s_repeatable(depth: usize, repeats: usize, clock: &dyn Clock) -> (Spread
     let root = tempfile::tempdir().unwrap();
     let f = Fixture::new(true);
     let mut store = open(root.path());
-    let (close, fingerprint, _) = flow_s_closing(&mut store, &f);
+    let (close, fingerprint, branch, _) = flow_s_closing(&mut store, &f);
     for n in 0..depth {
         let mut b = budget(&mut store, &f);
         store
@@ -910,8 +929,9 @@ fn flow_s_repeatable(depth: usize, repeats: usize, clock: &dyn Clock) -> (Spread
                 f.target,
                 &f.device,
                 &close,
-                Some(0),
+                crate::studio::StudioOwnerTenure::Known(0),
                 fingerprint,
+                branch,
                 flow_s_op(&f, n),
                 300 + n as u64,
                 &mut rng(),
@@ -951,8 +971,9 @@ fn flow_s_repeatable(depth: usize, repeats: usize, clock: &dyn Clock) -> (Spread
                 f.target,
                 &f.device,
                 &close,
-                Some(0),
+                crate::studio::StudioOwnerTenure::Known(0),
                 fingerprint,
+                branch,
                 flow_s_op(&f, depth - 1),
                 300 + depth as u64 - 1,
                 &mut rng(),

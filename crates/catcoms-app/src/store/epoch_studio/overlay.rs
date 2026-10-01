@@ -1,7 +1,12 @@
 //! No source writes accompany local acceptance. Eligibility is checked under the same
 //! exclusive store/group borrow as the shared intent transaction, with no detached gap.
+use super::overlay_capture::OverlayBranch;
 use super::*;
-use catcoms_replication::studio::{StudioClosingOverlayBasis, StudioOverlaySave};
+use crate::studio::{require_owner_tenure, StudioOwnerTenure};
+use catcoms_replication::studio::{
+    StudioClosingOverlayBasis, StudioOverlayAdmission, StudioOverlayRequestClass,
+    StudioOverlaySave, StudioOverlayState,
+};
 use catcoms_replication::{CloseRecord, LocalIntent};
 
 impl ServerStore {
@@ -13,8 +18,9 @@ impl ServerStore {
         target: StudioTarget,
         device: &MlsDevice,
         close: &CloseRecord,
-        tenure: Option<u64>,
+        tenure: StudioOwnerTenure,
         basis: [u8; 32],
+        branch: [u8; 32],
         operation: DomainOp,
         ts: u64,
         rng: &mut impl CryptoRngCore,
@@ -28,6 +34,7 @@ impl ServerStore {
             close,
             tenure,
             basis,
+            branch,
             operation,
             ts,
             rng,
@@ -45,8 +52,9 @@ impl ServerStore {
         target: StudioTarget,
         device: &MlsDevice,
         close: &CloseRecord,
-        tenure: Option<u64>,
+        tenure: StudioOwnerTenure,
         basis: [u8; 32],
+        branch: [u8; 32],
         operation: DomainOp,
         ts: u64,
         rng: &mut impl CryptoRngCore,
@@ -60,6 +68,7 @@ impl ServerStore {
             close,
             tenure,
             basis,
+            branch,
             operation,
             ts,
             rng,
@@ -77,7 +86,7 @@ impl ServerStore {
         target: StudioTarget,
         device: &MlsDevice,
         close: &CloseRecord,
-        tenure: Option<u64>,
+        tenure: StudioOwnerTenure,
         plan: StudioOverlayPlan,
         rng: &mut impl CryptoRngCore,
         budget: &mut EpochStudioBudget,
@@ -121,13 +130,52 @@ impl ServerStore {
             .map_err(invalid)
     }
 
+    /// The branch a Save prepared against `fresh` must name.
+    ///
+    /// A thin read over [`StudioOverlayState::request_branch_id`], which owns the derivation; this
+    /// only finds the record. It exists so a caller never computes a branch identity itself - a
+    /// second copy of that derivation is the defect the namespace was built to prevent.
+    ///
+    /// **Not for retries.** A retry must resend the branch its original request named. After a
+    /// transfer or a disposal this returns the *next* branch, because that is what a fresh Save
+    /// would open, and a retry that re-asked here would name a branch it never wrote to.
+    pub(crate) fn studio_overlay_request_branch(
+        &mut self,
+        server: u64,
+        group: &ServerGroup,
+        target: StudioTarget,
+        fresh: &StudioClosingOverlayBasis,
+        budget: &mut EpochStudioBudget,
+    ) -> Result<[u8; 32], AppError> {
+        let logical = target.document(&group.group_id()).map_err(invalid)?;
+        self.enter_studio_budget(server, group, budget)?;
+        let state = self.checked_epoch_replay_state(
+            server,
+            &logical,
+            &mut budget.storage,
+            &mut budget.intents,
+        )?;
+        let metadata = state.handoff_metadata();
+        if let Some(metadata) = metadata {
+            if metadata.target() != target {
+                return Err(invalid("overlay belongs to another channel"));
+            }
+        }
+        StudioOverlayState::request_branch_id(metadata, fresh).map_err(invalid)
+    }
+
     /// Everything Flow S does under the first custody visit: S0 validation, S1 classification,
-    /// the terminal S1a acknowledgement, and for new authoring S1b authorization, media admission
-    /// and capture.
+    /// the terminal S1a acknowledgements, and for new authoring S1b authorization, branch
+    /// admission, media admission and capture.
     ///
     /// Both callers use this. The synchronous adapter below composes it with `plan` and the commit
     /// inline; the scheduled runtime runs the same three stages with custody released around
     /// `plan`. There is deliberately no second algorithm for a scheduler to drift from.
+    ///
+    /// **The order is load bearing.** Every terminal acknowledgement - a transferred branch, a
+    /// disposed branch, an exact retry of an accepted operation - is reached before anything
+    /// requires tenure, mints a basis, reads a source or touches media (V8, AG1-001). Only work
+    /// that is genuinely new authoring reaches S1b.
     #[allow(clippy::too_many_arguments)]
     pub(in crate::store) fn start_studio_closing_overlay_with_io(
         &mut self,
@@ -136,8 +184,9 @@ impl ServerStore {
         target: StudioTarget,
         device: &MlsDevice,
         close: &CloseRecord,
-        tenure: Option<u64>,
+        tenure: StudioOwnerTenure,
         basis: [u8; 32],
+        branch: [u8; 32],
         operation: DomainOp,
         ts: u64,
         rng: &mut impl CryptoRngCore,
@@ -167,69 +216,71 @@ impl ServerStore {
             author: device.device_id(),
             operation: operation.clone(),
         };
-        if let Some(metadata) = state.handoff_metadata() {
-            if let Some(outcome) = metadata
-                .completed_retry(target, basis, &intent)
-                .map_err(invalid)?
-            {
-                let scope = super::super::epoch_intents::scope_bytes(server, &logical)?;
-                let (_, old) = self.read_epoch_intent_record(&scope, &logical)?;
-                self.write_prepared_intents(
-                    server,
-                    &logical,
-                    state,
-                    old,
-                    true,
-                    rng,
-                    &mut budget.storage,
-                    &mut budget.intents,
-                    WriteStep::new(WriteTag::Intents),
-                    hooks,
-                )?;
+        // S1: which terminal event, if any, is this request about? Structural, against the branch
+        // the request names - no basis, no tenure, no source, no media. `Unmatched` is not a
+        // verdict: it means no acknowledgement is owed, and S1b decides between a new branch and
+        // a stale request. A record for another channel refuses here with `EpochScope`, from the
+        // classifier's own target check - the same answer `completed_retry` used to give.
+        let class = match state.handoff_metadata() {
+            Some(metadata) => metadata
+                .classify_request(target, branch, &intent)
+                .map_err(invalid)?,
+            // No overlay record at all: nothing to acknowledge and nothing live to join.
+            None => StudioOverlayRequestClass::Unmatched,
+        };
+        let joins_live = match class {
+            StudioOverlayRequestClass::Transferred(outcome) => {
+                self.flush_acknowledged_overlay(server, &logical, state, rng, budget, hooks)?;
                 return Ok(StudioOverlayStart::Settled(Box::new(
                     StudioOverlaySave::HandedOff(outcome),
                 )));
             }
-        }
-        let exact = match state.overlay() {
-            Some(overlay) if overlay.target() == target => {
-                overlay.exact_retry(basis, &intent).map_err(invalid)?
+            StudioOverlayRequestClass::Disposed(disposal) => {
+                self.flush_acknowledged_overlay(server, &logical, state, rng, budget, hooks)?;
+                return Ok(StudioOverlayStart::Settled(Box::new(
+                    StudioOverlaySave::Disposed(disposal),
+                )));
             }
-            Some(_) => return Err(invalid("overlay belongs to another channel")),
-            None => false,
+            StudioOverlayRequestClass::Active => true,
+            StudioOverlayRequestClass::Unmatched => false,
         };
+        // An accepted exact retry, recognized BEFORE eligibility. An installed successor, a later
+        // fault or a tenure that is not Known cannot turn a saved exact request into a new append.
+        // Only a request naming the live branch can be one: an operation enters that branch only
+        // through a request that named it.
+        if joins_live {
+            let overlay = state
+                .overlay()
+                .ok_or_else(|| invalid("classified Active with no live branch"))?;
+            if overlay.exact_retry(basis, &intent).map_err(invalid)? {
+                drop(state);
+                return self
+                    .write_studio_overlay_intent(
+                        server,
+                        &logical,
+                        target,
+                        device,
+                        group,
+                        basis,
+                        operation,
+                        rng,
+                        &mut budget.storage,
+                        &mut budget.intents,
+                        hooks,
+                    )
+                    .map(|draft| {
+                        StudioOverlayStart::Settled(Box::new(StudioOverlaySave::Local(draft)))
+                    });
+            }
+        }
         // Equal nonce and body from an ordinary failed Save is not accepted local draft evidence.
         // That is classification rather than authoring, so it also precedes media admission; the
-        // writer keeps its own copy of this check as defence in depth.
-        if !exact
-            && state
-                .pending()
-                .any(|(id, _)| *id == intent.operation.id(&intent.author))
+        // plan keeps its own copy of this check as defence in depth.
+        if state
+            .pending()
+            .any(|(id, _)| *id == intent.operation.id(&intent.author))
         {
             return Err(invalid("ordinary intent cannot become an accepted overlay"));
-        }
-        // Recognize accepted retries BEFORE first/append eligibility. An installed successor,
-        // a later fault or Unknown tenure cannot turn a saved exact request into a new append.
-        if exact {
-            return self
-                .write_studio_overlay_intent(
-                    server,
-                    &logical,
-                    target,
-                    device,
-                    group,
-                    basis,
-                    None,
-                    operation,
-                    ts,
-                    rng,
-                    &mut budget.storage,
-                    &mut budget.intents,
-                    hooks,
-                )
-                .map(|draft| {
-                    StudioOverlayStart::Settled(Box::new(StudioOverlaySave::Local(draft)))
-                });
         }
         // Everything from here is new authoring. Authorization comes BEFORE media admission:
         // "not previously accepted" is not the same as "authorized to author now". A request
@@ -237,8 +288,10 @@ impl ServerStore {
         // without reading, promoting or holding any pixels, and without consulting the reference
         // rails. Otherwise a stale request reports a media error, or promotes a blob into the
         // durable namespace, on its way to being refused for an unrelated reason.
-        let tenure_value =
-            tenure.ok_or_else(|| invalid("Closing overlay needs observed owner tenure"))?;
+        //
+        // S1b is a V1 site, so this is where the tenure is required, and not before: everything
+        // above must stay reachable under Imported and Unknown.
+        let tenure_value = require_owner_tenure(tenure)?;
         let (mut source, observed, _) =
             self.checked_studio_source(server, group, target, device, false, &mut budget.storage)?;
         if observed.is_none() {
@@ -251,15 +304,70 @@ impl ServerStore {
             return Err(invalid("Closing overlay basis changed"));
         }
         drop(source);
-        // S1b, now that this request is both unaccepted and authorized: validate and promote the
-        // referenced pixels into the durable namespace, then take the job-owned hold. The intent,
-        // the frame facts and the hold are minted as one value bound to this operation, target and
-        // document, so no caller can hold verified frame facts without the hold that protects them
-        // or pair either with a different operation. The hold is carried through the detached stage
-        // and released only when the commit returns.
+        // S1b, the branch half: resolve `Unmatched` against the basis just minted. A new branch is
+        // admitted only when the request names exactly the identity the next admission would mint;
+        // anything else - an older generation, a skipped one, a disposed or transferred branch the
+        // request no longer matches, an unrelated basis - is stale, and is refused before any media
+        // work. This is the only place a branch is opened.
+        let joins = if joins_live {
+            OverlayBranch::Live
+        } else {
+            let admission = match state.handoff_metadata() {
+                Some(metadata) => metadata
+                    .admit_new_branch(target, branch, &fresh)
+                    .map_err(invalid)?,
+                None => StudioOverlayState::admit_first_branch(branch, &fresh),
+            };
+            match admission {
+                StudioOverlayAdmission::New { .. } => OverlayBranch::Admitted(admission),
+                StudioOverlayAdmission::Stale => {
+                    return Err(invalid(
+                        "Closing overlay request names a stale branch; prepare it again",
+                    ))
+                }
+            }
+        };
+        drop(state);
+        // S1b, the media half, now that this request is unaccepted, authorized and admitted to a
+        // branch: validate and promote the referenced pixels into the durable namespace, then take
+        // the job-owned hold. The intent, the frame facts and the hold are minted as one value
+        // bound to this operation, target and document, so no caller can hold verified frame facts
+        // without the hold that protects them or pair either with a different operation. The hold
+        // is carried through the detached stage and released only when the commit returns.
         let authoring = self.admit_studio_overlay_authoring(target, &logical, device, operation)?;
-        self.capture_studio_overlay_save(server, group, target, device, fresh, authoring, ts)
-            .map(|capture| StudioOverlayStart::Captured(Box::new(capture)))
+        self.capture_studio_overlay_save(
+            server, group, target, device, fresh, branch, joins, authoring, ts,
+        )
+        .map(|capture| StudioOverlayStart::Captured(Box::new(capture)))
+    }
+
+    /// The flush barrier a terminal acknowledgement owes before it answers: the record it read is
+    /// made durable as-is, so a retry that follows an uncertain outcome is never acknowledged from
+    /// state that could still be lost. Writes nothing new.
+    fn flush_acknowledged_overlay(
+        &mut self,
+        server: u64,
+        logical: &LogicalDocument,
+        state: super::super::epoch_intents::EpochIntentState,
+        rng: &mut impl CryptoRngCore,
+        budget: &mut EpochStudioBudget,
+        hooks: &mut WriteHooks<'_>,
+    ) -> Result<(), AppError> {
+        let scope = super::super::epoch_intents::scope_bytes(server, logical)?;
+        let (_, old) = self.read_epoch_intent_record(&scope, logical)?;
+        self.write_prepared_intents(
+            server,
+            logical,
+            state,
+            old,
+            true,
+            rng,
+            &mut budget.storage,
+            &mut budget.intents,
+            WriteStep::new(WriteTag::Intents),
+            hooks,
+        )?;
+        Ok(())
     }
 
     /// The synchronous adapter: the same three stages with no detach between them. Every caller
@@ -272,8 +380,9 @@ impl ServerStore {
         target: StudioTarget,
         device: &MlsDevice,
         close: &CloseRecord,
-        tenure: Option<u64>,
+        tenure: StudioOwnerTenure,
         basis: [u8; 32],
+        branch: [u8; 32],
         operation: DomainOp,
         ts: u64,
         rng: &mut impl CryptoRngCore,
@@ -284,7 +393,8 @@ impl ServerStore {
         hooks: &mut WriteHooks<'_>,
     ) -> Result<StudioOverlaySave, AppError> {
         let capture = match self.start_studio_closing_overlay_with_io(
-            server, group, target, device, close, tenure, basis, operation, ts, rng, budget, hooks,
+            server, group, target, device, close, tenure, basis, branch, operation, ts, rng,
+            budget, hooks,
         )? {
             StudioOverlayStart::Settled(saved) => return Ok(*saved),
             StudioOverlayStart::Captured(capture) => *capture,

@@ -11,8 +11,28 @@ use super::*;
 use crate::store::creative_references::CreativeHold;
 use crate::store::epoch_intents::{self, EpochIntentState};
 use catcoms_crypto::DeviceId;
-use catcoms_replication::studio::{StudioClosingOverlayBasis, StudioLocalDraft};
+use catcoms_replication::studio::{
+    StudioClosingOverlayBasis, StudioLocalDraft, StudioOverlayAdmission, StudioOverlayProvenance,
+    StudioOverlayState,
+};
 use catcoms_replication::LocalIntent;
+
+/// Which branch an authorized new acceptance joins, as S1b decided it under custody.
+///
+/// Decided against the very record the capture authenticates, and carried rather than re-chosen:
+/// the detached plan rechecks it against the bytes it decodes and refuses on any disagreement, but
+/// it never picks a branch on its own. Before this existed the plan did exactly that, with
+/// `unwrap_or_else(StudioOverlayState::new)` followed by an `append` that minted the next
+/// generation whenever no branch was live - so the branch-generation namespace was optional, and
+/// a request that skipped admission still got a branch.
+pub(crate) enum OverlayBranch {
+    /// `classify_request` answered `Active`: the request named the live branch and appends to it.
+    Live,
+    /// `Unmatched`, resolved at S1b to a new branch: by `admit_new_branch` when the document has an
+    /// overlay record, or `admit_first_branch` when it has none. Only `New` ever reaches here;
+    /// `Stale` is refused at S1b.
+    Admitted(StudioOverlayAdmission),
+}
 
 /// Exactly what the media facts were derived from. A-001: without this, "minted by admission" only
 /// says the facts are internally consistent, not that they belong to the operation that will
@@ -118,6 +138,9 @@ pub(crate) struct StudioOverlayCapture {
     stamp: StudioOverlayStamp,
     intent_bytes: Option<Zeroizing<Vec<u8>>>,
     basis: StudioClosingOverlayBasis,
+    /// The branch the request named, and what S1b decided it joins.
+    branch: [u8; 32],
+    joins: OverlayBranch,
     intent: LocalIntent,
     ts: u64,
     /// Verified frame facts and the hold that protects them, minted together at S1b. Possession
@@ -174,10 +197,7 @@ impl StudioOverlayCapture {
         if state.pending().any(|(id, _)| *id == op_id) {
             return Err(invalid("ordinary intent cannot become an accepted overlay"));
         }
-        let mut overlay = state
-            .overlay
-            .clone()
-            .unwrap_or_else(|| catcoms_replication::studio::StudioOverlayState::new(&self.basis));
+        let mut overlay = self.joined_branch(state.overlay.as_ref())?;
         state
             .ledger
             .prepare(self.intent.author, self.intent.operation.clone())
@@ -192,6 +212,48 @@ impl StudioOverlayCapture {
             draft,
             media: self.media,
         })
+    }
+
+    /// The branch state the new operation is appended to: the live one the request named, or the
+    /// one S1b admitted. Never a branch chosen here.
+    ///
+    /// Each arm rechecks S1b's decision against `existing`, the record this worker decoded, rather
+    /// than trusting it. The commit's stamp check will later prove those bytes are the ones S1b
+    /// read, so a disagreement here means the capture itself is inconsistent, and it is refused.
+    fn joined_branch(
+        &self,
+        existing: Option<&StudioOverlayState>,
+    ) -> Result<StudioOverlayState, AppError> {
+        match (&self.joins, existing) {
+            (OverlayBranch::Live, Some(state)) if state.branch_id() == Some(self.branch) => {
+                Ok(state.clone())
+            }
+            (OverlayBranch::Live, _) => Err(invalid(
+                "the live branch this request named is not the one in the record",
+            )),
+            (OverlayBranch::Admitted(admission), Some(state)) => {
+                if state
+                    .admit_new_branch(self.stamp.target, self.branch, &self.basis)
+                    .map_err(invalid)?
+                    != *admission
+                {
+                    return Err(invalid(
+                        "the record no longer admits the branch this request named",
+                    ));
+                }
+                state
+                    .new_admitted(&self.basis, *admission, StudioOverlayProvenance::Closing)
+                    .map_err(invalid)
+            }
+            (OverlayBranch::Admitted(admission), None) => {
+                if StudioOverlayState::admit_first_branch(self.branch, &self.basis) != *admission {
+                    return Err(invalid(
+                        "the record no longer admits the branch this request named",
+                    ));
+                }
+                Ok(StudioOverlayState::new(&self.basis))
+            }
+        }
     }
 }
 
@@ -292,7 +354,7 @@ impl ServerStore {
     }
 
     /// Capture under custody, after classification has ruled out an acknowledgement, the basis has
-    /// been matched, and authoring has been admitted.
+    /// been matched, the branch has been admitted, and authoring has been admitted.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn capture_studio_overlay_save(
         &self,
@@ -301,6 +363,8 @@ impl ServerStore {
         target: StudioTarget,
         device: &MlsDevice,
         basis: StudioClosingOverlayBasis,
+        branch: [u8; 32],
+        joins: OverlayBranch,
         authoring: AdmittedOverlayAuthoring,
         ts: u64,
     ) -> Result<StudioOverlayCapture, AppError> {
@@ -344,6 +408,8 @@ impl ServerStore {
             },
             intent_bytes: record.map(|r| r.plain),
             basis,
+            branch,
+            joins,
             intent,
             ts,
             media,
@@ -391,7 +457,7 @@ impl ServerStore {
         target: StudioTarget,
         device: &MlsDevice,
         close: &catcoms_replication::CloseRecord,
-        tenure: Option<u64>,
+        tenure: crate::studio::StudioOwnerTenure,
         plan: StudioOverlayPlan,
         rng: &mut impl CryptoRngCore,
         budget: &mut EpochStudioBudget,
@@ -426,9 +492,10 @@ impl ServerStore {
         }
         let document = stamp.document.clone();
         // Re-derive the basis under the same custody as the write. A changed Closing source, a
-        // replaced signed close, a changed owner or an Unknown tenure all discard the plan.
-        let tenure =
-            tenure.ok_or_else(|| invalid("Closing overlay needs observed owner tenure"))?;
+        // replaced signed close, a changed owner or a tenure that is not Known all discard the
+        // plan. S3 is a V1 site: the requirement is applied here, at the stage, so Imported and
+        // Unknown are refused with their own messages.
+        let tenure = crate::studio::require_owner_tenure(tenure)?;
         let (mut source, observed, _) =
             self.checked_studio_source(server, group, target, device, false, &mut budget.storage)?;
         if observed.is_none() {

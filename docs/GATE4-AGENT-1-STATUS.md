@@ -4028,39 +4028,97 @@ Implementation, on `gate4-agent1-runtime` only: the production and test files li
 and no frontend file has been changed, and nothing is merged to `Create-suite-2`. The remaining
 planned files are in design 5 and 15.
 
-## Agent 2's two Save-path requests: tenure done at preparation, branch identity blocked
+## Flow S carries branch identity: the generation namespace now runs on the real Save path
 
-Agent 2 raised two items against my Save path. Both claims verified in source before acting.
+Agent 2 found that `classify_request`, `admit_new_branch` and `new_admitted` had **no production
+callers** - Flow S carried `basis` only, so the branch-generation namespace they built never ran on
+any real Save, and a delayed request for a disposed branch could be accepted into a new one. A
+P1/P5 blocker, and mine. Verified in source, then fixed once Agent 2 exposed the derivation
+(`e5205318`: `request_branch_id`, and `admit_first_branch` for a document with no record).
 
-### Branch identity in Flow S - verified, and blocked on one accessor
+### What the Save path does now
 
-**Claim, verified:** `classify_request`, `admit_new_branch` and `new_admitted` in
-`catcoms-replication/src/studio/overlay/handoff.rs` have **no production callers** - every
-reference outside their own definitions is a doc comment. Flow S carries `basis` only, so the
-branch-generation namespace Agent 2 built never runs on the real Save path. That is a P1/P5
-blocker, and it is mine.
+| stage | before | now |
+|---|---|---|
+| preparation | basis only | a `StudioOverlaySaveTicket` - the basis **and** the branch the Save must name, both from one fresh basis in one custody visit, the branch from `request_branch_id` and never from the caller |
+| S1 | bare `completed_retry`, keyed by basis | `classify_request` against the branch the request names: `Transferred` -> `HandedOff`; `Disposed` -> the new terminal `StudioOverlaySave::Disposed` (design N17); `Active` -> exact-retry recognition, else on to S1b; `Unmatched` -> on to S1b |
+| S1b | basis match, then media | basis match, then **admission**: `admit_new_branch`, or `admit_first_branch` when there is no record. `Stale` is refused here, before any media work |
+| S2 (plan) | `unwrap_or_else(StudioOverlayState::new)` + an `append` that mints the next generation whenever no branch is live | the branch S1b decided: the live one, or one built by `new_admitted` / `new` - each **rechecked** against the record the worker decodes, and refused on disagreement |
 
-**Why it is not implemented here.** A new-authoring request has to *name* the branch it intends to
-open, and the only valid name is `branch_identity(fresh.fingerprint(), next_generation()?)`. Both of
-those are private to `handoff.rs`, and `admit_new_branch` only *checks* a candidate - it never
-produces one. So no caller anywhere can construct a valid branch id for a new branch. Plumbing
-`branch` into the Save request today would make every new-authoring request `Stale`.
+**Neither production Save site can open a branch on its own any more.** One was
+`write_studio_overlay_intent`'s new-authoring tail, unreachable since new authoring moved to the
+staged path (its only caller passed `basis: None`) but still a second place a branch could be
+opened; it is removed and the function is now the exact-retry flush barrier it had become. The
+other was the plan's `unwrap_or_else(new)`, replaced as above. `append`'s own minting stays for
+now - it is Agent 2's, and refusing there must land after this or the current Save breaks in
+between. That change is theirs, on top of this commit.
 
-Computing the hash on my side is not an option: it would be a second definition of the identity,
-which is exactly the failure Agent 2's comments on `next_generation` record ("written in one place
-and trusted in another"). The ask is one public accessor that derives through `next_generation`,
-so the definition stays single.
+**Terminal acknowledgements still come first.** Transferred, disposed and exact-retry outcomes are
+all decided before S1b requires tenure, mints a basis, reads a source or touches media.
 
-**What lands once it exists:** preparation returns the prospective branch beside the basis; the
-Save request carries `branch`; S1 calls `classify_request` - `Active` to the existing exact-retry
-and append path, `Transferred` to the existing `HandedOff` acknowledgement, `Disposed` to the
-disposal acknowledgement, `Unmatched` on to S1b - where `admit_new_branch` resolves `New` or
-`Stale` after the basis is re-derived, and the write goes through `new_admitted`. Terminal
-acknowledgements stay ahead of every authority check; nothing is hoisted. Agent 2's acceptance
-sequence - accept G1, dispose it, accept a disjoint G2 on the same basis, dispose it, then a
-delayed G1 request - is tested through the real Flow S entry point, not the core classifier.
+**The rollover floor still guards new branches.** Checked rather than assumed: `append` calls
+`check_basis_floor` unconditionally, and `new_admitted` carries `minimum_new_basis_closed_epoch`
+across, so a branch opened through admission is floor-checked in the plan exactly as before.
 
-### Live tenure at my V1 sites - done at preparation, deferred elsewhere on purpose
+### One correction to my own plan, from Agent 2
+
+I had said a request whose branch is admitted by someone else between preparation and S1b comes
+back `Stale`. **Half right.** The identity is a pure function of basis and generation, so if the
+winner was admitted on the *same* basis it carries exactly the id the late request holds, and that
+request is `Active` and appends - the outcome preparing after the admission would have produced.
+Only a winner on another basis, or a branch disposed or transferred in between, makes it `Stale`.
+No test here expects `Stale` for a same-basis race.
+
+### Tests, each broken on purpose
+
+| test | what it proves | mutations, all killed |
+|---|---|---|
+| `a_delayed_request_for_a_branch_whose_manifest_was_replaced_is_stale_on_the_save_path` | design N17b through the real Save entry and the production disposal transaction, both targets: G1 accepted and discarded, a disjoint G2 on the same basis accepted - **then the delayed G1 request is acknowledged as `Disposed`** (the control: G1's manifest is still retained) - G2 discarded, restart, G2's delayed request acknowledged, **and the identical G1 request now `Stale`**, opening no branch, no ledger entry, no generation step | namespace bypassed in S1b and the plan's old minting restored: the G1 request comes back `Ok(Local(.. accepted: 1 ..))` - accepted into a new branch, which is the hazard itself. `Disposed` classification suppressed in S1: the control fails |
+| `a_first_save_naming_an_identity_no_admission_would_mint_is_stale` | the no-record case `admit_first_branch` exists for; the same operation with the ticket's branch is accepted as the positive control | the same namespace bypass |
+| `a_durable_prepared_handoff_is_resolved_with_no_observed_tenure` | V8's third case, in both outcomes resolution can reach. **`Complete`** (crash after the source landed): settles with no tenure to the same outcome and byte-identical source as a known-tenure control on a copied vault. **`Absent`** (crash before it): resolution returns the branch to Active with no tenure; only the *new* handoff that follows is refused, and should be | a tenure requirement hoisted above resolution in H1: "resolution refused with tenure None". Killed by the `Complete` half; the `Absent` half's distinguishing assertion - Prepared resolved despite the refusal - would also fail under it by inspection, but was not run in isolation |
+
+**The first version of that last test was wrong, and the failure was the test's, not V8's.** It
+crashed before the source landed and expected a settled outcome under no tenure. Resolution of
+that case returns the branch to Active - tenure-free and durable - after which H1 starts a new
+handoff, which is new authoring and correctly needs tenure. I had conflated resolution with what
+follows it. Reading `resolve_studio_handoff_with_io` showed its two outcomes, `Complete` and
+`Absent`, and the test now claims exactly what each one does.
+
+Running the control and the hazard **in one test, on the same request** is the point of the first
+row: Agent 2 noted the shorter dispose-G1 / admit-G2 / retry-G1 sequence does not reproduce the
+hazard because the retained manifest catches it. Showing the acknowledgement turn into `Stale` at
+exactly the moment G2's disposal replaces G1's manifest is what demonstrates that the long sequence
+is doing the work.
+
+### Existing tests whose meaning changed, rather than just their arguments
+
+- **The rollover-floor test now proves two defences separately.** The forgotten retry resends the
+  branch its own ticket named, and is now refused by the **namespace** as `Stale`, before the plan
+  where the floor lives. A request prepared *after* the rewind is handed the current next branch,
+  so the namespace admits it and only the **floor** stops it, with `EpochScope`. Before this, the
+  floor was reachable only because nothing refused earlier; this is the first version of the test
+  that shows it holding on its own.
+- **Every retry after a transfer now resends its original branch.** After a transfer the generation
+  does not move, so a fresh derivation names the *next* branch; a test that re-derived would be
+  testing a request no client sends. Those tests capture the branch while it is live, as its client
+  would hold it.
+- **Tests that assemble a capture by hand now pass a branch and a decision**, taken from the same
+  core functions S1b calls - and the plan's recheck means a wrong pair would be refused, not
+  trusted.
+- **One assertion was tightened because it misreported my own fixture mistake.**
+  `studio_overlay_uncertain_acceptance_still_protects_its_pixels` asserted only `failed.is_err()`.
+  I first placed the branch derivation between the test's budget and its Save; deriving creates
+  fresh budgets, which made the outstanding one stale, so the Save was refused with "Studio budget
+  is stale" before ever reaching the protection transfer the test exists for. `is_err()` accepted
+  that, and the failure surfaced only at the later pixel check as "left its pixels reclaimable" -
+  which reads as an I-3 regression and was not one. Confirmed by re-running the old placement under
+  the tightened assertion, which names the real error. The assertion now requires the injected
+  failure, and the derivation runs first, so the fixture's own order is unchanged.
+- **Retries after a rotation read the branch from the record, not from a fresh derivation.**
+  `prepare` in the handoff tests rotates to a successor, after which no Closing basis can be minted
+  at all; `live_branch` reads the live branch's id, which is what the Save's client holds.
+
+### Live tenure at my V1 sites
 
 **Preparation now requires tenure through the typed seam.** `Server::prepare_studio_closing_overlay`
 calls `require_observed_owner_tenure()` first, and that function's `expect(dead_code)` is gone, as
@@ -4081,23 +4139,28 @@ non-tenure reason, the joiner must refuse at it. **Two mutations, both killed:**
 `authoring_owner_tenure_start()` yields the store's generic "needs observed owner tenure"; removing
 the requirement lets the joiner through to "source missing; fetch before sealing".
 
-**V8 holds structurally on both flows**, verified by reading the order rather than assumed: Save
-returns exact retries and completed acknowledgements before S1b's requirement, and H1 acknowledges
-a completed branch and resolves a durable Prepared record - `resolve_studio_handoff_with_io` takes
-no tenure at all - before it requires one. One V8 case is anchored by an existing test (a Save
-retry with no tenure after handoff returns `HandedOff`). **Not yet anchored:** an exact Save retry
-and a durable-Prepared resolution, each under absent tenure.
+**V8 holds on both flows, and all three of its cases are now anchored under absent tenure.** An
+exact Save retry - `studio_overlay_store_uncertain_writes_and_changed_source_retry_at_physical_cap`,
+which I wrongly reported as unanchored: its two `None`-tenure calls are exact retries. A completed
+handoff acknowledgement - three tests, now passing `StudioOwnerTenure::Unknown`. A durable-Prepared
+resolution - the new `a_durable_prepared_handoff_is_resolved_with_no_observed_tenure`, the one that
+genuinely was missing: every earlier resolution passed `Some(0)`, so a requirement hoisted above it
+would have passed every test.
 
-**Deferred, deliberately: Save S1b, S3's commit and H1.** All three still refuse correctly but with
-the generic message, because the store receives `Option<u64>`, which is precisely the lossy shape
-that collapses the two cases. Fixing it means changing the store parameter across roughly 45 call
-sites in nine files, several of them Agent 2's active test files - and the branch-identity change
-above rewrites the same Save signature anyway. Doing tenure now would churn those sites twice. The
-plan for the single change: the Server computes `require_observed_owner_tenure()` as a `Result`
-without applying `?`, passes it down, and each stage applies `?` at its own point after
-classification. That keeps the refusal at the stage (A-1), keeps V8's ordering, and cannot launder
-`Imported` into `Known`, because the only producer of the value is Agent 2's exhaustive `require`.
-The two missing V8 anchors land with it.
+**S1b and S3 now require tenure at their own points, through the typed value.** The Server *reads*
+`observed_owner_tenure()` and passes the `Copy` value down; S1b and S3 each call
+`require_owner_tenure` after classification, so `Imported` and `Unknown` are refused there with
+their own messages. My first plan - pass a `Result<u64, AppError>` and apply `?` at each stage -
+does not work, as Agent 2 pointed out: `AppError` is not `Clone` and both stages need the value.
+The typed value keeps everything that plan wanted: refusal at the stage (A-1), V8's order, and no
+laundering, since `convert` is the only producer and `require` is exhaustive. `require` is
+`pub(crate)` for this, re-exported as `crate::studio::require_owner_tenure`.
+
+**Not changed: H1.** The handoff's store signatures are not touched by the branch change, so the
+reason for bundling - not churning the same call sites twice - does not apply to them, and the
+scheduled runtime already holds a target with no tenure rather than surfacing a message. It still
+refuses correctly with the generic text. Recorded as a separate, small follow-up rather than
+silently dropped from the plan Agent 2 agreed to.
 
 ## A verification-scope failure of mine, recorded because the fix alone would hide it
 

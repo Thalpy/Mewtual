@@ -12,6 +12,10 @@ use super::disposal::{get_provenance, put_provenance};
 pub enum StudioOverlaySave {
     Local(StudioLocalDraft),
     HandedOff(StudioHandoffOutcome),
+    /// A delayed retry of an operation in the most recently **disposed** branch: the terminal
+    /// acknowledgement design N17 requires. Nothing was accepted and no branch was opened; the
+    /// manifest is returned so the caller can say what happened to the work it named.
+    Disposed(Box<StudioOverlayDisposal>),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

@@ -71,13 +71,16 @@ impl StudioReceiver {
         target: StudioTarget,
         close: &catcoms_replication::CloseRecord,
         basis: [u8; 32],
+        branch: [u8; 32],
         operation: catcoms_replication::DomainOp,
         budget: &mut crate::store::EpochStudioBudget,
     ) -> Result<StudioOverlaySaveVisit, AppError> {
+        // Read, never required here: S1b and S3 require it at their own points, and everything
+        // before them - retries and acknowledgements - must keep working without it (V8).
+        let tenure = server.observed_owner_tenure();
         // A plan this actor already produced is finished first. Its transient hold is the only
         // thing protecting its pixels, and it occupies admission until it is consumed.
         if let Some((plan, ownership)) = self.catchup.take_planned_overlay(target) {
-            let tenure = server.sync.authoring_owner_tenure_start();
             let committed = server.sync.with_registry_context(|group, device, _, rng| {
                 store.commit_studio_overlay(
                     id, group, target, device, close, tenure, *plan, rng, budget,
@@ -97,7 +100,6 @@ impl StudioReceiver {
         let Some(ownership) = self.catchup.reserve_overlay() else {
             return Ok(StudioOverlaySaveVisit::Busy);
         };
-        let tenure = server.sync.authoring_owner_tenure_start();
         let started = server
             .sync
             .with_registry_context(|group, device, clock, rng| {
@@ -109,6 +111,7 @@ impl StudioReceiver {
                     close,
                     tenure,
                     basis,
+                    branch,
                     operation,
                     clock.now_ms(),
                     rng,
