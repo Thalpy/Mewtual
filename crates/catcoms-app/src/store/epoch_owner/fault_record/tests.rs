@@ -292,7 +292,7 @@ fn fault_record_all_bindings_and_maximum_shape_roundtrip_without_authority() {
             ..base.clone()
         };
         let parsed = decode(&record, &f).unwrap();
-        assert_eq!(parsed.as_bytes(), record.encode());
+        assert_eq!(parsed.encode().unwrap().as_slice(), record.encode());
         assert!(record.encode().len() < MAX_RECORD_BYTES);
         let scope = scope_bytes(7, &f.doc).unwrap();
         // A fault record without a close is legal, including an empty owner journal.

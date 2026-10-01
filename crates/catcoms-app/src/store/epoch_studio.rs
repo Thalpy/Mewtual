@@ -36,6 +36,8 @@ pub(crate) use overlay_capture::{StudioOverlayCapture, StudioOverlayPlan};
 mod preparation;
 mod recovery_disposition;
 mod registry;
+mod repair;
+pub use repair::{StudioFaultEvidence, StudioRepairOutcome, StudioRepairRequest};
 mod rotation;
 pub use adoption::StudioAdoptionOutcome;
 #[cfg(test)]

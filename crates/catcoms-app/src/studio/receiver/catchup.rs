@@ -29,6 +29,7 @@ pub(crate) use preview::PreviewHarness;
 use preview::{PreviewCompletion, PreviewJob, PreviewRuntime};
 mod registry;
 mod registry_runtime;
+mod repair;
 mod rotation;
 use discovery::DiscoveryPlan;
 
@@ -439,6 +440,10 @@ pub(super) struct CatchupRuntime {
     registry_target: Option<StudioTarget>,
     registry_next_at: u64,
     registry_selection: usize,
+    // The repair step's own cadence and round-robin, so a held fault cannot starve rotation.
+    repair_next_at: u64,
+    repair_selection: usize,
+    repair_failure: Option<(StudioTarget, String)>,
 }
 impl CatchupRuntime {
     /// Never evict the source of a ready/active page or checkpoint just to start replay.
@@ -1003,6 +1008,9 @@ impl CatchupRuntime {
             && self.discovery_plan.is_none()
         {
             if let Some(updated) = self.rotate_owner(server, store, id, watches)? {
+                return Ok(Some(updated));
+            }
+            if let Some(updated) = self.repair_owner(server, store, id, watches)? {
                 return Ok(Some(updated));
             }
         }

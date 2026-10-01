@@ -28,6 +28,8 @@ pub use preview::{StudioPreview, StudioPreviewDelivery, StudioRead};
 mod publication;
 pub(crate) use publication::StudioSavedTransaction;
 mod control;
+mod fault;
+pub use fault::{StudioFaultCandidate, StudioFaultView, StudioRepairBlocker, StudioRepairStatus};
 mod replay;
 /// Crate-visible because copy's detached planner lives in the store and calls `plan` directly.
 pub(crate) mod restore;

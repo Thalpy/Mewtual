@@ -97,6 +97,7 @@ pub(crate) use epoch_studio::{
     StudioHandoffPlan, StudioHandoffStart, StudioOverlayCapture, StudioOverlayPlan,
     StudioOverlayStart, StudioSourceCapture, MAX_SIGNING_TURNS_PER_VISIT, SIGNING_SLICE_BUDGET_MS,
 };
+pub use epoch_studio::{StudioFaultEvidence, StudioRepairOutcome, StudioRepairRequest};
 pub mod epoch_budget;
 
 /// One persisted server in the registry: enough to relist it in the UI and reload its

@@ -119,6 +119,17 @@ impl StudioEpoch {
     pub fn fault_evidence(&self) -> Option<(&Receipt, &Receipt)> {
         self.receipts.fault_evidence()
     }
+
+    /// The receipt whose checkpoint this source installed, if any. Historical, not authority.
+    pub fn opening(&self) -> Option<&Receipt> {
+        self.opening.as_ref()
+    }
+
+    /// Highest repair sequence this source has applied. An owner's next sequence must exceed it
+    /// even when its own record was lost; this is bookkeeping, not authority.
+    pub fn repair_sequence(&self) -> u64 {
+        self.receipts.repair_sequence()
+    }
 }
 
 #[cfg(test)]

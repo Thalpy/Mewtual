@@ -1,7 +1,7 @@
 //! Checkpoint joining reuses Studio's source ownership/accounting and P1's recovery journal.
 //! No closure is locally held, so replacing a source never retires any author's durable intent.
 use super::*;
-use catcoms_replication::studio::StudioRecovery;
+use catcoms_replication::studio::{StudioAdoptionPlan, StudioRecovery};
 use catcoms_rt::Clock;
 
 /// The same persistence outcomes as Registry adoption; not a second state machine.
@@ -131,21 +131,95 @@ impl ServerStore {
         observed: Option<StorageRecord>,
         hooks: &mut WriteHooks<'_>,
     ) -> Result<(StudioAdoptionOutcome, EpochStudioState), AppError> {
-        let document = target.document(&group.group_id()).map_err(invalid)?;
         let plan = state
             .unit
             .prepare_checkpoint_adoption(receipt, raw_seed, group, tenure)
             .map_err(invalid)?;
+        self.install_studio_adoption_plan_with_io(
+            server, group, target, &plan, tenure, clock, rng, budget, state, observed, hooks,
+        )
+    }
+
+    /// The recovery-first install half shared by joining, owner takeover and repair replacement.
+    /// The successor write consumes a [`CheckedRepairRecovery`] that only the recovery stage
+    /// below can mint, so no reordering of this function can replace a source before its whole
+    /// version is durably readable as recovery.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn install_studio_adoption_plan_with_io(
+        &mut self,
+        server: u64,
+        group: &ServerGroup,
+        target: StudioTarget,
+        plan: &StudioAdoptionPlan,
+        tenure: u64,
+        clock: &dyn Clock,
+        rng: &mut impl CryptoRngCore,
+        budget: &mut EpochStudioBudget,
+        mut state: EpochStudioState,
+        observed: Option<StorageRecord>,
+        hooks: &mut WriteHooks<'_>,
+    ) -> Result<(StudioAdoptionOutcome, EpochStudioState), AppError> {
+        let document = target.document(&group.group_id()).map_err(invalid)?;
+        // The exact predecessor the capability binds; recovery staging never changes the source.
+        let before = Zeroizing::new(state.unit.snapshot().map_err(invalid)?);
+        let Some(recovery) = self.stage_studio_adoption_recovery(
+            server, &document, target, plan, &before, clock, rng, budget, hooks,
+        )?
+        else {
+            return Ok((StudioAdoptionOutcome::RecoveryPending, state));
+        };
+        // The source never left this exclusive transaction; don't restore/replay it a second
+        // time. A cold unchanged flush can have no warm version, so retain its actual observed
+        // physical record rather than using a normalized snapshot's size as accounting evidence.
+        let current_record = state
+            .source
+            .as_ref()
+            .map(source::SourceVersion::record)
+            .or(observed);
+        let successor = state
+            .unit
+            .adopted_successor(plan, group, tenure)
+            .map_err(invalid)?;
+        recovery.check(server, &before, plan)?;
+        let saved = self.save_studio_source(
+            server,
+            successor,
+            current_record,
+            &before,
+            WritePurpose::Settlement,
+            rng,
+            &mut budget.storage,
+            WriteStep::new(WriteTag::Successor),
+            hooks,
+        )?;
+        Ok((StudioAdoptionOutcome::Installed, saved))
+    }
+
+    /// B4/B5: validate every retained slot as typed, verify the recovery inventory record,
+    /// promote a due eviction, then stage the plan's whole-version snapshot. `None` means a
+    /// warning holds the replacement; everything stays retained.
+    #[allow(clippy::too_many_arguments)]
+    fn stage_studio_adoption_recovery(
+        &mut self,
+        server: u64,
+        document: &LogicalDocument,
+        target: StudioTarget,
+        plan: &StudioAdoptionPlan,
+        predecessor: &[u8],
+        clock: &dyn Clock,
+        rng: &mut impl CryptoRngCore,
+        budget: &mut EpochStudioBudget,
+        hooks: &mut WriteHooks<'_>,
+    ) -> Result<Option<CheckedRepairRecovery>, AppError> {
         // Even an empty source cannot discard an older staged warning or bypass verification
         // of retained recovery. Typed scope includes the full channel as well as the object key.
         let checked = (|| {
-            let old = self.load_epoch_recovery(server, &document)?;
+            let old = self.load_epoch_recovery(server, document)?;
             for held in old.retained().chain(old.staged()) {
-                StudioRecovery::from_snapshot(held, &document, target.channel())
-                    .map_err(invalid)?;
+                StudioRecovery::from_snapshot(held, document, target.channel()).map_err(invalid)?;
             }
-            let observed = self.epoch_recovery_inventory_record(server, &document)?;
-            let scope = super::super::epoch_recovery::scope_bytes(server, &document)?;
+            let observed = self.epoch_recovery_inventory_record(server, document)?;
+            let scope = super::super::epoch_recovery::scope_bytes(server, document)?;
             budget
                 .storage
                 .verify_record(
@@ -162,7 +236,7 @@ impl ServerStore {
         if self
             .advance_due_epoch_recovery_with_writer(
                 server,
-                &document,
+                document,
                 pending,
                 clock,
                 rng,
@@ -171,12 +245,12 @@ impl ServerStore {
             )?
             .is_some()
         {
-            return Ok((StudioAdoptionOutcome::RecoveryPending, state));
+            return Ok(None);
         }
         if let Some(snapshot) = plan.recovery_snapshot() {
             let saved = self.update_epoch_recovery_accounted_with_writer(
                 server,
-                &document,
+                document,
                 EpochRecoveryAction::Stage(snapshot.clone()),
                 clock,
                 rng,
@@ -184,33 +258,50 @@ impl ServerStore {
                 hooks,
             )?;
             if saved.state.eviction_pending()?.is_some() {
-                return Ok((StudioAdoptionOutcome::RecoveryPending, state));
+                return Ok(None);
             }
         }
-        // The source never left this exclusive transaction; don't restore/replay it a second
-        // time. A cold unchanged flush can have no warm version, so retain its actual observed
-        // physical record rather than using a normalized snapshot's size as accounting evidence.
-        let current_record = state
-            .source
-            .as_ref()
-            .map(source::SourceVersion::record)
-            .or(observed);
-        let before = Zeroizing::new(state.unit.snapshot().map_err(invalid)?);
-        let successor = state
-            .unit
-            .adopted_successor(&plan, group, tenure)
-            .map_err(invalid)?;
-        let saved = self.save_studio_source(
+        // Minted only here, after the staged save RETURNED, or after the same typed validation
+        // and inventory check concluded an actually empty source needs no snapshot.
+        Ok(Some(CheckedRepairRecovery {
             server,
-            successor,
-            current_record,
-            &before,
-            WritePurpose::Settlement,
-            rng,
-            &mut budget.storage,
-            WriteStep::new(WriteTag::Successor),
-            hooks,
-        )?;
-        Ok((StudioAdoptionOutcome::Installed, saved))
+            predecessor: *blake3::hash(predecessor).as_bytes(),
+            plan: adoption_plan_digest(plan)?,
+        }))
     }
+}
+
+/// Permission to replace exactly one predecessor with the successor of exactly one plan. Not
+/// Clone, not Copy, not durable and consumed by the check, so it cannot outlive its custody visit.
+struct CheckedRepairRecovery {
+    server: u64,
+    predecessor: [u8; 32],
+    plan: [u8; 32],
+}
+
+impl CheckedRepairRecovery {
+    fn check(
+        self,
+        server: u64,
+        predecessor: &[u8],
+        plan: &StudioAdoptionPlan,
+    ) -> Result<(), AppError> {
+        if self.server != server
+            || self.predecessor != *blake3::hash(predecessor).as_bytes()
+            || self.plan != adoption_plan_digest(plan)?
+        {
+            return Err(invalid("successor write lacks its recovery capability"));
+        }
+        Ok(())
+    }
+}
+
+fn adoption_plan_digest(plan: &StudioAdoptionPlan) -> Result<[u8; 32], AppError> {
+    let mut hash = blake3::Hasher::new_derive_key("catcoms/studio-adoption-recovery/v1");
+    hash.update(&plan.receipt().hash());
+    match plan.recovery_snapshot() {
+        Some(snapshot) => hash.update(&[1]).update(&snapshot.id().map_err(invalid)?),
+        None => hash.update(&[0]),
+    };
+    Ok(*hash.finalize().as_bytes())
 }

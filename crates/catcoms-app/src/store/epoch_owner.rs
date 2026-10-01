@@ -19,7 +19,10 @@ use super::epoch_recovery::AuthenticatedEpochFileBytes;
 use super::*;
 
 mod fault_record;
+pub(in crate::store) use fault_record::{BindingKind, Pair as FaultPair, ValidatedFaultAdmission};
 use fault_record::{InertFaultRecord, MAX_FAULT_ADMISSION_ATTESTATION_BYTES};
+mod repair;
+pub(in crate::store) use repair::TerminalRepairSource;
 
 pub(super) const RECORD_DOMAIN: &[u8] = b"catcoms/epoch-owner-store/v1";
 // Full framed local/group/type/key scope plus length framing, separate from the signed wire.
@@ -41,8 +44,37 @@ pub struct EpochOwnerReceiptState {
     // so a crash before source installation never needs to reconstruct lost close heads.
     decision_close: Option<([u8; 32], CloseRecord)>,
     // Structural decoding is useful for inventory, but cannot establish the observer, matching
-    // durable MLS snapshot or custody. No production writer can create or consume this yet.
+    // durable MLS snapshot or custody. Only the contextual repair writer may consume or change it.
     fault_record: Option<InertFaultRecord>,
+}
+
+/// How the single accounted writer authenticates a reloaded record before and after a change.
+enum OwnerGuard<'a> {
+    /// Legacy owner paths: any repair-bearing state refuses before mutation.
+    Ordinary,
+    /// Repair transitions: every retained attestation must name this observer and an epoch the
+    /// durable snapshot covers. This is a restore check, not new authority.
+    Repair {
+        observer: &'a catcoms_crypto::DeviceId,
+        durable_epoch: u64,
+    },
+}
+
+impl OwnerGuard<'_> {
+    fn check(&self, state: &EpochOwnerReceiptState) -> Result<(), AppError> {
+        match self {
+            Self::Ordinary => state.require_ordinary(),
+            Self::Repair {
+                observer,
+                durable_epoch,
+            } => state
+                .fault_record
+                .as_ref()
+                .map(|record| record.contextual(observer, *durable_epoch))
+                .transpose()
+                .map(drop),
+        }
+    }
 }
 
 impl std::fmt::Debug for EpochOwnerReceiptState {
@@ -147,7 +179,7 @@ impl EpochOwnerReceiptState {
         }
         let mut bytes = Zeroizing::new(e.finish());
         if let Some(fault) = &self.fault_record {
-            bytes.extend_from_slice(fault.as_bytes());
+            bytes.extend_from_slice(&fault.encode()?);
         }
         if bytes.len() > MAX_RECORD_BYTES {
             return Err(invalid("record exceeds its bound"));
@@ -506,6 +538,28 @@ impl ServerStore {
         apply: impl FnOnce(&mut EpochOwnerReceiptState) -> Result<(), AppError>,
         hooks: &mut WriteHooks<'_>,
     ) -> Result<EpochOwnerReceiptState, AppError> {
+        self.write_epoch_owner_state(
+            server,
+            document,
+            OwnerGuard::Ordinary,
+            rng,
+            budget,
+            apply,
+            hooks,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn write_epoch_owner_state(
+        &mut self,
+        server: u64,
+        document: &LogicalDocument,
+        guard: OwnerGuard<'_>,
+        rng: &mut impl CryptoRngCore,
+        budget: &mut EpochStorageBudget,
+        apply: impl FnOnce(&mut EpochOwnerReceiptState) -> Result<(), AppError>,
+        hooks: &mut WriteHooks<'_>,
+    ) -> Result<EpochOwnerReceiptState, AppError> {
         let scope = scope_bytes(server, document)?;
         let storage_scope = StorageScope::new(server, &document.server_id).map_err(invalid)?;
         let (mut state, size) = match self.read_epoch_owner_record(&scope, document) {
@@ -517,7 +571,7 @@ impl ServerStore {
         };
         // Before the mutation closure, budget verification/reservation, RNG or writer hooks.
         // Neither an exact publication callback nor a legacy prepare may bypass a repair hold.
-        state.require_ordinary()?;
+        guard.check(&state)?;
         let observed = size
             .map(|size| storage_record(server, document, &scope, size))
             .transpose()?;
@@ -525,7 +579,7 @@ impl ServerStore {
             .verify_record(&storage_scope, *blake3::hash(&scope).as_bytes(), observed)
             .map_err(invalid)?;
         apply(&mut state)?;
-        state.require_ordinary()?;
+        guard.check(&state)?;
         let plain = state.encode(&scope, document)?;
         let record = storage_record(server, document, &scope, plain.len() as u64 + 40)?;
         let reservation = budget
