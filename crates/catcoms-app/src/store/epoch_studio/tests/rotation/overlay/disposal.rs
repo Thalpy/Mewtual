@@ -188,37 +188,41 @@ fn a_preserving_disposal_syncs_its_archive_before_it_removes_the_branch() {
     let request = honest_request(&f, &mut store, StudioDisposalRequestMode::Preserve);
 
     let events = std::cell::RefCell::new(Vec::new());
-    let mut on_write = |tag: WriteTag, _p: &std::path::Path, _b: &[u8]| {
-        events.borrow_mut().push(("write", tag));
-        Intercept::Continue
-    };
-    let mut on_sync = |tag: WriteTag, _p: &std::path::Path, _n: u64| {
-        events.borrow_mut().push(("sync", tag));
-        AfterIntercept::Continue
-    };
-    let mut hooks = WriteHooks::Hooked {
-        before: Some(&mut on_write),
-        before_sync: Some(&mut on_sync),
-        before_unlink: None,
-        after: None,
-    };
-    let mut b = budget(&mut store, &f);
-    store
-        .dispose_studio_overlay_with_io(
-            SERVER,
-            &f.logical,
-            f.target,
-            &f.group,
-            &f.device,
-            request,
-            4242,
-            &mut rng(),
-            &mut b.storage,
-            &mut b.intents,
-            &mut hooks,
-        )
-        .expect("a preserving disposal with a durable archive must succeed");
-    drop(hooks);
+    // An inner scope rather than `drop(hooks)`: `WriteHooks` has no `Drop`, so dropping it only to
+    // end the closures' borrow of `events` is `clippy::drop_non_drop`, which failed the workspace
+    // gate. Ending the scope ends the borrow without pretending a destructor runs.
+    {
+        let mut on_write = |tag: WriteTag, _p: &std::path::Path, _b: &[u8]| {
+            events.borrow_mut().push(("write", tag));
+            Intercept::Continue
+        };
+        let mut on_sync = |tag: WriteTag, _p: &std::path::Path, _n: u64| {
+            events.borrow_mut().push(("sync", tag));
+            AfterIntercept::Continue
+        };
+        let mut hooks = WriteHooks::Hooked {
+            before: Some(&mut on_write),
+            before_sync: Some(&mut on_sync),
+            before_unlink: None,
+            after: None,
+        };
+        let mut b = budget(&mut store, &f);
+        store
+            .dispose_studio_overlay_with_io(
+                SERVER,
+                &f.logical,
+                f.target,
+                &f.group,
+                &f.device,
+                request,
+                4242,
+                &mut rng(),
+                &mut b.storage,
+                &mut b.intents,
+                &mut hooks,
+            )
+            .expect("a preserving disposal with a durable archive must succeed");
+    }
 
     let events = events.into_inner();
     let archive_sync = events
