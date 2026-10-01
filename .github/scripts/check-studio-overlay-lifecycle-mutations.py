@@ -118,26 +118,17 @@ MUTATIONS = [
         "lifecycle::a_fabricated_admission_cannot_mint_a_branch_at_a_chosen_generation",
         "would give a new branch its identity",
     ),
-    # The expected assertion here is NOT the test's generation assertion, and the difference is
-    # worth reading rather than fixing away.
-    #
-    # When this mutation was written by hand it failed at "must take the next generation". It no
-    # longer reaches that line: the disposal work later added a structural rule to `validate` - a
-    # live branch beside a retained disposal must be a strictly later generation - and `append`
-    # now refuses outright, so the test dies at its `expect` several lines earlier.
-    #
-    # The guard is therefore anchored twice and the stronger one fires first, which is the right
-    # outcome and not a reason to weaken either. What it does mean is that under THIS mutation the
-    # test's own generation assertions are unreachable and so have no mutant of their own; they are
-    # anchored by `a_fabricated_admission_cannot_mint_a_branch_at_a_chosen_generation` above, which
-    # reaches the same namespace through the admission path where no disposal exists to catch it.
+    # `append` no longer opens a branch: admission is the only way in. The mutant restores the old
+    # third door, so a state with no live branch silently gets one. Under it `validate`'s "a live
+    # branch beside a retained disposal must be strictly later" rule may also refuse, so the
+    # expected message is the test's own refusal assertion, which runs before any of that.
     (
-        "append-mints-next-generation", "catcoms-replication", REPL_TESTS,
+        "append-refuses-without-a-live-branch", "catcoms-replication", REPL_TESTS,
         f"{REPL}/overlay/handoff.rs",
-        "if minting {\n            next.branch_generation = self.next_generation()?;\n        }",
-        "let _ = minting;",
-        "lifecycle::appending_where_no_branch_exists_takes_the_next_generation",
-        "the first Save after a disposal is ordinary and must work",
+        "let Some(mut active) = self.active.clone() else {\n            return Err(ReplError::IntentConflict);\n        };",
+        "let mut active = self.active.clone().unwrap_or_else(|| StudioOverlay::new(basis));",
+        "lifecycle::appending_where_no_branch_exists_is_refused_and_admission_opens_the_next_one",
+        "append must not open a branch that admission never admitted",
     ),
     # --- the owner-tenure observation rule ---
     (

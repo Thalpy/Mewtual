@@ -553,29 +553,20 @@ impl StudioOverlayState {
             basis.0.receipt.closed_epoch,
             self.minimum_new_basis_closed_epoch,
         )?;
-        // Minting a branch where none existed is a generation event, and this path does it: after a
-        // transfer or a disposal `active` is `None`, and the next Save legitimately starts a new
-        // branch here. It must take the NEXT generation.
+        // Appending extends a live branch and never opens one. Opening a branch is a generation event,
+        // and it now has exactly two doors, both checked against the namespace: `new` for a document
+        // with no record (after `admit_first_branch`), and `new_admitted` after `admit_new_branch`.
         //
-        // An adversarial review found this reusing the current one, which is the defect the namespace
-        // exists to prevent: a new branch on the same basis would have had the same `branch_id` as the
-        // transferred or disposed one, so a delayed request for the old branch would classify as the
-        // live one. Refusing instead of incrementing was the other option and it is wrong - the first
-        // Save after a handoff is an ordinary thing for a user to do, and it must work.
-        //
-        // The increment goes through `next_generation`, the same definition `admit_new_branch` derives
-        // its accepted id from, so the id a client was handed for a new acceptance is the id this
-        // produces.
-        let minting = self.active.is_none();
-        let mut active = self
-            .active
-            .clone()
-            .unwrap_or_else(|| StudioOverlay::new(basis));
+        // This used to mint at the next generation whenever `active` was `None`, because the first
+        // Save after a transfer or a disposal must work and nothing else opened a branch then. That
+        // made the namespace optional: a request that never went through admission still got a
+        // branch. Flow S now admits before it appends, so the third door is closed. The floor check
+        // above stays first, so a branch opened through admission is still floor-checked here.
+        let Some(mut active) = self.active.clone() else {
+            return Err(ReplError::IntentConflict);
+        };
         let view = active.append(basis, ledger, id, ts)?;
         let mut next = self.clone();
-        if minting {
-            next.branch_generation = self.next_generation()?;
-        }
         next.active = Some(active);
         next.legacy = false;
         next.encode_vault(ledger)?;

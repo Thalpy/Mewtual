@@ -251,14 +251,13 @@ fn a_fabricated_admission_cannot_mint_a_branch_at_a_chosen_generation() {
         .is_err());
 }
 
-/// The second minting path, which the same review found reusing the generation.
-///
-/// After a transfer or a disposal `active` is `None`, and the next ordinary Save legitimately starts
-/// a new branch through `append`. That is a generation event and must take the next number. Reusing
-/// the current one would give the new branch the transferred or disposed branch's identity - the same
-/// defect as the fabricated admission above, reached through the ordinary Save path instead.
+/// `append` no longer opens a branch. It used to be a third door beside `new` and `new_admitted`,
+/// minting at the next generation whenever no branch was live, which made the namespace optional:
+/// a request that never went through admission still got a branch. Flow S now admits first, so
+/// `append` with no live branch refuses, and the first Save after a disposal goes through admission
+/// and still lands on the next generation.
 #[test]
-fn appending_where_no_branch_exists_takes_the_next_generation() {
+fn appending_where_no_branch_exists_is_refused_and_admission_opens_the_next_one() {
     let mut f = Fixture::new(true);
     let (g1, ledger, _ordered, basis) = branch(&mut f, 2);
     let g1_id = g1.branch_id().unwrap();
@@ -274,11 +273,35 @@ fn appending_where_no_branch_exists_takes_the_next_generation() {
     assert!(after.overlay().is_none());
     assert_eq!(after.branch_generation(), 1);
 
-    // The ordinary Save path: append onto a state with no live branch.
     let mut revived = IntentLedger::new(ledger.document().clone());
     let op = f.domain(f.title_body("the first save after a disposal"));
     let id = revived.prepare(f.owner.device_id(), op).unwrap();
-    let mut next = after.clone();
+
+    // Appending with no live branch opens nothing and changes nothing.
+    let mut bypass = after.clone();
+    assert!(
+        matches!(
+            bypass.append(&basis, &revived, id, 800),
+            Err(ReplError::IntentConflict)
+        ),
+        "append must not open a branch that admission never admitted"
+    );
+    assert!(bypass.overlay().is_none());
+    assert_eq!(bypass.branch_generation(), 1);
+    assert_eq!(
+        bypass.encode_vault(&revived).unwrap(),
+        after.encode_vault(&revived).unwrap(),
+        "a refused append must leave the record exactly as it was"
+    );
+
+    // The real path: the id the client was handed, admitted, then appended to.
+    let requested = StudioOverlayState::request_branch_id(Some(&after), &basis).unwrap();
+    let admission = after
+        .admit_new_branch(f.source.target, requested, &basis)
+        .unwrap();
+    let mut next = after
+        .new_admitted(&basis, admission, StudioOverlayProvenance::Closing)
+        .unwrap();
     next.append(&basis, &revived, id, 800)
         .expect("the first Save after a disposal is ordinary and must work");
 
@@ -661,7 +684,13 @@ fn the_generation_and_provenance_survive_the_round_trip_and_gate_the_version() {
     let mut revived = IntentLedger::new(ledger.document().clone());
     let op = f.domain(f.title_body("generation two"));
     let id = revived.prepare(f.owner.device_id(), op).unwrap();
-    let mut g2 = after;
+    let mut g2 = after
+        .new_admitted(
+            &basis,
+            StudioOverlayAdmission::New { generation: 2 },
+            StudioOverlayProvenance::Closing,
+        )
+        .unwrap();
     g2.append(&basis, &revived, id, 900).unwrap();
     assert_eq!(g2.branch_generation(), 2);
 
@@ -700,7 +729,7 @@ fn the_generation_and_provenance_survive_the_round_trip_and_gate_the_version() {
 #[test]
 fn validate_refuses_a_zero_generation_in_a_crafted_record() {
     let mut f = Fixture::new(true);
-    let (metadata, ledger, ordered) = transferable_branch(&mut f, 2);
+    let (metadata, ledger, _ordered) = transferable_branch(&mut f, 2);
     let mut batch = signing(&mut f, &metadata, &ledger);
     while batch.remaining() > 0 {
         batch.sign_next(&f.owner, &f.group, 0).unwrap();
@@ -710,16 +739,31 @@ fn validate_refuses_a_zero_generation_in_a_crafted_record() {
 
     // A new branch after the transfer: generation 2, no disposal, so v3 with a bare ten-byte tail.
     let mut revived = IntentLedger::new(ledger.document().clone());
-    let id = revived
-        .prepare(f.owner.device_id(), ordered[0].0.clone())
+    let op = f.domain(f.title_body("generation two after a transfer"));
+    let id = revived.prepare(f.owner.device_id(), op).unwrap();
+    // A transfer raises the basis floor to the prepared epoch, so the new branch needs a Closing
+    // basis minted from the successor epoch. The earlier version borrowed another document's basis,
+    // which never cleared the floor: its `append` always failed with `EpochScope` and the test
+    // always returned before reaching the rule it names.
+    let first = metadata.overlay().unwrap().receipt().clone();
+    f.fill();
+    let decision = f.decide(Some(&first));
+    let _plan = f.plan(&decision);
+    let basis = f
+        .source
+        .prepare_closing_overlay(decision.close(), &f.group, 0)
         .unwrap();
-    let basis = unrelated_basis();
-    let mut g2 = transferred;
-    if g2.append(&basis, &revived, id, 900).is_err() {
-        // The foreign basis may not clear this vault's basis floor. That is fine: the rule under test
-        // does not depend on which basis the branch sits on, and saying so beats silently passing.
-        return;
-    }
+    let mut g2 = transferred
+        .new_admitted(
+            &basis,
+            StudioOverlayAdmission::New { generation: 2 },
+            StudioOverlayProvenance::Closing,
+        )
+        .unwrap();
+    // This used to return early when the append failed, and that early return was silently taken
+    // once `append` stopped opening branches. An `expect` makes the setup a precondition instead.
+    g2.append(&basis, &revived, id, 900)
+        .expect("the crafted record needs a generation-2 branch to patch");
     let bytes = g2.encode_vault(&revived).unwrap();
     assert_eq!(bytes.first(), Some(&3));
     assert_eq!(g2.branch_generation(), 2);
