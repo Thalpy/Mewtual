@@ -161,6 +161,11 @@ impl StudioReceiver {
                 self.catchup
                     .repair_fault(server, store, id, request.target, *decision)?;
             Ok((StudioSavedTransaction::empty(), None, Some(response)))
+        } else if let StudioControlAction::RepairRegistryFault(decision) = request.action {
+            let response =
+                self.catchup
+                    .repair_registry_fault(server, store, id, request.target, *decision)?;
+            Ok((StudioSavedTransaction::empty(), None, Some(response)))
         } else if let StudioControlAction::Apply(apply) = request.action {
             let (edit, already_saved) =
                 server.prepare_studio_recovery_apply(store, id, request.target, *apply)?;

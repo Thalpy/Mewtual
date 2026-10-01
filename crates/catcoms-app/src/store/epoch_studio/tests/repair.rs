@@ -288,6 +288,207 @@ fn a_b1_failure_retries_exactly_and_a_held_decision_owns_the_target_until_resume
 }
 
 #[test]
+fn a_peer_applies_an_owner_repair_to_its_own_fault_and_writes_no_owner_record() {
+    let root = tempfile::tempdir().unwrap();
+    let mut owner = Fixture::new(false);
+    let peer = MlsDevice::generate().unwrap();
+    let welcome = owner
+        .group
+        .add_member(&owner.device, peer.key_package().unwrap())
+        .unwrap()
+        .welcome;
+    let peer_group = ServerGroup::join(&peer, &welcome).unwrap();
+    // The peer's own source, faulted on two receipts the owner signed in its tenure.
+    let f = Fixture {
+        device: peer,
+        group: peer_group,
+        target: owner.target,
+        logical: owner.logical.clone(),
+        id: owner.id,
+    };
+    let mut store = open(root.path());
+    let mut b = budget(&mut store, &f);
+    let (_, state) = f.edit(&mut store, &mut b, f.insert());
+    let signed = |close: u8| {
+        Receipt::sign(
+            f.logical.clone(),
+            state.epoch(),
+            [close; 32],
+            state
+                .projection()
+                .unwrap()
+                .checkpoint([close; 32])
+                .unwrap()
+                .change_hash(),
+            0,
+            InheritedCheckpoint::EpochZero,
+            &owner.device,
+        )
+        .unwrap()
+    };
+    let mut pair = [signed(7), signed(8)];
+    for receipt in &pair {
+        store
+            .seal_studio_epoch(
+                SERVER,
+                &f.group,
+                f.target,
+                &f.device,
+                receipt.clone(),
+                0,
+                &mut rng(),
+                &mut b,
+            )
+            .unwrap();
+    }
+    pair.sort_by_key(Receipt::hash);
+    assert_eq!(f.load(&store).unwrap().phase(), EpochPhase::Fault);
+    let repair = ReceiptRepair::sign_in_tenure(
+        f.logical.clone(),
+        pair[0].tenure_id,
+        [pair[0].hash(), pair[1].hash()],
+        pair[1].hash(),
+        1,
+        0,
+        &owner.device,
+    )
+    .unwrap();
+    // A repair signed by someone other than the current owner never applies.
+    let forged = ReceiptRepair::sign_in_tenure(
+        f.logical.clone(),
+        pair[0].tenure_id,
+        [pair[0].hash(), pair[1].hash()],
+        pair[1].hash(),
+        1,
+        0,
+        &f.device,
+    )
+    .unwrap();
+    assert!(apply(&f, &mut store, &forged, &pair, None).is_err());
+    assert_eq!(f.load(&store).unwrap().phase(), EpochPhase::Fault);
+    let (outcome, state) = apply(&f, &mut store, &repair, &pair, None).unwrap();
+    assert_eq!(outcome, StudioRepairOutcome::Repaired);
+    assert_eq!(state.phase(), EpochPhase::Closing);
+    assert!(
+        store
+            .epoch_owner_receipt_inventory_record(SERVER, &f.logical)
+            .unwrap()
+            .is_none(),
+        "a peer keeps no owner record"
+    );
+    drop(store);
+    let store = open(root.path());
+    assert_eq!(f.load(&store).unwrap().phase(), EpochPhase::Closing);
+}
+
+#[test]
+fn the_owner_never_applies_a_decision_it_did_not_persist_first() {
+    let root = tempfile::tempdir().unwrap();
+    let f = Fixture::new(false);
+    let mut store = open(root.path());
+    let pair = faulted(&f, &mut store);
+    let unpersisted = ReceiptRepair::sign_in_tenure(
+        f.logical.clone(),
+        pair[0].tenure_id,
+        [pair[0].hash(), pair[1].hash()],
+        pair[0].hash(),
+        1,
+        0,
+        &f.device,
+    )
+    .unwrap();
+    assert!(apply(&f, &mut store, &unpersisted, &pair, None).is_err());
+    assert_eq!(f.load(&store).unwrap().phase(), EpochPhase::Fault);
+    assert!(owner_is_ordinary(&f, &store));
+}
+
+#[test]
+fn head_service_serves_an_applied_repair_but_never_proves_while_it_is_held() {
+    let root = tempfile::tempdir().unwrap();
+    let mut store = open(root.path());
+    let f = Fixture::new(false);
+    let mut b = budget(&mut store, &f);
+    f.edit(&mut store, &mut b, f.insert());
+    let (chosen, seed) = checkpoint(&f, &store, 10, 10);
+    let (rival, _) = checkpoint(&f, &store, 10, 11);
+    adopt(&f, &mut store, &chosen, None);
+    adopt(&f, &mut store, &rival, None);
+    let mut pair = [chosen.clone(), rival.clone()];
+    pair.sort_by_key(Receipt::hash);
+    let (repair, outcome, state) =
+        issue(&f, &mut store, request([&chosen, &rival], &chosen), None).unwrap();
+    assert_eq!(outcome, StudioRepairOutcome::AwaitingSeed);
+    // Head service never cold-restores inside a request; the runtime retains each saved state.
+    store.retain_studio_source(&f.group, &f.device, state);
+    let mut b = budget(&mut store, &f);
+    let (selection, served) = store
+        .prepare_studio_head_with_fault_repair(
+            SERVER,
+            &f.group,
+            f.target,
+            &f.device,
+            Some(0),
+            &mut rng(),
+            &mut b,
+        )
+        .unwrap();
+    assert!(!selection.prove, "a held repair never permits a proof");
+    assert_eq!(selection.receipt.as_ref(), Some(&chosen));
+    assert_eq!(served.as_ref(), Some(&repair), "applied at B2, so servable");
+    // Without a durable owner tenure nothing is served as the owner's repair.
+    let mut b = budget(&mut store, &f);
+    let (_, served) = store
+        .prepare_studio_head_with_fault_repair(
+            SERVER,
+            &f.group,
+            f.target,
+            &f.device,
+            None,
+            &mut rng(),
+            &mut b,
+        )
+        .unwrap();
+    assert!(served.is_none());
+    // Ordinary discovery cannot install into the target while the decision is held.
+    let mut b = budget(&mut store, &f);
+    assert!(store
+        .adopt_studio_checkpoint(
+            SERVER,
+            &f.group,
+            f.target,
+            &f.device,
+            &chosen,
+            Some(seed.bytes()),
+            0,
+            &ManualClock::new(1000),
+            &mut rng(),
+            &mut b,
+        )
+        .is_err());
+    let (outcome, state) = apply(&f, &mut store, &repair, &pair, Some(seed.bytes())).unwrap();
+    assert_eq!(outcome, StudioRepairOutcome::Installed);
+    store.retain_studio_source(&f.group, &f.device, state);
+    let mut b = budget(&mut store, &f);
+    let (selection, served) = store
+        .prepare_studio_head_with_fault_repair(
+            SERVER,
+            &f.group,
+            f.target,
+            &f.device,
+            Some(0),
+            &mut rng(),
+            &mut b,
+        )
+        .unwrap();
+    assert_eq!(
+        served.as_ref(),
+        Some(&repair),
+        "still the source's disposition"
+    );
+    assert_eq!(selection.receipt.as_ref(), Some(&chosen));
+}
+
+#[test]
 fn an_adopting_fault_replaces_only_after_repair_recovery_and_keeps_every_intent() {
     for art in [false, true] {
         let root = tempfile::tempdir().unwrap();

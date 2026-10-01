@@ -3,7 +3,8 @@
 use super::*;
 use crate::checkpoint_exchange::CheckpointTarget;
 use catcoms_replication::{
-    registry::registry_document, LogicalDocument, Receipt, ReceiptHeadProof, VerifiedReceipt,
+    registry::registry_document, LogicalDocument, Receipt, ReceiptHeadProof, ReceiptRepair,
+    VerifiedReceipt,
 };
 use catcoms_rt::Responder;
 use registry_ingress::Rate;
@@ -469,6 +470,26 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             ReceiptHeadSource<'_>,
         ) -> Result<ReceiptHeadSelection, E>,
     ) -> Result<Option<Result<ReceiptHeadServed, E>>, SyncError> {
+        self.serve_receipt_head_with_fault_repair(watch, snapshot, |g, d, rng, source| {
+            serve(g, d, rng, source).map(|selected| (selected, None))
+        })
+    }
+
+    /// The same serving transaction, additionally carrying a signed fault repair the trusted
+    /// caller found durably servable: applied locally, never merely signed. Serving it claims
+    /// availability only; the receiver verifies it under its own observed tenure before use, and
+    /// a repair never mints a proof or a journal handoff.
+    pub fn serve_receipt_head_with_fault_repair<E>(
+        &mut self,
+        watch: &RegistryHeadWatch,
+        snapshot: Option<&DurableOwnerSnapshot>,
+        serve: impl FnOnce(
+            &ServerGroup,
+            &MlsDevice,
+            &mut R,
+            ReceiptHeadSource<'_>,
+        ) -> Result<(ReceiptHeadSelection, Option<ReceiptRepair>), E>,
+    ) -> Result<Option<Result<ReceiptHeadServed, E>>, SyncError> {
         if !self.registry_head_watch_is_current(watch) {
             return Err(SyncError::NoSuchDoc);
         }
@@ -503,7 +524,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         let tenure = snapshot
             .filter(|p| self.head_snapshot_is_current(p))
             .map(|p| p.tenure);
-        let selected = match serve(
+        let (selected, fault_repair) = match serve(
             &self.group,
             &self.device,
             &mut self.rng,
@@ -517,6 +538,12 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             Ok(value) => value,
             Err(error) => return Ok(Some(Err(error))),
         };
+        if fault_repair
+            .as_ref()
+            .is_some_and(|r| r.document != document)
+        {
+            return Err(SyncError::Malformed);
+        }
         // Synchronous disk work can consume the request's lifetime. Never send stale success.
         if !self.head_request_current(&item) || self.clock.monotonic_ms() >= item.expires {
             return Err(SyncError::Unauthorized);
@@ -544,7 +571,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         };
         let answer = ReceiptHeadAnswer {
             receipt,
-            repair: None,
+            repair: fault_repair,
             proof,
         };
         let bytes = encode_answer(&answer, &document)?;

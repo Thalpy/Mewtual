@@ -1,6 +1,7 @@
 //! Receipt-head selection shares the store's exclusive gate and both inventory checks. Serving
 //! never seals a source, changes the selected checkpoint, retires intents or completes publication.
 use super::*;
+use catcoms_replication::ReceiptRepair;
 use catcoms_sync::receipt_head::ReceiptHeadSelection;
 
 impl ServerStore {
@@ -39,6 +40,68 @@ impl ServerStore {
         budget: &mut EpochStorageBudget,
         hooks: &mut WriteHooks<'_>,
     ) -> Result<ReceiptHeadSelection, AppError> {
+        self.prepare_registry_head_and_repair(
+            server,
+            group,
+            bucket,
+            device,
+            durable_tenure,
+            rng,
+            budget,
+            hooks,
+        )
+        .map(|(selection, _)| selection)
+    }
+
+    /// Completion of an exact proved Registry decision. Publication-aware like Studio's: a
+    /// repaired reconciliation can publish, while a held repair still refuses in the writer.
+    pub(crate) fn complete_registry_head_publication(
+        &mut self,
+        server: u64,
+        receipt: &Receipt,
+        rng: &mut impl CryptoRngCore,
+        budget: &mut EpochStorageBudget,
+    ) -> Result<(), AppError> {
+        self.mark_epoch_owner_publication(server, &receipt.document, receipt.hash(), rng, budget)
+            .map(|_| ())
+    }
+
+    /// The head selection plus a durably applied fault repair safe to serve beside it.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn prepare_registry_head_with_fault_repair(
+        &mut self,
+        server: u64,
+        group: &ServerGroup,
+        bucket: u8,
+        device: &MlsDevice,
+        durable_tenure: Option<u64>,
+        rng: &mut impl CryptoRngCore,
+        budget: &mut EpochStorageBudget,
+    ) -> Result<(ReceiptHeadSelection, Option<ReceiptRepair>), AppError> {
+        self.prepare_registry_head_and_repair(
+            server,
+            group,
+            bucket,
+            device,
+            durable_tenure,
+            rng,
+            budget,
+            &mut WriteHooks::None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn prepare_registry_head_and_repair(
+        &mut self,
+        server: u64,
+        group: &ServerGroup,
+        bucket: u8,
+        device: &MlsDevice,
+        durable_tenure: Option<u64>,
+        rng: &mut impl CryptoRngCore,
+        budget: &mut EpochStorageBudget,
+        hooks: &mut WriteHooks<'_>,
+    ) -> Result<(ReceiptHeadSelection, Option<ReceiptRepair>), AppError> {
         if group.member_signature_key(&device.device_id()).as_deref()
             != Some(device.public_key_bytes().as_slice())
         {
@@ -79,9 +142,12 @@ impl ServerStore {
                 .map_err(invalid)?
                 .flatten()
                 .cloned();
-            Ok::<_, AppError>((held, record))
+            let applied = unit
+                .as_ref()
+                .and_then(|u| u.repair_state().map(|state| state.repair));
+            Ok::<_, AppError>((held, record, applied))
         })();
-        let (held, record) = match loaded {
+        let (held, record, applied) = match loaded {
             Ok(value) => value,
             Err(error) => {
                 budget.invalidate();
@@ -101,6 +167,7 @@ impl ServerStore {
             budget,
             held,
             record,
+            applied,
             hooks,
         )
     }
@@ -117,18 +184,17 @@ impl ServerStore {
         budget: &mut EpochStorageBudget,
         held: Option<Receipt>,
         record: Option<StorageRecord>,
+        applied: Option<ReceiptRepair>,
         hooks: &mut WriteHooks<'_>,
-    ) -> Result<ReceiptHeadSelection, AppError> {
+    ) -> Result<(ReceiptHeadSelection, Option<ReceiptRepair>), AppError> {
         let document = registry_document(&group.group_id(), bucket).map_err(invalid)?;
         let scope = scope_bytes(server, &document)?;
         let storage_scope = StorageScope::new(server, &document.server_id).map_err(invalid)?;
-        let (journal, owner_record) = (|| {
-            Ok::<_, AppError>((
-                self.load_epoch_owner_receipts(server, &document)?,
-                self.epoch_owner_receipt_inventory_record(server, &document)?,
-            ))
-        })()
-        .inspect_err(|_| budget.invalidate())?;
+        // Contextual, so a record a repair transaction holds is read rather than refused; a held
+        // repair never permits a proof, and before B2 not even a hint.
+        let (journal, owner_record) = self
+            .load_epoch_owner_repair_state(server, &document, &device.device_id(), group.epoch())
+            .inspect_err(|_| budget.invalidate())?;
         let owner_scope = super::super::epoch_owner::scope_bytes(server, &document)?;
         budget
             .verify_record(
@@ -138,8 +204,23 @@ impl ServerStore {
             )
             .map_err(invalid)?;
         let held = held.as_ref();
-        let own_choice = journal.pending().or_else(|| journal.published());
         let is_owner = group.designated_committer() == Some(device.device_id());
+        let servable = applied.filter(|r| {
+            is_owner && durable_tenure.is_some_and(|t| r.verify_current_owner(group, t).is_ok())
+        });
+        if let Some((pending, _, _)) = journal.held_repair() {
+            let applied = servable.filter(|r| r == pending);
+            let receipt = applied.as_ref().and(held.cloned());
+            return Ok((
+                ReceiptHeadSelection {
+                    receipt,
+                    prove: false,
+                },
+                applied,
+            ));
+        }
+        // Effective publication choice; identical to pending-then-published when ordinary.
+        let own_choice = journal.journal().effective_choice();
         let selected = if is_owner {
             own_choice.or(held)
         } else {
@@ -172,22 +253,24 @@ impl ServerStore {
             reservation.commit();
             // Re-save even an exact published retry: a previously visible rename is not itself
             // evidence of a successful parent flush. No mark-published or receipt issuance here.
-            self.prepare_epoch_owner_receipt(
+            self.prepare_epoch_owner_publication_with_writer(
                 server,
                 receipt.clone().expect("selected proof"),
                 group,
                 durable_tenure.expect("known proof tenure"),
                 rng,
                 budget,
+                &mut WriteHooks::None,
             )?;
         }
-        Ok(ReceiptHeadSelection { receipt, prove })
+        Ok((ReceiptHeadSelection { receipt, prove }, servable))
     }
 
     /// Same journal/flush/signing-selection barriers as the explicit cold adapter, without a
-    /// second restore of an already prepared source. The caller retains its preparation slot.
+    /// second restore of an already prepared source, carrying a durably applied fault repair
+    /// when servable. The caller retains its preparation slot.
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn prepare_registry_head_prepared(
+    pub(crate) fn prepare_registry_head_prepared_with_fault_repair(
         &mut self,
         server: u64,
         group: &ServerGroup,
@@ -200,9 +283,10 @@ impl ServerStore {
             &catcoms_replication::registry_epoch::catchup::RegistryPageSource,
         )>,
         budget: &mut EpochStorageBudget,
-    ) -> Result<ReceiptHeadSelection, AppError> {
+    ) -> Result<(ReceiptHeadSelection, Option<ReceiptRepair>), AppError> {
         let (head, record) = self
             .checked_registry_checkpoint_source(server, group, bucket, device, prepared, budget)?;
+        let applied = prepared.and_then(|(_, source)| source.fault_repair());
         self.finish_registry_head_source(
             server,
             group,
@@ -213,6 +297,7 @@ impl ServerStore {
             budget,
             head,
             record,
+            applied,
             &mut WriteHooks::None,
         )
     }

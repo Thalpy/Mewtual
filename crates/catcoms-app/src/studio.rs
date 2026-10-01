@@ -29,7 +29,11 @@ mod publication;
 pub(crate) use publication::StudioSavedTransaction;
 mod control;
 mod fault;
-pub use fault::{StudioFaultCandidate, StudioFaultView, StudioRepairBlocker, StudioRepairStatus};
+pub use catcoms_replication::{RepairDisposition, RepairHold};
+pub use fault::{
+    StudioFaultCandidate, StudioFaultScope, StudioFaultView, StudioRepairBlocker,
+    StudioRepairStatus,
+};
 mod replay;
 /// Crate-visible because copy's detached planner lives in the store and calls `plan` directly.
 pub(crate) mod restore;

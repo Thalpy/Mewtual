@@ -7,8 +7,8 @@ pub(super) const MAX_ANSWER: usize = 1 + 3 * (4 + MAX_RECEIPT_BYTES);
 const MAX_RESPONSE: usize = MAX_ANSWER + 108;
 
 /// Checked query-bound transport answer. Receipt/repair without `proof` are provisional hints;
-/// the public values remain uninstalled. This release sends no repair because its durable signed
-/// repair adapter is not yet implemented; bounded repairs can be carried by later providers.
+/// the public values remain uninstalled. A provider sends a repair only once it is durably
+/// applied locally; the receiver verifies it under its own observed tenure before any use.
 #[derive(Clone, PartialEq, Eq)]
 pub struct ReceiptHeadAnswer {
     pub receipt: Option<Receipt>,

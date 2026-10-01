@@ -40,10 +40,7 @@ impl ServerStore {
             return Ok(true);
         }
         let document = target.document(&group.group_id()).map_err(invalid)?;
-        Ok(self
-            .load_epoch_owner_receipts(server, &document)?
-            .pending()
-            .is_some())
+        self.epoch_owner_rotation_pending(server, &document)
     }
     /// Trusted current durable-owner-snapshot callback only. A UI-supplied tenure is not
     /// authority. A large source must already have passed the existing detached preparation.

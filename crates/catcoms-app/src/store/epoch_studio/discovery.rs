@@ -69,14 +69,7 @@ impl ServerStore {
         rng: &mut impl CryptoRngCore,
         budget: &mut EpochStudioBudget,
     ) -> Result<(), AppError> {
-        self.mark_epoch_owner_receipt_published(
-            server,
-            &receipt.document,
-            receipt.hash(),
-            rng,
-            &mut budget.storage,
-        )?;
-        Ok(())
+        self.complete_registry_head_publication(server, receipt, rng, &mut budget.storage)
     }
     /// Narrow checked status used after detached source preparation. No cold restore, no
     /// mutation and no inferred checkpoint: absence must agree with the inventory as usual.
@@ -195,6 +188,67 @@ impl ServerStore {
         budget: &mut EpochStudioBudget,
         hooks: &mut WriteHooks<'_>,
     ) -> Result<ReceiptHeadSelection, AppError> {
+        self.prepare_studio_head_and_repair_with_io(
+            server,
+            group,
+            target,
+            device,
+            durable_tenure,
+            rng,
+            budget,
+            hooks,
+        )
+        .map(|(selection, _)| selection)
+    }
+    /// The head selection plus a signed fault repair safe to serve beside it: one the saved
+    /// source carries as its resolved disposition (B2 returned) and that still verifies under the
+    /// caller's durable owner tenure. A signed but unapplied decision is never served (I-6).
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn prepare_studio_head_with_fault_repair(
+        &mut self,
+        server: u64,
+        group: &ServerGroup,
+        target: StudioTarget,
+        device: &MlsDevice,
+        durable_tenure: Option<u64>,
+        rng: &mut impl CryptoRngCore,
+        budget: &mut EpochStudioBudget,
+    ) -> Result<
+        (
+            ReceiptHeadSelection,
+            Option<catcoms_replication::ReceiptRepair>,
+        ),
+        AppError,
+    > {
+        self.prepare_studio_head_and_repair_with_io(
+            server,
+            group,
+            target,
+            device,
+            durable_tenure,
+            rng,
+            budget,
+            &mut WriteHooks::None,
+        )
+    }
+    #[allow(clippy::too_many_arguments)]
+    fn prepare_studio_head_and_repair_with_io(
+        &mut self,
+        server: u64,
+        group: &ServerGroup,
+        target: StudioTarget,
+        device: &MlsDevice,
+        durable_tenure: Option<u64>,
+        rng: &mut impl CryptoRngCore,
+        budget: &mut EpochStudioBudget,
+        hooks: &mut WriteHooks<'_>,
+    ) -> Result<
+        (
+            ReceiptHeadSelection,
+            Option<catcoms_replication::ReceiptRepair>,
+        ),
+        AppError,
+    > {
         let source =
             self.with_studio_checkpoint_source(server, group, target, device, budget, |state| {
                 Ok((
@@ -204,13 +258,20 @@ impl ServerStore {
                         .as_ref()
                         .ok_or_else(|| invalid("head source has no physical stamp"))?
                         .record(),
+                    state.unit.repair_state().map(|s| s.repair),
                 ))
             })?;
         let document = target.document(&group.group_id()).map_err(invalid)?;
         let storage_scope = StorageScope::new(server, &document.server_id).map_err(invalid)?;
         let journal = (|| {
-            let journal = self.load_epoch_owner_receipts(server, &document)?;
-            let owner_record = self.epoch_owner_receipt_inventory_record(server, &document)?;
+            // Contextual, so a record a repair transaction holds is read rather than refused;
+            // what it permits is decided below, and a held repair never permits a proof.
+            let (journal, owner_record) = self.load_epoch_owner_repair_state(
+                server,
+                &document,
+                &device.device_id(),
+                group.epoch(),
+            )?;
             let owner_scope = super::super::epoch_owner::scope_bytes(server, &document)?;
             budget
                 .storage
@@ -223,9 +284,29 @@ impl ServerStore {
             Ok::<_, AppError>(journal)
         })()
         .inspect_err(|_| budget.storage.invalidate())?;
-        let held = source.as_ref().and_then(|(r, _)| r.as_ref());
-        let own_choice = journal.pending().or_else(|| journal.published());
+        let held = source.as_ref().and_then(|(r, _, _)| r.as_ref());
         let is_owner = group.designated_committer() == Some(device.device_id());
+        let servable = source.as_ref().and_then(|(_, _, repair)| {
+            repair.clone().filter(|r| {
+                is_owner && durable_tenure.is_some_and(|t| r.verify_current_owner(group, t).is_ok())
+            })
+        });
+        if let Some((pending, _, _)) = journal.held_repair() {
+            // A nonterminal repair owns this target (CORE-007): no proof, and before B2 not even
+            // a hint, since the source may still sit on the branch the decision repudiates.
+            let applied = servable.filter(|r| r == pending);
+            let receipt = applied.as_ref().and(held.cloned());
+            return Ok((
+                ReceiptHeadSelection {
+                    receipt,
+                    prove: false,
+                },
+                applied,
+            ));
+        }
+        // The effective publication choice: pending, else a repaired reconciliation, else the
+        // last publication. Identical to pending-then-published for an ordinary journal.
+        let own_choice = journal.journal().effective_choice();
         let selected = if is_owner {
             own_choice.or(held)
         } else {
@@ -254,7 +335,7 @@ impl ServerStore {
             sync_studio(&mutation, &path, bytes)?;
             hooks.after_sync(WriteTag::Source, &path)?;
             reservation.commit();
-            self.prepare_epoch_owner_with_writer(
+            self.prepare_epoch_owner_publication_with_writer(
                 server,
                 receipt.clone().expect("selected proof"),
                 group,
@@ -264,7 +345,7 @@ impl ServerStore {
                 hooks,
             )?;
         }
-        Ok(ReceiptHeadSelection { receipt, prove })
+        Ok((ReceiptHeadSelection { receipt, prove }, servable))
     }
     /// Complete either a checked reply handoff or exact durable installed-head availability,
     /// under the same exclusive transaction. Neither outcome attests remote delivery. A failed
@@ -276,7 +357,9 @@ impl ServerStore {
         rng: &mut impl CryptoRngCore,
         budget: &mut EpochStudioBudget,
     ) -> Result<(), AppError> {
-        self.mark_epoch_owner_receipt_published(
+        // Publication-aware: completing a repaired reconciliation is ordinary progress, while
+        // any held repair still refuses inside the guarded writer.
+        self.mark_epoch_owner_publication(
             server,
             &receipt.document,
             receipt.hash(),

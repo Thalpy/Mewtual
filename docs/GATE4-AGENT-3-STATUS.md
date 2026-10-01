@@ -4,6 +4,40 @@ Owner: Agent 3 ([assignment](GATE4-AGENT-HANDOFFS.md#agent-3-runtime-signed-faul
 Proposal: [GATE4-AGENT-3-DESIGN](GATE4-AGENT-3-DESIGN.md), revision 16 follow-up.
 Review preamble: 3. Current entries override older ones.
 
+## Current-tenure runtime repair, Studio and Registry, 2026-10-01
+
+Implemented on `gate4-agent3-repair` (merge of base `9bfb7c79`/`94af29df` at `14dccacf`). Historical
+report admission and N17 remain blocked: `94af29df` is a rejoin *test*, not the CORE-005 archived
+witness, so only current-tenure (origin 0) evidence can be admitted.
+
+- **Owner record (5.2).** Tag 3 is a parsed canonical model; decode also requires
+  `encode(decode(bytes)) == bytes`. Retained attestations are usable only after contextual restore
+  against the local device and the durable snapshot epoch. New evidence enters only through
+  non-`Clone` `ValidatedFaultAdmission`, minted fresh for a current-tenure pair after live
+  current-owner checks. B1 binds repair, pair and the joint plan's journal candidate in one write;
+  B3 marks application; terminal recycling removes the bound pair and omits tag 3 when empty.
+- **Studio and Registry transactions (5.3, 5.4).** Issuance derives the decidable pair (shared
+  derivation), refuses stale echoes, persists B1, then runs Flow A on the same source. Application
+  reads the committed `repair_state()` first, saves B2, and replaces through the shared adoption
+  install half, whose successor write consumes a recovery capability minted only after the
+  `Repair` stage returned. Ordinary adoption refuses while the owner record holds a decision, and
+  a repair-pending source continues through `prepare_repair_adoption`.
+- **Serving and distribution (5.5, 5.6).** Head answers carry a repair only when the saved source
+  applied it (B2) and it verifies under the durable owner tenure. A held decision never proves and
+  gives no hint before B2. Proofs follow the journal's effective choice; a publication guard admits
+  repaired reconciliation but refuses any tag 3. Peers apply delivered repairs (Flow D) from evidence
+  they hold plus the answered receipt. Legacy rotation answers "not pending" for repair-bearing
+  records instead of aborting the catch-up step.
+- **App and native (5.7, 5.8).** V5 then durable snapshot, refusing on tenure disagreement; peer
+  application holds on Imported/Unknown. `ReadFault`/`RepairFault` and Registry-scoped equivalents,
+  `Repairing`/`StorageRefused` with native mapping, a native response encoder (commands unregistered,
+  Agent 4), and a catch-up step that resumes held decisions for sources and buckets.
+
+Not implemented: the W-1 report path and the 6.6 durable proof gate for reserved/overflow evidence
+(no writer creates either yet), select-repaired-checkpoint for an owner proving a head other than the
+selected receipt, the detached S1-S4 split (every step is one custody visit), and Imported coverage at
+the app boundary (no migrated-v1 Server fixture; the seam's own `require` anchor covers it).
+
 ## Base re-merge and the V5 tenure seam, 2026-10-01
 
 Merges: `b0b73453` (base `b15ce314`) then `d35b1836` (base `1f8a11d9`), both clean with no file

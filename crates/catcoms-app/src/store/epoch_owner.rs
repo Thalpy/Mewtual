@@ -19,10 +19,10 @@ use super::epoch_recovery::AuthenticatedEpochFileBytes;
 use super::*;
 
 mod fault_record;
-pub(in crate::store) use fault_record::{BindingKind, Pair as FaultPair, ValidatedFaultAdmission};
+pub(in crate::store) use fault_record::{BindingKind, ValidatedFaultAdmission};
 use fault_record::{InertFaultRecord, MAX_FAULT_ADMISSION_ATTESTATION_BYTES};
 mod repair;
-pub(in crate::store) use repair::TerminalRepairSource;
+pub(in crate::store) use repair::{decidable_pair, TerminalRepairSource};
 
 pub(super) const RECORD_DOMAIN: &[u8] = b"catcoms/epoch-owner-store/v1";
 // Full framed local/group/type/key scope plus length framing, separate from the signed wire.
@@ -58,12 +58,20 @@ enum OwnerGuard<'a> {
         observer: &'a catcoms_crypto::DeviceId,
         durable_epoch: u64,
     },
+    /// Repair-aware Studio head publication: journal repair provenance is legal because the
+    /// core journal enforces its own adjacency and evidence-only holds, but any tag-3 evidence
+    /// refuses, so a nonterminal repair transaction still owns its target (CORE-007).
+    Publication,
 }
 
 impl OwnerGuard<'_> {
     fn check(&self, state: &EpochOwnerReceiptState) -> Result<(), AppError> {
         match self {
             Self::Ordinary => state.require_ordinary(),
+            Self::Publication => match state.fault_record {
+                Some(_) => Err(invalid("a held repair owns this target")),
+                None => Ok(()),
+            },
             Self::Repair {
                 observer,
                 durable_epoch,
@@ -406,9 +414,32 @@ impl ServerStore {
         apply: impl FnOnce(&mut OwnerReceiptJournal) -> Result<(), AppError>,
         hooks: &mut WriteHooks<'_>,
     ) -> Result<EpochOwnerReceiptState, AppError> {
-        self.update_epoch_owner_state_with_writer(
+        self.update_epoch_owner_journal_guarded(
             server,
             document,
+            OwnerGuard::Ordinary,
+            rng,
+            budget,
+            apply,
+            hooks,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn update_epoch_owner_journal_guarded(
+        &mut self,
+        server: u64,
+        document: &LogicalDocument,
+        guard: OwnerGuard<'_>,
+        rng: &mut impl CryptoRngCore,
+        budget: &mut EpochStorageBudget,
+        apply: impl FnOnce(&mut OwnerReceiptJournal) -> Result<(), AppError>,
+        hooks: &mut WriteHooks<'_>,
+    ) -> Result<EpochOwnerReceiptState, AppError> {
+        self.write_epoch_owner_state(
+            server,
+            document,
+            guard,
             rng,
             budget,
             |state| {

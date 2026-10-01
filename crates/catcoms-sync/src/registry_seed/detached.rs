@@ -103,6 +103,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             None => RegistrySeedDiscovery::Hint(answer),
             Some(selection) => RegistrySeedDiscovery::Selected(RegistrySeedFetch {
                 selection,
+                fault_repair: answer.repair.map(Box::new),
                 _capacity: completed.capacity,
                 expires: completed.expires,
                 attempts: 0,

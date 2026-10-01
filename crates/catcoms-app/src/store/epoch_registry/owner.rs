@@ -49,10 +49,7 @@ impl ServerStore {
         if state.phase() == EpochPhase::Fault
             || (state.phase() == EpochPhase::Open
                 && !state.unit.close_candidate_ready()
-                && self
-                    .load_epoch_owner_receipts(server, &document)?
-                    .pending()
-                    .is_none())
+                && !self.epoch_owner_rotation_pending(server, &document)?)
         {
             return Ok(None);
         }

@@ -160,9 +160,21 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
                     .map(|s| &s.inner);
                 let served = self
                     .sync
-                    .serve_epoch_head_interest(interest, snapshot, |g, d, rng, request| {
-                        store.prepare_studio_head(server, g, target, d, request.tenure, rng, budget)
-                    })?
+                    .serve_epoch_head_interest_with_fault_repair(
+                        interest,
+                        snapshot,
+                        |g, d, rng, request| {
+                            store.prepare_studio_head_with_fault_repair(
+                                server,
+                                g,
+                                target,
+                                d,
+                                request.tenure,
+                                rng,
+                                budget,
+                            )
+                        },
+                    )?
                     .transpose()?;
                 match served {
                     Some(ReceiptHeadServed::Owner(handoff)) => {
@@ -375,11 +387,11 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
             .map(|s| &s.inner);
         let served = self
             .sync
-            .serve_receipt_head_with_handoff(
+            .serve_receipt_head_with_fault_repair(
                 &watch.head,
                 snapshot,
                 |group, device, rng, request| {
-                    store.prepare_studio_head(
+                    store.prepare_studio_head_with_fault_repair(
                         watch.server,
                         group,
                         watch.target,

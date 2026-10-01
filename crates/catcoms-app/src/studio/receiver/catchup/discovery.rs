@@ -94,14 +94,54 @@ impl CatchupRuntime {
             let result = server.complete_checkpoint_discovery(store, id, *completed);
             match result {
                 Ok(Some(ServerCheckpointDiscovery::Selected(pass))) => {
+                    // Flow D before the seed: once B2 crosses, the selected checkpoint's seed is
+                    // installed through the repair's own Repair-recovery adoption.
+                    if let Some(repair) = pass.inner.fault_repair().cloned() {
+                        let offered = pass.inner.selected_receipt().clone();
+                        match target {
+                            CheckpointTarget::Studio(studio) => {
+                                self.apply_offered_repair(
+                                    server,
+                                    store,
+                                    id,
+                                    studio,
+                                    &repair,
+                                    Some(&offered),
+                                )?;
+                            }
+                            CheckpointTarget::Registry(bucket) => {
+                                self.apply_offered_registry_repair(
+                                    server,
+                                    store,
+                                    id,
+                                    bucket,
+                                    &repair,
+                                    Some(&offered),
+                                )?;
+                            }
+                        }
+                    }
                     self.pass = None;
                     self.checkpoint = Some(pass);
                     self.checkpoint_sealed = false;
                 }
-                Ok(Some(ServerCheckpointDiscovery::Hint(_))) if registry => {
+                Ok(Some(ServerCheckpointDiscovery::Hint(answer))) if registry => {
+                    // A faulted bucket's only way out is the repair the owner's answer carries.
+                    if let (CheckpointTarget::Registry(bucket), Some(repair)) =
+                        (target, answer.repair.as_ref())
+                    {
+                        self.apply_offered_registry_repair(
+                            server,
+                            store,
+                            id,
+                            bucket,
+                            repair,
+                            answer.receipt.as_ref(),
+                        )?;
+                    }
                     self.discovery_plan = self.after_registry.take()
                 }
-                Ok(Some(ServerCheckpointDiscovery::Hint(_answer))) => {
+                Ok(Some(ServerCheckpointDiscovery::Hint(answer))) => {
                     #[cfg(test)]
                     if let Some(observer) = &self.hint_observer {
                         // Emitted only after the existing watch/mount/current-member/request
@@ -114,10 +154,23 @@ impl CatchupRuntime {
                                     .sync
                                     .registry_page_peer_device(peer)
                                     .expect("completed discovery authenticated this member"),
-                                receipt: _answer.receipt.clone(),
-                                proof_absent: _answer.proof.is_none(),
+                                receipt: answer.receipt.clone(),
+                                proof_absent: answer.proof.is_none(),
                             },
                         ));
+                    }
+                    // An unproven answer may still deliver a repair; verification is the app's.
+                    if let (CheckpointTarget::Studio(studio), Some(repair)) =
+                        (target, answer.repair.as_ref())
+                    {
+                        self.apply_offered_repair(
+                            server,
+                            store,
+                            id,
+                            studio,
+                            repair,
+                            answer.receipt.as_ref(),
+                        )?;
                     }
                     if let (CheckpointTarget::Studio(target), Some(inner)) =
                         (target, &self.discovery_watch)

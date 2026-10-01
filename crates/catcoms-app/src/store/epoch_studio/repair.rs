@@ -5,7 +5,8 @@
 //! touches a `DraftArchive`: a replacement preserves the losing version as `Repair` recovery.
 
 use super::super::epoch_owner::{
-    BindingKind, EpochOwnerReceiptState, FaultPair, TerminalRepairSource, ValidatedFaultAdmission,
+    decidable_pair, BindingKind, EpochOwnerReceiptState, TerminalRepairSource,
+    ValidatedFaultAdmission,
 };
 use super::*;
 use catcoms_replication::studio::StudioTarget;
@@ -58,7 +59,7 @@ pub struct StudioRepairRequest {
 }
 
 impl StudioRepairRequest {
-    fn names(&self, hashes: [[u8; 32]; 2]) -> bool {
+    pub(in crate::store) fn names(&self, hashes: [[u8; 32]; 2]) -> bool {
         let mut named = [self.receipt_a, self.receipt_b];
         named.sort();
         named == hashes && hashes.contains(&self.selected)
@@ -87,35 +88,7 @@ pub struct StudioFaultEvidence {
     pub opening: Option<[u8; 32]>,
 }
 
-/// The owner's contextual record plus its physical stamp, verified against the live budget.
-struct OwnerRepairContext {
-    state: EpochOwnerReceiptState,
-}
-
 impl ServerStore {
-    fn checked_owner_repair_state(
-        &self,
-        server: u64,
-        document: &LogicalDocument,
-        device: &MlsDevice,
-        durable_epoch: u64,
-        budget: &mut EpochStudioBudget,
-    ) -> Result<OwnerRepairContext, AppError> {
-        let (state, record) = self
-            .load_epoch_owner_repair_state(server, document, &device.device_id(), durable_epoch)
-            .inspect_err(|_| budget.storage.invalidate())?;
-        let scope = super::super::epoch_owner::scope_bytes(server, document)?;
-        budget
-            .storage
-            .verify_record(
-                &StorageScope::new(server, &document.server_id).map_err(invalid)?,
-                *blake3::hash(&scope).as_bytes(),
-                record,
-            )
-            .map_err(invalid)?;
-        Ok(OwnerRepairContext { state })
-    }
-
     /// S-1, owner issuance followed by Flow A on the same custody-held source. `tenure` is the
     /// authoring start read from the durable owner snapshot in this custody visit; the caller
     /// must already have refused `Imported` and `Unknown`. The repair is signed only for the
@@ -176,30 +149,34 @@ impl ServerStore {
         if source.observed.is_none() {
             return Err(invalid("a repair never creates a source"));
         }
-        let owner =
-            self.checked_owner_repair_state(server, &document, device, group.epoch(), budget)?;
+        let owner = self.checked_owner_repair_state(
+            server,
+            &document,
+            &observer,
+            group.epoch(),
+            &mut budget.storage,
+        )?;
         let (kind, pair, admission, repair) = if let Some((held, held_pair, kind)) =
-            owner.state.held_repair()
+            owner.held_repair()
         {
             if !request.names(held_pair.hashes()) || held.selected_receipt_hash != request.selected
             {
                 return Err(invalid("a different repair is held; resume it first"));
             }
             let admission = owner
-                .state
                 .retained_admission(held_pair.hashes(), &observer, group.epoch())?
                 .ok_or_else(|| invalid("held repair lost its admission"))?;
             (kind, held_pair.receipts().clone(), admission, held.clone())
         } else {
             let expected = tenure_id(&group.group_id(), &device.public_key_bytes(), tenure);
-            let (kind, pair) = decidable_pair(&owner.state, &source.unit, expected)
+            let (kind, pair) = decidable_pair(&owner, source.unit.fault_evidence(), expected)
                 .ok_or_else(|| invalid("no fault is decidable for this target"))?;
             if !request.names([pair[0].hash(), pair[1].hash()]) {
                 return Err(invalid(
                     "decision names a pair that is not the decidable fault",
                 ));
             }
-            let admission = match owner.state.retained_admission(
+            let admission = match owner.retained_admission(
                 [pair[0].hash(), pair[1].hash()],
                 &observer,
                 group.epoch(),
@@ -214,7 +191,6 @@ impl ServerStore {
             };
             let sequence = 1 + source.unit.repair_sequence().max(
                 owner
-                    .state
                     .journal()
                     .retained_repair()
                     .map_or(0, |r| r.repair_sequence),
@@ -242,8 +218,8 @@ impl ServerStore {
                 &repair,
                 &pair[0],
                 &pair[1],
-                owner.state.journal(),
-                owner.state.retiring_close(),
+                owner.journal(),
+                owner.retiring_close(),
                 group,
                 tenure,
             )
@@ -376,9 +352,14 @@ impl ServerStore {
         let resolved = unit.repair_state().filter(|s| s.repair == *repair);
         // The owner applies only what B1 persisted. A different held repair owns the target.
         let owner = if is_owner {
-            let owner =
-                self.checked_owner_repair_state(server, &document, device, group.epoch(), budget)?;
-            match owner.state.held_repair() {
+            let owner = self.checked_owner_repair_state(
+                server,
+                &document,
+                &observer,
+                group.epoch(),
+                &mut budget.storage,
+            )?;
+            match owner.held_repair() {
                 Some((held, _, _)) if held.hash() == repair.hash() => {}
                 Some(_) => return Err(invalid("another repair owns this target")),
                 None if resolved.is_some() => {}
@@ -396,14 +377,14 @@ impl ServerStore {
         if first {
             let outcome = match &owner {
                 Some(owner) => {
-                    let journal = owner.state.journal();
+                    let journal = owner.journal();
                     let plan = unit
                         .prepare_receipt_repair(
                             repair,
                             &pair[0],
                             &pair[1],
                             journal,
-                            owner.state.retiring_close(),
+                            owner.retiring_close(),
                             group,
                             tenure,
                         )
@@ -453,7 +434,7 @@ impl ServerStore {
         let mut installed_now = false;
         if committed.install_pending {
             if let Some(owner) = &owner {
-                if !owner.state.repair_applied() && owner.state.held_repair().is_some() {
+                if !owner.repair_applied() && owner.held_repair().is_some() {
                     self.mark_epoch_repair_applied_with_writer(
                         server,
                         &document,
@@ -519,6 +500,47 @@ impl ServerStore {
         Ok((outcome, state))
     }
 
+    /// Assemble the complete pair a distributed repair names from evidence this device already
+    /// holds (its fault pair, current head and installed opening) plus the receipt the same
+    /// authenticated answer offered. `None` means there is nothing to do: either this repair is
+    /// already terminal here, or this device cannot verify it, which is never a reason to invent
+    /// the missing receipt.
+    pub(crate) fn studio_repair_evidence(
+        &mut self,
+        server: u64,
+        group: &ServerGroup,
+        target: StudioTarget,
+        device: &MlsDevice,
+        repair: &ReceiptRepair,
+        offered: Option<&Receipt>,
+    ) -> Result<Option<[Receipt; 2]>, AppError> {
+        Ok(self
+            .with_studio_source(server, group, target, device, |state| {
+                let unit = &state.unit;
+                if unit
+                    .repair_state()
+                    .is_some_and(|s| s.repair == *repair && !s.install_pending)
+                {
+                    return Ok(None);
+                }
+                let mut held: Vec<Receipt> = Vec::new();
+                if let Some((a, b)) = unit.fault_evidence() {
+                    held.extend([a.clone(), b.clone()]);
+                }
+                if let Ok(Some(head)) = unit.receipt_head() {
+                    held.push(head.clone());
+                }
+                held.extend(unit.opening().cloned());
+                held.extend(offered.cloned());
+                let find = |hash: &[u8; 32]| held.iter().find(|r| r.hash() == *hash).cloned();
+                Ok(match repair.receipt_hashes.each_ref().map(find) {
+                    [Some(a), Some(b)] => Some([a, b]),
+                    _ => None,
+                })
+            })?
+            .flatten())
+    }
+
     /// The owner's persisted, not yet recycled decision for this target and the pair it binds.
     /// Read in context: a record admitted by another observer refuses rather than resuming.
     pub(crate) fn held_studio_repair(
@@ -575,7 +597,7 @@ impl ServerStore {
                 (Some((_, pair, _)), _) => Some(pair.receipts().clone()),
                 (None, Some(tenure)) => {
                     let expected = tenure_id(&group.group_id(), &device.public_key_bytes(), tenure);
-                    decidable_pair(record, unit, expected).map(|(_, pair)| pair)
+                    decidable_pair(record, unit.fault_evidence(), expected).map(|(_, pair)| pair)
                 }
                 (None, None) => unit.fault_evidence().map(|(a, b)| sorted(a, b)),
             };
@@ -600,28 +622,6 @@ impl ServerStore {
             })
         })
     }
-}
-
-/// Derivation rules 2 to 5 of design 5.2: the source's own fault, then a LIVE reserved pair,
-/// then the lowest historical pair, then a reserved pair that is no longer live. Rule 1, a held
-/// repair, is the caller's: once B1 exists that transaction owns the target.
-fn decidable_pair(
-    record: &EpochOwnerReceiptState,
-    unit: &StudioEpoch,
-    expected_tenure: [u8; 32],
-) -> Option<(BindingKind, [Receipt; 2])> {
-    if let Some((a, b)) = unit.fault_evidence() {
-        return Some((BindingKind::SourceBound, sorted(a, b)));
-    }
-    let (externals, reserved) = record.retained_pairs();
-    let live = |pair: &&FaultPair| pair.receipts()[0].tenure_id == expected_tenure;
-    if let Some(pair) = reserved.filter(live) {
-        return Some((BindingKind::Reserved, pair.receipts().clone()));
-    }
-    if let Some(pair) = externals.first() {
-        return Some((BindingKind::External(0), pair.receipts().clone()));
-    }
-    reserved.map(|pair| (BindingKind::Reserved, pair.receipts().clone()))
 }
 
 fn retained_names(record: &EpochOwnerReceiptState, hashes: [[u8; 32]; 2]) -> bool {

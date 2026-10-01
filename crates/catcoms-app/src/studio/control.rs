@@ -112,6 +112,10 @@ pub enum StudioControlAction {
     /// The owner's explicit decision. Intercepted by the receiver, which holds the durable
     /// owner snapshot this needs; the actor re-derives the pair and refuses a stale echo.
     RepairFault(Box<crate::store::StudioRepairRequest>),
+    /// The same two actions for the target's Registry bucket, whose fault blocks discovery of
+    /// a healthy Index or Flipnote. A separate scope, never inferred from the receipt hashes.
+    ReadRegistryFault,
+    RepairRegistryFault(Box<crate::store::StudioRepairRequest>),
     /// Read metadata for both retained slots and the optional staged slot. Never evicts.
     List,
     Read {
@@ -303,6 +307,7 @@ pub enum StudioControlResponse {
     /// What the repair step durably achieved, read back from the committed source.
     Repaired {
         target: StudioTarget,
+        scope: super::StudioFaultScope,
         outcome: crate::store::StudioRepairOutcome,
     },
 }
@@ -450,7 +455,12 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
                     .read_studio_fault(store, server, target)
                     .map(|view| StudioControlResponse::Fault(Box::new(view)))
             }
-            StudioControlAction::RepairFault(_) => {
+            StudioControlAction::ReadRegistryFault => {
+                return self
+                    .read_registry_fault(store, server, target)
+                    .map(|view| StudioControlResponse::Fault(Box::new(view)))
+            }
+            StudioControlAction::RepairFault(_) | StudioControlAction::RepairRegistryFault(_) => {
                 return Err(invalid(
                     "a fault repair requires the owner's durable snapshot",
                 ))
@@ -513,7 +523,10 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
                             "inspection, archiving, export and copy route before recovery decoding"
                         )
                     }
-                    StudioControlAction::ReadFault | StudioControlAction::RepairFault(_) => {
+                    StudioControlAction::ReadFault
+                    | StudioControlAction::RepairFault(_)
+                    | StudioControlAction::ReadRegistryFault
+                    | StudioControlAction::RepairRegistryFault(_) => {
                         unreachable!("fault read and repair route before recovery decoding")
                     }
                     // Read-only. It deliberately does NOT rebuild the branch: the whole point is to

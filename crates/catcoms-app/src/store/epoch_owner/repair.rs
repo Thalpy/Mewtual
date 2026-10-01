@@ -71,7 +71,135 @@ impl EpochOwnerReceiptState {
     }
 }
 
+/// Derivation rules 2 to 5 of design 5.2, shared by Studio and Registry: the source's own fault,
+/// then a LIVE reserved pair, then the lowest historical pair, then a reserved pair that is no
+/// longer live. Rule 1, a held repair, is the caller's: once B1 exists that transaction owns the
+/// target. Liveness compares the derived tenure id, never a bare start epoch.
+pub(in crate::store) fn decidable_pair(
+    record: &EpochOwnerReceiptState,
+    source_fault: Option<(&Receipt, &Receipt)>,
+    expected_tenure: [u8; 32],
+) -> Option<(BindingKind, [Receipt; 2])> {
+    if let Some((a, b)) = source_fault {
+        let mut pair = [a.clone(), b.clone()];
+        pair.sort_by_key(Receipt::hash);
+        return Some((BindingKind::SourceBound, pair));
+    }
+    let (externals, reserved) = record.retained_pairs();
+    let live = |pair: &&Pair| pair.receipts()[0].tenure_id == expected_tenure;
+    if let Some(pair) = reserved.filter(live) {
+        return Some((BindingKind::Reserved, pair.receipts().clone()));
+    }
+    if let Some(pair) = externals.first() {
+        return Some((BindingKind::External(0), pair.receipts().clone()));
+    }
+    reserved.map(|pair| (BindingKind::Reserved, pair.receipts().clone()))
+}
+
 impl ServerStore {
+    /// The owner's contextual record, its physical stamp verified against the live budget.
+    pub(in crate::store) fn checked_owner_repair_state(
+        &self,
+        server: u64,
+        document: &LogicalDocument,
+        observer: &DeviceId,
+        durable_epoch: u64,
+        budget: &mut EpochStorageBudget,
+    ) -> Result<EpochOwnerReceiptState, AppError> {
+        let (state, record) = self
+            .load_epoch_owner_repair_state(server, document, observer, durable_epoch)
+            .inspect_err(|_| budget.invalidate())?;
+        let scope = scope_bytes(server, document)?;
+        budget
+            .verify_record(
+                &StorageScope::new(server, &document.server_id).map_err(invalid)?,
+                *blake3::hash(&scope).as_bytes(),
+                record,
+            )
+            .map_err(invalid)?;
+        Ok(state)
+    }
+
+    /// Whether the legacy owner driver has a pending decision to rotate. A repair-bearing record
+    /// answers false: its transaction or unpublished reconciliation owns publication, and the
+    /// legacy driver must neither run against it nor turn that hold into a runtime error.
+    pub(crate) fn epoch_owner_rotation_pending(
+        &self,
+        server: u64,
+        document: &LogicalDocument,
+    ) -> Result<bool, AppError> {
+        let scope = scope_bytes(server, document)?;
+        let (state, _) = self.read_epoch_owner_record(&scope, document)?;
+        if state.require_ordinary().is_err() {
+            return Ok(false);
+        }
+        Ok(state.pending().is_some())
+    }
+
+    /// Whether a persisted repair transaction claims this document. Structural on purpose: a
+    /// claim counts whoever admitted it, so an unreadable context fences rather than releases.
+    pub(in crate::store) fn epoch_owner_repair_claimed(
+        &self,
+        server: u64,
+        document: &LogicalDocument,
+    ) -> Result<bool, AppError> {
+        let scope = scope_bytes(server, document)?;
+        let (state, _) = self.read_epoch_owner_record(&scope, document)?;
+        Ok(state.held_repair().is_some())
+    }
+
+    /// Studio prove path: re-save the effective decision before proving it. Unlike the legacy
+    /// prepare, a journal carrying repair provenance is accepted (the core journal enforces the
+    /// repaired adjacency and evidence-only holds); any tag-3 evidence still refuses.
+    #[allow(clippy::too_many_arguments)]
+    pub(in crate::store) fn prepare_epoch_owner_publication_with_writer(
+        &mut self,
+        server: u64,
+        receipt: Receipt,
+        group: &ServerGroup,
+        tenure: u64,
+        rng: &mut impl CryptoRngCore,
+        budget: &mut EpochStorageBudget,
+        hooks: &mut WriteHooks<'_>,
+    ) -> Result<EpochOwnerReceiptState, AppError> {
+        scope_bytes(server, &receipt.document)?;
+        if receipt.owner_public_key.len() != 32 || receipt.encode().len() > MAX_RECEIPT_BYTES {
+            return Err(invalid("receipt exceeds its bound"));
+        }
+        let receipt = Receipt::decode(&receipt.encode()).map_err(invalid)?;
+        let document = receipt.document.clone();
+        self.update_epoch_owner_journal_guarded(
+            server,
+            &document,
+            OwnerGuard::Publication,
+            rng,
+            budget,
+            |journal| journal.prepare(receipt, group, tenure).map_err(invalid),
+            hooks,
+        )
+    }
+
+    /// Studio completion of an exact proved decision, including a repaired reconciliation whose
+    /// publication returns the journal to ordinary once the source is also finalized.
+    pub(in crate::store) fn mark_epoch_owner_publication(
+        &mut self,
+        server: u64,
+        document: &LogicalDocument,
+        receipt_hash: [u8; 32],
+        rng: &mut impl CryptoRngCore,
+        budget: &mut EpochStorageBudget,
+    ) -> Result<EpochOwnerReceiptState, AppError> {
+        self.update_epoch_owner_journal_guarded(
+            server,
+            document,
+            OwnerGuard::Publication,
+            rng,
+            budget,
+            |journal| journal.mark_published(receipt_hash).map_err(invalid),
+            &mut WriteHooks::None,
+        )
+    }
+
     /// Repair-aware load. Retained attestations must name `observer` and an admission epoch no
     /// later than `durable_epoch`, which the caller reads from its durable owner snapshot in the
     /// same custody visit. The physical record is returned for budget verification.

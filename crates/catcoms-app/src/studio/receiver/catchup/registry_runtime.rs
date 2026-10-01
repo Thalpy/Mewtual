@@ -151,11 +151,27 @@ impl CatchupRuntime {
             &key,
             &mut budget,
         )?;
+        // A held owner decision for this bucket owns it until terminal: resume it first, whatever
+        // the phase, so a restart between its barriers can never strand the bucket.
+        if self.resume_registry_repair(server, store, id, target, bucket)? {
+            self.registry_target = None;
+            self.registry_selection = self.registry_selection.wrapping_add(1);
+            return Ok(true);
+        }
         if hint.is_some_and(|h| h.phase == EpochPhase::Fault) {
             // Fault is scoped to this bucket, not the vault or unrelated Studio traffic.
             // Keep refusing checkpoint service and writes there until an owner repair, but
             // allow the existing Studio pass and other watched buckets to continue normally.
             self.owner_failure = Some((target, "Registry bucket needs owner repair".into()));
+            // A peer cannot decide; the owner's next answer is what carries the repair.
+            if self.owner_snapshot.is_none() {
+                if let (Some((watch, _)), Some(peer)) = (
+                    watches.iter().find(|(w, _)| w.target == target),
+                    server.sync.studio_page_peers().first(),
+                ) {
+                    self.schedule_discovery(store, id, watch, *peer);
+                }
+            }
             self.registry_target = None;
             self.registry_selection = self.registry_selection.wrapping_add(1);
             return Ok(false);
@@ -198,10 +214,7 @@ impl CatchupRuntime {
         }
         if let Some(snapshot) = self.owner_snapshot.clone() {
             let logical = registry_document(&server.group_id(), bucket).map_err(invalid)?;
-            let pending = store
-                .load_epoch_owner_receipts(id, &logical)?
-                .pending()
-                .is_some();
+            let pending = store.epoch_owner_rotation_pending(id, &logical)?;
             if pending
                 || hint.is_some_and(|h| h.phase == EpochPhase::Closing || h.close_candidate_ready)
             {

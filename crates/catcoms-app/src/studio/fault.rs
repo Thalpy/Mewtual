@@ -7,8 +7,8 @@
 use super::*;
 use crate::registry_head::ServerOwnerSnapshot;
 use crate::store::{
-    EpochStudioBudget, EpochStudioState, StudioFaultEvidence, StudioRepairOutcome,
-    StudioRepairRequest,
+    EpochRegistryState, EpochStudioBudget, EpochStudioState, StudioFaultEvidence,
+    StudioRepairOutcome, StudioRepairRequest,
 };
 use catcoms_replication::{Receipt, ReceiptRepair, RepairDisposition};
 use std::sync::Arc;
@@ -50,9 +50,18 @@ pub enum StudioRepairBlocker {
     NoFault,
 }
 
+/// Which document a fault view or repair is about: the target's own source, or the Registry
+/// bucket that makes it discoverable. Explicit, so one decision can never be read as the other.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StudioFaultScope {
+    Source,
+    RegistryBucket(u8),
+}
+
 #[derive(Debug)]
 pub struct StudioFaultView {
     pub target: StudioTarget,
+    pub scope: StudioFaultScope,
     pub source: control::StudioSettlementSource,
     pub candidates: Option<[StudioFaultCandidate; 2]>,
     pub repair: Option<StudioRepairStatus>,
@@ -81,6 +90,7 @@ fn candidate(receipt: &Receipt, opening: Option<[u8; 32]>) -> StudioFaultCandida
 impl StudioFaultView {
     fn new(
         target: StudioTarget,
+        scope: StudioFaultScope,
         evidence: StudioFaultEvidence,
         owner: bool,
         tenure: StudioOwnerTenure,
@@ -132,6 +142,7 @@ impl StudioFaultView {
         };
         Self {
             target,
+            scope,
             source: control::StudioSettlementSource {
                 epoch_id: evidence.doc_id,
                 epoch: evidence.epoch,
@@ -183,7 +194,13 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
                 store.studio_fault_evidence(server, group, target, device, known)
             })?
             .ok_or_else(|| AppError::Invalid("no saved source for this target".into()))?;
-        Ok(StudioFaultView::new(target, evidence, owner, tenure))
+        Ok(StudioFaultView::new(
+            target,
+            StudioFaultScope::Source,
+            evidence,
+            owner,
+            tenure,
+        ))
     }
 
     /// Owner issuance and application in one custody visit (Flow I then Flow A). The signed
@@ -296,6 +313,182 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
                     server, group, target, device, repair, pair, tenure, raw_seed, clock, rng,
                     budget,
                 )
+            })
+    }
+
+    /// The Registry bucket a Studio target's pointer lives in, the scope of its discoverability.
+    pub(crate) fn studio_registry_bucket(&self, target: StudioTarget) -> Result<u8, AppError> {
+        let logical = target
+            .document(&self.group_id())
+            .map_err(|e| AppError::Invalid(e.to_string()))?;
+        Ok(
+            catcoms_replication::registry::PointerKey::new(logical.doc_type, logical.logical_key)
+                .map_err(|e| AppError::Invalid(e.to_string()))?
+                .bucket(),
+        )
+    }
+
+    /// S-4 for the target's Registry bucket. A faulted bucket blocks discovery of a healthy Index
+    /// or Flipnote, so it is decidable on its own, under an explicit scope.
+    pub(crate) fn read_registry_fault(
+        &mut self,
+        store: &mut ServerStore,
+        server: u64,
+        target: StudioTarget,
+    ) -> Result<StudioFaultView, AppError> {
+        self.check_studio_fault_channel(target)?;
+        let bucket = self.studio_registry_bucket(target)?;
+        let tenure = self.observed_owner_tenure();
+        let owner = self.sync.with_registry_context(|group, device, _, _| {
+            group.designated_committer() == Some(device.device_id())
+        });
+        let known = match tenure {
+            StudioOwnerTenure::Known(start) if owner => Some(start),
+            _ => None,
+        };
+        let evidence = self
+            .sync
+            .with_registry_context(|group, device, _, _| {
+                store.registry_fault_evidence(server, group, bucket, device, known)
+            })?
+            .ok_or_else(|| AppError::Invalid("no saved Registry bucket for this target".into()))?;
+        Ok(StudioFaultView::new(
+            target,
+            StudioFaultScope::RegistryBucket(bucket),
+            evidence,
+            owner,
+            tenure,
+        ))
+    }
+
+    /// Owner issuance and application for the target's Registry bucket, under the same V5 and
+    /// durable-snapshot authority as a Studio source repair.
+    #[allow(clippy::too_many_arguments)]
+    pub fn issue_registry_fault_repair(
+        &mut self,
+        store: &mut ServerStore,
+        server: u64,
+        target: StudioTarget,
+        snapshot: &ServerOwnerSnapshot,
+        request: StudioRepairRequest,
+        raw_seed: Option<&[u8]>,
+        budget: &mut EpochStudioBudget,
+    ) -> Result<(ReceiptRepair, StudioRepairOutcome, EpochRegistryState), AppError> {
+        let observed = self.require_observed_owner_tenure()?;
+        self.check_studio_fault_channel(target)?;
+        self.check_owner_snapshot(store, server, snapshot)?;
+        let bucket = self.studio_registry_bucket(target)?;
+        let clock = self.runtime_clock();
+        self.sync
+            .with_durable_owner_snapshot(&snapshot.inner, |group, device, rng, tenure| {
+                if tenure != observed {
+                    return Err(AppError::Invalid(
+                        "observed and durable owner tenure disagree".into(),
+                    ));
+                }
+                store.with_studio_protocol_budget(server, group, budget, |store, storage| {
+                    store.issue_registry_repair(
+                        server,
+                        group,
+                        bucket,
+                        device,
+                        tenure,
+                        request,
+                        raw_seed,
+                        clock.as_ref(),
+                        rng,
+                        storage,
+                    )
+                })
+            })?
+    }
+
+    /// The owner resumes its own persisted Registry decision. It never signs anything new.
+    #[allow(clippy::too_many_arguments)]
+    pub fn resume_registry_fault_repair(
+        &mut self,
+        store: &mut ServerStore,
+        server: u64,
+        target: StudioTarget,
+        snapshot: &ServerOwnerSnapshot,
+        repair: &ReceiptRepair,
+        pair: &[Receipt; 2],
+        raw_seed: Option<&[u8]>,
+        budget: &mut EpochStudioBudget,
+    ) -> Result<(StudioRepairOutcome, EpochRegistryState), AppError> {
+        let observed = self.require_observed_owner_tenure()?;
+        self.check_studio_fault_channel(target)?;
+        self.check_owner_snapshot(store, server, snapshot)?;
+        let bucket = self.studio_registry_bucket(target)?;
+        let clock = self.runtime_clock();
+        self.sync
+            .with_durable_owner_snapshot(&snapshot.inner, |group, device, rng, tenure| {
+                if tenure != observed {
+                    return Err(AppError::Invalid(
+                        "observed and durable owner tenure disagree".into(),
+                    ));
+                }
+                store.with_studio_protocol_budget(server, group, budget, |store, storage| {
+                    store.apply_registry_repair(
+                        server,
+                        group,
+                        bucket,
+                        device,
+                        repair,
+                        pair,
+                        tenure,
+                        raw_seed,
+                        clock.as_ref(),
+                        rng,
+                        storage,
+                    )
+                })
+            })?
+    }
+
+    /// Flow A for a peer applying a distributed Registry repair; authoring tenure required.
+    #[allow(clippy::too_many_arguments)]
+    pub fn apply_registry_fault_repair(
+        &mut self,
+        store: &mut ServerStore,
+        server: u64,
+        target: StudioTarget,
+        repair: &ReceiptRepair,
+        pair: &[Receipt; 2],
+        raw_seed: Option<&[u8]>,
+        budget: &mut EpochStudioBudget,
+    ) -> Result<(StudioRepairOutcome, EpochRegistryState), AppError> {
+        self.check_studio_fault_channel(target)?;
+        let bucket = self.studio_registry_bucket(target)?;
+        self.apply_registry_bucket_repair(store, server, bucket, repair, pair, raw_seed, budget)
+    }
+
+    /// Bucket-keyed Flow A, for a Registry discovery completion that knows only its bucket.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn apply_registry_bucket_repair(
+        &mut self,
+        store: &mut ServerStore,
+        server: u64,
+        bucket: u8,
+        repair: &ReceiptRepair,
+        pair: &[Receipt; 2],
+        raw_seed: Option<&[u8]>,
+        budget: &mut EpochStudioBudget,
+    ) -> Result<(StudioRepairOutcome, EpochRegistryState), AppError> {
+        let tenure = self.require_observed_owner_tenure()?;
+        self.sync
+            .with_registry_context(|group, device, clock, rng| {
+                if group.designated_committer() == Some(device.device_id()) {
+                    return Err(AppError::Invalid(
+                        "the owner resumes repairs through its durable snapshot".into(),
+                    ));
+                }
+                store.with_studio_protocol_budget(server, group, budget, |store, storage| {
+                    store.apply_registry_repair(
+                        server, group, bucket, device, repair, pair, tenure, raw_seed, clock, rng,
+                        storage,
+                    )
+                })
             })
     }
 

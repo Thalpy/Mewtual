@@ -6,6 +6,7 @@ use catcoms_app::studio::{
 };
 use serde_json::{json, Value};
 pub(crate) mod copy;
+pub(crate) mod fault;
 pub(crate) mod inspection;
 pub(crate) mod lifecycle;
 pub(crate) mod recovery;

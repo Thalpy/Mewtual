@@ -306,6 +306,10 @@ pub(super) fn response_value(response: Response) -> Result<Value, String> {
         Response::OverlayCopyPreparation(_) | Response::OverlayCopyPreview(_) => {
             return Err("mismatched overlay copy response".into());
         }
+        // The fault family converts itself (design 5.8), listed by variant for the same reason.
+        response @ (Response::Fault(_) | Response::Repaired { .. }) => {
+            return super::fault::response_value(response)
+        }
         Response::PointerRestored {
             target,
             epoch,

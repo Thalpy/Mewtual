@@ -63,6 +63,11 @@ impl ServerStore {
         receipt
             .verify_current_owner(group, tenure)
             .map_err(invalid)?;
+        // A persisted owner repair owns this target from B1 until it is terminal and recycled;
+        // ordinary discovery must not install into the source it decided about (AG3-DES-034).
+        if self.epoch_owner_repair_claimed(server, &document)? {
+            return Err(invalid("a held repair owns this target"));
+        }
         self.resolve_studio_handoff(server, group, target, device, rng, budget)?;
         // Shares the exact source transfer and fresh five-family accounting used for pages.
         // Actual absence is legal only after inventory agrees, never from a remote pointer.
@@ -131,10 +136,19 @@ impl ServerStore {
         observed: Option<StorageRecord>,
         hooks: &mut WriteHooks<'_>,
     ) -> Result<(StudioAdoptionOutcome, EpochStudioState), AppError> {
-        let plan = state
-            .unit
-            .prepare_checkpoint_adoption(receipt, raw_seed, group, tenure)
-            .map_err(invalid)?;
+        // A committed repair that still owes its replacement continues here with the Repair
+        // reason; the core accepts only that repair's exact selected receipt. Ordinary adoption
+        // keeps Rewound and the core refuses it for a repair-pending source.
+        let plan = if state.unit.repair_install_pending() {
+            state
+                .unit
+                .prepare_repair_adoption(receipt, raw_seed, group, tenure)
+        } else {
+            state
+                .unit
+                .prepare_checkpoint_adoption(receipt, raw_seed, group, tenure)
+        }
+        .map_err(invalid)?;
         self.install_studio_adoption_plan_with_io(
             server, group, target, &plan, tenure, clock, rng, budget, state, observed, hooks,
         )

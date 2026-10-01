@@ -1,0 +1,193 @@
+//! A faulted Registry bucket blocks Index and Flipnote discovery, so its repair is the same
+//! transaction as Studio's: issuance at B1, application at B2, recycling back to ordinary.
+use super::*;
+use crate::store::{StudioRepairOutcome, StudioRepairRequest};
+use catcoms_replication::{ReceiptRepair, RepairDisposition};
+use catcoms_rt::ManualClock;
+
+fn faulted(f: &mut Fixture, store: &mut ServerStore) -> [Receipt; 2] {
+    let mut b = budget(store, f);
+    let op = f.op(1);
+    f.ingest(store, &op, &mut b).unwrap();
+    let pair = [f.receipt(7), f.receipt(8)];
+    for receipt in &pair {
+        store
+            .seal_registry_epoch(
+                SERVER,
+                &f.group,
+                f.key.bucket(),
+                &f.device,
+                receipt.clone(),
+                0,
+                &mut rng(),
+                &mut b,
+            )
+            .unwrap();
+    }
+    assert_eq!(f.load(store).unwrap().phase(), EpochPhase::Fault);
+    let mut sorted = pair;
+    sorted.sort_by_key(Receipt::hash);
+    sorted
+}
+
+fn issue(
+    f: &Fixture,
+    store: &mut ServerStore,
+    pair: &[Receipt; 2],
+    selected: &Receipt,
+) -> Result<(ReceiptRepair, StudioRepairOutcome, EpochRegistryState), AppError> {
+    let mut b = budget(store, f);
+    store.issue_registry_repair(
+        SERVER,
+        &f.group,
+        f.key.bucket(),
+        &f.device,
+        0,
+        StudioRepairRequest {
+            receipt_a: pair[0].hash(),
+            receipt_b: pair[1].hash(),
+            selected: selected.hash(),
+        },
+        None,
+        &ManualClock::new(1000),
+        &mut rng(),
+        &mut b,
+    )
+}
+
+#[test]
+fn a_faulted_bucket_is_repaired_recycled_and_served_without_a_held_proof() {
+    let root = tempfile::tempdir().unwrap();
+    let mut f = Fixture::new();
+    let mut store = open(root.path());
+    let pair = faulted(&mut f, &mut store);
+    // A stale echo naming another selection refuses before any write.
+    let path = f.path(&store);
+    let before = fs::read(&path).unwrap();
+    let mut bogus = pair.clone();
+    bogus[1] = f.receipt(9);
+    assert!(issue(&f, &mut store, &bogus, &pair[0]).is_err());
+    assert_eq!(fs::read(&path).unwrap(), before);
+
+    let (repair, outcome, state) = issue(&f, &mut store, &pair, &pair[0]).unwrap();
+    assert_eq!(outcome, StudioRepairOutcome::Repaired);
+    assert_eq!(state.phase(), EpochPhase::Closing);
+    assert!(
+        store.load_epoch_owner_receipts(SERVER, &f.document).is_ok(),
+        "terminal recycling returned the owner record to ordinary"
+    );
+    drop(store);
+    let mut store = open(root.path());
+    let restored = f.load(&store).unwrap();
+    assert_eq!(restored.phase(), EpochPhase::Closing);
+    let resolved = restored.unit.repair_state().unwrap();
+    assert_eq!(resolved.repair, repair);
+    assert_eq!(resolved.disposition, RepairDisposition::Transitioned);
+    // Head service carries the applied repair to peers faulted on the same pair.
+    let mut b = budget(&mut store, &f);
+    let (_, served) = store
+        .prepare_registry_head_with_fault_repair(
+            SERVER,
+            &f.group,
+            f.key.bucket(),
+            &f.device,
+            Some(0),
+            &mut rng(),
+            &mut b,
+        )
+        .unwrap();
+    assert_eq!(served.as_ref(), Some(&repair));
+    // Nothing remains decidable once the bucket has left Fault.
+    assert!(issue(&f, &mut store, &pair, &pair[0]).is_err());
+}
+
+#[test]
+fn a_peer_applies_an_owner_bucket_repair_and_keeps_no_owner_record() {
+    let root = tempfile::tempdir().unwrap();
+    let mut owner = Fixture::new();
+    let peer = MlsDevice::generate().unwrap();
+    let welcome = owner
+        .group
+        .add_member(&owner.device, peer.key_package().unwrap())
+        .unwrap()
+        .welcome;
+    let peer_group = ServerGroup::join(&peer, &welcome).unwrap();
+    let mut store = open(root.path());
+    // The peer's own bucket, faulted on two receipts the owner signed.
+    let mut f = Fixture {
+        source: RegistryEpoch::new(&peer_group, owner.key.bucket(), peer.device_id()).unwrap(),
+        device: peer,
+        group: peer_group,
+        key: owner.key.clone(),
+        document: owner.document.clone(),
+    };
+    let mut b = budget(&mut store, &f);
+    let op = f.op(1);
+    f.ingest(&mut store, &op, &mut b).unwrap();
+    let signed = |close: u8| {
+        let seed = f
+            .source
+            .projection()
+            .unwrap()
+            .checkpoint([close; 32])
+            .unwrap();
+        Receipt::sign(
+            f.document.clone(),
+            0,
+            [close; 32],
+            seed.change_hash(),
+            0,
+            InheritedCheckpoint::EpochZero,
+            &owner.device,
+        )
+        .unwrap()
+    };
+    let mut pair = [signed(7), signed(8)];
+    for receipt in &pair {
+        store
+            .seal_registry_epoch(
+                SERVER,
+                &f.group,
+                f.key.bucket(),
+                &f.device,
+                receipt.clone(),
+                0,
+                &mut rng(),
+                &mut b,
+            )
+            .unwrap();
+    }
+    pair.sort_by_key(Receipt::hash);
+    let repair = ReceiptRepair::sign_in_tenure(
+        f.document.clone(),
+        pair[0].tenure_id,
+        [pair[0].hash(), pair[1].hash()],
+        pair[1].hash(),
+        1,
+        0,
+        &owner.device,
+    )
+    .unwrap();
+    let mut b = budget(&mut store, &f);
+    let (outcome, state) = store
+        .apply_registry_repair(
+            SERVER,
+            &f.group,
+            f.key.bucket(),
+            &f.device,
+            &repair,
+            &pair,
+            0,
+            None,
+            &ManualClock::new(1000),
+            &mut rng(),
+            &mut b,
+        )
+        .unwrap();
+    assert_eq!(outcome, StudioRepairOutcome::Repaired);
+    assert_eq!(state.phase(), EpochPhase::Closing);
+    assert!(store
+        .epoch_owner_receipt_inventory_record(SERVER, &f.document)
+        .unwrap()
+        .is_none());
+}
