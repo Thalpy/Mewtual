@@ -85,10 +85,9 @@ impl ServerStore {
         if receipt.document != document {
             return Err(invalid("checkpoint selection scope mismatch"));
         }
-        // A persisted owner repair owns this bucket from B1 until terminal and recycled.
-        if self.epoch_owner_repair_claimed(server, &document)? {
-            return Err(invalid("a held repair owns this target"));
-        }
+        // A persisted owner repair owns this bucket from B1 until terminal and recycled. The one
+        // adoption it permits is its own replacement, checked against the source below.
+        let held = self.epoch_owner_held_selection(server, &document)?;
         // Fault must cross its OWN save barrier before seed/recovery checks. Returning Err
         // from this mutation callback would discard the detached fault and lose the evidence.
         // Absence is allowed only after the updater verifies the complete inventory: a lost
@@ -103,6 +102,14 @@ impl ServerStore {
             rng,
             budget,
             |unit, _| {
+                if held.is_some_and(|selected| {
+                    selected != receipt.hash()
+                        || !unit.repair_state().is_some_and(|state| {
+                            state.install_pending && state.selected == *receipt
+                        })
+                }) {
+                    return Err(invalid("a held repair owns this target"));
+                }
                 if unit.opened_by(receipt) {
                     return Ok(RegistryAdoptionOutcome::AlreadyInstalled);
                 }

@@ -451,7 +451,7 @@ fn head_service_serves_an_applied_repair_but_never_proves_while_it_is_held() {
         )
         .unwrap();
     assert!(served.is_none());
-    // Ordinary discovery cannot install into the target while the decision is held.
+    // Ordinary discovery cannot install anything but the held decision's own replacement.
     let mut b = budget(&mut store, &f);
     assert!(
         store
@@ -460,8 +460,8 @@ fn head_service_serves_an_applied_repair_but_never_proves_while_it_is_held() {
                 &f.group,
                 f.target,
                 &f.device,
-                &chosen,
-                Some(seed.bytes()),
+                &rival,
+                None,
                 0,
                 &ManualClock::new(1000),
                 &mut rng(),
@@ -470,8 +470,56 @@ fn head_service_serves_an_applied_repair_but_never_proves_while_it_is_held() {
             .is_err(),
         "ordinary discovery must not install into a held target"
     );
-    let (outcome, state) = apply(&f, &mut store, &repair, &pair, Some(seed.bytes())).unwrap();
-    assert_eq!(outcome, StudioRepairOutcome::Installed);
+    // The runtime defers by the same rule, per target, instead of letting the installer fail.
+    let state = f.load(&store).unwrap();
+    store.retain_studio_source(&f.group, &f.device, state);
+    let defers = |store: &ServerStore, receipt: &Receipt| {
+        store
+            .studio_install_deferred_by_repair(SERVER, &f.group, f.target, &f.device, receipt)
+            .unwrap()
+    };
+    assert!(
+        defers(&store, &rival),
+        "a different receipt waits on the held decision"
+    );
+    assert!(
+        !defers(&store, &chosen),
+        "the decision's own replacement may proceed"
+    );
+    // A repaired seed pass installs the selected checkpoint through ordinary adoption, whose
+    // install half still preserves the losing version as Repair recovery first.
+    let mut b = budget(&mut store, &f);
+    let (adopted, state) = store
+        .adopt_studio_checkpoint(
+            SERVER,
+            &f.group,
+            f.target,
+            &f.device,
+            &chosen,
+            Some(seed.bytes()),
+            0,
+            &ManualClock::new(1000),
+            &mut rng(),
+            &mut b,
+        )
+        .unwrap();
+    assert_eq!(adopted, StudioAdoptionOutcome::Installed);
+    assert_eq!(
+        store
+            .load_epoch_recovery(SERVER, &f.logical)
+            .unwrap()
+            .retained()
+            .next()
+            .expect("losing version retained")
+            .reason,
+        RecoveryReason::Repair
+    );
+    store.retain_studio_source(&f.group, &f.device, state);
+    assert!(!owner_is_ordinary(&f, &store), "the decision is still held");
+    // The owner's next resume finds the replacement done and recycles its record.
+    let (outcome, state) = apply(&f, &mut store, &repair, &pair, None).unwrap();
+    assert_eq!(outcome, StudioRepairOutcome::AlreadyRepaired);
+    assert!(owner_is_ordinary(&f, &store));
     store.retain_studio_source(&f.group, &f.device, state);
     let mut b = budget(&mut store, &f);
     let (selection, served) = store
@@ -619,6 +667,177 @@ fn a_current_tenure_report_stages_suppresses_proof_and_is_decided_from_the_reser
         "nothing retained: tag 3 omitted"
     );
     assert!(head(&f, &mut store, None).prove, "ordinary proofs resume");
+}
+
+/// The rollback case: the owner's own head is the loser of a reported current-tenure pair, so
+/// the repair retargets its healthy source (case 6c) and replaces it after Repair recovery.
+#[test]
+fn a_rolled_back_owner_is_retargeted_with_no_pre_b2_hint_rotation_or_publication() {
+    let root = tempfile::tempdir().unwrap();
+    let f = Fixture::new(false);
+    let mut store = open(root.path());
+    let mut b = budget(&mut store, &f);
+    let (_, state) = f.edit(&mut store, &mut b, f.insert());
+    let projection = state.projection().unwrap();
+    let [lost, kept] = [7, 8].map(|close| f.receipt(&state, close));
+    let kept_seed = projection.checkpoint([8; 32]).unwrap();
+    let (_, sealed) = store
+        .seal_studio_epoch(
+            SERVER,
+            &f.group,
+            f.target,
+            &f.device,
+            lost.clone(),
+            0,
+            &mut rng(),
+            &mut b,
+        )
+        .unwrap();
+    store
+        .prepare_epoch_owner_receipt(
+            SERVER,
+            lost.clone(),
+            &f.group,
+            0,
+            &mut rng(),
+            &mut b.storage,
+        )
+        .unwrap();
+    store
+        .mark_epoch_owner_receipt_published(
+            SERVER,
+            &f.logical,
+            lost.hash(),
+            &mut rng(),
+            &mut b.storage,
+        )
+        .unwrap();
+    store.retain_studio_source(&f.group, &f.device, sealed);
+    let pair = sorted_pair(&lost, &kept);
+    assert!(!head(&f, &mut store, Some(&pair)).prove);
+
+    // B1 succeeds, B2 fails: the decision is held and the source still sits on the loser.
+    let mut fail_source = |tag: WriteTag, _: &Path, _: &[u8]| {
+        if tag == WriteTag::Source {
+            Intercept::Fail(AppError::Io("b2".into()))
+        } else {
+            Intercept::Continue
+        }
+    };
+    assert!(issue_with(
+        &f,
+        &mut store,
+        request([&pair[0], &pair[1]], &kept),
+        None,
+        &mut WriteHooks::Hooked {
+            before: Some(&mut fail_source),
+            before_sync: None,
+            before_unlink: None,
+            after: None,
+        },
+    )
+    .is_err());
+    let restored = f.load(&store).unwrap();
+    store.retain_studio_source(&f.group, &f.device, restored);
+    let held = head(&f, &mut store, None);
+    assert!(!held.prove);
+    assert!(
+        held.receipt.is_none(),
+        "before B2 the source still holds the repudiated receipt: no hint at all"
+    );
+    let mut b = budget(&mut store, &f);
+    assert!(
+        !store
+            .studio_owner_rotation_needed(SERVER, &f.group, f.target, &f.device, &mut b)
+            .unwrap(),
+        "a held decision is not rotated around"
+    );
+    let mut b = budget(&mut store, &f);
+    assert!(
+        store
+            .complete_studio_head(SERVER, &kept, &mut rng(), &mut b)
+            .is_err(),
+        "publication refuses while a repair is held"
+    );
+
+    // Resume: B2 retargets onto the kept receipt, then the seed replaces the losing version.
+    let (repair, outcome, state) =
+        issue(&f, &mut store, request([&pair[0], &pair[1]], &kept), None).unwrap();
+    assert_eq!(outcome, StudioRepairOutcome::AwaitingSeed);
+    assert_eq!(
+        state.unit.repair_state().unwrap().disposition,
+        RepairDisposition::Retargeted
+    );
+    let (outcome, state) = apply(&f, &mut store, &repair, &pair, Some(kept_seed.bytes())).unwrap();
+    assert_eq!(outcome, StudioRepairOutcome::Installed);
+    assert_eq!(state.phase(), EpochPhase::Open);
+    let recovery = store.load_epoch_recovery(SERVER, &f.logical).unwrap();
+    let held = recovery.retained().next().expect("losing version retained");
+    assert_eq!(held.reason, RecoveryReason::Repair);
+    assert_eq!(f.intents(&store), 1, "a repair retires no intent");
+}
+
+/// Section 9: replacement binds the DURABLE predecessor. If the source on disk changes after
+/// its Repair recovery was staged, the successor is refused rather than replacing a version
+/// that recovery never preserved.
+#[test]
+fn a_successor_is_refused_when_the_durable_predecessor_changed_after_recovery() {
+    let root = tempfile::tempdir().unwrap();
+    let mut store = open(root.path());
+    let f = Fixture::new(false);
+    let mut b = budget(&mut store, &f);
+    f.edit(&mut store, &mut b, f.insert());
+    let (chosen, seed) = checkpoint(&f, &store, 10, 10);
+    let (rival, _) = checkpoint(&f, &store, 10, 11);
+    adopt(&f, &mut store, &chosen, None);
+    adopt(&f, &mut store, &rival, None);
+    let mut pair = [chosen.clone(), rival.clone()];
+    pair.sort_by_key(Receipt::hash);
+    let source = f.path(&store);
+    let faulted_bytes = fs::read(&source).unwrap();
+    let (repair, outcome, _) =
+        issue(&f, &mut store, request([&chosen, &rival], &chosen), None).unwrap();
+    assert_eq!(outcome, StudioRepairOutcome::AwaitingSeed);
+    // Between the recovery stage returning and the successor write, put an older valid sealed
+    // version back on disk.
+    let mut swap = |op: CompletedOperation, tag: WriteTag, _: &Path| {
+        if tag == WriteTag::Recovery && op == CompletedOperation::Write {
+            fs::write(&source, &faulted_bytes).unwrap();
+        }
+        AfterIntercept::Continue
+    };
+    let mut b = budget(&mut store, &f);
+    let refused = store
+        .apply_studio_repair_with_io(
+            SERVER,
+            &f.group,
+            f.target,
+            &f.device,
+            &repair,
+            &pair,
+            0,
+            Some(seed.bytes()),
+            &ManualClock::new(1000),
+            &mut rng(),
+            &mut b,
+            &mut WriteHooks::Hooked {
+                before: None,
+                before_sync: None,
+                before_unlink: None,
+                after: Some(&mut swap),
+            },
+        )
+        .unwrap_err()
+        .to_string();
+    assert!(
+        refused.contains("recovery capability"),
+        "the successor must not replace an unpreserved version; got: {refused}"
+    );
+    assert_eq!(
+        fs::read(&source).unwrap(),
+        faulted_bytes,
+        "nothing was replaced"
+    );
 }
 
 #[test]

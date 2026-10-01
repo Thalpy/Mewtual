@@ -114,6 +114,23 @@ pub(in crate::store) fn decidable_pair(
     reserved.map(|pair| (BindingKind::Reserved, pair.receipts().clone()))
 }
 
+/// Whether installing `selected` must wait on a repair: a held owner decision permits only its
+/// own selected receipt into a source that owes it, and a source owing a replacement accepts
+/// only that replacement. Shared by Studio and Registry so the two holds cannot drift.
+pub(in crate::store) fn repair_defers_install(
+    held: Option<[u8; 32]>,
+    owed: Option<[u8; 32]>,
+    selected: [u8; 32],
+) -> bool {
+    match (held, owed) {
+        (Some(held), Some(owed)) => held != owed || owed != selected,
+        // Before B2, or terminal but not yet recycled: the held transaction owns the target.
+        (Some(_), None) => true,
+        (None, Some(owed)) => owed != selected,
+        (None, None) => false,
+    }
+}
+
 impl ServerStore {
     /// The owner's contextual record, its physical stamp verified against the live budget.
     pub(in crate::store) fn checked_owner_repair_state(
@@ -138,6 +155,19 @@ impl ServerStore {
         Ok(state)
     }
 
+    /// Whether the legacy owner driver may run at all: false while any repair state (a held
+    /// transaction, retained evidence or an unpublished reconciliation) owns publication. Checked
+    /// before rotation so a hold costs nothing per turn instead of a flush and a refusal.
+    pub(crate) fn epoch_owner_is_ordinary(
+        &self,
+        server: u64,
+        document: &LogicalDocument,
+    ) -> Result<bool, AppError> {
+        let scope = scope_bytes(server, document)?;
+        let (state, _) = self.read_epoch_owner_record(&scope, document)?;
+        Ok(state.require_ordinary().is_ok())
+    }
+
     /// Whether the legacy owner driver has a pending decision to rotate. A repair-bearing record
     /// answers false: its transaction or unpublished reconciliation owns publication, and the
     /// legacy driver must neither run against it nor turn that hold into a runtime error.
@@ -154,16 +184,19 @@ impl ServerStore {
         Ok(state.pending().is_some())
     }
 
-    /// Whether a persisted repair transaction claims this document. Structural on purpose: a
-    /// claim counts whoever admitted it, so an unreadable context fences rather than releases.
-    pub(in crate::store) fn epoch_owner_repair_claimed(
+    /// The selected receipt of a persisted repair transaction claiming this document, if any.
+    /// Structural on purpose: a claim counts whoever admitted it, so an unreadable context fences
+    /// rather than releases. Only that decision's own replacement may install while it holds.
+    pub(crate) fn epoch_owner_held_selection(
         &self,
         server: u64,
         document: &LogicalDocument,
-    ) -> Result<bool, AppError> {
+    ) -> Result<Option<[u8; 32]>, AppError> {
         let scope = scope_bytes(server, document)?;
         let (state, _) = self.read_epoch_owner_record(&scope, document)?;
-        Ok(state.held_repair().is_some())
+        Ok(state
+            .held_repair()
+            .map(|(repair, _, _)| repair.selected_receipt_hash))
     }
 
     /// Studio prove path: re-save the effective decision before proving it. Unlike the legacy

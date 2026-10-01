@@ -98,6 +98,34 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             expires,
         })
     }
+    /// Seed fetch for a repair that still owes its replacement: the selected receipt comes from
+    /// a locally verified repair, not a fresh owner proof, because a held or moved-on owner may
+    /// never prove it again. It reuses the four retained slots, three paced attempts and the
+    /// sixty-second lifetime; installing the seed still goes through Repair-recovery adoption.
+    pub fn select_repaired_checkpoint(
+        &mut self,
+        target: CheckpointTarget,
+        fault_repair: &catcoms_replication::ReceiptRepair,
+        selected: &Receipt,
+    ) -> Result<RegistrySeedFetch, SyncError> {
+        let capacity = self.registry_seeds.reserve_retained(false)?;
+        let expires = self
+            .clock
+            .monotonic_ms()
+            .checked_add(FETCH_MS)
+            .ok_or(SyncError::Malformed)?;
+        let selection = self.repaired_head_selection(target, fault_repair, selected)?;
+        Ok(RegistrySeedFetch {
+            selection,
+            fault_repair: Some(Box::new(fault_repair.clone())),
+            _capacity: capacity,
+            expires,
+            attempts: 0,
+            next_at: 0,
+            seed: None,
+            attempt: None,
+        })
+    }
     pub fn complete_checkpoint_discovery(
         &mut self,
         completed: CompletedCheckpointDiscovery,

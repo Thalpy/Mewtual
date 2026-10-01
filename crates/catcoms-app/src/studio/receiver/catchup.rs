@@ -443,7 +443,7 @@ pub(super) struct CatchupRuntime {
     // The repair step's own cadence and round-robin, so a held fault cannot starve rotation.
     repair_next_at: u64,
     repair_selection: usize,
-    repair_failure: Option<(StudioTarget, String)>,
+    registry_repair_next_at: u64,
 }
 impl CatchupRuntime {
     /// Never evict the source of a ready/active page or checkpoint just to start replay.

@@ -84,9 +84,54 @@ core.MUTATIONS = [
     ),
     (
         "REPAIR-adoption-claim", STUDIO_ADOPTION,
-        "if self.epoch_owner_repair_claimed(server, &document)? {", "if false {",
+        "if held.is_some_and(|selected| {", "if false && held.is_some_and(|selected| {",
         REPAIR_TESTS + "head_service_serves_an_applied_repair_but_never_proves_while_it_is_held",
         "ordinary discovery must not install into a held target",
+    ),
+    (
+        "REPAIR-durable-predecessor", STUDIO_ADOPTION,
+        "recovery.check(server, self.durable_studio_digest(server, &document)?, plan)?;",
+        "recovery.check(server, predecessor, plan)?;",
+        REPAIR_TESTS
+        + "a_successor_is_refused_when_the_durable_predecessor_changed_after_recovery",
+        "called `Result::unwrap_err()`",
+    ),
+    (
+        "REPAIR-contextual-observer", FAULT,
+        "            pair.attestation.observer != *observer.as_bytes()\n"
+        "                || pair.attestation.admission_epoch > durable_epoch",
+        "            pair.attestation.admission_epoch > durable_epoch",
+        "contextual_restore_refuses_another_observer_or_an_uncovered_admission_epoch",
+        "another observer's attestation is not this device's evidence",
+    ),
+    (
+        "REPAIR-pre-b2-hint", STUDIO_HEAD,
+        "let receipt = applied.as_ref().and(held.cloned());", "let receipt = held.cloned();",
+        REPAIR_TESTS
+        + "a_rolled_back_owner_is_retargeted_with_no_pre_b2_hint_rotation_or_publication",
+        "before B2 the source still holds the repudiated receipt",
+    ),
+    (
+        "REPAIR-rotation-fence", "crates/catcoms-app/src/store/epoch_studio/rotation.rs",
+        "if !self.epoch_owner_is_ordinary(server, &document)? {", "if false {",
+        REPAIR_TESTS
+        + "a_rolled_back_owner_is_retargeted_with_no_pre_b2_hint_rotation_or_publication",
+        "a held decision is not rotated around",
+    ),
+    (
+        "REPAIR-publication-guard", OWNER,
+        "Self::Publication => match state.fault_record.as_ref().and_then(|r| r.repair()) {",
+        "Self::Publication => match None::<()> {",
+        REPAIR_TESTS
+        + "a_rolled_back_owner_is_retargeted_with_no_pre_b2_hint_rotation_or_publication",
+        "publication refuses while a repair is held",
+    ),
+    (
+        "REPAIR-registry-claim", "crates/catcoms-app/src/store/epoch_registry/adoption.rs",
+        "if held.is_some_and(|selected| {", "if false && held.is_some_and(|selected| {",
+        "store::epoch_registry::tests::repair::"
+        "a_held_bucket_decision_fences_adoption_defers_installs_and_resumes_to_ordinary",
+        "ordinary adoption must not bypass a held bucket decision",
     ),
     (
         "REPAIR-proof-gate", STUDIO_HEAD,

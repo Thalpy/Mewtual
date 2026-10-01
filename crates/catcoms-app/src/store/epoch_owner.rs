@@ -22,7 +22,7 @@ mod fault_record;
 pub(in crate::store) use fault_record::{BindingKind, ValidatedFaultAdmission};
 use fault_record::{InertFaultRecord, MAX_FAULT_ADMISSION_ATTESTATION_BYTES};
 mod repair;
-pub(in crate::store) use repair::{decidable_pair, TerminalRepairSource};
+pub(in crate::store) use repair::{decidable_pair, repair_defers_install, TerminalRepairSource};
 
 pub(super) const RECORD_DOMAIN: &[u8] = b"catcoms/epoch-owner-store/v1";
 // Full framed local/group/type/key scope plus length framing, separate from the signed wire.
@@ -188,7 +188,10 @@ impl EpochOwnerReceiptState {
         }
         let mut bytes = Zeroizing::new(e.finish());
         if let Some(fault) = &self.fault_record {
-            bytes.extend_from_slice(&fault.encode()?);
+            let fault = fault.encode()?;
+            // Never acknowledge tag-3 bytes the strict restart decoder would refuse.
+            InertFaultRecord::decode(&fault, document)?;
+            bytes.extend_from_slice(&fault);
         }
         if bytes.len() > MAX_RECORD_BYTES {
             return Err(invalid("record exceeds its bound"));

@@ -46,7 +46,9 @@ impl ServerStore {
             return Ok(None);
         };
         let document = registry_document(&group.group_id(), bucket).map_err(invalid)?;
+        // Repair state owns publication; legacy maintenance would only flush and refuse.
         if state.phase() == EpochPhase::Fault
+            || !self.epoch_owner_is_ordinary(server, &document)?
             || (state.phase() == EpochPhase::Open
                 && !state.unit.close_candidate_ready()
                 && !self.epoch_owner_rotation_pending(server, &document)?)

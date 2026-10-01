@@ -26,6 +26,11 @@ impl ServerStore {
         if group.designated_committer() != Some(device.device_id()) {
             return Ok(false);
         }
+        // Repair state owns publication; rotating would only flush and then refuse each turn.
+        let document = target.document(&group.group_id()).map_err(invalid)?;
+        if !self.epoch_owner_is_ordinary(server, &document)? {
+            return Ok(false);
+        }
         let status =
             self.with_studio_checkpoint_source(server, group, target, device, budget, |state| {
                 Ok((state.phase(), state.unit.close_candidate_ready()))
@@ -39,7 +44,6 @@ impl ServerStore {
         if ready || phase == EpochPhase::Closing {
             return Ok(true);
         }
-        let document = target.document(&group.group_id()).map_err(invalid)?;
         self.epoch_owner_rotation_pending(server, &document)
     }
     /// Trusted current durable-owner-snapshot callback only. A UI-supplied tenure is not

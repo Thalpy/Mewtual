@@ -65,9 +65,8 @@ impl ServerStore {
             .map_err(invalid)?;
         // A persisted owner repair owns this target from B1 until it is terminal and recycled;
         // ordinary discovery must not install into the source it decided about (AG3-DES-034).
-        if self.epoch_owner_repair_claimed(server, &document)? {
-            return Err(invalid("a held repair owns this target"));
-        }
+        // The one adoption it permits is its own replacement, checked against the source below.
+        let held = self.epoch_owner_held_selection(server, &document)?;
         self.resolve_studio_handoff(server, group, target, device, rng, budget)?;
         // Shares the exact source transfer and fresh five-family accounting used for pages.
         // Actual absence is legal only after inventory agrees, never from a remote pointer.
@@ -77,6 +76,14 @@ impl ServerStore {
             before,
             version,
         } = self.checked_studio_receive_source(server, group, target, device, budget)?;
+        if held.is_some_and(|selected| {
+            selected != receipt.hash()
+                || !unit
+                    .repair_state()
+                    .is_some_and(|state| state.install_pending && state.selected == *receipt)
+        }) {
+            return Err(invalid("a held repair owns this target"));
+        }
         let outcome = if unit.opened_by(receipt) {
             StudioAdoptionOutcome::AlreadyInstalled
         } else {
@@ -174,10 +181,19 @@ impl ServerStore {
         hooks: &mut WriteHooks<'_>,
     ) -> Result<(StudioAdoptionOutcome, EpochStudioState), AppError> {
         let document = target.document(&group.group_id()).map_err(invalid)?;
-        // The exact predecessor the capability binds; recovery staging never changes the source.
         let before = Zeroizing::new(state.unit.snapshot().map_err(invalid)?);
+        // The durable predecessor the plan's recovery is about to preserve, read before staging.
+        let predecessor = self.durable_studio_digest(server, &document)?;
         let Some(recovery) = self.stage_studio_adoption_recovery(
-            server, &document, target, plan, &before, clock, rng, budget, hooks,
+            server,
+            &document,
+            target,
+            plan,
+            predecessor,
+            clock,
+            rng,
+            budget,
+            hooks,
         )?
         else {
             return Ok((StudioAdoptionOutcome::RecoveryPending, state));
@@ -194,7 +210,9 @@ impl ServerStore {
             .unit
             .adopted_successor(plan, group, tenure)
             .map_err(invalid)?;
-        recovery.check(server, &before, plan)?;
+        // Against the durable predecessor as it is NOW: a source that changed on disk across the
+        // recovery barrier is not the version that recovery preserved.
+        recovery.check(server, self.durable_studio_digest(server, &document)?, plan)?;
         let saved = self.save_studio_source(
             server,
             successor,
@@ -219,7 +237,7 @@ impl ServerStore {
         document: &LogicalDocument,
         target: StudioTarget,
         plan: &StudioAdoptionPlan,
-        predecessor: &[u8],
+        predecessor: [u8; 32],
         clock: &dyn Clock,
         rng: &mut impl CryptoRngCore,
         budget: &mut EpochStudioBudget,
@@ -276,17 +294,31 @@ impl ServerStore {
             }
         }
         // Minted only here, after the staged save RETURNED, or after the same typed validation
-        // and inventory check concluded an actually empty source needs no snapshot.
+        // and inventory check concluded an actually empty source needs no snapshot. It binds the
+        // durable predecessor as read BEFORE staging, the version that recovery preserves.
         Ok(Some(CheckedRepairRecovery {
             server,
-            predecessor: *blake3::hash(predecessor).as_bytes(),
+            predecessor,
             plan: adoption_plan_digest(plan)?,
         }))
     }
+
+    /// Digest of the authenticated on-disk source plaintext: the durable predecessor a
+    /// replacement binds, never an in-memory snapshot that could disagree with disk.
+    fn durable_studio_digest(
+        &self,
+        server: u64,
+        document: &LogicalDocument,
+    ) -> Result<[u8; 32], AppError> {
+        let held = self
+            .read_studio_record(&scope_bytes(server, document)?)?
+            .ok_or_else(|| invalid("replacement predecessor is missing"))?;
+        Ok(*blake3::hash(&held.plain).as_bytes())
+    }
 }
 
-/// Permission to replace exactly one predecessor with the successor of exactly one plan. Not
-/// Clone, not Copy, not durable and consumed by the check, so it cannot outlive its custody visit.
+/// Permission to replace exactly one durable predecessor with the successor of exactly one plan.
+/// Not Clone, not Copy, not durable and consumed by the check: it cannot outlive its custody visit.
 struct CheckedRepairRecovery {
     server: u64,
     predecessor: [u8; 32],
@@ -297,11 +329,11 @@ impl CheckedRepairRecovery {
     fn check(
         self,
         server: u64,
-        predecessor: &[u8],
+        durable_predecessor: [u8; 32],
         plan: &StudioAdoptionPlan,
     ) -> Result<(), AppError> {
         if self.server != server
-            || self.predecessor != *blake3::hash(predecessor).as_bytes()
+            || self.predecessor != durable_predecessor
             || self.plan != adoption_plan_digest(plan)?
         {
             return Err(invalid("successor write lacks its recovery capability"));

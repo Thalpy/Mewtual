@@ -49,10 +49,29 @@ the loser converges by case 6c's retarget. A non-live reserved pair is not migra
 slot, so a new live pair waits in overflow until it is decided. The legacy ordinary guard still
 refuses any tag 3, so ordinary rotation for that document waits for the decision (stricter than 5.2).
 
-Not implemented: historical admission (CORE-005), select-repaired-checkpoint for an owner proving a
-head other than the selected receipt, the detached S1-S4 split (every step is one custody visit),
-and Imported coverage at the app boundary (no migrated-v1 Server fixture; the seam's own `require`
-anchor covers it). Mutations: `scripts/check-agent3-store-mutations.py` gains eight runtime guards.
+Not implemented: historical admission (CORE-005), the detached S1-S4 split (every step is one
+custody visit), and Imported coverage at the app boundary (no migrated-v1 Server fixture; the seam's
+own `require` anchor covers it). Runtime-level tests of the catch-up repair step are still missing;
+its store predicates and transactions are tested directly.
+
+### Adversarial review of `90dca2c2`: REQUEST CHANGES, all findings addressed
+
+| Finding | Disposition |
+|---|---|
+| P1 a repair hold surfaced as an installer error, pausing all Studio catch-up | Fixed. The runtime checks one shared rule (`repair_defers_install`) before Studio and Registry seed installs and defers that target only. Adoption under a held decision is allowed solely for its own selected receipt into a source owing it (a single post-load check). |
+| Consequence: no runtime supplied the selected seed, so install cases stalled group-wide | Fixed. `select_repaired_checkpoint` mints a seed pass from a locally verified repair (authoring tenure; repair and selected receipt both current-owner verified); every `AwaitingSeed` enqueues it, adoption installs through `prepare_repair_adoption`, and the owner's next resume recycles. |
+| P2 Flow D cold restores on the actor | Fixed. Studio prepares through the detached pool and reads evidence warm-only; Registry consults its source rail and detached inventory first. |
+| P2 recovery capability was a tautology | Fixed. It binds the durable predecessor digest read before staging and refuses unless disk still matches before the successor write; a test swaps the on-disk source during the recovery write and the successor is refused. |
+| P2 guards without failing tests | Added tests and mutants: contextual observer/epoch, publication guard, pre-B2 hint, rotation fence, Registry claim and defer, durable predecessor; plus the rolled-back-owner 6c retarget end to end. |
+| P3 Held labelled Repairing | Fixed: a hold reports the saved phase. |
+| P3 Registry resume without backoff | Fixed: 60 s backoff on hold or failure. |
+| P3 rotation churn on a claimed target | Fixed: Studio rotation and Registry maintenance skip non-ordinary records. |
+| P3 peer path ignored the device's own earlier-tenure claim | Fixed: refused (CORE-007). |
+| P3 doc overclaimed re-validation | Fixed by making it true: the owner encoder re-decodes tag 3. |
+| P3 `repair_failure` never read | Folded into the surfaced `owner_failure` slot. |
+| P3 Registry `waiting` count | Fixed to exclude the decidable pair. |
+
+Mutations: `scripts/check-agent3-store-mutations.py` now carries twenty guards (six original).
 
 ## Base re-merge and the V5 tenure seam, 2026-10-01
 

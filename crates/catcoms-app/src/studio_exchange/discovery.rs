@@ -243,6 +243,25 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
             peer,
         })
     }
+    /// A seed-fetch pass for a repair that owes its replacement, minted from the locally verified
+    /// repair (design 5.6). Installing the fetched seed still crosses Repair recovery first.
+    pub(crate) fn select_repaired_checkpoint(
+        &mut self,
+        store: &ServerStore,
+        server: u64,
+        target: CheckpointTarget,
+        fault_repair: &catcoms_replication::ReceiptRepair,
+        selected: &catcoms_replication::Receipt,
+    ) -> Result<ServerCheckpointFetch, AppError> {
+        self.check_checkpoint_target(target)?;
+        Ok(ServerCheckpointFetch {
+            inner: self
+                .sync
+                .select_repaired_checkpoint(target, fault_repair, selected)?,
+            mount: store.registry_mount(),
+            server,
+        })
+    }
     pub fn complete_checkpoint_discovery(
         &mut self,
         store: &ServerStore,

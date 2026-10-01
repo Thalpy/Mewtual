@@ -371,6 +371,16 @@ impl ServerStore {
             }
             Some(owner)
         } else {
+            // A decision this device persisted in an earlier tenure still owns the target
+            // (CORE-007): it is held, never bypassed by applying someone else's repair.
+            if self
+                .epoch_owner_held_selection(server, &document)?
+                .is_some()
+            {
+                return Err(invalid(
+                    "a decision held from an earlier tenure owns this target",
+                ));
+            }
             None
         };
         let first = resolved.is_none();
@@ -505,40 +515,41 @@ impl ServerStore {
     /// authenticated answer offered. `None` means there is nothing to do: either this repair is
     /// already terminal here, or this device cannot verify it, which is never a reason to invent
     /// the missing receipt.
+    ///
+    /// Warm sources only: the caller prepares the source through the detached pool first, and a
+    /// cold source answers `None` rather than paying a full rebuild on the actor.
     pub(crate) fn studio_repair_evidence(
-        &mut self,
+        &self,
         server: u64,
         group: &ServerGroup,
         target: StudioTarget,
         device: &MlsDevice,
         repair: &ReceiptRepair,
         offered: Option<&Receipt>,
-    ) -> Result<Option<[Receipt; 2]>, AppError> {
-        Ok(self
-            .with_studio_source(server, group, target, device, |state| {
-                let unit = &state.unit;
-                if unit
-                    .repair_state()
-                    .is_some_and(|s| s.repair == *repair && !s.install_pending)
-                {
-                    return Ok(None);
-                }
-                let mut held: Vec<Receipt> = Vec::new();
-                if let Some((a, b)) = unit.fault_evidence() {
-                    held.extend([a.clone(), b.clone()]);
-                }
-                if let Ok(Some(head)) = unit.receipt_head() {
-                    held.push(head.clone());
-                }
-                held.extend(unit.opening().cloned());
-                held.extend(offered.cloned());
-                let find = |hash: &[u8; 32]| held.iter().find(|r| r.hash() == *hash).cloned();
-                Ok(match repair.receipt_hashes.each_ref().map(find) {
-                    [Some(a), Some(b)] => Some([a, b]),
-                    _ => None,
-                })
-            })?
-            .flatten())
+    ) -> Option<[Receipt; 2]> {
+        self.warm_studio_unit(server, group, target, device, |unit| {
+            if unit
+                .repair_state()
+                .is_some_and(|s| s.repair == *repair && !s.install_pending)
+            {
+                return None;
+            }
+            let mut held: Vec<Receipt> = Vec::new();
+            if let Some((a, b)) = unit.fault_evidence() {
+                held.extend([a.clone(), b.clone()]);
+            }
+            if let Ok(Some(head)) = unit.receipt_head() {
+                held.push(head.clone());
+            }
+            held.extend(unit.opening().cloned());
+            held.extend(offered.cloned());
+            let find = |hash: &[u8; 32]| held.iter().find(|r| r.hash() == *hash).cloned();
+            match repair.receipt_hashes.each_ref().map(find) {
+                [Some(a), Some(b)] => Some([a, b]),
+                _ => None,
+            }
+        })
+        .flatten()
     }
 
     /// The owner's persisted, not yet recycled decision for this target and the pair it binds.

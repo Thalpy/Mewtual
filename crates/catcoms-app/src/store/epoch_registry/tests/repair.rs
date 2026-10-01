@@ -103,6 +103,83 @@ fn a_faulted_bucket_is_repaired_recycled_and_served_without_a_held_proof() {
 }
 
 #[test]
+fn a_held_bucket_decision_fences_adoption_defers_installs_and_resumes_to_ordinary() {
+    let root = tempfile::tempdir().unwrap();
+    let mut f = Fixture::new();
+    let mut store = open(root.path());
+    let pair = faulted(&mut f, &mut store);
+    let mut fail_source = |tag: WriteTag, _: &Path, _: &[u8]| {
+        if tag == WriteTag::Source {
+            Intercept::Fail(AppError::Io("b2".into()))
+        } else {
+            Intercept::Continue
+        }
+    };
+    let mut b = budget(&mut store, &f);
+    assert!(store
+        .issue_registry_repair_with_io(
+            SERVER,
+            &f.group,
+            f.key.bucket(),
+            &f.device,
+            0,
+            StudioRepairRequest {
+                receipt_a: pair[0].hash(),
+                receipt_b: pair[1].hash(),
+                selected: pair[0].hash(),
+            },
+            None,
+            &ManualClock::new(1000),
+            &mut rng(),
+            &mut b,
+            &mut WriteHooks::Hooked {
+                before: Some(&mut fail_source),
+                before_sync: None,
+                before_unlink: None,
+                after: None,
+            },
+        )
+        .is_err());
+    assert_eq!(f.load(&store).unwrap().phase(), EpochPhase::Fault);
+    assert!(store
+        .load_epoch_owner_receipts(SERVER, &f.document)
+        .is_err());
+    // Another owner-proved receipt cannot install into the bucket the decision owns.
+    let other = f.receipt(9);
+    let mut b = budget(&mut store, &f);
+    assert!(
+        store
+            .adopt_registry_checkpoint(
+                SERVER,
+                &f.group,
+                f.key.bucket(),
+                &f.device,
+                &other,
+                None,
+                0,
+                &ManualClock::new(1000),
+                &mut rng(),
+                &mut b,
+            )
+            .is_err(),
+        "ordinary adoption must not bypass a held bucket decision"
+    );
+    assert!(store
+        .registry_install_deferred_by_repair(SERVER, &f.group, f.key.bucket(), &f.device, &other)
+        .unwrap());
+    // Legacy maintenance does not run against the held bucket.
+    assert!(!store.epoch_owner_is_ordinary(SERVER, &f.document).unwrap());
+    // Resuming the exact decision completes it and recycles the record.
+    let (_, outcome, state) = issue(&f, &mut store, &pair, &pair[0]).unwrap();
+    assert_eq!(outcome, StudioRepairOutcome::Repaired);
+    assert_eq!(state.phase(), EpochPhase::Closing);
+    assert!(store.load_epoch_owner_receipts(SERVER, &f.document).is_ok());
+    assert!(!store
+        .registry_install_deferred_by_repair(SERVER, &f.group, f.key.bucket(), &f.device, &other)
+        .unwrap());
+}
+
+#[test]
 fn a_peer_applies_an_owner_bucket_repair_and_keeps_no_owner_record() {
     let root = tempfile::tempdir().unwrap();
     let mut owner = Fixture::new();

@@ -977,3 +977,62 @@ fn fault_record_corruption_and_oversized_files_fail_structural_inventory() {
         .to_string();
     assert!(error.contains("bounded regular file"), "{error}");
 }
+
+/// Retained evidence is consumable only through contextual restore: it must name this observer
+/// and an admission epoch the caller's durable snapshot covers. A structurally perfect record
+/// admitted by another device, or after the snapshot, yields nothing.
+#[test]
+fn contextual_restore_refuses_another_observer_or_an_uncovered_admission_epoch() {
+    let owner = MlsDevice::generate().unwrap();
+    let peer = MlsDevice::generate().unwrap();
+    let mut group = ServerGroup::create(&owner).unwrap();
+    group
+        .add_member(&owner, peer.key_package().unwrap())
+        .unwrap();
+    assert_eq!(group.epoch(), 1);
+    let doc = LogicalDocument::new(group.group_id(), DocType::StudioIndex, vec![7; 16]).unwrap();
+    let sign = |marker: u8| {
+        Receipt::sign(
+            doc.clone(),
+            0,
+            [marker; 32],
+            [marker; 32],
+            0,
+            InheritedCheckpoint::EpochZero,
+            &owner,
+        )
+        .unwrap()
+    };
+    let mut pair = [sign(1), sign(2)];
+    pair.sort_by_key(Receipt::hash);
+    let hashes = [pair[0].hash(), pair[1].hash()];
+    // Admitted at the current group epoch (1) by the owner device.
+    let admission =
+        ValidatedFaultAdmission::current(&doc, &pair[0], &pair[1], &group, &owner.device_id(), 0)
+            .unwrap();
+    let repair = ReceiptRepair::sign_in_tenure(
+        doc.clone(),
+        pair[0].tenure_id,
+        hashes,
+        hashes[0],
+        1,
+        0,
+        &owner,
+    )
+    .unwrap();
+    let bound = InertFaultRecord::bind(None, BindingKind::SourceBound, admission, repair).unwrap();
+    let record = InertFaultRecord::decode(&bound.encode().unwrap(), &doc).unwrap();
+    assert!(record
+        .contextual(&owner.device_id(), 1)
+        .unwrap()
+        .retained_admission(hashes)
+        .is_some());
+    assert!(
+        record.contextual(&peer.device_id(), 1).is_err(),
+        "another observer's attestation is not this device's evidence"
+    );
+    assert!(
+        record.contextual(&owner.device_id(), 0).is_err(),
+        "an admission the durable snapshot does not cover is refused"
+    );
+}

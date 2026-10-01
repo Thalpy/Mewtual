@@ -232,6 +232,22 @@ impl CatchupRuntime {
             {
                 return Ok(None);
             }
+            let selected = self
+                .checkpoint
+                .as_ref()
+                .expect("pass")
+                .inner
+                .selected_receipt()
+                .clone();
+            if self.repair_defers_install(
+                server,
+                store,
+                id,
+                CheckpointTarget::Registry(bucket),
+                &selected,
+            ) {
+                return Ok(None);
+            }
             let mut budget = Self::budget(server, store, id)?;
             let outcome = server.install_registry_seed_for_studio(
                 store,
@@ -260,6 +276,22 @@ impl CatchupRuntime {
             return Ok(None);
         };
         if !self.prepare(server, store, id, target)? {
+            return Ok(None);
+        }
+        let selected = self
+            .checkpoint
+            .as_ref()
+            .expect("pass")
+            .inner
+            .selected_receipt()
+            .clone();
+        if self.repair_defers_install(
+            server,
+            store,
+            id,
+            CheckpointTarget::Studio(target),
+            &selected,
+        ) {
             return Ok(None);
         }
         let mut budget = Self::budget(server, store, id)?;

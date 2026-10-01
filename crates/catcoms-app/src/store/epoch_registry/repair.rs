@@ -276,6 +276,15 @@ impl ServerStore {
             }
             Some(owner)
         } else {
+            // A decision this device persisted in an earlier tenure still owns the bucket.
+            if self
+                .epoch_owner_held_selection(server, &document)?
+                .is_some()
+            {
+                return Err(invalid(
+                    "a decision held from an earlier tenure owns this target",
+                ));
+            }
             None
         };
         let first = resolved.is_none();
@@ -476,9 +485,16 @@ impl ServerStore {
                 pair
             }),
         };
+        // Further retained pairs only: the decidable one is not also "waiting".
         let retained = owner.as_ref().map_or(0, |record| {
             let (externals, reserved) = record.retained_pairs();
-            externals.len() + usize::from(reserved.is_some())
+            let hashes = decidable.as_ref().map(|d| [d[0].hash(), d[1].hash()]);
+            let decidable_retained = externals
+                .iter()
+                .chain(reserved)
+                .any(|pair| Some(pair.hashes()) == hashes);
+            (externals.len() + usize::from(reserved.is_some()))
+                .saturating_sub(usize::from(decidable_retained))
         });
         Ok(Some(crate::store::StudioFaultEvidence {
             decidable,
@@ -492,6 +508,30 @@ impl ServerStore {
             operations: unit.op_count(),
             opening: unit.opening().map(Receipt::hash),
         }))
+    }
+
+    /// Whether a repair hold, not storage, must defer installing `selected` into this bucket.
+    /// Deferring keeps the hold per bucket; an installer error would pause all catch-up.
+    pub(crate) fn registry_install_deferred_by_repair(
+        &self,
+        server: u64,
+        group: &ServerGroup,
+        bucket: u8,
+        device: &MlsDevice,
+        selected: &Receipt,
+    ) -> Result<bool, AppError> {
+        let document = registry_document(&group.group_id(), bucket).map_err(invalid)?;
+        let held = self.epoch_owner_held_selection(server, &document)?;
+        let owed = self
+            .load_registry_epoch(server, group, bucket, device)?
+            .and_then(|state| state.unit.repair_state())
+            .filter(|state| state.install_pending)
+            .map(|state| state.selected.hash());
+        Ok(super::super::epoch_owner::repair_defers_install(
+            held,
+            owed,
+            selected.hash(),
+        ))
     }
 
     /// The bucket's frozen fault pair for the W-1 reporter. Read only once the runtime already
