@@ -1,7 +1,7 @@
 //! A faulted Registry bucket blocks Index and Flipnote discovery, so its repair is the same
 //! transaction as Studio's: issuance at B1, application at B2, recycling back to ordinary.
 use super::*;
-use crate::store::{StudioRepairOutcome, StudioRepairRequest};
+use crate::store::{OfferedRepairEvidence, StudioRepairOutcome, StudioRepairRequest};
 use catcoms_replication::{ReceiptRepair, RepairDisposition};
 use catcoms_rt::ManualClock;
 
@@ -251,6 +251,33 @@ fn a_peer_applies_an_owner_bucket_repair_and_keeps_no_owner_record() {
         &owner.device,
     )
     .unwrap();
+    // Offered evidence, read before any work: the faulted bucket holds both receipts.
+    let evidence = |store: &ServerStore, repair: &ReceiptRepair| {
+        store
+            .registry_repair_evidence(SERVER, &f.group, f.key.bucket(), &f.device, repair, None)
+            .unwrap()
+    };
+    assert!(
+        matches!(evidence(&store, &repair), OfferedRepairEvidence::Pair(held) if *held == pair)
+    );
+    // A repair naming a receipt this device never held cannot be applied, but may become
+    // applicable later, so it is not terminal.
+    let mut unheld = [pair[0].hash(), [9; 32]];
+    unheld.sort();
+    let unheld = ReceiptRepair::sign_in_tenure(
+        f.document.clone(),
+        pair[0].tenure_id,
+        unheld,
+        pair[0].hash(),
+        1,
+        0,
+        &owner.device,
+    )
+    .unwrap();
+    assert!(matches!(
+        evidence(&store, &unheld),
+        OfferedRepairEvidence::Unverifiable
+    ));
     let mut b = budget(&mut store, &f);
     let (outcome, state) = store
         .apply_registry_repair(
@@ -273,4 +300,9 @@ fn a_peer_applies_an_owner_bucket_repair_and_keeps_no_owner_record() {
         .epoch_owner_receipt_inventory_record(SERVER, &f.document)
         .unwrap()
         .is_none());
+    // Applied and not owing a replacement: later answers carrying it are terminal here.
+    assert!(matches!(
+        evidence(&store, &repair),
+        OfferedRepairEvidence::Terminal
+    ));
 }

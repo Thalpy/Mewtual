@@ -449,6 +449,11 @@ pub(super) struct CatchupRuntime {
     // Terminal Registry repairs already applied here, so repeated answers carrying one cost no
     // further Registry restores. Bounded; forgetting one only costs a reload.
     registry_repairs_seen: std::collections::BTreeSet<(u8, [u8; 32])>,
+    // Targets whose owed repair hit a persistent hold (recovery warning, storage refusal, held
+    // decision, unobserved tenure): no repaired seed is fetched for them again until this time.
+    repair_backoff: std::collections::BTreeMap<CheckpointTarget, u64>,
+    // The Studio target a minted repaired pass reports to; a bucket pass may have no other.
+    repair_failure_target: Option<StudioTarget>,
 }
 impl CatchupRuntime {
     /// Never evict the source of a ready/active page or checkpoint just to start replay.

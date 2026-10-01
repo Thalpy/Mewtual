@@ -4,6 +4,8 @@ use catcoms_rt::{Hub, ManualClock, PeerId};
 use rand_chacha::ChaCha20Rng;
 use rand_core::SeedableRng;
 
+mod repair;
+
 #[tokio::test]
 async fn studio_owner_superseded_preparation_waits_its_local_deadline() {
     let clock = ManualClock::new(1000);

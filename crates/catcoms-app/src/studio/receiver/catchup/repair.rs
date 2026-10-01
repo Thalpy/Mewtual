@@ -1,7 +1,8 @@
 //! The repair step (design 5.7, 10.3). Only this runtime holds the durable owner snapshot, so the
 //! explicit decision reaches issuance here, and the owner resumes a persisted decision after a
 //! crash in the same slot as rotation, after discovery, seed and page work. One job per turn,
-//! round-robin over watched targets, with a 5 s cadence that backs off to 60 s on any hold. A
+//! round-robin over watched targets, with a 5 s cadence that backs off to 60 s on any hold; a
+//! persistent hold on an owed replacement also stops that target's seed refetches for 60 s. A
 //! hold is always a per-target wait: nothing here returns an error that would pause catch-up.
 use super::*;
 use crate::store::{OfferedRepairEvidence, StudioRepairOutcome, StudioRepairRequest};
@@ -10,6 +11,9 @@ use catcoms_replication::{Receipt, ReceiptRepair};
 
 /// Remembered terminal Registry repairs, bounded; forgetting one only costs a reload.
 const MAX_REMEMBERED_REGISTRY_REPAIRS: usize = 64;
+/// How long a persistent repair hold suppresses refetching that target's selected seed. The same
+/// 60 s the ordinary installer waits after a recovery warning.
+const REPAIR_HOLD_BACKOFF_MS: u64 = 60_000;
 
 impl CatchupRuntime {
     /// The visible exit (Flow X): `Repairing` has exactly this producer, after the application
@@ -49,6 +53,13 @@ impl CatchupRuntime {
         self.owner_failure = Some((target, error.to_string().chars().take(256).collect()));
     }
 
+    /// A bucket pass may belong to no Studio target; its failure is then only held, not shown.
+    fn note_repair_failure_for(&mut self, target: Option<StudioTarget>, error: &AppError) {
+        if let Some(target) = target {
+            self.note_repair_failure(target, error);
+        }
+    }
+
     fn remember_registry_repair(&mut self, bucket: u8, repair: &ReceiptRepair) {
         if self.registry_repairs_seen.len() >= MAX_REMEMBERED_REGISTRY_REPAIRS {
             self.registry_repairs_seen.clear();
@@ -67,12 +78,22 @@ impl CatchupRuntime {
         store: &ServerStore,
         id: u64,
         target: CheckpointTarget,
-        failure_target: StudioTarget,
+        failure_target: Option<StudioTarget>,
         repair: &ReceiptRepair,
         pair: &[Receipt; 2],
     ) {
-        if self.checkpoint.is_some() {
-            // One checkpoint pass at a time; the next resume turn asks again.
+        let now = server.runtime_clock().monotonic_ms();
+        if self.checkpoint.is_some() || self.in_flight || self.discovery_plan.is_some() {
+            // One checkpoint pass at a time, and never under a pending discovery, whose
+            // completion would drop it; the next resume or discovery turn asks again.
+            return;
+        }
+        if self
+            .repair_backoff
+            .get(&target)
+            .is_some_and(|until| now < *until)
+        {
+            // A persistent hold: refetching the seed would fail the same way.
             return;
         }
         let Some(selected) = pair
@@ -96,8 +117,13 @@ impl CatchupRuntime {
                 self.checkpoint_sealed = true;
                 self.checkpoint_peer = Some(peer);
                 self.checkpoint_retry = 0;
+                self.repair_failure_target = failure_target;
             }
-            Err(error) => self.note_repair_failure(failure_target, &error),
+            Err(error) => {
+                self.note_repair_failure_for(failure_target, &error);
+                // CORE-007 or an unobserved tenure: neither clears within a discovery turn.
+                self.hold_repair(target, now);
+            }
         }
     }
 
@@ -145,7 +171,7 @@ impl CatchupRuntime {
                     store,
                     id,
                     CheckpointTarget::Studio(target),
-                    target,
+                    Some(target),
                     &repair,
                     &pair,
                 );
@@ -198,7 +224,7 @@ impl CatchupRuntime {
                     store,
                     id,
                     CheckpointTarget::Registry(bucket),
-                    target,
+                    Some(target),
                     &repair,
                     &pair,
                 );
@@ -374,7 +400,7 @@ impl CatchupRuntime {
                         store,
                         id,
                         CheckpointTarget::Registry(bucket),
-                        target,
+                        Some(target),
                         &repair,
                         &pair,
                     );
@@ -453,7 +479,7 @@ impl CatchupRuntime {
                         store,
                         id,
                         CheckpointTarget::Studio(target),
-                        target,
+                        Some(target),
                         &repair,
                         &pair,
                     );
@@ -468,20 +494,32 @@ impl CatchupRuntime {
         }
     }
 
-    /// Route a fetched checkpoint pass before the ordinary installer, so a repair is never an
-    /// installer error that pauses all catch-up:
-    /// - the source owes a repair whose selected receipt is this pass's: install through the
-    ///   repair transaction itself, with typed RecoveryPending/StorageRefused and owner recycling;
-    /// - the source owes a different replacement: drop this pass and fetch that repair's own
-    ///   selected seed instead, from the source's committed evidence (a peer self-heals here);
+    /// Stop refetching `target`'s repaired seed for a while; expired holds are dropped here, so
+    /// the map stays as small as the set of targets currently held.
+    fn hold_repair(&mut self, target: CheckpointTarget, now: u64) {
+        self.repair_backoff.retain(|_, until| now < *until);
+        self.repair_backoff
+            .insert(target, now.saturating_add(REPAIR_HOLD_BACKOFF_MS));
+    }
+
+    /// Route a checkpoint pass before the ordinary installer, so a repair is never an installer
+    /// error that pauses all catch-up:
+    /// - the source owes a repair and this pass has fetched exactly its selected seed: install
+    ///   through the repair transaction itself, with typed RecoveryPending/StorageRefused and
+    ///   owner recycling (the owner only through a current durable snapshot);
+    /// - the source owes a repair and this pass names another receipt, or has no seed yet: drop
+    ///   it and fetch the repair's own selected seed instead, from the source's committed
+    ///   evidence (a peer self-heals here);
     /// - a held owner decision owns the target: defer this target only;
     /// - otherwise the ordinary installer proceeds (`Ok(None)`).
+    ///
+    /// `failure_target` is where diagnostics go; a bucket pass may have none.
     pub(super) fn route_checkpoint_install<T: MeshTransport, R: CryptoRngCore>(
         &mut self,
         server: &mut Server<T, R>,
         store: &mut ServerStore,
         id: u64,
-        failure_target: StudioTarget,
+        failure_target: Option<StudioTarget>,
     ) -> Result<Option<Option<StudioTarget>>, AppError> {
         let Some(pass) = self.checkpoint.as_ref() else {
             return Ok(None);
@@ -498,29 +536,64 @@ impl CatchupRuntime {
         let owed = match owed {
             Ok(owed) => owed,
             Err(error) => {
-                self.note_repair_failure(failure_target, &error);
+                self.note_repair_failure_for(failure_target, &error);
                 self.retry_discovery(now);
                 return Ok(Some(None));
             }
         };
         if let Some((repair, pair)) = owed {
-            if selected.hash() != repair.selected_receipt_hash {
+            let fetched = self
+                .checkpoint
+                .as_ref()
+                .is_some_and(|pass| pass.inner.is_fetched());
+            if selected.hash() != repair.selected_receipt_hash || !fetched {
+                // A different head, or a proof pass with no seed yet: fetch the repair's own
+                // selected seed through a repaired pass instead. That selection is made under
+                // this device's authoring tenure, never under a proof's own claim (6.3).
                 self.checkpoint = None;
                 self.await_repaired_seed(server, store, id, target, failure_target, &repair, &pair);
                 if self.checkpoint.is_none() {
-                    // No seed pass (CORE-007: a previous owner's repair no longer verifies, or no
-                    // peer is reachable): hold this target on the ordinary rotating cadence.
+                    // No seed pass (a persistent hold, CORE-007, or no reachable peer): hold
+                    // this target on the ordinary rotating cadence.
                     self.retry_discovery(now);
                 }
                 return Ok(Some(None));
             }
-            let pass = self.checkpoint.take().expect("pass");
+            let owner = server.sync.with_registry_context(|g, d, _, _| {
+                g.designated_committer() == Some(d.device_id())
+            });
+            // The owner installs only as a resume would: through a current durable snapshot.
+            let snapshot = match self.owner_snapshot.clone() {
+                Some(snapshot)
+                    if owner && server.owner_head_snapshot_is_current(store, id, &snapshot) =>
+                {
+                    Some(snapshot)
+                }
+                _ if owner => {
+                    let stale = invalid("the durable owner snapshot is stale; retry");
+                    self.note_repair_failure_for(failure_target, &stale);
+                    self.retry_discovery(now);
+                    return Ok(Some(None));
+                }
+                _ => None,
+            };
             let mut budget = Self::budget(server, store, id)?;
-            self.settlement
-                .note(failure_target, StudioSettlementState::RefreshRequired);
+            let pass = self.checkpoint.take().expect("pass");
+            if let Some(failure_target) = failure_target {
+                self.settlement
+                    .note(failure_target, StudioSettlementState::RefreshRequired);
+            }
             let installed = match target {
                 CheckpointTarget::Studio(studio) => server
-                    .install_repaired_studio_seed(store, id, &pass, &repair, &pair, &mut budget)
+                    .install_repaired_studio_seed(
+                        store,
+                        id,
+                        &pass,
+                        &repair,
+                        &pair,
+                        snapshot.as_ref(),
+                        &mut budget,
+                    )
                     .map(|(outcome, state)| {
                         let (phase, doc_id) = (state.phase(), state.doc_id());
                         server.sync.with_registry_context(|g, d, _, _| {
@@ -541,6 +614,7 @@ impl CatchupRuntime {
                             &pass,
                             &repair,
                             &pair,
+                            snapshot.as_ref(),
                             &mut budget,
                         )
                         .map(|(outcome, _)| outcome)
@@ -548,24 +622,31 @@ impl CatchupRuntime {
             };
             return Ok(Some(match installed {
                 Ok(outcome) if outcome.is_terminal() => {
-                    if let CheckpointTarget::Registry(_) = target {
-                        self.discovery_plan = self.after_registry.take();
-                        None
-                    } else {
-                        self.discovery_needed = None;
-                        self.discovery_watch = None;
-                        self.next_at = now;
-                        Some(failure_target)
+                    self.repair_backoff.remove(&target);
+                    match target {
+                        CheckpointTarget::Registry(_) => {
+                            self.reset_registry_tail(server, now);
+                            self.discovery_plan = self.after_registry.take();
+                            None
+                        }
+                        CheckpointTarget::Studio(studio) => {
+                            self.discovery_needed = None;
+                            self.discovery_watch = None;
+                            self.next_at = now;
+                            Some(studio)
+                        }
                     }
                 }
                 Ok(_) => {
-                    // Recovery warning, storage refusal or a hold: everything is retained and
-                    // this target retries on the ordinary discovery cadence.
+                    // Recovery warning, storage refusal or a hold: everything is retained. They
+                    // need the user or the owner, so the seed is not refetched for a while.
+                    self.hold_repair(target, now);
                     self.retry_discovery(now);
                     None
                 }
                 Err(error) => {
-                    self.note_repair_failure(failure_target, &error);
+                    self.note_repair_failure_for(failure_target, &error);
+                    self.hold_repair(target, now);
                     self.retry_discovery(now);
                     None
                 }
@@ -590,7 +671,7 @@ impl CatchupRuntime {
             }
             Err(error) => {
                 // An unreadable owner record is not a reason to install, and not silent either.
-                self.note_repair_failure(failure_target, &error);
+                self.note_repair_failure_for(failure_target, &error);
                 self.retry_discovery(now);
                 Ok(Some(None))
             }

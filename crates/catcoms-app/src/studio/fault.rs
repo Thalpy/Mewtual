@@ -316,10 +316,46 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
             })
     }
 
+    /// The seed a fetched pass verified for exactly this repair's selected receipt. Applying is
+    /// authoring (6.3), so the pass must have been selected under this device's observed owner
+    /// tenure: a proof pass carries the proof's own claim, which is never repair evidence.
+    fn repaired_seed_bytes(
+        &mut self,
+        store: &ServerStore,
+        server: u64,
+        pass: &crate::studio_exchange::discovery::ServerCheckpointFetch,
+        repair: &ReceiptRepair,
+    ) -> Result<Vec<u8>, AppError> {
+        let observed = self.require_observed_owner_tenure()?;
+        if pass.server != server || !Arc::ptr_eq(&pass.mount, &store.registry_mount()) {
+            return Err(AppError::Invalid(
+                "seed pass belongs to a replaced mount".into(),
+            ));
+        }
+        self.sync
+            .with_checkpoint_seed_selection(&pass.inner, |_, _, _, selected| {
+                if selected.receipt.hash() != repair.selected_receipt_hash {
+                    return Err(AppError::Invalid(
+                        "seed pass is not for this repair's selection".into(),
+                    ));
+                }
+                if selected.tenure != observed {
+                    return Err(AppError::Invalid(
+                        "seed pass was not selected under the observed owner tenure".into(),
+                    ));
+                }
+                selected
+                    .checkpoint
+                    .map(|seed| seed.bytes().to_vec())
+                    .ok_or_else(|| AppError::Invalid("no verified seed for this repair".into()))
+            })?
+    }
+
     /// Install a fetched selected seed for a repair this source owes, through the repair
     /// transaction itself so the outcome is typed (Installed, RecoveryPending, StorageRefused)
-    /// and an owner's record is recycled in the same step. The seed is the one the current pass
-    /// verified against exactly the repair's selected receipt; nothing else is installable.
+    /// and an owner's record is recycled in the same step. The owner goes through its durable
+    /// snapshot exactly as a resume does; a peer through Flow A, which refuses the owner.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn install_repaired_studio_seed(
         &mut self,
         store: &mut ServerStore,
@@ -327,6 +363,7 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
         pass: &crate::studio_exchange::discovery::ServerCheckpointFetch,
         repair: &ReceiptRepair,
         pair: &[Receipt; 2],
+        owner_snapshot: Option<&ServerOwnerSnapshot>,
         budget: &mut EpochStudioBudget,
     ) -> Result<(StudioRepairOutcome, EpochStudioState), AppError> {
         let catcoms_sync::checkpoint_exchange::CheckpointTarget::Studio(target) =
@@ -336,36 +373,32 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
                 "a Studio repair needs a Studio seed".into(),
             ));
         };
-        self.check_studio_fault_channel(target)?;
-        if pass.server != server || !Arc::ptr_eq(&pass.mount, &store.registry_mount()) {
-            return Err(AppError::Invalid(
-                "seed pass belongs to a replaced mount".into(),
-            ));
+        let seed = self.repaired_seed_bytes(store, server, pass, repair)?;
+        match owner_snapshot {
+            Some(snapshot) => self.resume_studio_fault_repair(
+                store,
+                server,
+                target,
+                snapshot,
+                repair,
+                pair,
+                Some(&seed),
+                budget,
+            ),
+            None => self.apply_studio_fault_repair(
+                store,
+                server,
+                target,
+                repair,
+                pair,
+                Some(&seed),
+                budget,
+            ),
         }
-        let clock = self.runtime_clock();
-        self.sync
-            .with_checkpoint_seed_selection(&pass.inner, |group, device, rng, selected| {
-                let seed = selected
-                    .checkpoint
-                    .filter(|_| selected.receipt.hash() == repair.selected_receipt_hash)
-                    .ok_or_else(|| AppError::Invalid("no verified seed for this repair".into()))?;
-                store.apply_studio_repair(
-                    server,
-                    group,
-                    target,
-                    device,
-                    repair,
-                    pair,
-                    selected.tenure,
-                    Some(seed.bytes()),
-                    clock.as_ref(),
-                    rng,
-                    budget,
-                )
-            })?
     }
 
     /// The Registry counterpart of [`Self::install_repaired_studio_seed`].
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn install_repaired_registry_seed(
         &mut self,
         store: &mut ServerStore,
@@ -373,6 +406,7 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
         pass: &crate::studio_exchange::discovery::ServerCheckpointFetch,
         repair: &ReceiptRepair,
         pair: &[Receipt; 2],
+        owner_snapshot: Option<&ServerOwnerSnapshot>,
         budget: &mut EpochStudioBudget,
     ) -> Result<(StudioRepairOutcome, EpochRegistryState), AppError> {
         let catcoms_sync::checkpoint_exchange::CheckpointTarget::Registry(bucket) =
@@ -382,34 +416,28 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
                 "a bucket repair needs a Registry seed".into(),
             ));
         };
-        if pass.server != server || !Arc::ptr_eq(&pass.mount, &store.registry_mount()) {
-            return Err(AppError::Invalid(
-                "seed pass belongs to a replaced mount".into(),
-            ));
+        let seed = self.repaired_seed_bytes(store, server, pass, repair)?;
+        match owner_snapshot {
+            Some(snapshot) => self.resume_registry_bucket_repair(
+                store,
+                server,
+                bucket,
+                snapshot,
+                repair,
+                pair,
+                Some(&seed),
+                budget,
+            ),
+            None => self.apply_registry_bucket_repair(
+                store,
+                server,
+                bucket,
+                repair,
+                pair,
+                Some(&seed),
+                budget,
+            ),
         }
-        let clock = self.runtime_clock();
-        self.sync
-            .with_checkpoint_seed_selection(&pass.inner, |group, device, rng, selected| {
-                let seed = selected
-                    .checkpoint
-                    .filter(|_| selected.receipt.hash() == repair.selected_receipt_hash)
-                    .ok_or_else(|| AppError::Invalid("no verified seed for this repair".into()))?;
-                store.with_studio_protocol_budget(server, group, budget, |store, storage| {
-                    store.apply_registry_repair(
-                        server,
-                        group,
-                        bucket,
-                        device,
-                        repair,
-                        pair,
-                        selected.tenure,
-                        Some(seed.bytes()),
-                        clock.as_ref(),
-                        rng,
-                        storage,
-                    )
-                })
-            })?
     }
 
     /// The Registry bucket a Studio target's pointer lives in, the scope of its discoverability.
@@ -512,10 +540,30 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
         raw_seed: Option<&[u8]>,
         budget: &mut EpochStudioBudget,
     ) -> Result<(StudioRepairOutcome, EpochRegistryState), AppError> {
-        let observed = self.require_observed_owner_tenure()?;
+        // V5 first, so an unobserved tenure is refused as such before any channel check.
+        self.require_observed_owner_tenure()?;
         self.check_studio_fault_channel(target)?;
-        self.check_owner_snapshot(store, server, snapshot)?;
         let bucket = self.studio_registry_bucket(target)?;
+        self.resume_registry_bucket_repair(
+            store, server, bucket, snapshot, repair, pair, raw_seed, budget,
+        )
+    }
+
+    /// Bucket-keyed owner resume, for a fetched bucket seed that knows only its bucket.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn resume_registry_bucket_repair(
+        &mut self,
+        store: &mut ServerStore,
+        server: u64,
+        bucket: u8,
+        snapshot: &ServerOwnerSnapshot,
+        repair: &ReceiptRepair,
+        pair: &[Receipt; 2],
+        raw_seed: Option<&[u8]>,
+        budget: &mut EpochStudioBudget,
+    ) -> Result<(StudioRepairOutcome, EpochRegistryState), AppError> {
+        let observed = self.require_observed_owner_tenure()?;
+        self.check_owner_snapshot(store, server, snapshot)?;
         let clock = self.runtime_clock();
         self.sync
             .with_durable_owner_snapshot(&snapshot.inner, |group, device, rng, tenure| {

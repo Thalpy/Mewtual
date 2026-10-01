@@ -51,9 +51,10 @@ refuses any tag 3, so ordinary rotation for that document waits for the decision
 
 Not implemented: historical admission (CORE-005), the detached S1-S4 split (every step is one
 custody visit), and Imported coverage at the app boundary (no migrated-v1 Server fixture; the seam's
-own `require` anchor covers it). Runtime-level tests of the catch-up repair step, including the
-install router, are still missing; its store predicates, transactions and the sync selection are
-tested directly.
+own `require` anchor covers it). Runtime-level tests of the catch-up repair step are partial: the
+install router has one (an owed source with an unfetched pass, and the hold backoff); Flow D and
+the resume steps are covered only through their store predicates, transactions and the sync
+selection.
 
 ### Adversarial review of `90dca2c2`: REQUEST CHANGES, all findings addressed
 
@@ -72,7 +73,25 @@ tested directly.
 | P3 `repair_failure` never read | Folded into the surfaced `owner_failure` slot. |
 | P3 Registry `waiting` count | Fixed to exclude the decidable pair. |
 
-Mutations: `scripts/check-agent3-store-mutations.py` now carries twenty guards (six original).
+Mutations: `scripts/check-agent3-store-mutations.py` now carries twenty guards (six original); all
+twenty were detected at `f59eb4ed` under `RUSTFLAGS=-D warnings`.
+
+### Adversarial re-review of `f59eb4ed`: REQUEST CHANGES, findings addressed
+
+| Finding | Disposition |
+|---|---|
+| P1 a kept proof pass for the selected receipt was never fetched: the router installed it seedless, failed and dropped it, and every rotation repeated that | Fixed. An owed source never installs from an unfetched pass. Whenever an offered repair leaves the source owing, and whenever the router sees an unfetched pass for an owed target, the repaired pass is minted instead. The new runtime test `catchup::tests::repair` drives an unfetched pass into the router; restoring the old condition fails it with "no verified seed". |
+| P2 the repaired install took its tenure from the pass, which for a proof pass is the proof's own claim | Fixed. `install_repaired_*` extracts the verified seed only if the pass was selected under this device's observed (authoring) tenure, then delegates. The owner goes through `resume_*` with its durable snapshot, and a peer through `apply_*`, which refuses the owner. |
+| P2 persistent holds refetched the seed every 5 s | Fixed. `RecoveryPending`, `StorageRefused`, a hold, an install error and a failed mint put that target in a 60 s backoff, during which no repaired seed is fetched for it. The rest of the rotation keeps the 5 s cadence. The test covers it, and removing the check fails it. |
+| P3 Registry tail not cleared after a routed install | Fixed. A shared `reset_registry_tail` is used by both installers. |
+| P3 wrong or missing target for a bucket pass | Fixed. A minted pass records the Studio target it reports to. A bucket pass with none is still routed, and its diagnostics are only held. |
+| P3 the owner installed outside its durable snapshot | Fixed. The router requires a current owner snapshot, otherwise it holds; see P2. |
+| P3 an explicit owner decision could mint a pass a pending discovery then dropped | Fixed. No pass is minted while a discovery is pending or in flight; `repair_owner` re-mints on its next turn. |
+| P3 the fetched seed was lost on a budget error | Fixed. The pass is taken after the budget call. |
+| P3 test gaps | The router test, plus Registry offered evidence (Pair, Unverifiable, Terminal) in the peer bucket test. Still missing: a fetched-seed install end to end (it needs a two-node seed transfer), and the positive `owed_registry_repair`. |
+
+`Unverifiable` evidence is still not memoised, by choice: it can change once the device faults on
+the pair.
 
 ### Adversarial re-review of `7943ee04`: REQUEST CHANGES, findings addressed
 
@@ -82,7 +101,7 @@ pending) installs through the repair transaction itself, using the fetched seed.
 
 | Finding | Disposition |
 |---|---|
-| P1 livelock: a fresh proof pass overwrote the repaired seed pass | Fixed. A proof pass is kept only when it already names the repair's selected receipt; otherwise it is dropped and the repaired pass minted instead. Discovery cannot relaunch while a pass is set. |
+| P1 livelock: a fresh proof pass overwrote the repaired seed pass | Fixed. The proof pass is dropped and the repaired pass minted instead (since `f59eb4ed`'s review, even when the proof names the selected receipt). Discovery cannot relaunch while a pass is set. |
 | P2 no re-mint after B2 | Fixed. `owed_studio_repair`/`owed_registry_repair` read the repair and full pair from the warm source's committed evidence, so any pass for that target re-mints the selected seed without the owner resending anything. |
 | P2 deferral pushed the global `next_at` out 60 s | Fixed. Deferral and failure use the ordinary 5 s `retry_discovery`, which rotates to the next target. |
 | P2 `StorageRefused` unreachable through adoption | Fixed. The owed install goes through `install_repaired_*_seed` and then `apply_*_repair`, giving typed `Installed`/`RecoveryPending`/`StorageRefused` and owner recycling in the same step. |
@@ -93,8 +112,9 @@ pending) installs through the repair transaction itself, using the fetched seed.
 
 Owner change while a source owes a previous owner's repair (not flagged by the review): the
 repaired pass no longer verifies under the current owner, so the target holds. This is CORE-007's
-accepted fail-closed limitation. The runtime surfaces the failure and retries on the rotating 5 s
-cadence. It does not install the new owner's checkpoint over the owed replacement.
+accepted fail-closed limitation. The runtime surfaces the failure and backs that target off for
+60 s while the rotation continues. It does not install the new owner's checkpoint over the owed
+replacement.
 
 ## Base re-merge and the V5 tenure seam, 2026-10-01
 
