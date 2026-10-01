@@ -246,6 +246,7 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
                                     bucket,
                                     d,
                                     request.tenure,
+                                    request.fault_report,
                                     rng,
                                     provider.prepared.as_ref().map(|p| (&p.stamp, &p.source)),
                                     budget,

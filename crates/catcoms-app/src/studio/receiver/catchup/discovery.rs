@@ -9,8 +9,30 @@ pub(super) struct DiscoveryPlan {
     pub server: u64,
     pub peer: PeerId,
     pub target: CheckpointTarget,
+    /// W-1: this device's own frozen pair for `target`, attached to its head query. Evidence for
+    /// the owner to attest or ignore; it chooses nothing and asserts no authority.
+    pub fault_report: Option<[catcoms_replication::Receipt; 2]>,
 }
 impl CatchupRuntime {
+    /// Schedule discovery and attach the warm Studio source's frozen pair, if it has one, so a
+    /// faulted peer both reports its evidence and receives the owner's repair in the answer.
+    pub(super) fn schedule_reporting_discovery<T: MeshTransport, R: CryptoRngCore>(
+        &mut self,
+        node: &mut Server<T, R>,
+        store: &ServerStore,
+        server: u64,
+        watch: &ServerStudioWatch,
+        peer: PeerId,
+    ) {
+        self.schedule_discovery(store, server, watch, peer);
+        let target = watch.target;
+        let report = node
+            .sync
+            .with_registry_context(|g, d, _, _| store.warm_studio_fault_pair(server, g, target, d));
+        if let Some(plan) = self.after_registry.as_mut() {
+            plan.fault_report = report;
+        }
+    }
     pub(super) fn schedule_discovery(
         &mut self,
         store: &ServerStore,
@@ -34,12 +56,14 @@ impl CatchupRuntime {
             server,
             target: CheckpointTarget::Studio(target),
             peer,
+            fault_report: None,
         });
         self.discovery_plan = Some(DiscoveryPlan {
             mount: store.registry_mount(),
             server,
             target: CheckpointTarget::Registry(bucket),
             peer,
+            fault_report: None,
         });
         self.checkpoint_retry = 0;
     }

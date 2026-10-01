@@ -58,9 +58,10 @@ enum OwnerGuard<'a> {
         observer: &'a catcoms_crypto::DeviceId,
         durable_epoch: u64,
     },
-    /// Repair-aware Studio head publication: journal repair provenance is legal because the
-    /// core journal enforces its own adjacency and evidence-only holds, but any tag-3 evidence
-    /// refuses, so a nonterminal repair transaction still owns its target (CORE-007).
+    /// Repair-aware head publication: journal repair provenance is legal because the core
+    /// journal enforces its own adjacency and evidence-only holds. A held repair refuses, so a
+    /// nonterminal transaction still owns its target (CORE-007); retained evidence without a
+    /// repair is preserved verbatim, never consumed, so it needs no contextual restore here.
     Publication,
 }
 
@@ -68,7 +69,7 @@ impl OwnerGuard<'_> {
     fn check(&self, state: &EpochOwnerReceiptState) -> Result<(), AppError> {
         match self {
             Self::Ordinary => state.require_ordinary(),
-            Self::Publication => match state.fault_record {
+            Self::Publication => match state.fault_record.as_ref().and_then(|r| r.repair()) {
                 Some(_) => Err(invalid("a held repair owns this target")),
                 None => Ok(()),
             },
@@ -641,7 +642,7 @@ impl ServerStore {
         Ok(state)
     }
 
-    fn epoch_owner_path(&self, scope: &[u8]) -> PathBuf {
+    pub(in crate::store) fn epoch_owner_path(&self, scope: &[u8]) -> PathBuf {
         self.dir
             .join("servers")
             .join(format!("{}.owner-receipts", blake3::hash(scope).to_hex()))

@@ -46,6 +46,7 @@ impl ServerStore {
             bucket,
             device,
             durable_tenure,
+            None,
             rng,
             budget,
             hooks,
@@ -75,6 +76,7 @@ impl ServerStore {
         bucket: u8,
         device: &MlsDevice,
         durable_tenure: Option<u64>,
+        fault_report: Option<&[Receipt; 2]>,
         rng: &mut impl CryptoRngCore,
         budget: &mut EpochStorageBudget,
     ) -> Result<(ReceiptHeadSelection, Option<ReceiptRepair>), AppError> {
@@ -84,6 +86,7 @@ impl ServerStore {
             bucket,
             device,
             durable_tenure,
+            fault_report,
             rng,
             budget,
             &mut WriteHooks::None,
@@ -98,6 +101,7 @@ impl ServerStore {
         bucket: u8,
         device: &MlsDevice,
         durable_tenure: Option<u64>,
+        fault_report: Option<&[Receipt; 2]>,
         rng: &mut impl CryptoRngCore,
         budget: &mut EpochStorageBudget,
         hooks: &mut WriteHooks<'_>,
@@ -168,6 +172,7 @@ impl ServerStore {
             held,
             record,
             applied,
+            fault_report,
             hooks,
         )
     }
@@ -185,11 +190,18 @@ impl ServerStore {
         held: Option<Receipt>,
         record: Option<StorageRecord>,
         applied: Option<ReceiptRepair>,
+        fault_report: Option<&[Receipt; 2]>,
         hooks: &mut WriteHooks<'_>,
     ) -> Result<(ReceiptHeadSelection, Option<ReceiptRepair>), AppError> {
         let document = registry_document(&group.group_id(), bucket).map_err(invalid)?;
         let scope = scope_bytes(server, &document)?;
         let storage_scope = StorageScope::new(server, &document.server_id).map_err(invalid)?;
+        // S-3 before the response is decided (U-7); a failed stage refuses the whole answer.
+        if let (Some(report), Some(tenure)) = (fault_report, durable_tenure) {
+            self.admit_fault_report(
+                server, &document, group, device, tenure, report, rng, budget,
+            )?;
+        }
         // Contextual, so a record a repair transaction holds is read rather than refused; a held
         // repair never permits a proof, and before B2 not even a hint.
         let (journal, owner_record) = self
@@ -230,14 +242,24 @@ impl ServerStore {
         // it yet, it is only a hint: never freshly prove an older published fallback. Requiring
         // exact equality also refuses same-tenure equivocation, inherited-baseline disagreement
         // and a source ahead of the journal, without modifying either file to manufacture agreement.
+        // The durable proof gate (6.6) is recomputed from durable state on every request.
+        let current = durable_tenure.map(|t| {
+            catcoms_replication::epoch::tenure_id(&group.group_id(), &device.public_key_bytes(), t)
+        });
+        let gated = selected
+            .is_some_and(|r| current.is_none_or(|c| journal.fault_suppresses_proof(r.hash(), c)));
         let prove = is_owner
+            && !gated
             && selected.is_some()
             && selected == held
             && selected == own_choice
             && durable_tenure.is_some_and(|t| {
                 selected.is_some_and(|r| r.verify_current_owner(group, t).is_ok())
             });
-        let receipt = selected.cloned();
+        // A disputed receipt is not even offered as a hint.
+        let receipt = selected
+            .filter(|r| !journal.fault_retains_member(r.hash()))
+            .cloned();
         if prove {
             let record = record.ok_or_else(|| invalid("proof source missing"))?;
             let reservation = budget
@@ -277,6 +299,7 @@ impl ServerStore {
         bucket: u8,
         device: &MlsDevice,
         tenure: Option<u64>,
+        fault_report: Option<&[Receipt; 2]>,
         rng: &mut impl CryptoRngCore,
         prepared: Option<(
             &super::RegistrySourceStamp,
@@ -298,6 +321,7 @@ impl ServerStore {
             head,
             record,
             applied,
+            fault_report,
             &mut WriteHooks::None,
         )
     }

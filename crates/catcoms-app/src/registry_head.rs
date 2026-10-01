@@ -185,6 +185,7 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
                         watch.bucket,
                         device,
                         request.tenure,
+                        request.fault_report,
                         rng,
                         budget,
                     )

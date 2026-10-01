@@ -96,6 +96,17 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         peer: PeerId,
         target: CheckpointTarget,
     ) -> Result<PendingCheckpointHead<T>, SyncError> {
+        self.prepare_checkpoint_head_with_fault_report(peer, target, None)
+    }
+
+    /// The same request, carrying this faulted requester's complete frozen pair (W-1). It asserts
+    /// nothing about authority and chooses nothing; the provider decides what it can attest.
+    pub fn prepare_checkpoint_head_with_fault_report(
+        &mut self,
+        peer: PeerId,
+        target: CheckpointTarget,
+        fault_report: Option<&[Receipt; 2]>,
+    ) -> Result<PendingCheckpointHead<T>, SyncError> {
         if !self.head_member(&self.device.public_key_bytes()) {
             return Err(SyncError::Unauthorized);
         }
@@ -104,7 +115,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             .ok_or(SyncError::Unauthorized)?;
         let mut nonce = [0; 16];
         self.rng.fill_bytes(&mut nonce);
-        let inner = encode_scoped_query(target, &self.group.group_id(), nonce)?;
+        let inner = encode_scoped_query(target, &self.group.group_id(), nonce, fault_report)?;
         let (request, auth) = self.build_authed_request(target.head_kind(), &inner)?;
         let slot = self
             .receipt_heads

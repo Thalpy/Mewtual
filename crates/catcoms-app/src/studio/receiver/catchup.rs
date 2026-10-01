@@ -1107,8 +1107,15 @@ impl CatchupRuntime {
             if phase != catcoms_replication::EpochPhase::Open {
                 // A persisted Closing epoch survives expiry/restart. It needs a fresh private
                 // head selection, not an Open-only page pass that globally pauses the receiver.
-                if phase == catcoms_replication::EpochPhase::Closing {
-                    self.schedule_discovery(store, id, watch, self.peers[0]);
+                // A Fault needs one too: the owner's answer is the only thing that can carry a
+                // repair, and the query is how this peer reports its frozen pair (W-1).
+                if matches!(
+                    phase,
+                    catcoms_replication::EpochPhase::Closing
+                        | catcoms_replication::EpochPhase::Fault
+                ) {
+                    let peer = self.peers[0];
+                    self.schedule_reporting_discovery(server, store, id, watch, peer);
                 }
                 self.next_at = now.saturating_add(5_000);
                 return Ok(None);
@@ -1160,6 +1167,7 @@ impl StudioReceiver {
                 plan.server,
                 plan.peer,
                 plan.target,
+                plan.fault_report.as_ref(),
             ) {
                 Ok(attempt) => Some(StudioBackgroundJob::Head(attempt)),
                 Err(_) => {

@@ -428,6 +428,7 @@ fn head_service_serves_an_applied_repair_but_never_proves_while_it_is_held() {
             f.target,
             &f.device,
             Some(0),
+            None,
             &mut rng(),
             &mut b,
         )
@@ -444,6 +445,7 @@ fn head_service_serves_an_applied_repair_but_never_proves_while_it_is_held() {
             f.target,
             &f.device,
             None,
+            None,
             &mut rng(),
             &mut b,
         )
@@ -451,20 +453,23 @@ fn head_service_serves_an_applied_repair_but_never_proves_while_it_is_held() {
     assert!(served.is_none());
     // Ordinary discovery cannot install into the target while the decision is held.
     let mut b = budget(&mut store, &f);
-    assert!(store
-        .adopt_studio_checkpoint(
-            SERVER,
-            &f.group,
-            f.target,
-            &f.device,
-            &chosen,
-            Some(seed.bytes()),
-            0,
-            &ManualClock::new(1000),
-            &mut rng(),
-            &mut b,
-        )
-        .is_err());
+    assert!(
+        store
+            .adopt_studio_checkpoint(
+                SERVER,
+                &f.group,
+                f.target,
+                &f.device,
+                &chosen,
+                Some(seed.bytes()),
+                0,
+                &ManualClock::new(1000),
+                &mut rng(),
+                &mut b,
+            )
+            .is_err(),
+        "ordinary discovery must not install into a held target"
+    );
     let (outcome, state) = apply(&f, &mut store, &repair, &pair, Some(seed.bytes())).unwrap();
     assert_eq!(outcome, StudioRepairOutcome::Installed);
     store.retain_studio_source(&f.group, &f.device, state);
@@ -476,6 +481,7 @@ fn head_service_serves_an_applied_repair_but_never_proves_while_it_is_held() {
             f.target,
             &f.device,
             Some(0),
+            None,
             &mut rng(),
             &mut b,
         )
@@ -486,6 +492,133 @@ fn head_service_serves_an_applied_repair_but_never_proves_while_it_is_held() {
         "still the source's disposition"
     );
     assert_eq!(selection.receipt.as_ref(), Some(&chosen));
+}
+
+fn head(
+    f: &Fixture,
+    store: &mut ServerStore,
+    report: Option<&[Receipt; 2]>,
+) -> catcoms_sync::receipt_head::ReceiptHeadSelection {
+    let mut b = budget(store, f);
+    store
+        .prepare_studio_head_with_fault_repair(
+            SERVER,
+            &f.group,
+            f.target,
+            &f.device,
+            Some(0),
+            report,
+            &mut rng(),
+            &mut b,
+        )
+        .unwrap()
+        .0
+}
+
+fn sorted_pair(a: &Receipt, b: &Receipt) -> [Receipt; 2] {
+    let mut pair = [a.clone(), b.clone()];
+    pair.sort_by_key(Receipt::hash);
+    pair
+}
+
+#[test]
+fn a_current_tenure_report_stages_suppresses_proof_and_is_decided_from_the_reserved_slot() {
+    let root = tempfile::tempdir().unwrap();
+    let f = Fixture::new(false);
+    let mut store = open(root.path());
+    let mut b = budget(&mut store, &f);
+    let (_, state) = f.edit(&mut store, &mut b, f.insert());
+    let [r1, r2, r3] = [7, 8, 9].map(|close| f.receipt(&state, close));
+    let (_, sealed) = store
+        .seal_studio_epoch(
+            SERVER,
+            &f.group,
+            f.target,
+            &f.device,
+            r1.clone(),
+            0,
+            &mut rng(),
+            &mut b,
+        )
+        .unwrap();
+    store
+        .prepare_epoch_owner_receipt(SERVER, r1.clone(), &f.group, 0, &mut rng(), &mut b.storage)
+        .unwrap();
+    store.retain_studio_source(&f.group, &f.device, sealed);
+    assert!(
+        head(&f, &mut store, None).prove,
+        "baseline: the owner proves its head"
+    );
+
+    // A peer reports a current-tenure equivocation it is frozen on.
+    let first = sorted_pair(&r1, &r2);
+    let gated = head(&f, &mut store, Some(&first));
+    assert!(
+        !gated.prove,
+        "a staged live pair suppresses proof in the same answer"
+    );
+    assert!(
+        gated.receipt.is_none(),
+        "a disputed receipt is not offered as a hint"
+    );
+    drop(store);
+    let mut store = open(root.path());
+    let restored = f.load(&store).unwrap();
+    store.retain_studio_source(&f.group, &f.device, restored);
+    assert!(
+        !head(&f, &mut store, None).prove,
+        "suppression is durable, not a property of the reporting exchange"
+    );
+
+    // A pair the owner cannot attest, signed outside its tenure, writes nothing.
+    let owner_record = store.epoch_owner_path(
+        &super::super::super::epoch_owner::scope_bytes(SERVER, &f.logical).unwrap(),
+    );
+    let before = fs::read(&owner_record).unwrap();
+    let outsider = MlsDevice::generate().unwrap();
+    let foreign = |close: u8| {
+        Receipt::sign(
+            f.logical.clone(),
+            0,
+            [close; 32],
+            [close; 32],
+            0,
+            InheritedCheckpoint::EpochZero,
+            &outsider,
+        )
+        .unwrap()
+    };
+    head(&f, &mut store, Some(&sorted_pair(&foreign(1), &foreign(2))));
+    assert_eq!(fs::read(&owner_record).unwrap(), before);
+
+    // A second pair while the reserved slot is occupied: only its fingerprint is kept.
+    let second = sorted_pair(&r1, &r3);
+    assert!(!head(&f, &mut store, Some(&second)).prove);
+
+    // Decide the reserved pair. The source is healthy, so this screens; the overflow still
+    // records a conflict this owner authenticated, so proof stays suppressed.
+    let (repair, outcome, state) =
+        issue(&f, &mut store, request([&first[0], &first[1]], &r1), None).unwrap();
+    assert_eq!(outcome, StudioRepairOutcome::Screened);
+    assert_eq!(repair.repair_sequence, 1);
+    store.retain_studio_source(&f.group, &f.device, state);
+    assert!(
+        !head(&f, &mut store, None).prove,
+        "live overflow still suppresses"
+    );
+
+    // The reporter retries; the freed slot takes the pair and its fingerprint is released.
+    assert!(!head(&f, &mut store, Some(&second)).prove);
+    let (repair, outcome, state) =
+        issue(&f, &mut store, request([&second[0], &second[1]], &r1), None).unwrap();
+    assert_eq!(outcome, StudioRepairOutcome::Screened);
+    assert_eq!(repair.repair_sequence, 2);
+    store.retain_studio_source(&f.group, &f.device, state);
+    assert!(
+        owner_is_ordinary(&f, &store),
+        "nothing retained: tag 3 omitted"
+    );
+    assert!(head(&f, &mut store, None).prove, "ordinary proofs resume");
 }
 
 #[test]

@@ -20,6 +20,11 @@ core.COMMAND = [
 ]
 OWNER = "crates/catcoms-app/src/store/epoch_owner.rs"
 FAULT = "crates/catcoms-app/src/store/epoch_owner/fault_record.rs"
+STUDIO_REPAIR = "crates/catcoms-app/src/store/epoch_studio/repair.rs"
+STUDIO_ADOPTION = "crates/catcoms-app/src/store/epoch_studio/adoption.rs"
+STUDIO_HEAD = "crates/catcoms-app/src/store/epoch_studio/discovery.rs"
+APP_FAULT = "crates/catcoms-app/src/studio/fault.rs"
+REPAIR_TESTS = "store::epoch_studio::tests::repair::"
 core.MUTATIONS = [
     (
         "STORE-empty-fault-section", FAULT,
@@ -58,6 +63,76 @@ core.MUTATIONS = [
         "if hashes != self.hashes", "if false",
         "fault_record_attestations_bind_full_tuple_pair_and_epoch_shape",
         "attestation tuple and exact pair must bind",
+    ),
+    # Runtime repair guards. Each named regression runs alone and must fail at its own message.
+    (
+        "REPAIR-terminal-recycle", STUDIO_REPAIR,
+        "        if owner.is_some() {\n"
+        "            let terminal = TerminalRepairSource::after_flushed_source(repair.hash());",
+        "        if false {\n"
+        "            let terminal = TerminalRepairSource::after_flushed_source(repair.hash());",
+        REPAIR_TESTS + "terminal_repair_recycles_to_ordinary_owner_state_across_save_and_reopen",
+        "assertion failed: owner_is_ordinary",
+    ),
+    (
+        "REPAIR-held-decision-fence", STUDIO_REPAIR,
+        "if !request.names(held_pair.hashes()) || held.selected_receipt_hash != request.selected",
+        "if false",
+        REPAIR_TESTS
+        + "a_b1_failure_retries_exactly_and_a_held_decision_owns_the_target_until_resumed",
+        "a second decision wrote",
+    ),
+    (
+        "REPAIR-adoption-claim", STUDIO_ADOPTION,
+        "if self.epoch_owner_repair_claimed(server, &document)? {", "if false {",
+        REPAIR_TESTS + "head_service_serves_an_applied_repair_but_never_proves_while_it_is_held",
+        "ordinary discovery must not install into a held target",
+    ),
+    (
+        "REPAIR-proof-gate", STUDIO_HEAD,
+        "current.is_none_or(|c| journal.fault_suppresses_proof(r.hash(), c))",
+        # Keeps `r` and `c` used so the mutant builds under CI's -D warnings.
+        "current.is_none_or(|c| c == r.hash() && journal.fault_retains_member(c))",
+        REPAIR_TESTS
+        + "a_current_tenure_report_stages_suppresses_proof_and_is_decided_from_the_reserved_slot",
+        "a staged live pair suppresses proof in the same answer",
+    ),
+    (
+        "REPAIR-hint-filter", STUDIO_HEAD,
+        ".filter(|r| !journal.fault_retains_member(r.hash()))", ".filter(|_| true)",
+        REPAIR_TESTS
+        + "a_current_tenure_report_stages_suppresses_proof_and_is_decided_from_the_reserved_slot",
+        "a disputed receipt is not offered as a hint",
+    ),
+    (
+        "REPAIR-fingerprint-release", FAULT,
+        "            record.reserved = Some(admission.pair);\n"
+        "            stored(&mut record);\n",
+        "            record.reserved = Some(admission.pair);\n",
+        REPAIR_TESTS
+        + "a_current_tenure_report_stages_suppresses_proof_and_is_decided_from_the_reserved_slot",
+        "nothing retained: tag 3 omitted",
+    ),
+    (
+        "REPAIR-v5-issuance", APP_FAULT,
+        "        // other check can answer with a less specific reason.\n"
+        "        let observed = self.require_observed_owner_tenure()?;",
+        "        // other check can answer with a less specific reason.\n"
+        "        let observed = 0u64;",
+        "studio::fault::tests::issuance_and_application_refuse_an_unobserved_tenure_with_that_message",
+        "issuance must refuse Unknown as Unknown",
+    ),
+    (
+        "REPAIR-current-admission", FAULT,
+        "        for receipt in [a, b] {\n"
+        "            receipt\n"
+        "                .verify_current_owner(group, authoring_start)\n"
+        "                .map_err(invalid)?;\n"
+        "        }\n",
+        "",
+        REPAIR_TESTS
+        + "a_current_tenure_report_stages_suppresses_proof_and_is_decided_from_the_reserved_slot",
+        "only a current-tenure pair can be staged as live",
     ),
 ]
 

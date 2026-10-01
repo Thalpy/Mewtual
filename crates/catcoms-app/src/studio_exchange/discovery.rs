@@ -170,6 +170,7 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
                                 target,
                                 d,
                                 request.tenure,
+                                request.fault_report,
                                 rng,
                                 budget,
                             )
@@ -211,18 +212,31 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
         peer: PeerId,
         target: CheckpointTarget,
     ) -> Result<CheckpointDiscoveryAttempt<T>, AppError> {
-        self.prepare_checkpoint_discovery_at_mount(store.registry_mount(), server, peer, target)
+        self.prepare_checkpoint_discovery_at_mount(
+            store.registry_mount(),
+            server,
+            peer,
+            target,
+            None,
+        )
     }
+    /// `fault_report` is this device's own frozen pair for `target` (W-1), sent with the head
+    /// query for the owner to attest or ignore. It asserts nothing and chooses nothing.
     pub(crate) fn prepare_checkpoint_discovery_at_mount(
         &mut self,
         mount: Arc<()>,
         server: u64,
         peer: PeerId,
         target: CheckpointTarget,
+        fault_report: Option<&[catcoms_replication::Receipt; 2]>,
     ) -> Result<CheckpointDiscoveryAttempt<T>, AppError> {
         self.check_checkpoint_target(target)?;
         Ok(CheckpointDiscoveryAttempt {
-            inner: self.sync.prepare_checkpoint_discovery(peer, target)?,
+            inner: self.sync.prepare_checkpoint_discovery_with_fault_report(
+                peer,
+                target,
+                fault_report,
+            )?,
             mount,
             server,
             target,
@@ -397,6 +411,7 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
                         watch.target,
                         device,
                         request.tenure,
+                        request.fault_report,
                         rng,
                         budget,
                     )

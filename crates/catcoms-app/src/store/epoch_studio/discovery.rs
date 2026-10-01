@@ -194,6 +194,7 @@ impl ServerStore {
             target,
             device,
             durable_tenure,
+            None,
             rng,
             budget,
             hooks,
@@ -211,6 +212,7 @@ impl ServerStore {
         target: StudioTarget,
         device: &MlsDevice,
         durable_tenure: Option<u64>,
+        fault_report: Option<&[Receipt; 2]>,
         rng: &mut impl CryptoRngCore,
         budget: &mut EpochStudioBudget,
     ) -> Result<
@@ -226,6 +228,7 @@ impl ServerStore {
             target,
             device,
             durable_tenure,
+            fault_report,
             rng,
             budget,
             &mut WriteHooks::None,
@@ -239,6 +242,7 @@ impl ServerStore {
         target: StudioTarget,
         device: &MlsDevice,
         durable_tenure: Option<u64>,
+        fault_report: Option<&[Receipt; 2]>,
         rng: &mut impl CryptoRngCore,
         budget: &mut EpochStudioBudget,
         hooks: &mut WriteHooks<'_>,
@@ -249,6 +253,16 @@ impl ServerStore {
         ),
         AppError,
     > {
+        // S-3 before the response is decided (U-7). A failed or uncertain stage refuses the
+        // whole answer rather than proving either side of a conflict it could not record.
+        if let (Some(report), Some(tenure)) = (fault_report, durable_tenure) {
+            let document = target.document(&group.group_id()).map_err(invalid)?;
+            self.with_studio_protocol_budget(server, group, budget, |store, storage| {
+                store.admit_fault_report(
+                    server, &document, group, device, tenure, report, rng, storage,
+                )
+            })?;
+        }
         let source =
             self.with_studio_checkpoint_source(server, group, target, device, budget, |state| {
                 Ok((
@@ -312,14 +326,26 @@ impl ServerStore {
         } else {
             held.or(own_choice)
         };
+        // The durable proof gate (6.6), recomputed from durable state on every request: live
+        // reserved or overflow evidence suppresses proof, and a retained pair member is never
+        // proved. Liveness is the derived current tenure id, never a cached classification.
+        let current = durable_tenure.map(|t| {
+            catcoms_replication::epoch::tenure_id(&group.group_id(), &device.public_key_bytes(), t)
+        });
+        let gated = selected
+            .is_some_and(|r| current.is_none_or(|c| journal.fault_suppresses_proof(r.hash(), c)));
         let prove = is_owner
+            && !gated
             && selected.is_some()
             && selected == held
             && selected == own_choice
             && durable_tenure.is_some_and(|t| {
                 selected.is_some_and(|r| r.verify_current_owner(group, t).is_ok())
             });
-        let receipt = selected.cloned();
+        // A disputed receipt is not even offered as a hint.
+        let receipt = selected
+            .filter(|r| !journal.fault_retains_member(r.hash()))
+            .cloned();
         if prove {
             let record = source.expect("matched proof source").1;
             let reservation = budget

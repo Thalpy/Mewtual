@@ -73,6 +73,16 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         peer: PeerId,
         target: CheckpointTarget,
     ) -> Result<PendingCheckpointDiscovery<T>, SyncError> {
+        self.prepare_checkpoint_discovery_with_fault_report(peer, target, None)
+    }
+
+    /// Discovery whose head request also reports this requester's frozen fault pair (W-1).
+    pub fn prepare_checkpoint_discovery_with_fault_report(
+        &mut self,
+        peer: PeerId,
+        target: CheckpointTarget,
+        fault_report: Option<&[Receipt; 2]>,
+    ) -> Result<PendingCheckpointDiscovery<T>, SyncError> {
         let capacity = self.registry_seeds.reserve_retained(false)?;
         let expires = self
             .clock
@@ -80,7 +90,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             .checked_add(FETCH_MS)
             .ok_or(SyncError::Malformed)?;
         let head = self
-            .prepare_checkpoint_head(peer, target)?
+            .prepare_checkpoint_head_with_fault_report(peer, target, fault_report)?
             .retaining(capacity.clone());
         Ok(PendingCheckpointDiscovery {
             head,

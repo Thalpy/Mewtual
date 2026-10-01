@@ -268,6 +268,28 @@ impl ServerStore {
         true
     }
 
+    /// The retained source's frozen fault pair, for the W-1 reporter: a memory read of state that
+    /// was authenticated when retained, never a load. Reporting it asserts nothing and grants
+    /// nothing; the provider decides what it can attest.
+    pub(crate) fn warm_studio_fault_pair(
+        &self,
+        server: u64,
+        group: &ServerGroup,
+        target: StudioTarget,
+        device: &MlsDevice,
+    ) -> Option<[Receipt; 2]> {
+        let (a, b) = self
+            .studio_source
+            .as_ref()
+            .filter(|s| s.matches(server, group, target, device.device_id()))?
+            .state
+            .unit
+            .fault_evidence()?;
+        let mut pair = [a.clone(), b.clone()];
+        pair.sort_by_key(Receipt::hash);
+        Some(pair)
+    }
+
     /// Pre-I/O service refusal only. A candidate NEVER authorizes reuse before fresh byte checks.
     pub(crate) fn studio_source_is_warm(
         &self,

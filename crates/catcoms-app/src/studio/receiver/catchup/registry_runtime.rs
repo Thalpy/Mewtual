@@ -163,13 +163,21 @@ impl CatchupRuntime {
             // Keep refusing checkpoint service and writes there until an owner repair, but
             // allow the existing Studio pass and other watched buckets to continue normally.
             self.owner_failure = Some((target, "Registry bucket needs owner repair".into()));
-            // A peer cannot decide; the owner's next answer is what carries the repair.
+            // A peer cannot decide; the owner's next answer is what carries the repair, and the
+            // Registry query reports this bucket's frozen pair so the owner can stage it (W-1).
             if self.owner_snapshot.is_none() {
                 if let (Some((watch, _)), Some(peer)) = (
                     watches.iter().find(|(w, _)| w.target == target),
                     server.sync.studio_page_peers().first(),
                 ) {
-                    self.schedule_discovery(store, id, watch, *peer);
+                    let peer = *peer;
+                    self.schedule_discovery(store, id, watch, peer);
+                    let report = server.sync.with_registry_context(|g, d, _, _| {
+                        store.registry_fault_pair(id, g, bucket, d)
+                    });
+                    if let (Some(plan), Ok(report)) = (self.discovery_plan.as_mut(), report) {
+                        plan.fault_report = report;
+                    }
                 }
             }
             self.registry_target = None;

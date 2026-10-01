@@ -45,6 +45,8 @@ struct Pending {
     generation: Arc<()>,
     inner: Vec<u8>,
     nonce: [u8; 16],
+    // The v2 report section, bounds-checked but not parsed until admission.
+    report: Option<Vec<u8>>,
     requester: DeviceId,
     key: Vec<u8>,
     auth: RequestAuth,
@@ -143,6 +145,9 @@ pub struct ReceiptHeadSource<'a> {
     pub requester: DeviceId,
     pub nonce: [u8; 16],
     pub tenure: Option<u64>,
+    /// A faulted requester's complete frozen pair, decoded only after both request rails. It is
+    /// self-signed evidence, not authority: the trusted provider decides whether it is provable.
+    pub fault_report: Option<&'a [Receipt; 2]>,
 }
 impl fmt::Debug for ReceiptHeadSource<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -361,7 +366,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         responder: Responder,
     ) {
         let now = self.receipt_heads.expire(self.clock.monotonic_ms());
-        if data.len() > MAX_QUERY + 144
+        if data.len() > MAX_QUERY_V2 + 144
             || (self.receipt_heads.watches.is_empty() && self.epoch_service.generation.is_none())
             || self.receipt_heads.pending.len() >= MAX_PENDING
             || !self
@@ -381,7 +386,10 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         {
             return;
         }
-        let Ok((target, nonce)) = decode_scoped_query(kind, &inner, &self.group.group_id()) else {
+        // Header only: the report section is captured as bounded opaque bytes and never parsed
+        // before this requester has paid its per-requester rail below.
+        let Ok((target, nonce, report)) = decode_scoped_query(kind, &inner, &self.group.group_id())
+        else {
             return;
         };
         // At most 256 fixed-size hashes, after authentication and the global preauth rail.
@@ -429,6 +437,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             generation,
             inner,
             nonce,
+            report,
             requester,
             key,
             auth,
@@ -524,6 +533,14 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         let tenure = snapshot
             .filter(|p| self.head_snapshot_is_current(p))
             .map(|p| p.tenure);
+        // Both rails are paid; only now are the reported receipts decoded. A malformed report
+        // is the requester's error and refuses this request without a response.
+        let fault_report = item
+            .report
+            .as_deref()
+            .map(|bytes| decode_fault_report(bytes, &document))
+            .transpose()?
+            .flatten();
         let (selected, fault_repair) = match serve(
             &self.group,
             &self.device,
@@ -533,6 +550,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
                 requester: item.requester,
                 nonce: item.nonce,
                 tenure,
+                fault_report: fault_report.as_ref(),
             },
         ) {
             Ok(value) => value,

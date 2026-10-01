@@ -32,6 +32,17 @@ pub(in crate::store) enum Binding {
     Reserved,
 }
 
+/// What staging a report durably recorded. None of these chooses a winner or grants authority.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(in crate::store) enum ReportAdmission {
+    /// This exact pair was already retained with its attestation.
+    AlreadyRecorded,
+    /// The pair and its attestation now occupy the reserved slot.
+    Reserved,
+    /// The reserved slot held a different pair; only a fingerprint was recorded.
+    Overflow,
+}
+
 /// Which slot a new repair should bind to, chosen by the store's active-pair derivation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(in crate::store) enum BindingKind {
@@ -549,6 +560,98 @@ impl InertFaultRecord {
         record.repair = Some((binding, repair));
         record.applied = false;
         Ok(record)
+    }
+
+    /// Stage an admitted current-tenure report (barrier B0). An exact pair already retained
+    /// anywhere is a no-op. Otherwise it takes the free reserved slot; with that slot occupied
+    /// by a different pair, only its fingerprint enters the overflow hold, under the derived
+    /// current tenure: a stale hold is replaced, a current one accumulates and never forgets.
+    /// Nothing frozen is ever replaced by a third receipt (I-10).
+    pub(super) fn admit_report(
+        record: Option<Self>,
+        admission: ValidatedFaultAdmission,
+        current_tenure: [u8; 32],
+    ) -> Result<(Self, ReportAdmission), AppError> {
+        let mut record = record.unwrap_or(Self {
+            pairs: Vec::new(),
+            reserved: None,
+            overflow: None,
+            repair: None,
+            applied: false,
+        });
+        let hashes = admission.pair.hashes;
+        if admission.pair.receipts[0].tenure_id != current_tenure {
+            return Err(invalid("only a current-tenure pair can be staged as live"));
+        }
+        let fingerprint = fingerprint(hashes);
+        // A fingerprint stands in for a pair only until that exact pair is stored (AG3-DES-048).
+        let stored = |record: &mut Self| {
+            if let Some(hold) = &mut record.overflow {
+                hold.fingerprints.retain(|f| *f != fingerprint);
+                if hold.fingerprints.is_empty() && !hold.unknown {
+                    record.overflow = None;
+                }
+            }
+        };
+        if record.all_pairs().any(|pair| pair.hashes == hashes) {
+            stored(&mut record);
+            return Ok((record, ReportAdmission::AlreadyRecorded));
+        }
+        if record.reserved.is_none() {
+            record.reserved = Some(admission.pair);
+            stored(&mut record);
+            return Ok((record, ReportAdmission::Reserved));
+        }
+        let outcome = match &mut record.overflow {
+            Some(hold) if hold.tenure == current_tenure => {
+                if hold.fingerprints.contains(&fingerprint) {
+                    ReportAdmission::AlreadyRecorded
+                } else if hold.fingerprints.len() < MAX_OVERFLOW_FINGERPRINTS {
+                    let at = hold
+                        .fingerprints
+                        .partition_point(|existing| *existing < fingerprint);
+                    hold.fingerprints.insert(at, fingerprint);
+                    ReportAdmission::Overflow
+                } else {
+                    hold.unknown = true;
+                    ReportAdmission::Overflow
+                }
+            }
+            // Absent, or stale metadata from a tenure that is no longer current: replaced in
+            // the same write that admits the new fingerprint, never merged.
+            _ => {
+                record.overflow = Some(Overflow {
+                    tenure: current_tenure,
+                    fingerprints: vec![fingerprint],
+                    unknown: false,
+                });
+                ReportAdmission::Overflow
+            }
+        };
+        Ok((record, outcome))
+    }
+
+    /// The durable proof gate (design 6.6) for one receipt: a live reserved pair or live
+    /// overflow suppresses every proof, and a receipt in any retained pair is never proved.
+    /// Liveness compares the derived current tenure id, recomputed by the caller each visit.
+    pub(in crate::store) fn suppresses_proof(
+        &self,
+        receipt_hash: [u8; 32],
+        current_tenure: [u8; 32],
+    ) -> bool {
+        self.reserved
+            .as_ref()
+            .is_some_and(|pair| pair.attestation.tenure == current_tenure)
+            || self.overflow.as_ref().is_some_and(|hold| {
+                hold.tenure == current_tenure && (hold.unknown || !hold.fingerprints.is_empty())
+            })
+            || self.retains_member(receipt_hash)
+    }
+
+    /// Whether any retained pair includes this receipt; such a receipt is never served as a hint.
+    pub(in crate::store) fn retains_member(&self, receipt_hash: [u8; 32]) -> bool {
+        self.all_pairs()
+            .any(|pair| pair.hashes.contains(&receipt_hash))
     }
 
     /// Barrier B3. Only the exact held repair may be marked; a stale hash cannot clear a newer one.

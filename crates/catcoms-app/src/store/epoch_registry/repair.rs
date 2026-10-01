@@ -494,6 +494,26 @@ impl ServerStore {
         }))
     }
 
+    /// The bucket's frozen fault pair for the W-1 reporter. Read only once the runtime already
+    /// knows the bucket is faulted, so ordinary discovery never pays a Registry restore for it.
+    pub(crate) fn registry_fault_pair(
+        &self,
+        server: u64,
+        group: &ServerGroup,
+        bucket: u8,
+        device: &MlsDevice,
+    ) -> Result<Option<[Receipt; 2]>, AppError> {
+        Ok(self
+            .load_registry_epoch(server, group, bucket, device)?
+            .and_then(|state| {
+                state.unit.fault_evidence().map(|(a, b)| {
+                    let mut pair = [a.clone(), b.clone()];
+                    pair.sort_by_key(Receipt::hash);
+                    pair
+                })
+            }))
+    }
+
     /// The owner's held, not yet recycled Registry decision and the pair it binds.
     pub(crate) fn held_registry_repair(
         &self,

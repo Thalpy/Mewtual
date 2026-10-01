@@ -214,12 +214,14 @@ fn studio_discovery_superseded_watch_drops_all_scheduled_work_without_rebinding(
         server: 83,
         peer: PeerId::from_u64(2),
         target: CheckpointTarget::Studio(target),
+        fault_report: None,
     });
     runtime.after_registry = Some(DiscoveryPlan {
         mount: store.registry_mount(),
         server: 83,
         peer: PeerId::from_u64(2),
         target: CheckpointTarget::Studio(target),
+        fault_report: None,
     });
     let newer = server.sync.watch_studio(target, 5).unwrap();
     assert!(runtime

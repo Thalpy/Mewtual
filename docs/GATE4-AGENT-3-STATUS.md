@@ -33,10 +33,26 @@ witness, so only current-tenure (origin 0) evidence can be admitted.
   `Repairing`/`StorageRefused` with native mapping, a native response encoder (commands unregistered,
   Agent 4), and a catch-up step that resumes held decisions for sources and buckets.
 
-Not implemented: the W-1 report path and the 6.6 durable proof gate for reserved/overflow evidence
-(no writer creates either yet), select-repaired-checkpoint for an owner proving a head other than the
-selected receipt, the detached S1-S4 split (every step is one custody visit), and Imported coverage at
-the app boundary (no migrated-v1 Server fixture; the seam's own `require` anchor covers it).
+- **Report path (W-1, 6.5, 6.6), current tenure only.** Scoped head query v2 (`2 | v1 fields |
+  count(0|2) | receipts`); v1 bytes unchanged. The report is captured opaque at queue time and
+  decoded only after both request rails. A faulted peer attaches its pair (warm source, or a
+  known-faulted bucket); a Fault phase now schedules discovery like Closing. The owner admits only a
+  pair whose receipts verify under its durable current tenure, staging it in the reserved slot (B0)
+  or, if occupied, as an overflow fingerprint (stale hold replaced, current hold accumulates; a
+  fingerprint is released when its pair is stored or resolved). A failed stage refuses the answer.
+  The durable proof gate suppresses proofs while reserved/overflow evidence is live and never
+  proves or hints a retained pair member.
+
+Deviations to review: the owner does **not** seal a reported current-tenure pair into its own source
+(no materialisability dry run); it decides through the reserved binding, and a rolled-back owner on
+the loser converges by case 6c's retarget. A non-live reserved pair is not migrated into an external
+slot, so a new live pair waits in overflow until it is decided. The legacy ordinary guard still
+refuses any tag 3, so ordinary rotation for that document waits for the decision (stricter than 5.2).
+
+Not implemented: historical admission (CORE-005), select-repaired-checkpoint for an owner proving a
+head other than the selected receipt, the detached S1-S4 split (every step is one custody visit),
+and Imported coverage at the app boundary (no migrated-v1 Server fixture; the seam's own `require`
+anchor covers it). Mutations: `scripts/check-agent3-store-mutations.py` gains eight runtime guards.
 
 ## Base re-merge and the V5 tenure seam, 2026-10-01
 

@@ -4,7 +4,7 @@
 //! Every transition reloads under the contextual guard, so retained evidence is consumed only
 //! when it names this observer and an epoch the caller's durable owner snapshot covers.
 
-use super::fault_record::{BindingKind, Pair, ValidatedFaultAdmission};
+use super::fault_record::{BindingKind, Pair, ReportAdmission, ValidatedFaultAdmission};
 use super::*;
 use catcoms_crypto::DeviceId;
 use catcoms_replication::{ReceiptRepair, ReceiptRepairPlan};
@@ -63,6 +63,24 @@ impl EpochOwnerReceiptState {
         Ok(record
             .contextual(observer, durable_epoch)?
             .retained_admission(hashes))
+    }
+
+    /// The durable proof gate (design 6.6) for one receipt under the current tenure identity.
+    pub(in crate::store) fn fault_suppresses_proof(
+        &self,
+        receipt_hash: [u8; 32],
+        current_tenure: [u8; 32],
+    ) -> bool {
+        self.fault_record
+            .as_ref()
+            .is_some_and(|r| r.suppresses_proof(receipt_hash, current_tenure))
+    }
+
+    /// Whether a retained pair includes this receipt, so it must not be served even as a hint.
+    pub(in crate::store) fn fault_retains_member(&self, receipt_hash: [u8; 32]) -> bool {
+        self.fault_record
+            .as_ref()
+            .is_some_and(|r| r.retains_member(receipt_hash))
     }
 
     /// The exact close a pending decision retires, from this already-validated record.
@@ -278,6 +296,93 @@ impl ServerStore {
             },
             hooks,
         )
+    }
+
+    /// S-3 provider admission (design 6.5, CORE-005) for a reported pair, under the caller's
+    /// durable owner tenure and before the response is decided. Only a pair both of whose
+    /// receipts verify under the CURRENT owner tenure is admissible: a historical pair needs the
+    /// archived Observed witness this store does not hold. `Ok(None)` writes nothing (not the
+    /// owner, unprovable, foreign or malformed); `Err` is a failed or uncertain B0 write, which
+    /// the caller must turn into a fail-closed answer.
+    #[allow(clippy::too_many_arguments)]
+    pub(in crate::store) fn admit_fault_report(
+        &mut self,
+        server: u64,
+        document: &LogicalDocument,
+        group: &ServerGroup,
+        device: &catcoms_mls::MlsDevice,
+        tenure: u64,
+        report: &[Receipt; 2],
+        rng: &mut impl CryptoRngCore,
+        budget: &mut EpochStorageBudget,
+    ) -> Result<Option<ReportAdmission>, AppError> {
+        let observer = device.device_id();
+        if group.designated_committer() != Some(observer) {
+            return Ok(None);
+        }
+        let Ok(admission) = ValidatedFaultAdmission::current(
+            document, &report[0], &report[1], group, &observer, tenure,
+        ) else {
+            return Ok(None);
+        };
+        let current = catcoms_replication::epoch::tenure_id(
+            &group.group_id(),
+            &device.public_key_bytes(),
+            tenure,
+        );
+        self.stage_epoch_fault_report_with_writer(
+            server,
+            document,
+            admission,
+            current,
+            &observer,
+            group.epoch(),
+            rng,
+            budget,
+            &mut WriteHooks::None,
+        )
+        .map(Some)
+    }
+
+    /// Barrier B0: durably stage an admitted current-tenure report before the response is
+    /// decided. An exact retained pair re-saves unchanged; the reserved slot takes a new pair,
+    /// otherwise only its fingerprint enters the overflow hold. Nothing here chooses a winner.
+    #[allow(clippy::too_many_arguments)]
+    pub(in crate::store) fn stage_epoch_fault_report_with_writer(
+        &mut self,
+        server: u64,
+        document: &LogicalDocument,
+        admission: ValidatedFaultAdmission,
+        current_tenure: [u8; 32],
+        observer: &DeviceId,
+        durable_epoch: u64,
+        rng: &mut impl CryptoRngCore,
+        budget: &mut EpochStorageBudget,
+        hooks: &mut WriteHooks<'_>,
+    ) -> Result<ReportAdmission, AppError> {
+        let mut outcome = ReportAdmission::AlreadyRecorded;
+        self.write_epoch_owner_state(
+            server,
+            document,
+            OwnerGuard::Repair {
+                observer,
+                durable_epoch,
+            },
+            rng,
+            budget,
+            |state| {
+                let (record, admitted) = InertFaultRecord::admit_report(
+                    state.fault_record.take(),
+                    admission,
+                    current_tenure,
+                )?;
+                state.fault_record = Some(record);
+                outcome = admitted;
+                Ok(())
+            },
+            hooks,
+        )?;
+        Ok(outcome)
     }
 
     /// Barrier B3: the local source durably crossed B2 for the held repair. An exact retry still

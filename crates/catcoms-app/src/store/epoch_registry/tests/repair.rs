@@ -92,6 +92,7 @@ fn a_faulted_bucket_is_repaired_recycled_and_served_without_a_held_proof() {
             f.key.bucket(),
             &f.device,
             Some(0),
+            None,
             &mut rng(),
             &mut b,
         )
