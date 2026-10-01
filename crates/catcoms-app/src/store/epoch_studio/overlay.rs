@@ -242,7 +242,33 @@ impl ServerStore {
                 )));
             }
             StudioOverlayRequestClass::Active => true,
-            StudioOverlayRequestClass::Unmatched => false,
+            StudioOverlayRequestClass::Unmatched => {
+                // A transferred branch's acknowledgement outlives the next admission; the
+                // classifier's recognition of it does not. `classify_request` derives the
+                // transferred identity from the *current* generation, so once a newer branch is
+                // admitted it can no longer match, and the request lands here. `completed_retry`
+                // keys the same acknowledgement on basis and operation instead, which a later
+                // admission does not disturb. Without this, the first version of this wiring
+                // refused such a retry - before tenure, at the pending check below, because a
+                // transferred operation stays pending until a rotation retires it - which broke
+                // V8 for good on an `Imported` device.
+                //
+                // This only ever acknowledges an exact author-and-envelope match in the retained
+                // transfer manifest. It accepts nothing and opens nothing, so the namespace's
+                // guarantee - no delayed request is accepted into a new branch - is untouched.
+                if let Some(outcome) = match state.handoff_metadata() {
+                    Some(metadata) => metadata
+                        .completed_retry(target, basis, &intent)
+                        .map_err(invalid)?,
+                    None => None,
+                } {
+                    self.flush_acknowledged_overlay(server, &logical, state, rng, budget, hooks)?;
+                    return Ok(StudioOverlayStart::Settled(Box::new(
+                        StudioOverlaySave::HandedOff(outcome),
+                    )));
+                }
+                false
+            }
         };
         // An accepted exact retry, recognized BEFORE eligibility. An installed successor, a later
         // fault or a tenure that is not Known cannot turn a saved exact request into a new append.
@@ -310,6 +336,22 @@ impl ServerStore {
         // request no longer matches, an unrelated basis - is stale, and is refused before any media
         // work. This is the only place a branch is opened.
         let joins = if joins_live {
+            // The live branch must be able to take an append on this basis, decided here and not
+            // after media admission. A ticket names the live branch whenever one exists, even if
+            // the Closing source has since moved, so a request can carry a fresh basis and a branch
+            // opened on an older one; and a branch being handed off is Prepared. The plan's
+            // `append` refuses both - `EpochScope` and `EpochClosed` - but only after S1b has
+            // promoted and held this request's pixels. Same refusals, moved ahead of the media
+            // work, which is the rule for anything that cannot succeed.
+            let metadata = state
+                .handoff_metadata()
+                .ok_or_else(|| invalid("classified Active with no overlay record"))?;
+            if metadata.is_prepared() {
+                return Err(invalid(catcoms_replication::ReplError::EpochClosed));
+            }
+            if state.overlay().map(|live| live.basis()) != Some(fresh.fingerprint()) {
+                return Err(invalid(catcoms_replication::ReplError::EpochScope));
+            }
             OverlayBranch::Live
         } else {
             let admission = match state.handoff_metadata() {
@@ -354,7 +396,12 @@ impl ServerStore {
         hooks: &mut WriteHooks<'_>,
     ) -> Result<(), AppError> {
         let scope = super::super::epoch_intents::scope_bytes(server, logical)?;
-        let (_, old) = self.read_epoch_intent_record(&scope, logical)?;
+        // Physical size only. The record was authenticated and classified above; decoding it again
+        // here - which the inherited `read_epoch_intent_record` did, replaying the whole branch -
+        // would pay C-1's full reconstruction just to acknowledge a terminal event.
+        let old = self
+            .read_scoped_intent_plain(&scope)?
+            .map(|record| record.physical_bytes);
         self.write_prepared_intents(
             server,
             logical,

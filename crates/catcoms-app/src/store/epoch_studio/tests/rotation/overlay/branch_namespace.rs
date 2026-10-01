@@ -28,6 +28,29 @@ fn send(
     branch: [u8; 32],
     op: DomainOp,
 ) -> Result<StudioOverlaySave, AppError> {
+    send_as(
+        f,
+        store,
+        close,
+        basis,
+        branch,
+        op,
+        StudioOwnerTenure::Known(0),
+    )
+}
+
+/// `send` under a chosen tenure. The terminal acknowledgements go through this with `Unknown`:
+/// V8 requires them to be reachable with no tenure at all, so testing them under a known one
+/// would prove nothing about that.
+fn send_as(
+    f: &Fixture,
+    store: &mut ServerStore,
+    close: &CloseRecord,
+    basis: [u8; 32],
+    branch: [u8; 32],
+    op: DomainOp,
+    tenure: StudioOwnerTenure,
+) -> Result<StudioOverlaySave, AppError> {
     let mut b = budget(store, f);
     store.save_studio_closing_overlay(
         SERVER,
@@ -35,7 +58,7 @@ fn send(
         f.target,
         &f.device,
         close,
-        StudioOwnerTenure::Known(0),
+        tenure,
         basis,
         branch,
         op,
@@ -128,7 +151,17 @@ fn a_delayed_request_for_a_branch_whose_manifest_was_replaced_is_stale_on_the_sa
         // The control: G1's manifest is still the retained one, so the delayed G1 request is
         // owed - and given - its terminal acknowledgement, and nothing is written.
         let before = intents_record(&f, &store);
-        match send(&f, &mut store, &close, basis, g1, x.clone()).unwrap() {
+        match send_as(
+            &f,
+            &mut store,
+            &close,
+            basis,
+            g1,
+            x.clone(),
+            StudioOwnerTenure::Unknown,
+        )
+        .unwrap()
+        {
             StudioOverlaySave::Disposed(manifest) => assert_eq!(
                 manifest.branch, g1,
                 "acknowledged against the wrong manifest"
@@ -155,7 +188,17 @@ fn a_delayed_request_for_a_branch_whose_manifest_was_replaced_is_stale_on_the_sa
         );
 
         // G2's delayed request: acknowledged from the retained manifest.
-        match send(&f, &mut store, &close, basis, g2, y).unwrap() {
+        match send_as(
+            &f,
+            &mut store,
+            &close,
+            basis,
+            g2,
+            y,
+            StudioOwnerTenure::Unknown,
+        )
+        .unwrap()
+        {
             StudioOverlaySave::Disposed(manifest) => assert_eq!(manifest.branch, g2),
             other => panic!("the delayed G2 request was not acknowledged as disposed: {other:?}"),
         }

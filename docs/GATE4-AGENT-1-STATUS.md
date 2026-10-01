@@ -4024,9 +4024,11 @@ Design passes, on `Create-suite-2`: `docs/GATE4-AGENT-1-DESIGN.md`,
 `docs/GATE4-AGENT-1-STATUS.md` only.
 
 Implementation, on `gate4-agent1-runtime` only: the production and test files listed under
-"Implementation progress". No shared contract document, no workflow, no native command registration
-and no frontend file has been changed, and nothing is merged to `Create-suite-2`. The remaining
-planned files are in design 5 and 15.
+"Implementation progress". One shared contract document has been changed: `docs/INTERFACES.md`'s
+"Closing overlay foundation" paragraph, which describes this scope's own adapters and had gone stale
+- it listed two Save outcomes, a tenure accessor Agent 2 has since removed, and a request without a
+branch. No workflow, no native command registration and no frontend file has been changed, and
+nothing is merged to `Create-suite-2`. The remaining planned files are in design 5 and 15.
 
 ## Flow S carries branch identity: the generation namespace now runs on the real Save path
 
@@ -4054,7 +4056,10 @@ now - it is Agent 2's, and refusing there must land after this or the current Sa
 between. That change is theirs, on top of this commit.
 
 **Terminal acknowledgements still come first.** Transferred, disposed and exact-retry outcomes are
-all decided before S1b requires tenure, mints a basis, reads a source or touches media.
+all decided before S1b requires tenure, mints a basis, reads a source or touches media. As first
+committed (`baf8a9cf`) that sentence was **true of the order and false of the coverage**: a
+transferred branch stopped being acknowledged once a newer branch was admitted. See the review
+record below; fixed in the following commit.
 
 **The rollover floor still guards new branches.** Checked rather than assumed: `append` calls
 `check_basis_floor` unconditionally, and `new_admitted` carries `minimum_new_basis_closed_epoch`
@@ -4139,13 +4144,16 @@ non-tenure reason, the joiner must refuse at it. **Two mutations, both killed:**
 `authoring_owner_tenure_start()` yields the store's generic "needs observed owner tenure"; removing
 the requirement lets the joiner through to "source missing; fetch before sealing".
 
-**V8 holds on both flows, and all three of its cases are now anchored under absent tenure.** An
-exact Save retry - `studio_overlay_store_uncertain_writes_and_changed_source_retry_at_physical_cap`,
+**V8 holds on both flows, and every terminal case is now anchored under absent tenure.** An exact
+Save retry - `studio_overlay_store_uncertain_writes_and_changed_source_retry_at_physical_cap`,
 which I wrongly reported as unanchored: its two `None`-tenure calls are exact retries. A completed
-handoff acknowledgement - three tests, now passing `StudioOwnerTenure::Unknown`. A durable-Prepared
-resolution - the new `a_durable_prepared_handoff_is_resolved_with_no_observed_tenure`, the one that
-genuinely was missing: every earlier resolution passed `Some(0)`, so a requirement hoisted above it
-would have passed every test.
+handoff acknowledgement - three tests, now passing `StudioOwnerTenure::Unknown`, plus
+`a_transferred_branch_is_still_acknowledged_after_a_newer_branch_is_admitted` for the case the
+review found. A disposed-branch acknowledgement - the N17b test's two `Disposed` answers, moved to
+`Unknown` after the review pointed out they ran under a known tenure. A durable-Prepared resolution -
+`a_durable_prepared_handoff_is_resolved_with_no_observed_tenure`, the one that genuinely was
+missing: every earlier resolution passed `Some(0)`, so a requirement hoisted above it would have
+passed every test. ("All three" in `baf8a9cf` predated the fourth case that commit itself added.)
 
 **S1b and S3 now require tenure at their own points, through the typed value.** The Server *reads*
 `observed_owner_tenure()` and passes the `Copy` value down; S1b and S3 each call
@@ -4161,6 +4169,28 @@ reason for bundling - not churning the same call sites twice - does not apply to
 scheduled runtime already holds a target with no tenure rather than surfacing a message. It still
 refuses correctly with the generic text. Recorded as a separate, small follow-up rather than
 silently dropped from the plan Agent 2 agreed to.
+
+### Review of `baf8a9cf`: PASS WITH FINDINGS, one of them a regression of mine
+
+A fable review, read-only against the committed blobs. It confirmed the hazard closed: it traced
+N17b through the production Save and found S1b refusing the delayed G1 request before media, and
+found **no production path that can open a branch except through the plan's recheck**. Five
+findings, all verified in source before acting:
+
+| # | finding | verdict | disposition |
+|---|---|---|---|
+| 1 | a transferred branch's acknowledgement stops being owed once a newer branch is admitted: `classify_request` derives the transferred identity at the *current* generation, while the `completed_retry` I replaced keyed it on basis and operation | **regression, mine** | fixed: `Unmatched` falls back to `completed_retry` before the pending check, where the old code had it. Acknowledgement only, never acceptance. New test written **first** and run against the unfixed code: it failed, refused not for tenure as the review predicted but earlier, as "ordinary intent cannot become an accepted overlay" - a transferred operation stays pending until a rotation retires it |
+| 2 | a ticket naming a live branch on a superseded basis, or a Prepared one, cannot succeed, but was refused in the plan **after** media promotion | pre-existing shape, now an explicit product of preparation | fixed: S1b refuses both, with the same `EpochScope` / `EpochClosed` the plan's `append` gave, ahead of media. Anchored in `source_version`'s accepted case with a frame naming unpublished pixels; removing the check makes it answer "publish the frame PIX", so the order is observable |
+| 3 | the new `Disposed` acknowledgement was only ever tested under a known tenure | untested | fixed: both `Disposed` answers in the N17b test now run under `Unknown` |
+| 4 | `INTERFACES.md` still listed two Save outcomes, a removed tenure accessor and a basis-only request; the commit message said "a hoisted requirement kills it" without the ledger's qualification that the `Absent` half was not run in isolation | overclaimed / stale | `INTERFACES.md`'s Closing-overlay paragraph rewritten to the current contract. The commit message is pushed and stays as it is; this row is the correction |
+| 5 | the acknowledgement flush decoded the whole record with the replaying reader to learn its physical size | inherited inefficiency | fixed: `read_scoped_intent_plain` for the size, as the other flush barriers already do |
+
+Finding 1 is the one that matters, and it is worth being exact about its cause. `classify_request`'s
+degradation after a newer admission is documented in Agent 2's own comment as acceptable - "the
+same degradation design 6.6 accepts for forgotten disposals ... refusal, never acceptance" - and as
+a statement about *safety* it is right. What it is not is V8-neutral, and I took the classifier's
+safety argument as covering availability without checking. The old basis-keyed check already gave
+the acknowledgement, so restoring it costs nothing in the namespace and needs no layout change.
 
 ## A verification-scope failure of mine, recorded because the fix alone would hide it
 

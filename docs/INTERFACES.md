@@ -2048,12 +2048,26 @@ actor/network path invokes these adapters yet.
 
 The design passed user review at `d576af2` on 2026-09-14. The bounded implementation adds
 `Server::prepare_studio_closing_overlay` and `Server::save_studio_closing_overlay` as explicit
-Rust adapters under caller-owned exclusive Server/store custody. They obtain tenure from
-`ChannelSync::observed_owner_tenure_start`; request data cannot supply tenure. A checked
-`StudioClosingOverlayBasis` derives from the actual Closing source and its settlement plan.
-Save takes its fingerprint and a canonical domain operation; timestamps come from the runtime
-clock and are preserved on exact retries. The result is now `StudioOverlaySave::Local(StudioLocalDraft)`
-or `StudioOverlaySave::HandedOff(StudioHandoffOutcome)` for a completed exact retry. A handoff is
+Rust adapters under caller-owned exclusive Server/store custody. Tenure comes only from the
+device's own observation (`Server::observed_owner_tenure`, a `StudioOwnerTenure` of `Known`,
+`Imported` or `Unknown`); request data cannot supply it. Preparation requires `Known` and refuses
+the other two with different messages. Save only *reads* it, because exact retries and terminal
+acknowledgements must succeed without it (V8); its authoring stages, S1b and the commit, require
+it at their own points. A checked `StudioClosingOverlayBasis` derives from the actual Closing
+source and its settlement plan.
+
+Preparation returns a `StudioOverlaySaveTicket { basis, branch }`. The branch is the
+branch-generation identity the Save must name: the live branch if there is one, otherwise the one
+the next admission would open, derived by `StudioOverlayState::request_branch_id` and never by the
+caller. Save takes the basis fingerprint, that branch and a canonical domain operation. A retry
+must resend its original request's branch: after a transfer or disposal, a fresh ticket names the
+*next* branch. Timestamps come from the runtime clock and are preserved on exact retries.
+
+The result is `StudioOverlaySave::Local(StudioLocalDraft)`;
+`StudioOverlaySave::HandedOff(StudioHandoffOutcome)` for a retry of a transferred operation; or
+`StudioOverlaySave::Disposed(StudioOverlayDisposal)` for a retry of an operation in the most
+recently disposed branch. The last two are terminal acknowledgements that accept nothing and open
+no branch. A request naming a branch no admission would open is refused as stale. A handoff is
 shared pending history, not receipt finality. No actor/native overlay command or automatic
 promotion/disposition is enabled by these internal adapters.
 

@@ -132,6 +132,52 @@ pub(super) fn check(accepted: bool) {
             assert_eq!(retry.basis(), saved.basis());
             assert_eq!(retry.projection(), saved.projection());
             assert_eq!(fs::read(&intent_path).unwrap(), original_intents);
+
+            // A ticket prepared now carries the fresh basis but still names the live branch, and
+            // that branch was opened on the basis the source has moved past, so it can take no
+            // append at all. The refusal belongs at S1b, ahead of media admission. On Flipnote the
+            // request names pixels that were never published, so a media-first order would answer
+            // "publish the frame PIX" instead - that difference is what makes the order visible.
+            let doomed = match f.target {
+                StudioTarget::Flipnote { .. } => f.domain(
+                    FlipnoteOp::InsertFrame {
+                        frame: [9; 16],
+                        after: None,
+                        cid: [0xAB; 32],
+                        bytes: 39,
+                    }
+                    .encode()
+                    .unwrap(),
+                    31,
+                ),
+                StudioTarget::Index { .. } => {
+                    let mut op = f.title();
+                    op.nonce = [31; 16];
+                    op
+                }
+            };
+            let live = live_branch(&f, &store);
+            let mut b = budget(&mut store, &f);
+            let refused = store.save_studio_closing_overlay(
+                SERVER,
+                &f.group,
+                f.target,
+                &f.device,
+                &close,
+                StudioOwnerTenure::Known(0),
+                fresh.fingerprint(),
+                live,
+                doomed,
+                457,
+                &mut rng(),
+                &mut b,
+            );
+            assert_eq!(
+                refused.map(|_| ()).unwrap_err().to_string(),
+                invalid(catcoms_replication::ReplError::EpochScope).to_string(),
+                "a live branch on a superseded basis was not refused ahead of media admission"
+            );
+            assert_eq!(fs::read(&intent_path).unwrap(), original_intents);
         } else {
             assert!(store
                 .load_epoch_intents(SERVER, &f.logical)
