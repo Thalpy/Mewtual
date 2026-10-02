@@ -542,44 +542,20 @@ impl ServerGroup {
                 // rotating to a new identity (remove A, add A' with a different `DeviceId`), or a
                 // genuine rejoin in a LATER commit. Only the ambiguous shape is excluded.
                 //
-                // **UNTESTED, and the reason is worth recording rather than leaving to be
-                // rediscovered.** An adversarial review found this rule unanchored, and an attempt to
-                // anchor it established that the shape cannot be delivered to a witness by any path
-                // this crate supports. Three layers each block it independently:
+                // **Reachable, and this rule is the ONLY thing that stops it.** This crate's own
+                // builders each commit a single inline proposal, which was once mistaken for proof
+                // the shape could not arrive. It can: an MLS commit carries its proposals by value,
+                // so any existing member can send one commit with an inline Remove of the designated
+                // committer and an inline Add of the same `DeviceId`. That sender is not the removed
+                // member, so it is not the self-removal case, and it is an ordinary member commit,
+                // so the external-commit refusal above does not apply either.
                 //
-                //  - every production builder here commits a single INLINE proposal (`add_member`,
-                //    `stage_add`, `remove_member`, `stage_remove`), so none can express remove+add;
-                //  - a by-reference commit, which is the only way to combine two proposals, cannot be
-                //    processed by a witness at all, because `process_incoming` drops proposal messages
-                //    into the `Other` arm without calling `store_pending_proposal`, so the queue is
-                //    always empty and MLS refuses the commit before reaching here;
-                //  - an external commit, which could seat a rejoining sender at the vacated leaf with
-                //    no Add proposal, is refused above.
-                //
-                // A test written against the by-reference path therefore PASSES with this rule
-                // deleted, for the second reason rather than this one - which is exactly the kind of
-                // test that is worse than none, so the attempt was removed rather than kept.
-                //
-                // **WITHDRAWN: the reasoning above does not establish that this rule is unreachable,
-                // and an adversarial review was right to reject it.**
-                //
-                // Every clause above is a statement about what *our* builder emits. An MLS commit
-                // carries a list of `ProposalOrRef`, and a proposal included **by value** needs no
-                // entry in anyone's proposal store - so a hostile or merely modified existing member
-                // can send a single commit carrying an inline Remove of the designated committer and
-                // an inline Add of the same `DeviceId`. That sender is not the removed member, so it
-                // is not the self-removal case, and it is not an external commit either, so the
-                // refusal above does not cover it. "Our builder cannot produce this shape" was never
-                // evidence that a peer cannot submit it, and treating the two as the same thing is
-                // the error this comment used to make.
-                //
-                // The rule is present and correctly placed - before the merge - so there is no known
-                // bypass. What is missing is the test. It is constructible: build the two proposals
-                // inline against OpenMLS directly rather than through this wrapper's single-proposal
-                // helpers, and feed the resulting bytes to this function. It must refuse with the
-                // receiver's epoch and state unchanged, and deleting this rule must then either allow
-                // the forbidden transition or reveal the specific earlier validation that genuinely
-                // makes it redundant.
+                // `m1_tests::a_witness_refuses_one_commit_that_removes_the_committer_and_re_adds_its_device_id`
+                // builds exactly that commit with OpenMLS's own commit builder and feeds it to a
+                // witness. With this rule deleted the witness MERGES it (`CommitApplied`): OpenMLS
+                // performs no validation that rejects a re-add of a just-removed signature key, and
+                // the credential-binding loop above passes because the Add's key package is
+                // correctly bound. Nothing upstream makes this rule redundant.
                 if let Some(committer) = self.designated_committer() {
                     let removes_committer = staged.remove_proposals().any(|remove| {
                         self.group
@@ -700,5 +676,87 @@ mod m1_tests {
             other.designated_committer_leaf(),
             "a different identity must not"
         );
+    }
+
+    /// M-1 on the RECEIVE path, against the shape a hostile or modified member can actually send.
+    ///
+    /// This crate's own builders each commit one inline proposal, so none of them can produce a
+    /// remove-and-re-add, and that was once mistaken for evidence the rule was unreachable. An MLS
+    /// commit carries its proposals by value, though, so any existing member can send ONE commit with
+    /// an inline Remove of the designated committer and an inline Add of the same `DeviceId`. Built
+    /// here with OpenMLS's own commit builder, by Bob, who is neither the committer nor the member
+    /// being removed - so it is not the self-removal case - and it is an ordinary member commit, so
+    /// the external-commit refusal does not apply. Carol is the witness.
+    ///
+    /// Every Add uses an invite-bound key package, so the credential-binding loop that runs before
+    /// M-1 passes. The refusal can therefore only be M-1's, and Carol's group must be left exactly
+    /// where it was.
+    #[test]
+    fn a_witness_refuses_one_commit_that_removes_the_committer_and_re_adds_its_device_id() {
+        let alice = MlsDevice::generate().unwrap();
+        let bob = MlsDevice::generate().unwrap();
+        let carol = MlsDevice::generate().unwrap();
+        let mut alice_group = ServerGroup::create(&alice).unwrap();
+        let group_id = alice_group.group_id();
+
+        let bob_added = alice_group
+            .add_member(
+                &alice,
+                bob.key_package_for_invite(&group_id, [1; 16]).unwrap(),
+            )
+            .unwrap();
+        let mut bob_group = ServerGroup::join(&bob, &bob_added.welcome).unwrap();
+        let carol_added = alice_group
+            .add_member(
+                &alice,
+                carol.key_package_for_invite(&group_id, [2; 16]).unwrap(),
+            )
+            .unwrap();
+        bob_group
+            .process_incoming(&bob, &carol_added.commit)
+            .expect("Bob must follow Carol's admission");
+        let mut carol_group = ServerGroup::join(&carol, &carol_added.welcome).unwrap();
+
+        assert_eq!(carol_group.designated_committer(), Some(alice.device_id()));
+        let alice_leaf = carol_group.member_leaf_index(&alice.device_id()).unwrap();
+        let epoch = carol_group.epoch();
+        let members = carol_group.member_device_ids();
+
+        // Bob's hostile commit: remove Alice and re-add Alice's own identity, inline, in one commit.
+        let returning = alice.key_package_for_invite(&group_id, [3; 16]).unwrap();
+        let bundle = bob_group
+            .group
+            .commit_builder()
+            .propose_removals([LeafNodeIndex::new(alice_leaf)])
+            .propose_adds([returning])
+            .load_psks(bob.provider().storage())
+            .unwrap()
+            .build(
+                bob.provider().rand(),
+                bob.provider().crypto(),
+                bob.signer(),
+                |_| true,
+            )
+            .expect("OpenMLS must let Bob build this commit, or the test is not reaching a witness")
+            .stage_commit(bob.provider())
+            .unwrap();
+        let commit = bundle.into_commit().tls_serialize_detached().unwrap();
+
+        let refused = carol_group.process_incoming(&carol, &commit);
+        assert!(
+            matches!(
+                refused,
+                Err(MlsError::Invite(InviteError::CredentialMismatch))
+            ),
+            "a witness must refuse a commit that removes the committer and re-adds its DeviceId; \
+             got {refused:?}"
+        );
+        assert_eq!(carol_group.epoch(), epoch, "the witness must not advance");
+        assert_eq!(
+            carol_group.member_device_ids(),
+            members,
+            "the witness's roster must be unchanged"
+        );
+        assert_eq!(carol_group.designated_committer(), Some(alice.device_id()));
     }
 }

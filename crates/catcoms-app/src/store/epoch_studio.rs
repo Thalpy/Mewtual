@@ -267,6 +267,21 @@ impl ServerStore {
         )
     }
 
+    /// Test-only: where `target`'s source record lives, so a test outside `crate::store` can model
+    /// an object that was cleaned up underneath a caller. The store has no deletion path for a
+    /// Studio source, and the copy probe exists precisely for one that disappeared anyway. Adds no
+    /// production surface.
+    #[cfg(test)]
+    pub(crate) fn studio_source_path_for_test(
+        &self,
+        server: u64,
+        group: &ServerGroup,
+        target: StudioTarget,
+    ) -> Result<PathBuf, AppError> {
+        let logical = target.document(&group.group_id()).map_err(invalid)?;
+        Ok(self.studio_epoch_path(&scope_bytes(server, &logical)?))
+    }
+
     pub fn load_studio_epoch(
         &self,
         server: u64,

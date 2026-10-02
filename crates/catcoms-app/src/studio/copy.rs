@@ -338,3 +338,6 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
         Ok((request, already_saved))
     }
 }
+
+#[cfg(test)]
+mod tests;

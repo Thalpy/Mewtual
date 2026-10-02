@@ -89,6 +89,29 @@ MUTATIONS = [
         "disposal::a_preserving_disposal_refuses_an_archive_whose_entries_are_not_the_branchs",
         "must not authorise destroying it",
     ),
+    # The branch and generation compares are removed TOGETHER. They are deliberately redundant for
+    # a correctly derived archive (`branch_id` is `H(basis, generation)`), so removing one alone
+    # leaves the other refusing; the semantic defence is "an archive of another generation is not
+    # this branch's", and that is what this mutant takes away. Without it, G3 is disposed of as
+    # `Preserved` under G1's archive.
+    (
+        "dispose-generation-binding", "catcoms-app", APP_TESTS,
+        f"{APP}/epoch_intents/disposal.rs",
+        "                    || Some(archive.branch()) != metadata.branch_id()\n                    || archive.generation() != metadata.branch_generation()\n",
+        "",
+        "disposal::a_preserving_disposal_refuses_an_earlier_generations_archive_of_identical_work",
+        "an archive of an earlier generation must not authorise disposing of a later one",
+    ),
+    # Membership on its own: the real author, removed. The stranger test cannot isolate this, since
+    # a stranger fails authorship too, and it stays green under this mutant.
+    (
+        "dispose-membership", "catcoms-app", APP_TESTS,
+        f"{APP}/epoch_intents/disposal.rs",
+        "        if document.server_id != group.group_id()\n            || group.member_signature_key(&device.device_id()).as_deref()\n                != Some(device.public_key_bytes().as_slice())\n        {\n            return Err(invalid(\"disposal author is not a current local member\"));",
+        "        if document.server_id != group.group_id() {\n            return Err(invalid(\"disposal author is not a current local member\"));",
+        "disposal::the_branchs_own_author_cannot_dispose_of_it_once_removed_from_the_group",
+        "a removed author must not dispose of the branch",
+    ),
     # --- evidence before removal: a preserving disposal must establish its archive durably first ---
     #
     # Swallowing the barrier's error is caught, but read what catches it. The disposal is STILL
@@ -108,6 +131,27 @@ MUTATIONS = [
         "                }).ok();\n                StudioDisposalDecision::Preserve { archive: record.id }",
         "disposal::a_preserving_disposal_whose_archive_cannot_be_made_durable_removes_nothing",
         "the refusal must be the durability barrier's",
+    ),
+    # --- copy into current: the object probe at C3 and C4, each on its own ---
+    #
+    # The planner runs with no store, so it calls a dangling `PutObject` Ready; only the probe can
+    # tell. The C3 mutant keeps the probe call (so every binding stays live under -D warnings) and
+    # ignores its answer; the C4 mutant does the same at apply. Each fails its own assertion.
+    (
+        "copy-probe-preview", "catcoms-app", "studio::copy::tests::",
+        "crates/catcoms-app/src/studio/copy.rs",
+        "Self::probe_copy_object(store, server, group, device, &plan)\n        })? {",
+        "Self::probe_copy_object(store, server, group, device, &plan).map(|_| true)\n        })? {",
+        "the_copy_probe_refuses_an_object_that_is_missing_or_disappears_before_apply",
+        "C3 must tell the user the object is missing",
+    ),
+    (
+        "copy-probe-apply", "catcoms-app", "studio::copy::tests::",
+        "crates/catcoms-app/src/studio/copy.rs",
+        "if !Self::probe_copy_object(store, server, group, device, &plan)? {",
+        "if !Self::probe_copy_object(store, server, group, device, &plan).map(|_| true)? {",
+        "the_copy_probe_refuses_an_object_that_is_missing_or_disappears_before_apply",
+        "C4 must refuse to publish an entry",
     ),
     # --- the branch-generation namespace ---
     (
@@ -129,6 +173,18 @@ MUTATIONS = [
         "let mut active = self.active.clone().unwrap_or_else(|| StudioOverlay::new(basis));",
         "lifecycle::appending_where_no_branch_exists_is_refused_and_admission_opens_the_next_one",
         "append must not open a branch that admission never admitted",
+    ),
+    # --- M-1 on the receive path: the only defence against a one-commit remove-and-re-add ---
+    #
+    # Hand-run first: with this rule disabled the witness MERGES the hostile commit, so OpenMLS does
+    # not make it redundant. `&& false` keeps `re_adds_committer` used under -D warnings.
+    (
+        "m1-receive-refusal", "catcoms-mls", "group::m1_tests::",
+        "crates/catcoms-mls/src/group.rs",
+        "if re_adds_committer {",
+        "if re_adds_committer && false {",
+        "a_witness_refuses_one_commit_that_removes_the_committer_and_re_adds_its_device_id",
+        "a witness must refuse a commit that removes the committer",
     ),
     # --- the owner-tenure observation rule ---
     (

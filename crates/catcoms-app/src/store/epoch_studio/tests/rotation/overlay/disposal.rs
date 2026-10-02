@@ -839,3 +839,197 @@ fn a_disposal_that_fails_at_the_write_leaves_the_branch_and_its_entries_intact()
         );
     }
 }
+
+/// Title edits with fixed nonces and timestamps, so a later generation can hold exactly the same
+/// entries as an earlier one. Header ops carry no PIX, which keeps blob protection out of a test
+/// that is about identity.
+fn save_titles(
+    f: &Fixture,
+    store: &mut ServerStore,
+    close: &CloseRecord,
+    basis: &StudioClosingOverlayBasis,
+    titles: &[(&str, u8, u64)],
+) {
+    for (title, nonce, ts) in titles {
+        save(
+            f,
+            store,
+            close,
+            basis.fingerprint(),
+            f.domain(
+                FlipnoteOp::SetHeader(FlipnoteHeader::Title((*title).into()))
+                    .encode()
+                    .unwrap(),
+                *nonce,
+            ),
+            *ts,
+        );
+    }
+}
+
+/// D4's generation binding, on the one input that isolates it.
+///
+/// An archive of an EARLIER generation whose entries genuinely match the live branch: same
+/// operations, same envelopes, same order and timestamps, so `matches_branch` accepts it and its
+/// content hash is the live branch's. Only the branch identity and generation differ. The review
+/// pointed out that the existing archive refusals all used different entries or mislabelled
+/// metadata, so none of them showed that an old archive cannot authorise destroying new work that
+/// happens to look the same.
+///
+/// The sequence is the one design 6.6 describes: G1 holds X and is preserve-disposed, leaving its
+/// archive A1 behind; G2 holds a disjoint Y and is discarded, replacing G1's retained manifest; G3
+/// holds X again. A preserving disposal of G3 must not accept A1.
+#[test]
+fn a_preserving_disposal_refuses_an_earlier_generations_archive_of_identical_work() {
+    let root = tempfile::tempdir().unwrap();
+    let f = Fixture::new(true);
+    let mut store = open(root.path());
+    let (close, basis) = closing(&f, &mut store);
+    let x: [(&str, u8, u64); 2] = [("x one", 0x61, 500), ("x two", 0x62, 501)];
+
+    // G1 holds X, is archived as A1, and is preserve-disposed. A1 stays on disk.
+    save_titles(&f, &mut store, &close, &basis, &x);
+    let a1 = preserve_archive(&f, &mut store);
+    let request = honest_request(&f, &mut store, StudioDisposalRequestMode::Preserve);
+    dispose(&f, &mut store, request).expect("G1's preserving disposal must succeed");
+
+    // G2 holds a disjoint Y and is discarded, replacing G1's retained manifest.
+    save_titles(&f, &mut store, &close, &basis, &[("y", 0x63, 600)]);
+    let request = honest_request(
+        &f,
+        &mut store,
+        StudioDisposalRequestMode::Discard(confirmation()),
+    );
+    dispose(&f, &mut store, request).expect("G2's discarding disposal must succeed");
+
+    // G3 holds X again, identically.
+    save_titles(&f, &mut store, &close, &basis, &x);
+
+    // Guard the guard: everything except identity must agree, or the refusal below could come
+    // from the content compare or the entry match instead of the generation binding.
+    let state = store.load_epoch_intents(SERVER, &f.logical).unwrap();
+    let meta = state.handoff_metadata().unwrap();
+    let live = state.overlay().unwrap();
+    assert_eq!(meta.branch_generation(), 3, "the live branch must be G3");
+    assert_eq!(
+        meta.disposed().unwrap().generation,
+        2,
+        "G2's discard must have replaced G1's manifest"
+    );
+    assert_eq!(a1.generation(), 1);
+    assert_eq!(
+        a1.content(),
+        meta.branch_content(&state.ledger).unwrap(),
+        "A1's content must equal G3's, or the content compare refuses first"
+    );
+    assert!(
+        a1.matches_branch(live, &state.ledger).unwrap(),
+        "A1's entries must genuinely match G3's, or the entry match refuses first"
+    );
+    assert_ne!(Some(a1.branch()), meta.branch_id());
+    drop(state);
+    let on_disk = store
+        .read_studio_draft_archive(SERVER, &f.logical)
+        .unwrap()
+        .expect("A1 must still be the archive on disk");
+    assert_eq!(
+        on_disk.archive.archive_id().unwrap(),
+        a1.archive_id().unwrap()
+    );
+
+    let request = honest_request(&f, &mut store, StudioDisposalRequestMode::Preserve);
+    let refused = dispose(&f, &mut store, request)
+        .expect_err(
+            "an archive of an earlier generation must not authorise disposing of a later one",
+        )
+        .to_string();
+    assert!(
+        refused.contains("the preserved archive is for a different branch"),
+        "the refusal must be the generation binding's, got: {refused}"
+    );
+    let after = store.load_epoch_intents(SERVER, &f.logical).unwrap();
+    assert_eq!(
+        after.overlay().map(|o| o.accepted()),
+        Some(2),
+        "G3 must survive with its work"
+    );
+    drop(after);
+    assert_eq!(
+        store
+            .read_studio_draft_archive(SERVER, &f.logical)
+            .unwrap()
+            .unwrap()
+            .archive
+            .archive_id()
+            .unwrap(),
+        a1.archive_id().unwrap(),
+        "and A1 must survive unchanged"
+    );
+}
+
+/// D1's membership half, isolated: the branch's REAL author, removed from the group.
+///
+/// The existing membership test uses a stranger, who fails authorship as well, so it cannot show
+/// that membership is checked on its own. Here authorship matches positively and only membership
+/// fails. The removal is real MLS - a second member commits it and the author's group processes it -
+/// and the refusal is asserted at the store boundary, not credited to any outer native check.
+#[test]
+fn the_branchs_own_author_cannot_dispose_of_it_once_removed_from_the_group() {
+    let root = tempfile::tempdir().unwrap();
+    let mut f = Fixture::new(true);
+    let mut store = open(root.path());
+    let (close, basis) = closing(&f, &mut store);
+    frame_branch(&f, &mut store, &close, &basis);
+    let request = honest_request(
+        &f,
+        &mut store,
+        StudioDisposalRequestMode::Discard(confirmation()),
+    );
+    assert_eq!(
+        store
+            .load_epoch_intents(SERVER, &f.logical)
+            .unwrap()
+            .overlay()
+            .unwrap()
+            .author(),
+        f.device.device_id(),
+        "authorship must match, so it cannot be what refuses"
+    );
+
+    // A second member joins, then commits the author's removal; the author's group applies it.
+    let other = MlsDevice::generate().unwrap();
+    let added = f
+        .group
+        .add_member(&f.device, other.key_package().unwrap())
+        .unwrap();
+    let mut other_group = catcoms_mls::ServerGroup::join(&other, &added.welcome).unwrap();
+    let removal = other_group
+        .stage_remove(&other, &f.device.device_id())
+        .unwrap();
+    other_group.merge_staged_self(&other).unwrap();
+    f.group
+        .process_incoming(&f.device, &removal.commit)
+        .expect("the author's group must apply its own removal");
+    assert!(
+        f.group
+            .member_signature_key(&f.device.device_id())
+            .is_none(),
+        "the author must really be removed, or this repeats the stranger test"
+    );
+
+    let refused = dispose(&f, &mut store, request)
+        .expect_err("a removed author must not dispose of the branch")
+        .to_string();
+    assert!(
+        refused.contains("not a current local member"),
+        "the refusal must be membership's, got: {refused}"
+    );
+    assert!(
+        store
+            .load_epoch_intents(SERVER, &f.logical)
+            .unwrap()
+            .overlay()
+            .is_some(),
+        "the branch must survive"
+    );
+}
