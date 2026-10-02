@@ -79,6 +79,70 @@ impl StudioEpoch {
         }
         Ok(kept)
     }
+    /// Why this installed source cannot take `overlay` as its handoff successor, or `None` exactly
+    /// when [`Self::check_overlay_successor`] would accept it (P2, design section 7).
+    ///
+    /// A classification over the same conditions as that check, never a second definition of
+    /// them: every comparison below is one the check makes, and
+    /// `the_successor_hold_agrees_with_the_handoff_precondition` holds the two together on every
+    /// state the fixtures can reach. The check stays authoritative; this only names its refusal.
+    ///
+    /// Ordered most-permanent first. A faulted, rewound or replaced source is reported as such even
+    /// when the successor would also be unpristine, because "wait" is the wrong advice for it.
+    ///
+    /// Not free: the final pristine comparison parses the branch's seed, as the check does. It
+    /// replays no branch operation.
+    pub fn overlay_successor_hold(
+        &mut self,
+        overlay: &StudioOverlay,
+        ledger: &IntentLedger,
+    ) -> Result<Option<StudioOverlayManualReason>, ReplError> {
+        use StudioOverlayManualReason as R;
+        // Not a hold: a record for another target or document is a caller error, refused as the
+        // check refuses it.
+        if self.target != overlay.target() || self.document() != ledger.document() {
+            return Err(ReplError::EpochScope);
+        }
+        if self.actor != overlay.author() {
+            return Ok(Some(R::NotCurrentAuthor));
+        }
+        if self.phase() == EpochPhase::Fault {
+            return Ok(Some(R::Fault));
+        }
+        let closed = overlay.receipt().closed_epoch;
+        let successor = closed.checked_add(1).ok_or(ReplError::EpochBound)?;
+        let epoch = self.epoch();
+        if epoch < closed {
+            return Ok(Some(R::SourceRewound));
+        }
+        if epoch == closed {
+            return Ok(Some(if self.phase() == EpochPhase::Closing {
+                R::SuccessorMissing
+            } else {
+                R::SourceNotClosing
+            }));
+        }
+        if epoch > successor {
+            return Ok(Some(R::SourceReplaced));
+        }
+        if self.gate.owner() != DeviceId::from_public_key_bytes(&overlay.receipt().owner_public_key)
+            || self.opening.as_ref() != Some(overlay.receipt())
+        {
+            return Ok(Some(R::ReceiptChanged));
+        }
+        if self.doc.checkpoint_bytes()?.as_deref() != Some(overlay.seed()) {
+            return Ok(Some(R::SourceReplaced));
+        }
+        if self.phase() != EpochPhase::Open
+            || self.adopting
+            || self.op_count() != 0
+            || self.projection()? != overlay.base_projection()?
+        {
+            return Ok(Some(R::SuccessorNotPristine));
+        }
+        Ok(None)
+    }
+
     pub(in crate::studio) fn check_overlay_successor(
         &mut self,
         overlay: &StudioOverlay,

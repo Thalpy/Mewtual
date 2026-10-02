@@ -61,6 +61,13 @@ pub enum InviteError {
     /// The token or credential bytes were malformed.
     #[error("malformed invite or credential")]
     Malformed,
+    /// M-1: one commit removed the designated committer and re-added the same `DeviceId`.
+    ///
+    /// Here rather than in a new error type because it is refused at the same receive-path stage as
+    /// the credential binding, by the same function. A distinct variant so that a witness log, an
+    /// operator and a test can tell this hostile commit shape from an ordinary binding mismatch.
+    #[error("commit removes the designated committer and re-adds the same device (M-1)")]
+    CommitterReAdded,
 }
 
 /// The binding carried in a joining device's MLS leaf credential.

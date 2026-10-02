@@ -4,7 +4,34 @@ Owner: Agent 2, [overlay lifecycle, provisional local work and repeated tenure](
 Design of record: [GATE4-AGENT-2-DESIGN.md](GATE4-AGENT-2-DESIGN.md).
 Review preamble: [preamble 2](GATE4-REVIEW-PREAMBLES.md#review-2-manualprovisional-overlay-lifecycle-and-repeated-tenure).
 
-## Current state
+## Completion matrix, 2026-10-02
+
+**This table is the current state.** Every section below it is a dated record; where one disagrees
+with this table, this table wins. Built against the six goals of the assignment and the
+whole-scope review of `510d0b54` (verdict: CHANGES REQUIRED, Agent 2 not complete).
+
+| Goal | State | Evidence, and what is still missing | Owner |
+|---|---|---|---|
+| 1. Bounded inspection, export, copy, disposition | Implemented, not natively exposed | Two-visit inspect/export/archive/copy, D1-D6 disposal, release. Export, archive and copy preview now keep the job's permit and the actor's delivery fence through native conversion (`3168de6e`); an archive whose result cannot be delivered reports `outcome=uncertain`. The nine commands are unregistered (`510d0b54`). | Agent 2; registration Agent 4 |
+| 2. Lossless work and PIX across refusal and restart | Implemented except one platform barrier | Archive codec, binding, release, collector, evidence-before-removal ordering (`6bd76c13`). **Open:** `sync_directory` is a no-op on `not(unix)`, so on Windows a preserving disposal cannot establish the archive's directory entry. | Persistence owner via Agent 4; Agent 2 shows disposal honours the result |
+| 3. Recoverable stale, rewound and non-pristine branches, with actionable states (P2) | Classification implemented, unreviewed | `StudioOverlayEligibility` / `StudioOverlayManualReason`; `StudioEpoch::overlay_successor_hold` is pinned to `check_overlay_successor` by an agreement test; the store adds author, provenance, missing/unreadable source, tenure and live-owner reasons; lifecycle and inspection carry `eligibility` and `manualReason`. Agent 1's `StudioOverlayHold` was designed but never built; its runtime still refuses with strings. | Agent 2; Agent 1 maps its runtime refusals |
+| 4. Durable local work on an awaiting-tenure preview | **Not implemented** | Design section 8 accepted; nothing built. Its absence is a Gate 4 gap, not a deferral. | Agent 2 |
+| 5. Repeated owner tenure, rejoin, newcomers, legitimate progress | Implemented at the sync and receipt layer; not yet through the app actor | Leaf-aware tenure, v1 import, app seam, CORE-005 archived witness (`066a6533`), M-1 on the receive path with its own error (`0335262e`). **The product never rejoins with the same identity**: join and found both mint a fresh `MlsDevice`, so a returning owner is a new `DeviceId`. `returning::a_removed_owner_returns_as_a_new_device_with_a_new_tenure_everywhere` drives that form with real MLS and real receipts: A' lands in the vacated leaf, A' and every witness agree on the new start across restart, A' can author, its receipt verifies on witnesses and a newcomer, and A's first-tenure receipt and A's old key claiming the new tenure are refused everywhere. **Missing:** the same flow through the actor and a real Studio rotation. | Agent 2 |
+| 6. Truthful native results and events | Partial | Results and settlement notices exist; no command beyond `studio_overlay_read` is registered; UI-hooks rows not applied. | Agent 2 contract; Agent 4 registration and rows |
+
+| Prerequisite | State |
+|---|---|
+| P1 reviewed manual lifecycle | Implemented; review at `510d0b54` returned CHANGES REQUIRED, items above |
+| P2 hold mapping | Implemented in this slice, not yet reviewed |
+| P3 native results and events | Partial (goal 6) |
+| P4 live-tenure contract | Implemented: `StudioOwnerTenure`, `require_owner_tenure`, CORE-005 witness |
+| **P5** | **FALSE.** Native Save stays unregistered. |
+
+The `510d0b54` review's evidence gaps are closed in `0335262e`: D4 against an earlier generation's
+archive of identical work, D1 for a removed real author, the copy object probe at C3 and C4, and
+M-1 on the receive path. Each was confirmed by disabling its guard.
+
+## Current state (historical, superseded by the matrix above)
 
 | Item | State |
 |---|---|
@@ -821,6 +848,14 @@ and confirmed the hard invariants directly: P5 holds (ten `studio_overlay_*` com
 none a save, and no composition writes into a Closing branch); evidence precedes removal; both
 confirmations are unforgeable and non-transferable; the detached worker carries no live authority;
 and M-1's unreachability claim survives attack.
+
+> **Two claims in that paragraph are now false; corrected 2026-10-02.** M-1 is **reachable**: any
+> existing member can send one commit with an inline Remove of the committer and an inline Add of
+> the same `DeviceId`, and with M-1 disabled a witness merges it
+> (`m1_tests::a_witness_refuses_one_commit_that_removes_the_committer_and_re_adds_its_device_id`,
+> `0335262e`). M-1 is the only defence and now refuses with its own `InviteError::CommitterReAdded`.
+> And the nine lifecycle and copy commands are **not registered** since `510d0b54`; only
+> `studio_overlay_read` is.
 
 **It also executed the two test sets I could not**, in a worktree that excludes the other agent's
 uncommitted work:

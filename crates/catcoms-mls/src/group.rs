@@ -576,7 +576,7 @@ impl ServerGroup {
                             DeviceId::from_public_key_bytes(leaf_pk) == committer
                         });
                         if re_adds_committer {
-                            return Err(InviteError::CredentialMismatch.into());
+                            return Err(InviteError::CommitterReAdded.into());
                         }
                     }
                 }
@@ -742,11 +742,13 @@ mod m1_tests {
             .unwrap();
         let commit = bundle.into_commit().tls_serialize_detached().unwrap();
 
+        // M-1's own error, distinct from the credential-binding refusal that runs just before it, so
+        // this assertion alone shows which rule refused.
         let refused = carol_group.process_incoming(&carol, &commit);
         assert!(
             matches!(
                 refused,
-                Err(MlsError::Invite(InviteError::CredentialMismatch))
+                Err(MlsError::Invite(InviteError::CommitterReAdded))
             ),
             "a witness must refuse a commit that removes the committer and re-adds its DeviceId; \
              got {refused:?}"

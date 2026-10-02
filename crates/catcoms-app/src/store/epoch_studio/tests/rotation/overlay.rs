@@ -8,6 +8,7 @@ mod archive;
 mod branch_namespace;
 mod copy_capture;
 mod disposal;
+mod eligibility;
 mod handoff;
 mod source_version;
 

@@ -26,6 +26,14 @@ fn check(value: &Value, f: &InspectionFixture) {
         u128::from_be_bytes(f.target.channel()).to_string()
     );
     assert_eq!(value["transferState"], "active");
+    // P2: a live draft is classified, with a reason exactly when it is manual. This draft rebuilds,
+    // so whatever the reason is, it is not `notReplayable`.
+    let eligibility = value["eligibility"]
+        .as_str()
+        .expect("a live draft must be classified");
+    assert!(matches!(eligibility, "transferable" | "manual"));
+    assert_eq!(value["manualReason"].is_string(), eligibility == "manual");
+    assert_ne!(value["manualReason"], "notReplayable");
     assert_eq!(value["readOnly"], true);
     assert_eq!(value["content"], projection_content(&f.expected));
     for field in [

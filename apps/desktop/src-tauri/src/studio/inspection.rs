@@ -83,10 +83,11 @@ mod tests;
 /// only `content` is null. The work is still there and still exportable; only the typed view of it
 /// is unavailable, and saying "the read failed" instead is both less true and less useful.
 ///
-/// Not present, and not by oversight: `eligibility`, `manualReason` and `unconfirmedState` are P2's
-/// mapping of `StudioOverlayHold`, a type that does not exist in the tree yet; and `archived`
-/// belongs to `studio_overlay_lifecycle`, which reads the archive record this capture deliberately
-/// does not hold.
+/// `eligibility` and `manualReason` are P2's classification, shared with the lifecycle row through
+/// `lifecycle::eligibility_fields`. Not present, and not by oversight: `unconfirmedState`, because
+/// no unconfirmed branch can exist until preview-local work does, and an always-null field would
+/// read as an answer; and `archived`, which belongs to `studio_overlay_lifecycle`, since that reads
+/// the archive record this capture deliberately does not hold.
 fn view(read: StudioOverlayInspection) -> Result<Value, String> {
     read.inspect(|v| {
         let channel = u128::from_be_bytes(v.target.channel()).to_string();
@@ -99,8 +100,11 @@ fn view(read: StudioOverlayInspection) -> Result<Value, String> {
             Some(StudioOverlayProvenance::Unconfirmed { .. }) => Some("unconfirmed"),
             None => None,
         };
+        let (eligibility, manual_reason) = super::lifecycle::eligibility_fields(v.eligibility);
         bounded_view(match (v.branch, v.disposed) {
             (Some(branch), _) => json!({"v":1,"kind":"local-draft","channel":channel,
+                "eligibility":eligibility,
+                "manualReason":manual_reason,
                 "object":object,
                 "basis":v.draft.map(|d| hex::encode(d.basis())),
                 "branch":hex::encode(branch),

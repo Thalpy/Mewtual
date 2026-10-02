@@ -24,6 +24,7 @@ mod discovery;
 mod handoff;
 pub(crate) use handoff::StudioHandoffStart;
 pub(in crate::store) mod copy_capture;
+mod eligibility;
 mod handoff_capture;
 pub(crate) use handoff_capture::{
     SigningSlice, StudioHandoffCapture, StudioHandoffCommit, StudioHandoffPlan,

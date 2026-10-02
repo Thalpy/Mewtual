@@ -46,6 +46,8 @@ struct Fixture {
     store: ServerStore,
     index: StudioTarget,
     clock: ManualClock,
+    /// Private, so held previews never compete with other tests for the process-wide pool.
+    pool: std::sync::Arc<tokio::sync::Semaphore>,
 }
 
 impl Fixture {
@@ -203,6 +205,7 @@ impl Fixture {
             store,
             index,
             clock,
+            pool: std::sync::Arc::new(tokio::sync::Semaphore::new(4)),
         }
     }
 
@@ -217,8 +220,9 @@ impl Fixture {
     /// C1 and C2 only: the planner's own verdict, before any custody probe.
     async fn plan(&mut self) -> StudioPreparedCopy {
         let choice = self.choice();
+        let pool = self.pool.clone();
         self.server
-            .begin_studio_copy(&self.store, SERVER, self.index, choice)
+            .begin_copy_with_pool(&self.store, SERVER, self.index, choice, &pool)
             .unwrap()
             .plan()
             .await

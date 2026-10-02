@@ -207,6 +207,16 @@ async fn lifecycle_classifies_a_live_branch_without_writing_to_the_vault() {
         assert_eq!(branch["generation"], "1", "the first minted generation");
         assert_eq!(branch["accepted"], 1);
         assert_eq!(value["prepared"], false, "no transfer is staged");
+        // P2: a live branch is always classified, with a reason exactly when it is manual.
+        let eligibility = value["eligibility"]
+            .as_str()
+            .expect("a live branch must be classified");
+        assert!(matches!(eligibility, "transferable" | "manual"));
+        assert_eq!(
+            value["manualReason"].is_string(),
+            eligibility == "manual",
+            "a reason exactly when manual, got {value}"
+        );
         assert!(value["archive"].is_null(), "nothing has been preserved yet");
         assert!(value["disposed"].is_null(), "nothing has been disposed yet");
         assert_eq!(value["transferred"], false);
@@ -582,6 +592,70 @@ async fn a_confirmed_discard_ends_the_branch_and_says_so_terminally() {
     );
     assert_eq!(after["disposed"]["generation"], "1");
     assert!(after["archive"].is_null());
+    f.shutdown().await;
+}
+
+/// An archive whose result cannot be delivered is UNCERTAIN, not refused, because the write already
+/// happened.
+///
+/// Delivering archive results through the inspection fence made this reachable: the handoff can
+/// expire while native converts. Every withheld result used to read as a plain refusal, which for
+/// an archive would tell a user nothing was preserved while the record sits on disk. Here the
+/// handoff expires mid-conversion, and the caller must be told to re-read, and the archive must
+/// really be there.
+#[tokio::test]
+async fn an_archive_whose_result_expires_before_delivery_is_uncertain_and_is_on_disk() {
+    let f = InspectionFixture::new(true).await;
+    let state = state(&f).await;
+    let target = f.target;
+    let context = InvokeContext::new(&state, fixture::SERVER, Some(target))
+        .await
+        .unwrap();
+    let job = invoke_with_context(
+        &state,
+        &context,
+        InvokeRequest::Control(StudioControlRequest {
+            target,
+            action: Action::ArchiveOverlay,
+        }),
+        |response| match response {
+            InvokeResponse::Control(Response::OverlayPreparation(job)) => Ok(job),
+            _ => Err("mismatched archive response".into()),
+        },
+    )
+    .await
+    .unwrap();
+    let prepared = job.rebuild_for_archive().await.unwrap();
+    let withheld = invoke_with_context(
+        &state,
+        &context,
+        InvokeRequest::Control(StudioControlRequest {
+            target,
+            action: Action::FinishOverlayArchive(Box::new(prepared)),
+        }),
+        |response| {
+            // The handoff expires while native is converting.
+            f.clock.advance_ms(5_000);
+            match response {
+                InvokeResponse::Control(response) => response_value(response),
+                _ => Err("mismatched archive response".into()),
+            }
+        },
+    )
+    .await
+    .expect_err("an expired archive result must not be delivered");
+    assert!(
+        withheld.starts_with(super::super::UNDELIVERED_ARCHIVE),
+        "a written archive must be reported uncertain, said: {withheld}"
+    );
+
+    let after = studio_overlay_lifecycle_for_test(&state, target)
+        .await
+        .unwrap();
+    assert!(
+        after["archive"].is_object(),
+        "the write the caller was told is uncertain must really have happened"
+    );
     f.shutdown().await;
 }
 

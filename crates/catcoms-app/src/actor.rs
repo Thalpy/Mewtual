@@ -4419,7 +4419,8 @@ where
                         let handoff = match &mut result {
                             // Every control result that carries a job's preparation slot - an
                             // inspection, an export, an archive, a copy preview - gets the same
-                            // bounded handoff, decided in one place on the response.
+                            // bounded handoff. Which ones is decided on the response, by an
+                            // exhaustive match there.
                             Ok(StudioResponse::Control(control)) => control.begin_delivery(server.runtime_clock()),
                             Ok(StudioResponse::Document(Some(crate::studio::StudioRead::AwaitingTenureReceipt(preview)))) => {
                                 // Detaching authoritative discovery above may supersede this

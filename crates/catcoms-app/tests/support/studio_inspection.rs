@@ -34,9 +34,25 @@ pub(crate) struct InspectionFixture {
     root: tempfile::TempDir,
     task: JoinHandle<()>,
     drain: JoinHandle<()>,
+    _serial: tokio::sync::OwnedMutexGuard<()>,
 }
+
+/// One live fixture per test process.
+///
+/// Every fixture drives real jobs through the process-wide preparation pool: four slots,
+/// try-acquire, no waiting. A finished inspection, export, archive or copy preview keeps its slot
+/// until native has delivered it, so a dozen fixtures running in parallel starve each other and
+/// fail with "capacity exhausted; retry". That is the correct production answer and the wrong test
+/// outcome: it would blame whichever test happened to lose. No test holds two fixtures at once, so
+/// serializing their lifetimes cannot deadlock.
+fn serial() -> Arc<Mutex<()>> {
+    static ONE: std::sync::OnceLock<Arc<Mutex<()>>> = std::sync::OnceLock::new();
+    ONE.get_or_init(Default::default).clone()
+}
+
 impl InspectionFixture {
     pub(crate) async fn new(art: bool) -> Self {
+        let serial = serial().lock_owned().await;
         // Setup uses real large signed operations to reach the production rotation threshold.
         let hub = Hub::new();
         let clock = ManualClock::new(1000);
@@ -217,6 +233,7 @@ impl InspectionFixture {
             root,
             task,
             drain,
+            _serial: serial,
         }
     }
     pub(crate) async fn capture(&self) -> StudioInspectionPreparation {

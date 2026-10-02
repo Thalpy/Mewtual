@@ -5,6 +5,7 @@ use rand_chacha::ChaCha20Rng;
 use rand_core::SeedableRng;
 
 mod archive;
+mod returning;
 
 type Node = ChannelSync<MemNetwork, ChaCha20Rng>;
 
@@ -172,12 +173,15 @@ async fn owner_tenure_winning_losing_and_inbound_staged_commits_observe_same_tra
 /// M-1 is scoped to the one-commit shape), and that every witness - the admitting one and the ones
 /// that apply the commit - observes a new start that is neither A's first tenure nor B's.
 ///
-/// It does NOT prove the rejoining device's own view. Constructing that device fails here: a
-/// same-identity device made with `MlsDevice::duplicate` carries A's old group in its provider, and
-/// `ServerGroup::join` then refuses with "A group with this GroupId already exists". That may be
-/// more than a harness limit: if a genuinely removed device also keeps its old group state, a
-/// same-`DeviceId` rejoin by Welcome would fail the same way in production. Whether removal discards
-/// the group, or a rejoin must, is recorded as an open question rather than assumed here.
+/// It does NOT prove the rejoining device's own view, and for this shape it cannot: a same-identity
+/// device made with `MlsDevice::duplicate` carries A's old group in its provider, and
+/// `ServerGroup::join` refuses with "A group with this GroupId already exists".
+///
+/// **That is not a production gap, and the reason is worth keeping beside the test.** The product
+/// never rejoins with the same identity: every join and every found mints a fresh `MlsDevice`, so a
+/// removed owner returns as a NEW `DeviceId`. Same-key A -> B -> A is reachable only from a modified
+/// client, and only the witnesses' view of it matters, which is what this test pins. The product's
+/// own returning owner, including its own view, is `returning::a_removed_owner_returns_as_a_new_device_with_a_new_tenure_everywhere`.
 #[tokio::test]
 async fn owner_tenure_same_device_rejoin_in_a_later_commit_is_a_new_tenure_on_every_witness() {
     let (_hub, mut nodes, ids) = build_members(4).await;

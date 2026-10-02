@@ -202,47 +202,72 @@ async fn invoke_with_context<V>(
         _ => None,
     };
     // Every control result that carries a job's slot - inspection, export, archive, copy preview -
-    // has a delivery the actor began. Asked of the response rather than matched variant by variant
-    // here, so a new delivered result cannot be added without native holding and rechecking it.
+    // has a delivery the actor began. Asked of the response, which lists its delivered variants
+    // exhaustively, rather than re-matched here where a second list could drift from the first.
     let inspection_delivery = match &response {
         InvokeResponse::Control(control) => control.delivery(),
         _ => None,
     };
-    if cancellation.is_cancelled() {
-        return Err("Studio request cancelled; its local save may have completed".into());
-    }
-    let _commit = require_ui_session_generation(state, generation).await?;
-    let servers = state.servers.lock().await;
-    if servers
-        .get(&server)
-        .is_none_or(|entry| entry.instance != instance)
-    {
-        return Err("server changed during Studio operation".into());
-    }
-    // Conversion can be substantial (base64 and full conflict-preserving JSON). Keep the
-    // completion fences until it is finished, and suppress even a lock request that arrived
-    // during conversion before the actual lock task can acquire this commit guard.
-    let value = convert(response)?;
-    if view_request
-        .as_ref()
-        .is_some_and(|request| !request.is_current())
-    {
-        return Err("Studio view request was superseded; refresh".into());
-    }
-    if preview_delivery
-        .as_ref()
-        .is_some_and(|delivery| !delivery.is_current())
-        || inspection_delivery
+    // An archive result is a DURABLE WRITE that already happened. Every refusal below withholds
+    // its result, but none of them undoes the write, so for an archive each one is `uncertain`,
+    // not `refused` (design section 11's write outcomes): the renderer must re-read rather than
+    // tell a user nothing was preserved. Reads lose nothing by being withheld and keep the plain
+    // refusals. Before results were delivered this could not arise for an archive.
+    let durable_write = matches!(
+        &response,
+        InvokeResponse::Control(catcoms_app::studio::StudioControlResponse::OverlayArchived(
+            _
+        ))
+    );
+    let delivered = async {
+        if cancellation.is_cancelled() {
+            return Err("Studio request cancelled; its local save may have completed".into());
+        }
+        let _commit = require_ui_session_generation(state, generation).await?;
+        let servers = state.servers.lock().await;
+        if servers
+            .get(&server)
+            .is_none_or(|entry| entry.instance != instance)
+        {
+            return Err("server changed during Studio operation".into());
+        }
+        // Conversion can be substantial (base64 and full conflict-preserving JSON). Keep the
+        // completion fences until it is finished, and suppress even a lock request that arrived
+        // during conversion before the actual lock task can acquire this commit guard.
+        let value = convert(response)?;
+        if view_request
+            .as_ref()
+            .is_some_and(|request| !request.is_current())
+        {
+            return Err("Studio view request was superseded; refresh".into());
+        }
+        if preview_delivery
             .as_ref()
             .is_some_and(|delivery| !delivery.is_current())
-        || cancellation.is_cancelled()
-        || state.session_lock_requested.load(Ordering::Acquire)
-        || state.ui_session_generation.load(Ordering::Acquire) != generation
-    {
-        return Err("Studio response belongs to a locked or changed UI session".into());
+            || inspection_delivery
+                .as_ref()
+                .is_some_and(|delivery| !delivery.is_current())
+            || cancellation.is_cancelled()
+            || state.session_lock_requested.load(Ordering::Acquire)
+            || state.ui_session_generation.load(Ordering::Acquire) != generation
+        {
+            return Err("Studio response belongs to a locked or changed UI session".into());
+        }
+        Ok(value)
     }
-    Ok(value)
+    .await;
+    if durable_write {
+        return delivered.map_err(|error| format!("{UNDELIVERED_ARCHIVE} ({error})"));
+    }
+    delivered
 }
+
+/// What a caller is told when an archive was written but its result could not be shown. Prefixed
+/// like every other uncertain outcome, so a renderer that already handles `outcome=uncertain;`
+/// handles this, and the exact retry it suggests is safe: the archive writer treats an identical
+/// payload as a sync-only repair.
+pub(crate) const UNDELIVERED_ARCHIVE: &str = "outcome=uncertain; the archive was written, but its \
+     result could not be delivered; read the archive to confirm it, or retry exactly";
 
 fn authorize(
     state: &AppState,

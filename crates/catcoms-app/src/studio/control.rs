@@ -200,6 +200,10 @@ pub struct StudioOverlayLifecycle {
     /// A transfer is staged on the live branch. D2 refuses a disposal while this holds, and it is
     /// here because deciding that without paying for an inspection is what this action is for.
     pub prepared: bool,
+    /// P2: whether the automatic handoff would take the live branch now, and if not, why. `None`
+    /// exactly when `branch` is. Structural: `NotReplayable` is only known after a rebuild, so it
+    /// appears on an inspection and never here.
+    pub eligibility: Option<types::StudioOverlayEligibility>,
     /// The preserved archive, if this document has one. It is evidence for the branch it names,
     /// which need not be the live one.
     pub archive: Option<StudioLifecycleArchive>,
@@ -330,19 +334,36 @@ impl std::fmt::Debug for StudioControlResponse {
 }
 impl StudioControlResponse {
     /// The delivery native must hold through conversion and recheck after it, for every variant
-    /// that has one. Asked uniformly so a new delivered variant cannot be added here and forgotten
-    /// at the native boundary.
+    /// that has one. The actor and native both ask the response, so the list lives here once.
+    ///
+    /// Every variant is named, with no wildcard, so adding a response is a compile error here until
+    /// someone decides whether it is delivered. The safety net behind that is `StudioDelivered`
+    /// itself: its value is unreadable until a delivery has begun, so a delivered variant missed
+    /// here would be loudly unreadable rather than silently unfenced.
     pub fn delivery(&self) -> Option<StudioInspectionDelivery> {
         match self {
             Self::OverlayInspection(inspection) => inspection.delivery_if_begun(),
             Self::OverlayCopyPreview(delivered) => delivered.delivery(),
             Self::OverlayArchived(delivered) => delivered.delivery(),
             Self::OverlayExport(delivered) => delivered.delivery(),
-            _ => None,
+            Self::OverlayPreparation(_)
+            | Self::OverlayLifecycle(_)
+            | Self::OverlayCopyPreparation(_)
+            | Self::OverlayArchive { .. }
+            | Self::OverlayArchiveReleased
+            | Self::OverlayDisposed(_)
+            | Self::PointerRestored { .. }
+            | Self::Preview(_)
+            | Self::Applied { .. }
+            | Self::List(_)
+            | Self::Version(_)
+            | Self::Export { .. }
+            | Self::Acknowledged(_) => None,
         }
     }
     /// The actor's half: begin the bounded handoff for any variant that carries a job's
-    /// preparation slot. `None` for every other variant, which is what they had before.
+    /// preparation slot. `None` for every other variant, which is what they had before. Named
+    /// exhaustively for the same reason as [`Self::delivery`].
     pub(crate) fn begin_delivery(
         &mut self,
         clock: std::sync::Arc<dyn catcoms_rt::Clock + Send>,
@@ -352,7 +373,19 @@ impl StudioControlResponse {
             Self::OverlayCopyPreview(delivered) => Some(delivered.begin_delivery(clock)),
             Self::OverlayArchived(delivered) => Some(delivered.begin_delivery(clock)),
             Self::OverlayExport(delivered) => Some(delivered.begin_delivery(clock)),
-            _ => None,
+            Self::OverlayPreparation(_)
+            | Self::OverlayLifecycle(_)
+            | Self::OverlayCopyPreparation(_)
+            | Self::OverlayArchive { .. }
+            | Self::OverlayArchiveReleased
+            | Self::OverlayDisposed(_)
+            | Self::PointerRestored { .. }
+            | Self::Preview(_)
+            | Self::Applied { .. }
+            | Self::List(_)
+            | Self::Version(_)
+            | Self::Export { .. }
+            | Self::Acknowledged(_) => None,
         }
     }
 }
@@ -449,9 +482,15 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
                     .map(StudioControlResponse::OverlayPreparation)
             }
             StudioControlAction::FinishOverlayInspection(prepared) => {
-                return self
-                    .finish_studio_inspection(store, server, target, *prepared)
-                    .map(StudioControlResponse::OverlayInspection)
+                let inspection = self.finish_studio_inspection(store, server, target, *prepared)?;
+                // P2, in the same custody visit that just proved the read current.
+                let tenure = require_owner_tenure(self.observed_owner_tenure()).ok();
+                let eligibility = self.sync.with_registry_context(|group, device, _, _| {
+                    store.studio_overlay_eligibility(server, group, target, device, tenure)
+                })?;
+                return Ok(StudioControlResponse::OverlayInspection(
+                    inspection.with_eligibility(eligibility),
+                ));
             }
             // Archiving takes the same two visits as inspection and the same capture; only the
             // rebuild differs, which is why the first visit is literally the inspection's.
@@ -514,6 +553,11 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
             }
             action => StudioControlRequest { target, action },
         };
+        // Read before the registry context borrows `self.sync`. The AUTHORING value, through the
+        // same exhaustive `require` new authoring uses: `Imported` and `Unknown` are both `None`,
+        // which is how the lifecycle can say `TenureUnknown` for exactly the cases the handoff
+        // would refuse. Only the lifecycle arm reads it.
+        let authoring_tenure = require_owner_tenure(self.observed_owner_tenure()).ok();
         self.sync
             .with_registry_context(|group, device, clock, rng| {
                 if group.member_signature_key(&device.device_id()).as_deref()
@@ -567,11 +611,19 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
                                 generation: archive.generation(),
                                 replayable: archive.replayable(),
                             });
+                        let eligibility = store.studio_overlay_eligibility(
+                            server,
+                            group,
+                            target,
+                            device,
+                            authoring_tenure,
+                        )?;
                         return Ok(StudioControlResponse::OverlayLifecycle(Box::new(
                             StudioOverlayLifecycle {
                                 target,
                                 branch,
                                 prepared: metadata.is_some_and(|m| m.is_prepared()),
+                                eligibility,
                                 archive,
                                 disposed: metadata.and_then(|m| m.disposed()).map(|d| {
                                     StudioLifecycleDisposal {

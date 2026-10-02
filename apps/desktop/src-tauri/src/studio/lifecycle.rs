@@ -405,12 +405,15 @@ fn with_payload(mut value: Value, archive: &StudioDraftArchive) -> Result<Value,
 /// would tell the user their current work is preserved when the archive is evidence for work they
 /// already disposed of - and the preserving disposal they then ask for is refused at D4.
 fn lifecycle_value(v: &StudioOverlayLifecycle) -> Result<Value, String> {
+    let (eligibility, manual_reason) = eligibility_fields(v.eligibility);
     Ok(json!({"v":1,"kind":"overlayLifecycle",
         "channel":channel_of(v.target),"object":object_of(v.target),
         "branch":v.branch.as_ref().map(|b| json!({"branch":hex::encode(b.id),
             "content":hex::encode(b.content),"generation":b.generation.to_string(),
             "accepted":b.accepted})),
         "prepared":v.prepared,
+        "eligibility":eligibility,
+        "manualReason":manual_reason,
         "archive":v.archive.as_ref().map(|a| json!({"archive":hex::encode(a.id),
             "branch":hex::encode(a.branch),"generation":a.generation.to_string(),
             "replayable":a.replayable})),
@@ -421,6 +424,42 @@ fn lifecycle_value(v: &StudioOverlayLifecycle) -> Result<Value, String> {
             value
         }),
         "transferred":v.transferred}))
+}
+
+/// P2's two fields, design section 11's `eligibility` and `manualReason`, from one classification.
+///
+/// One function for both reads, so the lifecycle row and the inspection can never disagree about
+/// what a reason is called. `null` for both when no branch is live. The reason names are section
+/// 11's, plus `sourceUnreadable`, which the backend adds rather than failing the whole read.
+pub(super) fn eligibility_fields(
+    eligibility: Option<catcoms_app::studio::types::StudioOverlayEligibility>,
+) -> (Value, Value) {
+    use catcoms_app::studio::types::{
+        StudioOverlayEligibility as E, StudioOverlayManualReason as R,
+    };
+    match eligibility {
+        None => (Value::Null, Value::Null),
+        Some(E::Transferable) => ("transferable".into(), Value::Null),
+        Some(E::Manual(reason)) => (
+            "manual".into(),
+            match reason {
+                R::NotReplayable => "notReplayable",
+                R::Unconfirmed => "unconfirmed",
+                R::NotCurrentAuthor => "notCurrentAuthor",
+                R::SourceMissing => "sourceMissing",
+                R::SourceUnreadable => "sourceUnreadable",
+                R::Fault => "fault",
+                R::SourceRewound => "sourceRewound",
+                R::SourceNotClosing => "sourceNotClosing",
+                R::SuccessorMissing => "successorMissing",
+                R::ReceiptChanged => "receiptChanged",
+                R::SourceReplaced => "sourceReplaced",
+                R::SuccessorNotPristine => "successorNotPristine",
+                R::TenureUnknown => "tenureUnknown",
+            }
+            .into(),
+        ),
+    }
 }
 
 fn disposal_value(v: &StudioOverlayDisposal) -> Result<Value, String> {

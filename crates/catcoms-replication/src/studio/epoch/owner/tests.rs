@@ -5,6 +5,7 @@ use rand_core::SeedableRng;
 
 mod archive;
 mod disposal;
+mod eligibility;
 mod frozen;
 mod handoff;
 mod lifecycle;

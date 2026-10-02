@@ -34,14 +34,13 @@ struct Retained {
     value: StudioInspectedDraft,
     _permit: OwnedSemaphorePermit,
 }
-/// What a read may say about a retained draft: design section 11's `OverlayInspection`, minus the
-/// fields that belong to another prerequisite.
+/// What a read may say about a retained draft: design section 11's `OverlayInspection`.
 ///
-/// `eligibility`, `manualReason` and `unconfirmedState` are **not** here, and not by oversight:
-/// they are P2's mapping of `StudioOverlayHold` to user-visible states, and that type does not
-/// exist anywhere in the tree yet. `archived` is not here either, because the inspection capture
-/// deliberately holds one record and the archive is a different one; `studio_overlay_lifecycle`
-/// answers that question from the record that actually knows.
+/// `eligibility` carries P2's `eligibility` and `manualReason` together. `unconfirmedState` is not
+/// here because no unconfirmed branch can exist yet: preview-local work is not implemented, and a
+/// field that is always null would read as an answer. `archived` is not here either, because the
+/// inspection capture deliberately holds one record and the archive is a different one;
+/// `studio_overlay_lifecycle` answers that question from the record that actually knows.
 ///
 /// A struct rather than a widening tuple because these are eight values of four types, and a
 /// caller destructuring them positionally would be one reordering away from reporting a branch id
@@ -66,12 +65,17 @@ pub struct StudioOverlayInspected<'a> {
     /// Whether typed reconstruction succeeded. `false` with a branch present is the shape design
     /// finding 5 asks for: every structural field, and a null typed projection.
     pub replayable: bool,
+    /// P2: whether the automatic handoff would take this branch now, and if not, why. `None` when
+    /// no branch is live. A branch that did not reconstruct is `Manual(NotReplayable)` whatever
+    /// else holds, because that is the one condition no amount of waiting changes.
+    pub eligibility: Option<types::StudioOverlayEligibility>,
 }
 
 #[derive(Debug)]
 pub struct StudioOverlayInspection {
     read: Arc<Retained>,
     delivery: Option<StudioInspectionDelivery>,
+    eligibility: Option<types::StudioOverlayEligibility>,
 }
 #[derive(Clone, Debug)]
 pub struct StudioInspectionDelivery(Arc<Delivery>);
@@ -248,7 +252,24 @@ impl StudioOverlayInspection {
             provenance: value.provenance,
             disposed: value.disposed.as_ref(),
             replayable: value.replayable.is_ok(),
+            eligibility: self.eligibility,
         }))
+    }
+    /// Attach P2's classification, computed under the same custody visit that finished this read.
+    ///
+    /// Separate from `finish_studio_inspection` because export and archive finish through it too
+    /// and do not need it; the source load it costs is paid only by a read that will show it.
+    pub(crate) fn with_eligibility(
+        mut self,
+        eligibility: Option<types::StudioOverlayEligibility>,
+    ) -> Self {
+        self.eligibility = match (eligibility, &self.read.value.replayable) {
+            (Some(_), Err(_)) => Some(types::StudioOverlayEligibility::Manual(
+                types::StudioOverlayManualReason::NotReplayable,
+            )),
+            (eligibility, _) => eligibility,
+        };
+        self
     }
     /// The archive this inspection built, for the durable write in the same custody visit.
     ///
@@ -372,6 +393,7 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
         Ok(StudioOverlayInspection {
             read: prepared.read,
             delivery: None,
+            eligibility: None,
         })
     }
 }
