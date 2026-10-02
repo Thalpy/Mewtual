@@ -390,6 +390,11 @@ impl StudioControlResponse {
     }
 }
 
+/// What a control reports when the actor drops its reply after the lease moved. Public because,
+/// once the lease has moved, the visit may already have written: a caller of a WRITING control has
+/// to treat this as uncertain rather than as a refusal, and needs to recognise it to do so.
+pub const CONTROL_REPLY_DROPPED: &str = "Studio control expired, cancelled or server stopped";
+
 #[derive(Debug)]
 pub struct StudioControlReady {
     pub(crate) lease: oneshot::Sender<StudioVaultLease>,
@@ -402,7 +407,7 @@ impl StudioControlReady {
             .map_err(|_| "Studio control expired".to_string())?;
         self.result
             .await
-            .unwrap_or_else(|_| Err("Studio control expired, cancelled or server stopped".into()))
+            .unwrap_or_else(|_| Err(CONTROL_REPLY_DROPPED.into()))
     }
 }
 
@@ -443,7 +448,14 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
             store.write_studio_draft_archive(server, &logical, archive, rng, &mut budget)?;
             let (archive, id, physical_bytes) = store
                 .read_studio_draft_archive_for_app(server, &logical)?
-                .ok_or_else(|| invalid("the draft archive did not survive its own write"))?;
+                // After the write: the archive may well be on disk, so this is uncertain, not a
+                // refusal. Marked so native reports it as one and the caller re-reads.
+                .ok_or_else(|| {
+                    invalid(format!(
+                        "{}: the draft archive was written but could not be read back",
+                        crate::UNCERTAIN_OUTCOME
+                    ))
+                })?;
             Ok(StudioControlResponse::OverlayArchived(Box::new(
                 StudioDelivered::new(
                     StudioOverlayArchived {

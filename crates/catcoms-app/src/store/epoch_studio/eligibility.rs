@@ -4,24 +4,36 @@
 //! and, when that is "refuse", why, so a caller can show a user the manual path and the reason
 //! instead of a bare branch and an error string later. The handoff re-derives everything under
 //! custody when it actually runs; nothing here is consulted by it or mints anything for it.
+//!
+//! **Cheap by construction.** The lifecycle row runs under the actor's custody on every read, so
+//! nothing here restores a source: each source record is unsealed and its header read, and no
+//! operation is decoded or replayed (`StudioEpoch::overlay_successor_hold_in_vault`,
+//! `vault_holds_work`). The branch itself is read structurally, as the lifecycle already did.
 use super::*;
 use catcoms_replication::studio::{
-    StudioOverlayEligibility, StudioOverlayManualReason as R, StudioOverlayProvenance,
+    IndexOp, StudioEpoch, StudioOverlayEligibility, StudioOverlayManualReason as R,
+    StudioOverlayProvenance,
 };
+use catcoms_replication::ReplError;
 
 impl ServerStore {
     /// `None` when the document has no live branch. Otherwise the most permanent applicable reason
-    /// first: provenance, then authorship, then the installed source against the branch's basis
-    /// (`StudioEpoch::overlay_successor_hold`, pinned to the handoff's own precondition), then the
-    /// tenure the handoff would sign under, then whether the branch's receipt is still the current
-    /// owner's under it.
+    /// first: provenance, authorship, the installed source against the branch's basis, the sources
+    /// an Index branch's entries name, the tenure the handoff would sign under, and whether the
+    /// branch's receipt is still the current owner's under it.
+    ///
+    /// Each refusal the automatic handoff makes from DURABLE state has a reason here, in the same
+    /// terms: the successor precondition (`check_overlay_successor`), H1's Index object check
+    /// (`check_index_object_sources`) and the live authority (`handoff_authority`). Transient
+    /// refusals - capacity, a concurrent job, a changed record mid-flight - are not classified;
+    /// they say "retry", not "act".
     ///
     /// `tenure` is the AUTHORING value: `Some` only for a fully observed tenure. `Imported` and
     /// `Unknown` both read as `TenureUnknown`, which is the handoff's own refusal for them.
     ///
-    /// A `Prepared` branch is classified like any other: its successor and authority are what its
-    /// resolution needs too. Whether it is in flight is reported separately (`prepared`), and the
-    /// two are deliberately not merged.
+    /// Errors only for a request this record does not answer (another target); a source that is
+    /// missing, unreadable or for another branch is a REASON, so the lifecycle row still reports
+    /// the branch a user needs to export, archive or dispose of.
     pub(crate) fn studio_overlay_eligibility(
         &self,
         server: u64,
@@ -36,6 +48,9 @@ impl ServerStore {
         let Some(metadata) = state.handoff_metadata() else {
             return Ok(None);
         };
+        // A Flipnote's logical key omits its channel, so the same record answers for every
+        // channel label of one object id. The handoff refuses the wrong one; so does this.
+        metadata.check_target(target).map_err(invalid)?;
         let Some(overlay) = metadata.overlay() else {
             return Ok(None);
         };
@@ -45,30 +60,68 @@ impl ServerStore {
         if overlay.author() != device.device_id() {
             return manual(R::NotCurrentAuthor);
         }
-        // A source that fails to load or does not pair with this branch is a reason, not an error:
-        // the lifecycle read must still report the branch, since export, archive and disposal do
-        // not need the source and are exactly what a user in this state reaches for.
-        let mut source = match self.load_studio_epoch(server, group, target, device) {
-            Ok(Some(source)) => source,
+        let owner = group.designated_committer();
+        match self.with_vault_source(server, group, target, |bytes| {
+            StudioEpoch::overlay_successor_hold_in_vault(bytes, target, owner, overlay)
+        }) {
             Ok(None) => return manual(R::SourceMissing),
+            Ok(Some(Some(reason))) => return manual(reason),
+            Ok(Some(None)) => {}
             Err(_) => return manual(R::SourceUnreadable),
-        };
-        match source.unit.overlay_successor_hold(overlay, &state.ledger) {
-            Ok(Some(reason)) => return manual(reason),
-            Ok(None) => {}
-            Err(_) => return manual(R::SourceUnreadable),
+        }
+        if let StudioTarget::Index { channel } = target {
+            for (_, intent) in state.pending().filter(|(id, _)| state.is_overlay(id)) {
+                let Ok(op) = IndexOp::decode_domain(&document, &intent.operation, &intent.author)
+                else {
+                    // The branch holds an entry it cannot decode, so it cannot be replayed into
+                    // the successor either; the handoff refuses the same way.
+                    return manual(R::NotReplayable);
+                };
+                if let IndexOp::PutObject { object, .. } = op {
+                    let flipnote = StudioTarget::Flipnote { channel, object };
+                    let holds_work = self.with_vault_source(server, group, flipnote, |bytes| {
+                        StudioEpoch::vault_holds_work(bytes, flipnote)
+                    });
+                    if !matches!(holds_work, Ok(Some(true))) {
+                        return manual(R::ObjectMissing);
+                    }
+                }
+            }
         }
         let Some(tenure) = tenure else {
             return manual(R::TenureUnknown);
         };
-        // The handoff's live-authority mint, run for its verdict only and then dropped. It checks
-        // that this device is still a member, and that the branch's receipt is the current
-        // owner's under the observed tenure; the earlier checks have already covered authorship.
-        // A Prepared branch has already minted one, and the mint refuses to mint twice, so its
-        // in-flight resolution is not second-guessed here.
-        if !state.handoff_prepared() && metadata.handoff_authority(device, group, tenure).is_err() {
+        // The receipt's owner must still be the current one under the observed tenure: the live
+        // half of `check_live`, asked directly so a Prepared branch is held to it as well. For an
+        // active branch the authority mint adds membership and runs for its verdict only; a
+        // Prepared branch has already minted one, and the mint refuses to mint twice.
+        if !overlay.receipt_owner_is_current(group, tenure)
+            || (!state.handoff_prepared()
+                && metadata.handoff_authority(device, group, tenure).is_err())
+        {
             return manual(R::ReceiptChanged);
         }
         Ok(Some(StudioOverlayEligibility::Transferable))
+    }
+
+    /// Run `read` over `target`'s authenticated vault source bytes, unsealed but not restored.
+    /// `None` when the document has no source record.
+    fn with_vault_source<T>(
+        &self,
+        server: u64,
+        group: &ServerGroup,
+        target: StudioTarget,
+        read: impl FnOnce(&[u8]) -> Result<T, ReplError>,
+    ) -> Result<Option<T>, AppError> {
+        let logical = target.document(&group.group_id()).map_err(invalid)?;
+        let scope = scope_bytes(server, &logical)?;
+        let Some(record) = self.read_studio_record(&scope)? else {
+            return Ok(None);
+        };
+        let (stored, snapshot) = decode_record(&record.plain, &scope, &logical)?;
+        if stored != target {
+            return Err(invalid("wrong object channel"));
+        }
+        read(snapshot).map(Some).map_err(invalid)
     }
 }

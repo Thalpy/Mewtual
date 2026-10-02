@@ -156,6 +156,22 @@ async fn a_removed_owner_returns_as_a_new_device_with_a_new_tenure_everywhere() 
     // own claim, which is exactly the case a stale receipt would try to exploit.
     let fresh = sign(&doc, start, &returning.device);
     let replayed = sign(&doc, start, &nodes[0].device);
+    // The tenure dimension on its own: the RIGHT key claiming a wrong start. Without these, every
+    // refusal below would be explained by A's old key alone, and a witness holding the wrong start
+    // would go unnoticed by the receipt checks.
+    for wrong in [0, b_start] {
+        let misdated = sign(&doc, wrong, &returning.device);
+        for (who, group) in [
+            ("A'", &returning.group),
+            ("B", &nodes[1].group),
+            ("C", &nodes[2].group),
+        ] {
+            assert!(
+                misdated.verify_current_owner(group, start).is_err(),
+                "{who} must refuse A' claiming the tenure that began at {wrong}"
+            );
+        }
+    }
     let witnesses = [
         ("A'", &returning.group, Some(start)),
         ("B", &nodes[1].group, Some(start)),

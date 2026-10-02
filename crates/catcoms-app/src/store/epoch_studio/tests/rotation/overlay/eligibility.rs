@@ -42,10 +42,16 @@ fn the_lifecycle_classification_names_each_store_level_reason() {
     );
 
     install(&f, &mut store, &close);
+    let restores = crate::store::epoch_studio::source::studio_full_restores_for_test();
     assert_eq!(
         classify(&f, &store, Some(0)),
         Some(E::Transferable),
         "the pristine successor, the author and the receipt's own tenure: the handoff would run"
+    );
+    assert_eq!(
+        crate::store::epoch_studio::source::studio_full_restores_for_test(),
+        restores,
+        "the lifecycle row runs under custody on every read and must not restore the source"
     );
     assert_eq!(
         classify(&f, &store, None),
@@ -75,4 +81,89 @@ fn the_lifecycle_classification_names_each_store_level_reason() {
         classify(&f, &store, Some(0)),
         Some(E::Manual(R::SourceMissing))
     );
+}
+
+/// The classification and the REAL handoff agree, in both directions, on the one durable refusal
+/// the successor precondition does not cover: an Index entry naming a Flipnote with no source.
+///
+/// A review found the classifier calling such a branch `Transferable` while H1 refused it with
+/// "overlay references an unavailable Flipnote", so a user would be told to wait for a transfer
+/// that never comes. Here the handoff is run, not reasoned about: `ObjectMissing` while it
+/// refuses, then `Transferable` once the Flipnote exists, and the handoff then succeeds.
+#[test]
+fn an_index_entry_naming_a_missing_flipnote_is_manual_exactly_while_the_handoff_refuses_it() {
+    let root = tempfile::tempdir().unwrap();
+    let f = Fixture::new(false);
+    let mut store = open(root.path());
+    let (close, basis) = closing(&f, &mut store);
+    let object = [15; 16];
+    let op = f.domain(
+        IndexOp::PutObject {
+            object,
+            kind: StudioKind::Flipnote,
+            title: "saved branch".into(),
+            created_by: f.device.device_id(),
+            ts: 123,
+            expiry: StudioExpiry::Never,
+        }
+        .encode()
+        .unwrap(),
+        55,
+    );
+    save(&f, &mut store, &close, basis.fingerprint(), op, 123);
+    install(&f, &mut store, &close);
+    let handoff = |store: &mut ServerStore| {
+        let mut b = budget(store, &f);
+        store.handoff_studio_overlay(
+            SERVER,
+            &f.group,
+            f.target,
+            &f.device,
+            basis.fingerprint(),
+            Some(0),
+            &mut rng(),
+            &mut b,
+        )
+    };
+
+    assert_eq!(
+        classify(&f, &store, Some(0)),
+        Some(E::Manual(R::ObjectMissing))
+    );
+    let refused = handoff(&mut store).unwrap_err().to_string();
+    assert!(
+        refused.contains("unavailable Flipnote"),
+        "the handoff must refuse for the reason the classifier named, got: {refused}"
+    );
+
+    // Create the Flipnote the entry names, and the two must agree the other way.
+    let flipnote = StudioTarget::Flipnote {
+        channel: f.target.channel(),
+        object,
+    };
+    let logical = flipnote.document(&f.group.group_id()).unwrap();
+    let edit = DomainOp {
+        doc_type: logical.doc_type,
+        logical_key: logical.logical_key.clone(),
+        nonce: [55; 16],
+        body: FlipnoteOp::SetHeader(FlipnoteHeader::Title("saved branch".into()))
+            .encode()
+            .unwrap(),
+    };
+    let mut b = budget(&mut store, &f);
+    store
+        .edit_studio_epoch(
+            SERVER,
+            &f.group,
+            flipnote,
+            epoch_zero_id(logical.doc_type, &logical.logical_key),
+            &f.device,
+            edit,
+            123,
+            &mut rng(),
+            &mut b,
+        )
+        .unwrap();
+    assert_eq!(classify(&f, &store, Some(0)), Some(E::Transferable));
+    handoff(&mut store).expect("a branch classified transferable must transfer");
 }

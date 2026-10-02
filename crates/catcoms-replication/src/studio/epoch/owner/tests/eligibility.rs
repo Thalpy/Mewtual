@@ -11,8 +11,15 @@ use super::*;
 use crate::studio::{StudioOverlayManualReason as R, StudioOverlayState};
 use crate::IntentLedger;
 
+/// Classify three ways and demand they agree: the handoff's own check, the full hold over the
+/// restored source, and the structural hold over the vault bytes that production actually calls.
+///
+/// The structural form does not check authorship (the record does not store the local actor; the
+/// store compares author and device first), so for `NotCurrentAuthor` only the first two are held
+/// together.
 fn classify(
     source: &mut StudioEpoch,
+    group: &ServerGroup,
     metadata: &StudioOverlayState,
     ledger: &IntentLedger,
 ) -> Option<R> {
@@ -23,6 +30,19 @@ fn classify(
         source.check_overlay_successor(overlay, ledger).is_ok(),
         "the hold ({hold:?}) must be None exactly when the handoff precondition accepts"
     );
+    if hold != Some(R::NotCurrentAuthor) {
+        let structural = StudioEpoch::overlay_successor_hold_in_vault(
+            &source.snapshot().unwrap(),
+            source.target,
+            group.designated_committer(),
+            overlay,
+        )
+        .unwrap();
+        assert_eq!(
+            structural, hold,
+            "the structural hold production calls must name the same reason as the full one"
+        );
+    }
     hold
 }
 
@@ -32,14 +52,14 @@ fn a_pristine_successor_is_transferable_and_anything_else_names_why_not() {
     let mut f = Fixture::new(true);
     let (metadata, ledger, _, _) = sealed_branch(&mut f, 1);
     assert_eq!(
-        classify(&mut f.source, &metadata, &ledger),
+        classify(&mut f.source, &f.group, &metadata, &ledger),
         Some(R::SuccessorMissing)
     );
 
     // The installed, untouched successor: the one state the handoff accepts.
     let mut f = Fixture::new(true);
     let (metadata, ledger, _) = transferable_branch(&mut f, 2);
-    assert_eq!(classify(&mut f.source, &metadata, &ledger), None);
+    assert_eq!(classify(&mut f.source, &f.group, &metadata, &ledger), None);
 
     // Another device's view of the same source: only the branch's author may transfer it.
     let mut other = StudioEpoch::restore(
@@ -50,14 +70,28 @@ fn a_pristine_successor_is_transferable_and_anything_else_names_why_not() {
     )
     .unwrap();
     assert_eq!(
-        classify(&mut other, &metadata, &ledger),
+        classify(&mut other, &f.group, &metadata, &ledger),
         Some(R::NotCurrentAuthor)
+    );
+
+    // The same pristine successor, but someone other than the receipt's owner now holds office:
+    // the branch's receipt is no longer the current owner's. A single-member fixture cannot change
+    // its committer, so the live owner is supplied directly, as the store supplies it.
+    assert_eq!(
+        StudioEpoch::overlay_successor_hold_in_vault(
+            &f.source.snapshot().unwrap(),
+            f.source.target,
+            Some(MlsDevice::generate().unwrap().device_id()),
+            metadata.overlay().unwrap(),
+        )
+        .unwrap(),
+        Some(R::ReceiptChanged)
     );
 
     // Work landed on the successor: no longer the base this branch was built on.
     f.edit(f.title_body("someone else's edit on the successor"));
     assert_eq!(
-        classify(&mut f.source, &metadata, &ledger),
+        classify(&mut f.source, &f.group, &metadata, &ledger),
         Some(R::SuccessorNotPristine)
     );
 }
@@ -73,7 +107,7 @@ fn a_source_that_moved_past_the_successor_is_replaced() {
     f.source = f.source.checkpoint_successor(&plan, &f.group, 0).unwrap();
     assert_eq!(f.source.epoch(), 2);
     assert_eq!(
-        classify(&mut f.source, &metadata, &ledger),
+        classify(&mut f.source, &f.group, &metadata, &ledger),
         Some(R::SourceReplaced)
     );
 }
@@ -108,7 +142,7 @@ fn a_source_at_the_closed_epoch_that_is_not_closing_is_named_as_such() {
         metadata.overlay().unwrap().receipt().closed_epoch
     );
     assert_eq!(
-        classify(&mut unsealed, &metadata, &ledger),
+        classify(&mut unsealed, &f.group, &metadata, &ledger),
         Some(R::SourceNotClosing)
     );
 }
@@ -144,7 +178,7 @@ fn a_source_from_before_the_closed_epoch_is_rewound() {
 
     assert_eq!(early.epoch(), 0);
     assert_eq!(
-        classify(&mut early, &metadata, &ledger),
+        classify(&mut early, &f.group, &metadata, &ledger),
         Some(R::SourceRewound)
     );
 }

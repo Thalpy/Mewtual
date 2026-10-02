@@ -126,6 +126,8 @@ async fn two_visit_archive(
 ) -> Result<Value, String> {
     let context = InvokeContext::new(state, server, Some(target)).await?;
     let mismatched = || format!("mismatched {what} response");
+    // Decided from the first visit's action before it moves: only archiving writes.
+    let writes = matches!(begin, Action::ArchiveOverlay);
     let job = invoke_with_context(
         state,
         &context,
@@ -147,7 +149,12 @@ async fn two_visit_archive(
         _ = cancellation.cancelled() => return Err(format!("{what} cancelled")),
         result = job.rebuild_for_archive() => result.map_err(|e| e.to_string())?,
     };
-    invoke_with_context(
+    // An archive's finish visit WRITES. `invoke_with_context` already reports a written archive
+    // whose result cannot be delivered as uncertain; these are the two ways the visit can fail
+    // after its write without producing a result at all: the store says so with the uncertain
+    // marker, or the actor dropped the reply. Neither is a refusal, and neither must read as one.
+    // Every other error is a pre-write refusal and keeps its plain text.
+    let result = invoke_with_context(
         state,
         &context,
         InvokeRequest::Control(StudioControlRequest {
@@ -159,7 +166,28 @@ async fn two_visit_archive(
             _ => Err(mismatched()),
         },
     )
-    .await
+    .await;
+    if writes {
+        result.map_err(archive_failure)
+    } else {
+        result
+    }
+}
+
+/// How an archive's finish visit reports a failure. Uncertain when it may have followed the write:
+/// the store marked it so, or the actor dropped the reply after the lease moved. Everything else
+/// is a pre-write refusal and keeps its plain text; an already-classified uncertain outcome passes
+/// through unchanged.
+fn archive_failure(error: String) -> String {
+    if error.starts_with("outcome=uncertain; ") {
+        error
+    } else if error.contains(catcoms_app::UNCERTAIN_OUTCOME)
+        || error == catcoms_app::studio::CONTROL_REPLY_DROPPED
+    {
+        format!("{} ({error})", super::UNDELIVERED_ARCHIVE)
+    } else {
+        error
+    }
 }
 
 /// Destroy the preserved archive. `archive` is the id from the read that populated the dialog, so a
@@ -455,6 +483,7 @@ pub(super) fn eligibility_fields(
                 R::ReceiptChanged => "receiptChanged",
                 R::SourceReplaced => "sourceReplaced",
                 R::SuccessorNotPristine => "successorNotPristine",
+                R::ObjectMissing => "objectMissing",
                 R::TenureUnknown => "tenureUnknown",
             }
             .into(),

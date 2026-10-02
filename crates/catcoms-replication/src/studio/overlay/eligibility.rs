@@ -54,6 +54,11 @@ pub enum StudioOverlayManualReason {
     SourceReplaced,
     /// The successor already holds other work, is adopting, or is no longer Open.
     SuccessorNotPristine,
+    /// An Index entry names a Flipnote whose source is absent or empty here. The handoff refuses
+    /// to publish an Index entry pointing at nothing (`check_index_object_sources`). Not in design
+    /// section 11's list; added so the classifier names that refusal rather than calling the
+    /// branch transferable.
+    ObjectMissing,
     /// This device cannot presently prove the current owner's tenure. Nothing is wrong with the
     /// work; a handoff signs under that tenure and must not guess it.
     TenureUnknown,

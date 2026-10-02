@@ -1005,6 +1005,15 @@ manual path remains available; the branch, its envelopes, its order and its prot
 retained across restart and any refusal. `check_basis_floor` remains the independent second fence
 after a rewind. Agent 1's `Hold` outcomes map onto these reasons, satisfying its prerequisite P2.
 
+> **As implemented, 2026-10-02** (`StudioOverlayManualReason`). `CloseMissing` is dropped: a
+> Closing branch carries its receipt and nothing in the handoff precondition consults the close
+> record separately, so no durable state produces it. Three are added: `SourceUnreadable` (a source
+> record that fails to read or pair, reported rather than failing the whole lifecycle read),
+> `ObjectMissing` (an Index entry naming a Flipnote with no source, which H1 refuses), and
+> `NotReplayable` (inspection only, since only a rebuild knows). The classification reads each
+> source record's header and never restores it, so the lifecycle row stays cheap under custody.
+> Agent 1's `StudioOverlayHold` was not built; its runtime refusals are still strings.
+
 - **S3, corrected (finding 5).** A branch that is authenticated, canonical and structurally
   consistent but fails typed reconstruction is classified `Manual(NotReplayable)`. Export, archiving
   and **`Preserved` disposal all remain available**, because none of them requires reconstruction
@@ -1484,10 +1493,12 @@ type OverlayInspection =
       basis: Hex64; branch: Hex64; generation: Decimal; accepted: number;
       mode: "preserved" | "discarded"; archive: Hex64 | null };
 
+// As implemented 2026-10-02; see section 7 for the changes from revision 7's list.
 type OverlayManualReason =
-  | "sourceMissing" | "sourceNotClosing" | "sourceReplaced" | "sourceRewound"
-  | "successorNotPristine" | "successorMissing" | "receiptChanged" | "closeMissing"
-  | "tenureUnknown" | "fault" | "notCurrentAuthor" | "unconfirmed" | "notReplayable";
+  | "sourceMissing" | "sourceUnreadable" | "sourceNotClosing" | "sourceReplaced"
+  | "sourceRewound" | "successorNotPristine" | "successorMissing" | "receiptChanged"
+  | "objectMissing" | "tenureUnknown" | "fault" | "notCurrentAuthor" | "unconfirmed"
+  | "notReplayable";
 ```
 
 `replayable: false` carries a null typed projection with every other field present, which is

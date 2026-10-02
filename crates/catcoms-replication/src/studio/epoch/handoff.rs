@@ -5,6 +5,50 @@ use crate::IntentLedger;
 mod preparation;
 pub(in crate::studio) use preparation::PreparedOverlayChanges;
 
+/// The header of a vault source record, read without decoding a single operation.
+///
+/// The same framing `StudioEpoch::snapshot` writes and `restore_scoped` reads, in the same order and
+/// with the same bounds, stopping at the operation count. For classification only: nothing here is
+/// verified against the operations, so it must never stand in for a restore.
+struct VaultShape<'a> {
+    adopting: bool,
+    opening: &'a [u8],
+    seed: &'a [u8],
+    gate: EpochGate,
+    operations: usize,
+}
+impl<'a> VaultShape<'a> {
+    fn read(bytes: &'a [u8], target: StudioTarget) -> Result<Self, ReplError> {
+        if bytes.len() > MAX_STUDIO_EPOCH_SNAPSHOT_BYTES {
+            return Err(ReplError::EpochBound);
+        }
+        let mut d = Decoder::new(bytes);
+        let adopting = match d.get_u8().map_err(|_| ReplError::Malformed)? {
+            1 => false,
+            2 => true,
+            _ => return Err(ReplError::Malformed),
+        };
+        if d.get_bytes().map_err(|_| ReplError::Malformed)? != target.channel() {
+            return Err(ReplError::EpochScope);
+        }
+        let opening = field(&mut d, MAX_RECEIPT_BYTES)?;
+        let seed = field(&mut d, MAX_CHECKPOINT_BYTES)?;
+        field(&mut d, MAX_RECEIPT_BOOK_BYTES)?;
+        let gate = EpochGate::decode(field(&mut d, MAX_EPOCH_GATE_BYTES)?)?;
+        let operations = d.get_u32().map_err(|_| ReplError::Malformed)? as usize;
+        if operations > MAX_EPOCH_OPERATIONS {
+            return Err(ReplError::EpochBound);
+        }
+        Ok(Self {
+            adopting,
+            opening,
+            seed,
+            gate,
+            operations,
+        })
+    }
+}
+
 impl StudioEpoch {
     pub(in crate::studio) fn copy_handoff_source(
         &mut self,
@@ -79,20 +123,99 @@ impl StudioEpoch {
         }
         Ok(kept)
     }
+    /// [`Self::overlay_successor_hold`] over authenticated vault bytes, WITHOUT restoring the source.
+    ///
+    /// What a lifecycle read actually calls. Restoring a source decodes and replays up to the full
+    /// operation log and builds a projection, under the actor's custody, which is exactly what the
+    /// cheap lifecycle row must not cost. Everything the hold compares is in the record's header -
+    /// the adopting flag, the opening receipt, the seed bytes, the gate's epoch and phase, and the
+    /// operation count - so this reads those and nothing else; the operations are never decoded.
+    ///
+    /// Two differences from the full hold, both deliberate:
+    ///
+    /// - **No projection comparison.** With the seed bytes equal and no operation applied, the
+    ///   source's projection is the seed's, so the comparison is implied. The handoff still makes it.
+    /// - **No author check.** The record does not store the local actor; the caller compares the
+    ///   branch's author with the requesting device before calling this.
+    ///
+    /// `owner` is the live designated committer, which is what a restore installs as the gate's
+    /// owner. `studio::epoch::owner::tests::eligibility` holds this, the full hold and the
+    /// handoff's own check together on every state its fixtures reach.
+    pub fn overlay_successor_hold_in_vault(
+        bytes: &[u8],
+        target: StudioTarget,
+        owner: Option<DeviceId>,
+        overlay: &StudioOverlay,
+    ) -> Result<Option<StudioOverlayManualReason>, ReplError> {
+        use StudioOverlayManualReason as R;
+        if overlay.target() != target {
+            return Err(ReplError::EpochScope);
+        }
+        let shape = VaultShape::read(bytes, target)?;
+        let phase = shape.gate.phase();
+        if phase == EpochPhase::Fault {
+            return Ok(Some(R::Fault));
+        }
+        let closed = overlay.receipt().closed_epoch;
+        let successor = closed.checked_add(1).ok_or(ReplError::EpochBound)?;
+        let epoch = shape.gate.epoch();
+        if epoch < closed {
+            return Ok(Some(R::SourceRewound));
+        }
+        if epoch == closed {
+            return Ok(Some(if phase == EpochPhase::Closing {
+                R::SuccessorMissing
+            } else {
+                R::SourceNotClosing
+            }));
+        }
+        if epoch > successor {
+            return Ok(Some(R::SourceReplaced));
+        }
+        let opening = (!shape.opening.is_empty())
+            .then(|| Receipt::decode(shape.opening))
+            .transpose()?;
+        if owner
+            != Some(DeviceId::from_public_key_bytes(
+                &overlay.receipt().owner_public_key,
+            ))
+            || opening.as_ref() != Some(overlay.receipt())
+        {
+            return Ok(Some(R::ReceiptChanged));
+        }
+        if shape.seed != overlay.seed() {
+            return Ok(Some(R::SourceReplaced));
+        }
+        if phase != EpochPhase::Open || shape.adopting || shape.operations != 0 {
+            return Ok(Some(R::SuccessorNotPristine));
+        }
+        Ok(None)
+    }
+
+    /// Whether authenticated vault bytes hold any work: a later epoch or at least one operation.
+    ///
+    /// The structural form of the H1 and H5 Index check, `check_index_object_sources`, which treats
+    /// a source at epoch 0 with no operations exactly like an absent one. Reads the header only.
+    pub fn vault_holds_work(bytes: &[u8], target: StudioTarget) -> Result<bool, ReplError> {
+        let shape = VaultShape::read(bytes, target)?;
+        Ok(shape.gate.epoch() > 0 || shape.operations > 0)
+    }
+
     /// Why this installed source cannot take `overlay` as its handoff successor, or `None` exactly
     /// when [`Self::check_overlay_successor`] would accept it (P2, design section 7).
     ///
     /// A classification over the same conditions as that check, never a second definition of
-    /// them: every comparison below is one the check makes, and
-    /// `the_successor_hold_agrees_with_the_handoff_precondition` holds the two together on every
-    /// state the fixtures can reach. The check stays authoritative; this only names its refusal.
+    /// them: every comparison below is one the check makes. It is the ORACLE for
+    /// [`Self::overlay_successor_hold_in_vault`], which production calls; the eligibility tests
+    /// hold all three together on every state their fixtures reach. The check stays authoritative;
+    /// this only names its refusal.
     ///
     /// Ordered most-permanent first. A faulted, rewound or replaced source is reported as such even
     /// when the successor would also be unpristine, because "wait" is the wrong advice for it.
     ///
-    /// Not free: the final pristine comparison parses the branch's seed, as the check does. It
-    /// replays no branch operation.
-    pub fn overlay_successor_hold(
+    /// Test-only: production classifies from the record header and never restores for it.
+    #[cfg(test)]
+    pub(in crate::studio) fn overlay_successor_hold(
         &mut self,
         overlay: &StudioOverlay,
         ledger: &IntentLedger,

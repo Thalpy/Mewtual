@@ -141,6 +141,33 @@ fn an_uncertain_outcome_is_marked_and_a_plain_refusal_is_not() {
     assert!(classified(Ok(json!({"ok": true}))).is_ok());
 }
 
+/// An archive finish that fails after its write is uncertain, and only then.
+///
+/// The two post-write failures that produce no result at all - the store's own uncertain read-back
+/// and the actor dropping the reply after the lease moved - must tell the caller to re-read. A
+/// pre-write refusal must not be dressed up as one that might have landed, and an outcome that is
+/// already classified passes through unchanged rather than being wrapped twice.
+#[test]
+fn an_archive_failure_is_uncertain_exactly_when_it_may_have_followed_the_write() {
+    let store = format!(
+        "{}: the draft archive was written but could not be read back",
+        catcoms_app::UNCERTAIN_OUTCOME
+    );
+    for post_write in [
+        store,
+        catcoms_app::studio::CONTROL_REPLY_DROPPED.to_string(),
+    ] {
+        assert!(
+            archive_failure(post_write.clone()).starts_with(super::super::UNDELIVERED_ARCHIVE),
+            "a post-write failure must be uncertain: {post_write}"
+        );
+    }
+    let refused = "overlay inspection changed; refresh".to_string();
+    assert_eq!(archive_failure(refused.clone()), refused);
+    let classified = format!("{} (x)", super::super::UNDELIVERED_ARCHIVE);
+    assert_eq!(archive_failure(classified.clone()), classified);
+}
+
 #[test]
 fn a_disposal_payload_must_carry_every_value_the_user_was_shown() {
     let whole = json!({"branch":HEX,"content":HEX,"accepted":1,"mode":{"kind":"preserve"}});
