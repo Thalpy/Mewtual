@@ -193,14 +193,6 @@ impl StudioOverlay {
     pub fn author(&self) -> DeviceId {
         self.base.author
     }
-    /// Whether this branch's receipt is the current owner's under `tenure`: the live half of the
-    /// handoff's authority check, as a predicate for P2's classification. Grants nothing.
-    pub fn receipt_owner_is_current(&self, group: &catcoms_mls::ServerGroup, tenure: u64) -> bool {
-        self.base
-            .receipt
-            .verify_current_owner(group, tenure)
-            .is_ok()
-    }
     pub fn contains(&self, id: &[u8; 32]) -> bool {
         self.entries.iter().any(|e| &e.id == id)
     }

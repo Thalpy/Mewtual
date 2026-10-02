@@ -2,6 +2,7 @@ use super::*;
 use catcoms_replication::studio::{StudioHandoffOutcome, StudioOverlaySave};
 use catcoms_replication::ReplError;
 
+mod classification;
 mod eligibility;
 mod evidence;
 mod fences;

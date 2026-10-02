@@ -269,6 +269,12 @@ async fn invoke_with_context<V>(
 pub(crate) const UNDELIVERED_ARCHIVE: &str = "outcome=uncertain; the archive was written, but its \
      result could not be delivered; read the archive to confirm it, or retry exactly";
 
+/// The weaker form, for an archive finish that failed without producing a result: the store could
+/// not read back what it wrote, or the actor dropped the reply. The second can also happen BEFORE
+/// the write, so this says "may have been", not "was". Same prefix, same safe action.
+pub(crate) const ARCHIVE_MAYBE_WRITTEN: &str = "outcome=uncertain; the archive may have been \
+     written; read the archive to confirm it, or retry exactly";
+
 fn authorize(
     state: &AppState,
     server: u64,

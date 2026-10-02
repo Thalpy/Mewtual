@@ -158,8 +158,8 @@ fn an_archive_failure_is_uncertain_exactly_when_it_may_have_followed_the_write()
         catcoms_app::studio::CONTROL_REPLY_DROPPED.to_string(),
     ] {
         assert!(
-            archive_failure(post_write.clone()).starts_with(super::super::UNDELIVERED_ARCHIVE),
-            "a post-write failure must be uncertain: {post_write}"
+            archive_failure(post_write.clone()).starts_with(super::super::ARCHIVE_MAYBE_WRITTEN),
+            "a failure that may follow the write must be uncertain: {post_write}"
         );
     }
     let refused = "overlay inspection changed; refresh".to_string();

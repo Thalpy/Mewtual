@@ -18,9 +18,10 @@ use catcoms_replication::ReplError;
 
 impl ServerStore {
     /// `None` when the document has no live branch. Otherwise the most permanent applicable reason
-    /// first: provenance, authorship, the installed source against the branch's basis, the sources
-    /// an Index branch's entries name, the tenure the handoff would sign under, and whether the
-    /// branch's receipt is still the current owner's under it.
+    /// first: provenance, authorship, then (for a branch that is not Prepared) the installed source
+    /// against the branch's basis, the sources an Index branch's entries name, the tenure the
+    /// handoff would sign under, and whether the branch's receipt is still the current owner's
+    /// under it.
     ///
     /// Each refusal the automatic handoff makes from DURABLE state has a reason here, in the same
     /// terms: the successor precondition (`check_overlay_successor`), H1's Index object check
@@ -60,6 +61,19 @@ impl ServerStore {
         if overlay.author() != device.device_id() {
             return manual(R::NotCurrentAuthor);
         }
+        // A Prepared branch is NOT classified against its successor or its tenure. H1 resolves it
+        // first, from the Prepared record alone and with no tenure (V8): Complete evidence settles
+        // it, Hold leaves it held. A successor already holding the branch's own signed operations
+        // is the normal Complete case, which the successor hold would call unpristine; and telling
+        // Complete from Hold needs the restore this read must not pay. So it reads Transferable -
+        // resolution is pending - and `prepared` says why.
+        //
+        // Known limit: a Prepared branch whose evidence is durably `Hold` is not distinguished
+        // here. It is rare (a conflicting or partial source after a crash), the handoff refuses it
+        // with "handoff remains held", and every manual operation except disposal stays open.
+        if state.handoff_prepared() {
+            return Ok(Some(StudioOverlayEligibility::Transferable));
+        }
         let owner = group.designated_committer();
         match self.with_vault_source(server, group, target, |bytes| {
             StudioEpoch::overlay_successor_hold_in_vault(bytes, target, owner, overlay)
@@ -70,6 +84,9 @@ impl ServerStore {
             Err(_) => return manual(R::SourceUnreadable),
         }
         if let StudioTarget::Index { channel } = target {
+            // One header read per DISTINCT object, at most `MAX_STUDIO_OVERLAY_OPS` of them: each
+            // is an unseal of a bounded record, never a restore.
+            let mut objects = std::collections::BTreeSet::new();
             for (_, intent) in state.pending().filter(|(id, _)| state.is_overlay(id)) {
                 let Ok(op) = IndexOp::decode_domain(&document, &intent.operation, &intent.author)
                 else {
@@ -78,27 +95,26 @@ impl ServerStore {
                     return manual(R::NotReplayable);
                 };
                 if let IndexOp::PutObject { object, .. } = op {
-                    let flipnote = StudioTarget::Flipnote { channel, object };
-                    let holds_work = self.with_vault_source(server, group, flipnote, |bytes| {
-                        StudioEpoch::vault_holds_work(bytes, flipnote)
-                    });
-                    if !matches!(holds_work, Ok(Some(true))) {
-                        return manual(R::ObjectMissing);
-                    }
+                    objects.insert(object);
+                }
+            }
+            for object in objects {
+                let flipnote = StudioTarget::Flipnote { channel, object };
+                let holds_work = self.with_vault_source(server, group, flipnote, |bytes| {
+                    StudioEpoch::vault_holds_work(bytes, flipnote)
+                });
+                if !matches!(holds_work, Ok(Some(true))) {
+                    return manual(R::ObjectMissing);
                 }
             }
         }
         let Some(tenure) = tenure else {
             return manual(R::TenureUnknown);
         };
-        // The receipt's owner must still be the current one under the observed tenure: the live
-        // half of `check_live`, asked directly so a Prepared branch is held to it as well. For an
-        // active branch the authority mint adds membership and runs for its verdict only; a
-        // Prepared branch has already minted one, and the mint refuses to mint twice.
-        if !overlay.receipt_owner_is_current(group, tenure)
-            || (!state.handoff_prepared()
-                && metadata.handoff_authority(device, group, tenure).is_err())
-        {
+        // The handoff's live-authority mint, run for its verdict only and then dropped: this
+        // device is still a member and the branch's receipt is the current owner's under the
+        // observed tenure. Authorship was checked above.
+        if metadata.handoff_authority(device, group, tenure).is_err() {
             return manual(R::ReceiptChanged);
         }
         Ok(Some(StudioOverlayEligibility::Transferable))

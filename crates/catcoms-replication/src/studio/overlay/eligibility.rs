@@ -18,7 +18,7 @@ pub enum StudioOverlayEligibility {
 
 /// The one reason given for a `Manual` draft. When several apply, the most permanent wins, so a
 /// user is not told to wait for something that would not help: see the order in
-/// `StudioEpoch::overlay_successor_hold` and the app-level classifier.
+/// `StudioEpoch::overlay_successor_hold_in_vault` and the app-level classifier.
 ///
 /// `closeMissing` from design section 11 is deliberately absent. A Closing branch carries its
 /// receipt, and nothing in the handoff precondition consults the close record separately, so no

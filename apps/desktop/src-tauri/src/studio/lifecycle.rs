@@ -184,7 +184,7 @@ fn archive_failure(error: String) -> String {
     } else if error.contains(catcoms_app::UNCERTAIN_OUTCOME)
         || error == catcoms_app::studio::CONTROL_REPLY_DROPPED
     {
-        format!("{} ({error})", super::UNDELIVERED_ARCHIVE)
+        format!("{} ({error})", super::ARCHIVE_MAYBE_WRITTEN)
     } else {
         error
     }

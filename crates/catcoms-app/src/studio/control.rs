@@ -446,16 +446,19 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
             let inventory = scan.finish()?;
             let mut budget = store.studio_storage_budget(server, group, &inventory)?;
             store.write_studio_draft_archive(server, &logical, archive, rng, &mut budget)?;
+            // After the write, BOTH failures of the read-back - an error and an absent record - are
+            // uncertain rather than refusals: the archive may well be on disk. Marked so native
+            // reports them as such and the caller re-reads instead of believing nothing was kept.
+            let unread = |why: String| {
+                invalid(format!(
+                    "{}: the draft archive was written but could not be read back ({why})",
+                    crate::UNCERTAIN_OUTCOME
+                ))
+            };
             let (archive, id, physical_bytes) = store
-                .read_studio_draft_archive_for_app(server, &logical)?
-                // After the write: the archive may well be on disk, so this is uncertain, not a
-                // refusal. Marked so native reports it as one and the caller re-reads.
-                .ok_or_else(|| {
-                    invalid(format!(
-                        "{}: the draft archive was written but could not be read back",
-                        crate::UNCERTAIN_OUTCOME
-                    ))
-                })?;
+                .read_studio_draft_archive_for_app(server, &logical)
+                .map_err(|error| unread(error.to_string()))?
+                .ok_or_else(|| unread("no record".into()))?;
             Ok(StudioControlResponse::OverlayArchived(Box::new(
                 StudioDelivered::new(
                     StudioOverlayArchived {
