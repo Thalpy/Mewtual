@@ -86,8 +86,9 @@ pub(crate) async fn studio_overlay_copy_preview(
             action: Action::FinishOverlayCopyPreview(Box::new(prepared)),
         }),
         |response| match response {
+            // Through the delivery, never unfenced: see `invoke_with_context`.
             InvokeResponse::Control(Response::OverlayCopyPreview(preview)) => {
-                preview_value(&preview)
+                preview.inspect(preview_value)?
             }
             _ => Err("mismatched overlay copy response".into()),
         },

@@ -79,8 +79,89 @@ struct Delivery {
     valid: Arc<AtomicBool>,
     clock: Arc<dyn catcoms_rt::Clock + Send>,
     expires: u64,
-    _read: Arc<Retained>,
+    /// Whatever owns the job's shared preparation slot: an inspection's `Retained`, or a copy's
+    /// permit. Type-erased because the guarantee is the same for every result that carries one -
+    /// the slot is not returned to the pool while native still holds the result.
+    _retained: Arc<dyn std::any::Any + Send + Sync>,
     _ack: oneshot::Sender<()>,
+}
+
+/// Begin the actor's bounded handoff for one result, keeping `retained` alive through it.
+///
+/// One definition for every overlay result that needs it, so an inspection, an export, an archive
+/// and a copy preview are all fenced the same way: the actor waits in `PreviewHandoff::finish`
+/// (processing no membership, MLS or source change) until native drops the delivery, the request is
+/// cancelled, or the fixed timeout fires, and a timeout revokes every copy of the delivery.
+fn begin(
+    retained: Arc<dyn std::any::Any + Send + Sync>,
+    clock: Arc<dyn catcoms_rt::Clock + Send>,
+) -> (StudioInspectionDelivery, super::preview::PreviewHandoff) {
+    let (handoff, valid, ack) = super::preview::PreviewHandoff::new();
+    let delivery = StudioInspectionDelivery(Arc::new(Delivery {
+        valid,
+        expires: clock.monotonic_ms().saturating_add(5_000),
+        clock,
+        _retained: retained,
+        _ack: ack,
+    }));
+    (delivery, handoff)
+}
+
+/// A finished overlay result delivered the way an inspection is.
+///
+/// Export, archive and copy preview used to copy their payload out of the job and return it bare.
+/// That released the shared preparation permit as soon as the finish visit returned, while a
+/// multi-megabyte result was still waiting for native conversion, and it skipped the delivery
+/// fence entirely: the actor went straight back to processing membership and MLS changes while
+/// native was still converting a result whose final validation those changes could invalidate.
+///
+/// This keeps the job's ORIGINAL permit (no second acquisition, no second pool) until the last copy
+/// of the delivery is dropped, and the value is reachable only through [`Self::inspect`], which
+/// refuses once the delivery has expired or been revoked.
+pub struct StudioDelivered<T> {
+    value: T,
+    retained: Arc<dyn std::any::Any + Send + Sync>,
+    delivery: Option<StudioInspectionDelivery>,
+}
+impl<T> std::fmt::Debug for StudioDelivered<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("StudioDelivered { .. }")
+    }
+}
+impl<T> StudioDelivered<T> {
+    pub(crate) fn new(value: T, retained: Arc<dyn std::any::Any + Send + Sync>) -> Self {
+        Self {
+            value,
+            retained,
+            delivery: None,
+        }
+    }
+    /// `None` until the actor has begun the handoff. Native takes this before conversion and
+    /// checks it again after.
+    pub fn delivery(&self) -> Option<StudioInspectionDelivery> {
+        self.delivery.clone()
+    }
+    /// The value, but only while its delivery is current. A result that never went through the
+    /// actor's handoff has no delivery and is refused, rather than read unfenced.
+    pub fn inspect<O>(&self, inspect: impl FnOnce(&T) -> O) -> Result<O, String> {
+        if !self.delivery.as_ref().is_some_and(|d| d.is_current()) {
+            return Err("overlay result delivery expired; refresh".into());
+        }
+        Ok(inspect(&self.value))
+    }
+    pub(crate) fn begin_delivery(
+        &mut self,
+        clock: Arc<dyn catcoms_rt::Clock + Send>,
+    ) -> super::preview::PreviewHandoff {
+        let (delivery, handoff) = begin(self.retained.clone(), clock);
+        self.delivery = Some(delivery);
+        handoff
+    }
+    /// For tests that drive the stages directly, below the actor.
+    #[cfg(test)]
+    pub(crate) fn value(&self) -> &T {
+        &self.value
+    }
 }
 impl std::fmt::Debug for Delivery {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -195,15 +276,19 @@ impl StudioOverlayInspection {
         &mut self,
         clock: Arc<dyn catcoms_rt::Clock + Send>,
     ) -> super::preview::PreviewHandoff {
-        let (handoff, valid, ack) = super::preview::PreviewHandoff::new();
-        self.delivery = Some(StudioInspectionDelivery(Arc::new(Delivery {
-            valid,
-            expires: clock.monotonic_ms().saturating_add(5_000),
-            clock,
-            _read: self.read.clone(),
-            _ack: ack,
-        })));
+        let (delivery, handoff) = begin(self.read.clone(), clock);
+        self.delivery = Some(delivery);
         handoff
+    }
+    /// The delivery if the actor has begun one. Unlike [`Self::delivery`] this does not panic, so
+    /// a caller handling every response variant can ask uniformly.
+    pub(crate) fn delivery_if_begun(&self) -> Option<StudioInspectionDelivery> {
+        self.delivery.clone()
+    }
+    /// What owns this job's preparation slot, for a result derived from this inspection that must
+    /// keep the same slot through its own delivery.
+    pub(crate) fn retained(&self) -> Arc<dyn std::any::Any + Send + Sync> {
+        self.read.clone()
     }
 }
 impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
@@ -242,7 +327,8 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
             crate::registry_catchup::preparation_pool(),
         )
     }
-    fn begin_inspection_with_pool(
+    /// Inspection against a given pool; see `begin_copy_with_pool` for why the seam exists.
+    pub(in crate::studio) fn begin_inspection_with_pool(
         &mut self,
         store: &ServerStore,
         server: u64,

@@ -45,16 +45,18 @@ struct Fixture {
     server: Node,
     store: ServerStore,
     index: StudioTarget,
+    clock: ManualClock,
 }
 
 impl Fixture {
     async fn new() -> Self {
         let hub = Hub::new();
+        let clock = ManualClock::new(1000);
         let mut server = Server::found(
             hub.join(PeerId::from_u64(1)),
             MlsDevice::generate().unwrap(),
             rng(),
-            Box::new(ManualClock::new(1000)),
+            Box::new(clock.clone()),
             "copy-probe",
         )
         .unwrap();
@@ -200,6 +202,7 @@ impl Fixture {
             server,
             store,
             index,
+            clock,
         }
     }
 
@@ -309,7 +312,7 @@ async fn the_copy_probe_refuses_an_object_that_is_missing_or_disappears_before_a
         .finish_studio_copy_preview(&mut f.store, SERVER, f.index, prepared)
         .unwrap();
     assert_eq!(
-        preview.disposition,
+        preview.value().disposition,
         StudioRecoveryDisposition::MissingTarget,
         "C3 must tell the user the object is missing rather than offer a copy that names it"
     );
@@ -330,7 +333,10 @@ async fn the_copy_probe_refuses_an_object_that_is_missing_or_disappears_before_a
         .server
         .finish_studio_copy_preview(&mut f.store, SERVER, f.index, prepared)
         .unwrap();
-    assert_eq!(preview.disposition, StudioRecoveryDisposition::Ready);
+    assert_eq!(
+        preview.value().disposition,
+        StudioRecoveryDisposition::Ready
+    );
     let (_, already) = f
         .apply(f.echo_for(&echo))
         .expect("with the object present, C4 must accept the echo");
@@ -364,5 +370,115 @@ impl Fixture {
             nonce: echo.nonce,
             body: echo.body.clone(),
         }
+    }
+
+    fn finish(&mut self, action: StudioControlAction) -> StudioControlResponse {
+        self.server
+            .studio_control_transaction(
+                &mut self.store,
+                SERVER,
+                StudioControlRequest {
+                    target: self.index,
+                    action,
+                },
+            )
+            .unwrap()
+    }
+}
+
+/// Whether native could read the value right now, for any delivered variant.
+fn readable(response: &StudioControlResponse) -> Result<(), String> {
+    match response {
+        StudioControlResponse::OverlayExport(v) => v.inspect(|_| ()),
+        StudioControlResponse::OverlayArchived(v) => v.inspect(|_| ()),
+        StudioControlResponse::OverlayCopyPreview(v) => v.inspect(|_| ()),
+        other => panic!("not a delivered overlay result: {other:?}"),
+    }
+}
+
+/// The review's parked-result regression, for export, archive and copy preview alike.
+///
+/// Each used to copy its payload out of the job and return it bare, which gave the job's shared
+/// preparation slot back to the pool the moment the finish visit returned and skipped the delivery
+/// fence entirely. Each is now held to the inspection's contract, and this checks both halves on a
+/// private pool so no other test in the process can move the count:
+///
+/// - **the slot:** still held after the finish visit, still held by native's delivery after the
+///   response itself is dropped, and returned only when that delivery is dropped;
+/// - **the fence:** nothing is readable before the actor begins the handoff, it is readable while
+///   the handoff is current, and an expired handoff revokes it. (That the actor processes nothing
+///   else while the handoff is outstanding is `inspection`'s actor-level test.)
+#[tokio::test]
+async fn export_archive_and_copy_preview_keep_their_slot_and_fence_through_delivery() {
+    let mut f = Fixture::new().await;
+    f.create_object();
+    let pool = std::sync::Arc::new(tokio::sync::Semaphore::new(4));
+
+    for what in ["export", "archive", "copy preview"] {
+        let mut response = match what {
+            "export" | "archive" => {
+                let prepared = f
+                    .server
+                    .begin_inspection_with_pool(&f.store, SERVER, f.index, &pool)
+                    .unwrap()
+                    .rebuild_for_archive()
+                    .await
+                    .unwrap();
+                f.finish(if what == "export" {
+                    StudioControlAction::FinishOverlayExport(Box::new(prepared))
+                } else {
+                    StudioControlAction::FinishOverlayArchive(Box::new(prepared))
+                })
+            }
+            _ => {
+                let choice = f.choice();
+                let prepared = f
+                    .server
+                    .begin_copy_with_pool(&f.store, SERVER, f.index, choice, &pool)
+                    .unwrap()
+                    .plan()
+                    .await
+                    .unwrap();
+                f.finish(StudioControlAction::FinishOverlayCopyPreview(Box::new(
+                    prepared,
+                )))
+            }
+        };
+        assert_eq!(
+            pool.available_permits(),
+            3,
+            "{what}: the finished result must still hold its job's slot"
+        );
+        assert!(
+            readable(&response).is_err(),
+            "{what}: a result the actor has not handed off must not be readable"
+        );
+
+        let handoff = response
+            .begin_delivery(std::sync::Arc::new(f.clock.clone()))
+            .unwrap_or_else(|| panic!("{what} must be a delivered variant"));
+        readable(&response).unwrap_or_else(|e| panic!("{what}: a current delivery reads: {e}"));
+        let delivery = response
+            .delivery()
+            .expect("the handoff installs a delivery");
+
+        f.clock.advance_ms(5_000);
+        assert!(
+            readable(&response).is_err() && !delivery.is_current(),
+            "{what}: an expired handoff must revoke the result"
+        );
+        drop(response);
+        assert_eq!(
+            pool.available_permits(),
+            3,
+            "{what}: native's delivery must keep the slot after the response is dropped"
+        );
+        drop(delivery);
+        assert_eq!(
+            pool.available_permits(),
+            4,
+            "{what}: dropping the last delivery must return the slot"
+        );
+        drop(handoff);
     }
 }

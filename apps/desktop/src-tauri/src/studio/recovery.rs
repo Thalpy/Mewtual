@@ -295,8 +295,8 @@ pub(super) fn response_value(response: Response) -> Result<Value, String> {
         // The lifecycle family converts itself. Listed by variant rather than caught by a wildcard
         // so a new response still has to choose a home here.
         response @ (Response::OverlayLifecycle(_)
-        | Response::OverlayArchived { .. }
-        | Response::OverlayExport { .. }
+        | Response::OverlayArchived(_)
+        | Response::OverlayExport(_)
         | Response::OverlayArchive { .. }
         | Response::OverlayArchiveReleased
         | Response::OverlayDisposed(_)) => return super::lifecycle::response_value(response),

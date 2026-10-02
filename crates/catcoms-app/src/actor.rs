@@ -4417,7 +4417,10 @@ where
                         let background = if result.is_ok() && !lease.is_cancelled() { studio_receiver.detach(&mut server) } else { None };
                         let cancellation = lease.background_cancellation();
                         let handoff = match &mut result {
-                            Ok(StudioResponse::Control(crate::studio::StudioControlResponse::OverlayInspection(inspection))) => Some(inspection.begin_delivery(server.runtime_clock())),
+                            // Every control result that carries a job's preparation slot - an
+                            // inspection, an export, an archive, a copy preview - gets the same
+                            // bounded handoff, decided in one place on the response.
+                            Ok(StudioResponse::Control(control)) => control.begin_delivery(server.runtime_clock()),
                             Ok(StudioResponse::Document(Some(crate::studio::StudioRead::AwaitingTenureReceipt(preview)))) => {
                                 // Detaching authoritative discovery above may supersede this
                                 // target's hint. Recheck after every preparation, before handoff.

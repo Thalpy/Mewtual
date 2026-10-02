@@ -240,30 +240,40 @@ pub struct StudioLifecycleDisposal {
     pub generation: u64,
 }
 
+/// An archive that was just written, as `OverlayArchived` delivers it.
+#[derive(Debug)]
+pub struct StudioOverlayArchived {
+    pub archive: StudioDraftArchive,
+    pub id: [u8; 32],
+    pub physical_bytes: u64,
+    /// What typed reconstruction found at archive time. `Err` is not a failure of the archive: the
+    /// branch was already unreplayable and the archive records that it was.
+    pub replayable: Result<(), String>,
+}
+
+/// The live draft's canonical payload, as `OverlayExport` delivers it. **Nothing was written**,
+/// which is why this carries no physical size: there is no record to have one.
+#[derive(Debug)]
+pub struct StudioOverlayExport {
+    pub archive: StudioDraftArchive,
+    pub id: [u8; 32],
+    pub replayable: Result<(), String>,
+}
+
 pub enum StudioControlResponse {
     OverlayPreparation(StudioInspectionPreparation),
     OverlayInspection(StudioOverlayInspection),
     OverlayLifecycle(Box<StudioOverlayLifecycle>),
     OverlayCopyPreparation(Box<StudioCopyPreparation>),
-    OverlayCopyPreview(Box<StudioOverlayCopyPreview>),
+    /// Delivered: keeps the copy job's preparation slot and its delivery fence until native has
+    /// converted it. See [`StudioDelivered`].
+    OverlayCopyPreview(Box<StudioDelivered<StudioOverlayCopyPreview>>),
     /// An archive was just written. A distinct variant from `OverlayArchive` because one of these
     /// changed the vault and the other did not, and a caller that cannot tell them apart cannot
-    /// tell a user whether anything happened.
-    OverlayArchived {
-        archive: Box<StudioDraftArchive>,
-        id: [u8; 32],
-        physical_bytes: u64,
-        /// What typed reconstruction found at archive time. `Err` is not a failure of the archive:
-        /// the branch was already unreplayable and the archive records that it was.
-        replayable: Result<(), String>,
-    },
-    /// The live draft's canonical payload. **Nothing was written**, which is why this carries no
-    /// physical size: there is no record to have one.
-    OverlayExport {
-        archive: Box<StudioDraftArchive>,
-        id: [u8; 32],
-        replayable: Result<(), String>,
-    },
+    /// tell a user whether anything happened. Delivered, like an inspection.
+    OverlayArchived(Box<StudioDelivered<StudioOverlayArchived>>),
+    /// The live draft's canonical payload, writing nothing. Delivered, like an inspection.
+    OverlayExport(Box<StudioDelivered<StudioOverlayExport>>),
     /// The decoded archive and its identity. Reading is not authority.
     OverlayArchive {
         archive: Box<StudioDraftArchive>,
@@ -303,8 +313,8 @@ impl std::fmt::Debug for StudioControlResponse {
             Self::OverlayLifecycle(_) => "OverlayLifecycle { .. }",
             Self::OverlayCopyPreparation(_) => "OverlayCopyPreparation { .. }",
             Self::OverlayCopyPreview(_) => "OverlayCopyPreview { .. }",
-            Self::OverlayArchived { .. } => "OverlayArchived { .. }",
-            Self::OverlayExport { .. } => "OverlayExport { .. }",
+            Self::OverlayArchived(_) => "OverlayArchived { .. }",
+            Self::OverlayExport(_) => "OverlayExport { .. }",
             Self::OverlayArchive { .. } => "OverlayArchive { .. }",
             Self::OverlayArchiveReleased => "OverlayArchiveReleased",
             Self::OverlayDisposed(_) => "OverlayDisposed { .. }",
@@ -316,6 +326,34 @@ impl std::fmt::Debug for StudioControlResponse {
             Self::Export { .. } => "Export { .. }",
             Self::Acknowledged(_) => "Acknowledged { .. }",
         })
+    }
+}
+impl StudioControlResponse {
+    /// The delivery native must hold through conversion and recheck after it, for every variant
+    /// that has one. Asked uniformly so a new delivered variant cannot be added here and forgotten
+    /// at the native boundary.
+    pub fn delivery(&self) -> Option<StudioInspectionDelivery> {
+        match self {
+            Self::OverlayInspection(inspection) => inspection.delivery_if_begun(),
+            Self::OverlayCopyPreview(delivered) => delivered.delivery(),
+            Self::OverlayArchived(delivered) => delivered.delivery(),
+            Self::OverlayExport(delivered) => delivered.delivery(),
+            _ => None,
+        }
+    }
+    /// The actor's half: begin the bounded handoff for any variant that carries a job's
+    /// preparation slot. `None` for every other variant, which is what they had before.
+    pub(crate) fn begin_delivery(
+        &mut self,
+        clock: std::sync::Arc<dyn catcoms_rt::Clock + Send>,
+    ) -> Option<super::preview::PreviewHandoff> {
+        match self {
+            Self::OverlayInspection(inspection) => Some(inspection.begin_delivery(clock)),
+            Self::OverlayCopyPreview(delivered) => Some(delivered.begin_delivery(clock)),
+            Self::OverlayArchived(delivered) => Some(delivered.begin_delivery(clock)),
+            Self::OverlayExport(delivered) => Some(delivered.begin_delivery(clock)),
+            _ => None,
+        }
     }
 }
 
@@ -355,6 +393,8 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
     ) -> Result<StudioControlResponse, AppError> {
         let inspection = self.finish_studio_inspection(store, server, target, prepared)?;
         let replayable = inspection.replayable();
+        // The job's slot travels with the result, not with `inspection`, which ends here.
+        let retained = inspection.retained();
         self.sync.with_registry_context(|group, device, _, rng| {
             if group.member_signature_key(&device.device_id()).as_deref()
                 != Some(device.public_key_bytes().as_slice())
@@ -371,12 +411,17 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
             let (archive, id, physical_bytes) = store
                 .read_studio_draft_archive_for_app(server, &logical)?
                 .ok_or_else(|| invalid("the draft archive did not survive its own write"))?;
-            Ok(StudioControlResponse::OverlayArchived {
-                archive: Box::new(archive),
-                id,
-                physical_bytes,
-                replayable,
-            })
+            Ok(StudioControlResponse::OverlayArchived(Box::new(
+                StudioDelivered::new(
+                    StudioOverlayArchived {
+                        archive,
+                        id,
+                        physical_bytes,
+                        replayable,
+                    },
+                    retained,
+                ),
+            )))
         })
     }
 
@@ -426,7 +471,9 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
             StudioControlAction::FinishOverlayCopyPreview(prepared) => {
                 return self
                     .finish_studio_copy_preview(store, server, target, *prepared)
-                    .map(|preview| StudioControlResponse::OverlayCopyPreview(Box::new(preview)))
+                    .map(|delivered| {
+                        StudioControlResponse::OverlayCopyPreview(Box::new(delivered))
+                    })
             }
             StudioControlAction::ApplyOverlayCopy(_) => {
                 return Err(invalid("copy Apply requires the ordinary publication path"))
@@ -452,11 +499,18 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
                 if archive.archive_id().map_err(invalid)? != id {
                     return Err(invalid("the exported payload does not round-trip"));
                 }
-                return Ok(StudioControlResponse::OverlayExport {
-                    archive: Box::new(archive),
-                    id,
-                    replayable,
-                });
+                // The export keeps the inspection's slot and fence until native has converted it;
+                // a bare copy of the payload would have released both here.
+                return Ok(StudioControlResponse::OverlayExport(Box::new(
+                    StudioDelivered::new(
+                        StudioOverlayExport {
+                            archive,
+                            id,
+                            replayable,
+                        },
+                        inspection.retained(),
+                    ),
+                )));
             }
             action => StudioControlRequest { target, action },
         };

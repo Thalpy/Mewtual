@@ -21,8 +21,8 @@ pub use copy::{
 mod inspection;
 mod overlay;
 pub use inspection::{
-    StudioInspectionDelivery, StudioInspectionPreparation, StudioOverlayInspection,
-    StudioPreparedInspection,
+    StudioDelivered, StudioInspectionDelivery, StudioInspectionPreparation,
+    StudioOverlayInspection, StudioPreparedInspection,
 };
 pub use overlay::StudioOverlaySaveTicket;
 mod preview;
@@ -36,9 +36,9 @@ pub(crate) mod restore;
 mod settlement;
 pub use control::{
     StudioArchiveReleaseRequest, StudioControlAction, StudioControlReady, StudioControlRequest,
-    StudioControlResponse, StudioOverlayLifecycle, StudioRecoveryApply, StudioRecoveryListing,
-    StudioRecoveryPreview, StudioRecoverySummary, StudioRecoveryVersion, StudioReleaseConfirmation,
-    StudioSettlementSource,
+    StudioControlResponse, StudioOverlayArchived, StudioOverlayExport, StudioOverlayLifecycle,
+    StudioRecoveryApply, StudioRecoveryListing, StudioRecoveryPreview, StudioRecoverySummary,
+    StudioRecoveryVersion, StudioReleaseConfirmation, StudioSettlementSource,
 };
 pub use restore::{
     StudioRecoveryDisposition, StudioRecoveryItem, StudioRecoveryMode, StudioRecoveryPlan,

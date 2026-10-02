@@ -356,7 +356,7 @@ async fn preview(
         }),
         |response| match response {
             InvokeResponse::Control(Response::OverlayCopyPreview(preview)) => {
-                preview_value(&preview)
+                preview.inspect(preview_value)?
             }
             _ => Err("mismatched overlay copy response".into()),
         },

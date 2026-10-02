@@ -201,10 +201,11 @@ async fn invoke_with_context<V>(
         }
         _ => None,
     };
+    // Every control result that carries a job's slot - inspection, export, archive, copy preview -
+    // has a delivery the actor began. Asked of the response rather than matched variant by variant
+    // here, so a new delivered result cannot be added without native holding and rechecking it.
     let inspection_delivery = match &response {
-        InvokeResponse::Control(catcoms_app::studio::StudioControlResponse::OverlayInspection(
-            inspection,
-        )) => Some(inspection.delivery()),
+        InvokeResponse::Control(control) => control.delivery(),
         _ => None,
     };
     if cancellation.is_cancelled() {

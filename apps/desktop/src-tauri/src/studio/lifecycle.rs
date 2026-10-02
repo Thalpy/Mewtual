@@ -438,41 +438,34 @@ fn disposal_value(v: &StudioOverlayDisposal) -> Result<Value, String> {
 pub(super) fn response_value(response: Response) -> Result<Value, String> {
     let value = match response {
         Response::OverlayLifecycle(v) => lifecycle_value(&v)?,
-        Response::OverlayArchived {
-            archive,
-            id,
-            physical_bytes,
-            replayable,
-        } => {
-            let mut value = archive_value(&archive, id, physical_bytes)?;
+        // Read through the delivery, which refuses once the actor's handoff has expired or been
+        // revoked; the result is never read unfenced.
+        Response::OverlayArchived(delivered) => delivered.inspect(|v| {
+            let mut value = archive_value(&v.archive, v.id, v.physical_bytes)?;
             value["kind"] = "overlayArchived".into();
             // Said positively and separately from the archive's own label: a user who archived an
             // unreplayable branch has preserved their work and should be told so, not left to read
             // a bare false as a failure.
             value["preserved"] = true.into();
-            value["notReplayable"] = match replayable {
+            value["notReplayable"] = match &v.replayable {
                 Ok(()) => Value::Null,
-                Err(reason) => reason.into(),
+                Err(reason) => reason.clone().into(),
             };
-            value
-        }
+            Ok::<_, String>(value)
+        })??,
         // Nothing was written, so there is no physical size to report and the view must not invent
         // one. The payload is the point.
-        Response::OverlayExport {
-            archive,
-            id,
-            replayable,
-        } => {
-            let mut value = with_payload(archive_value(&archive, id, 0)?, &archive)?;
+        Response::OverlayExport(delivered) => delivered.inspect(|v| {
+            let mut value = with_payload(archive_value(&v.archive, v.id, 0)?, &v.archive)?;
             value["kind"] = "overlayExport".into();
             value["preserved"] = false.into();
-            value["notReplayable"] = match replayable {
+            value["notReplayable"] = match &v.replayable {
                 Ok(()) => Value::Null,
-                Err(reason) => reason.into(),
+                Err(reason) => reason.clone().into(),
             };
             value.as_object_mut().unwrap().remove("physicalBytes");
-            value
-        }
+            Ok::<_, String>(value)
+        })??,
         Response::OverlayArchive {
             archive,
             id,

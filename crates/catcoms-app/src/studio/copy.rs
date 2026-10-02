@@ -193,10 +193,29 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
         source: StudioTarget,
         choice: StudioOverlayCopyChoice,
     ) -> Result<StudioCopyPreparation, AppError> {
+        self.begin_copy_with_pool(
+            store,
+            server,
+            source,
+            choice,
+            crate::registry_catchup::preparation_pool(),
+        )
+    }
+    /// C1 against a given pool. Production always passes the shared preparation pool; the seam
+    /// exists so a capacity test can count one job's slot without racing every other test in the
+    /// process for the global one, as inspection's capacity test already does.
+    fn begin_copy_with_pool(
+        &mut self,
+        store: &ServerStore,
+        server: u64,
+        source: StudioTarget,
+        choice: StudioOverlayCopyChoice,
+        pool: &std::sync::Arc<tokio::sync::Semaphore>,
+    ) -> Result<StudioCopyPreparation, AppError> {
         let scope = Self::copy_scope(source, choice.destination)?;
         let context = self.copy_context(source)?;
         self.copy_context(choice.destination)?;
-        let permit = crate::registry_catchup::preparation_pool()
+        let permit = pool
             .clone()
             .try_acquire_owned()
             .map_err(|_| invalid("overlay copy capacity exhausted; retry"))?;
@@ -224,16 +243,22 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
         server: u64,
         source: StudioTarget,
         prepared: StudioPreparedCopy,
-    ) -> Result<StudioOverlayCopyPreview, AppError> {
+    ) -> Result<super::StudioDelivered<StudioOverlayCopyPreview>, AppError> {
+        let StudioPreparedCopy {
+            plan,
+            instance,
+            context: prepared_context,
+            _permit: permit,
+        } = prepared;
         let context = self.copy_context(source)?;
         // The destination's channel is rechecked here too, not only at C1 and C4. A channel this
         // device has left between the capture and the preview is not a channel it may still be
         // offered a copy into.
-        self.copy_context(prepared.plan.destination_target())?;
-        if !self.sync.matches_registry_instance(&prepared.instance) || context != prepared.context {
+        self.copy_context(plan.destination_target())?;
+        if !self.sync.matches_registry_instance(&instance) || context != prepared_context {
             return Err(invalid("overlay copy changed; preview again"));
         }
-        let mut plan = prepared.plan;
+        let mut plan = plan;
         let current = self.sync.with_registry_context(|group, device, _, _| {
             store.studio_copy_is_current(server, group, device, &plan)
         })?;
@@ -250,16 +275,21 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
         })? {
             plan.hold(StudioRecoveryDisposition::MissingTarget);
         }
-        Ok(StudioOverlayCopyPreview {
-            source,
-            destination: plan.destination_target(),
-            epoch_id: plan.epoch_id(),
-            expected_projection: plan.fingerprint(),
-            disposition: plan.disposition(),
-            body: plan.body().cloned(),
-            original_author: plan.original_author(),
-            source_ops: plan.source_ops().to_vec(),
-        })
+        // The preview keeps the job's ORIGINAL permit through native conversion and delivery,
+        // rather than returning it to the shared pool the moment this visit returns.
+        Ok(super::StudioDelivered::new(
+            StudioOverlayCopyPreview {
+                source,
+                destination: plan.destination_target(),
+                epoch_id: plan.epoch_id(),
+                expected_projection: plan.fingerprint(),
+                disposition: plan.disposition(),
+                body: plan.body().cloned(),
+                original_author: plan.original_author(),
+                source_ops: plan.source_ops().to_vec(),
+            },
+            std::sync::Arc::new(permit),
+        ))
     }
 
     /// C4. Exact-retry shortcut first, then re-plan from durable state and demand the echo match.
