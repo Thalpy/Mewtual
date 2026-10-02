@@ -384,6 +384,19 @@ async fn newcomer(closing: bool, require_preview: bool) {
     let b_store = Arc::new(Mutex::new(Some(newcomer_store)));
     let (a, ae, at) = crate::spawn(provider);
     let (b, be, bt) = crate::spawn(newcomer);
+    // Each actor models its own process, so each gets its own preparation pools rather than the
+    // process-wide ones every parallel test also draws on, as the scheduling tests do. Discovery
+    // and the preview retry a refused slot on the next step, but this test steps a fixed number
+    // of times, so under a parallel test load it ran out of steps before the preview was ready:
+    // one run measured 72 preview refusals from the shared pool.
+    for actor in [&a, &b] {
+        actor
+            .studio_preparation_pools_for_test(
+                Arc::new(tokio::sync::Semaphore::new(4)),
+                Arc::new(tokio::sync::Semaphore::new(3)),
+            )
+            .await;
+    }
     let ad = drain_events(ae);
     let bd = drain_events(be);
     assert!(save(&b, &b_store, StudioRequest::Read { target: target() })
