@@ -19,6 +19,8 @@ use crate::{
 };
 
 mod adoption;
+mod repair;
+use crate::epoch::repair_transition::RepairBinding;
 pub mod catchup;
 mod handoff;
 pub(in crate::studio) use handoff::PreparedOverlayChanges;
@@ -48,10 +50,12 @@ pub struct StudioEpoch {
     gate: EpochGate,
     receipts: ReceiptBook,
     opening: Option<Receipt>,
-    // Version 2 is used ONLY while accepting a discovered checkpoint without its predecessor
-    // closure. Ordinary restart bytes stay v1. Its receipt-book/gate validation must use the
-    // existing P1 adoption mode or a crash after sealing would strand the whole source.
+    // Without repair provenance, ordinary/adopting restart bytes remain v1/v2. Bound repair
+    // snapshots use v3 with this mode explicit. Adoption without a held predecessor closure
+    // requires P1 book/gate validation or a crash after sealing would strand the whole source.
     adopting: bool,
+    // Exact signed-repair binding and original action; copied alongside the book on successors.
+    repair_binding: Option<RepairBinding>,
     // Derived from the VERIFIED seed-only projection before any successor edits. Current
     // registers can hide an inherited replacement CID even though the retained seed needs it.
     // Recomputed on restore; never trusted from a separate persisted pin list.
@@ -112,6 +116,7 @@ impl StudioEpoch {
             receipts: ReceiptBook::default(),
             opening: None,
             adopting: false,
+            repair_binding: None,
             seed_blob_cids: Default::default(),
         })
     }
@@ -172,6 +177,7 @@ impl StudioEpoch {
             receipts,
             opening: Some(receipt),
             adopting: false,
+            repair_binding: None,
             seed_blob_cids,
         })
     }
@@ -406,6 +412,9 @@ impl StudioEpoch {
         group: &ServerGroup,
         tenure_start: u64,
     ) -> Result<ReceiptIngest, ReplError> {
+        if self.repair_install_pending() {
+            return self.begin_checkpoint_adoption(receipt, group, tenure_start);
+        }
         self.refresh_owner(group)?;
         if self.adopting {
             return self.begin_checkpoint_adoption(receipt, group, tenure_start);
@@ -429,7 +438,7 @@ impl StudioEpoch {
     /// restart identity even though an object's globally unique logical key is just its id.
     pub fn snapshot(&mut self) -> Result<Vec<u8>, ReplError> {
         let mut e = Encoder::new();
-        e.put_u8(if self.adopting { 2 } else { 1 });
+        RepairBinding::encode_prefix(self.repair_binding.as_ref(), self.adopting, &mut e);
         e.put_bytes(&self.target.channel())
             .map_err(|_| ReplError::EpochBound)?;
         for bytes in [
@@ -514,7 +523,9 @@ impl StudioEpoch {
         } else {
             0
         };
-        Ok(book + opening + gate)
+        // V3 adds adopting/disposition/bound tags and a length-prefixed repair hash.
+        let repair = if self.repair_binding.is_some() { 39 } else { 0 };
+        Ok(book + opening + gate + repair)
     }
     fn restore_scoped(
         bytes: &[u8],
@@ -527,11 +538,7 @@ impl StudioEpoch {
             return Err(ReplError::EpochBound);
         }
         let mut d = Decoder::new(bytes);
-        let adopting = match d.get_u8().map_err(|_| ReplError::Malformed)? {
-            1 => false,
-            2 => true,
-            _ => return Err(ReplError::Malformed),
-        };
+        let (adopting, repair_binding) = RepairBinding::decode_prefix(&mut d)?;
         if d.get_bytes().map_err(|_| ReplError::Malformed)? != target.channel() {
             return Err(ReplError::EpochScope);
         }
@@ -598,6 +605,15 @@ impl StudioEpoch {
         result.gate = gate;
         result.receipts = receipts;
         result.adopting = adopting;
+        if let Some(binding) = &repair_binding {
+            binding.validate(
+                &result.receipts,
+                &result.gate,
+                result.opening.as_ref(),
+                adopting,
+            )?;
+        }
+        result.repair_binding = repair_binding;
         result.gate.update_owner(owner);
         Ok(result)
     }

@@ -15,6 +15,7 @@ mod pass;
 pub(crate) mod performance;
 mod receive;
 mod recovery;
+mod repair;
 mod replay;
 mod seed;
 mod settlement;

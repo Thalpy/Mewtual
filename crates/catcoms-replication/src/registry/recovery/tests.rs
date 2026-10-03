@@ -39,6 +39,57 @@ fn fixture() -> (RegistryRecovery, RecoverySnapshot) {
 }
 
 #[test]
+fn registry_repair_recovery_uses_whole_source_rules_including_seed_only_and_terminal_epoch() {
+    for reason in [RecoveryReason::Rewound, RecoveryReason::Repair] {
+        for epoch in [0, 7, MAX_REGISTRY_EPOCH] {
+            for seed_only in [false, true] {
+                let (mut typed, mut snapshot) = fixture();
+                typed.projection.epoch = epoch;
+                typed.receipt_hash = if epoch == 0 { [0; 32] } else { [4; 32] };
+                snapshot.reason = reason;
+                snapshot.epoch = epoch;
+                snapshot.base_close_record_hash = (epoch != 0).then_some([5; 32]);
+                if seed_only {
+                    typed.excluded.clear();
+                    snapshot.applied_ops.clear();
+                }
+                snapshot.projection = typed.encode(MAX_RECOVERY_SNAPSHOT_BYTES).unwrap();
+                let decode = |s: &RecoverySnapshot| {
+                    RegistryRecovery::from_snapshot(
+                        s,
+                        &typed.projection.document,
+                        typed.projection.bucket,
+                    )
+                };
+                let restored = decode(&snapshot).unwrap();
+                assert_eq!(restored.projection(), typed.projection());
+                assert_eq!(restored.excluded_operations(), typed.excluded_operations());
+                let mut bad = snapshot.clone();
+                bad.applied_ops.push([255; 32]);
+                assert!(decode(&bad).is_err());
+                let mut bad = snapshot.clone();
+                bad.base_close_record_hash = if epoch == 0 { Some([5; 32]) } else { None };
+                assert!(decode(&bad).is_err());
+                let mut wrong_provenance = decode(&snapshot).unwrap();
+                wrong_provenance.receipt_hash = if epoch == 0 { [4; 32] } else { [0; 32] };
+                let mut bad = snapshot.clone();
+                bad.projection = wrong_provenance
+                    .encode(MAX_RECOVERY_SNAPSHOT_BYTES)
+                    .unwrap();
+                assert!(decode(&bad).is_err());
+                if seed_only {
+                    let mut empty = decode(&snapshot).unwrap();
+                    empty.projection.pointers.clear();
+                    let mut bad = snapshot.clone();
+                    bad.projection = empty.encode(MAX_RECOVERY_SNAPSHOT_BYTES).unwrap();
+                    assert!(decode(&bad).is_err());
+                }
+            }
+        }
+    }
+}
+
+#[test]
 fn registry_recovery_codec_roundtrip_is_canonical_and_debug_is_redacted() {
     let (typed, snapshot) = fixture();
     let restored = RegistryRecovery::from_snapshot(

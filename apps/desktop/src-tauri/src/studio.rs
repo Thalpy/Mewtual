@@ -12,6 +12,7 @@ use serde_json::{json, Value};
 // Registration restores the attributes and removes these expectations in the same change.
 #[expect(dead_code, reason = "registered by Agent 4 with its security rows")]
 pub(crate) mod copy;
+pub(crate) mod fault;
 pub(crate) mod inspection;
 #[expect(dead_code, reason = "registered by Agent 4 with its security rows")]
 pub(crate) mod lifecycle;

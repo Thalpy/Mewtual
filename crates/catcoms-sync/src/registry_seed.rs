@@ -110,6 +110,10 @@ pub struct RegistrySeedFetch {
     next_at: u64,
     seed: Option<VerifiedCheckpoint>,
     attempt: Option<Arc<()>>,
+    // A signed fault repair carried by the same authenticated answer. Delivery, not authority:
+    // the app verifies it under its own observed tenure before applying anything.
+    // Boxed: rare, and it must not inflate every in-flight seed fetch.
+    fault_repair: Option<Box<catcoms_replication::ReceiptRepair>>,
     // Drop retained bytes before refunding capacity, even when a caller drops off-thread.
     _capacity: Arc<()>,
 }
@@ -128,6 +132,14 @@ impl RegistrySeedFetch {
     /// Bytes have been checked; this says nothing about current authority, durability or editing.
     pub fn is_fetched(&self) -> bool {
         self.seed.is_some()
+    }
+    /// The fault repair the owner's answer carried, unverified. Never a selection or a proof.
+    pub fn fault_repair(&self) -> Option<&catcoms_replication::ReceiptRepair> {
+        self.fault_repair.as_deref()
+    }
+    /// The freshly proved selected receipt. Historical once read; not a lease.
+    pub fn selected_receipt(&self) -> &Receipt {
+        &self.selection.receipt
     }
 }
 /// Borrowed during a current-scope synchronous callback, not a capability the renderer can mint.

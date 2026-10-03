@@ -160,9 +160,22 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
                     .map(|s| &s.inner);
                 let served = self
                     .sync
-                    .serve_epoch_head_interest(interest, snapshot, |g, d, rng, request| {
-                        store.prepare_studio_head(server, g, target, d, request.tenure, rng, budget)
-                    })?
+                    .serve_epoch_head_interest_with_fault_repair(
+                        interest,
+                        snapshot,
+                        |g, d, rng, request| {
+                            store.prepare_studio_head_with_fault_repair(
+                                server,
+                                g,
+                                target,
+                                d,
+                                request.tenure,
+                                request.fault_report,
+                                rng,
+                                budget,
+                            )
+                        },
+                    )?
                     .transpose()?;
                 match served {
                     Some(ReceiptHeadServed::Owner(handoff)) => {
@@ -199,22 +212,54 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
         peer: PeerId,
         target: CheckpointTarget,
     ) -> Result<CheckpointDiscoveryAttempt<T>, AppError> {
-        self.prepare_checkpoint_discovery_at_mount(store.registry_mount(), server, peer, target)
+        self.prepare_checkpoint_discovery_at_mount(
+            store.registry_mount(),
+            server,
+            peer,
+            target,
+            None,
+        )
     }
+    /// `fault_report` is this device's own frozen pair for `target` (W-1), sent with the head
+    /// query for the owner to attest or ignore. It asserts nothing and chooses nothing.
     pub(crate) fn prepare_checkpoint_discovery_at_mount(
         &mut self,
         mount: Arc<()>,
         server: u64,
         peer: PeerId,
         target: CheckpointTarget,
+        fault_report: Option<&[catcoms_replication::Receipt; 2]>,
     ) -> Result<CheckpointDiscoveryAttempt<T>, AppError> {
         self.check_checkpoint_target(target)?;
         Ok(CheckpointDiscoveryAttempt {
-            inner: self.sync.prepare_checkpoint_discovery(peer, target)?,
+            inner: self.sync.prepare_checkpoint_discovery_with_fault_report(
+                peer,
+                target,
+                fault_report,
+            )?,
             mount,
             server,
             target,
             peer,
+        })
+    }
+    /// A seed-fetch pass for a repair that owes its replacement, minted from the locally verified
+    /// repair (design 5.6). Installing the fetched seed still crosses Repair recovery first.
+    pub(crate) fn select_repaired_checkpoint(
+        &mut self,
+        store: &ServerStore,
+        server: u64,
+        target: CheckpointTarget,
+        fault_repair: &catcoms_replication::ReceiptRepair,
+        selected: &catcoms_replication::Receipt,
+    ) -> Result<ServerCheckpointFetch, AppError> {
+        self.check_checkpoint_target(target)?;
+        Ok(ServerCheckpointFetch {
+            inner: self
+                .sync
+                .select_repaired_checkpoint(target, fault_repair, selected)?,
+            mount: store.registry_mount(),
+            server,
         })
     }
     pub fn complete_checkpoint_discovery(
@@ -375,16 +420,17 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
             .map(|s| &s.inner);
         let served = self
             .sync
-            .serve_receipt_head_with_handoff(
+            .serve_receipt_head_with_fault_repair(
                 &watch.head,
                 snapshot,
                 |group, device, rng, request| {
-                    store.prepare_studio_head(
+                    store.prepare_studio_head_with_fault_repair(
                         watch.server,
                         group,
                         watch.target,
                         device,
                         request.tenure,
+                        request.fault_report,
                         rng,
                         budget,
                     )
