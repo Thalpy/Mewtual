@@ -39,8 +39,13 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
     ///
     /// Requiring through the typed seam rather than `authoring_owner_tenure_start()` changes no
     /// acceptance - both admit `Known` alone - but it keeps `Imported` and `Unknown` apart in the
-    /// refusal, because they are different situations for whoever reads it: one is fixed by
-    /// observing the owner take office, the other is not fixed by waiting at all.
+    /// refusal, because they describe different things the device holds: nothing at all, or a
+    /// value from a snapshot it cannot verify. They do **not** differ in how they end. Neither is
+    /// cleared by elapsed time or by an ordinary commit; both end at the same event, the next
+    /// contiguous step that derives a fresh tenure here - an owner change, or the committer's
+    /// membership restarting on a new leaf (`OwnerTenure::applied`; pinned by
+    /// `owner_tenure_imported_and_unknown_both_end_at_the_next_observed_owner_change`). An earlier
+    /// version of this comment said waiting fixes one and not the other, which was false.
     ///
     /// Returns the branch the Save must name alongside the basis, both from the one fresh basis and
     /// in the one custody visit, so a caller cannot hold one without the other or compute the

@@ -4132,8 +4132,16 @@ correct: it mints a fresh basis and has no terminal path, so nothing V8 protects
 refusing before it.
 
 Acceptance is unchanged - both the old accessor and the seam admit `Known` alone. What changes is
-that `Imported` and `Unknown` are refused **apart**, which matters to whoever reads the refusal: one
-is fixed by observing the owner take office, the other is not fixed by waiting.
+that `Imported` and `Unknown` are refused **apart**, because they describe different things the
+device holds - nothing, or an unverifiable imported value. **Corrected:** this paragraph first said
+"one is fixed by observing the owner take office, the other is not fixed by waiting". That was
+false, and I put the same claim in a code comment. A review of Agent 2's traced
+`OwnerTenure::applied`: both end at the same event, the next contiguous step that derives a fresh
+tenure (an owner change, or the committer's membership restarting on a new leaf), and neither is
+cleared by elapsed time or an ordinary commit. Now pinned by
+`owner_tenure_imported_and_unknown_both_end_at_the_next_observed_owner_change`. The split is still
+right - P2 now carries `TenureImported` beside `TenureUnknown` - but it is about what the device
+holds, not about how the state ends.
 
 **Tested on a real joiner, with the founder as control** -
 `preparation_refuses_a_member_with_no_observed_tenure_and_says_which_case`. A plain joiner's
