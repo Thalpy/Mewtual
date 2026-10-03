@@ -1011,9 +1011,11 @@ after a rewind. Agent 1's `Hold` outcomes map onto these reasons, satisfying its
 > record that fails to read or pair, reported rather than failing the whole lifecycle read),
 > `ObjectMissing` (an Index entry naming a Flipnote with no source, which H1 refuses), and
 > `NotReplayable` (from an inspection's rebuild, or from the lifecycle row when an Index entry
-> cannot even be decoded). A Prepared branch reads transferable with `prepared` set, because its
-> resolution needs no tenure and telling settled from held needs a restore; a durably held one is a
-> known limit. The classification reads each
+> cannot even be decoded). `TenureImported` is split from `TenureUnknown` (2026-10-03, Agent 1's
+> question): waiting fixes only the second. A Prepared branch is classified by its resolution's own
+> evidence, read from the record's framing (`StudioOverlayState::evidence_in_vault`, held to
+> `evidence` by an agreement test): `Hold` is `PreparedStuck`, `Complete` or `Absent` is
+> transferable with `prepared` set, since resolution needs no tenure. The classification reads each
 > source record's header and never restores it, so the lifecycle row stays cheap under custody.
 > Agent 1's `StudioOverlayHold` was not built; its runtime refusals are still strings.
 
@@ -1500,7 +1502,8 @@ type OverlayInspection =
 type OverlayManualReason =
   | "sourceMissing" | "sourceUnreadable" | "sourceNotClosing" | "sourceReplaced"
   | "sourceRewound" | "successorNotPristine" | "successorMissing" | "receiptChanged"
-  | "objectMissing" | "tenureUnknown" | "fault" | "notCurrentAuthor" | "unconfirmed"
+  | "objectMissing" | "tenureUnknown" | "tenureImported" | "preparedStuck" | "fault"
+  | "notCurrentAuthor" | "unconfirmed"
   | "notReplayable";
 ```
 

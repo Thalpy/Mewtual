@@ -6,9 +6,10 @@
 //! on a real vault, through the ordinary Save path.
 use super::archive::frame_branch;
 use super::*;
+use crate::studio::StudioOwnerTenure::{self, Imported, Known, Unknown};
 use catcoms_replication::studio::{StudioOverlayEligibility as E, StudioOverlayManualReason as R};
 
-fn classify(f: &Fixture, store: &ServerStore, tenure: Option<u64>) -> Option<E> {
+fn classify(f: &Fixture, store: &ServerStore, tenure: StudioOwnerTenure) -> Option<E> {
     store
         .studio_overlay_eligibility(SERVER, &f.group, f.target, &f.device, tenure)
         .unwrap()
@@ -20,7 +21,7 @@ fn the_lifecycle_classification_names_each_store_level_reason() {
     let f = Fixture::new(true);
     let mut store = open(root.path());
     assert_eq!(
-        classify(&f, &store, Some(0)),
+        classify(&f, &store, Known(0)),
         None,
         "no branch, no classification"
     );
@@ -28,14 +29,14 @@ fn the_lifecycle_classification_names_each_store_level_reason() {
     let (close, basis) = closing(&f, &mut store);
     frame_branch(&f, &mut store, &close, &basis);
     assert_eq!(
-        classify(&f, &store, Some(0)),
+        classify(&f, &store, Known(0)),
         Some(E::Manual(R::SuccessorMissing)),
         "on the still-Closing source the successor does not exist yet"
     );
     let other = MlsDevice::generate().unwrap();
     assert_eq!(
         store
-            .studio_overlay_eligibility(SERVER, &f.group, f.target, &other, Some(0))
+            .studio_overlay_eligibility(SERVER, &f.group, f.target, &other, Known(0))
             .unwrap(),
         Some(E::Manual(R::NotCurrentAuthor)),
         "only the branch's author may transfer it"
@@ -44,7 +45,7 @@ fn the_lifecycle_classification_names_each_store_level_reason() {
     install(&f, &mut store, &close);
     let restores = crate::store::epoch_studio::source::studio_full_restores_for_test();
     assert_eq!(
-        classify(&f, &store, Some(0)),
+        classify(&f, &store, Known(0)),
         Some(E::Transferable),
         "the pristine successor, the author and the receipt's own tenure: the handoff would run"
     );
@@ -54,12 +55,17 @@ fn the_lifecycle_classification_names_each_store_level_reason() {
         "the lifecycle row runs under custody on every read and must not restore the source"
     );
     assert_eq!(
-        classify(&f, &store, None),
+        classify(&f, &store, Unknown),
         Some(E::Manual(R::TenureUnknown)),
         "without an observed tenure the handoff cannot sign, so the draft is manual"
     );
     assert_eq!(
-        classify(&f, &store, Some(7)),
+        classify(&f, &store, Imported(0)),
+        Some(E::Manual(R::TenureImported)),
+        "an imported tenure is refused too, and named apart: waiting does not fix it"
+    );
+    assert_eq!(
+        classify(&f, &store, Known(7)),
         Some(E::Manual(R::ReceiptChanged)),
         "under a tenure the receipt was not issued in, its owner is not the current one"
     );
@@ -72,13 +78,13 @@ fn the_lifecycle_classification_names_each_store_level_reason() {
     corrupt[middle] ^= 0xff;
     std::fs::write(&path, &corrupt).unwrap();
     assert_eq!(
-        classify(&f, &store, Some(0)),
+        classify(&f, &store, Known(0)),
         Some(E::Manual(R::SourceUnreadable))
     );
 
     std::fs::remove_file(&path).unwrap();
     assert_eq!(
-        classify(&f, &store, Some(0)),
+        classify(&f, &store, Known(0)),
         Some(E::Manual(R::SourceMissing))
     );
 }
@@ -127,7 +133,7 @@ fn an_index_entry_naming_a_missing_flipnote_is_manual_exactly_while_the_handoff_
     };
 
     assert_eq!(
-        classify(&f, &store, Some(0)),
+        classify(&f, &store, Known(0)),
         Some(E::Manual(R::ObjectMissing))
     );
     let refused = handoff(&mut store).unwrap_err().to_string();
@@ -164,6 +170,6 @@ fn an_index_entry_naming_a_missing_flipnote_is_manual_exactly_while_the_handoff_
             &mut b,
         )
         .unwrap();
-    assert_eq!(classify(&f, &store, Some(0)), Some(E::Transferable));
+    assert_eq!(classify(&f, &store, Known(0)), Some(E::Transferable));
     handoff(&mut store).expect("a branch classified transferable must transfer");
 }

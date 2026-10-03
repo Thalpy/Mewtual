@@ -679,6 +679,50 @@ impl StudioOverlayState {
             StudioHandoffEvidence::Hold
         })
     }
+    /// [`Self::evidence`] over authenticated vault source bytes, WITHOUT restoring the source.
+    ///
+    /// What P2's lifecycle classification calls for a Prepared branch, so a branch whose handoff is
+    /// durably stuck (`Hold`) can be named without paying a restore under custody. The same
+    /// comparisons in the same order: target, document id and epoch, then each accepted entry's
+    /// signed-operation hash against the Prepared manifest, found with the same
+    /// `overlay_signed_hash_in` the restored path uses. The operations are decoded from their
+    /// framing only; nothing is replayed or verified, so this classifies and never resolves.
+    /// `the_vault_evidence_agrees_with_the_restored_evidence` holds the two together.
+    pub fn evidence_in_vault(
+        &self,
+        bytes: &[u8],
+        ledger: &IntentLedger,
+    ) -> Result<StudioHandoffEvidence, ReplError> {
+        self.validate(ledger)?;
+        let p = self.prepared.as_ref().ok_or(ReplError::EpochScope)?;
+        let shape = match crate::studio::epoch::VaultShape::read(bytes, self.target) {
+            Ok(shape) => shape,
+            // A record for another channel is "the source is not this target", which `evidence`
+            // answers with Hold rather than an error.
+            Err(ReplError::EpochScope) => return Ok(StudioHandoffEvidence::Hold),
+            Err(error) => return Err(error),
+        };
+        if !shape.is_document(ledger.document(), p.doc_id) || shape.epoch() != p.epoch {
+            return Ok(StudioHandoffEvidence::Hold);
+        }
+        let operations = shape.signed_operations()?;
+        let overlay = self.active.as_ref().ok_or(ReplError::Malformed)?;
+        let mut count = 0;
+        for ((_, intent), expected) in overlay.checked_entries(ledger)?.into_iter().zip(&p.signed) {
+            match crate::studio::epoch::overlay_signed_hash_in(&operations, intent) {
+                Ok(Some(actual)) if &actual == expected => count += 1,
+                Ok(None) => {}
+                _ => return Ok(StudioHandoffEvidence::Hold),
+            }
+        }
+        Ok(if count == p.signed.len() {
+            StudioHandoffEvidence::Complete
+        } else if count == 0 {
+            StudioHandoffEvidence::Absent
+        } else {
+            StudioHandoffEvidence::Hold
+        })
+    }
     pub fn matches_source_before(&self, source: &mut StudioEpoch) -> Result<bool, ReplError> {
         let hash = source_hash(source)?;
         Ok(self.prepared.as_ref().is_some_and(|p| p.before == hash))

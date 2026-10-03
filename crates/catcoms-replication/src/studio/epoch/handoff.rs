@@ -10,15 +10,44 @@ pub(in crate::studio) use preparation::PreparedOverlayChanges;
 /// The same framing `StudioEpoch::snapshot` writes and `restore_scoped` reads, in the same order and
 /// with the same bounds, stopping at the operation count. For classification only: nothing here is
 /// verified against the operations, so it must never stand in for a restore.
-struct VaultShape<'a> {
+pub(in crate::studio) struct VaultShape<'a> {
     adopting: bool,
     opening: &'a [u8],
     seed: &'a [u8],
     gate: EpochGate,
     operations: usize,
+    /// Everything after the count: the signed operations, still encoded.
+    rest: &'a [u8],
 }
 impl<'a> VaultShape<'a> {
-    fn read(bytes: &'a [u8], target: StudioTarget) -> Result<Self, ReplError> {
+    pub(in crate::studio) fn epoch(&self) -> u64 {
+        self.gate.epoch()
+    }
+    /// Whether the gate names this logical document and epoch document id.
+    pub(in crate::studio) fn is_document(&self, document: &LogicalDocument, doc_id: u128) -> bool {
+        self.gate.verify_scope(document, doc_id).is_ok()
+    }
+    /// The signed operations, each decoded from its framing only: no Automerge change is applied,
+    /// no signature is checked, nothing is replayed. With the same per-operation and total bounds
+    /// `restore_scoped` applies.
+    pub(in crate::studio) fn signed_operations(&self) -> Result<Vec<SignedOp>, ReplError> {
+        let mut d = Decoder::new(self.rest);
+        let mut total = 0usize;
+        let mut operations = Vec::with_capacity(self.operations);
+        for _ in 0..self.operations {
+            let bytes = field(&mut d, MAX_SIGNED_EPOCH_OP_BYTES)?;
+            total = total.saturating_add(bytes.len());
+            if total > MAX_EPOCH_BYTES {
+                return Err(ReplError::EpochBound);
+            }
+            operations.push(SignedOp::decode(bytes)?);
+        }
+        Ok(operations)
+    }
+    pub(in crate::studio) fn read(
+        bytes: &'a [u8],
+        target: StudioTarget,
+    ) -> Result<Self, ReplError> {
         if bytes.len() > MAX_STUDIO_EPOCH_SNAPSHOT_BYTES {
             return Err(ReplError::EpochBound);
         }
@@ -39,12 +68,14 @@ impl<'a> VaultShape<'a> {
         if operations > MAX_EPOCH_OPERATIONS {
             return Err(ReplError::EpochBound);
         }
+        let consumed = bytes.len() - d.remaining();
         Ok(Self {
             adopting,
             opening,
             seed,
             gate,
             operations,
+            rest: &bytes[consumed..],
         })
     }
 }
@@ -303,8 +334,38 @@ impl StudioEpoch {
         &self,
         intent: &LocalIntent,
     ) -> Result<Option<[u8; 32]>, ReplError> {
-        Ok(self.held(intent.author, &intent.operation)?.map(|op| {
-            blake3::derive_key("catcoms/studio-overlay-signed-operation/v1", &op.encode())
-        }))
+        overlay_signed_hash_in(self.doc.signed_log(), intent)
     }
+}
+
+/// [`StudioEpoch::overlay_signed_hash`] over a list of signed operations, so a restored source and
+/// a vault record's undecoded log answer with ONE definition. The restored path passes its own
+/// signed log; `StudioOverlayState::evidence_in_vault` passes the operations it decoded from the
+/// record's framing.
+pub(in crate::studio) fn overlay_signed_hash_in(
+    operations: &[SignedOp],
+    intent: &LocalIntent,
+) -> Result<Option<[u8; 32]>, ReplError> {
+    Ok(held_in(operations, intent.author, &intent.operation)?
+        .map(|op| blake3::derive_key("catcoms/studio-overlay-signed-operation/v1", &op.encode())))
+}
+
+/// The signed operation `author` saved for `domain`'s id, if any; an id held with a DIFFERENT body
+/// is a conflict, not an absence. Shared by `StudioEpoch::held`.
+pub(in crate::studio) fn held_in<'a>(
+    operations: &'a [SignedOp],
+    author: DeviceId,
+    domain: &DomainOp,
+) -> Result<Option<&'a SignedOp>, ReplError> {
+    let id = domain.id(&author);
+    for op in operations.iter().filter(|op| op.author_device == author) {
+        let body = op.parsed_domain_op()?.ok_or(ReplError::Malformed)?;
+        if body.id(&author) == id {
+            if body != *domain {
+                return Err(ReplError::IntentConflict);
+            }
+            return Ok(Some(op));
+        }
+    }
+    Ok(None)
 }

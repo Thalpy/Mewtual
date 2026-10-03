@@ -485,6 +485,8 @@ pub(super) fn eligibility_fields(
                 R::SuccessorNotPristine => "successorNotPristine",
                 R::ObjectMissing => "objectMissing",
                 R::TenureUnknown => "tenureUnknown",
+                R::TenureImported => "tenureImported",
+                R::PreparedStuck => "preparedStuck",
             }
             .into(),
         ),

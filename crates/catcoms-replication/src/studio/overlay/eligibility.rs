@@ -59,7 +59,17 @@ pub enum StudioOverlayManualReason {
     /// section 11's list; added so the classifier names that refusal rather than calling the
     /// branch transferable.
     ObjectMissing,
-    /// This device cannot presently prove the current owner's tenure. Nothing is wrong with the
-    /// work; a handoff signs under that tenure and must not guess it.
+    /// This device has not observed the current owner's tenure. Nothing is wrong with the work; a
+    /// handoff signs under that tenure and must not guess it. This one can resolve by waiting: the
+    /// next observed owner transition establishes it.
     TenureUnknown,
+    /// This device holds the tenure only from an imported (v1-migrated) snapshot, which it cannot
+    /// verify. Distinct from `TenureUnknown` because waiting does NOT fix it: an imported value is
+    /// never promoted, so telling this device "this resolves once the owner is observed" would be
+    /// false. Only a genuinely new owner tenure, observed here, clears it.
+    TenureImported,
+    /// A handoff of this branch was staged (Prepared) and its source holds a partial or conflicting
+    /// set of the branch's signed operations, so the resolution can neither complete it nor return
+    /// it to active. Permanent until resolved by hand; every manual operation but disposal remains.
+    PreparedStuck,
 }

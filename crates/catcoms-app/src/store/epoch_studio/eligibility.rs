@@ -10,9 +10,10 @@
 //! operation is decoded or replayed (`StudioEpoch::overlay_successor_hold_in_vault`,
 //! `vault_holds_work`). The branch itself is read structurally, as the lifecycle already did.
 use super::*;
+use crate::studio::StudioOwnerTenure;
 use catcoms_replication::studio::{
-    IndexOp, StudioEpoch, StudioOverlayEligibility, StudioOverlayManualReason as R,
-    StudioOverlayProvenance,
+    IndexOp, StudioEpoch, StudioHandoffEvidence, StudioOverlayEligibility,
+    StudioOverlayManualReason as R, StudioOverlayProvenance,
 };
 use catcoms_replication::ReplError;
 
@@ -29,8 +30,9 @@ impl ServerStore {
     /// refusals - capacity, a concurrent job, a changed record mid-flight - are not classified;
     /// they say "retry", not "act".
     ///
-    /// `tenure` is the AUTHORING value: `Some` only for a fully observed tenure. `Imported` and
-    /// `Unknown` both read as `TenureUnknown`, which is the handoff's own refusal for them.
+    /// `tenure` is this device's observed tenure, unconverted. Only `Known` can be transferable;
+    /// `Imported` and `Unknown` are named apart (`TenureImported`, `TenureUnknown`) because waiting
+    /// fixes only the second, and the UI must not promise otherwise.
     ///
     /// Errors only for a request this record does not answer (another target); a source that is
     /// missing, unreadable or for another branch is a REASON, so the lifecycle row still reports
@@ -41,7 +43,7 @@ impl ServerStore {
         group: &ServerGroup,
         target: StudioTarget,
         device: &MlsDevice,
-        tenure: Option<u64>,
+        tenure: StudioOwnerTenure,
     ) -> Result<Option<StudioOverlayEligibility>, AppError> {
         let manual = |reason| Ok(Some(StudioOverlayEligibility::Manual(reason)));
         let document = target.document(&group.group_id()).map_err(invalid)?;
@@ -63,16 +65,22 @@ impl ServerStore {
         }
         // A Prepared branch is NOT classified against its successor or its tenure. H1 resolves it
         // first, from the Prepared record alone and with no tenure (V8): Complete evidence settles
-        // it, Hold leaves it held. A successor already holding the branch's own signed operations
-        // is the normal Complete case, which the successor hold would call unpristine; and telling
-        // Complete from Hold needs the restore this read must not pay. So it reads Transferable -
-        // resolution is pending - and `prepared` says why.
-        //
-        // Known limit: a Prepared branch whose evidence is durably `Hold` is not distinguished
-        // here. It is rare (a conflicting or partial source after a crash), the handoff refuses it
-        // with "handoff remains held", and every manual operation except disposal stays open.
+        // it, Absent returns it to active, Hold leaves it held - permanently. A successor already
+        // holding the branch's own signed operations is the normal Complete case, which the
+        // successor hold would call unpristine. So the question for a Prepared branch is only the
+        // resolution's own: is the evidence Hold? Answered from the record's framing, without a
+        // restore, by the same comparisons `evidence` makes.
         if state.handoff_prepared() {
-            return Ok(Some(StudioOverlayEligibility::Transferable));
+            return match self.with_vault_source(server, group, target, |bytes| {
+                metadata.evidence_in_vault(bytes, &state.ledger)
+            }) {
+                Ok(None) => manual(R::SourceMissing),
+                Ok(Some(StudioHandoffEvidence::Hold)) => manual(R::PreparedStuck),
+                Ok(Some(StudioHandoffEvidence::Complete | StudioHandoffEvidence::Absent)) => {
+                    Ok(Some(StudioOverlayEligibility::Transferable))
+                }
+                Err(_) => manual(R::SourceUnreadable),
+            };
         }
         let owner = group.designated_committer();
         match self.with_vault_source(server, group, target, |bytes| {
@@ -108,8 +116,12 @@ impl ServerStore {
                 }
             }
         }
-        let Some(tenure) = tenure else {
-            return manual(R::TenureUnknown);
+        // The handoff signs under a fully observed tenure only. The two refusals are named apart
+        // because only one of them is fixed by waiting.
+        let tenure = match tenure {
+            StudioOwnerTenure::Known(start) => start,
+            StudioOwnerTenure::Imported(_) => return manual(R::TenureImported),
+            StudioOwnerTenure::Unknown => return manual(R::TenureUnknown),
         };
         // The handoff's live-authority mint, run for its verdict only and then dropped: this
         // device is still a member and the branch's receipt is the current owner's under the
@@ -122,7 +134,7 @@ impl ServerStore {
 
     /// Run `read` over `target`'s authenticated vault source bytes, unsealed but not restored.
     /// `None` when the document has no source record.
-    fn with_vault_source<T>(
+    pub(super) fn with_vault_source<T>(
         &self,
         server: u64,
         group: &ServerGroup,

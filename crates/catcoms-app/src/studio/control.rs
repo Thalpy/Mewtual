@@ -499,7 +499,7 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
             StudioControlAction::FinishOverlayInspection(prepared) => {
                 let inspection = self.finish_studio_inspection(store, server, target, *prepared)?;
                 // P2, in the same custody visit that just proved the read current.
-                let tenure = require_owner_tenure(self.observed_owner_tenure()).ok();
+                let tenure = self.observed_owner_tenure();
                 let eligibility = self.sync.with_registry_context(|group, device, _, _| {
                     store.studio_overlay_eligibility(server, group, target, device, tenure)
                 })?;
@@ -568,11 +568,10 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
             }
             action => StudioControlRequest { target, action },
         };
-        // Read before the registry context borrows `self.sync`. The AUTHORING value, through the
-        // same exhaustive `require` new authoring uses: `Imported` and `Unknown` are both `None`,
-        // which is how the lifecycle can say `TenureUnknown` for exactly the cases the handoff
-        // would refuse. Only the lifecycle arm reads it.
-        let authoring_tenure = require_owner_tenure(self.observed_owner_tenure()).ok();
+        // Read before the registry context borrows `self.sync`, unconverted, so the lifecycle can
+        // name `Imported` and `Unknown` apart: only one of them is fixed by waiting. Only the
+        // lifecycle arm reads it.
+        let observed_tenure = self.observed_owner_tenure();
         self.sync
             .with_registry_context(|group, device, clock, rng| {
                 if group.member_signature_key(&device.device_id()).as_deref()
@@ -631,7 +630,7 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
                             group,
                             target,
                             device,
-                            authoring_tenure,
+                            observed_tenure,
                         )?;
                         return Ok(StudioControlResponse::OverlayLifecycle(Box::new(
                             StudioOverlayLifecycle {

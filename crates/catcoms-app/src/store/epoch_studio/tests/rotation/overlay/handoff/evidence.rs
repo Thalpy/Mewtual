@@ -56,7 +56,7 @@ fn studio_overlay_handoff_candidate_requires_the_private_store_capability() {
 
 /// Simulate authenticated but conflicting saved evidence at an interrupted source write.
 /// The alternate source is independently typed-admitted/signed; it is not a malformed blob.
-fn substituted(
+pub(super) fn substituted(
     f: &Fixture,
     store: &ServerStore,
     mutate_delta: bool,
