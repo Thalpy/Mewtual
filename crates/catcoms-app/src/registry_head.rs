@@ -142,15 +142,7 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
             snapshot,
             budget,
             |store, server, receipt, rng, budget| {
-                store
-                    .mark_epoch_owner_receipt_published(
-                        server,
-                        &receipt.document,
-                        receipt.hash(),
-                        rng,
-                        budget,
-                    )
-                    .map(|_| ())
+                store.complete_registry_head_publication(server, receipt, rng, budget)
             },
         )
     }
@@ -183,16 +175,17 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
             .map(|p| &p.inner);
         let served = self
             .sync
-            .serve_receipt_head_with_handoff(
+            .serve_receipt_head_with_fault_repair(
                 &watch.inner,
                 snapshot,
                 |group, device, rng, request| {
-                    store.prepare_registry_head(
+                    store.prepare_registry_head_with_fault_repair(
                         watch.server,
                         group,
                         watch.bucket,
                         device,
                         request.tenure,
+                        request.fault_report,
                         rng,
                         budget,
                     )

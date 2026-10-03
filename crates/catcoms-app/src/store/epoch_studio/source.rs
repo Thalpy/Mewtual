@@ -1,6 +1,7 @@
 //! One mount-owned, moved (never cloned) verified restart unit. This is work reuse, not a
 //! persistence owner or an authority cache. Every take authenticates the actual full wrapper.
 
+use super::super::epoch_owner::repair_defers_install;
 use super::*;
 use catcoms_crypto::DeviceId;
 
@@ -266,6 +267,88 @@ impl ServerStore {
             version.record,
         );
         true
+    }
+
+    /// Read the retained source without loading anything: a memory read of state that was
+    /// authenticated when retained. `None` when it is cold; callers must not fall back to a
+    /// rebuild on the actor, so a cold source simply defers their repair work.
+    pub(super) fn warm_studio_unit<V>(
+        &self,
+        server: u64,
+        group: &ServerGroup,
+        target: StudioTarget,
+        device: &MlsDevice,
+        read: impl FnOnce(&StudioEpoch) -> V,
+    ) -> Option<V> {
+        self.studio_source
+            .as_ref()
+            .filter(|s| s.matches(server, group, target, device.device_id()))
+            .map(|s| read(&s.state.unit))
+    }
+
+    /// The retained source's frozen fault pair, for the W-1 reporter. Reporting it asserts
+    /// nothing and grants nothing; the provider decides what it can attest.
+    pub(crate) fn warm_studio_fault_pair(
+        &self,
+        server: u64,
+        group: &ServerGroup,
+        target: StudioTarget,
+        device: &MlsDevice,
+    ) -> Option<[Receipt; 2]> {
+        self.warm_studio_unit(server, group, target, device, |unit| {
+            unit.fault_evidence().map(|(a, b)| {
+                let mut pair = [a.clone(), b.clone()];
+                pair.sort_by_key(Receipt::hash);
+                pair
+            })
+        })
+        .flatten()
+    }
+
+    /// The committed repair this warm source still owes a replacement for, with its complete
+    /// pair from the source's own resolved evidence. Lets a peer re-request the selected seed
+    /// after B2 without the owner resending anything; a cold source answers `None`.
+    pub(crate) fn owed_studio_repair(
+        &self,
+        server: u64,
+        group: &ServerGroup,
+        target: StudioTarget,
+        device: &MlsDevice,
+    ) -> Option<(catcoms_replication::ReceiptRepair, [Receipt; 2])> {
+        self.warm_studio_unit(server, group, target, device, |unit| {
+            unit.repair_state()
+                .filter(|state| state.install_pending)
+                .map(|state| {
+                    let mut pair = [state.selected, state.losing];
+                    pair.sort_by_key(Receipt::hash);
+                    (state.repair, pair)
+                })
+        })
+        .flatten()
+    }
+
+    /// Whether a repair hold, not storage, must defer installing `selected` into this target: a
+    /// held owner decision for another receipt (or not yet applied), or a source that owes a
+    /// different replacement. Deferring keeps the hold per target; an error here would pause all
+    /// catch-up. A cold source answers from the owner record alone.
+    pub(crate) fn studio_install_deferred_by_repair(
+        &self,
+        server: u64,
+        group: &ServerGroup,
+        target: StudioTarget,
+        device: &MlsDevice,
+        selected: &Receipt,
+    ) -> Result<bool, AppError> {
+        let document = target.document(&group.group_id()).map_err(invalid)?;
+        let held = self.epoch_owner_held_selection(server, &document)?;
+        let owed = self
+            .warm_studio_unit(server, group, target, device, |unit| {
+                unit.repair_state()
+                    .filter(|state| state.install_pending)
+                    .map(|state| state.selected.hash())
+            })
+            .flatten();
+        Ok(repair_defers_install(held, owed, selected.hash()))
     }
 
     /// Pre-I/O service refusal only. A candidate NEVER authorizes reuse before fresh byte checks.

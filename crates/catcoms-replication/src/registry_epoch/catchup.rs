@@ -76,6 +76,11 @@ impl RegistryPageSource {
     pub fn receipt_head(&self) -> Result<Option<&Receipt>, ReplError> {
         self.0.receipt_head()
     }
+    /// The signed repair this verified source carries as its resolved disposition. Historical:
+    /// a provider must still verify it under current owner authority before serving it.
+    pub fn fault_repair(&self) -> Option<crate::ReceiptRepair> {
+        self.0.repair_state().map(|state| state.repair)
+    }
     pub fn checkpoint_bytes_by_hash(
         &mut self,
         id: u128,

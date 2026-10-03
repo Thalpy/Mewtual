@@ -235,20 +235,25 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
                     .map(|s| &s.inner);
                 let served = self
                     .sync
-                    .serve_epoch_head_interest(interest, snapshot, |g, d, rng, request| {
-                        store.with_studio_protocol_budget(server, g, budget, |store, budget| {
-                            store.prepare_registry_head_prepared(
-                                server,
-                                g,
-                                bucket,
-                                d,
-                                request.tenure,
-                                rng,
-                                provider.prepared.as_ref().map(|p| (&p.stamp, &p.source)),
-                                budget,
-                            )
-                        })
-                    })?
+                    .serve_epoch_head_interest_with_fault_repair(
+                        interest,
+                        snapshot,
+                        |g, d, rng, request| {
+                            store.with_studio_protocol_budget(server, g, budget, |store, budget| {
+                                store.prepare_registry_head_prepared_with_fault_repair(
+                                    server,
+                                    g,
+                                    bucket,
+                                    d,
+                                    request.tenure,
+                                    request.fault_report,
+                                    rng,
+                                    provider.prepared.as_ref().map(|p| (&p.stamp, &p.source)),
+                                    budget,
+                                )
+                            })
+                        },
+                    )?
                     .transpose()?;
                 if let Some(ReceiptHeadServed::Owner(handoff)) = served {
                     self.sync
