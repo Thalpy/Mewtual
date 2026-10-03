@@ -199,6 +199,11 @@ async fn provisional_tail_pages_use_real_fixed_prefix_without_rebinding_ordinary
             Arc::new(f.clock.clone()),
             &mut f.provider.rng,
         );
+        // The seed as the callback exposed it before any tail, to compare once the tail has run.
+        let seed_before = f
+            .client
+            .with_provisional_studio_seed(&f.candidate, |view| view.seed_bytes.to_vec())
+            .unwrap();
         let mut candidate = f.candidate;
         for expected_more in [true, false] {
             let pending = f.client.prepare_provisional_studio_tail(candidate).unwrap();
@@ -231,6 +236,12 @@ async fn provisional_tail_pages_use_real_fixed_prefix_without_rebinding_ordinary
         f.client
             .with_provisional_studio_seed(&candidate, |view| {
                 assert_eq!(view.projection, &f.source.projection().unwrap());
+                // Design 8.1: the merged view moved with the tail; the seed it exposes did not.
+                assert_eq!(
+                    view.seed_bytes,
+                    seed_before.as_slice(),
+                    "the tail must not change the seed an unconfirmed draft is based on"
+                );
                 assert_eq!(view.candidate.provider, f.provider.device.device_id());
                 assert!(view
                     .candidate

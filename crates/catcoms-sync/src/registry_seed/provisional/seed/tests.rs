@@ -177,6 +177,11 @@ async fn provisional_seed_nonowner_index_and_flipnote_are_only_unconfirmed_typed
                 assert_eq!(value.projection.epoch(), 1);
                 assert_eq!(value.projection.document(), &receipt.document);
                 assert_eq!(value.projection.channel(), target.channel());
+                assert_eq!(
+                    value.seed_bytes,
+                    seed.bytes(),
+                    "the callback exposes exactly the seed the provider served (design 8.1)"
+                );
                 match value.projection {
                     StudioProjection::Flipnote(p) => assert_eq!(
                         p.title.as_ref().unwrap().selected.value,

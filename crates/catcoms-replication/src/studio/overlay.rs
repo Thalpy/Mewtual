@@ -151,8 +151,7 @@ impl BasisData {
     }
     fn graph(&self) -> Result<(AutoCommit, StudioProjection), ReplError> {
         let (mut doc, projection) =
-            UnconfirmedStudioSeed::parse(self.target, &self.receipt, &self.seed)?
-                .into_local_graph();
+            UnconfirmedStudioSeed::parse_graph(self.target, &self.receipt, &self.seed)?;
         doc.set_actor(ActorId::from(self.author.as_bytes().to_vec()));
         Ok((doc, projection))
     }

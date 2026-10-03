@@ -251,8 +251,9 @@ impl StudioDraftArchive {
     /// collects, which is what makes a preserving disposal leave nothing reclaimable that the
     /// branch was protecting.
     pub fn blob_cids(&self) -> Result<BTreeSet<ContentId>, ReplError> {
-        let seed = UnconfirmedStudioSeed::parse(self.target, &self.receipt, &self.seed)?;
-        let mut cids = crate::studio::references::projection_cids(seed.projection());
+        let (_, projection) =
+            UnconfirmedStudioSeed::parse_graph(self.target, &self.receipt, &self.seed)?;
+        let mut cids = crate::studio::references::projection_cids(&projection);
         for entry in &self.entries {
             if let Some(cid) = references::operation_blob_cid(&entry.operation)? {
                 cids.insert(cid);

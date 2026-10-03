@@ -17,6 +17,15 @@ pub struct UnconfirmedStudioSeed {
     applied: HashSet<[u8; 32]>,
     operations: BTreeMap<[u8; 32], crate::LocalIntent>,
     encoded_bytes: usize,
+    /// The exact checkpoint bytes `parse` was given and proved canonical (design 8.1 part 1).
+    ///
+    /// Kept because nothing else can reproduce them once a tail is applied: the tail advances
+    /// `projection`, so `projection.checkpoint(..)` stops matching the seed (review finding A2),
+    /// and an unconfirmed draft must be based on the seed itself, not on the merged preview.
+    /// Immutable after `parse`; no tail operation touches it. Zeroized on drop like the raw
+    /// transfer buffer it came from. Up to `MAX_CHECKPOINT_BYTES` (2 MiB), retained beside the
+    /// parsed graph for as long as a ready preview is, which the design's memory accounting counts.
+    seed_bytes: zeroize::Zeroizing<Vec<u8>>,
 }
 impl std::fmt::Debug for UnconfirmedStudioSeed {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -26,7 +35,40 @@ impl std::fmt::Debug for UnconfirmedStudioSeed {
 impl UnconfirmedStudioSeed {
     /// Cold, bounded parsing only. Network provenance and lifecycle must be checked separately
     /// before using the result. This value cannot be installed or used to authorize edits.
+    ///
+    /// Retains a copy of `bytes` once they are proved to be the canonical seed (see `seed_bytes`).
+    /// A caller that only wants the graph uses [`Self::parse_graph`] and skips that copy.
     pub fn parse(target: StudioTarget, receipt: &Receipt, bytes: &[u8]) -> Result<Self, ReplError> {
+        let (doc, projection, doc_id) = Self::parsed(target, receipt, bytes)?;
+        Ok(Self {
+            projection,
+            target,
+            doc,
+            doc_id,
+            applied: HashSet::new(),
+            operations: BTreeMap::new(),
+            encoded_bytes: 0,
+            seed_bytes: zeroize::Zeroizing::new(bytes.to_vec()),
+        })
+    }
+
+    /// The same checks as [`Self::parse`], returning only the private data graph, never a
+    /// checkpoint or epoch capability. For local drafts and archives, which hold the seed bytes
+    /// themselves and so must not pay for a second retained copy.
+    pub(in crate::studio) fn parse_graph(
+        target: StudioTarget,
+        receipt: &Receipt,
+        bytes: &[u8],
+    ) -> Result<(AutoCommit, StudioProjection), ReplError> {
+        let (doc, projection, _) = Self::parsed(target, receipt, bytes)?;
+        Ok((doc, projection))
+    }
+
+    fn parsed(
+        target: StudioTarget,
+        receipt: &Receipt,
+        bytes: &[u8],
+    ) -> Result<(AutoCommit, StudioProjection, u128), ReplError> {
         let doc = crate::checkpoint::inspect_unconfirmed_seed(receipt, bytes)?;
         let epoch = receipt
             .closed_epoch
@@ -52,15 +94,7 @@ impl UnconfirmedStudioSeed {
             epoch,
             &receipt.close_record_hash,
         );
-        Ok(Self {
-            projection,
-            target,
-            doc,
-            doc_id,
-            applied: HashSet::new(),
-            operations: BTreeMap::new(),
-            encoded_bytes: 0,
-        })
+        Ok((doc, projection, doc_id))
     }
     /// Typed content only; seed authors, receipt signer membership and tenure remain unconfirmed.
     pub fn projection(&self) -> &StudioProjection {
@@ -69,9 +103,14 @@ impl UnconfirmedStudioSeed {
     pub fn doc_id(&self) -> u128 {
         self.doc_id
     }
-
-    /// The caller receives only a private data graph, never a checkpoint/epoch capability.
-    pub(super) fn into_local_graph(self) -> (AutoCommit, StudioProjection) {
-        (self.doc, self.projection)
+    /// The exact seed checkpoint bytes `parse` accepted, unchanged by any tail since.
+    ///
+    /// Unconfirmed bytes, never authority, exactly like `projection`. **Custody is the holder's
+    /// job:** `catcoms-sync` keeps its prepared seed's fields private and exposes these only
+    /// through `with_provisional_studio_seed`, which re-checks the hint's current scope on every
+    /// use (design 8.1 part 2). A consumer that persists them must re-parse them against their
+    /// receipt first rather than trust this retention (part 3).
+    pub fn seed_bytes(&self) -> &[u8] {
+        &self.seed_bytes
     }
 }

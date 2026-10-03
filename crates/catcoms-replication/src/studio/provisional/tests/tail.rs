@@ -186,6 +186,44 @@ fn provisional_tail_replays_real_index_and_flipnote_changes_and_deduplicates() {
     }
 }
 
+/// Design 8.1 part 1, and the review finding (A2) it answers: once a tail is applied, the preview's
+/// projection has moved past the seed, so the seed an unconfirmed draft is based on can only come
+/// from what `parse` kept. The tail here is real, and the move is observed rather than assumed.
+#[test]
+fn provisional_seed_bytes_are_the_parsed_seed_and_survive_a_tail_that_moves_the_projection() {
+    for art in [false, true] {
+        let mut f = Fixture::new(art);
+        let original = f.candidate();
+        let mut preview = f.candidate();
+        assert_eq!(
+            preview.seed_bytes(),
+            f.seed.bytes(),
+            "exactly the bytes parse accepted"
+        );
+        let edit = f.edit(1);
+        preview = preview
+            .prepare_tail(vec![edit], &f.group, &f.owner)
+            .unwrap()
+            .prepare()
+            .unwrap();
+        assert_ne!(
+            preview.projection(),
+            original.projection(),
+            "precondition: the tail moved the merged projection off the seed"
+        );
+        assert_eq!(
+            preview.seed_bytes(),
+            f.seed.bytes(),
+            "the tail must not touch the retained seed"
+        );
+        // And the retained bytes are still the seed in the only sense that matters later: they
+        // re-parse, against the same receipt, to the seed's own projection (part 3's re-check).
+        let reparsed = UnconfirmedStudioSeed::parse(f.target, &f.receipt, preview.seed_bytes())
+            .expect("the retained seed re-parses against its receipt");
+        assert_eq!(reparsed.projection(), original.projection());
+    }
+}
+
 #[test]
 fn provisional_tail_rejects_authenticated_relay_forgery_scope_and_typed_semantics() {
     for bad in [

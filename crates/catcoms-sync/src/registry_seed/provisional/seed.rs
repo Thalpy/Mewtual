@@ -32,10 +32,26 @@ pub struct PreparedProvisionalStudioSeed {
     pub(super) hint: ProvisionalStudioHint,
 }
 /// Scoped, explicitly unconfirmed data. There is no owner capability or ordinary StudioView.
-#[derive(Debug)]
 pub struct ProvisionalStudioSeedUse<'a> {
     pub candidate: ProvisionalStudioHintUse<'a>,
+    /// The merged preview: the seed plus any authenticated tail applied since.
     pub projection: &'a StudioProjection,
+    /// The exact seed checkpoint bytes the preview was parsed from, NOT the merged view above
+    /// (design 8.1 part 2). An unconfirmed draft is based on these, because a tail is never
+    /// persisted. Reachable only through this callback, so every scope check the hint performs
+    /// (mount, server, channel, watch, attempt, membership, provider identity, expiry) gates them.
+    /// Unconfirmed bytes, not authority; a consumer that keeps them must re-parse them first.
+    pub seed_bytes: &'a [u8],
+}
+impl fmt::Debug for ProvisionalStudioSeedUse<'_> {
+    // The seed is private Studio content; the derive this replaces would have printed it whole.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ProvisionalStudioSeedUse")
+            .field("candidate", &self.candidate)
+            .field("projection", &self.projection)
+            .field("seed_bytes", &self.seed_bytes.len())
+            .finish()
+    }
 }
 impl<T: MeshTransport> fmt::Debug for PendingProvisionalStudioSeed<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -179,6 +195,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             inspect(ProvisionalStudioSeedUse {
                 candidate,
                 projection: prepared.seed.projection(),
+                seed_bytes: prepared.seed.seed_bytes(),
             })
         })
     }
