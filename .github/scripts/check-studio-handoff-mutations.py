@@ -16,9 +16,15 @@ STORE = "crates/catcoms-app/src/store/epoch_studio/handoff.rs"
 COMMAND = ["cargo", "test", "--locked", "-j", "4", "--config",
            "profile.test.package.catcoms-app.debug=0", "-p", "catcoms-app", "--lib"]
 MUTATIONS = [
+    # The channel guard on a completed-handoff retry. Since Flow S began carrying branch identity,
+    # S1 classifies through `classify_request` FIRST, and its own `check_target` is what refuses a
+    # retry for another channel. `completed_retry`'s check (the original anchor here) now runs only
+    # as the Unmatched fallback, after classification has already passed on the same target, so
+    # removing it changes nothing any Save can observe - this entry stopped detecting anything the
+    # moment that ordering landed. The anchor is the guard that actually stands in the way.
     ("completed-target", CORE,
-     "self.check_target(target)?;\n        let Some(done) = &self.completed else {",
-     "let _ = target;\n        let Some(done) = &self.completed else {",
+     "self.check_target(target)?;\n        if self.branch_id() == Some(branch) {",
+     "let _ = target;\n        if self.branch_id() == Some(branch) {",
      "studio_overlay_handoff_completed_retry_keeps_channel_after_real_receipt_retirement",
      "completed retry acknowledged a different channel"),
     ("signed-digest", CORE,
@@ -44,9 +50,13 @@ MUTATIONS = [
     ("required-intents", STORE, "if linked {", "if linked && false {",
      "fences::studio_overlay_handoff_missing_metadata_cannot_become_publishable_after_restart",
      "missing Prepared record exposed its source"),
+    # The test now proves the namespace and the floor separately: the forgotten retry is refused
+    # by the namespace as stale, and a request prepared after the rewind - which the namespace
+    # admits - is what the floor alone must stop. Disabling the floor fails that second half, with
+    # the request accepted.
     ("retry-floor", CORE, "if closed < floor {", "if closed < floor && false {",
      "metadata::studio_overlay_handoff_rollover_floor_rejects_forgotten_retry_after_rewind",
-     "forgotten overlay retry crossed persisted floor"),
+     "a freshly prepared request on a rewound basis crossed the persisted floor"),
     ("acceptance-order", "crates/catcoms-replication/src/studio/epoch/handoff/preparation.rs",
      "for (intent, ts) in overlay.ordered(ledger)? {",
      "for (intent, ts) in overlay.ordered(ledger)?.into_iter().rev() {",

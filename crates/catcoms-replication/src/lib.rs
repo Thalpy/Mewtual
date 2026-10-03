@@ -20,6 +20,7 @@
 //! sync protocol over the network.
 
 mod bounded_change;
+mod catchup_index;
 pub mod checkpoint;
 pub mod doc;
 pub mod epoch;

@@ -2,12 +2,143 @@ use super::*;
 use catcoms_replication::studio::{StudioOverlay, StudioOverlayState};
 use catcoms_replication::IntentLedger;
 
+/// V8, and a regression the branch wiring first introduced: a transferred branch's acknowledgement
+/// stays owed after a **newer** branch has been admitted, and it needs no tenure.
+///
+/// `classify_request` derives the transferred branch's identity from the *current* generation, so
+/// it can only recognise it until the next admission moves the generation on. The bare
+/// `completed_retry` that S1 used to call keyed the same acknowledgement on basis and operation
+/// instead, so it survived that. Replacing it outright made the delayed retry `Unmatched`: refused
+/// as stale under a known tenure, and refused for its tenure under `Imported` or `Unknown` - which
+/// for `Imported` is permanent. An acknowledgement is not an acceptance, so nothing about the
+/// namespace requires giving it up.
+///
+/// Sequence: G1 accepted and transferred; a new Closing basis; G2 admitted and live at generation
+/// 2; then G1's own delayed request, with **no** tenure. It must be acknowledged with G1's outcome,
+/// write nothing new and leave G2 untouched.
+#[test]
+fn a_transferred_branch_is_still_acknowledged_after_a_newer_branch_is_admitted() {
+    let root = tempfile::tempdir().unwrap();
+    let f = Fixture::new(true);
+    let mut store = open(root.path());
+    let (first_close, first_basis) = closing(&f, &mut store);
+    let first_branch = request_branch(&f, &mut store, &first_close);
+    save(
+        &f,
+        &mut store,
+        &first_close,
+        first_basis.fingerprint(),
+        f.title(),
+        123,
+    );
+    install(&f, &mut store, &first_close);
+    let first_outcome = transfer(&f, &mut store, first_basis.fingerprint());
+
+    // A new Closing basis, and G2 admitted on it.
+    grow(&f, &mut store);
+    let mut source = f.load(&store).unwrap();
+    let previous = source.unit.receipt_head().unwrap().cloned().unwrap();
+    let decision = source
+        .unit
+        .new_owner_decision(&f.group, &f.device, 0, Some(&previous))
+        .unwrap();
+    let close = decision.close().clone();
+    let mut b = budget(&mut store, &f);
+    store
+        .seal_studio_epoch(
+            SERVER,
+            &f.group,
+            f.target,
+            &f.device,
+            decision.receipt().clone(),
+            0,
+            &mut rng(),
+            &mut b,
+        )
+        .unwrap();
+    let basis = store
+        .prepare_studio_closing_overlay(
+            SERVER,
+            &f.group,
+            f.target,
+            &f.device,
+            &close,
+            Some(0),
+            &mut b,
+        )
+        .unwrap();
+    let mut second = f.title();
+    second.nonce = [77; 16];
+    save(&f, &mut store, &close, basis.fingerprint(), second, 300);
+    let state = store.load_epoch_intents(SERVER, &f.logical).unwrap();
+    let metadata = state.handoff_metadata().unwrap();
+    assert_eq!(
+        metadata.branch_generation(),
+        2,
+        "G2 must be live at a newer generation, or this is not the case under test"
+    );
+    assert!(
+        metadata.has_completed(),
+        "G1's transfer manifest must still be retained"
+    );
+    let live = metadata.branch_id();
+    drop(state);
+    let before =
+        fs::read(store.epoch_intent_path(
+            &crate::store::epoch_intents::scope_bytes(SERVER, &f.logical).unwrap(),
+        ))
+        .unwrap();
+
+    // G1's delayed request, exactly as its client sent it, with no tenure at all.
+    let mut b = budget(&mut store, &f);
+    let retried = store
+        .save_studio_closing_overlay(
+            SERVER,
+            &f.group,
+            f.target,
+            &f.device,
+            &first_close,
+            StudioOwnerTenure::Unknown,
+            first_basis.fingerprint(),
+            first_branch,
+            f.title(),
+            999,
+            &mut rng(),
+            &mut b,
+        )
+        .unwrap_or_else(|e| panic!("the transferred branch's acknowledgement was refused: {e}"));
+    assert!(
+        matches!(retried, StudioOverlaySave::HandedOff(ref value) if value == &first_outcome),
+        "acknowledged with the wrong outcome: {retried:?}"
+    );
+    assert_eq!(
+        fs::read(store.epoch_intent_path(
+            &crate::store::epoch_intents::scope_bytes(SERVER, &f.logical).unwrap()
+        ))
+        .unwrap(),
+        before,
+        "an acknowledgement wrote new content"
+    );
+    assert_eq!(
+        store
+            .load_epoch_intents(SERVER, &f.logical)
+            .unwrap()
+            .handoff_metadata()
+            .unwrap()
+            .branch_id(),
+        live,
+        "acknowledging G1 disturbed the live G2 branch"
+    );
+}
+
 #[test]
 fn studio_overlay_handoff_rollover_floor_rejects_forgotten_retry_after_rewind() {
     let root = tempfile::tempdir().unwrap();
     let f = Fixture::new(true);
     let mut store = open(root.path());
     let (first_close, first_basis) = closing(&f, &mut store);
+    // The branch the first Save's ticket named, kept as its client would keep it.
+    let first_branch = request_branch(&f, &mut store, &first_close);
     let rewind = f.load(&store).unwrap().unit.snapshot().unwrap();
     save(
         &f,
@@ -79,17 +210,30 @@ fn studio_overlay_handoff_rollover_floor_rejects_forgotten_retry_after_rewind() 
         .unwrap()
         .is_none());
     // A valid floor-only record retains complete target binding even with no branch or ack.
+    //
+    // **This record is now v3, not v2, and that is correct.** The Save above minted a branch where
+    // none existed - `active` was `None` after the first transfer - which is a generation event, so
+    // this document is on branch generation 2. A generation other than 1 cannot be expressed in v2.
+    // Agent 2's lifecycle slice made that increment happen; before it, a second branch silently
+    // reused generation 1 and would have inherited the transferred branch's identity.
+    //
+    // The consequence for this test is only that the synthesised floor-only record must carry the v3
+    // tail as well: eight bytes of generation, a provenance byte and a disposal-presence byte, all at
+    // the end. They are copied from the original rather than rebuilt, so this test does not restate
+    // the layout it is checking.
     let encoded = metadata.encode_vault(&state.ledger).unwrap();
     let mut d = Decoder::new(&encoded);
-    assert_eq!(d.get_u8().unwrap(), 2);
+    assert_eq!(d.get_u8().unwrap(), 3);
     assert_eq!(d.get_u8().unwrap(), 1);
     d.get_bytes().unwrap();
     d.get_bytes().unwrap();
     assert_eq!(d.get_u64().unwrap(), 2);
     assert_eq!(d.get_u8().unwrap(), 0);
+    const V3_TAIL: usize = 10;
     let completed_offset = encoded.len() - d.remaining();
     let mut floor_only = encoded[..completed_offset].to_vec();
     floor_only.push(0);
+    floor_only.extend_from_slice(&encoded[encoded.len() - V3_TAIL..]);
     let empty = IntentLedger::new(f.logical.clone());
     let floor = StudioOverlayState::decode_vault(&floor_only, &empty).unwrap();
     assert_eq!(floor.target(), f.target);
@@ -110,8 +254,8 @@ fn studio_overlay_handoff_rollover_floor_rejects_forgotten_retry_after_rewind() 
             WritePurpose::Ordinary,
             &mut rng(),
             &mut b.storage,
-            atomic_write,
-            sync_studio,
+            WriteStep::new(WriteTag::Source),
+            &mut WriteHooks::None,
         )
         .unwrap();
     drop(store);
@@ -135,22 +279,64 @@ fn studio_overlay_handoff_rollover_floor_rejects_forgotten_retry_after_rewind() 
     );
     let scope = crate::store::epoch_intents::scope_bytes(SERVER, &f.logical).unwrap();
     let original = fs::read(store.epoch_intent_path(&scope)).unwrap();
+
+    // Two independent defences now stand in front of the forgotten retry, and each is proved on
+    // its own rather than letting either one's refusal stand in for the other.
+    //
+    // The first is the branch namespace. The forgotten request resends the branch its own ticket
+    // named, generation 1 of the first basis. Both branches since have been transferred and the
+    // document is on generation 2, so that identity names nothing and S1b refuses it as stale -
+    // before any media work, and before the plan where the floor lives.
     let result = store.save_studio_closing_overlay(
         SERVER,
         &f.group,
         f.target,
         &f.device,
         &first_close,
-        Some(0),
+        StudioOwnerTenure::Known(0),
         first_basis.fingerprint(),
+        first_branch,
         f.title(),
         123,
         &mut rng(),
         &mut b,
     );
     assert!(
-        matches!(result,Err(AppError::Invalid(ref s)) if s.contains(&ReplError::EpochScope.to_string())),
-        "forgotten overlay retry crossed persisted floor: {result:?}"
+        matches!(result, Err(AppError::Invalid(ref s)) if s.contains("stale branch")),
+        "a forgotten retry naming a long-gone branch was not refused by the namespace: {result:?}"
+    );
+    assert_eq!(fs::read(store.epoch_intent_path(&scope)).unwrap(), original);
+
+    // The second is the rollover floor, now isolated. A request prepared *after* the rewind is
+    // handed the branch the next admission would open, so the namespace admits it, and the only
+    // thing between it and a new branch on a basis the document has legitimately moved past is
+    // `minimum_new_basis_closed_epoch`. Design 6.3 step 3: the detached plan refuses it with
+    // `EpochScope` before any write. Before the namespace existed the floor was reachable only
+    // because nothing refused earlier; this is the first version of the test that shows it holding
+    // on its own.
+    let fresh_branch = request_branch(&f, &mut store, &first_close);
+    assert_ne!(
+        fresh_branch, first_branch,
+        "the rewound document handed out the forgotten branch again"
+    );
+    let mut b = budget(&mut store, &f);
+    let result = store.save_studio_closing_overlay(
+        SERVER,
+        &f.group,
+        f.target,
+        &f.device,
+        &first_close,
+        StudioOwnerTenure::Known(0),
+        first_basis.fingerprint(),
+        fresh_branch,
+        f.title(),
+        124,
+        &mut rng(),
+        &mut b,
+    );
+    assert!(
+        matches!(result, Err(AppError::Invalid(ref s)) if s.contains(&ReplError::EpochScope.to_string())),
+        "a freshly prepared request on a rewound basis crossed the persisted floor: {result:?}"
     );
     assert_eq!(fs::read(store.epoch_intent_path(&scope)).unwrap(), original);
 }
@@ -161,6 +347,8 @@ fn studio_overlay_handoff_capacity_preflight_and_full_cap_completed_sync_retry()
     let f = Fixture::new(true);
     let mut store = open(root.path());
     let (close, basis, _) = prepare(&f, &mut store);
+    // The accepted Save's branch, which both completed retries below resend.
+    let branch = live_branch(&f, &store);
     let scope = crate::store::epoch_intents::scope_bytes(SERVER, &f.logical).unwrap();
     let path = store.epoch_intent_path(&scope);
     let staging = path.with_file_name(format!(
@@ -184,11 +372,16 @@ fn studio_overlay_handoff_capacity_preflight_and_full_cap_completed_sync_retry()
         Some(0),
         &mut rng(),
         &mut b,
-        &mut |_, p, bytes| {
-            wrote = true;
-            atomic_write(p, bytes)
+        // Records whether any replacement was reached; the transaction still performs it.
+        &mut WriteHooks::Hooked {
+            before: Some(&mut |_: WriteTag, _: &Path, _: &[u8]| {
+                wrote = true;
+                Intercept::Continue
+            }),
+            before_sync: None,
+            before_unlink: None,
+            after: None,
         },
-        &mut flush,
     );
     assert!(
         matches!(result,Err(AppError::Invalid(ref s)) if s.contains("vault intent limit reached")),
@@ -219,14 +412,24 @@ fn studio_overlay_handoff_capacity_preflight_and_full_cap_completed_sync_retry()
         f.target,
         &f.device,
         &close,
-        None,
+        StudioOwnerTenure::Unknown,
         basis,
+        branch,
         f.title(),
         999,
         &mut rng(),
         &mut b,
-        |_, _| panic!("completed retry allocated replacement"),
-        |_, _| Err(invalid("injected completed retry sync")),
+        // A completed retry must reach the flush, never a replacement.
+        &mut WriteHooks::Hooked {
+            before: Some(&mut |_: WriteTag, _: &Path, _: &[u8]| {
+                panic!("completed retry allocated replacement")
+            }),
+            before_sync: Some(&mut |_: WriteTag, _: &Path, _: u64| {
+                AfterIntercept::Fail(invalid("injected completed retry sync"))
+            }),
+            before_unlink: None,
+            after: None,
+        },
     );
     assert!(
         matches!(result,Err(AppError::Invalid(ref s)) if s.contains("injected completed retry sync"))
@@ -241,16 +444,24 @@ fn studio_overlay_handoff_capacity_preflight_and_full_cap_completed_sync_retry()
             f.target,
             &f.device,
             &close,
-            None,
+            StudioOwnerTenure::Unknown,
             basis,
+            branch,
             f.title(),
             999,
             &mut rng(),
             &mut b,
-            |_, _| panic!("completed retry allocated replacement"),
-            |p, bytes| {
-                synced = true;
-                sync_intent(p, bytes)
+            // The flush still happens; this only records that the transaction reached it.
+            &mut WriteHooks::Hooked {
+                before: Some(&mut |_: WriteTag, _: &Path, _: &[u8]| {
+                    panic!("completed retry allocated replacement")
+                }),
+                before_sync: Some(&mut |_: WriteTag, _: &Path, _: u64| {
+                    synced = true;
+                    AfterIntercept::Continue
+                }),
+                before_unlink: None,
+                after: None,
             },
         )
         .unwrap();
@@ -327,11 +538,16 @@ fn studio_overlay_handoff_preflights_later_source_peak_before_prepared_write() {
         Some(0),
         &mut rng(),
         &mut b,
-        &mut |_, p, bytes| {
-            wrote = true;
-            atomic_write(p, bytes)
+        // Records whether any replacement was reached; the transaction still performs it.
+        &mut WriteHooks::Hooked {
+            before: Some(&mut |_: WriteTag, _: &Path, _: &[u8]| {
+                wrote = true;
+                Intercept::Continue
+            }),
+            before_sync: None,
+            before_unlink: None,
+            after: None,
         },
-        &mut flush,
     );
     assert!(result.is_err());
     assert!(

@@ -6,6 +6,79 @@ fn cold(f: &mut Fixture) -> ServerRegistryPageProvider {
         .unwrap()
 }
 
+/// The half the test below does not cover: that a quiet actor **asks for** the releasing visit.
+///
+/// `expire_registry_source` drops a retained provider and its process-wide permit, but it runs
+/// only from `lifecycle`, which runs only during a pass. The test below supplies that pass by
+/// calling `run` itself, so it proves release works *given* a visit — and the defect was that no
+/// visit was ever scheduled. `pending` never consulted the retention deadline and returned early
+/// on an actor with no current watch, and `wake_in` covered only the handoff deadline. So four
+/// quiet servers could strand the entire pool indefinitely, which is the exact outcome the
+/// comment on `expire_registry_source` claims is prevented.
+///
+/// This test therefore never calls `run` until after the scheduling claim is made, because in
+/// production there is nothing to call it.
+#[tokio::test]
+async fn a_quiet_actor_schedules_the_visit_that_releases_a_retained_registry_source() {
+    let pool = Arc::new(Semaphore::new(4));
+    let mut held = Vec::new();
+    for _ in 0..4 {
+        let mut f = Fixture::new();
+        f.edit(1);
+        let mut provider = cold(&mut f);
+        let job = f
+            .server
+            .begin_registry_page_preparation_with(&f.store, &mut provider, &pool)
+            .unwrap()
+            .unwrap();
+        let result = job.rebuild().await.unwrap();
+        f.server
+            .finish_registry_page_preparation(&f.store, &mut provider, result)
+            .unwrap();
+        let receiver = crate::studio::StudioReceiver::retaining_registry_for_test(provider, 31_000);
+        held.push((f, receiver));
+    }
+    assert_eq!(pool.available_permits(), 0);
+
+    // Below the deadline: no work yet, but a deadline the actor can sleep on.
+    for (f, receiver) in &mut held {
+        f.clock.advance_ms(29_999);
+        assert_eq!(
+            receiver.wake_in(&f.server),
+            Some(1),
+            "a retained Registry source published no deadline, so a quiet actor would never \
+             schedule the visit that releases its permit"
+        );
+    }
+    assert_eq!(pool.available_permits(), 0, "no premature refund");
+
+    // At the deadline the visit must be reported as work, or nothing will ever run it.
+    for (f, receiver) in &mut held {
+        f.clock.advance_ms(1);
+        assert!(
+            receiver.pending(&f.server),
+            "at its deadline a retained Registry source was not reported as pending, so a quiet \
+             actor schedules no pass and the process-wide permit is stranded"
+        );
+        assert!(
+            receiver.wake_in(&f.server).is_none(),
+            "an expired retention is still publishing a deadline, which is a spin not a wake"
+        );
+    }
+
+    // Only now the pass the scheduler asked for, which must actually release them.
+    for (f, receiver) in &mut held {
+        receiver
+            .run(&mut f.server, &mut f.store, SERVER, None)
+            .unwrap();
+    }
+    assert_eq!(
+        pool.available_permits(),
+        4,
+        "the scheduled pass did not release the retained sources"
+    );
+}
+
 #[tokio::test]
 async fn registry_idle_runtime_caches_release_all_four_slots_for_another_studio_source() {
     // Private pool keeps this resource-lifetime regression deterministic beside parallel

@@ -22,7 +22,18 @@ use std::sync::Arc;
 mod adoption;
 mod discovery;
 mod handoff;
+pub(crate) use handoff::StudioHandoffStart;
+pub(in crate::store) mod copy_capture;
+mod eligibility;
+mod handoff_capture;
+pub(crate) use handoff_capture::{
+    SigningSlice, StudioHandoffCapture, StudioHandoffCommit, StudioHandoffPlan,
+    MAX_SIGNING_TURNS_PER_VISIT, SIGNING_SLICE_BUDGET_MS,
+};
 mod overlay;
+pub(crate) use overlay::StudioOverlayStart;
+mod overlay_capture;
+pub(crate) use overlay_capture::{StudioOverlayCapture, StudioOverlayPlan};
 mod preparation;
 mod recovery_disposition;
 mod registry;
@@ -206,6 +217,72 @@ impl ServerStore {
     }
     /// Bounded read-only vault restore. Only actual absence returns None; malformed/incoherent
     /// state is an error, never an invitation to overwrite it with a fresh epoch-zero document.
+    /// Test-only: perform the second half of an owner rotation for a source that has ALREADY
+    /// been sealed, which `rotate_studio_owner` refuses because it seals as part of its own
+    /// transaction. This is the same sequence the store's own rotation fixtures run; it exists so
+    /// tests outside `crate::store` can reach the post-seal successor state. It adds no
+    /// production surface and grants no authority.
+    #[cfg(test)]
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn install_sealed_studio_successor_for_test(
+        &mut self,
+        server: u64,
+        group: &ServerGroup,
+        target: StudioTarget,
+        device: &MlsDevice,
+        close: &catcoms_replication::CloseRecord,
+        rng: &mut impl CryptoRngCore,
+        budget: &mut EpochStudioBudget,
+    ) -> Result<EpochStudioState, AppError> {
+        let mut state = self
+            .load_studio_epoch(server, group, target, device)?
+            .ok_or_else(|| invalid("no installed source"))?;
+        let plan = state
+            .unit
+            .prepare_settlement(close, group, 0)
+            .map_err(invalid)?;
+        self.retire_studio_intents_with_io(
+            server,
+            &plan,
+            rng,
+            &mut budget.storage,
+            &mut budget.intents,
+            &mut WriteHooks::None,
+        )?;
+        let observed = state.source.as_ref().map(source::SourceVersion::record);
+        let before = state.unit.snapshot().map_err(invalid)?;
+        let next = state
+            .unit
+            .checkpoint_successor(&plan, group, 0)
+            .map_err(invalid)?;
+        self.save_studio_source(
+            server,
+            next,
+            observed,
+            &before,
+            WritePurpose::Settlement,
+            rng,
+            &mut budget.storage,
+            WriteStep::new(WriteTag::Source),
+            &mut WriteHooks::None,
+        )
+    }
+
+    /// Test-only: where `target`'s source record lives, so a test outside `crate::store` can model
+    /// an object that was cleaned up underneath a caller. The store has no deletion path for a
+    /// Studio source, and the copy probe exists precisely for one that disappeared anyway. Adds no
+    /// production surface.
+    #[cfg(test)]
+    pub(crate) fn studio_source_path_for_test(
+        &self,
+        server: u64,
+        group: &ServerGroup,
+        target: StudioTarget,
+    ) -> Result<PathBuf, AppError> {
+        let logical = target.document(&group.group_id()).map_err(invalid)?;
+        Ok(self.studio_epoch_path(&scope_bytes(server, &logical)?))
+    }
+
     pub fn load_studio_epoch(
         &self,
         server: u64,
@@ -258,10 +335,8 @@ impl ServerStore {
             ts,
             rng,
             budget,
-            atomic_write,
-            super::epoch_intents::sync_intent,
-            atomic_write,
-            sync_studio,
+            WriteStep::new(WriteTag::Intents),
+            &mut WriteHooks::None,
         )
     }
     #[allow(clippy::too_many_arguments)]
@@ -276,10 +351,8 @@ impl ServerStore {
         ts: u64,
         rng: &mut impl CryptoRngCore,
         budget: &mut EpochStudioBudget,
-        intent_writer: impl FnOnce(&Path, &[u8]) -> Result<(), AppError>,
-        intent_sync: impl FnOnce(&Path, u64) -> Result<(), AppError>,
-        epoch_writer: impl FnOnce(&Path, &[u8]) -> Result<(), AppError>,
-        epoch_sync: impl FnOnce(&Path, u64) -> Result<(), AppError>,
+        intent_step: WriteStep,
+        hooks: &mut WriteHooks<'_>,
     ) -> Result<(SealedOp, EpochStudioState), AppError> {
         let logical = target.document(&group.group_id()).map_err(invalid)?;
         match target {
@@ -311,8 +384,8 @@ impl ServerStore {
             rng,
             &mut budget.storage,
             &mut budget.intents,
-            intent_writer,
-            intent_sync,
+            intent_step,
+            hooks,
         )?;
         // The same exclusive store borrow retains this checked detached source across both
         // barriers. Intent persistence cannot mutate the Studio source. Failure keeps the intent.
@@ -327,8 +400,8 @@ impl ServerStore {
             WritePurpose::Ordinary,
             rng,
             &mut budget.storage,
-            epoch_writer,
-            epoch_sync,
+            WriteStep::new(WriteTag::Epoch),
+            hooks,
         )?;
         Ok((sealed, state))
     }
@@ -360,8 +433,8 @@ impl ServerStore {
             WritePurpose::Ordinary,
             rng,
             &mut budget.storage,
-            atomic_write,
-            sync_studio,
+            WriteStep::new(WriteTag::Source),
+            &mut WriteHooks::None,
         )?;
         Ok((outcome, state))
     }
@@ -388,7 +461,8 @@ impl ServerStore {
             tenure_start,
             rng,
             budget,
-            atomic_write,
+            WriteStep::new(WriteTag::Source),
+            &mut WriteHooks::None,
         )
     }
     #[allow(clippy::too_many_arguments)]
@@ -402,7 +476,8 @@ impl ServerStore {
         tenure_start: u64,
         rng: &mut impl CryptoRngCore,
         budget: &mut EpochStudioBudget,
-        writer: impl FnOnce(&Path, &[u8]) -> Result<(), AppError>,
+        step: WriteStep,
+        hooks: &mut WriteHooks<'_>,
     ) -> Result<(ReceiptIngest, EpochStudioState), AppError> {
         let logical = target.document(&group.group_id()).map_err(invalid)?;
         scope_bytes(server, &receipt.document)?;
@@ -430,8 +505,8 @@ impl ServerStore {
             WritePurpose::Settlement,
             rng,
             &mut budget.storage,
-            writer,
-            sync_studio,
+            step,
+            hooks,
         )?;
         Ok((outcome, state))
     }
@@ -492,7 +567,7 @@ impl ServerStore {
     }
     #[allow(clippy::too_many_arguments)]
     fn save_studio_source(
-        &self,
+        &mut self,
         server: u64,
         unit: StudioEpoch,
         observed: Option<StorageRecord>,
@@ -500,16 +575,16 @@ impl ServerStore {
         purpose: WritePurpose,
         rng: &mut impl CryptoRngCore,
         budget: &mut EpochStorageBudget,
-        writer: impl FnOnce(&Path, &[u8]) -> Result<(), AppError>,
-        sync: impl FnOnce(&Path, u64) -> Result<(), AppError>,
+        step: WriteStep,
+        hooks: &mut WriteHooks<'_>,
     ) -> Result<EpochStudioState, AppError> {
         self.save_studio_source_reusing(
-            server, unit, observed, before, purpose, rng, budget, writer, sync, None,
+            server, unit, observed, before, purpose, rng, budget, step, hooks, None,
         )
     }
     #[allow(clippy::too_many_arguments)]
     fn save_studio_source_reusing(
-        &self,
+        &mut self,
         server: u64,
         unit: StudioEpoch,
         observed: Option<StorageRecord>,
@@ -517,17 +592,17 @@ impl ServerStore {
         purpose: WritePurpose,
         rng: &mut impl CryptoRngCore,
         budget: &mut EpochStorageBudget,
-        writer: impl FnOnce(&Path, &[u8]) -> Result<(), AppError>,
-        sync: impl FnOnce(&Path, u64) -> Result<(), AppError>,
+        step: WriteStep,
+        hooks: &mut WriteHooks<'_>,
         prior: Option<source::SourceVersion>,
     ) -> Result<EpochStudioState, AppError> {
         self.save_studio_source_checked(
-            server, unit, observed, before, purpose, rng, budget, writer, sync, prior, None,
+            server, unit, observed, before, purpose, rng, budget, step, hooks, prior, None,
         )
     }
     #[allow(clippy::too_many_arguments)]
     fn save_studio_source_checked(
-        &self,
+        &mut self,
         server: u64,
         mut unit: StudioEpoch,
         observed: Option<StorageRecord>,
@@ -535,8 +610,8 @@ impl ServerStore {
         purpose: WritePurpose,
         rng: &mut impl CryptoRngCore,
         budget: &mut EpochStorageBudget,
-        writer: impl FnOnce(&Path, &[u8]) -> Result<(), AppError>,
-        sync: impl FnOnce(&Path, u64) -> Result<(), AppError>,
+        step: WriteStep,
+        hooks: &mut WriteHooks<'_>,
         prior: Option<source::SourceVersion>,
         handoff: Option<&handoff::CheckedHandoffWrite>,
     ) -> Result<EpochStudioState, AppError> {
@@ -555,12 +630,19 @@ impl ServerStore {
             let reservation = budget
                 .reserve_sync(&storage_scope, record)
                 .map_err(invalid)?;
-            sync(&path, record.footprint.total().map_err(invalid)?)?;
+            // I-4: unchanged Studio source still flushes, so it still rotates.
+            let bytes = record.footprint.total().map_err(invalid)?;
+            let mutation = self.epoch_mutation_guard();
+            hooks.before_sync(step.tag(), &path, bytes)?;
+            sync_studio(&mutation, &path, bytes)?;
+            hooks.after_sync(step.tag(), &path)?;
             reservation.commit();
             // Restore can normalize owner state without rewriting the file. Preserve its actual
             // prior physical stamp, not a hash of the normalized in-memory snapshot.
             prior
         } else {
+            // A flush-only step reaching a replacement is a routing fault, not a write failure.
+            step.permit_replacement()?;
             let mut e = Encoder::new();
             e.put_bytes(&scope).map_err(invalid)?;
             e.put_bytes(&unit.target().channel()).map_err(invalid)?;
@@ -593,7 +675,12 @@ impl ServerStore {
                     return Err(error.into());
                 }
             };
-            writer(&path, &frame(&sealed))?;
+            // I-4: rotate before the write, never after it succeeds.
+            let framed = frame(&sealed);
+            let mutation = self.epoch_mutation_guard();
+            let framed = hooks.before(step.tag(), &path, &framed)?;
+            mutation.write(&path, &framed)?;
+            hooks.after_write(step.tag(), &path)?;
             reservation.commit();
             Some(self.studio_source_version(server, &unit, &plain, plain.len() as u64 + 40)?)
         };
@@ -833,7 +920,11 @@ fn storage_record(
         },
     })
 }
-fn sync_studio(path: &Path, expected: u64) -> Result<(), AppError> {
+pub(super) fn sync_studio(
+    m: &EpochMutation<'_>,
+    path: &Path,
+    expected: u64,
+) -> Result<(), AppError> {
     let metadata = fs::symlink_metadata(path).map_err(|e| AppError::Io(e.to_string()))?;
     if !regular_file(&metadata) || metadata.len() != expected {
         return Err(invalid("retry file changed"));
@@ -847,7 +938,7 @@ fn sync_studio(path: &Path, expected: u64) -> Result<(), AppError> {
         return Err(invalid("opened retry file changed"));
     }
     file.sync_all().map_err(|e| AppError::Io(e.to_string()))?;
-    sync_directory(path.parent().ok_or_else(|| invalid("missing parent"))?)
+    m.sync_parent_io(path.parent().ok_or_else(|| invalid("missing parent"))?)
         .map_err(|e| AppError::Io(e.to_string()))
 }
 fn invalid(error: impl std::fmt::Display) -> AppError {
@@ -856,3 +947,99 @@ fn invalid(error: impl std::fmt::Display) -> AppError {
 
 #[cfg(test)]
 pub(crate) mod tests;
+
+impl ServerStore {
+    /// App-facing release: the same transaction with no hook injection, taking the studio budget the
+    /// caller already holds.
+    ///
+    /// The `_with_io` form stays private because `WriteHooks` is a store type and a caller outside
+    /// the store has no business naming it. Same shape as `handoff_studio_overlay` and its siblings.
+    pub(crate) fn release_studio_draft_archive(
+        &mut self,
+        server: u64,
+        document: &catcoms_replication::LogicalDocument,
+        expected_archive: [u8; 32],
+        budget: &mut EpochStudioBudget,
+    ) -> Result<(), AppError> {
+        self.release_studio_draft_archive_with_io(
+            server,
+            document,
+            expected_archive,
+            &mut budget.storage,
+            &mut budget.intents,
+            &mut WriteHooks::None,
+        )
+    }
+
+    /// App-facing disposal, likewise.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn dispose_studio_overlay(
+        &mut self,
+        server: u64,
+        document: &catcoms_replication::LogicalDocument,
+        target: StudioTarget,
+        group: &ServerGroup,
+        device: &MlsDevice,
+        request: crate::store::StudioOverlayDisposalRequest,
+        ts: u64,
+        rng: &mut impl CryptoRngCore,
+        budget: &mut EpochStudioBudget,
+    ) -> Result<catcoms_replication::studio::StudioOverlayDisposal, AppError> {
+        self.dispose_studio_overlay_with_io(
+            server,
+            document,
+            target,
+            group,
+            device,
+            request,
+            ts,
+            rng,
+            &mut budget.storage,
+            &mut budget.intents,
+            &mut WriteHooks::None,
+        )
+    }
+
+    /// App-facing archive write. The control layer holds a `StudioDraftArchive` built on the
+    /// detached worker and cannot reach `WriteHooks` or the budget halves.
+    ///
+    /// Writing is an insert or a replacement of one record, so unlike release it is an ordinary
+    /// reserving write: an exact retry after an uncertain outcome re-derives the same payload and
+    /// lands on the same record.
+    pub(crate) fn write_studio_draft_archive(
+        &mut self,
+        server: u64,
+        document: &catcoms_replication::LogicalDocument,
+        archive: &catcoms_replication::studio::StudioDraftArchive,
+        rng: &mut impl CryptoRngCore,
+        budget: &mut EpochStudioBudget,
+    ) -> Result<(), AppError> {
+        self.write_studio_draft_archive_with_io(
+            server,
+            document,
+            archive,
+            rng,
+            &mut budget.storage,
+            &mut budget.intents,
+            &mut WriteHooks::None,
+        )
+    }
+
+    /// App-facing archive read, so the control layer does not need store-private types.
+    pub(crate) fn read_studio_draft_archive_for_app(
+        &self,
+        server: u64,
+        document: &catcoms_replication::LogicalDocument,
+    ) -> Result<
+        Option<(
+            catcoms_replication::studio::StudioDraftArchive,
+            [u8; 32],
+            u64,
+        )>,
+        AppError,
+    > {
+        Ok(self
+            .read_studio_draft_archive(server, document)?
+            .map(|record| (record.archive, record.id, record.physical_bytes)))
+    }
+}

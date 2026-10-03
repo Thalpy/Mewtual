@@ -92,12 +92,18 @@ fn staging_path(store: &ServerStore, doc: &LogicalDocument, sequence: u64) -> Pa
 }
 // Simulate a process death that leaves its securely created staging sibling behind. Returning a
 // normal error would let the production RAII guard unlink it, unlike a killed process.
-fn leave_staging(path: &Path, bytes: &[u8]) -> Result<(), AppError> {
-    let (mut file, mut staging) = create_staging_file(path)?;
+/// Leave behind the staging sibling an interrupted write would have left, then refuse before
+/// the rename. Creating the sibling is fixture work: the record itself is never created here,
+/// and the transaction's own write never runs.
+fn leave_staging(_: WriteTag, path: &Path, bytes: &[u8]) -> Intercept {
+    let (mut file, mut staging) = match create_staging_file_for_test(path) {
+        Ok(pair) => pair,
+        Err(error) => return Intercept::Fail(error),
+    };
     file.write_all(bytes).unwrap();
     file.sync_all().unwrap();
-    staging.remove_on_drop = false;
-    Err(AppError::Io("interrupted before rename".into()))
+    staging.keep_for_test();
+    Intercept::Fail(AppError::Io("interrupted before rename".into()))
 }
 fn cleanup(store: &mut ServerStore) -> EpochStorageInventory {
     let mut cleanup = store.cleanup_epoch_storage_staging_with_intents().unwrap();
@@ -305,8 +311,13 @@ fn interrupted_first_save_is_not_an_accepted_edit_and_cleanup_does_not_promote_i
         &mut rng(),
         &mut limits.0,
         &mut limits.1,
-        leave_staging,
-        sync_intent,
+        WriteStep::new(WriteTag::Intents),
+        &mut WriteHooks::Hooked {
+            before: Some(&mut leave_staging),
+            before_sync: None,
+            before_unlink: None,
+            after: None,
+        },
     );
     assert!(result.is_err());
     assert!(limits.0.requires_reconciliation());
@@ -352,8 +363,13 @@ fn failed_replacement_counts_orphans_as_content_and_global_bytes_until_reconcili
             &mut rng(),
             &mut limits.0,
             &mut limits.1,
-            leave_staging,
-            sync_intent
+            WriteStep::new(WriteTag::Intents),
+            &mut WriteHooks::Hooked {
+                before: Some(&mut leave_staging),
+                before_sync: None,
+                before_unlink: None,
+                after: None,
+            }
         )
         .is_err());
     let view = inventory(&mut store);
@@ -448,13 +464,8 @@ fn committed_first_save_retries_at_both_caps_without_another_copy() {
             &mut rng(),
             &mut limits.0,
             &mut limits.1,
-            |path, bytes| atomic_write_with_hook_and_sync(
-                path,
-                bytes,
-                |_, _| {},
-                |_| Err(std::io::Error::other("after rename"))
-            ),
-            sync_intent
+            WriteStep::new(WriteTag::Intents),
+            &mut WriteHooks::fail_after_write(FailError::NotDurable("after rename"))
         )
         .is_err());
     drop(store);
@@ -473,6 +484,12 @@ fn committed_first_save_retries_at_both_caps_without_another_copy() {
         budget.usage().content,
         super::super::epoch_budget::CONTENT_ALLOWANCE_BYTES
     );
+    // I4-002. This call is guaranteed to take the exact-retry *sync* branch, because its writer
+    // panics if anything rewrites. So it is the right place to assert that a flush which changes
+    // no bytes still rotates the inventory generation: the replacement branches were converted
+    // first and every retry branch was missed, which a test driving a second replacement would
+    // not have noticed.
+    let before_retry = store.inventory_generation();
     let state = store
         .prepare_epoch_intent_with_io(
             SERVER,
@@ -483,10 +500,14 @@ fn committed_first_save_retries_at_both_caps_without_another_copy() {
             &mut rng(),
             &mut budget,
             &mut intents,
-            |_, _| panic!("an exact retry must not rewrite ciphertext"),
-            sync_intent,
+            WriteStep::new(WriteTag::Intents),
+            &mut WriteHooks::MustNotWrite("an exact retry must not rewrite ciphertext"),
         )
         .unwrap();
+    assert!(
+        !std::sync::Arc::ptr_eq(&before_retry, &store.inventory_generation()),
+        "an exact retry flushed the record without rotating, so an inventory captured before it          would survive a durability-changing operation it never saw"
+    );
     assert_eq!(state.pending().len(), 1);
     assert_eq!(intents.bytes(), MAX_VAULT_INTENT_BYTES);
     assert!(!budget.requires_reconciliation());
@@ -520,8 +541,8 @@ fn writer_and_retry_flush_panics_or_errors_poison_both_budgets() {
             &mut rng(),
             &mut limits.0,
             &mut limits.1,
-            |_, _| panic!("writer panic"),
-            sync_intent,
+            WriteStep::new(WriteTag::Intents),
+            &mut WriteHooks::MustNotWrite("writer panic"),
         )
     }));
     assert!(panic.is_err());
@@ -539,8 +560,16 @@ fn writer_and_retry_flush_panics_or_errors_poison_both_budgets() {
             &mut rng(),
             &mut limits.0,
             &mut limits.1,
-            |_, _| panic!("no rewrite"),
-            |_, _| Err(AppError::Io("flush failed".into()))
+            WriteStep::new(WriteTag::Intents),
+            // The exact retry must reach the flush and not a replacement, and the flush fails.
+            &mut WriteHooks::Hooked {
+                before: Some(&mut |_: WriteTag, _: &Path, _: &[u8]| panic!("no rewrite")),
+                before_sync: Some(&mut |_: WriteTag, _: &Path, _: u64| {
+                    AfterIntercept::Fail(AppError::Io("flush failed".into()))
+                }),
+                before_unlink: None,
+                after: None,
+            }
         )
         .is_err());
     assert!(limits.0.requires_reconciliation());
@@ -683,6 +712,109 @@ fn old_scans_and_cleanup_ignore_intent_family_while_new_cleanup_preserves_finals
     assert_eq!(view.orphans().len(), 0);
     assert_eq!(view.records().len(), 1);
     assert_eq!(fs::read(final_path).unwrap(), before);
+}
+
+/// The `DraftArchive` seam, against a real intent ledger rather than a hand-built vault: one
+/// logical document can hold both an intent ledger and a preserved archive at once. They are
+/// separate physical families with separate inventory keys, and one accounting class.
+#[test]
+fn a_draft_archive_coexists_with_the_same_document_intent_ledger_in_one_accounting_class() {
+    let root = tempfile::tempdir().unwrap();
+    let (device, group, doc) = fixture();
+    let mut store = open(root.path());
+    let mut limits = budgets(&mut store, &doc);
+    prepare(&mut store, &doc, op(&doc, 1), &device, &group, &mut limits).unwrap();
+    let intent_path = store.epoch_intent_path(&scope_bytes(SERVER, &doc).unwrap());
+    let ledger_bytes = fs::read(&intent_path).unwrap();
+    let before = inventory(&mut store);
+    let ledger_record = before
+        .records()
+        .find(|e| e.kind == EpochRecordKind::Intents)
+        .unwrap()
+        .record;
+    let ledger_budget = EpochIntentBudget::from_inventory(&before).unwrap();
+
+    let archive_path = crate::store::epoch_draft_archive::write_draft_archive_for_test(
+        &store,
+        SERVER,
+        &doc,
+        b"opaque preserved draft",
+        &mut rng(),
+    )
+    .unwrap();
+    assert_ne!(archive_path, intent_path, "the two families shared a path");
+    let archive_bytes = fs::metadata(&archive_path).unwrap().len();
+
+    let view = inventory(&mut store);
+    let entries: Vec<_> = view
+        .records()
+        .filter(|e| e.kind.intent_class())
+        .map(|e| (e.kind, e.record))
+        .collect();
+    assert_eq!(entries.len(), 2, "one family displaced the other");
+    let archive = entries
+        .iter()
+        .find(|(kind, _)| *kind == EpochRecordKind::DraftArchive)
+        .unwrap()
+        .1;
+    // Same logical document, distinct records: the ids derive from different scope domains, so
+    // neither can silently overwrite or alias the other in the inventory map.
+    assert_eq!(archive.document, ledger_record.document);
+    assert_ne!(archive.id, ledger_record.id);
+    assert_eq!(archive.footprint.content, archive_bytes);
+    assert_eq!(
+        entries
+            .iter()
+            .find(|(kind, _)| *kind == EpochRecordKind::Intents)
+            .unwrap()
+            .1,
+        ledger_record,
+        "the archive changed the ledger's accounting"
+    );
+    assert_eq!(fs::read(&intent_path).unwrap(), ledger_bytes);
+
+    // Both charge the one vault-wide intent class.
+    let budget = EpochIntentBudget::from_inventory(&view).unwrap();
+    assert_eq!(
+        budget.bytes(),
+        ledger_budget.bytes() + archive_bytes,
+        "an archive's bytes were not charged to the intent accounting class"
+    );
+    assert_eq!(
+        budget.record_slots_for_test(),
+        ledger_budget.record_slots_for_test() + 1,
+        "an archive did not claim a record slot in the intent accounting class"
+    );
+
+    // A temporary sibling of each family is attributed to its own family, and a temporary named
+    // for one family's digest is not evidence about the other.
+    let archive_orphan = archive_path.with_file_name(format!(
+        ".{}.mewtual-stage-7-9.tmp",
+        archive_path.file_name().unwrap().to_str().unwrap()
+    ));
+    fs::write(&archive_orphan, b"unpublished archive").unwrap();
+    let with_orphan = inventory(&mut store);
+    assert_eq!(with_orphan.orphans().len(), 1);
+    assert_eq!(
+        with_orphan.orphans().next().unwrap().kind(),
+        EpochRecordKind::DraftArchive
+    );
+    assert_eq!(
+        EpochIntentBudget::from_inventory(&with_orphan)
+            .unwrap()
+            .bytes(),
+        budget.bytes() + fs::metadata(&archive_orphan).unwrap().len()
+    );
+
+    // Cleanup still runs at intent coverage and leaves both finals alone.
+    let cleaned = cleanup(&mut store);
+    assert_eq!(cleaned.orphans().len(), 0);
+    assert_eq!(
+        cleaned.records().filter(|e| e.kind.intent_class()).count(),
+        2
+    );
+    assert_eq!(fs::read(&intent_path).unwrap(), ledger_bytes);
+    assert_eq!(fs::metadata(&archive_path).unwrap().len(), archive_bytes);
 }
 
 #[test]
@@ -907,4 +1039,189 @@ fn intent_metadata_rail_and_server_admission_refuse_without_poisoning_untouched_
     assert!(limits.1.ready);
     assert!(!limits.0.requires_reconciliation());
     assert_eq!(inventory(&mut store).records().len(), 0);
+}
+
+/// The Intents consumer of `WriteStep::flush_only`.
+///
+/// Five production callers construct flush-only steps to say "this path must not rewrite its
+/// record", and three leaves enforce that with `permit_replacement()`. Those callers never reach
+/// a replacement in practice, so the refusal arm has no coverage from them: deleting the leaf's
+/// call would leave every existing test green. This drives the leaf directly.
+///
+/// Both controls matter. Without the first, an unrelated fence or a stale budget could produce
+/// the same error and the test would pass with the policy deleted. Without the second, "the
+/// flush-only step was accepted" could mean the transaction did nothing at all.
+#[test]
+fn a_flush_only_step_refuses_an_intent_replacement_but_still_reaches_the_flush() {
+    let root = tempfile::tempdir().unwrap();
+    let (device, group, doc) = fixture();
+    let mut store = open(root.path());
+    let mut limits = budgets(&mut store, &doc);
+    prepare(&mut store, &doc, op(&doc, 1), &device, &group, &mut limits).unwrap();
+
+    let scope = scope_bytes(SERVER, &doc).unwrap();
+    let path = store.epoch_intent_path(&scope);
+    let held = fs::read(&path).unwrap();
+
+    // An otherwise-valid replacement: one more intent on top of the saved ledger.
+    let replacement = |store: &mut ServerStore| {
+        let mut state = store.load_epoch_intents(SERVER, &doc).unwrap();
+        state
+            .ledger
+            .prepare(device.device_id(), op(&doc, 2))
+            .unwrap();
+        state
+    };
+    let old = || {
+        fs::metadata(&path)
+            .map(|meta| meta.len())
+            .ok()
+            .filter(|_| true)
+    };
+
+    // Refused by the policy, before anything is charged and without consulting the write hook.
+    let mut limits = budgets(&mut store, &doc);
+    let state = replacement(&mut store);
+    let reached = std::cell::Cell::new(false);
+    let refused = store.write_prepared_intents(
+        SERVER,
+        &doc,
+        state,
+        old(),
+        false,
+        &mut rng(),
+        &mut limits.0,
+        &mut limits.1,
+        WriteStep::flush_only(WriteTag::Intents, "this path must not rewrite its intents"),
+        &mut WriteHooks::Hooked {
+            before: Some(&mut |_: WriteTag, _: &Path, _: &[u8]| {
+                reached.set(true);
+                Intercept::Continue
+            }),
+            before_sync: None,
+            before_unlink: None,
+            after: None,
+        },
+    );
+    assert!(
+        refused
+            .unwrap_err()
+            .to_string()
+            .contains("this path must not rewrite its intents"),
+        "the flush-only step did not refuse the replacement"
+    );
+    assert!(
+        !reached.get(),
+        "the transaction reached its replacement despite a flush-only step"
+    );
+    assert_eq!(fs::read(&path).unwrap(), held, "the held ledger changed");
+
+    // Control one: the same replacement is accepted under an ordinary step, so the refusal
+    // above is attributable to the policy and not to the candidate, fence or budget.
+    let mut limits = budgets(&mut store, &doc);
+    let state = replacement(&mut store);
+    store
+        .write_prepared_intents(
+            SERVER,
+            &doc,
+            state,
+            old(),
+            false,
+            &mut rng(),
+            &mut limits.0,
+            &mut limits.1,
+            WriteStep::new(WriteTag::Intents),
+            &mut WriteHooks::None,
+        )
+        .expect("an ordinary step must accept the same replacement");
+    assert_ne!(
+        fs::read(&path).unwrap(),
+        held,
+        "the control did not actually replace anything"
+    );
+
+    // Control two: an unchanged record under the same flush-only step really reaches its sync.
+    // Observed, not inferred from a successful return.
+    let mut limits = budgets(&mut store, &doc);
+    let state = store.load_epoch_intents(SERVER, &doc).unwrap();
+    let synced = std::cell::Cell::new(false);
+    store
+        .write_prepared_intents(
+            SERVER,
+            &doc,
+            state,
+            old(),
+            true,
+            &mut rng(),
+            &mut limits.0,
+            &mut limits.1,
+            WriteStep::flush_only(WriteTag::Intents, "this path must not rewrite its intents"),
+            &mut WriteHooks::Hooked {
+                before: None,
+                before_sync: Some(&mut |_: WriteTag, _: &Path, _: u64| {
+                    synced.set(true);
+                    AfterIntercept::Continue
+                }),
+                before_unlink: None,
+                after: None,
+            },
+        )
+        .expect("a flush-only step must still permit the flush");
+    assert!(
+        synced.get(),
+        "the flush-only step returned success without reaching a sync"
+    );
+}
+
+/// N17, intents family, both the replacement and the exact-retry flush.
+///
+/// The flush case is the one worth stating: it changes no bytes, and an inventory captured
+/// before it would still describe the right content. It must invalidate anyway, because the
+/// operation changes the record's durability and I-4's safe direction is to over-rotate.
+#[test]
+fn a_cursor_parked_across_an_intent_write_or_its_exact_retry_flush_refuses() {
+    let coverage = EpochInventoryCoverage::RecoveryOwnerReceiptsAndIntents;
+
+    // The replacement.
+    let root = tempfile::tempdir().unwrap();
+    let (device, group, doc) = fixture();
+    let mut store = open(root.path());
+    let mut limits = budgets(&mut store, &doc);
+    prepare(&mut store, &doc, op(&doc, 1), &device, &group, &mut limits).unwrap();
+
+    let mut limits = budgets(&mut store, &doc);
+    let mut cursor = store.begin_epoch_storage_scan(coverage).unwrap();
+    let progress = store.step_epoch_storage_scan(&mut cursor, 1, None).unwrap();
+    assert!(
+        !progress.complete,
+        "the fixture must span more than one step"
+    );
+    prepare(&mut store, &doc, op(&doc, 2), &device, &group, &mut limits).unwrap();
+    assert!(
+        store.step_epoch_storage_scan(&mut cursor, 1, None).is_err(),
+        "a cursor parked across an intent write resumed anyway"
+    );
+    assert!(
+        store.finish_epoch_storage_scan(cursor).is_err(),
+        "a cursor parked across an intent write still issued an inventory"
+    );
+
+    // The exact retry, which flushes without rewriting.
+    let path = store.epoch_intent_path(&scope_bytes(SERVER, &doc).unwrap());
+    let held = fs::read(&path).unwrap();
+    let mut limits = budgets(&mut store, &doc);
+    let mut cursor = store.begin_epoch_storage_scan(coverage).unwrap();
+    store.step_epoch_storage_scan(&mut cursor, 1, None).unwrap();
+    prepare(&mut store, &doc, op(&doc, 2), &device, &group, &mut limits).unwrap();
+    assert_eq!(
+        fs::read(&path).unwrap(),
+        held,
+        "the control is broken: this retry rewrote the ledger, so it is not the flush case"
+    );
+    assert!(
+        store.step_epoch_storage_scan(&mut cursor, 1, None).is_err(),
+        "a cursor survived an exact-retry intent flush, which is still a durability-changing \
+         operation on an inventoried record"
+    );
+    assert!(store.finish_epoch_storage_scan(cursor).is_err());
 }

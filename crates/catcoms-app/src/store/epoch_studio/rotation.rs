@@ -12,21 +12,6 @@ pub(crate) mod interruption;
 /// successful disk transaction. Pending recovery keeps the complete source sealed on disk.
 pub use crate::store::RegistryOwnerRotationOutcome as StudioRotationOutcome;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum RotationWrite {
-    Journal,
-    Source,
-    Recovery,
-    Intents,
-    Successor,
-}
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum RotationSync {
-    Source,
-    Intents,
-    Successor,
-}
-
 impl ServerStore {
     /// Local scheduling metadata only: the actual transaction rechecks every source and owner
     /// boundary. Do not repeatedly construct/sign large ineligible closures on idle ticks.
@@ -76,26 +61,34 @@ impl ServerStore {
     ) -> Result<(StudioRotationOutcome, EpochStudioState), AppError> {
         #[cfg(test)]
         let interruption = self.studio_rotation_interruption.clone();
+        #[cfg(test)]
+        let mut interrupt_before = |step: WriteTag, _: &Path, _: &[u8]| {
+            interruption
+                .as_ref()
+                .map_or(Intercept::Continue, |i| i.before(target, step))
+        };
+        #[cfg(test)]
+        let mut interrupt_after = |op: CompletedOperation, step: WriteTag, _: &Path| {
+            // Only after a replacement: the interruption models a record that is durable but
+            // unaccounted, and this transaction flushes some records before replacing them.
+            if op != CompletedOperation::Write {
+                return AfterIntercept::Continue;
+            }
+            interruption
+                .as_ref()
+                .map_or(AfterIntercept::Continue, |i| i.after(target, step))
+        };
+        #[cfg(test)]
+        let mut hooks = WriteHooks::Hooked {
+            before: Some(&mut interrupt_before),
+            before_sync: None,
+            before_unlink: None,
+            after: Some(&mut interrupt_after),
+        };
+        #[cfg(not(test))]
+        let mut hooks = WriteHooks::None;
         self.rotate_studio_owner_with_io(
-            server,
-            group,
-            target,
-            device,
-            tenure,
-            clock,
-            rng,
-            budget,
-            &mut |_step, p, b| {
-                #[cfg(test)]
-                if let Some(interruption) = &interruption {
-                    interruption.before_write(target, _step, p, b)?;
-                }
-                atomic_write(p, b)
-            },
-            &mut |step, p, b| match step {
-                RotationSync::Intents => super::super::epoch_intents::sync_intent(p, b),
-                _ => sync_studio(p, b),
-            },
+            server, group, target, device, tenure, clock, rng, budget, &mut hooks,
         )
     }
 
@@ -110,8 +103,7 @@ impl ServerStore {
         clock: &dyn Clock,
         rng: &mut impl CryptoRngCore,
         budget: &mut EpochStudioBudget,
-        writer: &mut impl FnMut(RotationWrite, &Path, &[u8]) -> Result<(), AppError>,
-        sync: &mut impl FnMut(RotationSync, &Path, u64) -> Result<(), AppError>,
+        hooks: &mut WriteHooks<'_>,
     ) -> Result<(StudioRotationOutcome, EpochStudioState), AppError> {
         if group.designated_committer() != Some(device.device_id()) || tenure > group.epoch() {
             return Err(invalid(
@@ -138,8 +130,8 @@ impl ServerStore {
             WritePurpose::Settlement,
             rng,
             &mut budget.storage,
-            |p, b| writer(RotationWrite::Source, p, b),
-            |p, b| sync(RotationSync::Source, p, b),
+            WriteStep::new(WriteTag::Source),
+            hooks,
             version,
         )?;
         let document = target.document(&group.group_id()).map_err(invalid)?;
@@ -208,7 +200,7 @@ impl ServerStore {
             tenure,
             rng,
             &mut budget.storage,
-            |p, b| writer(RotationWrite::Journal, p, b),
+            hooks,
         )?;
         let pending = saved.pending().is_some();
         // The exact decision is durable before sealing. Installed retries must preserve newer
@@ -243,14 +235,13 @@ impl ServerStore {
             WritePurpose::Settlement,
             rng,
             &mut budget.storage,
-            |p, b| writer(RotationWrite::Source, p, b),
-            |p, b| sync(RotationSync::Source, p, b),
+            WriteStep::new(WriteTag::Source),
+            hooks,
         )?;
         if outcome == ReceiptIngest::Fault {
             return Ok((StudioRotationOutcome::Fault, state));
         }
         if let Some(seed) = adoption_seed {
-            use super::adoption::{AdoptionSync, AdoptionWrite};
             let (outcome, state) = self.finish_studio_checkpoint_adoption_with_io(
                 server,
                 group,
@@ -263,27 +254,10 @@ impl ServerStore {
                 budget,
                 state,
                 record,
-                &mut |step, p, b| {
-                    writer(
-                        match step {
-                            AdoptionWrite::Source => RotationWrite::Source,
-                            AdoptionWrite::Recovery => RotationWrite::Recovery,
-                            AdoptionWrite::Successor => RotationWrite::Successor,
-                        },
-                        p,
-                        b,
-                    )
-                },
-                &mut |step, p, b| {
-                    sync(
-                        match step {
-                            AdoptionSync::Source => RotationSync::Source,
-                            AdoptionSync::Successor => RotationSync::Successor,
-                        },
-                        p,
-                        b,
-                    )
-                },
+                // These were two identity maps between per-transaction tag enums, complete with
+                // an `unreachable!` for tags the other enum lacked. One store-wide tag removes
+                // the translation and the unreachable arm with it.
+                hooks,
             )?;
             // This shared install half can only install or hold a recovery warning. An
             // unexpected future outcome must not be reported as successful rotation.
@@ -312,8 +286,7 @@ impl ServerStore {
             clock,
             rng,
             budget,
-            writer,
-            sync,
+            hooks,
         )
     }
 
@@ -333,8 +306,7 @@ impl ServerStore {
         clock: &dyn Clock,
         rng: &mut impl CryptoRngCore,
         budget: &mut EpochStudioBudget,
-        writer: &mut impl FnMut(RotationWrite, &Path, &[u8]) -> Result<(), AppError>,
-        sync: &mut impl FnMut(RotationSync, &Path, u64) -> Result<(), AppError>,
+        hooks: &mut WriteHooks<'_>,
     ) -> Result<(StudioRotationOutcome, EpochStudioState), AppError> {
         let plan = state
             .unit
@@ -370,7 +342,7 @@ impl ServerStore {
                 clock,
                 rng,
                 &mut budget.storage,
-                |p, b| writer(RotationWrite::Recovery, p, b),
+                hooks,
             )?
             .is_some()
         {
@@ -384,7 +356,7 @@ impl ServerStore {
                 clock,
                 rng,
                 &mut budget.storage,
-                |p, b| writer(RotationWrite::Recovery, p, b),
+                hooks,
             )?;
             if saved.state.eviction_pending()?.is_some() {
                 return Ok((StudioRotationOutcome::RecoveryPending, state));
@@ -396,8 +368,7 @@ impl ServerStore {
             rng,
             &mut budget.storage,
             &mut budget.intents,
-            |p, b| writer(RotationWrite::Intents, p, b),
-            |p, b| sync(RotationSync::Intents, p, b),
+            hooks,
         )?;
         let record = state
             .source
@@ -417,8 +388,8 @@ impl ServerStore {
             WritePurpose::Settlement,
             rng,
             &mut budget.storage,
-            |p, b| writer(RotationWrite::Successor, p, b),
-            |p, b| sync(RotationSync::Successor, p, b),
+            WriteStep::new(WriteTag::Successor),
+            hooks,
         )?;
         Ok((
             StudioRotationOutcome::Installed {

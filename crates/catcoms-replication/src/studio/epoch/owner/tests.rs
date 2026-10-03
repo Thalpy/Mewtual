@@ -3,8 +3,13 @@ use automerge::transaction::{CommitOptions, Transactable};
 use rand_chacha::ChaCha20Rng;
 use rand_core::SeedableRng;
 
+mod archive;
+mod disposal;
+mod eligibility;
 mod frozen;
 mod handoff;
+mod lifecycle;
+mod unconfirmed;
 
 struct Fixture {
     owner: MlsDevice,

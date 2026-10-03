@@ -62,9 +62,24 @@ impl CreativeReferences {
         Ok(())
     }
 }
+/// Job-owned holds for references that are not durable yet. A complete scan derives its set from
+/// durable state alone, so a reference created by an in-flight detached job would otherwise be
+/// deleted the moment that scan installs. These entries are NOT cleared by `unknown`, NOT
+/// subtractable by an install, and are consulted by every deletion.
+struct TransientHold {
+    owner: std::sync::Weak<()>,
+    group: Vec<u8>,
+    cids: BTreeSet<Cid>,
+}
+
+/// At most this many live job-owned holds. Exhaustion refuses new admission; it never disables
+/// unrelated reclamation by marking the whole store unknown.
+pub(super) const MAX_TRANSIENT_HOLD_OWNERS: usize = 8;
+
 pub(super) struct Protection {
     pub(super) generation: Arc<()>,
     pins: Option<CreativeReferences>,
+    transient: Vec<TransientHold>,
 }
 pub(super) type SharedProtection = Arc<Mutex<Protection>>;
 impl Protection {
@@ -73,11 +88,20 @@ impl Protection {
         Arc::new(Mutex::new(Self {
             generation: Arc::new(()),
             pins: empty.then(CreativeReferences::default),
+            transient: Vec::new(),
         }))
     }
+    /// Unknown durable protection. Job-owned holds survive: their references are not derivable
+    /// from durable state, so dropping them here would defeat their entire purpose.
     pub(super) fn unknown(&mut self) {
         self.generation = Arc::new(());
         self.pins = None;
+    }
+    /// The same reset `creative_pinned_cids` performs, for a test that drives a reference scan
+    /// through the cursor instead of through that wrapper.
+    #[cfg(test)]
+    pub(in crate::store) fn unknown_for_test(&mut self) {
+        self.unknown();
     }
     pub(super) fn install(
         &mut self,
@@ -89,6 +113,48 @@ impl Protection {
         }
         self.pins = Some(pins);
         Ok(())
+    }
+    /// Drop entries whose owning job has finished. Called before every hold and every deletion,
+    /// so a cancelled worker's hold disappears exactly when the worker itself does.
+    fn reap(&mut self) {
+        self.transient.retain(|hold| hold.owner.strong_count() != 0);
+    }
+    fn transient_holds(&self, group: &[u8], cid: &Cid) -> bool {
+        self.transient.iter().any(|hold| {
+            hold.owner.strong_count() != 0 && hold.group == group && hold.cids.contains(cid)
+        })
+    }
+    fn live_transient_cids(&self) -> usize {
+        self.transient
+            .iter()
+            .filter(|hold| hold.owner.strong_count() != 0)
+            .map(|hold| hold.cids.len())
+            .sum()
+    }
+}
+
+/// Releases its hold when dropped, so a cancelled waiter cannot free protection that the actual
+/// worker still needs. Moved through every detached stage and result alongside the permit.
+pub(crate) struct CreativeHold {
+    owner: Arc<()>,
+    protection: SharedProtection,
+}
+impl std::fmt::Debug for CreativeHold {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("CreativeHold { .. }")
+    }
+}
+impl Drop for CreativeHold {
+    fn drop(&mut self) {
+        if let Ok(mut state) = self.protection.lock() {
+            let owner = &self.owner;
+            state.transient.retain(|hold| {
+                !hold
+                    .owner
+                    .upgrade()
+                    .is_some_and(|live| Arc::ptr_eq(&live, owner))
+            });
+        }
     }
 }
 impl ServerStore {
@@ -126,6 +192,67 @@ impl ServerStore {
         } else if document.doc_type != DocType::DocRegistry {
             self.hold_creative(&document.server_id, Err(invalid()));
         }
+    }
+    /// Protect references that no durable record names yet, for the lifetime of one job.
+    ///
+    /// Bounds are checked BEFORE any entry is installed, so exhaustion never leaves a partial
+    /// hold, and it refuses the caller rather than marking the store unknown: a caller must not be
+    /// able to disable unrelated reclamation. That rule is about new admission only; the
+    /// fail-closed unknown path after uncertain durable I/O is unaffected.
+    ///
+    /// This is not durable protection. The caller must transfer these references to the ordinary
+    /// conservative holds before releasing the returned guard; see the overlay commit path.
+    pub(crate) fn hold_creative_transient(
+        &self,
+        group: &[u8],
+        cids: BTreeSet<[u8; 32]>,
+    ) -> Result<CreativeHold, AppError> {
+        if group.is_empty() || group.len() > 256 {
+            return Err(invalid());
+        }
+        let cids: BTreeSet<Cid> = cids.into_iter().map(Cid::from_bytes).collect();
+        let mut state = self.creative_protection.lock().map_err(|_| invalid())?;
+        state.reap();
+        if state.transient.len() >= MAX_TRANSIENT_HOLD_OWNERS {
+            return Err(invalid());
+        }
+        // Transient and durable references share the existing rail. Duplicates are counted, not
+        // hidden: a caller cannot obtain unbounded protection by repeating the same CID.
+        let durable = state.pins.as_ref().map_or(0, CreativeReferences::len);
+        if durable
+            .checked_add(state.live_transient_cids())
+            .and_then(|held| held.checked_add(cids.len()))
+            .is_none_or(|total| total > MAX_CREATIVE_REFERENCES)
+        {
+            return Err(invalid());
+        }
+        let owner = Arc::new(());
+        state.transient.push(TransientHold {
+            owner: Arc::downgrade(&owner),
+            group: group.to_vec(),
+            cids,
+        });
+        Ok(CreativeHold {
+            owner,
+            protection: self.creative_protection.clone(),
+        })
+    }
+
+    /// Test-only: how many job-owned holds are currently live. Used to prove that a path which
+    /// must not perform media admission genuinely took none, rather than inferring it from a
+    /// successful result.
+    #[cfg(test)]
+    pub(crate) fn live_transient_holds_for_test(&self) -> usize {
+        self.creative_protection
+            .lock()
+            .map(|state| {
+                state
+                    .transient
+                    .iter()
+                    .filter(|hold| hold.owner.strong_count() != 0)
+                    .count()
+            })
+            .unwrap_or(0)
     }
     pub(crate) fn creative_references_known(&self) -> bool {
         self.creative_protection
@@ -178,10 +305,16 @@ pub(super) struct ProtectedBlobs {
 }
 impl BlobStore for ProtectedBlobs {
     fn delete(&mut self, cid: &Cid) -> Result<bool, StorageError> {
-        let guard = self
+        let mut guard = self
             .protection
             .lock()
             .map_err(|_| StorageError::Io("creative reference protection unavailable".into()))?;
+        guard.reap();
+        // A live job-owned hold protects references no durable record names yet. Check it even
+        // when durable protection is unknown, and before consulting the installed set.
+        if guard.transient_holds(&self.group, cid) {
+            return Ok(false);
+        }
         let pins = guard.pins.as_ref().ok_or_else(|| {
             StorageError::Io("creative references need a complete scan; blob retained".into())
         })?;

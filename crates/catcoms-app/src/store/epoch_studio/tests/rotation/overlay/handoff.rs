@@ -1,8 +1,8 @@
 use super::*;
-use crate::store::epoch_studio::handoff::{HandoffSync, HandoffWrite};
 use catcoms_replication::studio::{StudioHandoffOutcome, StudioOverlaySave};
 use catcoms_replication::ReplError;
 
+mod classification;
 mod eligibility;
 mod evidence;
 mod fences;
@@ -26,17 +26,22 @@ fn transfer(f: &Fixture, store: &mut ServerStore, basis: [u8; 32]) -> StudioHand
         )
         .unwrap()
 }
-fn flush(step: HandoffSync, path: &Path, bytes: u64) -> Result<(), AppError> {
-    match step {
-        HandoffSync::Source => sync_studio(path, bytes),
-        HandoffSync::Intents => sync_intent(path, bytes),
-    }
-}
 fn prepare(f: &Fixture, store: &mut ServerStore) -> (CloseRecord, [u8; 32], StudioProjection) {
+    let (close, basis, expected, _) = prepare_keeping_closing(f, store);
+    (close, basis, expected)
+}
+
+/// `prepare`, also returning the Closing source record's vault bytes as they stood before the
+/// rotation, so a test can put the source back behind a branch that was based past it.
+fn prepare_keeping_closing(
+    f: &Fixture,
+    store: &mut ServerStore,
+) -> (CloseRecord, [u8; 32], StudioProjection, Vec<u8>) {
     let (close, basis) = closing(f, store);
     let expected = save(f, store, &close, basis.fingerprint(), f.title(), 123)
         .projection()
         .clone();
+    let closing_record = std::fs::read(f.path(store)).unwrap();
     let mut source = f.load(store).unwrap();
     let receipt = source.unit.receipt_head().unwrap().cloned().unwrap();
     let decision = source
@@ -52,7 +57,7 @@ fn prepare(f: &Fixture, store: &mut ServerStore) -> (CloseRecord, [u8; 32], Stud
             0,
             &mut rng(),
             &mut b.storage,
-            atomic_write,
+            &mut WriteHooks::None,
         )
         .unwrap();
     warm(f, store);
@@ -71,7 +76,288 @@ fn prepare(f: &Fixture, store: &mut ServerStore) -> (CloseRecord, [u8; 32], Stud
             &mut b,
         )
         .unwrap();
-    (close, basis.fingerprint(), expected)
+    (close, basis.fingerprint(), expected, closing_record)
+}
+
+/// A clock that advances a fixed step on every read, so a slice deadline is crossed by
+/// construction rather than by hoping cheap and expensive operations fall either side of a
+/// wall-clock threshold. Design 7.3 requires the injected `Clock`, never `SystemClock`.
+#[derive(Debug)]
+struct SteppingClock {
+    ms: std::sync::atomic::AtomicU64,
+    step: u64,
+}
+
+impl catcoms_rt::Clock for SteppingClock {
+    fn now_ms(&self) -> u64 {
+        self.monotonic_ms()
+    }
+    fn monotonic_ms(&self) -> u64 {
+        self.ms
+            .fetch_add(self.step, std::sync::atomic::Ordering::SeqCst)
+            + self.step
+    }
+    fn sleep(
+        &self,
+        _: std::time::Duration,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + '_>> {
+        Box::pin(std::future::ready(()))
+    }
+}
+
+/// N31. Design 7.3's two distinct events, proven apart rather than inferred from "work remains".
+///
+/// A visit that returns with work left proves nothing on its own, because it may have deferred
+/// before signing anything. The discriminator is the remaining count at slice entry and exit: the
+/// core decrements it by exactly one per successful `sign_next`, so the difference is a count of
+/// signatures actually produced. Each of the four outcomes is asserted on that pair, and each
+/// limiter is exercised with the **other** one disabled so neither can stand in for it.
+#[test]
+fn studio_overlay_handoff_signing_slice_reports_yield_bound_and_completion_apart() {
+    use crate::store::epoch_studio::handoff_capture::{
+        MAX_SIGNING_TURNS_PER_VISIT, SIGNING_SLICE_BUDGET_MS,
+    };
+    let root = tempfile::tempdir().unwrap();
+    let f = Fixture::new(false);
+    let mut store = open(root.path());
+    let (basis, _) = performance::fixture(&f, &mut store, 40);
+    let records = canonical(&store);
+
+    let mut b = budget(&mut store, &f);
+    let capture = match store
+        .start_studio_handoff_with_io(
+            SERVER,
+            &f.group,
+            f.target,
+            &f.device,
+            basis,
+            Some(0),
+            &mut rng(),
+            &mut b,
+            &mut WriteHooks::None,
+        )
+        .unwrap()
+    {
+        crate::store::epoch_studio::handoff::StudioHandoffStart::Captured(capture) => capture,
+        crate::store::epoch_studio::handoff::StudioHandoffStart::Settled(_) => {
+            panic!("the fixture branch was classified as already transferred")
+        }
+    };
+    let mut plan = capture.prepare().expect("H2 reconstructs the candidate");
+    assert_eq!(plan.remaining(), 40);
+
+    // 1. Priority yield. Signs ZERO and leaves the count untouched, and says so itself rather
+    //    than leaving the caller to infer a yield from the fact that work remains.
+    let ticking = SteppingClock {
+        ms: std::sync::atomic::AtomicU64::new(0),
+        step: 1,
+    };
+    let slice = plan
+        .sign_slice(
+            &f.device,
+            &f.group,
+            0,
+            true,
+            MAX_SIGNING_TURNS_PER_VISIT,
+            Some((&ticking, SIGNING_SLICE_BUDGET_MS)),
+        )
+        .unwrap();
+    assert!(slice.yielded(), "a priority yield was not reported as one");
+    assert_eq!(slice.signed(), 0, "a priority yield signed something");
+    assert_eq!(slice.remaining(), 40);
+    assert!(!slice.complete());
+
+    // 2. Count-bounded slice, with the time limiter DISABLED so only the turn cap can stop it.
+    let slice = plan
+        .sign_slice(
+            &f.device,
+            &f.group,
+            0,
+            false,
+            MAX_SIGNING_TURNS_PER_VISIT,
+            None,
+        )
+        .unwrap();
+    assert!(!slice.yielded());
+    assert_eq!(
+        slice.signed(),
+        MAX_SIGNING_TURNS_PER_VISIT,
+        "the turn cap did not bound the slice"
+    );
+    assert_eq!(slice.remaining(), 40 - MAX_SIGNING_TURNS_PER_VISIT);
+    assert!(!slice.complete());
+
+    // 3. Time-bounded slice, with the count limiter DISABLED so only the deadline can stop it.
+    //    The clock advances 200 ms per read against a 250 ms budget: the entry read sets the
+    //    deadline, the first signature's check is under it, the second crosses. A slice may
+    //    overrun by one whole operation, which is exactly the two signatures observed here.
+    let stepping = SteppingClock {
+        ms: std::sync::atomic::AtomicU64::new(0),
+        step: 200,
+    };
+    let slice = plan
+        .sign_slice(
+            &f.device,
+            &f.group,
+            0,
+            false,
+            usize::MAX,
+            Some((&stepping, SIGNING_SLICE_BUDGET_MS)),
+        )
+        .unwrap();
+    assert!(!slice.yielded());
+    assert_eq!(
+        slice.signed(),
+        2,
+        "the slice budget did not bound the slice"
+    );
+    assert_eq!(slice.remaining(), 40 - MAX_SIGNING_TURNS_PER_VISIT - 2);
+    assert!(!slice.complete());
+
+    // 4. Completion, with both limiters disabled.
+    let slice = plan
+        .sign_slice(&f.device, &f.group, 0, false, usize::MAX, None)
+        .unwrap();
+    assert_eq!(slice.signed(), 40 - MAX_SIGNING_TURNS_PER_VISIT - 2);
+    assert_eq!(slice.remaining(), 0);
+    assert!(slice.complete());
+
+    // No signature became durable at any point: H3 signs privately and H5 alone writes.
+    assert_eq!(
+        canonical(&store),
+        records,
+        "signing exposed a durable prefix"
+    );
+}
+
+/// H4 refuses a batch that is not finished signing. `finish` would fail anyway, but it would fail
+/// somewhere inside manifest construction; refusing here names the actual mistake, and a scheduled
+/// caller that assembles a plan it has only partly signed is exactly the mistake worth naming.
+#[test]
+fn studio_overlay_handoff_assembly_refuses_a_partly_signed_batch() {
+    let root = tempfile::tempdir().unwrap();
+    let f = Fixture::new(false);
+    let mut store = open(root.path());
+    let (basis, _) = performance::fixture(&f, &mut store, 4);
+    let mut b = budget(&mut store, &f);
+    let capture = match store
+        .start_studio_handoff_with_io(
+            SERVER,
+            &f.group,
+            f.target,
+            &f.device,
+            basis,
+            Some(0),
+            &mut rng(),
+            &mut b,
+            &mut WriteHooks::None,
+        )
+        .unwrap()
+    {
+        crate::store::epoch_studio::handoff::StudioHandoffStart::Captured(capture) => capture,
+        crate::store::epoch_studio::handoff::StudioHandoffStart::Settled(_) => {
+            panic!("the fixture branch was classified as already transferred")
+        }
+    };
+    let mut plan = capture.prepare().unwrap();
+    // One bounded slice, deliberately short of the whole branch.
+    let slice = plan
+        .sign_slice(&f.device, &f.group, 0, false, 2, None)
+        .unwrap();
+    assert_eq!(slice.signed(), 2);
+    assert_eq!(slice.remaining(), 2);
+    match plan.assemble() {
+        Err(error) => assert!(
+            error.to_string().contains("signing did not complete"),
+            "a partly signed batch was refused for an unrelated reason: {error}"
+        ),
+        Ok(_) => panic!("a partly signed batch was assembled"),
+    }
+}
+
+/// H1/H2. A plan built from records that have since moved on is a stale proposal, however well
+/// formed it is, and the commit visit must refuse it before any signature becomes durable.
+///
+/// This is the handoff analogue of `studio_overlay_detached_plan_is_refused_when_the_record
+/// _changed`, and it is what makes the H5 stamp recheck load bearing: the synchronous adapter
+/// never leaves a gap, so nothing else in this suite can exercise it.
+#[test]
+fn studio_overlay_handoff_plan_is_refused_when_its_records_changed() {
+    let root = tempfile::tempdir().unwrap();
+    let f = Fixture::new(false);
+    let mut store = open(root.path());
+    let (close, basis, _) = prepare(&f, &mut store);
+    let records = canonical(&store);
+
+    // H1 under custody, then H2 detached. Nothing durable exists yet.
+    let mut b = budget(&mut store, &f);
+    let capture = match store
+        .start_studio_handoff_with_io(
+            SERVER,
+            &f.group,
+            f.target,
+            &f.device,
+            basis,
+            Some(0),
+            &mut rng(),
+            &mut b,
+            &mut WriteHooks::None,
+        )
+        .unwrap()
+    {
+        crate::store::epoch_studio::handoff::StudioHandoffStart::Captured(capture) => capture,
+        crate::store::epoch_studio::handoff::StudioHandoffStart::Settled(_) => {
+            panic!("the fixture branch was classified as already transferred")
+        }
+    };
+    let mut plan = capture.prepare().expect("H2 reconstructs the candidate");
+    assert!(
+        plan.sign_slice(&f.device, &f.group, 0, false, usize::MAX, None)
+            .unwrap()
+            .complete(),
+        "H3 did not sign the whole branch"
+    );
+    let commit = plan.assemble().expect("H4 assembles the candidate");
+    assert_eq!(
+        canonical(&store),
+        records,
+        "H1 to H4 wrote something durable"
+    );
+
+    // The vault is closed and reopened while the plan is detached, which is what a crash between
+    // H2 and H5 looks like. The plan still holds the previous mount, so the context it was built
+    // against no longer exists even though every byte on disk is identical.
+    let _ = close;
+    drop(store);
+    let mut store = open(root.path());
+    assert_eq!(canonical(&store), records);
+
+    let mut b = budget(&mut store, &f);
+    let refused = store.commit_studio_handoff_with_io(
+        SERVER,
+        &f.group,
+        f.target,
+        &f.device,
+        commit,
+        Some(0),
+        &mut rng(),
+        &mut b,
+        &mut WriteHooks::None,
+    );
+    match refused {
+        Err(error) => assert!(
+            error
+                .to_string()
+                .contains("overlay records or context changed"),
+            "a stale handoff plan was refused for an unrelated reason: {error}"
+        ),
+        Ok(_) => panic!("a handoff plan built from superseded records was committed"),
+    }
+    assert_eq!(
+        canonical(&store),
+        records,
+        "a refused handoff plan changed durable records"
+    );
 }
 
 #[test]
@@ -81,6 +367,9 @@ fn studio_overlay_handoff_signs_the_whole_branch_once_and_keeps_pending_intents(
         let f = Fixture::new(art);
         let mut store = open(root.path());
         let (close, basis, expected) = prepare(&f, &mut store);
+        // The branch the accepted Save named, held as its client would hold it. After the transfer
+        // a fresh derivation would name the *next* branch, so the retry below must resend this.
+        let branch = live_branch(&f, &store);
         let before_intents = store
             .load_epoch_intents(SERVER, &f.logical)
             .unwrap()
@@ -104,20 +393,21 @@ fn studio_overlay_handoff_signs_the_whole_branch_once_and_keeps_pending_intents(
                 Some(0),
                 &mut rng(),
                 &mut b,
-                &mut |step, p, bytes| {
-                    writes.push(step);
-                    atomic_write(p, bytes)
+                // Record which steps the transaction writes, without performing any of them.
+                &mut WriteHooks::Hooked {
+                    before: Some(&mut |step: WriteTag, _: &Path, _: &[u8]| {
+                        writes.push(step);
+                        Intercept::Continue
+                    }),
+                    before_sync: None,
+                    before_unlink: None,
+                    after: None,
                 },
-                &mut flush,
             )
             .unwrap();
         assert_eq!(
             writes,
-            [
-                HandoffWrite::Prepared,
-                HandoffWrite::Source,
-                HandoffWrite::Completed
-            ]
+            [WriteTag::Prepared, WriteTag::Source, WriteTag::Completed]
         );
         let saved = store.load_epoch_intents(SERVER, &f.logical).unwrap();
         assert!(
@@ -146,6 +436,7 @@ fn studio_overlay_handoff_signs_the_whole_branch_once_and_keeps_pending_intents(
         let mut store = open(root.path());
         assert_eq!(transfer(&f, &mut store, basis), outcome);
         assert_eq!(fs::read(f.path(&store)).unwrap(), source_bytes);
+        // V8: the acknowledgement is owed without any tenure at all.
         let mut b = budget(&mut store, &f);
         let retry = store
             .save_studio_closing_overlay(
@@ -154,8 +445,9 @@ fn studio_overlay_handoff_signs_the_whole_branch_once_and_keeps_pending_intents(
                 f.target,
                 &f.device,
                 &close,
-                None,
+                StudioOwnerTenure::Unknown,
                 basis,
+                branch,
                 f.title(),
                 999,
                 &mut rng(),
@@ -187,17 +479,15 @@ fn studio_overlay_handoff_crash_barriers_reopen_without_signed_prefixes_or_dupli
         let mut template = open(root.path());
         let (_, basis, expected) = prepare(&f, &mut template);
         drop(template);
-        for step in [
-            HandoffWrite::Prepared,
-            HandoffWrite::Source,
-            HandoffWrite::Completed,
-        ] {
+        for step in [WriteTag::Prepared, WriteTag::Source, WriteTag::Completed] {
             for after in [false, true] {
                 let attempt = tempfile::tempdir().unwrap();
                 copy_vault(root.path(), attempt.path());
                 let mut store = open(attempt.path());
                 let mut b = budget(&mut store, &f);
-                let mut hit = false;
+                // A Cell because both decisions below record into it, and only one of them
+                // fires: two closures cannot each hold it mutably.
+                let hit = std::cell::Cell::new(false);
                 let error = store
                     .handoff_studio_overlay_with_io(
                         SERVER,
@@ -208,27 +498,36 @@ fn studio_overlay_handoff_crash_barriers_reopen_without_signed_prefixes_or_dupli
                         Some(0),
                         &mut rng(),
                         &mut b,
-                        &mut |at, p, bytes| {
-                            if at == step {
-                                hit = true;
-                                if after {
-                                    atomic_write(p, bytes)?;
+                        // Fail one named step, on whichever side of it the case wants. Other
+                        // steps proceed normally through the transaction's own writes.
+                        &mut WriteHooks::Hooked {
+                            before: Some(&mut |at: WriteTag, _: &Path, _: &[u8]| {
+                                if at == step && !after {
+                                    hit.set(true);
+                                    return Intercept::Fail(invalid("injected handoff write"));
                                 }
-                                return Err(invalid("injected handoff write"));
-                            }
-                            atomic_write(p, bytes)
+                                Intercept::Continue
+                            }),
+                            before_sync: None,
+                            before_unlink: None,
+                            after: Some(&mut |op: CompletedOperation, at: WriteTag, _: &Path| {
+                                if op == CompletedOperation::Write && at == step && after {
+                                    hit.set(true);
+                                    return AfterIntercept::Fail(invalid("injected handoff write"));
+                                }
+                                AfterIntercept::Continue
+                            }),
                         },
-                        &mut flush,
                     )
                     .unwrap_err();
-                assert!(hit && error.to_string().contains("injected handoff write"));
+                assert!(hit.get() && error.to_string().contains("injected handoff write"));
                 assert!(b.requires_reconciliation());
                 drop(store);
                 let mut store = open(attempt.path());
                 let state = store.load_epoch_intents(SERVER, &f.logical).unwrap();
                 let source = f.load(&store).unwrap();
                 assert!(source.op_count() <= 1);
-                if step == HandoffWrite::Completed && after {
+                if step == WriteTag::Completed && after {
                     assert!(state.overlay().is_none());
                 } else {
                     assert_eq!(
@@ -247,7 +546,7 @@ fn studio_overlay_handoff_crash_barriers_reopen_without_signed_prefixes_or_dupli
             copy_vault(root.path(), attempt.path());
             let mut store = open(attempt.path());
             let mut b = budget(&mut store, &f);
-            let mut hit = false;
+            let hit = std::cell::Cell::new(false);
             let error = store
                 .handoff_studio_overlay_with_io(
                     SERVER,
@@ -258,18 +557,34 @@ fn studio_overlay_handoff_crash_barriers_reopen_without_signed_prefixes_or_dupli
                     Some(0),
                     &mut rng(),
                     &mut b,
-                    &mut |_, p, bytes| atomic_write(p, bytes),
-                    &mut |step, p, bytes| {
-                        assert_eq!(step, HandoffSync::Source);
-                        hit = true;
-                        if after {
-                            flush(step, p, bytes)?;
-                        }
-                        Err(invalid("injected handoff sync"))
+                    // The source flush, refused on one side or the other. `after` used to mean
+                    // "do the real flush, then fail"; it now means "let the transaction flush,
+                    // then fail", which is the same observable without a second sync path.
+                    &mut WriteHooks::Hooked {
+                        before: None,
+                        before_sync: Some(&mut |step: WriteTag, _: &Path, _: u64| {
+                            assert_eq!(step, WriteTag::Source);
+                            if after {
+                                return AfterIntercept::Continue;
+                            }
+                            hit.set(true);
+                            AfterIntercept::Fail(invalid("injected handoff sync"))
+                        }),
+                        before_unlink: None,
+                        // Deliberately after the *sync*: this case means "let the transaction
+                        // flush, then fail", which is a different event from the replacement.
+                        after: Some(&mut |op: CompletedOperation, step: WriteTag, _: &Path| {
+                            if !after || op != CompletedOperation::Sync || step != WriteTag::Source
+                            {
+                                return AfterIntercept::Continue;
+                            }
+                            hit.set(true);
+                            AfterIntercept::Fail(invalid("injected handoff sync"))
+                        }),
                     },
                 )
                 .unwrap_err();
-            assert!(hit && error.to_string().contains("injected handoff sync"));
+            assert!(hit.get() && error.to_string().contains("injected handoff sync"));
             drop(store);
             let mut store = open(attempt.path());
             assert!(store
@@ -280,6 +595,150 @@ fn studio_overlay_handoff_crash_barriers_reopen_without_signed_prefixes_or_dupli
             transfer(&f, &mut store, basis);
             assert_eq!(f.load(&store).unwrap().projection().unwrap(), expected);
         }
+    }
+}
+
+/// Interrupt a handoff by failing the write tagged `crash_at`, reopen, and confirm it left a
+/// durable Prepared record behind. Returns the branch's basis and the expected projection.
+fn interrupted_handoff(
+    f: &Fixture,
+    root: &Path,
+    crash_at: WriteTag,
+) -> ([u8; 32], StudioProjection) {
+    let mut store = open(root);
+    let (_, basis, expected) = prepare(f, &mut store);
+    let mut b = budget(&mut store, f);
+    let interrupted = store.handoff_studio_overlay_with_io(
+        SERVER,
+        &f.group,
+        f.target,
+        &f.device,
+        basis,
+        Some(0),
+        &mut rng(),
+        &mut b,
+        &mut WriteHooks::fail_before_write(FailError::Io("injected crash")).at(crash_at),
+    );
+    assert!(
+        matches!(interrupted, Err(ref e) if e.to_string().contains("injected crash")),
+        "the handoff was not interrupted where the fixture meant it to be: {interrupted:?}"
+    );
+    drop(store);
+    assert!(
+        open(root)
+            .load_epoch_intents(SERVER, &f.logical)
+            .unwrap()
+            .handoff_prepared(),
+        "the interruption did not leave a durable Prepared record to resolve"
+    );
+    (basis, expected)
+}
+
+/// V8: resolving an already durable `Prepared` handoff needs no tenure, in both of the outcomes
+/// resolution can reach.
+///
+/// **`Complete` - the crash came after the source landed.** The source holds every signed change,
+/// so resolution completes the handoff from durable evidence alone and settles. The vault is
+/// copied and resolved twice, with a known tenure as the control and with **none**; both must
+/// settle to the same outcome and leave byte-identical sources, so the absent tenure changed
+/// nothing rather than merely failing to stop something.
+///
+/// **`Absent` - the crash came before the source landed.** There is no signed evidence to complete
+/// from, so resolution returns the branch to Active, durably, which is also tenure-free. What
+/// follows is a *new* handoff, and that is new authoring: it is refused without tenure, and it
+/// should be. So the claim here is narrower and stated exactly: the call is refused for its tenure,
+/// **and** the Prepared record is resolved anyway, with the draft intact.
+///
+/// The first version of this test crashed before the source and expected a settled outcome. It
+/// failed, and the failure was the test's, not V8's: it had conflated resolution with the new
+/// handoff that follows an `Absent` one. Reading `resolve_studio_handoff_with_io` is what showed the
+/// two outcomes and which of them settles.
+///
+/// This anchors V8's third case. The other two are anchored under absent tenure elsewhere: an exact
+/// Save retry (`studio_overlay_store_uncertain_writes_and_changed_source_retry_at_physical_cap`)
+/// and a completed-handoff acknowledgement (`..._signs_the_whole_branch_once_...`,
+/// `..._completed_retry_keeps_channel_...`). Until this, every resolution ran with `Some(0)`, so a
+/// tenure requirement hoisted above it would have passed every test.
+#[test]
+fn a_durable_prepared_handoff_is_resolved_with_no_observed_tenure() {
+    for art in [false, true] {
+        let f = Fixture::new(art);
+
+        // Complete: settles identically with and without tenure.
+        let root = tempfile::tempdir().unwrap();
+        let (basis, expected) = interrupted_handoff(&f, root.path(), WriteTag::Completed);
+        let control = tempfile::tempdir().unwrap();
+        copy_vault(root.path(), control.path());
+        let resolve = |path: &Path, tenure: Option<u64>| {
+            let mut store = open(path);
+            let mut b = budget(&mut store, &f);
+            let outcome = store
+                .handoff_studio_overlay(
+                    SERVER,
+                    &f.group,
+                    f.target,
+                    &f.device,
+                    basis,
+                    tenure,
+                    &mut rng(),
+                    &mut b,
+                )
+                .unwrap_or_else(|e| panic!("resolution refused with tenure {tenure:?}: {e}"));
+            (
+                outcome,
+                fs::read(f.path(&store)).unwrap(),
+                f.load(&store).unwrap(),
+            )
+        };
+        let (known, known_source, _) = resolve(control.path(), Some(0));
+        let (absent, absent_source, resolved) = resolve(root.path(), None);
+        assert_eq!(
+            absent, known,
+            "resolution without tenure settled differently"
+        );
+        assert_eq!(
+            absent_source, known_source,
+            "resolution without tenure wrote a different source"
+        );
+        assert_eq!(resolved.projection().unwrap(), expected);
+        assert!(!open(root.path())
+            .load_epoch_intents(SERVER, &f.logical)
+            .unwrap()
+            .handoff_prepared());
+
+        // Absent: resolved to Active without tenure; only the new handoff after it is refused.
+        let root = tempfile::tempdir().unwrap();
+        let (basis, expected) = interrupted_handoff(&f, root.path(), WriteTag::Source);
+        let mut store = open(root.path());
+        let mut b = budget(&mut store, &f);
+        let refused = store.handoff_studio_overlay(
+            SERVER,
+            &f.group,
+            f.target,
+            &f.device,
+            basis,
+            None,
+            &mut rng(),
+            &mut b,
+        );
+        assert!(
+            matches!(refused, Err(ref e) if e.to_string().contains("owner tenure")),
+            "the new handoff after an Absent resolution was not refused for its tenure: \
+             {refused:?}"
+        );
+        drop(store);
+        let after = open(root.path())
+            .load_epoch_intents(SERVER, &f.logical)
+            .unwrap();
+        assert!(
+            !after.handoff_prepared(),
+            "the Prepared record was not resolved without tenure"
+        );
+        assert_eq!(
+            after.local_draft().unwrap().unwrap().projection(),
+            &expected,
+            "resolution did not return the branch to Active intact"
+        );
     }
 }
 
@@ -330,8 +789,8 @@ fn grow(f: &Fixture, store: &mut ServerStore) {
             WritePurpose::Ordinary,
             &mut rng(),
             &mut b.storage,
-            atomic_write,
-            sync_studio,
+            WriteStep::new(WriteTag::Source),
+            &mut WriteHooks::None,
         )
         .unwrap();
     store.retain_studio_source(&f.group, &f.device, state);
@@ -343,6 +802,8 @@ fn studio_overlay_handoff_completed_retry_keeps_channel_after_real_receipt_retir
     let f = Fixture::new(true);
     let mut store = open(root.path());
     let (close, basis, _) = prepare(&f, &mut store);
+    // The accepted Save's branch, held across the transfer and the rotation as its client would.
+    let branch = live_branch(&f, &store);
     let outcome = transfer(&f, &mut store, basis);
     assert!(store
         .load_epoch_intents(SERVER, &f.logical)
@@ -373,16 +834,23 @@ fn studio_overlay_handoff_completed_retry_keeps_channel_after_real_receipt_retir
             f.target,
             &f.device,
             &close,
-            None,
+            StudioOwnerTenure::Unknown,
             basis,
+            branch,
             f.title(),
             999,
             &mut rng(),
             &mut b,
-            |_, _| panic!("completed retry rewrote its record"),
-            |p, bytes| {
-                syncs += 1;
-                sync_intent(p, bytes)
+            &mut WriteHooks::Hooked {
+                before: Some(&mut |_: WriteTag, _: &Path, _: &[u8]| {
+                    panic!("completed retry rewrote its record")
+                }),
+                before_sync: Some(&mut |_: WriteTag, _: &Path, _: u64| {
+                    syncs += 1;
+                    AfterIntercept::Continue
+                }),
+                before_unlink: None,
+                after: None,
             },
         )
         .unwrap();
@@ -404,16 +872,23 @@ fn studio_overlay_handoff_completed_retry_keeps_channel_after_real_receipt_retir
         wrong,
         &f.device,
         &close,
-        None,
+        StudioOwnerTenure::Unknown,
         basis,
+        branch,
         f.title(),
         999,
         &mut rng(),
         &mut b,
-        |_, _| panic!("wrong-channel retry wrote"),
-        |p, bytes| {
-            syncs += 1;
-            sync_intent(p, bytes)
+        &mut WriteHooks::Hooked {
+            before: Some(&mut |_: WriteTag, _: &Path, _: &[u8]| {
+                panic!("wrong-channel retry wrote")
+            }),
+            before_sync: Some(&mut |_: WriteTag, _: &Path, _: u64| {
+                syncs += 1;
+                AfterIntercept::Continue
+            }),
+            before_unlink: None,
+            after: None,
         },
     );
     assert!(

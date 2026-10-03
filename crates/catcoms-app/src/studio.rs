@@ -11,24 +11,35 @@ pub use catcoms_replication::{studio as types, EpochPhase, RecoveryReason, Recov
 use catcoms_rt::{CryptoRngCore, MeshTransport};
 use tokio::sync::{oneshot, OwnedMutexGuard};
 
+mod tenure;
+pub(crate) use tenure::require as require_owner_tenure;
+pub use tenure::StudioOwnerTenure;
+mod copy;
+pub use copy::{
+    StudioCopyPreparation, StudioOverlayCopyApply, StudioOverlayCopyPreview, StudioPreparedCopy,
+};
 mod inspection;
 mod overlay;
 pub use inspection::{
-    StudioInspectionDelivery, StudioInspectionPreparation, StudioOverlayInspection,
-    StudioPreparedInspection,
+    StudioDelivered, StudioInspectionDelivery, StudioInspectionPreparation,
+    StudioOverlayInspection, StudioPreparedInspection,
 };
+pub use overlay::StudioOverlaySaveTicket;
 mod preview;
 pub use preview::{StudioPreview, StudioPreviewDelivery, StudioRead};
 mod publication;
 pub(crate) use publication::StudioSavedTransaction;
 mod control;
 mod replay;
-mod restore;
+/// Crate-visible because copy's detached planner lives in the store and calls `plan` directly.
+pub(crate) mod restore;
 mod settlement;
 pub use control::{
-    StudioControlAction, StudioControlReady, StudioControlRequest, StudioControlResponse,
+    StudioArchiveReleaseRequest, StudioControlAction, StudioControlReady, StudioControlRequest,
+    StudioControlResponse, StudioOverlayArchived, StudioOverlayExport, StudioOverlayLifecycle,
     StudioRecoveryApply, StudioRecoveryListing, StudioRecoveryPreview, StudioRecoverySummary,
-    StudioRecoveryVersion, StudioSettlementSource,
+    StudioRecoveryVersion, StudioReleaseConfirmation, StudioSettlementSource,
+    CONTROL_REPLY_DROPPED,
 };
 pub use restore::{
     StudioRecoveryDisposition, StudioRecoveryItem, StudioRecoveryMode, StudioRecoveryPlan,

@@ -5,7 +5,16 @@ use catcoms_app::studio::{
     types::*, EpochPhase, StudioRead, StudioRequest, StudioVaultLease, StudioView,
 };
 use serde_json::{json, Value};
+// The overlay lifecycle and copy commands are built and tested but NOT registered: native command
+// and security registration is Agent 4's, and registering them without their policy rows,
+// capability grants and session-gate review failed the frontend security gate. They also carry no
+// `#[tauri::command]` yet, because that gate requires every annotated function to be registered.
+// Registration restores the attributes and removes these expectations in the same change.
+#[expect(dead_code, reason = "registered by Agent 4 with its security rows")]
+pub(crate) mod copy;
 pub(crate) mod inspection;
+#[expect(dead_code, reason = "registered by Agent 4 with its security rows")]
+pub(crate) mod lifecycle;
 pub(crate) mod recovery;
 mod requests;
 pub(crate) mod settlement;
@@ -192,47 +201,79 @@ async fn invoke_with_context<V>(
         }
         _ => None,
     };
+    // Every control result that carries a job's slot - inspection, export, archive, copy preview -
+    // has a delivery the actor began. Asked of the response, which lists its delivered variants
+    // exhaustively, rather than re-matched here where a second list could drift from the first.
     let inspection_delivery = match &response {
-        InvokeResponse::Control(catcoms_app::studio::StudioControlResponse::OverlayInspection(
-            inspection,
-        )) => Some(inspection.delivery()),
+        InvokeResponse::Control(control) => control.delivery(),
         _ => None,
     };
-    if cancellation.is_cancelled() {
-        return Err("Studio request cancelled; its local save may have completed".into());
-    }
-    let _commit = require_ui_session_generation(state, generation).await?;
-    let servers = state.servers.lock().await;
-    if servers
-        .get(&server)
-        .is_none_or(|entry| entry.instance != instance)
-    {
-        return Err("server changed during Studio operation".into());
-    }
-    // Conversion can be substantial (base64 and full conflict-preserving JSON). Keep the
-    // completion fences until it is finished, and suppress even a lock request that arrived
-    // during conversion before the actual lock task can acquire this commit guard.
-    let value = convert(response)?;
-    if view_request
-        .as_ref()
-        .is_some_and(|request| !request.is_current())
-    {
-        return Err("Studio view request was superseded; refresh".into());
-    }
-    if preview_delivery
-        .as_ref()
-        .is_some_and(|delivery| !delivery.is_current())
-        || inspection_delivery
+    // An archive result is a DURABLE WRITE that already happened. Every refusal below withholds
+    // its result, but none of them undoes the write, so for an archive each one is `uncertain`,
+    // not `refused` (design section 11's write outcomes): the renderer must re-read rather than
+    // tell a user nothing was preserved. Reads lose nothing by being withheld and keep the plain
+    // refusals. Before results were delivered this could not arise for an archive.
+    let durable_write = matches!(
+        &response,
+        InvokeResponse::Control(catcoms_app::studio::StudioControlResponse::OverlayArchived(
+            _
+        ))
+    );
+    let delivered = async {
+        if cancellation.is_cancelled() {
+            return Err("Studio request cancelled; its local save may have completed".into());
+        }
+        let _commit = require_ui_session_generation(state, generation).await?;
+        let servers = state.servers.lock().await;
+        if servers
+            .get(&server)
+            .is_none_or(|entry| entry.instance != instance)
+        {
+            return Err("server changed during Studio operation".into());
+        }
+        // Conversion can be substantial (base64 and full conflict-preserving JSON). Keep the
+        // completion fences until it is finished, and suppress even a lock request that arrived
+        // during conversion before the actual lock task can acquire this commit guard.
+        let value = convert(response)?;
+        if view_request
+            .as_ref()
+            .is_some_and(|request| !request.is_current())
+        {
+            return Err("Studio view request was superseded; refresh".into());
+        }
+        if preview_delivery
             .as_ref()
             .is_some_and(|delivery| !delivery.is_current())
-        || cancellation.is_cancelled()
-        || state.session_lock_requested.load(Ordering::Acquire)
-        || state.ui_session_generation.load(Ordering::Acquire) != generation
-    {
-        return Err("Studio response belongs to a locked or changed UI session".into());
+            || inspection_delivery
+                .as_ref()
+                .is_some_and(|delivery| !delivery.is_current())
+            || cancellation.is_cancelled()
+            || state.session_lock_requested.load(Ordering::Acquire)
+            || state.ui_session_generation.load(Ordering::Acquire) != generation
+        {
+            return Err("Studio response belongs to a locked or changed UI session".into());
+        }
+        Ok(value)
     }
-    Ok(value)
+    .await;
+    if durable_write {
+        return delivered.map_err(|error| format!("{UNDELIVERED_ARCHIVE} ({error})"));
+    }
+    delivered
 }
+
+/// What a caller is told when an archive was written but its result could not be shown. Prefixed
+/// like every other uncertain outcome, so a renderer that already handles `outcome=uncertain;`
+/// handles this, and the exact retry it suggests is safe: the archive writer treats an identical
+/// payload as a sync-only repair.
+pub(crate) const UNDELIVERED_ARCHIVE: &str = "outcome=uncertain; the archive was written, but its \
+     result could not be delivered; read the archive to confirm it, or retry exactly";
+
+/// The weaker form, for an archive finish that failed without producing a result: the store could
+/// not read back what it wrote, or the actor dropped the reply. The second can also happen BEFORE
+/// the write, so this says "may have been", not "was". Same prefix, same safe action.
+pub(crate) const ARCHIVE_MAYBE_WRITTEN: &str = "outcome=uncertain; the archive may have been \
+     written; read the archive to confirm it, or retry exactly";
 
 fn authorize(
     state: &AppState,

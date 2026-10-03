@@ -319,7 +319,7 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
         self.begin_registry_page_preparation_with(store, provider, preparation_pool())
     }
 
-    fn begin_registry_page_preparation_with(
+    pub(crate) fn begin_registry_page_preparation_with(
         &mut self,
         store: &ServerStore,
         provider: &mut ServerRegistryPageProvider,

@@ -1,9 +1,13 @@
 import { sanitizeStatusCursor, type StatusCursors } from "./statusread.ts";
 import { MAX_LATE_PAST, type LatePast, type ReadMark } from "./unread.ts";
 import { sanitizeFileTrustPolicies, type FileTrustPolicies } from "./file-trust.ts";
+import { sanitizePendingSends, type PendingSends } from "./pending-sends.ts";
 
 export type UiContinuity = {
   version: 1;
+  pendingSends: PendingSends;
+  /** Explicitly recovered text, independent of whether its original conversation still exists. */
+  recoveredSendDrafts: PendingSends;
   drafts: Record<string, string>;
   readMarks: Record<string, ReadMark>;
   /**
@@ -43,7 +47,7 @@ export type UiContinuity = {
 
 const MAX_ENTRIES = 2_000;
 const MAX_KEY_CHARS = 256;
-const MAX_DRAFT_CHARS = 32_768;
+export const MAX_DRAFT_CHARS = 32_768;
 /** Message ids are fixed-width hex in practice; this only has to stop an unbounded record. */
 const MAX_ID_CHARS = 128;
 
@@ -98,7 +102,9 @@ export function sanitizeUiContinuity(value: unknown): UiContinuity {
   // field, a truthy string a future build wrote, a corrupted record. The permissive direction of
   // this flag starts network requests, so it is the one that has to be asked for exactly.
   const embedAutoLoad = root.embedAutoLoad === true;
-  return { version: 1, drafts, readMarks, statusCursors, fileTrustPolicies, latePast, embedAutoLoad };
+  const pendingSends = sanitizePendingSends(root.pendingSends);
+  const recoveredSendDrafts = sanitizePendingSends(root.recoveredSendDrafts);
+  return { version: 1, drafts, readMarks, statusCursors, fileTrustPolicies, latePast, embedAutoLoad, pendingSends, recoveredSendDrafts };
 }
 
 /**
@@ -152,6 +158,8 @@ export function planLegacyReadMarkMigration(
       fileTrustPolicies: current.fileTrustPolicies,
       latePast: current.latePast,
       embedAutoLoad: current.embedAutoLoad,
+      pendingSends: current.pendingSends,
+      recoveredSendDrafts: current.recoveredSendDrafts,
     });
     return { state: migrated, saveBeforeRemoval: true, removeLegacy: true };
   } catch {

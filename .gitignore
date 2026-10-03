@@ -33,3 +33,5 @@ crates/*/fuzz/artifacts
 *.pem
 *.p12
 *.pfx
+scratchpad/*
+.github/scripts/__pycache__/*

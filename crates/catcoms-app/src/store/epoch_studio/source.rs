@@ -300,8 +300,7 @@ impl ServerStore {
             sealed,
             rng,
             budget,
-            atomic_write,
-            sync_studio,
+            &mut WriteHooks::None,
         )
     }
     #[allow(clippy::too_many_arguments)]
@@ -314,8 +313,7 @@ impl ServerStore {
         sealed: &SealedOp,
         rng: &mut impl CryptoRngCore,
         budget: &mut EpochStudioBudget,
-        writer: impl FnOnce(&Path, &[u8]) -> Result<(), AppError>,
-        sync: impl FnOnce(&Path, u64) -> Result<(), AppError>,
+        hooks: &mut WriteHooks<'_>,
     ) -> Result<(Admission, EpochStudioState), AppError> {
         if sealed.blob.ciphertext.len() > MAX_INBOUND_CIPHERTEXT {
             return Err(invalid("inbound ciphertext too large"));
@@ -335,8 +333,8 @@ impl ServerStore {
             WritePurpose::Ordinary,
             rng,
             &mut budget.storage,
-            writer,
-            sync,
+            WriteStep::new(WriteTag::Source),
+            hooks,
             version,
         )?;
         Ok((admission, state))

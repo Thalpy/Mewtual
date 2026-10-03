@@ -148,6 +148,121 @@ async fn bounded<F: Future>(future: F) -> F::Output {
         .expect("actor operation stalled")
 }
 
+/// Resume a transfer step that is parked on a `ManualClock` sleep.
+///
+/// A paused retry round registers its sleep only when the spawned task is first polled, and the
+/// test has no event to observe for that, so a single `advance_ms` can land before the target is
+/// computed and be lost. Advancing repeatedly while re-polling removes the race without the test
+/// having to guess at scheduler order.
+async fn resume_paused(
+    transfers: &mut FileTransfers,
+    clock: &ManualClock,
+    step_ms: u64,
+) -> TransferStep {
+    for _ in 0..64 {
+        tokio::task::yield_now().await;
+        clock.advance_ms(step_ms);
+        if let Ok(Some(step)) =
+            tokio::time::timeout(Duration::from_millis(20), transfers.next()).await
+        {
+            return step;
+        }
+    }
+    panic!("a paused transfer round never resumed");
+}
+
+#[tokio::test]
+async fn a_transport_failure_retries_the_chunk_against_the_only_provider() {
+    // The deployed shape: one other member online, one encrypted variant, so the candidate list
+    // holds exactly one entry. Draining it used to end the read, which meant a single dropped
+    // response failed the whole download and `READ_MS` could never be spent. The first attempt
+    // here expires against its own budget; the read must survive it and succeed on a later round.
+    let Pair {
+        mut requester,
+        mut holder,
+        cid,
+        data,
+        gate,
+        mut entered,
+        clock,
+    } = pair().await;
+    let mut transfers = FileTransfers::new();
+    let (reply, result) = oneshot::channel();
+    transfers.chunk(&mut requester, cid.as_bytes().to_vec(), 0, None, reply);
+
+    // Attempt one is parked at the gate and expires against `ATTEMPT_MS`.
+    let first = bounded(entered.recv()).await.unwrap();
+    clock.advance_ms(ATTEMPT_MS);
+    let expired = bounded(transfers.next()).await.unwrap();
+    transfers.complete(&mut requester, expired);
+    drop(first);
+
+    // The read is still open: a paused retry round, not a failure.
+    assert!(
+        !transfers.is_empty(),
+        "an expired attempt must arm a retry rather than end the read"
+    );
+
+    // Let the next attempt through and drive the round to completion.
+    gate.add_permits(1);
+    let resumed = resume_paused(&mut transfers, &clock, ROUND_BACKOFF_MS).await;
+    transfers.complete(&mut requester, resumed);
+    let served = {
+        let next = transfers.next();
+        tokio::pin!(next);
+        loop {
+            tokio::select! {
+                step = &mut next => break step.unwrap(),
+                _ = holder.sync_once() => {}
+            }
+        }
+    };
+    transfers.complete(&mut requester, served);
+    let (bytes, _) = bounded(result).await.unwrap().unwrap();
+    assert_eq!(bytes, data, "the retried round must deliver the real chunk");
+}
+
+#[tokio::test]
+async fn a_provider_carries_one_bulk_request_at_a_time() {
+    // Two reads of the same chunk share the single connected provider. On a NAT-punched path
+    // that provider is the only route there is, so the second read must wait for the first
+    // rather than putting a second multi-megabyte request on the same wire.
+    let Pair {
+        mut requester,
+        holder: _,
+        cid,
+        mut entered,
+        ..
+    } = pair().await;
+    let mut transfers = FileTransfers::new();
+    let (first_reply, _first_result) = oneshot::channel();
+    transfers.chunk(
+        &mut requester,
+        cid.as_bytes().to_vec(),
+        0,
+        None,
+        first_reply,
+    );
+    let _first = bounded(entered.recv()).await.unwrap();
+
+    let (second_reply, _second_result) = oneshot::channel();
+    transfers.chunk(
+        &mut requester,
+        cid.as_bytes().to_vec(),
+        0,
+        None,
+        second_reply,
+    );
+    // The provider is busy, so the second read parks instead of reaching the transport. A
+    // request would have arrived on `entered` immediately if it had been admitted.
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), entered.recv())
+            .await
+            .is_err(),
+        "a second bulk request reached the same provider while one was already in flight"
+    );
+}
+
 #[tokio::test]
 async fn a_withholding_chunk_does_not_block_commands_or_another_local_read() {
     let Pair {
@@ -310,6 +425,7 @@ async fn cancelled_or_timed_out_requests_hold_capacity_until_transport_retiremen
         running: JoinSet::new(),
         slots: Arc::new(Semaphore::new(1)),
         process: Arc::new(Semaphore::new(1)),
+        inflight: HashSet::new(),
     };
     let (reply, result) = oneshot::channel();
     transfers.chunk(&mut requester, cid.as_bytes().to_vec(), 0, None, reply);
@@ -317,12 +433,24 @@ async fn cancelled_or_timed_out_requests_hold_capacity_until_transport_retiremen
     clock.advance_ms(ATTEMPT_MS);
     let finished = bounded(transfers.next()).await.unwrap();
     transfers.complete(&mut requester, finished);
-    assert!(bounded(result).await.unwrap().is_err());
+    // An expired attempt budget now arms a retry round rather than ending the read, so the
+    // caller is still waiting here. Capacity is the thing under test and is unchanged: the
+    // retry has to find its own permit, it cannot inherit the one the live lower request holds.
     assert!(attempt.is_cancelled());
     assert_eq!(
         transfers.slots.available_permits(),
         0,
         "lower ownership has not retired"
+    );
+    // Drive the paused round. The permit is still held by the unretired request, so the retry
+    // is refused for capacity, which is what finally fails the read.
+    let resumed = resume_paused(&mut transfers, &clock, ROUND_BACKOFF_MS).await;
+    transfers.complete(&mut requester, resumed);
+    assert!(bounded(result).await.unwrap().is_err());
+    assert_eq!(
+        transfers.slots.available_permits(),
+        0,
+        "a refused retry must not refund the live request's permit"
     );
     let (reply, result) = oneshot::channel();
     transfers.chunk(&mut requester, cid.as_bytes().to_vec(), 0, None, reply);

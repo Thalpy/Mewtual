@@ -1074,9 +1074,11 @@ table with the commit that closed it.
   from later being mistaken for migration consent. On every later dial the sync layer reparses the
   terminal peer binding, requires exactly one current roster member's signed descriptor to claim
   that transport peer, rejects removed/replaced/ambiguous claims, and charges the shared
-  process/server/peer/endpoint/prefix budget. Direct admission therefore makes one bounded
-  best-effort PEX request while the authenticated connection is still live, so an immediate
-  post-join snapshot normally contains the inviter descriptor required by reload.
+  process/server/peer/endpoint/prefix budget. Every completed admission now makes one bounded
+  best-effort PEX request over the existing connection, so the first snapshot can retain signed
+  member descriptors even after a reply/helper join. This request fails if the connection closes;
+  it cannot implicitly redial a temporary contact. Learning records is independent of local route
+  authority and does not make the reply/helper path restart-safe by itself.
 
   The route remains self-asserted at the device-to-transport boundary: Noise proves control of the
   transport key, while the member's signed descriptor is the only link from that key to a device.

@@ -179,8 +179,7 @@ impl ServerStore {
             durable_tenure,
             rng,
             budget,
-            sync_studio,
-            atomic_write,
+            &mut WriteHooks::None,
         )
     }
     // Deterministic failure seams use the same transaction/reservations as production.
@@ -194,8 +193,7 @@ impl ServerStore {
         durable_tenure: Option<u64>,
         rng: &mut impl CryptoRngCore,
         budget: &mut EpochStudioBudget,
-        sync: impl FnOnce(&Path, u64) -> Result<(), AppError>,
-        writer: impl FnOnce(&Path, &[u8]) -> Result<(), AppError>,
+        hooks: &mut WriteHooks<'_>,
     ) -> Result<ReceiptHeadSelection, AppError> {
         let source =
             self.with_studio_checkpoint_source(server, group, target, device, budget, |state| {
@@ -248,10 +246,13 @@ impl ServerStore {
                 .reserve_sync(&storage_scope, record)
                 .map_err(invalid)?;
             let scope = scope_bytes(server, &document)?;
-            sync(
-                &self.studio_epoch_path(&scope),
-                record.footprint.total().map_err(invalid)?,
-            )?;
+            // I-4: unchanged-file flush still invalidates a captured inventory.
+            let path = self.studio_epoch_path(&scope);
+            let bytes = record.footprint.total().map_err(invalid)?;
+            let mutation = self.epoch_mutation_guard();
+            hooks.before_sync(WriteTag::Source, &path, bytes)?;
+            sync_studio(&mutation, &path, bytes)?;
+            hooks.after_sync(WriteTag::Source, &path)?;
             reservation.commit();
             self.prepare_epoch_owner_with_writer(
                 server,
@@ -260,7 +261,7 @@ impl ServerStore {
                 durable_tenure.expect("proof tenure"),
                 rng,
                 &mut budget.storage,
-                writer,
+                hooks,
             )?;
         }
         Ok(ReceiptHeadSelection { receipt, prove })

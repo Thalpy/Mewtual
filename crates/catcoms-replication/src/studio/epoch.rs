@@ -22,6 +22,7 @@ mod adoption;
 pub mod catchup;
 mod handoff;
 pub(in crate::studio) use handoff::PreparedOverlayChanges;
+pub(in crate::studio) use handoff::{overlay_signed_hash_in, VaultShape};
 mod owner;
 mod settlement;
 pub use adoption::StudioAdoptionPlan;
@@ -250,22 +251,7 @@ impl StudioEpoch {
         Ok(())
     }
     fn held(&self, author: DeviceId, domain: &DomainOp) -> Result<Option<&SignedOp>, ReplError> {
-        let id = domain.id(&author);
-        for op in self
-            .doc
-            .signed_log()
-            .iter()
-            .filter(|op| op.author_device == author)
-        {
-            let body = op.parsed_domain_op()?.ok_or(ReplError::Malformed)?;
-            if body.id(&author) == id {
-                if body != *domain {
-                    return Err(ReplError::IntentConflict);
-                }
-                return Ok(Some(op));
-            }
-        }
-        Ok(None)
+        handoff::held_in(self.doc.signed_log(), author, domain)
     }
     /// Read-only exact saved-operation evidence, not marker/current-value equality. This grants
     /// no edit or send authority; a caller still needs current membership and the open gate.

@@ -166,10 +166,8 @@ impl ServerStore {
             rng,
             budget,
             intents,
-            atomic_write,
-            super::epoch_intents::sync_intent,
-            atomic_write,
-            sync_registry,
+            WriteStep::new(WriteTag::Intents),
+            &mut WriteHooks::None,
         )
     }
 
@@ -185,10 +183,14 @@ impl ServerStore {
         rng: &mut impl CryptoRngCore,
         budget: &mut EpochStorageBudget,
         intents: &mut EpochIntentBudget,
-        intent_writer: impl FnOnce(&Path, &[u8]) -> Result<(), AppError>,
-        intent_sync: impl FnOnce(&Path, u64) -> Result<(), AppError>,
-        epoch_writer: impl FnOnce(&Path, &[u8]) -> Result<(), AppError>,
-        epoch_sync: impl FnOnce(&Path, u64) -> Result<(), AppError>,
+        // The intent half separately, because a replay assessment appends no intent while still
+        // writing its epoch: the two halves have different replacement policies even though
+        // they share one transaction's decisions.
+        intent_step: WriteStep,
+        // One set of decisions for the whole transaction. The four closures this replaces were
+        // an intent writer, an intent sync, an epoch writer and an epoch sync; the hooks are
+        // already tagged, so `Intents` and `Epoch` distinguish them without separate seams.
+        hooks: &mut WriteHooks<'_>,
     ) -> Result<(SealedOp, EpochRegistryState), AppError> {
         let document = registry_document(&group.group_id(), bucket).map_err(invalid)?;
         // Bound and authenticate the caller before rebuilding any saved graph or copying its
@@ -234,8 +236,8 @@ impl ServerStore {
             rng,
             budget,
             intents,
-            intent_writer,
-            intent_sync,
+            intent_step,
+            hooks,
         )?;
         // The exclusive store borrow spans both records. There is no accepted edit or outbound
         // result between them. An uncertain second save never rolls back the already-safe intent.
@@ -255,8 +257,8 @@ impl ServerStore {
                 unit.edit_or_reseal(device, group, rng, &operation)
                     .map_err(invalid)
             },
-            epoch_writer,
-            epoch_sync,
+            WriteStep::new(WriteTag::Epoch),
+            hooks,
         )
     }
 
@@ -315,8 +317,8 @@ impl ServerStore {
             rng,
             budget,
             |unit, _| unit.ingest(sealed, group, device).map_err(invalid),
-            atomic_write,
-            sync_registry,
+            WriteStep::new(WriteTag::Epoch),
+            &mut WriteHooks::None,
         )
     }
 
@@ -359,8 +361,8 @@ impl ServerStore {
             rng,
             budget,
             |unit, _| unit.seal(receipt, group, tenure_start).map_err(invalid),
-            atomic_write,
-            sync_registry,
+            WriteStep::new(WriteTag::Epoch),
+            &mut WriteHooks::None,
         )
     }
 
@@ -379,8 +381,11 @@ impl ServerStore {
         rng: &mut R,
         budget: &mut EpochStorageBudget,
         apply: impl FnOnce(&mut RegistryEpoch, &mut R) -> Result<T, AppError>,
-        writer: impl FnOnce(&Path, &[u8]) -> Result<(), AppError>,
-        sync: impl FnOnce(&Path, u64) -> Result<(), AppError>,
+        // Which step of the caller's transaction this record is, and whether it may replace at
+        // all. Plain values, not closures: naming or forbidding a write is not the authority to
+        // perform one.
+        step: WriteStep,
+        hooks: &mut WriteHooks<'_>,
     ) -> Result<(T, EpochRegistryState), AppError> {
         let document = registry_document(&group.group_id(), bucket).map_err(invalid)?;
         let scope = scope_bytes(server, &document)?;
@@ -445,9 +450,17 @@ impl ServerStore {
             let reservation = budget
                 .reserve_sync(&storage_scope, record)
                 .map_err(invalid)?;
-            sync(&path, record.footprint.total().map_err(invalid)?)?;
+            // I-4: unchanged Registry still flushes, so it still rotates.
+            let bytes = record.footprint.total().map_err(invalid)?;
+            let mutation = self.epoch_mutation_guard();
+            hooks.before_sync(step.tag(), &path, bytes)?;
+            sync_registry(&mutation, &path, bytes)?;
+            hooks.after_sync(step.tag(), &path)?;
             reservation.commit();
         } else {
+            // A flush-only step reaching a replacement is a routing fault, refused before the
+            // reservation so it costs nothing and leaves the held record alone.
+            step.permit_replacement()?;
             let record = storage_record(
                 server,
                 &document,
@@ -472,7 +485,12 @@ impl ServerStore {
                     return Err(error.into());
                 }
             };
-            writer(&path, &frame(&sealed))?;
+            // I-4: rotate before the write, never after it succeeds.
+            let framed = frame(&sealed);
+            let mutation = self.epoch_mutation_guard();
+            let framed = hooks.before(step.tag(), &path, &framed)?;
+            mutation.write(&path, &framed)?;
+            hooks.after_write(step.tag(), &path)?;
             reservation.commit();
         }
         Ok((outcome, EpochRegistryState { unit }))
@@ -619,7 +637,11 @@ fn storage_record(
     })
 }
 
-fn sync_registry(path: &Path, expected_bytes: u64) -> Result<(), AppError> {
+pub(super) fn sync_registry(
+    m: &EpochMutation<'_>,
+    path: &Path,
+    expected_bytes: u64,
+) -> Result<(), AppError> {
     let metadata = fs::symlink_metadata(path).map_err(|e| AppError::Io(e.to_string()))?;
     if !regular_file(&metadata) || metadata.len() != expected_bytes {
         return Err(invalid("retry file changed"));
@@ -633,7 +655,7 @@ fn sync_registry(path: &Path, expected_bytes: u64) -> Result<(), AppError> {
         return Err(invalid("opened retry file changed"));
     }
     file.sync_all().map_err(|e| AppError::Io(e.to_string()))?;
-    sync_directory(path.parent().ok_or_else(|| invalid("missing parent"))?)
+    m.sync_parent_io(path.parent().ok_or_else(|| invalid("missing parent"))?)
         .map_err(|e| AppError::Io(e.to_string()))
 }
 

@@ -11,6 +11,32 @@ impl CatchupRuntime {
         self.registry_provider = Some(provider);
         self.registry_retained_until = until;
     }
+    /// How long a retained Registry source still has, or `Some(0)` once it is due.
+    ///
+    /// **One definition, because there are three consumers.** `expire_registry_source` drops the
+    /// provider, `pending` has to report the visit that calls it as work, and `wake_in` has to
+    /// publish the deadline so a quiet actor schedules that visit at all. Deriving all three from
+    /// this is the point: the bound below claimed four quiet servers could not strand the pool,
+    /// and they could, because the expiry existed and the wake did not. That is the same shape as
+    /// every serious Flow H finding — two representations of one fact, only one of them present.
+    pub(super) fn registry_retention(&self, now: u64) -> Option<u64> {
+        self.registry_provider
+            .as_ref()
+            .is_some_and(|p| p.has_prepared_source())
+            .then(|| self.registry_retained_until.saturating_sub(now))
+    }
+
+    /// A visit is owed: the retained source is past its deadline and only a pass can drop it.
+    pub(in crate::studio::receiver) fn registry_expiry_due(&self, now: u64) -> bool {
+        self.registry_retention(now) == Some(0)
+    }
+
+    /// Milliseconds until that visit is owed, for the actor's injected-clock wake.
+    pub(in crate::studio::receiver) fn registry_wake_in(&self, now: u64) -> Option<u64> {
+        self.registry_retention(now)
+            .filter(|remaining| *remaining > 0)
+    }
+
     /// A retained read-only Registry graph still owns a process preparation permit. Bound
     /// its idle lifetime so four quiet servers cannot strand every other server's Studio
     /// receive. Do not extend this deadline per query or refund any running worker's slot.
@@ -80,6 +106,7 @@ impl CatchupRuntime {
         id: u64,
         bucket: u8,
     ) -> Result<bool, AppError> {
+        let pool = self.preparation_pool();
         if self
             .registry_provider
             .as_ref()
@@ -107,10 +134,7 @@ impl CatchupRuntime {
         }
         // A busy global pool is not corrupt storage. A future idle turn retries; any installed
         // Registry graphs release their slots on their fixed local-clock deadlines.
-        let Ok(permit) = crate::registry_catchup::preparation_pool()
-            .clone()
-            .try_acquire_owned()
-        else {
+        let Ok(permit) = pool.try_acquire_owned() else {
             return Ok(false);
         };
         if let Some(job) =
@@ -129,6 +153,7 @@ impl CatchupRuntime {
         id: u64,
         mut work: ServiceWork,
     ) {
+        let pool = self.preparation_pool();
         let CheckpointTarget::Registry(bucket) = work.interest.target() else {
             return;
         };
@@ -167,7 +192,7 @@ impl CatchupRuntime {
             if work.captured {
                 return;
             }
-            match server.begin_registry_page_preparation(store, provider) {
+            match server.begin_registry_page_preparation_with(store, provider, &pool) {
                 Ok(Some(job)) => {
                     work.captured = true;
                     self.registry_preparation = Some((job, Some(work.generation.clone())));

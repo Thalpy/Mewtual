@@ -181,8 +181,11 @@ impl ServerStore {
             rng,
             budget,
             |_, _| Ok(()),
-            |_, _| Err(invalid("rotation source preparation cannot rewrite")),
-            sync_registry,
+            WriteStep::flush_only(
+                WriteTag::Source,
+                "rotation source preparation cannot rewrite",
+            ),
+            &mut WriteHooks::None,
         )?;
         let checked = (|| {
             let journal = self.load_epoch_owner_receipts(server, &document)?;

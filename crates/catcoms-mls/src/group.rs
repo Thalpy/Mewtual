@@ -152,6 +152,29 @@ impl ServerGroup {
         self.group.members().map(|m| m.index.u32()).min()
     }
 
+    /// The designated committer's leaf index and a digest over its leaf **identity**:
+    /// `blake3(index, signature_key, credential bytes)`.
+    ///
+    /// This exists so an observer can tell an ordinary same-owner commit from a remove-and-re-add of
+    /// the committer. Comparing `DeviceId` and epoch cannot: a device removed and re-added in one
+    /// commit keeps its `DeviceId`, so a witness preserves the old tenure start while the rejoining
+    /// device computes a new one, and the two disagree about who may issue a receipt.
+    ///
+    /// The HPKE `encryption_key` is **deliberately excluded**. An ordinary self-update rotates that
+    /// key while keeping the credential, and a self-update is not a discontinuity: including it would
+    /// make every key rotation look like a new tenure and destroy the knowledge this value exists to
+    /// preserve. The credential is the right discriminator because a joiner's KeyPackage credential is
+    /// bound to `(this group, invite_nonce)`, so a genuine rejoin always presents a different one
+    /// while an update never changes it.
+    pub fn designated_committer_leaf(&self) -> Option<(u32, [u8; 32])> {
+        let member = self.group.members().min_by_key(|m| m.index.u32())?;
+        let mut hash = blake3::Hasher::new_derive_key("catcoms/mls-committer-leaf/v1");
+        hash.update(&member.index.u32().to_be_bytes());
+        hash.update(&member.signature_key);
+        hash.update(member.credential.serialized_content());
+        Some((member.index.u32(), *hash.finalize().as_bytes()))
+    }
+
     /// The leaf index of a current member, by device id.
     pub fn member_leaf_index(&self, device_id: &DeviceId) -> Option<u32> {
         self.group
@@ -237,6 +260,7 @@ impl ServerGroup {
             expires_at_ms,
             bootstrap,
             rendezvous,
+            policy: None,
             signature,
         })
     }
@@ -460,6 +484,21 @@ impl ServerGroup {
             .group
             .process_message(device.provider(), protocol)
             .map_err(proto)?;
+        // M-1's other half: refuse an EXTERNAL commit outright.
+        //
+        // An external (resync) commit can remove a member and seat its sender at the vacated leaf
+        // through the commit's own path leaf, with **no Add proposal at all**. Both the
+        // credential-binding loop and M-1 below walk `add_proposals()`, so neither would see it: an
+        // external commit is a way to produce exactly the remove-and-re-add shape M-1 exists to
+        // forbid, while stepping around the check. MLS also exempts external senders from the
+        // wire-format rule, so the ciphertext-only policy does not block it either.
+        //
+        // Refusing is safe because this product has no external-join flow: every member arrives by
+        // Welcome after an Add. If one is ever introduced, the joiner's path leaf has to be bound and
+        // checked the way an Add's credential already is, and M-1 restated over it.
+        if matches!(processed.sender(), Sender::NewMemberCommit) {
+            return Err(InviteError::CredentialMismatch.into());
+        }
         match processed.into_content() {
             ProcessedMessageContent::ApplicationMessage(app) => {
                 Ok(Incoming::Application(app.into_bytes()))
@@ -480,6 +519,65 @@ impl ServerGroup {
                         || DeviceId::from_public_key_bytes(leaf_pk) != membership.device_id
                     {
                         return Err(InviteError::CredentialMismatch.into());
+                    }
+                }
+                // M-1. A single commit must not both remove the PRE-COMMIT designated committer and
+                // add the same `DeviceId`.
+                //
+                // This is the one commit shape that leaves members provably unable to agree. A
+                // remove-and-re-add in one commit keeps the device's `DeviceId`, so a witness sees
+                // an ordinary same-owner step and preserves the old tenure start, while the rejoining
+                // device knows its membership restarted and computes a new one. They then disagree
+                // about who may issue a receipt, and the disagreement does not self-correct.
+                //
+                // Enforced on the RECEIVE side, on every staged commit, not in the committer's invite
+                // ledger. The ledger is local to the admitting party: every other member can check
+                // only that an Add's credential names this group and matches its leaf key, so a
+                // malicious, modified or merely buggy committer could build this shape and honest
+                // witnesses would merge it. Refusing before the merge means no member ever reaches
+                // the ambiguous position.
+                //
+                // Stated over `DeviceId` rather than leaf index, so it does not depend on whether
+                // OpenMLS happens to recycle the same leaf. What it does NOT forbid: a device
+                // rotating to a new identity (remove A, add A' with a different `DeviceId`), or a
+                // genuine rejoin in a LATER commit. Only the ambiguous shape is excluded.
+                //
+                // **Reachable, and this rule is the ONLY thing that stops it.** This crate's own
+                // builders each commit a single inline proposal, which was once mistaken for proof
+                // the shape could not arrive. It can: an MLS commit carries its proposals by value,
+                // so any existing member can send one commit with an inline Remove of the designated
+                // committer and an inline Add of the same `DeviceId`. That sender is not the removed
+                // member, so it is not the self-removal case, and it is an ordinary member commit,
+                // so the external-commit refusal above does not apply either.
+                //
+                // `m1_tests::a_witness_refuses_one_commit_that_removes_the_committer_and_re_adds_its_device_id`
+                // builds exactly that commit with OpenMLS's own commit builder and feeds it to a
+                // witness. With this rule deleted the witness MERGES it (`CommitApplied`): OpenMLS
+                // performs no validation that rejects a re-add of a just-removed signature key, and
+                // the credential-binding loop above passes because the Add's key package is
+                // correctly bound. Nothing upstream makes this rule redundant.
+                if let Some(committer) = self.designated_committer() {
+                    let removes_committer = staged.remove_proposals().any(|remove| {
+                        self.group
+                            .members()
+                            .find(|m| m.index == remove.remove_proposal().removed())
+                            .is_some_and(|m| {
+                                DeviceId::from_public_key_bytes(&m.signature_key) == committer
+                            })
+                    });
+                    if removes_committer {
+                        let re_adds_committer = staged.add_proposals().any(|add| {
+                            let leaf_pk = add
+                                .add_proposal()
+                                .key_package()
+                                .leaf_node()
+                                .signature_key()
+                                .as_slice();
+                            DeviceId::from_public_key_bytes(leaf_pk) == committer
+                        });
+                        if re_adds_committer {
+                            return Err(InviteError::CommitterReAdded.into());
+                        }
                     }
                 }
                 // Inspect the staged commit for Remove proposals *before* the merge
@@ -534,6 +632,11 @@ impl ServerGroup {
     pub fn contains_device(&self, id: &DeviceId) -> bool {
         self.member_device_ids().contains(id)
     }
+
+    /// Whether this local MLS instance still belongs to the group after applied removals.
+    pub fn is_active(&self) -> bool {
+        self.group.is_active()
+    }
 }
 
 impl fmt::Debug for ServerGroup {
@@ -542,5 +645,120 @@ impl fmt::Debug for ServerGroup {
             .field("epoch", &self.epoch())
             .field("members", &self.member_count())
             .finish()
+    }
+}
+
+#[cfg(test)]
+mod m1_tests {
+    use super::*;
+
+    /// The leaf identity excludes the HPKE encryption key, so a key rotation is not a discontinuity.
+    ///
+    /// Without that exclusion every self-update would look like a new tenure and destroy the very
+    /// knowledge the value exists to preserve. Asserted on the digest's inputs rather than by
+    /// performing an update, because no self-update path is exposed here: the digest must be stable
+    /// across two groups whose committer has the same index, signature key and credential.
+    #[test]
+    fn the_committer_leaf_digest_is_stable_for_one_identity() {
+        let alice = MlsDevice::generate().unwrap();
+        let one = ServerGroup::create(&alice).unwrap();
+        let two = ServerGroup::create(&alice).unwrap();
+        assert_eq!(
+            one.designated_committer_leaf(),
+            two.designated_committer_leaf(),
+            "the same identity at the same index must hash the same, whatever else differs"
+        );
+
+        let bob = MlsDevice::generate().unwrap();
+        let other = ServerGroup::create(&bob).unwrap();
+        assert_ne!(
+            one.designated_committer_leaf(),
+            other.designated_committer_leaf(),
+            "a different identity must not"
+        );
+    }
+
+    /// M-1 on the RECEIVE path, against the shape a hostile or modified member can actually send.
+    ///
+    /// This crate's own builders each commit one inline proposal, so none of them can produce a
+    /// remove-and-re-add, and that was once mistaken for evidence the rule was unreachable. An MLS
+    /// commit carries its proposals by value, though, so any existing member can send ONE commit with
+    /// an inline Remove of the designated committer and an inline Add of the same `DeviceId`. Built
+    /// here with OpenMLS's own commit builder, by Bob, who is neither the committer nor the member
+    /// being removed - so it is not the self-removal case - and it is an ordinary member commit, so
+    /// the external-commit refusal does not apply. Carol is the witness.
+    ///
+    /// Every Add uses an invite-bound key package, so the credential-binding loop that runs before
+    /// M-1 passes. The refusal can therefore only be M-1's, and Carol's group must be left exactly
+    /// where it was.
+    #[test]
+    fn a_witness_refuses_one_commit_that_removes_the_committer_and_re_adds_its_device_id() {
+        let alice = MlsDevice::generate().unwrap();
+        let bob = MlsDevice::generate().unwrap();
+        let carol = MlsDevice::generate().unwrap();
+        let mut alice_group = ServerGroup::create(&alice).unwrap();
+        let group_id = alice_group.group_id();
+
+        let bob_added = alice_group
+            .add_member(
+                &alice,
+                bob.key_package_for_invite(&group_id, [1; 16]).unwrap(),
+            )
+            .unwrap();
+        let mut bob_group = ServerGroup::join(&bob, &bob_added.welcome).unwrap();
+        let carol_added = alice_group
+            .add_member(
+                &alice,
+                carol.key_package_for_invite(&group_id, [2; 16]).unwrap(),
+            )
+            .unwrap();
+        bob_group
+            .process_incoming(&bob, &carol_added.commit)
+            .expect("Bob must follow Carol's admission");
+        let mut carol_group = ServerGroup::join(&carol, &carol_added.welcome).unwrap();
+
+        assert_eq!(carol_group.designated_committer(), Some(alice.device_id()));
+        let alice_leaf = carol_group.member_leaf_index(&alice.device_id()).unwrap();
+        let epoch = carol_group.epoch();
+        let members = carol_group.member_device_ids();
+
+        // Bob's hostile commit: remove Alice and re-add Alice's own identity, inline, in one commit.
+        let returning = alice.key_package_for_invite(&group_id, [3; 16]).unwrap();
+        let bundle = bob_group
+            .group
+            .commit_builder()
+            .propose_removals([LeafNodeIndex::new(alice_leaf)])
+            .propose_adds([returning])
+            .load_psks(bob.provider().storage())
+            .unwrap()
+            .build(
+                bob.provider().rand(),
+                bob.provider().crypto(),
+                bob.signer(),
+                |_| true,
+            )
+            .expect("OpenMLS must let Bob build this commit, or the test is not reaching a witness")
+            .stage_commit(bob.provider())
+            .unwrap();
+        let commit = bundle.into_commit().tls_serialize_detached().unwrap();
+
+        // M-1's own error, distinct from the credential-binding refusal that runs just before it, so
+        // this assertion alone shows which rule refused.
+        let refused = carol_group.process_incoming(&carol, &commit);
+        assert!(
+            matches!(
+                refused,
+                Err(MlsError::Invite(InviteError::CommitterReAdded))
+            ),
+            "a witness must refuse a commit that removes the committer and re-adds its DeviceId; \
+             got {refused:?}"
+        );
+        assert_eq!(carol_group.epoch(), epoch, "the witness must not advance");
+        assert_eq!(
+            carol_group.member_device_ids(),
+            members,
+            "the witness's roster must be unchanged"
+        );
+        assert_eq!(carol_group.designated_committer(), Some(alice.device_id()));
     }
 }

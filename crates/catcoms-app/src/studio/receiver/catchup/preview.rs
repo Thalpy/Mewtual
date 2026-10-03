@@ -127,6 +127,16 @@ pub(in crate::studio::receiver) struct PreviewRuntime {
     notices: VecDeque<StudioTarget>,
 }
 impl PreviewRuntime {
+    #[cfg(test)]
+    pub(super) fn set_preparation_pools_for_test(
+        &mut self,
+        shared: Arc<tokio::sync::Semaphore>,
+        preview: Arc<tokio::sync::Semaphore>,
+    ) {
+        assert!(self.active.is_none() && self.job.is_none() && self.ready.is_empty());
+        self.pools = Some((shared, preview));
+    }
+
     pub(super) fn generation(&self) -> Arc<()> {
         self.generation.clone()
     }
@@ -403,6 +413,26 @@ impl PreviewRuntime {
 
 #[cfg(test)]
 impl StudioReceiver {
+    /// One test resource domain for every actor sharing one ManualClock. Production continues
+    /// using the process-wide pools; this must happen before the first Studio custody visit.
+    pub(crate) fn preparation_pools_for_test(
+        &mut self,
+        shared: Arc<tokio::sync::Semaphore>,
+        preview: Arc<tokio::sync::Semaphore>,
+    ) {
+        assert!(self.watches.is_empty() && self.catchup.lifecycle.is_none());
+        self.catchup.overlay_pool = Some(shared.clone());
+        self.catchup
+            .preview
+            .set_preparation_pools_for_test(shared, preview);
+    }
+
+    /// Used only by the opt-in process-global contention regression, which runs alone.
+    pub(crate) fn default_preparation_pools_for_test(
+    ) -> (Arc<tokio::sync::Semaphore>, Arc<tokio::sync::Semaphore>) {
+        PreviewRuntime::default().preparation_pools()
+    }
+
     /// Observe the actual actor cache and probe its own capacity allocator. The temporary
     /// reservations are released before returning; no source, queue, selection or clock changes.
     /// An optional barrier pauses the next real parser only after it owns both worker permits.
@@ -504,5 +534,53 @@ impl PreviewHarness {
         target: StudioTarget,
     ) -> Option<StudioPreview> {
         self.0.read(server, store, id, target)
+    }
+}
+
+#[cfg(test)]
+mod pool_tests {
+    use super::*;
+
+    #[test]
+    fn actor_preparation_classes_share_capacity_and_cancelled_custody() {
+        let global = crate::registry_catchup::preparation_pool();
+        let default = StudioReceiver::default();
+        assert!(Arc::ptr_eq(&default.catchup.preparation_pool(), global));
+        assert!(Arc::ptr_eq(
+            &default.catchup.preview.preparation_pools().0,
+            global
+        ));
+
+        let shared = Arc::new(tokio::sync::Semaphore::new(4));
+        let preview = Arc::new(tokio::sync::Semaphore::new(3));
+        let mut owner = StudioReceiver::default();
+        let mut client = StudioReceiver::default();
+        for actor in [&mut owner, &mut client] {
+            actor.preparation_pools_for_test(shared.clone(), preview.clone());
+            assert!(Arc::ptr_eq(&actor.catchup.preparation_pool(), &shared));
+            assert!(Arc::ptr_eq(&actor.catchup.overlay_pool(), &shared));
+            let (parser_shared, parser_preview) = actor.catchup.preview.preparation_pools();
+            assert!(Arc::ptr_eq(&parser_shared, &shared));
+            assert!(Arc::ptr_eq(&parser_preview, &preview));
+        }
+        let owned = owner.catchup.reserve_overlay().unwrap();
+        let others = shared.clone().try_acquire_many_owned(3).unwrap();
+        assert!(client.catchup.reserve_overlay().is_none());
+        assert!(client
+            .catchup
+            .preview
+            .preparation_pools()
+            .0
+            .try_acquire_owned()
+            .is_err());
+        owner.catchup.note_cancelled_overlay_for_test();
+        assert_eq!(shared.available_permits(), 0);
+        assert!(client.catchup.reserve_overlay().is_none());
+        drop(owned);
+        let retried = client.catchup.reserve_overlay().unwrap();
+        assert_eq!(shared.available_permits(), 0);
+        drop((retried, others));
+        assert_eq!(shared.available_permits(), 4);
+        assert_eq!(preview.available_permits(), 3);
     }
 }

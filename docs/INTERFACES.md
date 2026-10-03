@@ -4,6 +4,27 @@ A reference for the **seams** (dependency-injection hooks) and the key public AP
 Signatures are abbreviated; see the source for exact generics/lifetimes. This is the
 contract a new contributor (or agent) builds against.
 
+The native `send_message` command returns `{ accepted: true, persistence }` after actor acceptance.
+`persistence.status` is `durable`, `pending` (with `snapshot_failed`, `store_unavailable`, or
+`write_failed` reason), or `superseded` for a replaced server incarnation. Only `durable` confirms
+a covering local snapshot; none asserts remote custody or delivery. Pending writes keep their
+dirty ticket for the existing discovery worker to retry. The frontend must not resubmit an
+accepted message because persistence or a later view refresh failed. Successful warm unlock
+wakes that same coalescing worker; duplicate already-open unlocks do not create a new actor.
+
+`AppEvent::SnapshotNeeded` is a native persistence request with no renderer payload. An independent
+actor tracker compares the MLS epoch and current open legacy-document identities/operation counts
+at owner-turn boundaries, including after a partially applied sync tick is cancelled by a command.
+It costs O(open documents), reads no message bodies, and replaces the tracked map so removed ids
+are released. Reads and snapshot commands alone do not produce another invalidation.
+
+The native event consumer marks the exact server incarnation dirty before the UI lock gate and
+wakes one separate snapshot worker; it never awaits the actor for a snapshot itself. The worker
+requests an initial save, then coalesces subsequent wakes in fixed 250-ms windows through the same
+ticket/write locks. Discovery also retries failed writes. Neither a marker nor the batching window
+confirms a completed save: an abrupt stop before the write remains nondurable. This supplements
+existing persistence triggers and leaves Studio's separate persistence barriers intact.
+
 ---
 
 ## 1. The seams (the load-bearing hooks)
@@ -1322,6 +1343,7 @@ pub struct ChannelSync<T: MeshTransport, R: CryptoRngCore>;
   mint_invite(nonce:[u8;16], expires_at_ms, bootstrap) -> Result<InviteToken>;
   mint_invite_with_rendezvous(nonce, expires_at_ms, bootstrap, rendezvous:Vec<String>) -> Result<InviteToken>;  // 6e-3d-9
   async open_channel(DocType, doc_id) -> Result<()>;       // create doc + subscribe its ns_secret_L-keyed topic
+  document_versions() -> impl Iterator<Item = ((DocType, u128), u64)>; // raw open-document op counts for snapshot invalidation
   async post(DocType, doc_id, FnOnce(&mut AutoCommit)->Result<(),AutomergeError>) -> Result<()>;  // edit, then gossip; Ok once the EDIT applied
   async run_once() -> Result<bool>;                        // drain outbox + recovery + sub-resync; then handle ONE event
   async request_catchup(peer:PeerId, DocType, doc_id) -> Result<usize>;        // incremental where possible; see KIND_CATCHUP_SINCE
@@ -1332,6 +1354,8 @@ pub struct ChannelSync<T: MeshTransport, R: CryptoRngCore>;
   // 6e-3d-7 member PEX: members supply each other dialable, self-signed peer records.
   publish_self_record(addresses:Vec<String>, seq:u64) -> Result<()>;  ingest_peer_record(PeerDescriptor) -> bool;
   async request_pex(peer:PeerId) -> Result<usize>;  known_peer_records() -> Vec<PeerDescriptor>;  peer_record(&DeviceId) -> Option<&PeerDescriptor>;
+  async request_pex_connected(peer:PeerId) -> Result<usize>; // same verification; never implicitly redial a temporary admission contact
+  schedule_reconciliation() -> usize; // paced, bounded sweep of open docs; preserves pending cursors/cooldowns
   // Cross-session redial: newest roster-checked cached records are policy-ranked. Equal address
   // epochs retry with bounded monotonic exponential backoff+jitter; a newer signed seq or a live
   // connect/disconnect lifecycle resets the delay. Old public IPs are not unioned indefinitely.
@@ -2024,12 +2048,26 @@ actor/network path invokes these adapters yet.
 
 The design passed user review at `d576af2` on 2026-09-14. The bounded implementation adds
 `Server::prepare_studio_closing_overlay` and `Server::save_studio_closing_overlay` as explicit
-Rust adapters under caller-owned exclusive Server/store custody. They obtain tenure from
-`ChannelSync::observed_owner_tenure_start`; request data cannot supply tenure. A checked
-`StudioClosingOverlayBasis` derives from the actual Closing source and its settlement plan.
-Save takes its fingerprint and a canonical domain operation; timestamps come from the runtime
-clock and are preserved on exact retries. The result is now `StudioOverlaySave::Local(StudioLocalDraft)`
-or `StudioOverlaySave::HandedOff(StudioHandoffOutcome)` for a completed exact retry. A handoff is
+Rust adapters under caller-owned exclusive Server/store custody. Tenure comes only from the
+device's own observation (`Server::observed_owner_tenure`, a `StudioOwnerTenure` of `Known`,
+`Imported` or `Unknown`); request data cannot supply it. Preparation requires `Known` and refuses
+the other two with different messages. Save only *reads* it, because exact retries and terminal
+acknowledgements must succeed without it (V8); its authoring stages, S1b and the commit, require
+it at their own points. A checked `StudioClosingOverlayBasis` derives from the actual Closing
+source and its settlement plan.
+
+Preparation returns a `StudioOverlaySaveTicket { basis, branch }`. The branch is the
+branch-generation identity the Save must name: the live branch if there is one, otherwise the one
+the next admission would open, derived by `StudioOverlayState::request_branch_id` and never by the
+caller. Save takes the basis fingerprint, that branch and a canonical domain operation. A retry
+must resend its original request's branch: after a transfer or disposal, a fresh ticket names the
+*next* branch. Timestamps come from the runtime clock and are preserved on exact retries.
+
+The result is `StudioOverlaySave::Local(StudioLocalDraft)`;
+`StudioOverlaySave::HandedOff(StudioHandoffOutcome)` for a retry of a transferred operation; or
+`StudioOverlaySave::Disposed(StudioOverlayDisposal)` for a retry of an operation in the most
+recently disposed branch. The last two are terminal acknowledgements that accept nothing and open
+no branch. A request naming a branch no admission would open is refused as stale. A handoff is
 shared pending history, not receipt finality. No actor/native overlay command or automatic
 promotion/disposition is enabled by these internal adapters.
 
@@ -2467,6 +2505,15 @@ partial, malformed or trailing data rejects. New snapshots always encode the tai
 Unknown. Older binaries reject the new tail; backward reading of old snapshots is supported,
 not downgrade compatibility. Existing peer-address extraction stops before this appended data.
 
+Current snapshots follow the tenure frame with the authenticated group-policy pin and durable-chat
+state, then an optional member-finalization correlation frame. Its version-1 body contains a u32
+count and at most 512 device/transport pairs (two length-prefixed 32-byte identities each; 36,869
+inner bytes maximum). Canonical device order, unique peers, exact lengths and full consumption are
+required. Absence loads an empty correlation map; malformed/unknown data rejects. Current P2P
+permission, membership and descriptor conflicts are checked on restore. These are admitted retry
+correlations only, with no live proof, addresses or dial authority. An older reader rejects the
+new trailing frame, even with zero entries; reopening after a new write requires the new reader.
+
 Welcome joins start Unknown, even if the new device fills the lowest leaf and becomes owner.
 Legacy upgrades and such owners may remain Unknown indefinitely across same-owner commits.
 Do not recover availability by assigning the current epoch or copying a receipt's own tenure.
@@ -2808,9 +2855,11 @@ clone/decode/verification, containing malicious replicated-index work.
 `ReconnectRoute { peer_id, address }` rows. A row is valid only under `AuthorizedPeer` and must name
 that exact peer. Version 4 appends an optional `pending_recovery_peer` plus the signed code's
 absolute expiry. Versions 1 and 2 decode with an empty route list and `LegacyPending`; version 3
-decodes with no pending recovery. New founders
-and helper/reply/switchboard admissions persist `Disabled`, while a successful direct admission
-persists only its named inviter as `AuthorizedPeer`. Each address is capped at 512 bytes and the
+decodes with no pending recovery. Without authenticated P2P permission, helper/reply/switchboard
+admissions retain `Disabled`, while a successful direct admission permits only its named inviter
+as `AuthorizedPeer`. Version 5 adds `MemberMesh` for authenticated P2P groups; version 6 retains up
+to eight current members with two routes each inside an exact 8-KiB encoded route budget. Each
+address is capped at 512 bytes and the
 entire record remains vault-sealed and atomically replaced. Every `ServerStore` record uses the
 same durability primitive: write and sync a sibling staging file, rename it over the destination,
 then sync the parent directory on Unix. Abrupt termination before rename therefore retains the
@@ -2833,13 +2882,24 @@ them into `ChannelSync`, which reparses the canonical terminal peer binding, per
 TCP/QUIC (including private/loopback) but rejects DNS, relay, WebSocket, link-local, multicast,
 unspecified and IPv4 0/8 or 240/4 hosts, requires exactly one current roster record to claim that
 transport peer, skips live/self peers, and spends the same process-wide endpoint scheduler as other
-untrusted recovery dials. Direct admission makes one bounded best-effort PEX request before the
-first post-join snapshot so the inviter's signed descriptor normally accompanies the sealed socket.
+untrusted recovery dials. Every completed admission makes one bounded connected-only PEX request
+before the first post-join snapshot. Direct admission can thereby retain the descriptor needed
+by its sealed route; reply/helper admission learns records without acquiring route authority.
 On the discovery cadence, an authorized record may refresh only that inviter. `LegacyPending` may
 promote once only when the group has exactly one other member and exactly one unique live member
 claim; its captured route must additionally be private/loopback. A non-empty observation replaces
 and installs the bounded hints; an empty observation does not erase them merely because the remote
-app is closed.
+app is closed. These narrow migration rules apply to legacy groups. Authenticated P2P admission
+also performs a connected two-way signed member-finalization exchange, which can prove the
+callback dialer's peer before immediate close. Its bounded capture worker retries unfinished
+observed members without granting authority to an unverified endpoint.
+
+Orderly close performs local capture only: unfinished peer verification is saved retry work and
+does not require a network response. The final actor barrier still saves accepted history before
+freezing; failed local snapshot/network writes or stale custody refuse close. Initial admission
+and restored-server projections expose an absent saved outgoing route without claiming the group
+cannot reconnect: inbound connections and discovery may still recover it. See
+[the offline-close contract](communication-recovery/OFFLINE-CLOSE.md).
 
 Applying a member recovery code first verifies its group, signature, current roster membership,
 exact unique device→transport record, deadline and route grammar **without dialing**. While the UI
@@ -2949,7 +3009,11 @@ pub struct ChannelChange {          // WHAT moved, carried by every ChannelUpdat
     topic: bool,
     jukebox: bool,
 }
-pub enum AppEvent { ChannelUpdated { channel: u128, change: ChannelChange }, /* … */ }
+pub enum AppEvent {
+    SnapshotNeeded,                 // native snapshot request; no rendered change or completed-save claim
+    ChannelUpdated { channel: u128, change: ChannelChange },
+    /* … */
+}
 
 pub struct ChannelHead {            // one per directory channel; no message text
     channel: u128, count: u64, latest_ts: u64,

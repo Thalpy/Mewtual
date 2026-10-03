@@ -6,10 +6,16 @@ use catcoms_rt::CryptoRngCore;
 mod preparation;
 pub use preparation::{StudioHandoffAuthority, StudioHandoffSigning};
 
+use super::disposal::{get_provenance, put_provenance};
+
 #[derive(Debug)]
 pub enum StudioOverlaySave {
     Local(StudioLocalDraft),
     HandedOff(StudioHandoffOutcome),
+    /// A delayed retry of an operation in the most recently **disposed** branch: the terminal
+    /// acknowledgement design N17 requires. Nothing was accepted and no branch was opened; the
+    /// manifest is returned so the caller can say what happened to the work it named.
+    Disposed(Box<StudioOverlayDisposal>),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -45,8 +51,68 @@ pub struct StudioOverlayState {
     active: Option<StudioOverlay>,
     prepared: Option<Prepared>,
     completed: Option<Completed>,
+    /// The retained terminal acknowledgement of a branch that was dropped rather than
+    /// transferred. Deliberately independent of `active`: a vault can hold this alone, and can
+    /// equally hold it beside a **new** branch started after the disposal, which is the state a
+    /// later request classifies against.
+    disposed: Option<StudioOverlayDisposal>,
+    /// Monotonic per logical document, starting at 1. Incremented exactly once when a branch is
+    /// first accepted where none existed, never reset, never reused, never decremented.
+    ///
+    /// This is the rollover defence. `minimum_new_basis_closed_epoch` is deliberately *not*
+    /// advanced by a disposal, because a fresh Save on a still-eligible basis after a disposal is a
+    /// legitimate new decision; what must not happen is an old request for a disposed branch being
+    /// accepted as a new one. Binding the generation into the branch identity makes such a request
+    /// name a namespace that no longer exists.
+    branch_generation: u64,
+    /// How this branch's base was obtained. A property of the mint, not of the basis blob, which is
+    /// why it has to be carried: the nested basis alone cannot say whether it came from an installed
+    /// Closing source or an unconfirmed preview.
+    provenance: StudioOverlayProvenance,
     minimum_new_basis_closed_epoch: u64,
     legacy: bool,
+}
+
+/// Which terminal event, if any, an incoming request's `branch` names.
+///
+/// Exactly one arm can match, and the order of matching is part of the contract: live branch, then
+/// transferred manifest, then disposed manifest.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum StudioOverlayRequestClass {
+    /// `branch` names the live branch; ordinary exact-retry or append applies.
+    Active,
+    /// `branch` names the retained transferred manifest, with a matching envelope.
+    Transferred(StudioHandoffOutcome),
+    /// `branch` names the retained disposal manifest, with a matching envelope.
+    Disposed(Box<StudioOverlayDisposal>),
+    /// None of the identities this record holds. **Not a verdict.** `branch_id` is a hash of a
+    /// basis this stage deliberately does not mint, so it genuinely cannot tell a legitimate
+    /// next-generation request from a stale one; `admit_new_branch` resolves it where a fresh basis
+    /// exists. Reaching this arm does mean no terminal acknowledgement is owed.
+    Unmatched,
+}
+
+/// The resolution of [`StudioOverlayRequestClass::Unmatched`], available only where a fresh basis
+/// has just been minted under live authority.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StudioOverlayAdmission {
+    /// First acceptance of the derived next generation. The increment and the first accepted
+    /// envelope become durable in the **same** sealed replacement, so there is no reserved but
+    /// uncommitted generation and no second durable transition.
+    New { generation: u64 },
+    /// An older generation, a skipped generation, an unrelated basis, or an unknown identity.
+    Stale,
+}
+
+/// `H("catcoms/studio-overlay-branch/v1", basis fingerprint, branch_generation)`.
+///
+/// An identifier, never authority. It cannot be inverted, which is exactly why the structural
+/// classification stage cannot resolve `Unmatched` on its own.
+fn branch_identity(basis: [u8; 32], generation: u64) -> [u8; 32] {
+    let mut hash = blake3::Hasher::new_derive_key("catcoms/studio-overlay-branch/v1");
+    hash.update(&basis);
+    hash.update(&generation.to_be_bytes());
+    *hash.finalize().as_bytes()
 }
 
 impl std::fmt::Debug for StudioOverlayState {
@@ -54,6 +120,7 @@ impl std::fmt::Debug for StudioOverlayState {
         f.debug_struct("StudioOverlayState")
             .field("prepared", &self.prepared.is_some())
             .field("completed", &self.completed.is_some())
+            .field("disposed", &self.disposed.is_some())
             .finish_non_exhaustive()
     }
 }
@@ -81,16 +148,355 @@ pub enum StudioHandoffEvidence {
 }
 
 impl StudioOverlayState {
-    pub fn new(basis: &StudioClosingOverlayBasis) -> Self {
+    /// The first branch of a logical document: generation 1, with the provenance of its basis.
+    ///
+    /// Kept as the plain constructor so that every existing caller and every existing vault is
+    /// unchanged: from a Closing basis this is generation 1, `Closing`, and still encodes as v2
+    /// byte-for-byte. From an Unconfirmed basis the provenance is not v2-expressible, so the state
+    /// encodes as v3. A branch admitted after a disposal uses [`Self::new_admitted`] instead.
+    pub fn new<'a>(basis: impl Into<StudioOverlayBasis<'a>>) -> Self {
+        let basis = basis.into();
         Self {
-            target: basis.0.target,
+            target: basis.target(),
             active: Some(StudioOverlay::new(basis)),
             prepared: None,
             completed: None,
+            disposed: None,
+            branch_generation: 1,
+            provenance: basis.provenance(),
             minimum_new_basis_closed_epoch: 0,
             legacy: false,
         }
     }
+
+    /// A branch accepted where none existed, carrying forward what this vault already holds.
+    ///
+    /// The admission is **re-checked here, not trusted**. `StudioOverlayAdmission` is a public enum
+    /// with a public field, so a caller can construct `New { generation }` for any number at all, and
+    /// an earlier version of this function stored whatever it was handed. An adversarial review
+    /// showed what that bought: fabricating generation 1 on a post-disposal vault produced a live
+    /// branch sharing the disposed branch's identity, and `classify_request` then answered `Active`
+    /// for a branch that had been destroyed. Re-deriving costs one addition and removes the hole,
+    /// and it means an admission computed against a state that has since moved on is refused rather
+    /// than silently applied.
+    ///
+    /// Any retained terminal manifest is preserved: a new branch does not erase the acknowledgement
+    /// owed for the previous one.
+    ///
+    /// **`provenance` is checked, never trusted** (design review (ii) change 4). It used to be
+    /// stored as given beside a Closing basis, so nothing tied the label to the base. `validate`
+    /// caught a Closing basis labelled Unconfirmed, because its source identity is nonzero. It did
+    /// not catch the dangerous direction: an Unconfirmed basis labelled Closing, which
+    /// `prepare_handoff`'s guard (keyed on the label) would then let become signed history. The
+    /// provenance is now the basis variant's own, and an argument that disagrees with it is
+    /// refused. The argument stays only so Agent 1's call site compiles unchanged. It is redundant,
+    /// and removing it is a coordinated change.
+    pub fn new_admitted<'a>(
+        &self,
+        basis: impl Into<StudioOverlayBasis<'a>>,
+        admission: StudioOverlayAdmission,
+        provenance: StudioOverlayProvenance,
+    ) -> Result<Self, ReplError> {
+        let basis = basis.into();
+        if provenance != basis.provenance() {
+            return Err(ReplError::IntentConflict);
+        }
+        let StudioOverlayAdmission::New { generation } = admission else {
+            return Err(ReplError::IntentConflict);
+        };
+        if self.active.is_some() {
+            return Err(ReplError::IntentConflict);
+        }
+        if generation != self.next_generation()? {
+            return Err(ReplError::IntentConflict);
+        }
+        Ok(Self {
+            target: self.target,
+            active: Some(StudioOverlay::new(basis)),
+            prepared: None,
+            completed: self.completed.clone(),
+            disposed: self.disposed.clone(),
+            branch_generation: generation,
+            provenance: basis.provenance(),
+            minimum_new_basis_closed_epoch: self.minimum_new_basis_closed_epoch,
+            legacy: false,
+        })
+    }
+
+    pub fn provenance(&self) -> StudioOverlayProvenance {
+        self.provenance
+    }
+
+    /// Whether this state is fully described by the v2 layout, and so must encode as v2.
+    ///
+    /// One predicate, consulted by both the encoder and the version choice, so "what v2 can express"
+    /// cannot drift from "what we emit tag 2 for". Two copies of that judgement is how a state ends
+    /// up with two valid encodings.
+    fn is_v2_expressible(&self) -> bool {
+        self.branch_generation == 1
+            && matches!(self.provenance, StudioOverlayProvenance::Closing)
+            && self.disposed.is_none()
+    }
+
+    pub fn branch_generation(&self) -> u64 {
+        self.branch_generation
+    }
+
+    /// The generation a branch minted here and now would carry.
+    ///
+    /// **One definition, used by all three paths that care**: `admit_new_branch` derives the id it
+    /// will accept from it, `new_admitted` checks the admission it was handed against it, and
+    /// `append` uses it when it mints a branch where none existed. Before this existed the increment
+    /// was written in one place and *trusted* in another, and an adversarial review proved the
+    /// consequences: a caller could hand `new_admitted` any `New { generation }` it liked, because
+    /// `StudioOverlayAdmission` is a public enum with a public field. Fabricating generation 1 on a
+    /// post-disposal vault produced a live branch sharing the disposed branch's identity, and
+    /// `classify_request` then answered `Active` for a branch that had been destroyed.
+    ///
+    /// Exhaustion refuses rather than wraps: a wrapped generation would let an ancient request name
+    /// a live namespace again, which is the one thing this namespace exists to prevent.
+    fn next_generation(&self) -> Result<u64, ReplError> {
+        self.branch_generation
+            .checked_add(1)
+            .ok_or(ReplError::EpochBound)
+    }
+
+    /// The branch a Save prepared from `fresh` here and now must name: the live branch if there is
+    /// one, otherwise the branch the next admission would mint. `state` is `None` when the document
+    /// has no overlay record yet, which is generation 1, the same number [`Self::new`] stores.
+    ///
+    /// Derived and never reserved. Preparation computes it and S1 and S1b check it again. If the
+    /// branch it named is disposed or transferred in between, or a branch on another basis is
+    /// admitted, the id names nothing and the request is `Stale`: the user prepares again, and no
+    /// delayed request can claim a namespace it was not handed. If a branch on the **same** basis
+    /// is admitted in between, the id is that branch's, because the derivation is a pure function
+    /// of basis and generation, and the request joins it as `Active`. That is the outcome
+    /// preparing after the admission would have produced, so it is not a hole.
+    ///
+    /// Exposed so that callers outside this file never compute [`branch_identity`] themselves. A
+    /// second copy of the derivation is the defect `next_generation` records.
+    pub fn request_branch_id<'a>(
+        state: Option<&Self>,
+        fresh: impl Into<StudioOverlayBasis<'a>>,
+    ) -> Result<[u8; 32], ReplError> {
+        let fresh = fresh.into();
+        Ok(match state {
+            Some(state) => match state.branch_id() {
+                Some(live) => live,
+                None => branch_identity(fresh.fingerprint(), state.next_generation()?),
+            },
+            None => branch_identity(fresh.fingerprint(), 1),
+        })
+    }
+
+    /// [`Self::admit_new_branch`] for a document with no overlay record at all.
+    ///
+    /// `New { generation: 1 }` exactly when `branch` is the generation-1 identity of `fresh`, and
+    /// the caller then builds the state with [`Self::new`]. There is no retained manifest to
+    /// classify against, so every other id is `Stale`.
+    pub fn admit_first_branch<'a>(
+        branch: [u8; 32],
+        fresh: impl Into<StudioOverlayBasis<'a>>,
+    ) -> StudioOverlayAdmission {
+        if branch_identity(fresh.into().fingerprint(), 1) == branch {
+            StudioOverlayAdmission::New { generation: 1 }
+        } else {
+            StudioOverlayAdmission::Stale
+        }
+    }
+
+    /// The identity every request must carry, or `None` when there is no live branch to name.
+    pub fn branch_id(&self) -> Option<[u8; 32]> {
+        self.active
+            .as_ref()
+            .map(|active| branch_identity(active.basis(), self.branch_generation))
+    }
+
+    /// Structural classification of an incoming request, before any basis mint, tenure read, source
+    /// lookup or media admission.
+    ///
+    /// Matching order is live branch, then transferred, then disposed, and exactly one arm can
+    /// match because the three identities are distinct by construction: a live branch's id is
+    /// derived from the current generation, and a retained manifest's is the one recorded when it
+    /// became terminal.
+    ///
+    /// The `intent` is required for the terminal arms and not merely for symmetry: an
+    /// acknowledgement is owed only for the exact operation the terminal branch recorded, so a
+    /// request naming the right branch with a body that manifest never held is `Unmatched` rather
+    /// than acknowledged.
+    ///
+    /// **That case is deliberately `Unmatched` and not an error**, which is a decision worth stating
+    /// because `completed_retry` answers `IntentConflict` for the same shape. The difference is what
+    /// each is for. `completed_retry` is asked "is this the exact retry I think it is?", where a near
+    /// miss is a caller bug worth reporting. This is asked "which terminal event, if any, is this
+    /// request about?", and the honest answer for a request that matches no event exactly is that
+    /// none of them is. The caller then continues to the authorizing stage, which returns `Stale`,
+    /// so the request is still refused - the cost is only that a conflict is reported as staleness.
+    /// If that distinction ever needs to reach a user, it belongs in a separate diagnostic rather
+    /// than in a classification whose whole contract is that exactly one arm matches.
+    pub fn classify_request(
+        &self,
+        target: StudioTarget,
+        branch: [u8; 32],
+        intent: &LocalIntent,
+    ) -> Result<StudioOverlayRequestClass, ReplError> {
+        self.check_target(target)?;
+        if self.branch_id() == Some(branch) {
+            return Ok(StudioOverlayRequestClass::Active);
+        }
+        let id = intent.operation.id(&intent.author);
+        // The transferred manifest stores no branch identity of its own, and it must not start
+        // storing one: the `completed` block is part of the v2 layout, so adding a field would
+        // rewrite existing records and break the byte-identity every current vault depends on.
+        //
+        // It is derivable instead. A transfer does not change `branch_generation` - only admitting a
+        // new branch does - so while no newer branch has been admitted, the transferred branch's id
+        // is exactly `branch_identity(outcome.basis, branch_generation)`. Once a new branch is
+        // admitted the generation moves on and that id becomes unrecoverable, so an old transferred
+        // request degrades to `Unmatched` and is refused. That is the same degradation design 6.6
+        // accepts for forgotten disposals, and in the same safe direction: refusal, never acceptance.
+        if let Some(c) = &self.completed {
+            if branch_identity(c.outcome.basis, self.branch_generation) == branch {
+                return Ok(match c.entries.iter().find(|e| e.id == id) {
+                    Some(entry)
+                        if c.author == intent.author && entry.envelope == envelope(intent)? =>
+                    {
+                        StudioOverlayRequestClass::Transferred(c.outcome.clone())
+                    }
+                    // The right branch, a body it never held. An acknowledgement is owed for the
+                    // exact operation the terminal branch recorded and for nothing else.
+                    _ => StudioOverlayRequestClass::Unmatched,
+                });
+            }
+        }
+        if let Some(d) = &self.disposed {
+            if d.branch == branch {
+                return Ok(match d.entries.iter().find(|e| e.id == id) {
+                    Some(entry)
+                        if d.author == intent.author && entry.envelope == envelope(intent)? =>
+                    {
+                        StudioOverlayRequestClass::Disposed(Box::new(d.clone()))
+                    }
+                    _ => StudioOverlayRequestClass::Unmatched,
+                });
+            }
+        }
+        Ok(StudioOverlayRequestClass::Unmatched)
+    }
+
+    /// Resolve `Unmatched` where a fresh basis has just been minted under live authority.
+    ///
+    /// `New` exactly when there is no active branch **and** `branch` is the identity derived from
+    /// this fresh basis at `branch_generation + 1`. Everything else is `Stale`: an older generation,
+    /// a skipped one, an unrelated basis, an unknown identity.
+    ///
+    /// The generation is derived here and never reserved, so two concurrent visits cannot both hold
+    /// a claim on the same number - whichever commits first makes the other's derived id stop
+    /// matching. Exhaustion refuses rather than wrapping, because a wrapped generation would let an
+    /// ancient request name a live namespace again, which is the one thing this defence exists to
+    /// prevent.
+    pub fn admit_new_branch<'a>(
+        &self,
+        target: StudioTarget,
+        branch: [u8; 32],
+        fresh: impl Into<StudioOverlayBasis<'a>>,
+    ) -> Result<StudioOverlayAdmission, ReplError> {
+        self.check_target(target)?;
+        if self.active.is_some() {
+            return Ok(StudioOverlayAdmission::Stale);
+        }
+        let generation = self.next_generation()?;
+        if branch_identity(fresh.into().fingerprint(), generation) == branch {
+            return Ok(StudioOverlayAdmission::New { generation });
+        }
+        Ok(StudioOverlayAdmission::Stale)
+    }
+    /// The retained terminal disposal, if this vault has one.
+    pub fn disposed(&self) -> Option<&StudioOverlayDisposal> {
+        self.disposed.as_ref()
+    }
+
+    /// The live branch's content identity, the value a disposal request must carry back.
+    ///
+    /// Exposed because the request has to be built from something: the inspection a user saw
+    /// reports this, and `dispose` refuses anything else. Without an accessor a caller would have
+    /// to re-derive the hash, which is precisely the second representation that lets a request
+    /// name work the user never saw.
+    pub fn branch_content(&self, ledger: &IntentLedger) -> Result<[u8; 32], ReplError> {
+        branch_content_hash(self.active.as_ref().ok_or(ReplError::Malformed)?, ledger)
+    }
+
+    /// Drop the active branch without transferring it.
+    ///
+    /// Returns the rebuilt state and **the exact ids the caller must retire from the ledger**,
+    /// read once from the branch rather than recomputed by the caller. Two derivations of "which
+    /// ids went away" is how an entry ends up charged to a branch that no longer exists.
+    ///
+    /// This proves nothing about authorization. The caller has already established membership,
+    /// authorship, the absence of a transfer hold, the branch identity, and - for `Preserve` - that
+    /// a durable archive for this exact branch exists. All of that needs records this layer cannot
+    /// read. What happens here is the state rebuild, its validation, and the two checks this layer
+    /// *can* make: the transfer hold below, and `content` against the branch's own hash. A
+    /// `StudioDisposalDecision` is required rather than a bare mode so that a destructive disposal
+    /// cannot be constructed through the preserving path.
+    ///
+    /// **`branch`, `generation` and `provenance` are now DERIVED from this state, not supplied.**
+    /// An earlier version took all three from the caller and recorded them verbatim, which let a
+    /// manifest misdescribe its own branch - a Closing branch could be labelled `Unconfirmed` - with
+    /// nothing at this layer able to notice. Now that the state carries the generation and the
+    /// provenance there is nothing left for a caller to get wrong, and the manifest cannot disagree
+    /// with the branch it describes. `content` remains a parameter precisely because it is the value
+    /// the *user* saw: checking the caller's copy against the branch's own hash is the whole point.
+    ///
+    /// A branch that survives structural validation but cannot be replayed is still disposable.
+    /// Refusing here would leave exactly the drafts most in need of disposal undisposable.
+    pub fn dispose(
+        &self,
+        ledger: &IntentLedger,
+        decision: StudioDisposalDecision,
+        content: [u8; 32],
+        sequence: u64,
+        at: u64,
+    ) -> Result<(Self, BTreeSet<[u8; 32]>), ReplError> {
+        let active = self.active.as_ref().ok_or(ReplError::Malformed)?;
+        let branch = self.branch_id().ok_or(ReplError::Malformed)?;
+        let generation = self.branch_generation;
+        let provenance = self.provenance;
+        // A Prepared branch refuses outright: a transfer hold is live evidence that someone else
+        // may be about to accept this work, and dropping it here would race that acceptance.
+        if self.prepared.is_some() {
+            return Err(ReplError::IntentConflict);
+        }
+        if content != branch_content_hash(active, ledger)? {
+            return Err(ReplError::IntentConflict);
+        }
+        let manifest = StudioOverlayDisposal::from_branch(
+            active, ledger, provenance, branch, content, generation, &decision, sequence, at,
+        )?;
+        let removed = manifest.removed_ids();
+        let next = Self {
+            target: self.target,
+            // Cleared: the whole point of the transition. The manifest is self-contained, so
+            // nothing that survives refers to the branch that is gone.
+            active: None,
+            prepared: None,
+            completed: self.completed.clone(),
+            disposed: Some(manifest),
+            // Carried, not reset. The namespace is monotonic per logical document, so a disposal
+            // must not hand the next branch a number this one already used.
+            branch_generation: self.branch_generation,
+            provenance: self.provenance,
+            minimum_new_basis_closed_epoch: self.minimum_new_basis_closed_epoch,
+            legacy: false,
+        };
+        // Validate and encode the rebuilt state, as `append`, `complete` and `set_prepared` all do.
+        // Returning it unvalidated would make the store the first thing to discover any
+        // inconsistency, at the point where it is already committed to a write. This is also what
+        // enforces the cross-manifest rule when `completed` is retained.
+        next.encode_vault(ledger)?;
+        Ok((next, removed))
+    }
+
     pub fn target(&self) -> StudioTarget {
         self.target
     }
@@ -148,25 +554,31 @@ impl StudioOverlayState {
             .filter(|c| c.author == author && c.outcome.basis == basis)
             .map(|c| c.outcome.clone()))
     }
-    pub fn append(
+    pub fn append<'a>(
         &mut self,
-        basis: &StudioClosingOverlayBasis,
+        basis: impl Into<StudioOverlayBasis<'a>>,
         ledger: &IntentLedger,
         id: [u8; 32],
         ts: u64,
     ) -> Result<StudioLocalDraft, ReplError> {
-        self.check_target(basis.0.target)?;
+        let basis = basis.into();
+        self.check_target(basis.target())?;
         if self.prepared.is_some() {
             return Err(ReplError::EpochClosed);
         }
-        check_basis_floor(
-            basis.0.receipt.closed_epoch,
-            self.minimum_new_basis_closed_epoch,
-        )?;
-        let mut active = self
-            .active
-            .clone()
-            .unwrap_or_else(|| StudioOverlay::new(basis));
+        check_basis_floor(basis.closed_epoch(), self.minimum_new_basis_closed_epoch)?;
+        // Appending extends a live branch and never opens one. Opening a branch is a generation event,
+        // and it now has exactly two doors, both checked against the namespace: `new` for a document
+        // with no record (after `admit_first_branch`), and `new_admitted` after `admit_new_branch`.
+        //
+        // This used to mint at the next generation whenever `active` was `None`, because the first
+        // Save after a transfer or a disposal must work and nothing else opened a branch then. That
+        // made the namespace optional: a request that never went through admission still got a
+        // branch. Flow S now admits before it appends, so the third door is closed. The floor check
+        // above stays first, so a branch opened through admission is still floor-checked here.
+        let Some(mut active) = self.active.clone() else {
+            return Err(ReplError::IntentConflict);
+        };
         let view = active.append(basis, ledger, id, ts)?;
         let mut next = self.clone();
         next.active = Some(active);
@@ -265,21 +677,55 @@ impl StudioOverlayState {
             return Ok(StudioHandoffEvidence::Hold);
         }
         let overlay = self.active.as_ref().ok_or(ReplError::Malformed)?;
-        let mut count = 0;
-        for ((_, intent), expected) in overlay.checked_entries(ledger)?.into_iter().zip(&p.signed) {
-            match source.overlay_signed_hash(intent) {
-                Ok(Some(actual)) if &actual == expected => count += 1,
-                Ok(None) => {}
-                _ => return Ok(StudioHandoffEvidence::Hold),
-            }
+        Ok(classify_signed(
+            overlay.checked_entries(ledger)?,
+            &p.signed,
+            |intent| source.overlay_signed_hash(intent),
+        ))
+    }
+    /// [`Self::evidence`] over authenticated vault source bytes, WITHOUT restoring the source.
+    ///
+    /// What P2's lifecycle classification calls for a Prepared branch, so a branch whose handoff is
+    /// durably stuck (`Hold`) can be named without paying a restore under custody. The same
+    /// comparisons in the same order: target, document id and epoch, then each accepted entry's
+    /// signed-operation hash against the Prepared manifest, found with the same
+    /// `overlay_signed_hash_in` the restored path uses. The operations are decoded from their
+    /// framing only; nothing is replayed or verified, so this classifies and never resolves.
+    ///
+    /// **The agreement is over restorable records.** A record whose framing decodes but which
+    /// `StudioEpoch::restore` would refuse (a bad signature, a duplicate id, an inconsistent delta)
+    /// can read `Complete` or `Absent` here, where the resolution fails with an error instead.
+    /// The app's own snapshots are restorable by construction, so this is a writer bug rather
+    /// than a reachable state, and the direction that matters holds unconditionally:
+    /// `Hold` here means the resolution refuses. The app's `evidence_both_ways` test helper
+    /// (`epoch_studio::tests::rotation::overlay::handoff::classification`) holds the two together
+    /// for Absent, Complete, partial Hold and scope Hold.
+    pub fn evidence_in_vault(
+        &self,
+        bytes: &[u8],
+        ledger: &IntentLedger,
+    ) -> Result<StudioHandoffEvidence, ReplError> {
+        self.validate(ledger)?;
+        let p = self.prepared.as_ref().ok_or(ReplError::EpochScope)?;
+        let shape = match crate::studio::epoch::VaultShape::read(bytes, self.target) {
+            Ok(shape) => shape,
+            // A record for another channel is "the source is not this target", which `evidence`
+            // answers with Hold rather than an error. The app's classifier never reaches this arm
+            // (its vault read refuses a wrong-channel record first, as `SourceUnreadable`); it is
+            // here so this function answers like `evidence` for any caller.
+            Err(ReplError::EpochScope) => return Ok(StudioHandoffEvidence::Hold),
+            Err(error) => return Err(error),
+        };
+        if !shape.is_document(ledger.document(), p.doc_id) || shape.epoch() != p.epoch {
+            return Ok(StudioHandoffEvidence::Hold);
         }
-        Ok(if count == p.signed.len() {
-            StudioHandoffEvidence::Complete
-        } else if count == 0 {
-            StudioHandoffEvidence::Absent
-        } else {
-            StudioHandoffEvidence::Hold
-        })
+        let operations = shape.signed_operations()?;
+        let overlay = self.active.as_ref().ok_or(ReplError::Malformed)?;
+        Ok(classify_signed(
+            overlay.checked_entries(ledger)?,
+            &p.signed,
+            |intent| crate::studio::epoch::overlay_signed_hash_in(&operations, intent),
+        ))
     }
     pub fn matches_source_before(&self, source: &mut StudioEpoch) -> Result<bool, ReplError> {
         let hash = source_hash(source)?;
@@ -328,9 +774,58 @@ impl StudioOverlayState {
         if self.target.document(&ledger.document().server_id)? != *ledger.document() {
             return Err(ReplError::EpochScope);
         }
+        // The generation namespace. `>= 1` because a zero generation would make the first branch's
+        // identity collide with the "no branch yet" case, and every branch is at least the first.
+        if self.branch_generation < 1 {
+            return Err(ReplError::Malformed);
+        }
+        if let Some(disposal) = &self.disposed {
+            // A manifest from the future would mean the namespace went backwards, which is the one
+            // thing monotonicity buys.
+            if disposal.generation > self.branch_generation {
+                return Err(ReplError::Malformed);
+            }
+            // A live branch beside a retained disposal must be a strictly later generation. This is
+            // implied by `branch_id` construction, since admitting a branch increments, but it is
+            // asserted rather than assumed: if it ever failed, the two would share an identity and
+            // `classify_request` could answer `Active` and `Disposed` for the same request.
+            if self.active.is_some() && self.branch_generation <= disposal.generation {
+                return Err(ReplError::Malformed);
+            }
+        }
+        // `Unconfirmed` has no installed source, so it can neither be handed off nor carry a source
+        // identity. The nested basis blob is untouched for it, which means those fields must be
+        // canonically zero rather than merely ignored.
+        if let StudioOverlayProvenance::Unconfirmed { .. } = self.provenance {
+            if self.prepared.is_some() {
+                return Err(ReplError::EpochAuthority);
+            }
+            if let Some(active) = &self.active {
+                if !active.has_zero_source_identity() {
+                    return Err(ReplError::Malformed);
+                }
+            }
+        }
         if let Some(active) = &self.active {
             if active.target() != self.target {
                 return Err(ReplError::EpochScope);
+            }
+            // The label and the base must be the same kind. Constructors derive the label from the
+            // basis and the decoder derives the kind from the label, so this fails only when one
+            // of them is wrong. That is worth refusing outright: the kind picks the fingerprint
+            // domain, and `prepare_handoff` keys on the label.
+            if active.basis_kind() != BasisKind::of(&self.provenance) {
+                return Err(ReplError::Malformed);
+            }
+            // The converse of the Unconfirmed rule above. A Closing basis is minted only from a
+            // settlement plan, which always names its installed source in both fields, so a
+            // Closing label over a basis missing either is a preview base wearing that label, or
+            // corruption. At generation 1 the canonical re-encode check already refuses such a
+            // relabel (it would encode as v2); from generation 2 on, this rule is the defence.
+            if matches!(self.provenance, StudioOverlayProvenance::Closing)
+                && !active.has_complete_source_identity()
+            {
+                return Err(ReplError::Malformed);
             }
             check_basis_floor(
                 active.receipt().closed_epoch,
@@ -385,13 +880,62 @@ impl StudioOverlayState {
                 }
             }
         }
+        if let Some(disposal) = &self.disposed {
+            if disposal.target != self.target {
+                return Err(ReplError::EpochScope);
+            }
+            disposal.validate()?;
+            // Two rules shared with the transferred manifest, and a third that only exists because
+            // two terminal manifests can now be retained at once.
+            //
+            // The shared pair: a retained manifest must not claim an id the *current* live branch
+            // holds, or a request naming that id would classify against the wrong event; and where
+            // an id is somehow still in the ledger, its author and envelope must be the ones this
+            // manifest recorded, so a retained acknowledgement cannot be made to describe a
+            // different body.
+            //
+            // The third rule is **no id may appear in both terminal manifests**. `classify_request`
+            // answers "which terminal event is this request about" and exactly one arm may match;
+            // an id in both would make `Transferred` and `Disposed` simultaneously true for one
+            // request while saying opposite things about where the work went. This slice is where
+            // the rule becomes necessary, because `dispose` retains `completed` while adding
+            // `disposed`.
+            let pending: BTreeMap<_, _> = ledger.pending().collect();
+            for entry in &disposal.entries {
+                if self
+                    .active
+                    .as_ref()
+                    .is_some_and(|active| active.contains(&entry.id))
+                {
+                    return Err(ReplError::IntentConflict);
+                }
+                if self
+                    .completed
+                    .as_ref()
+                    .is_some_and(|c| c.entries.iter().any(|e| e.id == entry.id))
+                {
+                    return Err(ReplError::IntentConflict);
+                }
+                if let Some(intent) = pending.get(&entry.id) {
+                    if intent.author != disposal.author || envelope(intent)? != entry.envelope {
+                        return Err(ReplError::IntentConflict);
+                    }
+                }
+            }
+        }
         Ok(())
     }
     pub fn encode_vault(&self, ledger: &IntentLedger) -> Result<Vec<u8>, ReplError> {
         self.validate(ledger)?;
+        // `is_v2_expressible()` joins the legacy conditions, which covers the disposal, the
+        // generation and the provenance in one predicate. The v1 arm writes the single-branch format,
+        // which has nowhere to put any of the three: without this a state carrying one would have it
+        // silently dropped on encode, and silently losing a terminal record or a generation is the
+        // one failure this family must never have.
         if self.legacy
             && self.prepared.is_none()
             && self.completed.is_none()
+            && self.is_v2_expressible()
             && self.minimum_new_basis_closed_epoch == 0
         {
             return self
@@ -401,7 +945,15 @@ impl StudioOverlayState {
                 .encode_vault(ledger);
         }
         let mut e = Encoder::new();
-        e.put_u8(2);
+        // Tag 3 only when the state cannot be expressed as v2: a non-Closing provenance, a
+        // generation other than 1, or a retained disposal. Everything else still encodes as v2
+        // byte-for-byte, so no existing record is rewritten and the canonical re-encode equality
+        // every current vault relies on is untouched. A v1 or v2 record decodes with generation 1
+        // and Closing provenance, which is exactly what those records always meant.
+        //
+        // Old readers fail closed on tag 3, which is the intended direction: a reader with no notion
+        // of a generation namespace must not silently read a later generation as the first.
+        e.put_u8(if self.is_v2_expressible() { 2 } else { 3 });
         put_target(&mut e, self.target)?;
         e.put_u64(self.minimum_new_basis_closed_epoch);
         match &self.active {
@@ -441,6 +993,19 @@ impl StudioOverlayState {
                 }
             }
         }
+        if !self.is_v2_expressible() {
+            e.put_u64(self.branch_generation);
+            put_provenance(&mut e, &self.provenance)?;
+            match &self.disposed {
+                None => {
+                    e.put_u8(0);
+                }
+                Some(d) => {
+                    e.put_u8(1);
+                    d.put(&mut e)?;
+                }
+            }
+        }
         let bytes = e.finish();
         let seed_bytes = self.active.as_ref().map_or(0, |a| a.base.seed.len());
         if bytes.len().saturating_sub(seed_bytes) > MAX_METADATA || bytes.len() > MAX_EXTENSION {
@@ -448,23 +1013,46 @@ impl StudioOverlayState {
         }
         Ok(bytes)
     }
+    /// Full validation, including complete ordered reconstruction of any retained branch.
     pub fn decode_vault(bytes: &[u8], ledger: &IntentLedger) -> Result<Self, ReplError> {
+        Self::decode_vault_inner(bytes, ledger, true)
+    }
+
+    /// Identity, bounds, scope, entry and canonical-encoding validation without replaying the
+    /// branch. See `StudioOverlay::decode_vault_structural`: this mints no authority, and a
+    /// decoded Prepared or Completed flag remains evidence of a local record, never a capability.
+    pub fn decode_vault_structural(bytes: &[u8], ledger: &IntentLedger) -> Result<Self, ReplError> {
+        Self::decode_vault_inner(bytes, ledger, false)
+    }
+
+    fn decode_vault_inner(
+        bytes: &[u8],
+        ledger: &IntentLedger,
+        replay: bool,
+    ) -> Result<Self, ReplError> {
         if bytes.len() > MAX_EXTENSION {
             return Err(ReplError::EpochBound);
         }
         if bytes.first() == Some(&1) {
-            let active = StudioOverlay::decode_vault(bytes, ledger)?;
+            let active = StudioOverlay::decode_vault_inner(bytes, ledger, replay)?;
             return Ok(Self {
                 target: active.target(),
                 active: Some(active),
                 prepared: None,
                 completed: None,
+                disposed: None,
+                // A v1 record predates the namespace, so it is the first generation on a Closing
+                // basis. That is what such a record has always meant; reading it any other way
+                // would invent history it does not contain.
+                branch_generation: 1,
+                provenance: StudioOverlayProvenance::Closing,
                 minimum_new_basis_closed_epoch: 0,
                 legacy: true,
             });
         }
         let mut d = Decoder::new(bytes);
-        if byte(&mut d)? != 2 {
+        let version = byte(&mut d)?;
+        if version != 2 && version != 3 {
             return Err(ReplError::Malformed);
         }
         let target = get_target(&mut d)?;
@@ -483,7 +1071,7 @@ impl StudioOverlayState {
                 if bytes.len().saturating_sub(seed_bytes) > MAX_METADATA {
                     return Err(ReplError::EpochBound);
                 }
-                let a = StudioOverlay::decode_vault(raw, ledger)?;
+                let a = StudioOverlay::decode_vault_inner(raw, ledger, replay)?;
                 let p = if tag == 2 {
                     let epoch = number(&mut d)?;
                     let doc_id = u128::from_be_bytes(fixed(&mut d)?);
@@ -535,12 +1123,42 @@ impl StudioOverlayState {
             }
             _ => return Err(ReplError::Malformed),
         };
+        // v3 carries the generation, the provenance and an optional disposal block. v2 carries none
+        // of them, and means generation 1, Closing provenance and no disposal - exactly what such a
+        // record has always meant.
+        //
+        // A v3 record that is nevertheless v2-expressible is refused, not silently accepted: the
+        // canonical re-encode check below would produce tag 2 for it and the comparison fails. That
+        // is what keeps one state from having two valid encodings, which would otherwise break
+        // Agent 1's digest fence.
+        let (branch_generation, provenance, disposed) = if version == 3 {
+            let generation = number(&mut d)?;
+            let provenance = get_provenance(&mut d)?;
+            let disposed = match byte(&mut d)? {
+                0 => None,
+                1 => Some(StudioOverlayDisposal::get(&mut d)?),
+                _ => return Err(ReplError::Malformed),
+            };
+            (generation, provenance, disposed)
+        } else {
+            (1, StudioOverlayProvenance::Closing, None)
+        };
         d.finish().map_err(|_| ReplError::Malformed)?;
+        // The nested blob was decoded before the provenance was known, so its basis came out as
+        // Closing. Give it the record's kind before anything fingerprints the branch, or a reloaded
+        // Unconfirmed branch would change identity across a restart (design review (i) change 2).
+        let mut active = active;
+        if let Some(active) = active.as_mut() {
+            active.set_basis_kind(BasisKind::of(&provenance));
+        }
         let out = Self {
             target,
             active,
             prepared,
             completed,
+            disposed,
+            branch_generation,
+            provenance,
             minimum_new_basis_closed_epoch,
             legacy: false,
         };
@@ -548,6 +1166,36 @@ impl StudioOverlayState {
             return Err(ReplError::Malformed);
         }
         Ok(out)
+    }
+}
+
+/// The one definition of how a Prepared branch's evidence is counted, shared by the restored
+/// reading (`evidence`) and the structural one (`evidence_in_vault`) so the two cannot drift.
+///
+/// `held` answers, for one accepted entry, the hash of the signed operation the source holds for
+/// it, if any. Every entry must be held with exactly the hash the Prepared manifest recorded
+/// (Complete), or none may be held at all (Absent). Anything else is Hold: a partial set, a
+/// different signed operation, or an unreadable one. The mutation harness anchors on the
+/// comparison line below, so it covers both readings at once.
+fn classify_signed(
+    entries: Vec<(&Entry, &LocalIntent)>,
+    signed: &[[u8; 32]],
+    mut held: impl FnMut(&LocalIntent) -> Result<Option<[u8; 32]>, ReplError>,
+) -> StudioHandoffEvidence {
+    let mut count = 0;
+    for ((_, intent), expected) in entries.into_iter().zip(signed) {
+        match held(intent) {
+            Ok(Some(actual)) if &actual == expected => count += 1,
+            Ok(None) => {}
+            _ => return StudioHandoffEvidence::Hold,
+        }
+    }
+    if count == signed.len() {
+        StudioHandoffEvidence::Complete
+    } else if count == 0 {
+        StudioHandoffEvidence::Absent
+    } else {
+        StudioHandoffEvidence::Hold
     }
 }
 
@@ -579,6 +1227,11 @@ fn nested_seed_len(raw: &[u8]) -> Result<usize, ReplError> {
     }
     Ok(seed.len())
 }
+/// The **document-wide** hash: this branch and the whole intent ledger around it.
+///
+/// Used only for `Prepared.branch`, where document-wide is the right scope. A transfer hold is a
+/// signing commitment made against a state, so any change to that state should invalidate it, and
+/// being conservative there costs a re-preparation rather than any evidence.
 fn branch_hash(active: &StudioOverlay, ledger: &IntentLedger) -> Result<[u8; 32], ReplError> {
     let mut hash = blake3::Hasher::new_derive_key("catcoms/studio-overlay-branch-ledger/v1");
     for bytes in [active.encode_vault(ledger)?, ledger.encode()?] {
@@ -587,7 +1240,33 @@ fn branch_hash(active: &StudioOverlay, ledger: &IntentLedger) -> Result<[u8; 32]
     }
     Ok(*hash.finalize().as_bytes())
 }
-fn validate_manifest(entries: &[Entry]) -> Result<(), ReplError> {
+
+/// The **branch's own** content identity: its base, and its entries' ids, accepted envelopes, order
+/// and timestamps. `encode_vault` already carries exactly that, and `checked_entries` inside it
+/// still verifies every entry against the ledger, so the ledger remains a validator without
+/// becoming part of the value.
+///
+/// **This deliberately does not hash the ledger, and that is a fix rather than an omission.**
+/// `content` answers "is this the same branch I was shown". Hashing the whole ledger made it answer
+/// "is this the same document", so an ordinary Save into the document - a copy landing an intent, a
+/// receipt retiring one - changed a branch nobody had touched. The consequence was specific: an
+/// archive written at one moment could no longer satisfy D4 at the next, and a preserving disposal
+/// refused with "the preserved archive is for a different branch" while holding an archive of
+/// exactly that branch. The user's only recourse was to release verified evidence and re-archive.
+///
+/// A distinct derive key, so a value computed under one definition can never be mistaken for the
+/// other.
+fn branch_content_hash(
+    active: &StudioOverlay,
+    ledger: &IntentLedger,
+) -> Result<[u8; 32], ReplError> {
+    let mut hash = blake3::Hasher::new_derive_key("catcoms/studio-overlay-branch-content/v1");
+    let bytes = active.encode_vault(ledger)?;
+    hash.update(&(bytes.len() as u64).to_be_bytes());
+    hash.update(&bytes);
+    Ok(*hash.finalize().as_bytes())
+}
+pub(super) fn validate_manifest(entries: &[Entry]) -> Result<(), ReplError> {
     if entries.is_empty() || entries.len() > MAX_STUDIO_OVERLAY_OPS {
         return Err(ReplError::EpochBound);
     }
@@ -600,25 +1279,25 @@ fn validate_manifest(entries: &[Entry]) -> Result<(), ReplError> {
     }
     Ok(())
 }
-fn put(e: &mut Encoder, bytes: &[u8]) -> Result<(), ReplError> {
+pub(super) fn put(e: &mut Encoder, bytes: &[u8]) -> Result<(), ReplError> {
     e.put_bytes(bytes)
         .map(|_| ())
         .map_err(|_| ReplError::EpochBound)
 }
-fn byte(d: &mut Decoder<'_>) -> Result<u8, ReplError> {
+pub(super) fn byte(d: &mut Decoder<'_>) -> Result<u8, ReplError> {
     d.get_u8().map_err(|_| ReplError::Malformed)
 }
-fn number(d: &mut Decoder<'_>) -> Result<u64, ReplError> {
+pub(super) fn number(d: &mut Decoder<'_>) -> Result<u64, ReplError> {
     d.get_u64().map_err(|_| ReplError::Malformed)
 }
-fn count(d: &mut Decoder<'_>) -> Result<usize, ReplError> {
+pub(super) fn count(d: &mut Decoder<'_>) -> Result<usize, ReplError> {
     let n = d.get_u32().map_err(|_| ReplError::Malformed)? as usize;
     if n == 0 || n > MAX_STUDIO_OVERLAY_OPS {
         return Err(ReplError::EpochBound);
     }
     Ok(n)
 }
-fn put_target(e: &mut Encoder, target: StudioTarget) -> Result<(), ReplError> {
+pub(super) fn put_target(e: &mut Encoder, target: StudioTarget) -> Result<(), ReplError> {
     e.put_u8(match target {
         StudioTarget::Index { .. } => 0,
         StudioTarget::Flipnote { .. } => 1,
@@ -629,7 +1308,7 @@ fn put_target(e: &mut Encoder, target: StudioTarget) -> Result<(), ReplError> {
     }
     Ok(())
 }
-fn get_target(d: &mut Decoder<'_>) -> Result<StudioTarget, ReplError> {
+pub(super) fn get_target(d: &mut Decoder<'_>) -> Result<StudioTarget, ReplError> {
     let tag = byte(d)?;
     let channel = fixed(d)?;
     match tag {
@@ -641,14 +1320,14 @@ fn get_target(d: &mut Decoder<'_>) -> Result<StudioTarget, ReplError> {
         _ => Err(ReplError::Malformed),
     }
 }
-fn put_entry(e: &mut Encoder, entry: &Entry) -> Result<(), ReplError> {
+pub(super) fn put_entry(e: &mut Encoder, entry: &Entry) -> Result<(), ReplError> {
     put(e, &entry.id)?;
     put(e, &entry.envelope)?;
     e.put_u64(entry.sequence);
     e.put_u64(entry.ts);
     Ok(())
 }
-fn get_entry(d: &mut Decoder<'_>) -> Result<Entry, ReplError> {
+pub(super) fn get_entry(d: &mut Decoder<'_>) -> Result<Entry, ReplError> {
     Ok(Entry {
         id: fixed(d)?,
         envelope: fixed(d)?,
