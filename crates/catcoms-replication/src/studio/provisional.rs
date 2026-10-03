@@ -22,9 +22,11 @@ pub struct UnconfirmedStudioSeed {
     /// Kept because nothing else can reproduce them once a tail is applied: the tail advances
     /// `projection`, so `projection.checkpoint(..)` stops matching the seed (review finding A2),
     /// and an unconfirmed draft must be based on the seed itself, not on the merged preview.
-    /// Immutable after `parse`; no tail operation touches it. Zeroized on drop like the raw
-    /// transfer buffer it came from. Up to `MAX_CHECKPOINT_BYTES` (2 MiB), retained beside the
-    /// parsed graph for as long as a ready preview is, which the design's memory accounting counts.
+    /// Immutable after `parse`; no tail operation touches it. Zeroizing for consistency with the
+    /// raw transfer buffer it came from, **not** as a confidentiality property: the same content
+    /// lives un-zeroized in `doc` and `projection`. Up to `MAX_CHECKPOINT_BYTES` (2 MiB), retained
+    /// beside the parsed graph for as long as a ready preview is, which the design's memory
+    /// accounting counts.
     seed_bytes: zeroize::Zeroizing<Vec<u8>>,
 }
 impl std::fmt::Debug for UnconfirmedStudioSeed {

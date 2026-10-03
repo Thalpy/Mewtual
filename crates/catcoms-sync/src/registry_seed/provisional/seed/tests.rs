@@ -182,6 +182,23 @@ async fn provisional_seed_nonowner_index_and_flipnote_are_only_unconfirmed_typed
                     seed.bytes(),
                     "the callback exposes exactly the seed the provider served (design 8.1)"
                 );
+                // The view is private Studio content and must not print as such: neither the
+                // typed content nor the seed bytes, which a derived Debug would list in full.
+                let shown = format!("{value:?}");
+                assert!(
+                    !shown.contains("unconfirmed title"),
+                    "the view's Debug printed preview content: {shown}"
+                );
+                let leading = seed.bytes()[..8]
+                    .iter()
+                    .map(u8::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                assert!(
+                    !shown.contains(&leading),
+                    "the view's Debug printed the seed bytes: {shown}"
+                );
+                assert!(shown.contains(&format!("seed_bytes: {}", seed.bytes().len())));
                 match value.projection {
                     StudioProjection::Flipnote(p) => assert_eq!(
                         p.title.as_ref().unwrap().selected.value,

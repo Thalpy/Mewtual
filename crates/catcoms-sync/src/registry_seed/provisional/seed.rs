@@ -44,13 +44,17 @@ pub struct ProvisionalStudioSeedUse<'a> {
     pub seed_bytes: &'a [u8],
 }
 impl fmt::Debug for ProvisionalStudioSeedUse<'_> {
-    // The seed is private Studio content; the derive this replaces would have printed it whole.
+    // The seed is private Studio content, and a derive would print `seed_bytes` as a byte list.
+    // The projection types already redact their own Debug; this view shows only its epoch anyway,
+    // so its redaction does not rest on theirs. Only the scope metadata, the epoch and a length are
+    // shown, as every sibling type (`UnconfirmedStudioSeed`, `StudioOverlay`, `StudioDraftArchive`)
+    // already does.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("ProvisionalStudioSeedUse")
             .field("candidate", &self.candidate)
-            .field("projection", &self.projection)
+            .field("epoch", &self.projection.epoch())
             .field("seed_bytes", &self.seed_bytes.len())
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 impl<T: MeshTransport> fmt::Debug for PendingProvisionalStudioSeed<T> {

@@ -54,5 +54,7 @@ fn provisional_seed_rejects_noncanonical_order_after_raw_and_typed_checks_pass()
             target.read(&logical, 1, &source).unwrap()
         );
         assert!(UnconfirmedStudioSeed::parse(target, &receipt, reordered.bytes()).is_err());
+        // The non-retaining path runs the same canonical re-emission check.
+        assert!(UnconfirmedStudioSeed::parse_graph(target, &receipt, reordered.bytes()).is_err());
     }
 }

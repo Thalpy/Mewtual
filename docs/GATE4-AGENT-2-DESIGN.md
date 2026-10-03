@@ -1050,7 +1050,11 @@ Correction, in three parts:
    `ProvisionalStudioSeedUse` gains `seed_bytes: &'a [u8]`, so every current-scope check the
    accepted contract already performs (mount, numeric server, channel, copied watch, attempt
    generation, current membership, proven provider identity, unexpired hint) gates access to it.
-   No public accessor and no `Clone` is added.
+   No accessor on the sync wrapper and no `Clone` is added. *As built (`3dc1984a`):* the
+   replication type does have a public `seed_bytes()`, reachable only by whoever holds the value.
+   The only production holder is sync's private field, and a caller that could call it on a seed
+   it parsed itself already had those bytes. What keeps this honest is the value, not the
+   accessor, which is why (ii) below hides `parse`.
 3. **Do not trust the retention.** The mint copies the bytes under custody, and the **detached**
    plan stage re-runs `UnconfirmedStudioSeed::parse(target, &receipt, &captured_bytes)` before the
    branch is built. That re-proves the receipt binding, the canonical compact encoding and the
@@ -1120,6 +1124,86 @@ over the same receipt and seed cannot be interchanged.
 > so a Closing basis can be labelled `Unconfirmed` or the reverse. Its one production caller
 > (Agent 1's `overlay_capture.rs`) passes `Closing`, so it is latent. Proposed: take a basis enum
 > and derive the provenance from the basis variant.
+
+> **Design review of the note above, 2026-10-03: (i) ACCEPT WITH CHANGES, (ii) ACCEPT WITH CHANGES.
+> This is the design to build; it replaces the proposal above where they differ.**
+>
+> **(i) Fingerprint.** Dropping the observation time and the MLS epoch loses no fence. Every mint
+> already enforces both through the callback: `head_context_is_current` refuses a hint from any
+> other MLS epoch, and the hint check refuses an expired hint, a removed requester or provider,
+> and a provider whose endpoint no longer proves its device. Present-time evidence belongs to the
+> callback. The fingerprint is the identity of the base content and must be stable in time. Four
+> changes:
+>
+> 1. **The provider is dropped from the fingerprint too.** It is not part of the base's identity:
+>    the receipt names the seed hash, so two providers serve byte-identical content, and 8.6's
+>    `BaseConfirmed` is already provider-agnostic. Keeping it would strand a branch in the
+>    ordinary refresh cycle. A ready preview refreshes through new discovery, whichever member
+>    answers, and the first provider may leave. Either way `append` would refuse `EpochScope`
+>    forever. The fingerprint covers the target, the author, the receipt bytes, the exact seed
+>    bytes and the provenance discriminant.
+> 2. **The domain is derived from persisted state.** `BasisData::fingerprint` hard-codes the
+>    Closing domain and feeds `basis()`, `exact_retry`, `append`, `branch_id`,
+>    `admit_new_branch` and the archive and disposal digests. The nested v1 basis blob is decoded
+>    before the v3 provenance is read, so an Unconfirmed branch reloaded after a restart would
+>    fingerprint under the Closing domain. Its `branch_id` would change and its S3 re-mint would
+>    never match again. So `BasisData` gains a **non-persisted** discriminant that
+>    `StudioOverlayState` sets after decoding (Closing for v1/v2; from the v3 field otherwise).
+>    `fingerprint()` selects its domain by it, and `validate` asserts that it equals
+>    `self.provenance.tag()`. A restart test pins `branch_id` and `basis()` across a reload of an
+>    Unconfirmed branch.
+> 3. **`observed_at_ms` is wall time** (`Clock::now_ms`). Monotonic readings are process-local and
+>    meaningless after a restart. Hint expiry stays monotonic.
+> 4. **Recorded once, and labelled so.** Provenance (first provider, MLS epoch, wall time) is
+>    fixed at admission. Later appends after a re-preview do not update it. Native results say
+>    "first admitted from P at epoch E, time T" and never present it as current evidence.
+>
+> **(ii) Enforcement.** A name gate alone leaves the real door open, because the mint's input is
+> forgeable. `UnconfirmedStudioSeed::parse` is public, so a caller could parse an archive's
+> receipt and seed, an installed source's checkpoint, or copied callback bytes, and then mint. So:
+>
+> 1. **The value is the capability.** `parse` is hidden and renamed for its one production use
+>    (for example `parse_live_transfer`; its only non-test caller is sync's preparation). Both it
+>    and the mint are pinned. Then production `UnconfirmedStudioSeed` values exist only inside
+>    sync's private field. The view hands out `&[u8]`, never `&UnconfirmedStudioSeed`, so no other
+>    crate can name an argument for the mint.
+> 2. **The mint lives on `ChannelSync`**, takes `&PreparedProvisionalStudioSeed`, and runs inside
+>    `with_provisional_studio_hint`. It never hangs off a view: `ProvisionalStudioSeedUse` and
+>    `ProvisionalStudioHintUse` have all-public fields and are constructible elsewhere. Each also
+>    gains a private marker field. The mint passes the MLS epoch and `now_ms` through as
+>    provenance, unfingerprinted.
+> 3. **The primary gate is `clippy.toml` `disallowed-methods`**, naming the hidden parse and the
+>    mint, with `#[allow(clippy::disallowed_methods)]` at the one sanctioned call site. Clippy
+>    resolves names, so `use .. as`, re-exports and method syntax are caught, and it already runs
+>    under `-D warnings` in CI. The `src-tauri` workspace gets a copy. A `scripts/` grep, with an
+>    explicit test allowlist, stays as a second layer.
+> 4. **`new_admitted` is closed before the mint exists.** The dangerous direction is open today:
+>    `validate` catches a Closing basis labelled Unconfirmed (its source identity is nonzero), but
+>    not an Unconfirmed basis labelled Closing. `prepare_handoff`'s guard keys on the label, so a
+>    mislabelled preview could become signed history.
+>    - `new_admitted` and `append` take `enum StudioOverlayBasis { Closing(..), Unconfirmed(..) }`
+>      and derive provenance from the variant, the move `dispose` already made.
+>    - `validate` gains "Closing requires nonzero source identity", after checking that no
+>      fixture relies on zeros.
+>    - Regressions: admitting each variant under the other's label is refused, and a handoff
+>      prepared from an Unconfirmed-domain basis is refused whatever its label.
+>    - This changes Agent 1's `overlay_capture.rs` call site, so it is coordinated with Agent 1
+>      first.
+>
+> **Further hazards recorded for 8.3-8.7:**
+> - S3 re-enters through the target's *current* ready preview, not an `Arc` captured at S1b. A
+>   captured one keeps the seed, the graph and a slot alive past eviction, and its 60 s expiry
+>   would bound the whole Save window. With (i), the fingerprint proves it is the same base across
+>   a refresh.
+> - "No installed source" is re-checked at S3 under custody. Discovery can install a source
+>   while custody is released for the detached plan.
+> - The callback's epoch pin means any MLS commit between S1b and S3 refuses the Save. That is
+>   correct, and the native result must say "preview changed; refresh", not report a failure of
+>   the work.
+> - Part 3's restart reconstruction uses `parse_graph` semantics, which `BasisData::graph`
+>   already uses, so a reload does not retain a second 2 MiB per branch.
+> - 8.6 compares the installed source against the receipt's `seed_change_hash` and
+>   `close_record_hash`, which is what `parse` verified, not only a re-hash of persisted bytes.
 
 ### 8.2 What is persisted, and why the tail is not
 
@@ -1707,7 +1791,11 @@ stage; (2) copy preview at the same shapes, separating destination decode, proje
 sync-only exact retry at the vault cap; (4) the archive record's effect on a five-family inventory
 and on its reference arm; (5) `studio_overlay_lifecycle` on a vault with several large retained
 branches; (6) the retained original seed bytes of finding 6 across three ready previews, as actual
-retained memory rather than an assumed bound.
+retained memory rather than an assumed bound. The real worst case per slot is the graph plus the
+seed plus the applied tail, not the 2 MiB seed alone. Measure two transient peaks as well: up to
+three copies while `prepare` runs (the raw buffer, the document's copy and the retained copy), and
+the Save capture's own copy of `seed_bytes` while an unconfirmed Save is in flight, which Flow S's
+one in-flight Save per document bounds.
 
 - **L1.** Copy planning and the typed projection view require reconstruction; export, archiving and
   `Preserved` disposal do not (corrected by finding 5).

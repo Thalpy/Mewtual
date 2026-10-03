@@ -224,6 +224,48 @@ fn provisional_seed_bytes_are_the_parsed_seed_and_survive_a_tail_that_moves_the_
     }
 }
 
+/// `parse_graph` skips only the retained copy, never a check: it accepts what `parse` accepts,
+/// with the same projection, and refuses what `parse` refuses. Structural today, because both run
+/// `parsed`; pinned so a future divergence between the two cannot pass unnoticed. Local drafts and
+/// archives rebuild their graph through `parse_graph`, so a weaker one would admit a base that the
+/// preview path would have refused. (The reordered-encoding class is pinned in `tests.rs`.)
+#[test]
+fn parse_graph_refuses_exactly_what_parse_refuses() {
+    for art in [false, true] {
+        let f = Fixture::new(art);
+        let (_, graph) =
+            UnconfirmedStudioSeed::parse_graph(f.target, &f.receipt, f.seed.bytes()).unwrap();
+        assert_eq!(&graph, f.candidate().projection());
+
+        let logical = f.target.document(&f.group.group_id()).unwrap();
+        let other_hash = Receipt::sign(
+            logical,
+            0,
+            [7; 32],
+            [0xEE; 32],
+            0,
+            InheritedCheckpoint::EpochZero,
+            &f.outsider,
+        )
+        .unwrap();
+        let bytes = f.seed.bytes();
+        let truncated = &bytes[..bytes.len() - 1];
+        for (case, receipt, bytes) in [
+            ("a receipt naming another seed", &other_hash, bytes),
+            ("truncated bytes", &f.receipt, truncated),
+        ] {
+            assert!(
+                UnconfirmedStudioSeed::parse(f.target, receipt, bytes).is_err(),
+                "precondition, {case}: parse refuses"
+            );
+            assert!(
+                UnconfirmedStudioSeed::parse_graph(f.target, receipt, bytes).is_err(),
+                "{case}: parse_graph must refuse what parse refuses"
+            );
+        }
+    }
+}
+
 #[test]
 fn provisional_tail_rejects_authenticated_relay_forgery_scope_and_typed_semantics() {
     for bad in [
