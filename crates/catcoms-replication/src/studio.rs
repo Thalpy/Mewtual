@@ -34,9 +34,10 @@ pub use overlay::{
     StudioClosingOverlayBasis, StudioDiscardConfirmation, StudioDisposalDecision,
     StudioDisposalMode, StudioDraftArchive, StudioHandoffAuthority, StudioHandoffCandidate,
     StudioHandoffEvidence, StudioHandoffOutcome, StudioHandoffSigning, StudioLocalDraft,
-    StudioOverlay, StudioOverlayAdmission, StudioOverlayDisposal, StudioOverlayEligibility,
-    StudioOverlayManualReason, StudioOverlayProvenance, StudioOverlayRequestClass,
-    StudioOverlaySave, StudioOverlayState, MAX_STUDIO_DRAFT_ARCHIVE_BYTES, MAX_STUDIO_OVERLAY_OPS,
+    StudioOverlay, StudioOverlayAdmission, StudioOverlayBasis, StudioOverlayDisposal,
+    StudioOverlayEligibility, StudioOverlayManualReason, StudioOverlayProvenance,
+    StudioOverlayRequestClass, StudioOverlaySave, StudioOverlayState,
+    StudioUnconfirmedOverlayBasis, MAX_STUDIO_DRAFT_ARCHIVE_BYTES, MAX_STUDIO_OVERLAY_OPS,
 };
 mod epoch;
 pub use epoch::catchup;

@@ -1205,6 +1205,33 @@ over the same receipt and seed cannot be interchanged.
 > - 8.6 compares the installed source against the receipt's `seed_change_hash` and
 >   `close_record_hash`, which is what `parse` verified, not only a re-hash of persisted bytes.
 
+> **As built, 2026-10-03: the basis and its mint**, as reviewed above, with these specifics:
+>
+> - `StudioUnconfirmedOverlayBasis::mint_from_live_preview(seed, receipt, author, provider,
+>   observed_mls_epoch, observed_at_ms)` is hidden. It re-parses the retained bytes against the
+>   receipt, requires the receipt's document id to be the seed's, and bounds the time.
+>   `UnconfirmedStudioSeed::parse` is now the hidden `parse_live_transfer`.
+> - `ChannelSync::mint_unconfirmed_overlay_basis(&prepared)` is the one production caller. It
+>   requires `tail_complete()` and runs inside `with_provisional_studio_hint`, taking the provider
+>   from the hint, the author from its own device, the MLS epoch from its group and `now_ms` from
+>   its clock.
+> - Both names are pinned by the root `clippy.toml` (`disallowed-methods`, which resolves through
+>   the re-export and inside the defining crate; both checked with deliberate probes) and by the
+>   source-scan test `construction_gates_are_called_only_from_their_sanctioned_sites` in
+>   `catcoms-replication`. The scan runs under plain `cargo test`, so it needs no CI change.
+> - Both scoped views are `#[non_exhaustive]`.
+> - `BasisData` carries a non-persisted `BasisKind`, and the state decoder sets it from the
+>   record's provenance. `validate` requires the kind to equal the label, and now also requires a
+>   Closing label to have a nonzero source identity.
+> - `new`, `new_admitted`, `admit_first_branch`, `admit_new_branch`, `request_branch_id` and
+>   `append` take `impl Into<StudioOverlayBasis>`, so Agent 1's call sites compile unchanged.
+>   `new_admitted` refuses a `provenance` argument that disagrees with the basis variant and
+>   stores the variant's own. Removing the redundant argument is left for coordination with
+>   Agent 1.
+> - **Not yet built:** the app side. That is "no installed source" under custody, the S3 re-entry
+>   through the current preview, the 8.3 rails, the 8.7 save path, 8.6 reconciliation and native
+>   results. Each waits on Agent 1's provenance-parameterized Flow S and its structural decode.
+
 ### 8.2 What is persisted, and why the tail is not
 
 The persisted base is the seed checkpoint only, at

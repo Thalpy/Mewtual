@@ -148,20 +148,22 @@ pub enum StudioHandoffEvidence {
 }
 
 impl StudioOverlayState {
-    /// The first branch of a logical document: generation 1, `Closing` provenance.
+    /// The first branch of a logical document: generation 1, with the provenance of its basis.
     ///
     /// Kept as the plain constructor so that every existing caller and every existing vault is
-    /// unchanged, and so a state built this way still encodes as v2 byte-for-byte. A branch admitted
-    /// after a disposal uses [`Self::new_admitted`] instead.
-    pub fn new(basis: &StudioClosingOverlayBasis) -> Self {
+    /// unchanged: from a Closing basis this is generation 1, `Closing`, and still encodes as v2
+    /// byte-for-byte. From an Unconfirmed basis the provenance is not v2-expressible, so the state
+    /// encodes as v3. A branch admitted after a disposal uses [`Self::new_admitted`] instead.
+    pub fn new<'a>(basis: impl Into<StudioOverlayBasis<'a>>) -> Self {
+        let basis = basis.into();
         Self {
-            target: basis.0.target,
+            target: basis.target(),
             active: Some(StudioOverlay::new(basis)),
             prepared: None,
             completed: None,
             disposed: None,
             branch_generation: 1,
-            provenance: StudioOverlayProvenance::Closing,
+            provenance: basis.provenance(),
             minimum_new_basis_closed_epoch: 0,
             legacy: false,
         }
@@ -180,12 +182,25 @@ impl StudioOverlayState {
     ///
     /// Any retained terminal manifest is preserved: a new branch does not erase the acknowledgement
     /// owed for the previous one.
-    pub fn new_admitted(
+    ///
+    /// **`provenance` is checked, never trusted** (design review (ii) change 4). It used to be
+    /// stored as given beside a Closing basis, so nothing tied the label to the base. `validate`
+    /// caught a Closing basis labelled Unconfirmed, because its source identity is nonzero. It did
+    /// not catch the dangerous direction: an Unconfirmed basis labelled Closing, which
+    /// `prepare_handoff`'s guard (keyed on the label) would then let become signed history. The
+    /// provenance is now the basis variant's own, and an argument that disagrees with it is
+    /// refused. The argument stays only so Agent 1's call site compiles unchanged. It is redundant,
+    /// and removing it is a coordinated change.
+    pub fn new_admitted<'a>(
         &self,
-        basis: &StudioClosingOverlayBasis,
+        basis: impl Into<StudioOverlayBasis<'a>>,
         admission: StudioOverlayAdmission,
         provenance: StudioOverlayProvenance,
     ) -> Result<Self, ReplError> {
+        let basis = basis.into();
+        if provenance != basis.provenance() {
+            return Err(ReplError::IntentConflict);
+        }
         let StudioOverlayAdmission::New { generation } = admission else {
             return Err(ReplError::IntentConflict);
         };
@@ -202,7 +217,7 @@ impl StudioOverlayState {
             completed: self.completed.clone(),
             disposed: self.disposed.clone(),
             branch_generation: generation,
-            provenance,
+            provenance: basis.provenance(),
             minimum_new_basis_closed_epoch: self.minimum_new_basis_closed_epoch,
             legacy: false,
         })
@@ -260,10 +275,11 @@ impl StudioOverlayState {
     ///
     /// Exposed so that callers outside this file never compute [`branch_identity`] themselves. A
     /// second copy of the derivation is the defect `next_generation` records.
-    pub fn request_branch_id(
+    pub fn request_branch_id<'a>(
         state: Option<&Self>,
-        fresh: &StudioClosingOverlayBasis,
+        fresh: impl Into<StudioOverlayBasis<'a>>,
     ) -> Result<[u8; 32], ReplError> {
+        let fresh = fresh.into();
         Ok(match state {
             Some(state) => match state.branch_id() {
                 Some(live) => live,
@@ -278,11 +294,11 @@ impl StudioOverlayState {
     /// `New { generation: 1 }` exactly when `branch` is the generation-1 identity of `fresh`, and
     /// the caller then builds the state with [`Self::new`]. There is no retained manifest to
     /// classify against, so every other id is `Stale`.
-    pub fn admit_first_branch(
+    pub fn admit_first_branch<'a>(
         branch: [u8; 32],
-        fresh: &StudioClosingOverlayBasis,
+        fresh: impl Into<StudioOverlayBasis<'a>>,
     ) -> StudioOverlayAdmission {
-        if branch_identity(fresh.fingerprint(), 1) == branch {
+        if branch_identity(fresh.into().fingerprint(), 1) == branch {
             StudioOverlayAdmission::New { generation: 1 }
         } else {
             StudioOverlayAdmission::Stale
@@ -379,18 +395,18 @@ impl StudioOverlayState {
     /// matching. Exhaustion refuses rather than wrapping, because a wrapped generation would let an
     /// ancient request name a live namespace again, which is the one thing this defence exists to
     /// prevent.
-    pub fn admit_new_branch(
+    pub fn admit_new_branch<'a>(
         &self,
         target: StudioTarget,
         branch: [u8; 32],
-        fresh: &StudioClosingOverlayBasis,
+        fresh: impl Into<StudioOverlayBasis<'a>>,
     ) -> Result<StudioOverlayAdmission, ReplError> {
         self.check_target(target)?;
         if self.active.is_some() {
             return Ok(StudioOverlayAdmission::Stale);
         }
         let generation = self.next_generation()?;
-        if branch_identity(fresh.fingerprint(), generation) == branch {
+        if branch_identity(fresh.into().fingerprint(), generation) == branch {
             return Ok(StudioOverlayAdmission::New { generation });
         }
         Ok(StudioOverlayAdmission::Stale)
@@ -538,21 +554,19 @@ impl StudioOverlayState {
             .filter(|c| c.author == author && c.outcome.basis == basis)
             .map(|c| c.outcome.clone()))
     }
-    pub fn append(
+    pub fn append<'a>(
         &mut self,
-        basis: &StudioClosingOverlayBasis,
+        basis: impl Into<StudioOverlayBasis<'a>>,
         ledger: &IntentLedger,
         id: [u8; 32],
         ts: u64,
     ) -> Result<StudioLocalDraft, ReplError> {
-        self.check_target(basis.0.target)?;
+        let basis = basis.into();
+        self.check_target(basis.target())?;
         if self.prepared.is_some() {
             return Err(ReplError::EpochClosed);
         }
-        check_basis_floor(
-            basis.0.receipt.closed_epoch,
-            self.minimum_new_basis_closed_epoch,
-        )?;
+        check_basis_floor(basis.closed_epoch(), self.minimum_new_basis_closed_epoch)?;
         // Appending extends a live branch and never opens one. Opening a branch is a generation event,
         // and it now has exactly two doors, both checked against the namespace: `new` for a document
         // with no record (after `admit_first_branch`), and `new_admitted` after `admit_new_branch`.
@@ -814,6 +828,21 @@ impl StudioOverlayState {
         if let Some(active) = &self.active {
             if active.target() != self.target {
                 return Err(ReplError::EpochScope);
+            }
+            // The label and the base must be the same kind. Constructors derive the label from the
+            // basis and the decoder derives the kind from the label, so this fails only when one
+            // of them is wrong. That is worth refusing outright: the kind picks the fingerprint
+            // domain, and `prepare_handoff` keys on the label.
+            if active.basis_kind() != BasisKind::of(&self.provenance) {
+                return Err(ReplError::Malformed);
+            }
+            // The converse of the Unconfirmed rule above. A Closing basis is minted only from a
+            // settlement plan, which always names its installed source, so an all-zero source
+            // identity under a Closing label could only be a preview base wearing that label.
+            if matches!(self.provenance, StudioOverlayProvenance::Closing)
+                && active.has_zero_source_identity()
+            {
+                return Err(ReplError::Malformed);
             }
             check_basis_floor(
                 active.receipt().closed_epoch,
@@ -1132,6 +1161,13 @@ impl StudioOverlayState {
             (1, StudioOverlayProvenance::Closing, None)
         };
         d.finish().map_err(|_| ReplError::Malformed)?;
+        // The nested blob was decoded before the provenance was known, so its basis came out as
+        // Closing. Give it the record's kind before anything fingerprints the branch, or a reloaded
+        // Unconfirmed branch would change identity across a restart (design review (i) change 2).
+        let mut active = active;
+        if let Some(active) = active.as_mut() {
+            active.set_basis_kind(BasisKind::of(&provenance));
+        }
         let out = Self {
             target,
             active,

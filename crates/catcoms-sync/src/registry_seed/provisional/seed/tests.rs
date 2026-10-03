@@ -208,6 +208,13 @@ async fn provisional_seed_nonowner_index_and_flipnote_are_only_unconfirmed_typed
                 }
             })
             .unwrap();
+        // Design 8.1: no authenticated tail has run yet, so the preview has not shown the whole
+        // current history, and no draft may be based on it.
+        assert!(!prepared.tail_complete());
+        assert!(matches!(
+            client.mint_unconfirmed_overlay_basis(&prepared),
+            Err(SyncError::Unauthorized)
+        ));
         assert_eq!(retained(&client), 1);
         drop(prepared);
         assert_eq!(retained(&client), 0);

@@ -115,7 +115,8 @@ impl Fixture {
         }
     }
     fn candidate(&self) -> UnconfirmedStudioSeed {
-        UnconfirmedStudioSeed::parse(self.target, &self.receipt, self.seed.bytes()).unwrap()
+        UnconfirmedStudioSeed::parse_live_transfer(self.target, &self.receipt, self.seed.bytes())
+            .unwrap()
     }
     fn edit(&mut self, n: u8) -> SealedOp {
         let logical = self.target.document(&self.group.group_id()).unwrap();
@@ -218,8 +219,9 @@ fn provisional_seed_bytes_are_the_parsed_seed_and_survive_a_tail_that_moves_the_
         );
         // And the retained bytes are still the seed in the only sense that matters later: they
         // re-parse, against the same receipt, to the seed's own projection (part 3's re-check).
-        let reparsed = UnconfirmedStudioSeed::parse(f.target, &f.receipt, preview.seed_bytes())
-            .expect("the retained seed re-parses against its receipt");
+        let reparsed =
+            UnconfirmedStudioSeed::parse_live_transfer(f.target, &f.receipt, preview.seed_bytes())
+                .expect("the retained seed re-parses against its receipt");
         assert_eq!(reparsed.projection(), original.projection());
     }
 }
@@ -255,7 +257,7 @@ fn parse_graph_refuses_exactly_what_parse_refuses() {
             ("truncated bytes", &f.receipt, truncated),
         ] {
             assert!(
-                UnconfirmedStudioSeed::parse(f.target, receipt, bytes).is_err(),
+                UnconfirmedStudioSeed::parse_live_transfer(f.target, receipt, bytes).is_err(),
                 "precondition, {case}: parse refuses"
             );
             assert!(

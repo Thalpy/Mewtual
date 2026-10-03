@@ -9,6 +9,7 @@ mod eligibility;
 mod frozen;
 mod handoff;
 mod lifecycle;
+mod unconfirmed;
 
 struct Fixture {
     owner: MlsDevice,

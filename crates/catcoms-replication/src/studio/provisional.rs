@@ -17,12 +17,13 @@ pub struct UnconfirmedStudioSeed {
     applied: HashSet<[u8; 32]>,
     operations: BTreeMap<[u8; 32], crate::LocalIntent>,
     encoded_bytes: usize,
-    /// The exact checkpoint bytes `parse` was given and proved canonical (design 8.1 part 1).
+    /// The exact checkpoint bytes `parse_live_transfer` was given and proved canonical (design
+    /// 8.1 part 1).
     ///
     /// Kept because nothing else can reproduce them once a tail is applied: the tail advances
     /// `projection`, so `projection.checkpoint(..)` stops matching the seed (review finding A2),
     /// and an unconfirmed draft must be based on the seed itself, not on the merged preview.
-    /// Immutable after `parse`; no tail operation touches it. Zeroizing for consistency with the
+    /// Immutable after parsing; no tail operation touches it. Zeroizing for consistency with the
     /// raw transfer buffer it came from, **not** as a confidentiality property: the same content
     /// lives un-zeroized in `doc` and `projection`. Up to `MAX_CHECKPOINT_BYTES` (2 MiB), retained
     /// beside the parsed graph for as long as a ready preview is, which the design's memory
@@ -40,7 +41,18 @@ impl UnconfirmedStudioSeed {
     ///
     /// Retains a copy of `bytes` once they are proved to be the canonical seed (see `seed_bytes`).
     /// A caller that only wants the graph uses [`Self::parse_graph`] and skips that copy.
-    pub fn parse(target: StudioTarget, receipt: &Receipt, bytes: &[u8]) -> Result<Self, ReplError> {
+    ///
+    /// **For `catcoms-sync`'s live seed transfer only** (design 8.1 (ii)). A value of this type is
+    /// what the Unconfirmed basis mint takes, so whoever can make one from bytes of their choosing
+    /// could mint a preview base from an archive, an installed checkpoint or copied callback
+    /// bytes. Hidden and named for its one use, and pinned with the mint by the repository gate:
+    /// `clippy.toml`'s `disallowed-methods` and a source-scan test.
+    #[doc(hidden)]
+    pub fn parse_live_transfer(
+        target: StudioTarget,
+        receipt: &Receipt,
+        bytes: &[u8],
+    ) -> Result<Self, ReplError> {
         let (doc, projection, doc_id) = Self::parsed(target, receipt, bytes)?;
         Ok(Self {
             projection,
@@ -54,7 +66,7 @@ impl UnconfirmedStudioSeed {
         })
     }
 
-    /// The same checks as [`Self::parse`], returning only the private data graph, never a
+    /// The same checks as [`Self::parse_live_transfer`], returning only the private data graph, never a
     /// checkpoint or epoch capability. For local drafts and archives, which hold the seed bytes
     /// themselves and so must not pay for a second retained copy.
     pub(in crate::studio) fn parse_graph(
@@ -105,7 +117,11 @@ impl UnconfirmedStudioSeed {
     pub fn doc_id(&self) -> u128 {
         self.doc_id
     }
-    /// The exact seed checkpoint bytes `parse` accepted, unchanged by any tail since.
+    /// The target this seed was parsed for, which the Unconfirmed basis mint re-parses against.
+    pub(in crate::studio) fn target(&self) -> StudioTarget {
+        self.target
+    }
+    /// The exact seed checkpoint bytes `parse_live_transfer` accepted, unchanged by any tail since.
     ///
     /// Unconfirmed bytes, never authority, exactly like `projection`. **Custody is the holder's
     /// job:** `catcoms-sync` keeps its prepared seed's fields private and exposes these only
