@@ -124,12 +124,21 @@ impl StudioUnconfirmedOverlayBasis {
     /// `construction_gates_are_called_only_from_their_sanctioned_sites`, together with
     /// `UnconfirmedStudioSeed::parse_live_transfer`, the only maker of the value it takes.
     ///
-    /// Does not trust the seed's retention (8.1 part 3). The retained bytes are re-parsed against
-    /// `receipt` from first principles, which re-proves the receipt binding, the canonical
-    /// encoding and the seed-to-projection identity. The document id the receipt names must
-    /// also be the one the seed was parsed for. Only then is the base built, with a zero source
-    /// identity. `observed_at_ms` is wall-clock time (`Clock::now_ms`), because it is persisted
-    /// and a monotonic reading means nothing after a restart.
+    /// **Binds, it does not re-parse.** `receipt` must be exactly the receipt the seed's bytes
+    /// were proven against when sync parsed them (canonical encoding, receipt binding and
+    /// document identity, all at parse time). Equality is the whole check. This runs on the actor
+    /// under the sync borrow, at S1b and again at S3, and a full re-parse of up to 2 MiB would
+    /// stall sync twice per Save. The same crate keeps the original parse off the actor for that
+    /// reason (design review of `47a73463`, M2).
+    ///
+    /// 8.1 part 3, "do not trust the retention", still holds, just off the actor. Every
+    /// `StudioOverlay` reconstruction re-parses its base against its receipt (`BasisData::graph`),
+    /// and that includes the typed reconstruction inside every `append`, so no accepted Save and
+    /// no reload ever rests on the retained bytes unchecked.
+    ///
+    /// The base is built with a zero source identity. `observed_at_ms` is wall-clock time
+    /// (`Clock::now_ms`), because it is persisted and a monotonic reading means nothing after a
+    /// restart.
     #[doc(hidden)]
     pub fn mint_from_live_preview(
         seed: &UnconfirmedStudioSeed,
@@ -140,18 +149,7 @@ impl StudioUnconfirmedOverlayBasis {
         observed_at_ms: u64,
     ) -> Result<Self, ReplError> {
         let target = seed.target();
-        UnconfirmedStudioSeed::parse_graph(target, receipt, seed.seed_bytes())?;
-        let epoch = receipt
-            .closed_epoch
-            .checked_add(1)
-            .ok_or(ReplError::EpochBound)?;
-        let doc_id = crate::epoch_id(
-            receipt.document.doc_type,
-            &receipt.document.logical_key,
-            epoch,
-            &receipt.close_record_hash,
-        );
-        if doc_id != seed.doc_id() {
+        if seed.proven_receipt() != receipt {
             return Err(ReplError::EpochScope);
         }
         integer_bound(observed_at_ms)?;
@@ -402,6 +400,13 @@ impl StudioOverlay {
     /// nonzero value there would be a source claim nothing had authorised.
     pub(in crate::studio) fn has_zero_source_identity(&self) -> bool {
         self.base.source_id == 0 && self.base.source_version == [0; 32]
+    }
+    /// Whether the nested basis names an installed source in BOTH fields: the Closing rule's
+    /// converse of the one above. A settlement-minted Closing basis always passes the epoch's
+    /// document id and a source-version hash, neither of which is zero, so a Closing label over
+    /// a basis missing either one is not a record this build wrote.
+    pub(in crate::studio) fn has_complete_source_identity(&self) -> bool {
+        self.base.source_id != 0 && self.base.source_version != [0; 32]
     }
     /// Exact saved acceptance can be acknowledged after source replacement, without minting
     /// a fresh basis or allowing an append. Full envelope equality is required independently.

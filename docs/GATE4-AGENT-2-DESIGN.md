@@ -1208,8 +1208,15 @@ over the same receipt and seed cannot be interchanged.
 > **As built, 2026-10-03: the basis and its mint**, as reviewed above, with these specifics:
 >
 > - `StudioUnconfirmedOverlayBasis::mint_from_live_preview(seed, receipt, author, provider,
->   observed_mls_epoch, observed_at_ms)` is hidden. It re-parses the retained bytes against the
->   receipt, requires the receipt's document id to be the seed's, and bounds the time.
+>   observed_mls_epoch, observed_at_ms)` is hidden. It requires `receipt` to *equal* the receipt
+>   the seed was proven against at parse time, which the seed now records, and it bounds the time.
+>   It does **not** re-parse. The mint runs on the actor under the sync borrow at S1b and again at
+>   S3, and a full parse of up to 2 MiB there would stall sync twice per Save. The same crate keeps
+>   the original parse off the actor for that reason (review of `47a73463`, M2). Equality is
+>   strictly tighter than a re-parse: it also refuses a different, validly signed receipt over the
+>   same seed. Part 3's "do not trust the retention" still holds off the actor. Every
+>   reconstruction re-parses its base against its receipt (`BasisData::graph`), including the
+>   typed reconstruction inside every `append` and every reload.
 >   `UnconfirmedStudioSeed::parse` is now the hidden `parse_live_transfer`.
 > - `ChannelSync::mint_unconfirmed_overlay_basis(&prepared)` is the one production caller. It
 >   requires `tail_complete()` and runs inside `with_provisional_studio_hint`, taking the provider
@@ -1222,7 +1229,9 @@ over the same receipt and seed cannot be interchanged.
 > - Both scoped views are `#[non_exhaustive]`.
 > - `BasisData` carries a non-persisted `BasisKind`, and the state decoder sets it from the
 >   record's provenance. `validate` requires the kind to equal the label, and now also requires a
->   Closing label to have a nonzero source identity.
+>   Closing label to have **both** source-identity fields nonzero. A generation-1 relabel is
+>   already refused by the canonical re-encode check; from generation 2 on, this rule is the
+>   defence, and a byte-surgery regression on a generation-2 preview record pins it.
 > - `new`, `new_admitted`, `admit_first_branch`, `admit_new_branch`, `request_branch_id` and
 >   `append` take `impl Into<StudioOverlayBasis>`, so Agent 1's call sites compile unchanged.
 >   `new_admitted` refuses a `provenance` argument that disagrees with the basis variant and
@@ -1231,6 +1240,17 @@ over the same receipt and seed cannot be interchanged.
 > - **Not yet built:** the app side. That is "no installed source" under custody, the S3 re-entry
 >   through the current preview, the 8.3 rails, the 8.7 save path, 8.6 reconciliation and native
 >   results. Each waits on Agent 1's provenance-parameterized Flow S and its structural decode.
+> - **Required with the app slice, not optional:** the receiver's automatic handoff selector
+>   (`studio/receiver/handoff.rs`, the probe that picks a live overlay authored by this device)
+>   must skip non-Closing provenance and memoise it as quiet. Today it would select an
+>   Unconfirmed branch, capture authority, run the detached H2, be refused by provenance, and
+>   back off and retry every 30 to 300 s for as long as the branch exists: a full `decode_vault`
+>   each time, and diagnostics showing a handoff being attempted. The core fence holds, so this is
+>   cost and truthfulness, not safety. It ships with a receiver regression once the app can
+>   produce the state (review of `47a73463`, M1).
+> - **Native results, when built:** a Closing Save against a document holding an Unconfirmed
+>   branch, or the reverse, refuses with `EpochScope` from `append`. It must say "a draft of the
+>   other kind holds this document", not report a stale basis.
 
 ### 8.2 What is persisted, and why the tail is not
 

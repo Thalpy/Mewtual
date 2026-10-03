@@ -8,10 +8,12 @@
 // (ii)). These tests are the other place that legitimately calls them.
 #![allow(clippy::disallowed_methods)]
 use super::archive::branch;
+use super::handoff::{branch as transferable_branch, signing};
 use super::*;
 use crate::studio::{
-    StudioDiscardConfirmation, StudioDisposalDecision, StudioOverlayAdmission, StudioOverlayBasis,
-    StudioOverlayProvenance, StudioUnconfirmedOverlayBasis, UnconfirmedStudioSeed,
+    StudioDiscardConfirmation, StudioDisposalDecision, StudioDraftArchive, StudioOverlayAdmission,
+    StudioOverlayBasis, StudioOverlayProvenance, StudioOverlayRequestClass,
+    StudioUnconfirmedOverlayBasis, UnconfirmedStudioSeed,
 };
 use crate::{InheritedCheckpoint, IntentLedger};
 
@@ -21,19 +23,26 @@ struct Bases {
     closing: StudioClosingOverlayBasis,
     seed: UnconfirmedStudioSeed,
     receipt: Receipt,
+    target: StudioTarget,
 }
 
 fn bases(f: &mut Fixture) -> Bases {
     let (state, _, _, closing) = branch(f, 0);
+    seed_of(&state, closing)
+}
+
+/// The same receipt and seed a Closing branch was built on, re-parsed as a preview would hold it.
+fn seed_of(state: &StudioOverlayState, closing: StudioClosingOverlayBasis) -> Bases {
     let overlay = state.overlay().unwrap();
     let receipt = overlay.receipt().clone();
+    let target = overlay.target();
     let seed =
-        UnconfirmedStudioSeed::parse_live_transfer(overlay.target(), &receipt, overlay.seed())
-            .unwrap();
+        UnconfirmedStudioSeed::parse_live_transfer(target, &receipt, overlay.seed()).unwrap();
     Bases {
         closing,
         seed,
         receipt,
+        target,
     }
 }
 
@@ -173,14 +182,24 @@ fn the_unconfirmed_fingerprint_binds_the_author_and_not_the_admission_facts() {
     );
 }
 
-/// Design 8.1 part 3: the mint does not trust the seed's retention. A receipt that names another
-/// seed is refused when the retained bytes are re-parsed against it, and an observation time
-/// outside the integer bound is refused before anything is built.
+/// The mint binds to the exact receipt the seed was proven against when it was parsed, by
+/// equality, with no re-parse on the actor (review of `47a73463`, M2). That is strictly tighter
+/// than a re-parse. A receipt naming another seed is refused, and so is a different, validly signed
+/// receipt over the SAME seed, which a re-parse would have accepted. An observation time outside
+/// the integer bound is refused before anything is built.
 #[test]
-fn the_mint_re_parses_the_retained_seed_against_the_receipt_it_is_given() {
+fn the_mint_binds_the_receipt_the_seed_was_proven_against() {
     let mut f = Fixture::new(false);
     let b = bases(&mut f);
     let owner = f.owner.device_id();
+    let refused = |receipt: &Receipt| {
+        matches!(
+            StudioUnconfirmedOverlayBasis::mint_from_live_preview(
+                &b.seed, receipt, owner, owner, 1, 1
+            ),
+            Err(ReplError::EpochScope)
+        )
+    };
     let other_seed = Receipt::sign(
         b.receipt.document.clone(),
         b.receipt.closed_epoch,
@@ -191,15 +210,26 @@ fn the_mint_re_parses_the_retained_seed_against_the_receipt_it_is_given() {
         &f.owner,
     )
     .unwrap();
-    assert!(StudioUnconfirmedOverlayBasis::mint_from_live_preview(
-        &b.seed,
-        &other_seed,
-        owner,
-        owner,
-        1,
-        1
+    assert!(refused(&other_seed), "a receipt naming another seed");
+
+    let other_signer = Receipt::sign(
+        b.receipt.document.clone(),
+        b.receipt.closed_epoch,
+        b.receipt.close_record_hash,
+        b.receipt.seed_change_hash,
+        0,
+        InheritedCheckpoint::EpochZero,
+        &MlsDevice::generate().unwrap(),
     )
-    .is_err());
+    .unwrap();
+    assert_ne!(other_signer, b.receipt);
+    assert!(
+        UnconfirmedStudioSeed::parse_live_transfer(b.target, &other_signer, b.seed.seed_bytes())
+            .is_ok(),
+        "precondition: the re-signed receipt re-parses the same seed, so only equality refuses it"
+    );
+    assert!(refused(&other_signer), "another receipt over the same seed");
+
     assert!(matches!(
         StudioUnconfirmedOverlayBasis::mint_from_live_preview(
             &b.seed,
@@ -323,4 +353,154 @@ fn an_unconfirmed_branch_is_never_prepared_for_handoff() {
         state.prepare_handoff_detached(source, ledger, authority),
         Err(ReplError::EpochAuthority)
     ));
+}
+
+/// The decode-path fence against a relabelled record (review of `47a73463`, M3).
+///
+/// An Unconfirmed record whose outer label is rewritten to Closing would decode, fingerprint under
+/// the Closing domain, and pass the handoff guard, which keys on the label. Only generation 2 and
+/// later can carry the relabel: at generation 1 the result is v2-expressible and the canonical
+/// re-encode check refuses it already. So the record here is a generation-2 preview branch
+/// admitted after a transfer, which leaves no disposal manifest and so ends in exactly the
+/// generation, the provenance block and a zero presence byte. Its only defence is "a Closing label
+/// needs a complete source identity", and removing that rule makes this test fail.
+#[test]
+fn a_generation_two_preview_record_relabelled_closing_is_refused() {
+    let mut f = Fixture::new(true);
+    let (metadata, ledger, _) = transferable_branch(&mut f, 2);
+    let mut batch = signing(&mut f, &metadata, &ledger);
+    while batch.sign_next(&f.owner, &f.group, 0).unwrap() {}
+    let (candidate, prepared) = batch.finish().unwrap().into_parts();
+    let transferred = prepared.complete(&candidate, &ledger).unwrap();
+
+    // The transfer raised the basis floor, so generation 2 needs a base from the successor's own
+    // close (as lifecycle's crafted-record test explains), here taken as a preview would hold it.
+    let first = metadata.overlay().unwrap().receipt().clone();
+    f.fill();
+    let decision = f.decide(Some(&first));
+    let _plan = f.plan(&decision);
+    let closing = f
+        .source
+        .prepare_closing_overlay(decision.close(), &f.group, 0)
+        .unwrap();
+    let state = StudioOverlayState::new(&closing);
+    let b = seed_of(&state, closing);
+    let owner = f.owner.device_id();
+    let preview = mint(&b, owner, owner, 5, 1_700_000_000_000);
+    let mut revived = IntentLedger::new(ledger.document().clone());
+    let body = f.title_body("generation two from a preview");
+    let op = f.domain(body);
+    let id = revived.prepare(owner, op).unwrap();
+    let mut g2 = transferred
+        .new_admitted(
+            &preview,
+            StudioOverlayAdmission::New { generation: 2 },
+            preview.provenance(),
+        )
+        .unwrap();
+    g2.append(&preview, &revived, id, 900)
+        .expect("precondition: the generation-2 preview branch accepts its first Save");
+    let bytes = g2.encode_vault(&revived).unwrap();
+    StudioOverlayState::decode_vault(&bytes, &revived)
+        .expect("precondition: the genuine record decodes");
+
+    // generation(8) | tag 1 | provider (4-byte length + 32) | epoch(8) | at(8) | presence 0.
+    let n = bytes.len();
+    assert_eq!(bytes[0], 3);
+    assert_eq!(
+        bytes[n - 1],
+        0,
+        "no disposal manifest, or the offsets are wrong"
+    );
+    assert_eq!(
+        u64::from_be_bytes(bytes[n - 62..n - 54].try_into().unwrap()),
+        2,
+        "the generation must sit right before the provenance block"
+    );
+    assert_eq!(
+        bytes[n - 54],
+        1,
+        "the Unconfirmed tag follows the generation"
+    );
+    let relabelled = [&bytes[..n - 54], &[0u8, 0u8][..]].concat();
+    assert!(matches!(
+        StudioOverlayState::decode_vault(&relabelled, &revived),
+        Err(ReplError::Malformed)
+    ));
+    assert!(matches!(
+        StudioOverlayState::decode_vault_structural(&relabelled, &revived),
+        Err(ReplError::Malformed)
+    ));
+}
+
+/// An Unconfirmed branch's identity carries through everything that records it: an archive of the
+/// reloaded branch, a disposal manifest and its round trip, and the classification of a delayed
+/// request against that manifest. After the disposal a Closing branch is admitted at the next
+/// generation, so the kinds can alternate across generations (review of `47a73463`, L1).
+#[test]
+fn an_unconfirmed_branch_archives_and_disposes_under_its_own_basis() {
+    let mut f = Fixture::new(false);
+    let b = bases(&mut f);
+    let owner = f.owner.device_id();
+    let preview = mint(&b, owner, owner, 2, 1_700_000_000_000);
+    let (ledger, id) = one_intent(&mut f, "preview work, archived then disposed");
+    let intent = ledger
+        .pending()
+        .find(|(key, _)| **key == id)
+        .map(|(_, intent)| intent.clone())
+        .unwrap();
+    let mut state = StudioOverlayState::new(&preview);
+    state.append(&preview, &ledger, id, 1).unwrap();
+    let read =
+        StudioOverlayState::decode_vault(&state.encode_vault(&ledger).unwrap(), &ledger).unwrap();
+    let branch = read.branch_id().unwrap();
+    let content = read.branch_content(&ledger).unwrap();
+
+    let archive = StudioDraftArchive::from_branch(
+        read.overlay().unwrap(),
+        &ledger,
+        read.provenance(),
+        true,
+        branch,
+        content,
+        read.branch_generation(),
+    )
+    .unwrap();
+    assert_eq!(archive.basis(), preview.fingerprint());
+    let decoded = StudioDraftArchive::decode(&archive.encode().unwrap()).unwrap();
+    assert_eq!(decoded.basis(), preview.fingerprint());
+    assert_eq!(decoded.provenance(), preview.provenance());
+
+    let (after, _) = read
+        .dispose(
+            &ledger,
+            StudioDisposalDecision::Discard(
+                StudioDiscardConfirmation::parse(StudioDiscardConfirmation::TOKEN).unwrap(),
+            ),
+            content,
+            1,
+            1,
+        )
+        .unwrap();
+    let after =
+        StudioOverlayState::decode_vault(&after.encode_vault(&ledger).unwrap(), &ledger).unwrap();
+    let manifest = after.disposed().unwrap();
+    assert_eq!(manifest.basis, preview.fingerprint());
+    assert_eq!(manifest.branch, branch);
+    assert_eq!(manifest.provenance, preview.provenance());
+    assert!(matches!(
+        after.classify_request(b.target, branch, &intent).unwrap(),
+        StudioOverlayRequestClass::Disposed(_)
+    ));
+    assert_eq!(
+        after
+            .new_admitted(
+                &b.closing,
+                StudioOverlayAdmission::New { generation: 2 },
+                StudioOverlayProvenance::Closing
+            )
+            .unwrap()
+            .provenance(),
+        StudioOverlayProvenance::Closing
+    );
 }

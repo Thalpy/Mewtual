@@ -31,6 +31,12 @@ fn rust_files(dir: &Path, out: &mut Vec<PathBuf>) {
     for entry in entries.flatten() {
         let path = entry.path();
         if path.is_dir() {
+            // Build output and dependencies are not source, and src-tauri keeps its own `target`.
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if name == "target" || name == "node_modules" || name.starts_with('.') {
+                continue;
+            }
             rust_files(&path, out);
         } else if path.extension().is_some_and(|e| e == "rs") {
             out.push(path);
@@ -42,7 +48,9 @@ fn rust_files(dir: &Path, out: &mut Vec<PathBuf>) {
 fn construction_gates_are_called_only_from_their_sanctioned_sites() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let mut files = Vec::new();
-    for dir in ["crates", "bins", "apps/desktop/src-tauri/src"] {
+    // The whole src-tauri workspace, not only `src`: its integration tests and `build.rs` depend
+    // on catcoms-replication and catcoms-sync directly, and CI runs no Clippy over that workspace.
+    for dir in ["crates", "bins", "apps/desktop/src-tauri"] {
         rust_files(&root.join(dir), &mut files);
     }
     assert!(
@@ -66,7 +74,11 @@ fn construction_gates_are_called_only_from_their_sanctioned_sites() {
             if !text.contains(name) {
                 continue;
             }
-            if relative == "crates/catcoms-sync/src/registry_seed/provisional/seed.rs" {
+            // A call, not a mention: a surviving comment must not satisfy the non-vacuity check
+            // after the call itself has gone.
+            if relative == "crates/catcoms-sync/src/registry_seed/provisional/seed.rs"
+                && text.contains(&format!("{name}("))
+            {
                 sanctioned_caller_seen[n] = true;
             }
             if !is_sanctioned(&relative) {

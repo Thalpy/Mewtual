@@ -29,6 +29,10 @@ pub struct UnconfirmedStudioSeed {
     /// beside the parsed graph for as long as a ready preview is, which the design's memory
     /// accounting counts.
     seed_bytes: zeroize::Zeroizing<Vec<u8>>,
+    /// The receipt `seed_bytes` were proven against: canonical encoding, receipt binding and
+    /// document identity, all at parse time. The Unconfirmed basis mint binds to it by equality
+    /// rather than re-parsing on the actor; see `StudioUnconfirmedOverlayBasis`.
+    proven_receipt: Receipt,
 }
 impl std::fmt::Debug for UnconfirmedStudioSeed {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -63,6 +67,7 @@ impl UnconfirmedStudioSeed {
             operations: BTreeMap::new(),
             encoded_bytes: 0,
             seed_bytes: zeroize::Zeroizing::new(bytes.to_vec()),
+            proven_receipt: receipt.clone(),
         })
     }
 
@@ -117,9 +122,13 @@ impl UnconfirmedStudioSeed {
     pub fn doc_id(&self) -> u128 {
         self.doc_id
     }
-    /// The target this seed was parsed for, which the Unconfirmed basis mint re-parses against.
+    /// The target this seed was parsed for, which the Unconfirmed basis inherits.
     pub(in crate::studio) fn target(&self) -> StudioTarget {
         self.target
+    }
+    /// The receipt the retained seed bytes were proven against when this value was parsed.
+    pub(in crate::studio) fn proven_receipt(&self) -> &Receipt {
+        &self.proven_receipt
     }
     /// The exact seed checkpoint bytes `parse_live_transfer` accepted, unchanged by any tail since.
     ///

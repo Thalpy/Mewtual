@@ -837,10 +837,12 @@ impl StudioOverlayState {
                 return Err(ReplError::Malformed);
             }
             // The converse of the Unconfirmed rule above. A Closing basis is minted only from a
-            // settlement plan, which always names its installed source, so an all-zero source
-            // identity under a Closing label could only be a preview base wearing that label.
+            // settlement plan, which always names its installed source in both fields, so a
+            // Closing label over a basis missing either is a preview base wearing that label, or
+            // corruption. At generation 1 the canonical re-encode check already refuses such a
+            // relabel (it would encode as v2); from generation 2 on, this rule is the defence.
             if matches!(self.provenance, StudioOverlayProvenance::Closing)
-                && active.has_zero_source_identity()
+                && !active.has_complete_source_identity()
             {
                 return Err(ReplError::Malformed);
             }
