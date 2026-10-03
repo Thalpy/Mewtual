@@ -32,9 +32,12 @@ fn rust_files(dir: &Path, out: &mut Vec<PathBuf>) {
         let path = entry.path();
         if path.is_dir() {
             // Build output and dependencies are not source, and src-tauri keeps its own `target`.
+            // A build directory is recognised by the CACHEDIR.TAG Cargo writes into it, not by its
+            // name alone, so a source module that happens to be called `target` is still scanned.
             let name = entry.file_name();
             let name = name.to_string_lossy();
-            if name == "target" || name == "node_modules" || name.starts_with('.') {
+            let build_output = name == "target" && path.join("CACHEDIR.TAG").exists();
+            if build_output || name == "node_modules" || name.starts_with('.') {
                 continue;
             }
             rust_files(&path, out);

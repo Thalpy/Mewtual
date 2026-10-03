@@ -677,21 +677,11 @@ impl StudioOverlayState {
             return Ok(StudioHandoffEvidence::Hold);
         }
         let overlay = self.active.as_ref().ok_or(ReplError::Malformed)?;
-        let mut count = 0;
-        for ((_, intent), expected) in overlay.checked_entries(ledger)?.into_iter().zip(&p.signed) {
-            match source.overlay_signed_hash(intent) {
-                Ok(Some(actual)) if &actual == expected => count += 1,
-                Ok(None) => {}
-                _ => return Ok(StudioHandoffEvidence::Hold),
-            }
-        }
-        Ok(if count == p.signed.len() {
-            StudioHandoffEvidence::Complete
-        } else if count == 0 {
-            StudioHandoffEvidence::Absent
-        } else {
-            StudioHandoffEvidence::Hold
-        })
+        Ok(classify_signed(
+            overlay.checked_entries(ledger)?,
+            &p.signed,
+            |intent| source.overlay_signed_hash(intent),
+        ))
     }
     /// [`Self::evidence`] over authenticated vault source bytes, WITHOUT restoring the source.
     ///
@@ -704,8 +694,9 @@ impl StudioOverlayState {
     ///
     /// **The agreement is over restorable records.** A record whose framing decodes but which
     /// `StudioEpoch::restore` would refuse (a bad signature, a duplicate id, an inconsistent delta)
-    /// can read `Complete` or `Absent` here, where the resolution fails with an error instead. The app's own snapshots are restorable by construction, so this is a writer
-    /// bug rather than a reachable state, and the direction that matters holds unconditionally:
+    /// can read `Complete` or `Absent` here, where the resolution fails with an error instead.
+    /// The app's own snapshots are restorable by construction, so this is a writer bug rather
+    /// than a reachable state, and the direction that matters holds unconditionally:
     /// `Hold` here means the resolution refuses. The app's `evidence_both_ways` test helper
     /// (`epoch_studio::tests::rotation::overlay::handoff::classification`) holds the two together
     /// for Absent, Complete, partial Hold and scope Hold.
@@ -730,21 +721,11 @@ impl StudioOverlayState {
         }
         let operations = shape.signed_operations()?;
         let overlay = self.active.as_ref().ok_or(ReplError::Malformed)?;
-        let mut count = 0;
-        for ((_, intent), expected) in overlay.checked_entries(ledger)?.into_iter().zip(&p.signed) {
-            match crate::studio::epoch::overlay_signed_hash_in(&operations, intent) {
-                Ok(Some(actual)) if &actual == expected => count += 1,
-                Ok(None) => {}
-                _ => return Ok(StudioHandoffEvidence::Hold),
-            }
-        }
-        Ok(if count == p.signed.len() {
-            StudioHandoffEvidence::Complete
-        } else if count == 0 {
-            StudioHandoffEvidence::Absent
-        } else {
-            StudioHandoffEvidence::Hold
-        })
+        Ok(classify_signed(
+            overlay.checked_entries(ledger)?,
+            &p.signed,
+            |intent| crate::studio::epoch::overlay_signed_hash_in(&operations, intent),
+        ))
     }
     pub fn matches_source_before(&self, source: &mut StudioEpoch) -> Result<bool, ReplError> {
         let hash = source_hash(source)?;
@@ -1185,6 +1166,36 @@ impl StudioOverlayState {
             return Err(ReplError::Malformed);
         }
         Ok(out)
+    }
+}
+
+/// The one definition of how a Prepared branch's evidence is counted, shared by the restored
+/// reading (`evidence`) and the structural one (`evidence_in_vault`) so the two cannot drift.
+///
+/// `held` answers, for one accepted entry, the hash of the signed operation the source holds for
+/// it, if any. Every entry must be held with exactly the hash the Prepared manifest recorded
+/// (Complete), or none may be held at all (Absent). Anything else is Hold: a partial set, a
+/// different signed operation, or an unreadable one. The mutation harness anchors on the
+/// comparison line below, so it covers both readings at once.
+fn classify_signed(
+    entries: Vec<(&Entry, &LocalIntent)>,
+    signed: &[[u8; 32]],
+    mut held: impl FnMut(&LocalIntent) -> Result<Option<[u8; 32]>, ReplError>,
+) -> StudioHandoffEvidence {
+    let mut count = 0;
+    for ((_, intent), expected) in entries.into_iter().zip(signed) {
+        match held(intent) {
+            Ok(Some(actual)) if &actual == expected => count += 1,
+            Ok(None) => {}
+            _ => return StudioHandoffEvidence::Hold,
+        }
+    }
+    if count == signed.len() {
+        StudioHandoffEvidence::Complete
+    } else if count == 0 {
+        StudioHandoffEvidence::Absent
+    } else {
+        StudioHandoffEvidence::Hold
     }
 }
 

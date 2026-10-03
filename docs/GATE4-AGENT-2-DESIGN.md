@@ -1217,6 +1217,8 @@ over the same receipt and seed cannot be interchanged.
 >   same seed. Part 3's "do not trust the retention" still holds off the actor. Every
 >   reconstruction re-parses its base against its receipt (`BasisData::graph`), including the
 >   typed reconstruction inside every `append` and every reload.
+>   Through sync the equality cannot fail today, because both operands are the same hint's
+>   receipt. Its job is to pin a future refactor of sync, not to catch a live condition.
 >   `UnconfirmedStudioSeed::parse` is now the hidden `parse_live_transfer`.
 > - `ChannelSync::mint_unconfirmed_overlay_basis(&prepared)` is the one production caller. It
 >   requires `tail_complete()` and runs inside `with_provisional_studio_hint`, taking the provider
@@ -1248,6 +1250,10 @@ over the same receipt and seed cannot be interchanged.
 >   each time, and diagnostics showing a handoff being attempted. The core fence holds, so this is
 >   cost and truthfulness, not safety. It ships with a receiver regression once the app can
 >   produce the state (review of `47a73463`, M1).
+> - **Also required with the app slice:** the first `append` of an Unconfirmed branch must run
+>   off the actor, in the detached plan stage. That `append` is where the base is now re-parsed
+>   (up to 2 MiB). Run on the actor, it would put back the very stall the mint was changed to
+>   avoid, and invariant I-J's "detached re-parse" would hold in name only.
 > - **Native results, when built:** a Closing Save against a document holding an Unconfirmed
 >   branch, or the reverse, refuses with `EpochScope` from `append`. It must say "a draft of the
 >   other kind holds this document", not report a stale basis.
