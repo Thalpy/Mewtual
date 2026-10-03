@@ -117,6 +117,86 @@ fn studio_handoff_preparation_one_turn_and_full_output_match_ordinary_edits() {
     }
 }
 
+/// `check_handoff_authority_after_resolution` answers for the active branch a resolution returns
+/// to, and only when the caller holds the evidence that says it will return there.
+///
+/// P2 asks it of a Prepared branch whose evidence is Absent. A review found the "only after
+/// Absent" contract documented but not enforced: on a Hold or Complete branch it would have given
+/// the verdict of an active branch that branch never becomes again. Here every evidence value is
+/// tried, and the Absent answer is compared, in both directions, with what the returned branch's
+/// own `handoff_authority` says.
+#[test]
+fn authority_after_resolution_answers_only_for_the_branch_absent_evidence_returns() {
+    for art in [false, true] {
+        let mut f = Fixture::new(art);
+        let (metadata, ledger, _) = branch(&mut f, 2);
+        let mut batch = signing(&mut f, &metadata, &ledger);
+        while batch.sign_next(&f.owner, &f.group, 0).unwrap() {}
+        let (candidate, prepared) = batch.finish().unwrap().into_parts();
+        assert!(
+            matches!(
+                prepared.handoff_authority(&f.owner, &f.group, 0),
+                Err(ReplError::EpochClosed)
+            ),
+            "precondition: the minting check refuses anything still Prepared"
+        );
+
+        // Absent: the pristine successor holds none of the branch. The verdict must be the
+        // returned branch's, for a tenure that passes and one that does not.
+        let absent = prepared.evidence(&f.source, &ledger).unwrap();
+        assert_eq!(absent, StudioHandoffEvidence::Absent);
+        let returned = prepared.return_to_active(&f.source, &ledger).unwrap();
+        assert!(
+            returned.handoff_authority(&f.owner, &f.group, 0).is_ok(),
+            "precondition: the returned branch is transferable under its own tenure"
+        );
+        for tenure in [0, 7] {
+            assert_eq!(
+                prepared
+                    .check_handoff_authority_after_resolution(
+                        Some(absent),
+                        &f.owner,
+                        &f.group,
+                        tenure
+                    )
+                    .is_ok(),
+                returned
+                    .handoff_authority(&f.owner, &f.group, tenure)
+                    .is_ok(),
+                "tenure {tenure}: Absent must answer as the branch it returns to"
+            );
+        }
+
+        // Anything else: the branch is not going back to active, so no verdict is given for it.
+        assert_eq!(
+            prepared.evidence(&candidate, &ledger).unwrap(),
+            StudioHandoffEvidence::Complete,
+            "precondition: the candidate holds the whole branch"
+        );
+        for evidence in [
+            Some(StudioHandoffEvidence::Complete),
+            Some(StudioHandoffEvidence::Hold),
+            None,
+        ] {
+            assert!(
+                matches!(
+                    prepared
+                        .check_handoff_authority_after_resolution(evidence, &f.owner, &f.group, 0),
+                    Err(ReplError::EpochClosed)
+                ),
+                "{evidence:?} must not get an active branch's verdict"
+            );
+        }
+
+        // An Active branch is asked exactly as `handoff_authority` asks it; evidence is ignored.
+        for evidence in [None, Some(StudioHandoffEvidence::Hold)] {
+            assert!(metadata
+                .check_handoff_authority_after_resolution(evidence, &f.owner, &f.group, 0)
+                .is_ok());
+        }
+    }
+}
+
 #[test]
 fn studio_handoff_preparation_partial_finish_and_changed_source_refuse() {
     for art in [false, true] {

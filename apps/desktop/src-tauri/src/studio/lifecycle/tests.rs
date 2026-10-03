@@ -124,10 +124,14 @@ fn a_disposal_that_meant_to_preserve_and_lost_its_kind_is_refused_not_guessed() 
 
 /// Every manual reason's wire name, pinned to design section 11's `OverlayManualReason` union.
 ///
-/// The renderer switches on these literals, so a misspelt one reaches the UI as an unknown reason
+/// A renderer will switch on these literals, and a misspelt one would reach it as an unknown reason
 /// with no compile error on either side; the fixture test only checks that `manualReason` is a
 /// string. The `expected` match has no catch-all, so a new reason fails to compile here until its
 /// name is written down, and the names must stay distinct.
+///
+/// **One-sided today.** No frontend code consumes `manualReason` yet (the commands are unregistered
+/// and section 11's TypeScript union is Agent 4's to apply), so this pins only the native side.
+/// Whoever adds the renderer needs a matching test on the TypeScript side.
 #[test]
 fn every_manual_reason_crosses_under_its_section_11_name() {
     use catcoms_app::studio::types::{

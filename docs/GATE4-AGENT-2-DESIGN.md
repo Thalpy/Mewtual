@@ -1013,7 +1013,8 @@ after a rewind. Agent 1's `Hold` outcomes map onto these reasons, satisfying its
 > `NotReplayable` (from an inspection's rebuild, or from the lifecycle row when an Index entry
 > cannot even be decoded). `TenureImported` is split from `TenureUnknown` (2026-10-03, Agent 1's
 > question) for what the device holds: an unverifiable imported value, or nothing. Not for how they
-> end: both are cleared by the same event, the next owner transition this device observes, and
+> end: both are cleared by the same event, the next contiguous step that derives a tenure here (an
+> owner change, or the committer's membership restarting), and
 > neither by waiting alone (pinned in `catcoms-sync`). A Prepared branch is classified by what H1
 > does with it, starting with its resolution's own evidence, read from the record's framing
 > (`StudioOverlayState::evidence_in_vault`, held to `evidence` by an agreement test): `Hold` is
@@ -1076,6 +1077,49 @@ must be true; the target's logical document must have **no installed source**; t
 provider must both be current members and the provider the proven endpoint identity of the hint's
 peer. `fingerprint()` covers the provenance discriminant, so a `Closing` and an `Unconfirmed` basis
 over the same receipt and seed cannot be interchanged.
+
+> **Implementation note, 2026-10-03: two questions for the next design review before the mint is
+> built.** Parts 1 and 2 are built (`3dc1984a`): the retained `seed_bytes`, and
+> `ProvisionalStudioSeedUse.seed_bytes` inside the scoped callback.
+>
+> **(i) What the fingerprint may cover.** The text above has the basis bind the MLS epoch and the
+> receiver-clock observation time, and has the S3 re-mint "require the same fingerprint". Both
+> cannot hold if the fingerprint covers the observation time: a re-mint is a later observation,
+> so it never matches. The same problem hits every later Save to an existing unconfirmed branch,
+> because `StudioOverlay::append` requires the branch's fixed basis fingerprint to equal the fresh
+> mint's. Covering the MLS epoch has a milder form of it: any unrelated commit between S1b and S3
+> would refuse the Save.
+>
+> Proposed: the fingerprint covers the target, the author, the receipt bytes, the exact seed
+> bytes, the provider and the provenance discriminant, under its own derive-key domain
+> (`catcoms/studio-unconfirmed-overlay-basis/v1`). The Closing domain and encoding stay unchanged,
+> so persisted v1/v2 branches keep their fingerprints. The MLS epoch and the observation time are
+> recorded once, in `StudioOverlayProvenance::Unconfirmed`, when the branch is admitted. They are
+> facts about that admission, not part of the exact-request fence.
+>
+> **(ii) Where "only inside the callback" is enforced.** `StudioOverlay` lives in
+> `catcoms-replication`, so the basis type must live there too. Its mint conditions, though, span
+> three crates:
+> - `catcoms-sync`: the hint scope, the provider, the MLS epoch, the clock and `tail_complete`;
+> - `catcoms-app`: no installed source for the document, checked under custody;
+> - `catcoms-replication`: the type itself.
+>
+> Rust cannot stop another crate from calling a public constructor. Proposed:
+> 1. One constructor, `#[doc(hidden)] pub fn mint_from_live_preview(seed: &UnconfirmedStudioSeed,
+>    receipt, author, provider)`. It re-parses `seed.seed_bytes()` against `receipt` (part 3) and
+>    zeroes the source identity.
+> 2. One caller: a `catcoms-sync` method reachable only inside `with_provisional_studio_hint`,
+>    which takes the provider from the hint, the author from its own device and requires
+>    `tail_complete()`.
+> 3. The app checks "no installed source" under custody before asking.
+> 4. A `scripts/` gate, in the style of `check-no-ambient.sh`, fails CI if the constructor's name
+>    appears anywhere else.
+>
+> **Related hole, found while reading:** `StudioOverlayState::new_admitted` takes a
+> `StudioClosingOverlayBasis` and a separate `provenance` argument. Nothing ties the two together,
+> so a Closing basis can be labelled `Unconfirmed` or the reverse. Its one production caller
+> (Agent 1's `overlay_capture.rs`) passes `Closing`, so it is latent. Proposed: take a basis enum
+> and derive the provenance from the basis variant.
 
 ### 8.2 What is persisted, and why the tail is not
 
@@ -1551,7 +1595,8 @@ Truthfulness rules asserted by tests:
   tenure, not that anything is wrong with the work.
 - `manualReason:"tenureImported"` means this device holds the current owner's tenure only from an
   imported snapshot it cannot vouch for, so it will not sign under it. Neither tenure reason
-  promises a cure by waiting: both clear at the next owner transition this device observes.
+  promises a cure by waiting: both clear at the next contiguous step that derives a tenure here
+  (an owner change, or the committer's membership restarting).
 - `manualReason:"preparedStuck"` means a staged handoff's source no longer answers it cleanly
   (it holds part of the branch, a conflicting copy, or is another generation), so no automatic
   path resolves it and disposal is refused; export, archive and copy remain.

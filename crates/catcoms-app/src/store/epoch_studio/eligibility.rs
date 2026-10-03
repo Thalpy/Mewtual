@@ -33,7 +33,7 @@ impl ServerStore {
     /// `tenure` is this device's observed tenure, unconverted. Only `Known` can be transferable;
     /// `Imported` and `Unknown` are named apart (`TenureImported`, `TenureUnknown`) because the
     /// device holds different things, an unverifiable value or nothing. Both end at the same event,
-    /// the next owner transition observed here; neither is cured by waiting alone.
+    /// the next contiguous step that derives a tenure here; neither is cured by waiting alone.
     ///
     /// Errors only for a request this record does not answer (another target); a source that is
     /// missing, unreadable or for another branch is a REASON, so the lifecycle row still reports
@@ -77,7 +77,10 @@ impl ServerStore {
         //   authority and the successor precondition. So does this, by falling through. Stopping
         //   at `Transferable` here told the user a Faulted successor, or a device with no observed
         //   tenure, would transfer, and H1 then refused in the same call.
-        if state.handoff_prepared() {
+        //
+        // `resolution` keeps the evidence for the authority check below, which refuses a Prepared
+        // branch unless it is handed the Absent that returns it to active.
+        let resolution = if state.handoff_prepared() {
             match self.with_vault_source(server, group, target, |bytes| {
                 metadata.evidence_in_vault(bytes, &state.ledger)
             }) {
@@ -86,10 +89,12 @@ impl ServerStore {
                 Ok(Some(StudioHandoffEvidence::Complete)) => {
                     return Ok(Some(StudioOverlayEligibility::Transferable))
                 }
-                Ok(Some(StudioHandoffEvidence::Absent)) => {}
+                Ok(Some(StudioHandoffEvidence::Absent)) => Some(StudioHandoffEvidence::Absent),
                 Err(_) => return manual(R::SourceUnreadable),
             }
-        }
+        } else {
+            None
+        };
         let owner = group.designated_committer();
         match self.with_vault_source(server, group, target, |bytes| {
             StudioEpoch::overlay_successor_hold_in_vault(bytes, target, owner, overlay)
@@ -137,7 +142,7 @@ impl ServerStore {
         // evidence is asked as the active branch its resolution returns it to; `handoff_authority`
         // itself refuses anything still marked Prepared.
         if metadata
-            .check_handoff_authority_after_resolution(device, group, tenure)
+            .check_handoff_authority_after_resolution(resolution, device, group, tenure)
             .is_err()
         {
             return manual(R::ReceiptChanged);

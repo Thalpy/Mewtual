@@ -47,9 +47,10 @@ fn the_app_conversion_never_launders_imported_into_known() {
 
 /// M24b: `require_` succeeds for `Known` alone, and says which fail-closed state it hit.
 ///
-/// The two refusals carry different text on purpose. `Unknown` can be resolved by observing the
-/// owner take office; `Imported` cannot be resolved by waiting at all, and telling a user to wait
-/// would be advice that never comes good.
+/// The two refusals carry different text on purpose: `Unknown` means the device holds nothing,
+/// `Imported` that it holds a value it cannot vouch for. Not because they end differently. Both
+/// end at the next contiguous step that derives a tenure here (an owner change, or the committer's
+/// membership restarting), and neither ends by waiting alone; `catcoms-sync` pins that.
 #[test]
 fn requiring_a_tenure_succeeds_for_known_alone_and_distinguishes_the_two_refusals() {
     assert_eq!(require(StudioOwnerTenure::Known(7)).unwrap(), 7);

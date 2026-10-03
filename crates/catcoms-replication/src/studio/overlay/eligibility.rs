@@ -64,10 +64,11 @@ pub enum StudioOverlayManualReason {
     /// it.
     ///
     /// Neither tenure reason is cleared by elapsed time or by an ordinary commit. Both are cleared
-    /// by the same single event: the next owner transition this device observes, which derives a
-    /// fresh tenure (`owner_tenure_imported_and_unknown_both_end_at_the_next_observed_owner_change`
-    /// in `catcoms-sync` pins this). The UI must say that, and must not promise either one a cure
-    /// by waiting.
+    /// by the same event: the next contiguous step that derives a fresh tenure here, which is an
+    /// owner change or the committer's membership restarting on a new leaf
+    /// (`owner_tenure_imported_and_unknown_both_end_at_the_next_observed_owner_change` in
+    /// `catcoms-sync` pins the owner-change case). The UI must say that, and must not promise
+    /// either one a cure by waiting.
     TenureUnknown,
     /// This device holds the current owner's tenure only from an imported (v1-migrated) snapshot.
     /// It still uses that value to verify receipts but cannot vouch for it, so it refuses to author

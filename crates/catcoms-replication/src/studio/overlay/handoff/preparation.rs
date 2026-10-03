@@ -83,14 +83,21 @@ impl StudioOverlayState {
     /// author and receipt are the ones checked here. Mints nothing; the handoff still captures its
     /// own authority under custody.
     ///
-    /// Only meaningful for a Prepared branch whose evidence is `Absent`: Complete settles without
-    /// authority, and Hold never reaches it. The caller classifies the evidence first.
+    /// `evidence` is the resolution evidence the caller already read for a Prepared branch, and the
+    /// contract is enforced rather than documented: only `Absent` returns a branch to active, so a
+    /// Prepared branch with any other evidence, or none, is refused with `EpochClosed`, exactly as
+    /// `handoff_authority` refuses it. Without that, a Hold or Complete branch would get the verdict
+    /// of an active branch it never becomes again. An Active branch ignores `evidence`.
     pub fn check_handoff_authority_after_resolution(
         &self,
+        evidence: Option<StudioHandoffEvidence>,
         device: &MlsDevice,
         group: &ServerGroup,
         tenure: u64,
     ) -> Result<(), ReplError> {
+        if self.prepared.is_some() && evidence != Some(StudioHandoffEvidence::Absent) {
+            return Err(ReplError::EpochClosed);
+        }
         self.live_authority(device, group, tenure).map(drop)
     }
 

@@ -116,17 +116,33 @@ fn a_prepared_branch_interrupted_after_its_source_write_reads_transferable_and_s
 ///
 /// A review found it stopping at `Transferable` for every Absent branch, so a device with no
 /// observed tenure was told the draft would transfer while H1 returned it to active and refused
-/// in the same call. Here both directions are run, not reasoned about.
+/// in the same call. Here both directions are run, not reasoned about, each from a freshly
+/// interrupted Prepared state: the tenure-less run durably returns its branch to active, so the
+/// transfer is proved on a second fixture that never left Prepared.
 #[test]
 fn a_prepared_branch_interrupted_before_its_source_write_is_classified_as_the_active_branch_it_returns_to(
 ) {
+    let interrupted = |root: &Path| {
+        let f = Fixture::new(true);
+        let mut store = open(root);
+        let (_, basis, _) = prepare(&f, &mut store);
+        super::fences::interrupt(&f, &mut store, basis, WriteTag::Source);
+        assert!(store
+            .load_epoch_intents(SERVER, &f.logical)
+            .unwrap()
+            .handoff_prepared());
+        assert_eq!(evidence_both_ways(&f, &store), Evidence::Absent);
+        (f, store, basis)
+    };
+
     let root = tempfile::tempdir().unwrap();
-    let f = Fixture::new(true);
-    let mut store = open(root.path());
-    let (_, basis, _) = prepare(&f, &mut store);
-    super::fences::interrupt(&f, &mut store, basis, WriteTag::Source);
-    assert_eq!(evidence_both_ways(&f, &store), Evidence::Absent);
+    let (f, mut store, basis) = interrupted(root.path());
     assert_eq!(classify(&f, &store), Some(E::Transferable));
+    handoff(&f, &mut store, basis, Some(0))
+        .expect("the Prepared branch the row called transferable transfers");
+
+    let root = tempfile::tempdir().unwrap();
+    let (f, mut store, basis) = interrupted(root.path());
     assert_eq!(
         classify_under(&f, &store, StudioOwnerTenure::Unknown),
         Some(E::Manual(R::TenureUnknown)),
@@ -139,8 +155,6 @@ fn a_prepared_branch_interrupted_before_its_source_write_is_classified_as_the_ac
             .contains("overlay handoff needs observed owner tenure"),
         "the handoff refuses for the reason the row gave: {refused}"
     );
-    handoff(&f, &mut store, basis, Some(0))
-        .expect("and with the tenure, the branch the row called transferable transfers");
 }
 
 /// Prepared with Absent evidence, but the source under it has since been faulted. The resolution
@@ -167,9 +181,14 @@ fn a_prepared_branch_over_a_faulted_source_is_manual_exactly_while_the_handoff_r
         "the faulted source holds none of the branch's operations"
     );
     assert_eq!(classify(&f, &store), Some(E::Manual(R::Fault)));
+    // The successor precondition's own refusal of a source that is no longer Open, not an
+    // incidental one from the inventory or the source read.
+    let refused = handoff(&f, &mut store, basis, Some(0)).unwrap_err();
     assert!(
-        handoff(&f, &mut store, basis, Some(0)).is_err(),
-        "the handoff refuses the state the row calls faulted"
+        refused
+            .to_string()
+            .contains("epoch does not accept operations"),
+        "the handoff refuses the state the row calls faulted: {refused}"
     );
 }
 
@@ -196,11 +215,14 @@ fn a_prepared_branch_whose_source_went_back_a_generation_is_stuck() {
     assert_eq!(evidence_both_ways(&f, &store), Evidence::Hold);
     assert_eq!(classify(&f, &store), Some(E::Manual(R::PreparedStuck)));
     let mut b = budget(&mut store, &f);
+    let refused = store
+        .resolve_studio_handoff(SERVER, &f.group, f.target, &f.device, &mut rng(), &mut b)
+        .unwrap_err();
     assert!(
-        store
-            .resolve_studio_handoff(SERVER, &f.group, f.target, &f.device, &mut rng(), &mut b)
-            .is_err(),
-        "the resolution refuses the source the row calls stuck"
+        refused
+            .to_string()
+            .contains("prepared handoff retains conflicting or incomplete signed evidence"),
+        "the resolution refuses with its own Hold, the state the row calls stuck: {refused}"
     );
 }
 
@@ -227,11 +249,12 @@ fn a_prepared_branch_whose_source_is_missing_or_unreadable_says_so() {
     std::fs::remove_file(&path).unwrap();
     assert_eq!(classify(&f, &store), Some(E::Manual(R::SourceMissing)));
     let mut b = budget(&mut store, &f);
+    let refused = store
+        .resolve_studio_handoff(SERVER, &f.group, f.target, &f.device, &mut rng(), &mut b)
+        .unwrap_err();
     assert!(
-        store
-            .resolve_studio_handoff(SERVER, &f.group, f.target, &f.device, &mut rng(), &mut b)
-            .is_err(),
-        "with no source the resolution cannot read its evidence either"
+        refused.to_string().contains("source missing"),
+        "with no source the resolution cannot read its evidence either: {refused}"
     );
 }
 
@@ -283,10 +306,13 @@ fn a_prepared_branch_with_a_partial_source_is_stuck_exactly_while_the_resolution
     assert_eq!(evidence_both_ways(&f, &store), Evidence::Hold);
     assert_eq!(classify(&f, &store), Some(E::Manual(R::PreparedStuck)));
     let mut b = budget(&mut store, &f);
+    let refused = store
+        .resolve_studio_handoff(SERVER, &f.group, f.target, &f.device, &mut rng(), &mut b)
+        .unwrap_err();
     assert!(
-        store
-            .resolve_studio_handoff(SERVER, &f.group, f.target, &f.device, &mut rng(), &mut b)
-            .is_err(),
-        "the resolution refuses exactly the state the row calls stuck"
+        refused
+            .to_string()
+            .contains("prepared handoff retains conflicting or incomplete signed evidence"),
+        "the resolution refuses with its own Hold, exactly the state the row calls stuck: {refused}"
     );
 }
