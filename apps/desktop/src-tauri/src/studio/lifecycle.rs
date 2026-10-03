@@ -457,8 +457,9 @@ fn lifecycle_value(v: &StudioOverlayLifecycle) -> Result<Value, String> {
 /// P2's two fields, design section 11's `eligibility` and `manualReason`, from one classification.
 ///
 /// One function for both reads, so the lifecycle row and the inspection can never disagree about
-/// what a reason is called. `null` for both when no branch is live. The reason names are section
-/// 11's, plus `sourceUnreadable`, which the backend adds rather than failing the whole read.
+/// what a reason is called. `null` for both when no branch is live. The reason names are design
+/// section 11's `OverlayManualReason` union, as implemented; a table test beside this module pins
+/// each literal.
 pub(super) fn eligibility_fields(
     eligibility: Option<catcoms_app::studio::types::StudioOverlayEligibility>,
 ) -> (Value, Value) {

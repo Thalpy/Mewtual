@@ -755,3 +755,80 @@ async fn owner_tenure_imported_verifies_but_cannot_author() {
         );
     }
 }
+
+/// What ends `Imported` and what ends `Unknown`: the same event, for both.
+///
+/// The app names the two apart (`TenureImported`, `TenureUnknown`), and an earlier revision of that
+/// copy said waiting fixed only `Unknown`. A review traced `applied` and showed otherwise. Neither is
+/// fixed by elapsed time or by an ordinary same-owner commit, and both are fixed by exactly one
+/// thing: the next contiguous owner transition this device observes, which derives a fresh start.
+/// The split is about what the device holds while the current tenure lasts (an unverifiable value,
+/// or nothing), not about how that tenure ends. This pins it, so the user-facing copy cannot drift
+/// back into promising a difference the state machine does not have.
+#[tokio::test]
+async fn owner_tenure_imported_and_unknown_both_end_at_the_next_observed_owner_change() {
+    let (_, nodes, _) = build_members(2).await;
+    let other = nodes[1].device.device_id();
+    let group = &nodes[0].group;
+    let epoch = group.epoch();
+    assert!(
+        epoch > 0,
+        "the fixture must have advanced so a v1 start can be imported"
+    );
+    let live = Position::of(group);
+    assert!(
+        live.owner.is_some_and(|owner| owner != other),
+        "the step below needs a previous owner that differs from the live one"
+    );
+
+    // A v1 tail with `start < epoch`, as in the migration test: the only way to build `Imported`.
+    let mut v1 = Encoder::new();
+    v1.put_u8(1);
+    v1.put_u64(epoch);
+    v1.put_bytes(nodes[0].device.device_id().as_bytes())
+        .unwrap();
+    v1.put_bytes((epoch - 1).to_be_bytes().as_ref()).unwrap();
+    let v1 = v1.finish();
+    // Fresh states per step: `OwnerTenure` is deliberately not `Clone`.
+    let imported = || OwnerTenure::decode(&v1, group).unwrap();
+    let unknown = || OwnerTenure::unknown(group);
+    assert_eq!(
+        imported().observed(group),
+        ObservedOwnerTenure::Imported(epoch - 1)
+    );
+    assert_eq!(unknown().observed(group), ObservedOwnerTenure::Unknown);
+
+    // One contiguous step back, same owner and leaf: the preserve arm.
+    let preserve = Position {
+        epoch: epoch - 1,
+        ..live
+    };
+    // One contiguous step back, a different owner: the arm that DERIVES a start.
+    let change = Position {
+        owner: Some(other),
+        leaf: None,
+        owner_key: None,
+        epoch: epoch - 1,
+    };
+    let cases: [(&str, &dyn Fn() -> OwnerTenure); 2] =
+        [("imported", &imported), ("unknown", &unknown)];
+    for (name, fresh) in cases {
+        let before = fresh().observed(group);
+        let mut state = fresh();
+        state.position = preserve;
+        state.applied(preserve, group);
+        assert_eq!(
+            state.observed(group),
+            before,
+            "{name}: an ordinary same-owner step must change neither state"
+        );
+        let mut state = fresh();
+        state.position = change;
+        state.applied(change, group);
+        assert_eq!(
+            state.observed(group),
+            ObservedOwnerTenure::Observed(epoch),
+            "{name}: the next observed owner change must establish a fully observed tenure"
+        );
+    }
+}

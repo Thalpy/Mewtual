@@ -1012,12 +1012,16 @@ after a rewind. Agent 1's `Hold` outcomes map onto these reasons, satisfying its
 > `ObjectMissing` (an Index entry naming a Flipnote with no source, which H1 refuses), and
 > `NotReplayable` (from an inspection's rebuild, or from the lifecycle row when an Index entry
 > cannot even be decoded). `TenureImported` is split from `TenureUnknown` (2026-10-03, Agent 1's
-> question): waiting fixes only the second. A Prepared branch is classified by its resolution's own
-> evidence, read from the record's framing (`StudioOverlayState::evidence_in_vault`, held to
-> `evidence` by an agreement test): `Hold` is `PreparedStuck`, `Complete` or `Absent` is
-> transferable with `prepared` set, since resolution needs no tenure. The classification reads each
-> source record's header and never restores it, so the lifecycle row stays cheap under custody.
-> Agent 1's `StudioOverlayHold` was not built; its runtime refusals are still strings.
+> question) for what the device holds: an unverifiable imported value, or nothing. Not for how they
+> end: both are cleared by the same event, the next owner transition this device observes, and
+> neither by waiting alone (pinned in `catcoms-sync`). A Prepared branch is classified by what H1
+> does with it, starting with its resolution's own evidence, read from the record's framing
+> (`StudioOverlayState::evidence_in_vault`, held to `evidence` by an agreement test): `Hold` is
+> `PreparedStuck`; `Complete` is transferable with `prepared` set, since that resolution settles
+> without a tenure; `Absent` returns the branch to active, after which H1 runs every active check,
+> so the classifier runs them too. The classification reads each source record's header and never
+> restores it, so the lifecycle row stays cheap under custody. Agent 1's `StudioOverlayHold` was not
+> built; its runtime refusals are still strings.
 
 - **S3, corrected (finding 5).** A branch that is authenticated, canonical and structurally
   consistent but fails typed reconstruction is classified `Manual(NotReplayable)`. Export, archiving
@@ -1545,6 +1549,12 @@ Truthfulness rules asserted by tests:
   draft base are labelled separately (8.2).
 - `manualReason:"tenureUnknown"` means this device cannot presently prove the current owner's
   tenure, not that anything is wrong with the work.
+- `manualReason:"tenureImported"` means this device holds the current owner's tenure only from an
+  imported snapshot it cannot vouch for, so it will not sign under it. Neither tenure reason
+  promises a cure by waiting: both clear at the next owner transition this device observes.
+- `manualReason:"preparedStuck"` means a staged handoff's source no longer answers it cleanly
+  (it holds part of the branch, a conflicting copy, or is another generation), so no automatic
+  path resolves it and disposal is refused; export, archive and copy remain.
 
 Events reuse the existing bounded `SettlementNotices` rail and the `settlement-changed` channel:
 `LocalDraftManual` and `LocalDraftDisposed`. Neither is a delivery, settlement or finality claim.

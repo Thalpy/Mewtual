@@ -59,17 +59,26 @@ pub enum StudioOverlayManualReason {
     /// section 11's list; added so the classifier names that refusal rather than calling the
     /// branch transferable.
     ObjectMissing,
-    /// This device has not observed the current owner's tenure. Nothing is wrong with the work; a
-    /// handoff signs under that tenure and must not guess it. This one can resolve by waiting: the
-    /// next observed owner transition establishes it.
+    /// This device holds no tenure for the current owner: it has not watched that owner take
+    /// office. Nothing is wrong with the work; a handoff signs under that tenure and must not guess
+    /// it.
+    ///
+    /// Neither tenure reason is cleared by elapsed time or by an ordinary commit. Both are cleared
+    /// by the same single event: the next owner transition this device observes, which derives a
+    /// fresh tenure (`owner_tenure_imported_and_unknown_both_end_at_the_next_observed_owner_change`
+    /// in `catcoms-sync` pins this). The UI must say that, and must not promise either one a cure
+    /// by waiting.
     TenureUnknown,
-    /// This device holds the tenure only from an imported (v1-migrated) snapshot, which it cannot
-    /// verify. Distinct from `TenureUnknown` because waiting does NOT fix it: an imported value is
-    /// never promoted, so telling this device "this resolves once the owner is observed" would be
-    /// false. Only a genuinely new owner tenure, observed here, clears it.
+    /// This device holds the current owner's tenure only from an imported (v1-migrated) snapshot.
+    /// It still uses that value to verify receipts but cannot vouch for it, so it refuses to author
+    /// under it, and the value is never promoted in place. Named apart from `TenureUnknown` because
+    /// the device holds a different thing (an unverifiable value rather than nothing), not because
+    /// it ends differently: see `TenureUnknown` for what clears both.
     TenureImported,
-    /// A handoff of this branch was staged (Prepared) and its source holds a partial or conflicting
-    /// set of the branch's signed operations, so the resolution can neither complete it nor return
-    /// it to active. Permanent until resolved by hand; every manual operation but disposal remains.
+    /// A handoff of this branch was staged (Prepared) and its source no longer answers it cleanly:
+    /// it holds a partial or conflicting set of the branch's signed operations, or it is not the
+    /// Prepared epoch's document at all. The resolution can neither complete it nor return it to
+    /// active. Permanent: no automatic path resolves it. Disposal is refused too, since a
+    /// transfer hold may be an acceptance in flight; export, archive and copy remain.
     PreparedStuck,
 }

@@ -241,13 +241,11 @@ fn studio_overlay_handoff_partial_manifest_keeps_the_entire_branch() {
     assert_eq!(f.load(&store).unwrap().op_count(), 1);
 }
 
-#[test]
-fn studio_overlay_handoff_rechecks_source_after_prepared_before_candidate_write() {
-    let root = tempfile::tempdir().unwrap();
-    let f = Fixture::new(true);
-    let mut store = open(root.path());
-    let (_, basis, _) = prepare(&f, &mut store);
-    let mut changed = f.load(&store).unwrap().unit;
+/// The current source record, re-sealed after a conflicting receipt has faulted it: same epoch,
+/// still no operations, phase `Fault`. Returned as framed vault bytes for the caller to install,
+/// so each test chooses the moment the source changes underneath the handoff.
+pub(super) fn faulted_source(f: &Fixture, store: &ServerStore) -> Vec<u8> {
+    let mut changed = f.load(store).unwrap().unit;
     let conflict = Receipt::sign(
         f.logical.clone(),
         0,
@@ -269,7 +267,16 @@ fn studio_overlay_handoff_rechecks_source_after_prepared_before_candidate_write(
     e.put_bytes(&f.target.channel()).unwrap();
     e.put_bytes(&changed.snapshot().unwrap()).unwrap();
     e.put_u8(1);
-    let changed = frame(&seal(&store.keys.db_key().unwrap(), &e.finish(), &mut rng()).unwrap());
+    frame(&seal(&store.keys.db_key().unwrap(), &e.finish(), &mut rng()).unwrap())
+}
+
+#[test]
+fn studio_overlay_handoff_rechecks_source_after_prepared_before_candidate_write() {
+    let root = tempfile::tempdir().unwrap();
+    let f = Fixture::new(true);
+    let mut store = open(root.path());
+    let (_, basis, _) = prepare(&f, &mut store);
+    let changed = faulted_source(&f, &store);
     let source_path = f.path(&store);
     let mut b = budget(&mut store, &f);
     let mut hit = false;

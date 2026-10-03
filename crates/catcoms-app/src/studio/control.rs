@@ -569,8 +569,8 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
             action => StudioControlRequest { target, action },
         };
         // Read before the registry context borrows `self.sync`, unconverted, so the lifecycle can
-        // name `Imported` and `Unknown` apart: only one of them is fixed by waiting. Only the
-        // lifecycle arm reads it.
+        // name `Imported` and `Unknown` apart: the device holds an unverifiable value in one and
+        // nothing in the other. Only the lifecycle arm reads it.
         let observed_tenure = self.observed_owner_tenure();
         self.sync
             .with_registry_context(|group, device, clock, rng| {

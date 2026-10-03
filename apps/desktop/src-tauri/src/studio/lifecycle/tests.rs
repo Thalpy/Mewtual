@@ -122,6 +122,69 @@ fn a_disposal_that_meant_to_preserve_and_lost_its_kind_is_refused_not_guessed() 
     }
 }
 
+/// Every manual reason's wire name, pinned to design section 11's `OverlayManualReason` union.
+///
+/// The renderer switches on these literals, so a misspelt one reaches the UI as an unknown reason
+/// with no compile error on either side; the fixture test only checks that `manualReason` is a
+/// string. The `expected` match has no catch-all, so a new reason fails to compile here until its
+/// name is written down, and the names must stay distinct.
+#[test]
+fn every_manual_reason_crosses_under_its_section_11_name() {
+    use catcoms_app::studio::types::{
+        StudioOverlayEligibility as E, StudioOverlayManualReason as R,
+    };
+    let expected = |reason: R| match reason {
+        R::NotReplayable => "notReplayable",
+        R::Unconfirmed => "unconfirmed",
+        R::NotCurrentAuthor => "notCurrentAuthor",
+        R::SourceMissing => "sourceMissing",
+        R::SourceUnreadable => "sourceUnreadable",
+        R::Fault => "fault",
+        R::SourceRewound => "sourceRewound",
+        R::SourceNotClosing => "sourceNotClosing",
+        R::SuccessorMissing => "successorMissing",
+        R::ReceiptChanged => "receiptChanged",
+        R::SourceReplaced => "sourceReplaced",
+        R::SuccessorNotPristine => "successorNotPristine",
+        R::ObjectMissing => "objectMissing",
+        R::TenureUnknown => "tenureUnknown",
+        R::TenureImported => "tenureImported",
+        R::PreparedStuck => "preparedStuck",
+    };
+    let every = [
+        R::NotReplayable,
+        R::Unconfirmed,
+        R::NotCurrentAuthor,
+        R::SourceMissing,
+        R::SourceUnreadable,
+        R::Fault,
+        R::SourceRewound,
+        R::SourceNotClosing,
+        R::SuccessorMissing,
+        R::ReceiptChanged,
+        R::SourceReplaced,
+        R::SuccessorNotPristine,
+        R::ObjectMissing,
+        R::TenureUnknown,
+        R::TenureImported,
+        R::PreparedStuck,
+    ];
+    let mut names = std::collections::BTreeSet::new();
+    for reason in every {
+        assert_eq!(
+            eligibility_fields(Some(E::Manual(reason))),
+            (Value::from("manual"), Value::from(expected(reason))),
+            "{reason:?}"
+        );
+        assert!(names.insert(expected(reason)), "two reasons share a name");
+    }
+    assert_eq!(
+        eligibility_fields(Some(E::Transferable)),
+        (Value::from("transferable"), Value::Null)
+    );
+    assert_eq!(eligibility_fields(None), (Value::Null, Value::Null));
+}
+
 #[test]
 fn an_uncertain_outcome_is_marked_and_a_plain_refusal_is_not() {
     // Release can fail after the unlink, and such a caller must reconcile rather than resend. A

@@ -27,10 +27,21 @@ fn transfer(f: &Fixture, store: &mut ServerStore, basis: [u8; 32]) -> StudioHand
         .unwrap()
 }
 fn prepare(f: &Fixture, store: &mut ServerStore) -> (CloseRecord, [u8; 32], StudioProjection) {
+    let (close, basis, expected, _) = prepare_keeping_closing(f, store);
+    (close, basis, expected)
+}
+
+/// `prepare`, also returning the Closing source record's vault bytes as they stood before the
+/// rotation, so a test can put the source back behind a branch that was based past it.
+fn prepare_keeping_closing(
+    f: &Fixture,
+    store: &mut ServerStore,
+) -> (CloseRecord, [u8; 32], StudioProjection, Vec<u8>) {
     let (close, basis) = closing(f, store);
     let expected = save(f, store, &close, basis.fingerprint(), f.title(), 123)
         .projection()
         .clone();
+    let closing_record = std::fs::read(f.path(store)).unwrap();
     let mut source = f.load(store).unwrap();
     let receipt = source.unit.receipt_head().unwrap().cloned().unwrap();
     let decision = source
@@ -65,7 +76,7 @@ fn prepare(f: &Fixture, store: &mut ServerStore) -> (CloseRecord, [u8; 32], Stud
             &mut b,
         )
         .unwrap();
-    (close, basis.fingerprint(), expected)
+    (close, basis.fingerprint(), expected, closing_record)
 }
 
 /// A clock that advances a fixed step on every read, so a slice deadline is crossed by

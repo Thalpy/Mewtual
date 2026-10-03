@@ -35,6 +35,8 @@ pub enum StudioOwnerTenure {
     ///
     /// **Usable for verification, fail-closed for authoring**, and never promoted: not by a
     /// restart, a save and reload, elapsed time, a fresh owner proof, or a peer's agreement (V6).
+    /// It ends only when the next owner transition observed here replaces it with a freshly
+    /// derived tenure, which is exactly what ends `Unknown` too.
     /// It stays visible to verification precisely because hiding it would make the device fall back
     /// to accepting a proof's *claimed* tenure instead of comparing against what it holds.
     Imported(u64),
@@ -89,7 +91,8 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
     /// `Imported` and `Unknown` are refused separately rather than with one message, because they
     /// are different situations for whoever reads the error: `Unknown` means this device has never
     /// observed the owner take office, and `Imported` means it holds a value from a snapshot it
-    /// cannot verify. The second is not fixed by waiting.
+    /// cannot verify. Neither is fixed by waiting alone: both end at the next owner transition this
+    /// device observes.
     ///
     /// Callers that are **not** new authoring must not use this. Agent 3 takes it for repair
     /// issuance and holds on both fail-closed values (V5); an exact retry, an acknowledgement or

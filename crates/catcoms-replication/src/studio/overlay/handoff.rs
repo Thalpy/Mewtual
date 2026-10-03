@@ -687,7 +687,14 @@ impl StudioOverlayState {
     /// signed-operation hash against the Prepared manifest, found with the same
     /// `overlay_signed_hash_in` the restored path uses. The operations are decoded from their
     /// framing only; nothing is replayed or verified, so this classifies and never resolves.
-    /// `the_vault_evidence_agrees_with_the_restored_evidence` holds the two together.
+    ///
+    /// **The agreement is over restorable records.** A record whose framing decodes but which
+    /// `StudioEpoch::restore` would refuse (a bad signature, a duplicate id, an inconsistent delta)
+    /// can read `Complete` or `Absent` here, where the resolution fails with an error instead. The app's own snapshots are restorable by construction, so this is a writer
+    /// bug rather than a reachable state, and the direction that matters holds unconditionally:
+    /// `Hold` here means the resolution refuses. The app's `evidence_both_ways` test helper
+    /// (`epoch_studio::tests::rotation::overlay::handoff::classification`) holds the two together
+    /// for Absent, Complete, partial Hold and scope Hold.
     pub fn evidence_in_vault(
         &self,
         bytes: &[u8],
@@ -698,7 +705,9 @@ impl StudioOverlayState {
         let shape = match crate::studio::epoch::VaultShape::read(bytes, self.target) {
             Ok(shape) => shape,
             // A record for another channel is "the source is not this target", which `evidence`
-            // answers with Hold rather than an error.
+            // answers with Hold rather than an error. The app's classifier never reaches this arm
+            // (its vault read refuses a wrong-channel record first, as `SourceUnreadable`); it is
+            // here so this function answers like `evidence` for any caller.
             Err(ReplError::EpochScope) => return Ok(StudioHandoffEvidence::Hold),
             Err(error) => return Err(error),
         };

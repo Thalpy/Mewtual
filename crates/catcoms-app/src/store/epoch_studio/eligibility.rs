@@ -19,10 +19,10 @@ use catcoms_replication::ReplError;
 
 impl ServerStore {
     /// `None` when the document has no live branch. Otherwise the most permanent applicable reason
-    /// first: provenance, authorship, then (for a branch that is not Prepared) the installed source
-    /// against the branch's basis, the sources an Index branch's entries name, the tenure the
-    /// handoff would sign under, and whether the branch's receipt is still the current owner's
-    /// under it.
+    /// first: provenance, authorship, a Prepared branch's resolution evidence, then (unless that
+    /// resolution settles the branch outright) the installed source against the branch's basis,
+    /// the sources an Index branch's entries name, the tenure the handoff would sign under, and
+    /// whether the branch's receipt is still the current owner's under it.
     ///
     /// Each refusal the automatic handoff makes from DURABLE state has a reason here, in the same
     /// terms: the successor precondition (`check_overlay_successor`), H1's Index object check
@@ -31,8 +31,9 @@ impl ServerStore {
     /// they say "retry", not "act".
     ///
     /// `tenure` is this device's observed tenure, unconverted. Only `Known` can be transferable;
-    /// `Imported` and `Unknown` are named apart (`TenureImported`, `TenureUnknown`) because waiting
-    /// fixes only the second, and the UI must not promise otherwise.
+    /// `Imported` and `Unknown` are named apart (`TenureImported`, `TenureUnknown`) because the
+    /// device holds different things, an unverifiable value or nothing. Both end at the same event,
+    /// the next owner transition observed here; neither is cured by waiting alone.
     ///
     /// Errors only for a request this record does not answer (another target); a source that is
     /// missing, unreadable or for another branch is a REASON, so the lifecycle row still reports
@@ -63,24 +64,31 @@ impl ServerStore {
         if overlay.author() != device.device_id() {
             return manual(R::NotCurrentAuthor);
         }
-        // A Prepared branch is NOT classified against its successor or its tenure. H1 resolves it
-        // first, from the Prepared record alone and with no tenure (V8): Complete evidence settles
-        // it, Absent returns it to active, Hold leaves it held - permanently. A successor already
-        // holding the branch's own signed operations is the normal Complete case, which the
-        // successor hold would call unpristine. So the question for a Prepared branch is only the
-        // resolution's own: is the evidence Hold? Answered from the record's framing, without a
-        // restore, by the same comparisons `evidence` makes.
+        // A Prepared branch is classified by what H1 does with it, which starts with the resolution:
+        // from the Prepared record alone and with no tenure (V8), Complete evidence settles it,
+        // Hold leaves it held permanently, and Absent returns it to active. The evidence is read
+        // from the record's framing, without a restore, by the same comparisons `evidence` makes.
+        //
+        // - Complete stops here. The resolution settles the branch without a tenure, and the
+        //   successor check below would wrongly call it unpristine: the operations the successor
+        //   holds are this branch's own.
+        // - Absent does NOT stop here. After the resolution, the branch is exactly an active branch
+        //   against the same source, and H1 continues through tenure, the Index objects, the live
+        //   authority and the successor precondition. So does this, by falling through. Stopping
+        //   at `Transferable` here told the user a Faulted successor, or a device with no observed
+        //   tenure, would transfer, and H1 then refused in the same call.
         if state.handoff_prepared() {
-            return match self.with_vault_source(server, group, target, |bytes| {
+            match self.with_vault_source(server, group, target, |bytes| {
                 metadata.evidence_in_vault(bytes, &state.ledger)
             }) {
-                Ok(None) => manual(R::SourceMissing),
-                Ok(Some(StudioHandoffEvidence::Hold)) => manual(R::PreparedStuck),
-                Ok(Some(StudioHandoffEvidence::Complete | StudioHandoffEvidence::Absent)) => {
-                    Ok(Some(StudioOverlayEligibility::Transferable))
+                Ok(None) => return manual(R::SourceMissing),
+                Ok(Some(StudioHandoffEvidence::Hold)) => return manual(R::PreparedStuck),
+                Ok(Some(StudioHandoffEvidence::Complete)) => {
+                    return Ok(Some(StudioOverlayEligibility::Transferable))
                 }
-                Err(_) => manual(R::SourceUnreadable),
-            };
+                Ok(Some(StudioHandoffEvidence::Absent)) => {}
+                Err(_) => return manual(R::SourceUnreadable),
+            }
         }
         let owner = group.designated_committer();
         match self.with_vault_source(server, group, target, |bytes| {
@@ -117,16 +125,21 @@ impl ServerStore {
             }
         }
         // The handoff signs under a fully observed tenure only. The two refusals are named apart
-        // because only one of them is fixed by waiting.
+        // for what the device holds, not for how they end (see `TenureUnknown`).
         let tenure = match tenure {
             StudioOwnerTenure::Known(start) => start,
             StudioOwnerTenure::Imported(_) => return manual(R::TenureImported),
             StudioOwnerTenure::Unknown => return manual(R::TenureUnknown),
         };
-        // The handoff's live-authority mint, run for its verdict only and then dropped: this
-        // device is still a member and the branch's receipt is the current owner's under the
-        // observed tenure. Authorship was checked above.
-        if metadata.handoff_authority(device, group, tenure).is_err() {
+        // The handoff's live-authority check, for its verdict only: this device is still a member
+        // and the branch's receipt is the current owner's under the observed tenure. Authorship was
+        // checked above. Asked of the branch as H1 will hold it, so a Prepared branch with Absent
+        // evidence is asked as the active branch its resolution returns it to; `handoff_authority`
+        // itself refuses anything still marked Prepared.
+        if metadata
+            .check_handoff_authority_after_resolution(device, group, tenure)
+            .is_err()
+        {
             return manual(R::ReceiptChanged);
         }
         Ok(Some(StudioOverlayEligibility::Transferable))

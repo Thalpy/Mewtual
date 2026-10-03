@@ -22,7 +22,7 @@ whole-scope review of `510d0b54` (verdict: CHANGES REQUIRED, Agent 2 not complet
 | Prerequisite | State |
 |---|---|
 | P1 reviewed manual lifecycle | Implemented; review at `510d0b54` returned CHANGES REQUIRED, items above |
-| P2 hold mapping | Implemented in this slice, not yet reviewed |
+| P2 hold mapping | Implemented. Agent 1's two questions answered in `f158c17b` (`TenureImported`, `PreparedStuck`). Its re-review found no blocker and two mediums, both fixed in the next commit: a Prepared branch with Absent evidence now runs every active check H1 runs after returning it to active, and the tenure copy no longer claims waiting cures one reason but not the other (both end at the next observed owner transition). |
 | P3 native results and events | Partial (goal 6) |
 | P4 live-tenure contract | Implemented: `StudioOwnerTenure`, `require_owner_tenure`, CORE-005 witness |
 | **P5** | **FALSE.** Native Save stays unregistered. |

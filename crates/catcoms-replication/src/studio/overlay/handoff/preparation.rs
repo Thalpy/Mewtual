@@ -73,6 +73,34 @@ impl StudioOverlayState {
         if self.prepared.is_some() {
             return Err(ReplError::EpochClosed);
         }
+        self.live_authority(device, group, tenure)
+    }
+
+    /// [`Self::handoff_authority`]'s verdict for P2's classification, for the branch as H1 will hold
+    /// it when it gets that far. An Active branch is asked exactly as `handoff_authority` asks it.
+    /// A Prepared branch is asked as the active branch its resolution returns it to:
+    /// `return_to_active` changes nothing but the Prepared marker, so the active branch, its target,
+    /// author and receipt are the ones checked here. Mints nothing; the handoff still captures its
+    /// own authority under custody.
+    ///
+    /// Only meaningful for a Prepared branch whose evidence is `Absent`: Complete settles without
+    /// authority, and Hold never reaches it. The caller classifies the evidence first.
+    pub fn check_handoff_authority_after_resolution(
+        &self,
+        device: &MlsDevice,
+        group: &ServerGroup,
+        tenure: u64,
+    ) -> Result<(), ReplError> {
+        self.live_authority(device, group, tenure).map(drop)
+    }
+
+    /// The live check both share: everything `handoff_authority` checks except the Prepared guard.
+    fn live_authority(
+        &self,
+        device: &MlsDevice,
+        group: &ServerGroup,
+        tenure: u64,
+    ) -> Result<StudioHandoffAuthority, ReplError> {
         let active = self.active.as_ref().ok_or(ReplError::EpochScope)?;
         self.check_target(active.target())?;
         if active.author() != device.device_id() {

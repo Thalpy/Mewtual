@@ -29,11 +29,13 @@ impl<'a> VaultShape<'a> {
     }
     /// The signed operations, each decoded from its framing only: no Automerge change is applied,
     /// no signature is checked, nothing is replayed. With the same per-operation and total bounds
-    /// `restore_scoped` applies.
+    /// `restore_scoped` applies, and the same refusal of trailing bytes after the last one.
     pub(in crate::studio) fn signed_operations(&self) -> Result<Vec<SignedOp>, ReplError> {
         let mut d = Decoder::new(self.rest);
         let mut total = 0usize;
-        let mut operations = Vec::with_capacity(self.operations);
+        // Grown as operations decode, as `restore_scoped` does, rather than sized from the
+        // header's count before any operation has been seen.
+        let mut operations = Vec::new();
         for _ in 0..self.operations {
             let bytes = field(&mut d, MAX_SIGNED_EPOCH_OP_BYTES)?;
             total = total.saturating_add(bytes.len());
@@ -42,6 +44,7 @@ impl<'a> VaultShape<'a> {
             }
             operations.push(SignedOp::decode(bytes)?);
         }
+        d.finish().map_err(|_| ReplError::Malformed)?;
         Ok(operations)
     }
     pub(in crate::studio) fn read(

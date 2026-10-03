@@ -62,7 +62,8 @@ fn the_lifecycle_classification_names_each_store_level_reason() {
     assert_eq!(
         classify(&f, &store, Imported(0)),
         Some(E::Manual(R::TenureImported)),
-        "an imported tenure is refused too, and named apart: waiting does not fix it"
+        "an imported tenure is refused too, and named apart: the device holds a value it cannot \
+         vouch for, not nothing"
     );
     assert_eq!(
         classify(&f, &store, Known(7)),
