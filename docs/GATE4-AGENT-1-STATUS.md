@@ -4170,6 +4170,37 @@ scheduled runtime already holds a target with no tenure rather than surfacing a 
 refuses correctly with the generic text. Recorded as a separate, small follow-up rather than
 silently dropped from the plan Agent 2 agreed to.
 
+### The six-client native restart failure: flaky, and it entered with PR #29, not this branch
+
+Reported to me as "the six-client restart failure, inherited from their base". The native test is
+`six_client_recovery::six_client_native_restart_and_partition_recovery` (`apps/desktop/src-tauri`).
+It entered this branch through the merge `a12209bc` of PR #29 (`Chat-method-redesign`), whose last
+commit is "Record six-client recovery acceptance".
+
+**It is flaky on this host, not failing.** Five runs at each of three points:
+
+| commit | what it is | passed |
+|---|---|---|
+| `2e87cf12` | PR #29's own head - no gate4 code at all | **2 / 5** |
+| `a12209bc` | the merge into this branch | **3 / 5** |
+| `74a5e577` | this branch's head | **2 / 5** |
+
+The same rate at the PR's own head is what rules out a gate4 regression: the code this branch adds
+is not present there. The earlier "fails reproducibly" attribution came from single runs.
+
+When it fails, it fails the same way every time: after all six rejoin, each partition has the common
+chat and the post-restart conversation but **not the other partition's isolated-period messages**.
+Live gossip after the heal works; the backfill does not land inside the test's 90 s wall-clock
+convergence bound. `MESSAGE-FLOW.md` 4.4 gives the reconcile sweep 30 s and 31 s minimum retry
+delays, and passing runs sometimes take up to ~160 s in total, so the bound and the retry cadence
+are close enough that host speed decides the result.
+
+Not fixed here and not mine to fix: whether healed partitions should converge faster or the test's
+bound should change is a chat-sync decision for PR #29's owner. Two notes for whoever takes it: CI
+has never run this test on gate4 branches, because the Linux job's `npm test` fails first on three
+native-command registration checks; and one failure is not evidence of anything - run it several
+times.
+
 ### CI: the handoff mutation harness went dark at `baf8a9cf`, and that was mine
 
 Reported to me as "the studio-handoff completed-target failure, inherited from the base". **It was
