@@ -17,7 +17,10 @@ permissions:
 jobs:
   repair-core:
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 30
+    # The Windows matrix leg can exceed 30 minutes on a cold or contended
+    # runner even when the full library suite and every mutation pass. Keep
+    # enough headroom to preserve the complete gate instead of cancelling it.
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
