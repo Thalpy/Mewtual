@@ -158,7 +158,18 @@ impl StudioReceiver {
         // Both applies publish through the ordinary Save path rather than writing in the control
         // transaction, so both are intercepted here. Copy's `target` is the SOURCE it copied from;
         // the request it produces publishes to the destination.
-        if let StudioControlAction::Apply(apply) = request.action {
+        if let StudioControlAction::RepairFault(decision) = request.action {
+            // Only the catch-up runtime holds the durable owner snapshot issuance requires.
+            let response =
+                self.catchup
+                    .repair_fault(server, store, id, request.target, *decision)?;
+            Ok((StudioSavedTransaction::empty(), None, Some(response)))
+        } else if let StudioControlAction::RepairRegistryFault(decision) = request.action {
+            let response =
+                self.catchup
+                    .repair_registry_fault(server, store, id, request.target, *decision)?;
+            Ok((StudioSavedTransaction::empty(), None, Some(response)))
+        } else if let StudioControlAction::Apply(apply) = request.action {
             let (edit, already_saved) =
                 server.prepare_studio_recovery_apply(store, id, request.target, *apply)?;
             let (saved, updated) = self.run(server, store, id, Some(edit))?;

@@ -12,6 +12,7 @@ pub(crate) mod performance;
 mod preparation;
 mod recovery_disposition;
 mod registry;
+mod repair;
 mod rotation;
 mod source;
 

@@ -29,6 +29,7 @@ pub(crate) use preview::PreviewHarness;
 use preview::{PreviewCompletion, PreviewJob, PreviewRuntime};
 mod registry;
 mod registry_runtime;
+mod repair;
 mod rotation;
 use discovery::DiscoveryPlan;
 
@@ -439,6 +440,20 @@ pub(super) struct CatchupRuntime {
     registry_target: Option<StudioTarget>,
     registry_next_at: u64,
     registry_selection: usize,
+    // The repair step's own cadence and round-robin, so a held fault cannot starve rotation.
+    repair_next_at: u64,
+    repair_selection: usize,
+    registry_repair_next_at: u64,
+    // Rotates which peer a repaired seed is requested from.
+    repair_seed_peer: usize,
+    // Terminal Registry repairs already applied here, so repeated answers carrying one cost no
+    // further Registry restores. Bounded; forgetting one only costs a reload.
+    registry_repairs_seen: std::collections::BTreeSet<(u8, [u8; 32])>,
+    // Targets whose owed repair hit a persistent hold (recovery warning, storage refusal, held
+    // decision, unobserved tenure): no repaired seed is fetched for them again until this time.
+    repair_backoff: std::collections::BTreeMap<CheckpointTarget, u64>,
+    // The Studio target a minted repaired pass reports to; a bucket pass may have no other.
+    repair_failure_target: Option<StudioTarget>,
 }
 impl CatchupRuntime {
     /// Never evict the source of a ready/active page or checkpoint just to start replay.
@@ -1005,6 +1020,9 @@ impl CatchupRuntime {
             if let Some(updated) = self.rotate_owner(server, store, id, watches)? {
                 return Ok(Some(updated));
             }
+            if let Some(updated) = self.repair_owner(server, store, id, watches)? {
+                return Ok(Some(updated));
+            }
         }
         // Answer requests even during our own detached fetch; symmetric reconnect must not
         // wait for one side's client pass to finish before serving its counterpart.
@@ -1099,8 +1117,15 @@ impl CatchupRuntime {
             if phase != catcoms_replication::EpochPhase::Open {
                 // A persisted Closing epoch survives expiry/restart. It needs a fresh private
                 // head selection, not an Open-only page pass that globally pauses the receiver.
-                if phase == catcoms_replication::EpochPhase::Closing {
-                    self.schedule_discovery(store, id, watch, self.peers[0]);
+                // A Fault needs one too: the owner's answer is the only thing that can carry a
+                // repair, and the query is how this peer reports its frozen pair (W-1).
+                if matches!(
+                    phase,
+                    catcoms_replication::EpochPhase::Closing
+                        | catcoms_replication::EpochPhase::Fault
+                ) {
+                    let peer = self.peers[0];
+                    self.schedule_reporting_discovery(server, store, id, watch, peer);
                 }
                 self.next_at = now.saturating_add(5_000);
                 return Ok(None);
@@ -1152,6 +1177,7 @@ impl StudioReceiver {
                 plan.server,
                 plan.peer,
                 plan.target,
+                plan.fault_report.as_ref(),
             ) {
                 Ok(attempt) => Some(StudioBackgroundJob::Head(attempt)),
                 Err(_) => {

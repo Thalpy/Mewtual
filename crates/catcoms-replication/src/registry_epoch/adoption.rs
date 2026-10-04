@@ -2,7 +2,9 @@
 //! No method in this module removes the source or proves that recovery reached durable storage.
 
 use super::*;
-use crate::{registry::RegistryRecovery, LocalIntent, RecoverySnapshot, VerifiedCheckpoint};
+use crate::{
+    registry::RegistryRecovery, LocalIntent, RecoveryReason, RecoverySnapshot, VerifiedCheckpoint,
+};
 use std::collections::BTreeMap;
 
 /// An immutable, typed plan for replacing a still-whole source with the selected checkpoint.
@@ -11,6 +13,7 @@ use std::collections::BTreeMap;
 /// transaction must save it and finish any eviction warning BEFORE selecting the new unit.
 pub struct RegistryAdoptionPlan {
     receipt: Receipt,
+    reason: RecoveryReason,
     checkpoint: VerifiedCheckpoint,
     source_version: [u8; 32],
     recovery: Option<RecoverySnapshot>,
@@ -72,6 +75,17 @@ impl RegistryEpoch {
         if receipt.closed_epoch >= MAX_REGISTRY_EPOCH {
             return Err(ReplError::EpochBound);
         }
+        if let Some(outcome) = self.repair_binding.as_ref().and_then(|binding| {
+            binding.pending_admission(
+                &self.receipts,
+                self.phase(),
+                self.opening.as_ref(),
+                self.adopting,
+                &receipt,
+            )
+        }) {
+            return outcome;
+        }
         if self.opened_by(&receipt) {
             return Ok(ReceiptIngest::Duplicate);
         }
@@ -99,6 +113,51 @@ impl RegistryEpoch {
         group: &ServerGroup,
         expected_tenure_start: u64,
     ) -> Result<RegistryAdoptionPlan, ReplError> {
+        if self.repair_install_pending() {
+            return Err(ReplError::ReceiptConflict);
+        }
+        self.prepare_adoption(
+            receipt,
+            raw_seed,
+            group,
+            expected_tenure_start,
+            RecoveryReason::Rewound,
+        )
+    }
+
+    /// Continue only the exact committed repair, retaining the complete losing source as Repair
+    /// evidence. This does not acknowledge durable recovery or authorize source replacement.
+    pub fn prepare_repair_adoption(
+        &mut self,
+        receipt: &Receipt,
+        raw_seed: &[u8],
+        group: &ServerGroup,
+        expected_tenure_start: u64,
+    ) -> Result<RegistryAdoptionPlan, ReplError> {
+        let state = self.repair_state().ok_or(ReplError::ReceiptConflict)?;
+        state
+            .repair
+            .verify_current_owner(group, expected_tenure_start)?;
+        if !state.install_pending || &state.selected != receipt {
+            return Err(ReplError::ReceiptConflict);
+        }
+        self.prepare_adoption(
+            receipt,
+            raw_seed,
+            group,
+            expected_tenure_start,
+            RecoveryReason::Repair,
+        )
+    }
+
+    fn prepare_adoption(
+        &mut self,
+        receipt: &Receipt,
+        raw_seed: &[u8],
+        group: &ServerGroup,
+        expected_tenure_start: u64,
+        reason: RecoveryReason,
+    ) -> Result<RegistryAdoptionPlan, ReplError> {
         if !self.adopting
             || self.phase() != EpochPhase::Closing
             || self.receipts.is_faulted()
@@ -119,12 +178,14 @@ impl RegistryEpoch {
                 },
             );
         }
-        let recovery = RegistryRecovery::snapshot_for_rewind(
+        let recovery = RegistryRecovery::snapshot_for_replacement(
             self.projection()?,
             self.opening.as_ref(),
             operations,
+            reason,
         )?;
         Ok(RegistryAdoptionPlan {
+            reason,
             receipt: receipt.clone(),
             checkpoint,
             source_version: settlement::source_version(self)?,
@@ -141,6 +202,18 @@ impl RegistryEpoch {
         group: &ServerGroup,
         expected_tenure_start: u64,
     ) -> Result<Self, ReplError> {
+        let expected_reason = if self.repair_install_pending() {
+            self.repair_state()
+                .ok_or(ReplError::ReceiptConflict)?
+                .repair
+                .verify_current_owner(group, expected_tenure_start)?;
+            RecoveryReason::Repair
+        } else {
+            RecoveryReason::Rewound
+        };
+        if plan.reason != expected_reason {
+            return Err(ReplError::ReceiptConflict);
+        }
         if !self.adopting
             || self.phase() != EpochPhase::Closing
             || self.receipts.is_faulted()
@@ -158,6 +231,7 @@ impl RegistryEpoch {
             plan.checkpoint.bytes(),
         )?;
         successor.receipts = self.receipts.clone();
+        successor.repair_binding = self.repair_binding;
         successor.receipts.mark_latest_installed();
         Ok(successor)
     }
