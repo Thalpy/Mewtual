@@ -4012,8 +4012,9 @@ the reciprocal control protocol is not a dual-key device↔transport ownership p
   separate store coverage.) Linux-only store tests abort a subprocess
   after the staged record is synced and immediately after rename; readers observe either the
   complete previous or complete replacement record. The persistence primitive uses unique
-  create-new siblings, rejects staging symlinks, syncs the staged file and, on Unix, its parent
-  directory; a post-rename sync failure is explicitly classified as committed-but-not-durable.
+  create-new siblings, rejects staging symlinks, syncs the staged file and, on Unix and Windows,
+  its parent directory; a post-rename sync failure is explicitly classified as
+  committed-but-not-durable.
   The root `vault.bin` now uses the same durable staging shape plus an OS-backed interprocess lock;
   it fails lock contention promptly as `VaultBusy`, and real child-process tests prove concurrent
   first creation cannot return mismatched DEKs or hang and conflicting rewraps cannot both succeed.

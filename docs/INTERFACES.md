@@ -806,8 +806,9 @@ Plaintext wraps framed scope, channel and snapshot; vault framing adds 40 physic
 The store caps both path metadata and actual bounded reads, authenticates the seal and verifies
 scope/name consistency during inventory. Receipt-book growth, opening receipt and closing gate
 hash charge protocol; user/seed/metadata/quarantine bytes charge content. Atomic replacements
-reserve old-plus-new peak bytes; unchanged files are flushed without rewriting. File sync plus
-Unix-only parent sync uses the existing vault durability seam, not a new Windows guarantee.
+reserve old-plus-new peak bytes; unchanged files are flushed without rewriting. File sync is
+followed by parent sync on Unix and Windows; unsupported targets retain atomic replacement without
+a directory-flush guarantee.
 
 These store APIs are not network-send permits. The explicit native adapter below coordinates
 local indexing and blob/reference ordering. Conservative byte-reference protection is described
@@ -1906,8 +1907,8 @@ step visits at most 64 names, with the same 131,072-entry traversal rail as inve
 only exact canonical recovery-write staging siblings. It does not read bodies or touch published
 recovery files, even corrupt ones; logical staged snapshots stay inside their final record.
 Failure/panic poisons completion and can leave partial deletions. Every successful batch/EOF,
-including an empty retry, runs the existing parent sync (Unix-only durability). A successful EOF
-means that traversal ended, not that directory iteration during deletion found every orphan.
+including an empty retry, runs the existing parent sync (Unix and Windows durability). A successful
+EOF means that traversal ended, not that directory iteration during deletion found every orphan.
 `into_inventory()` requires successful EOF and transfers the exclusive borrow to a fresh scan;
 callers repeat cleanup if necessary and reconcile complete current inventories before refunding
 any budget. This standalone operation has no startup, actor/bridge or network invocation yet.
@@ -1984,8 +1985,8 @@ inventory below covers its namespace and orphan temporaries. The sole coordinato
 publication remain deferred; the recovery-only scanner still excludes owner files. Before actual sending,
 the publisher must re-prepare/re-save the exact choice and recheck current owner, tenure and session.
 The explicit registry rotation path now validates the close and deterministic seed before signing;
-other managed types still need their own adapters. File-sync and
-atomic replacement use the existing store primitive, with parent-directory durability on Unix only.
+other managed types still need their own adapters. File-sync and atomic replacement use the
+existing store primitive, with parent-directory durability on Unix and Windows.
 
 `scan_epoch_storage()` returns `EpochStorageScan`; `cleanup_epoch_storage_staging()` returns
 `EpochStorageCleanup`. These share the recovery engine and its unchanged aggregate traversal,
@@ -2017,7 +2018,8 @@ The caller must validate type-specific semantics first. There is no public raw-s
 API. Exact duplicate intents preserve newer entries and sync the authenticated unchanged final
 file plus parent without rewriting; sync-only admission reserves no bytes. New entries use ordinary
 content replacement accounting. Reads alone do not repair an uncertain save or authorize replay
-as a different author. File and parent durability are the existing file-sync/Unix-parent-sync model.
+as a different author. File and parent durability are the existing file-sync plus
+Unix/Windows-parent-sync model.
 
 The new explicit `scan_epoch_storage_with_intents` and
 `cleanup_epoch_storage_staging_with_intents` APIs return the same incremental jobs with fixed
@@ -2753,7 +2755,8 @@ authenticated file and parent. Both snapshots use the restored current owner: re
 derived quota owner alone needs no copy at the content cap. Actual old bytes remain accounted and
 flushed, and each restore derives the owner again. Failed writes, flushes or unwinds grant no
 success and poison accounting until reconciliation. A loaded state alone grants no acknowledgement
-after an uncertain rename. The existing durability model remains file sync plus Unix-only parent sync.
+after an uncertain rename. The existing durability model remains file sync plus Unix/Windows
+parent sync.
 
 Peer-writable history, seed and metadata charge ordinary content. Only exact receipt-book growth,
 the opening receipt and the optional gate receipt hash charge protocol allowance; an owner seal
@@ -2862,8 +2865,8 @@ to eight current members with two routes each inside an exact 8-KiB encoded rout
 address is capped at 512 bytes and the
 entire record remains vault-sealed and atomically replaced. Every `ServerStore` record uses the
 same durability primitive: write and sync a sibling staging file, rename it over the destination,
-then sync the parent directory on Unix. Abrupt termination before rename therefore retains the
-complete authenticated predecessor; after rename readers see the complete replacement. Staging
+then sync the parent directory on Unix and Windows. Abrupt termination before rename therefore
+retains the complete authenticated predecessor; after rename readers see the complete replacement. Staging
 siblings are destination-specific, unique per invocation and opened with create-new semantics, so
 concurrent record types cannot alias and a pre-planted symlink is not followed. A parent-directory
 sync failure is reported distinctly as `CommittedButNotDurable`: the replacement is already visible

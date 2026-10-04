@@ -126,9 +126,10 @@ impl<'a> EpochStorageCleanup<'a> {
     pub fn coverage(&self) -> EpochInventoryCoverage {
         self.coverage
     }
-    /// Visit at most 64 entries, then sync the parent before reporting success (Unix directory
-    /// sync; the existing non-Unix primitive is a no-op). Even a zero-removal batch syncs, so a
-    /// retry after an uncertain unlink cannot convert absence into unproven free-space credit.
+    /// Visit at most 64 entries, then sync the parent before reporting success (a real directory
+    /// flush on Unix and Windows; unsupported targets retain the existing no-op). Even a
+    /// zero-removal batch syncs, so a retry after an uncertain unlink cannot convert absence into
+    /// unproven free-space credit.
     /// A failed/cancelled pass may already have removed some unpublished siblings. It never
     /// changes a budget: only complete, current inventory reconciliation can release charges.
     pub fn step(&mut self) -> Result<EpochStorageCleanupProgress, AppError> {

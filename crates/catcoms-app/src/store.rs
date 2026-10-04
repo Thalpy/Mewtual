@@ -523,8 +523,9 @@ mod persistence {
     /// Write `bytes` to `path` atomically and durably.
     ///
     /// The staged file is flushed before rename, so termination before the rename leaves the previous
-    /// authenticated record intact. On Unix the containing directory is flushed after rename as well,
-    /// making the name replacement durable across power loss rather than merely atomic to readers.
+    /// authenticated record intact. On Unix and Windows the containing directory is flushed after
+    /// rename as well, making the name replacement durable across power loss rather than merely atomic
+    /// to readers. Other targets retain atomic replacement but have no directory-flush implementation.
     /// Each invocation uses a destination-specific, securely-created sibling. Concurrent writers and
     /// the `.bin`/`.net`/`.cache` records for one server therefore cannot overwrite each other's staged
     /// bytes, and a pre-planted symlink is rejected rather than followed.
@@ -1263,9 +1264,43 @@ mod persistence {
         File::open(path).and_then(|directory| directory.sync_all())
     }
 
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    fn sync_directory(path: &Path) -> std::io::Result<()> {
+        use std::os::windows::fs::OpenOptionsExt;
+        use windows_sys::Win32::Storage::FileSystem::{
+            FILE_FLAG_BACKUP_SEMANTICS, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
+        };
+
+        // A normal Windows file open cannot acquire a directory handle. Backup semantics permits
+        // that handle, write access permits FlushFileBuffers (used by File::sync_all), and full
+        // sharing avoids turning this short durability barrier into a rename/delete exclusion.
+        OpenOptions::new()
+            .write(true)
+            .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+            .open(path)
+            .and_then(|directory| directory.sync_all())
+    }
+
+    #[cfg(not(any(unix, windows)))]
     fn sync_directory(_path: &Path) -> std::io::Result<()> {
         Ok(())
+    }
+
+    #[cfg(all(test, windows))]
+    mod windows_tests {
+        use super::*;
+
+        #[test]
+        fn directory_sync_uses_a_real_windows_handle() {
+            let root = tempfile::tempdir().unwrap();
+            sync_directory(root.path()).expect("an existing directory can be flushed");
+
+            let missing = root.path().join("missing");
+            let error =
+                sync_directory(&missing).expect_err("a missing directory cannot be flushed");
+            assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
+        }
     }
 }
 

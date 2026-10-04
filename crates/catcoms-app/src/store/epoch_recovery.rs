@@ -438,7 +438,8 @@ impl ServerStore {
     /// On any error, do not install a checkpoint, prune history, or report successful eviction.
     /// CommittedButNotDurable means the replacement may already be visible; reload and retry
     /// the same action. A successful write provides the existing store's file-sync/atomic-rename
-    /// guarantee, plus parent-directory sync on Unix, not immunity to storage-device failure.
+    /// guarantee, plus parent-directory sync on Unix and Windows, not immunity to storage-device
+    /// failure or a promise for other targets.
     /// The Clock's wall time is used because this seven-day deadline must survive process exit.
     pub fn update_epoch_recovery(
         &mut self,

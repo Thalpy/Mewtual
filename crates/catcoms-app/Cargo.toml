@@ -26,6 +26,11 @@ thiserror.workspace = true
 tracing.workspace = true
 tokio = { workspace = true, features = ["rt", "sync", "macros", "time"] }
 
+[target.'cfg(windows)'.dependencies]
+# Opening a directory for an actual metadata flush requires Windows' backup-semantics flag.
+# Keep this target-specific: Unix uses the standard File directory handle below.
+windows-sys = { version = "0.61", features = ["Win32_Storage_FileSystem"] }
+
 [dev-dependencies]
 # A driver-acknowledgement seam exercises replay cancellation and ambiguous submission without
 # sockets or sleeps. These are existing workspace dependencies, used only by test transports.
