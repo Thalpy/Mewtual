@@ -291,6 +291,36 @@ impl ServerStore {
         Ok((state, record))
     }
 
+    /// Re-save the exact authenticated repair journal before distributing a repair that relies on
+    /// it. A visible rename from an earlier B1/B3 attempt is not evidence that its parent-directory
+    /// durability barrier completed; this no-op semantic transition repeats the ordinary accounted
+    /// sealed-record write and rechecks the live observer/MLS epoch on both sides of it.
+    #[allow(clippy::too_many_arguments)]
+    pub(in crate::store) fn resave_epoch_owner_repair_state_with_writer(
+        &mut self,
+        server: u64,
+        document: &LogicalDocument,
+        observer: &DeviceId,
+        durable_epoch: u64,
+        rng: &mut impl CryptoRngCore,
+        budget: &mut EpochStorageBudget,
+        hooks: &mut WriteHooks<'_>,
+    ) -> Result<(), AppError> {
+        self.write_epoch_owner_state(
+            server,
+            document,
+            OwnerGuard::Repair {
+                observer,
+                durable_epoch,
+            },
+            rng,
+            budget,
+            |_| Ok(()),
+            hooks,
+        )
+        .map(drop)
+    }
+
     /// Barrier B1. Persist the signed repair, its admitted pair and the plan's journal candidate
     /// together, including a journal `NoChange`. The plan must have been computed against exactly
     /// this journal; a stale candidate refuses rather than overwriting newer owner work. An exact

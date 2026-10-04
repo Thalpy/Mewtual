@@ -115,6 +115,125 @@ fn a_faulted_bucket_is_repaired_recycled_and_served_without_a_held_proof() {
 }
 
 #[test]
+fn repair_only_registry_head_repeats_uncertain_b2_durability_before_service() {
+    let root = tempfile::tempdir().unwrap();
+    let mut f = Fixture::new();
+    let mut store = open(root.path());
+    let pair = faulted(&mut f, &mut store);
+    let mut b = budget(&mut store, &f);
+    let error = store
+        .issue_registry_repair_with_io(
+            SERVER,
+            &f.group,
+            f.key.bucket(),
+            &f.device,
+            0,
+            StudioRepairRequest {
+                receipt_a: pair[0].hash(),
+                receipt_b: pair[1].hash(),
+                selected: pair[0].hash(),
+            },
+            None,
+            &ManualClock::new(1000),
+            &mut rng(),
+            &mut b,
+            &mut WriteHooks::fail_after_write(FailError::NotDurable(
+                "uncertain Registry B2 source",
+            ))
+            .at(WriteTag::Source),
+        )
+        .unwrap_err();
+    assert!(matches!(error, AppError::CommittedButNotDurable(_)));
+    drop(store);
+
+    let mut store = open(root.path());
+    let repair = f
+        .load(&store)
+        .unwrap()
+        .unit
+        .repair_state()
+        .expect("the visible bucket carries the repair")
+        .repair;
+    let mut b = budget(&mut store, &f);
+    let refused = store.prepare_registry_head_and_repair(
+        SERVER,
+        &f.group,
+        f.key.bucket(),
+        &f.device,
+        Some(0),
+        None,
+        &mut rng(),
+        &mut b,
+        &mut WriteHooks::fail_before_sync(FailError::NotDurable(
+            "Registry source durability still unavailable",
+        ))
+        .at(WriteTag::Source),
+    );
+    assert!(refused.is_err(), "repair service bypassed the source flush");
+
+    let mut b = budget(&mut store, &f);
+    let refused = store.prepare_registry_head_and_repair(
+        SERVER,
+        &f.group,
+        f.key.bucket(),
+        &f.device,
+        Some(0),
+        None,
+        &mut rng(),
+        &mut b,
+        &mut WriteHooks::fail_before_write(FailError::NotDurable(
+            "Registry owner repair journal durability still unavailable",
+        ))
+        .at(WriteTag::Journal),
+    );
+    assert!(
+        refused.is_err(),
+        "repair service bypassed the owner-record re-save"
+    );
+
+    let mut b = budget(&mut store, &f);
+    let refused = store.prepare_registry_head_and_repair(
+        SERVER,
+        &f.group,
+        f.key.bucket(),
+        &f.device,
+        Some(0),
+        None,
+        &mut rng(),
+        &mut b,
+        &mut WriteHooks::fail_after_write(FailError::NotDurable(
+            "Registry owner repair journal replacement is visible but uncertain",
+        ))
+        .at(WriteTag::Journal),
+    );
+    assert!(
+        matches!(refused, Err(AppError::CommittedButNotDurable(_))),
+        "repair service treated an uncertain B3 owner-record replacement as durable"
+    );
+    drop(store);
+
+    // Re-open so the final service result proves that no in-memory success leaked through the
+    // uncertain owner-record write. The clean retry must repeat both durability barriers.
+    let mut store = open(root.path());
+
+    let mut b = budget(&mut store, &f);
+    let (selection, served) = store
+        .prepare_registry_head_with_fault_repair(
+            SERVER,
+            &f.group,
+            f.key.bucket(),
+            &f.device,
+            Some(0),
+            None,
+            &mut rng(),
+            &mut b,
+        )
+        .unwrap();
+    assert!(!selection.prove);
+    assert_eq!(served, Some(repair));
+}
+
+#[test]
 fn a_held_bucket_decision_fences_adoption_defers_installs_and_resumes_to_ordinary() {
     let root = tempfile::tempdir().unwrap();
     let mut f = Fixture::new();

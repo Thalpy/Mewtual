@@ -9,7 +9,7 @@ use catcoms_replication::{DomainOp, EpochPhase, InheritedCheckpoint, Receipt};
 const SERVER: u64 = 83;
 
 #[tokio::test]
-async fn an_owed_repair_replaces_an_unfetched_pass_with_its_own_repaired_seed_fetch() {
+async fn a_warm_owed_repair_defers_without_mutation_while_the_shared_pool_is_full() {
     let hub = Hub::new();
     let alice_peer = PeerId::from_u64(1);
     let mut alice = Server::found(
@@ -180,28 +180,27 @@ async fn an_owed_repair_replaces_an_unfetched_pass_with_its_own_repaired_seed_fe
         target: Some(target),
         ..Default::default()
     };
+    let pool = runtime.inject_overlay_pool_for_test(4);
+    let _occupied = pool
+        .clone()
+        .try_acquire_many_owned(4)
+        .expect("occupy every shared preparation slot");
+    assert_eq!(pool.available_permits(), 0);
     runtime.checkpoint = Some(unfetched(&mut alice, &store));
     runtime.checkpoint_sealed = false;
     let routed = runtime
         .route_checkpoint_install(&mut alice, &mut store, SERVER, Some(target))
         .unwrap();
-    assert_eq!(routed, Some(None), "the router handled the pass");
+    assert_eq!(routed, Some(None), "the router deferred the pass");
     assert!(
         runtime.owner_failure.is_none(),
         "{:?}",
         runtime.owner_failure
     );
-    let minted = runtime
-        .checkpoint
-        .as_ref()
-        .expect("a repaired seed fetch replaces the unfetched pass");
     assert!(
-        runtime.checkpoint_sealed,
-        "the repaired pass is fetched next"
+        runtime.checkpoint.is_none(),
+        "no repair job or ordinary install may survive the fail-closed gate"
     );
-    assert!(!minted.inner.is_fetched());
-    assert_eq!(minted.inner.selected_receipt(), &chosen);
-    assert_eq!(minted.inner.fault_repair(), Some(&repair));
     let after = std::fs::read_dir(root.path().join("servers"))
         .unwrap()
         .map(|e| e.unwrap().path())
@@ -209,20 +208,4 @@ async fn an_owed_repair_replaces_an_unfetched_pass_with_its_own_repaired_seed_fe
         .map(|p| std::fs::read(p).unwrap())
         .collect::<Vec<_>>();
     assert_eq!(after, source, "nothing was installed");
-
-    // A persistent hold on the target stops further seed fetches until it expires.
-    runtime.checkpoint = None;
-    runtime.repair_backoff.insert(
-        CheckpointTarget::Studio(target),
-        alice.runtime_clock().monotonic_ms() + 60_000,
-    );
-    runtime.checkpoint = Some(unfetched(&mut alice, &store));
-    runtime.checkpoint_sealed = false;
-    runtime
-        .route_checkpoint_install(&mut alice, &mut store, SERVER, Some(target))
-        .unwrap();
-    assert!(
-        runtime.checkpoint.is_none(),
-        "a held target fetches nothing"
-    );
 }

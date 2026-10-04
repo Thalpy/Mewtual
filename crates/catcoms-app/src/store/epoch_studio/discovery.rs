@@ -235,7 +235,7 @@ impl ServerStore {
         )
     }
     #[allow(clippy::too_many_arguments)]
-    fn prepare_studio_head_and_repair_with_io(
+    pub(super) fn prepare_studio_head_and_repair_with_io(
         &mut self,
         server: u64,
         group: &ServerGroup,
@@ -310,6 +310,18 @@ impl ServerStore {
             // a hint, since the source may still sit on the branch the decision repudiates.
             let applied = servable.filter(|r| r == pending);
             let receipt = applied.as_ref().and(held.cloned());
+            if applied.is_some() {
+                self.flush_studio_repair_service_barriers(
+                    server,
+                    &document,
+                    source.as_ref().expect("servable repair source").1,
+                    group,
+                    device,
+                    rng,
+                    budget,
+                    hooks,
+                )?;
+            }
             return Ok((
                 ReceiptHeadSelection {
                     receipt,
@@ -346,21 +358,39 @@ impl ServerStore {
             && durable_tenure.is_some_and(|t| {
                 selected.is_some_and(|r| r.verify_current_owner(group, t).is_ok())
             });
+        // Repair carriage has its own durability gate. It is independent of proof selection:
+        // readable replacement bytes after an uncertain B2/B3 write are not permission to
+        // distribute the signed repair. Re-save the exact source and owner state first.
+        let repair_durable = servable.is_some();
+        if repair_durable {
+            self.flush_studio_repair_service_barriers(
+                server,
+                &document,
+                source.as_ref().expect("servable repair source").1,
+                group,
+                device,
+                rng,
+                budget,
+                hooks,
+            )?;
+        }
         if prove {
             let record = source.expect("matched proof source").1;
-            let reservation = budget
-                .storage
-                .reserve_sync(&storage_scope, record)
-                .map_err(invalid)?;
-            let scope = scope_bytes(server, &document)?;
-            // I-4: unchanged-file flush still invalidates a captured inventory.
-            let path = self.studio_epoch_path(&scope);
-            let bytes = record.footprint.total().map_err(invalid)?;
-            let mutation = self.epoch_mutation_guard();
-            hooks.before_sync(WriteTag::Source, &path, bytes)?;
-            sync_studio(&mutation, &path, bytes)?;
-            hooks.after_sync(WriteTag::Source, &path)?;
-            reservation.commit();
+            if !repair_durable {
+                let reservation = budget
+                    .storage
+                    .reserve_sync(&storage_scope, record)
+                    .map_err(invalid)?;
+                let scope = scope_bytes(server, &document)?;
+                // I-4: unchanged-file flush still invalidates a captured inventory.
+                let path = self.studio_epoch_path(&scope);
+                let bytes = record.footprint.total().map_err(invalid)?;
+                let mutation = self.epoch_mutation_guard();
+                hooks.before_sync(WriteTag::Source, &path, bytes)?;
+                sync_studio(&mutation, &path, bytes)?;
+                hooks.after_sync(WriteTag::Source, &path)?;
+                reservation.commit();
+            }
             self.prepare_epoch_owner_publication_with_writer(
                 server,
                 receipt.clone().expect("selected proof"),
@@ -372,6 +402,42 @@ impl ServerStore {
             )?;
         }
         Ok((ReceiptHeadSelection { receipt, prove }, servable))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn flush_studio_repair_service_barriers(
+        &mut self,
+        server: u64,
+        document: &catcoms_replication::LogicalDocument,
+        record: StorageRecord,
+        group: &ServerGroup,
+        device: &MlsDevice,
+        rng: &mut impl CryptoRngCore,
+        budget: &mut EpochStudioBudget,
+        hooks: &mut WriteHooks<'_>,
+    ) -> Result<(), AppError> {
+        let storage_scope = StorageScope::new(server, &document.server_id).map_err(invalid)?;
+        let reservation = budget
+            .storage
+            .reserve_sync(&storage_scope, record)
+            .map_err(invalid)?;
+        let scope = scope_bytes(server, document)?;
+        let path = self.studio_epoch_path(&scope);
+        let bytes = record.footprint.total().map_err(invalid)?;
+        let mutation = self.epoch_mutation_guard();
+        hooks.before_sync(WriteTag::Source, &path, bytes)?;
+        sync_studio(&mutation, &path, bytes)?;
+        hooks.after_sync(WriteTag::Source, &path)?;
+        reservation.commit();
+        self.resave_epoch_owner_repair_state_with_writer(
+            server,
+            document,
+            &device.device_id(),
+            group.epoch(),
+            rng,
+            &mut budget.storage,
+            hooks,
+        )
     }
     /// Complete either a checked reply handoff or exact durable installed-head availability,
     /// under the same exclusive transaction. Neither outcome attests remote delivery. A failed

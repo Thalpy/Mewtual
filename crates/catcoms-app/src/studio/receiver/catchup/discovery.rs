@@ -142,25 +142,35 @@ impl CatchupRuntime {
                     // supersedes this pass's selection, so the two must never race.
                     let mut keep = true;
                     if let Some(repair) = pass.inner.fault_repair().cloned() {
+                        if !Self::automatic_repair_execution_ready() {
+                            // The pass cannot fall through to ordinary installation: its repair
+                            // needs the not-yet-built admitted detached execution boundary.
+                            keep = false;
+                            self.retry_discovery(now);
+                        }
                         let offered = pass.inner.selected_receipt().clone();
-                        let applied = match target {
-                            CheckpointTarget::Studio(studio) => self.apply_offered_repair(
-                                server,
-                                store,
-                                id,
-                                studio,
-                                &repair,
-                                Some(&offered),
-                            )?,
-                            CheckpointTarget::Registry(bucket) => self
-                                .apply_offered_registry_repair(
+                        let applied = if keep {
+                            match target {
+                                CheckpointTarget::Studio(studio) => self.apply_offered_repair(
                                     server,
                                     store,
                                     id,
-                                    bucket,
+                                    studio,
                                     &repair,
                                     Some(&offered),
                                 )?,
+                                CheckpointTarget::Registry(bucket) => self
+                                    .apply_offered_registry_repair(
+                                        server,
+                                        store,
+                                        id,
+                                        bucket,
+                                        &repair,
+                                        Some(&offered),
+                                    )?,
+                            }
+                        } else {
+                            None
                         };
                         let failure_target = match target {
                             CheckpointTarget::Studio(studio) => Some(studio),

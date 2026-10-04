@@ -532,9 +532,13 @@ table with the commit that closed it.
   complete the exact owner publication journal, without proving driver admission or peer delivery.
   Eight fixed-lifetime queued requests,
   full-identity rates, four driver-owned outbound slots and source service rails bound resources;
-  rate debt is process-local and Sybils still reach aggregate caps. Signed repair bytes are not
-  served yet. Registry seed fetching and explicit recovery-first installation are implemented;
-  head hints alone still authorize neither replacement nor an editing lease.
+  rate debt is process-local and Sybils still reach aggregate caps. Authenticated current-tenure
+  repair bytes may be carried only after the exact replacement source is synchronized and the
+  contextual owner record is re-saved durably. Automatic receiving-side repair application,
+  continuation and repaired-seed installation remain disabled until they can retain shared
+  preparation admission across detached capture, revalidation and commit. Registry seed fetching
+  and explicit recovery-first installation are implemented; head hints alone still authorize
+  neither replacement nor an editing lease.
 - **Registry page cursors are continuation claims, not remote possession or currency proofs.**
   Cooperative page serving binds an ephemeral HMAC-SHA256 key to the exact provider/requester,
   full group/logical/concrete scope, initial heads/seed, fixed accepted-log prefix and monotonic

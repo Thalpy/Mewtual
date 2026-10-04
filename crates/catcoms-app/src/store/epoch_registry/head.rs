@@ -94,7 +94,7 @@ impl ServerStore {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn prepare_registry_head_and_repair(
+    pub(super) fn prepare_registry_head_and_repair(
         &mut self,
         server: u64,
         group: &ServerGroup,
@@ -223,6 +223,18 @@ impl ServerStore {
         if let Some((pending, _, _)) = journal.held_repair() {
             let applied = servable.filter(|r| r == pending);
             let receipt = applied.as_ref().and(held.cloned());
+            if applied.is_some() {
+                self.flush_registry_repair_service_barriers(
+                    server,
+                    &document,
+                    record.expect("servable repair source"),
+                    group,
+                    device,
+                    rng,
+                    budget,
+                    hooks,
+                )?;
+            }
             return Ok((
                 ReceiptHeadSelection {
                     receipt,
@@ -260,19 +272,34 @@ impl ServerStore {
             && durable_tenure.is_some_and(|t| {
                 selected.is_some_and(|r| r.verify_current_owner(group, t).is_ok())
             });
+        let repair_durable = servable.is_some();
+        if repair_durable {
+            self.flush_registry_repair_service_barriers(
+                server,
+                &document,
+                record.expect("servable repair source"),
+                group,
+                device,
+                rng,
+                budget,
+                hooks,
+            )?;
+        }
         if prove {
             let record = record.ok_or_else(|| invalid("proof source missing"))?;
-            let reservation = budget
-                .reserve_sync(&storage_scope, record)
-                .map_err(invalid)?;
-            // I-4: an unchanged-file flush is a mutation for inventory purposes.
-            let path = self.registry_epoch_path(&scope);
-            let bytes = record.footprint.total().map_err(invalid)?;
-            let mutation = self.epoch_mutation_guard();
-            hooks.before_sync(WriteTag::Source, &path, bytes)?;
-            sync_registry(&mutation, &path, bytes)?;
-            hooks.after_sync(WriteTag::Source, &path)?;
-            reservation.commit();
+            if !repair_durable {
+                let reservation = budget
+                    .reserve_sync(&storage_scope, record)
+                    .map_err(invalid)?;
+                // I-4: an unchanged-file flush is a mutation for inventory purposes.
+                let path = self.registry_epoch_path(&scope);
+                let bytes = record.footprint.total().map_err(invalid)?;
+                let mutation = self.epoch_mutation_guard();
+                hooks.before_sync(WriteTag::Source, &path, bytes)?;
+                sync_registry(&mutation, &path, bytes)?;
+                hooks.after_sync(WriteTag::Source, &path)?;
+                reservation.commit();
+            }
             // Re-save even an exact published retry: a previously visible rename is not itself
             // evidence of a successful parent flush. No mark-published or receipt issuance here.
             self.prepare_epoch_owner_publication_with_writer(
@@ -286,6 +313,41 @@ impl ServerStore {
             )?;
         }
         Ok((ReceiptHeadSelection { receipt, prove }, servable))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn flush_registry_repair_service_barriers(
+        &mut self,
+        server: u64,
+        document: &catcoms_replication::LogicalDocument,
+        record: StorageRecord,
+        group: &ServerGroup,
+        device: &MlsDevice,
+        rng: &mut impl CryptoRngCore,
+        budget: &mut EpochStorageBudget,
+        hooks: &mut WriteHooks<'_>,
+    ) -> Result<(), AppError> {
+        let storage_scope = StorageScope::new(server, &document.server_id).map_err(invalid)?;
+        let reservation = budget
+            .reserve_sync(&storage_scope, record)
+            .map_err(invalid)?;
+        let scope = scope_bytes(server, document)?;
+        let path = self.registry_epoch_path(&scope);
+        let bytes = record.footprint.total().map_err(invalid)?;
+        let mutation = self.epoch_mutation_guard();
+        hooks.before_sync(WriteTag::Source, &path, bytes)?;
+        sync_registry(&mutation, &path, bytes)?;
+        hooks.after_sync(WriteTag::Source, &path)?;
+        reservation.commit();
+        self.resave_epoch_owner_repair_state_with_writer(
+            server,
+            document,
+            &device.device_id(),
+            group.epoch(),
+            rng,
+            budget,
+            hooks,
+        )
     }
 
     /// Same journal/flush/signing-selection barriers as the explicit cold adapter, without a

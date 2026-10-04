@@ -567,6 +567,129 @@ fn head_service_serves_an_applied_repair_but_never_proves_while_it_is_held() {
     assert_eq!(selection.receipt.as_ref(), Some(&chosen));
 }
 
+#[test]
+fn repair_only_head_repeats_uncertain_b2_durability_before_service() {
+    let root = tempfile::tempdir().unwrap();
+    let mut store = open(root.path());
+    let f = Fixture::new(false);
+    let mut b = budget(&mut store, &f);
+    f.edit(&mut store, &mut b, f.insert());
+    let (chosen, _) = checkpoint(&f, &store, 10, 10);
+    let (rival, _) = checkpoint(&f, &store, 10, 11);
+    adopt(&f, &mut store, &chosen, None);
+    adopt(&f, &mut store, &rival, None);
+    let mut pair = [chosen.clone(), rival.clone()];
+    pair.sort_by_key(Receipt::hash);
+
+    // B1 lands, then B2's source replacement becomes visible while its acknowledgement is
+    // uncertain. `AfterWrite` is the store's committed/not-durable failure model: the retry must
+    // treat the visible record as needing another explicit source barrier.
+    let error = issue_with(
+        &f,
+        &mut store,
+        request([&chosen, &rival], &chosen),
+        None,
+        &mut WriteHooks::fail_after_write(FailError::NotDurable("uncertain B2 source"))
+            .at(WriteTag::Source),
+    )
+    .unwrap_err();
+    assert!(matches!(error, AppError::CommittedButNotDurable(_)));
+    drop(store);
+
+    let mut store = open(root.path());
+    let state = f.load(&store).expect("the B2 replacement is visible");
+    let repair = state
+        .unit
+        .repair_state()
+        .expect("the visible source carries the repair")
+        .repair;
+    store.retain_studio_source(&f.group, &f.device, state);
+
+    let mut b = budget(&mut store, &f);
+    let refused = store.prepare_studio_head_and_repair_with_io(
+        SERVER,
+        &f.group,
+        f.target,
+        &f.device,
+        Some(0),
+        None,
+        &mut rng(),
+        &mut b,
+        &mut WriteHooks::fail_before_sync(FailError::NotDurable(
+            "source durability still unavailable",
+        ))
+        .at(WriteTag::Source),
+    );
+    assert!(refused.is_err(), "repair service bypassed the source flush");
+
+    let mut b = budget(&mut store, &f);
+    let refused = store.prepare_studio_head_and_repair_with_io(
+        SERVER,
+        &f.group,
+        f.target,
+        &f.device,
+        Some(0),
+        None,
+        &mut rng(),
+        &mut b,
+        &mut WriteHooks::fail_before_write(FailError::NotDurable(
+            "owner repair journal durability still unavailable",
+        ))
+        .at(WriteTag::Journal),
+    );
+    assert!(
+        refused.is_err(),
+        "repair service bypassed the owner-record re-save"
+    );
+
+    let mut b = budget(&mut store, &f);
+    let refused = store.prepare_studio_head_and_repair_with_io(
+        SERVER,
+        &f.group,
+        f.target,
+        &f.device,
+        Some(0),
+        None,
+        &mut rng(),
+        &mut b,
+        &mut WriteHooks::fail_after_write(FailError::NotDurable(
+            "owner repair journal replacement is visible but uncertain",
+        ))
+        .at(WriteTag::Journal),
+    );
+    assert!(
+        matches!(refused, Err(AppError::CommittedButNotDurable(_))),
+        "repair service treated an uncertain B3 owner-record replacement as durable"
+    );
+    drop(store);
+
+    // A fresh mount must not inherit an in-memory success from the uncertain write. Re-open the
+    // exact replacement source and make both barriers succeed before repair carriage resumes.
+    let mut store = open(root.path());
+    let state = f
+        .load(&store)
+        .expect("the replacement remains readable after the uncertain B3 write");
+    store.retain_studio_source(&f.group, &f.device, state);
+
+    // Reconcile the invalidated inventory and retry. B3 is intentionally still outstanding:
+    // successful B2/B3 durability, not replacement installation, is the service prerequisite.
+    let mut b = budget(&mut store, &f);
+    let (selection, served) = store
+        .prepare_studio_head_with_fault_repair(
+            SERVER,
+            &f.group,
+            f.target,
+            &f.device,
+            Some(0),
+            None,
+            &mut rng(),
+            &mut b,
+        )
+        .unwrap();
+    assert!(!selection.prove);
+    assert_eq!(served, Some(repair));
+}
+
 fn head(
     f: &Fixture,
     store: &mut ServerStore,

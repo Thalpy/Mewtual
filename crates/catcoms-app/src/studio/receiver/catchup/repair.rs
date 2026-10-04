@@ -16,6 +16,18 @@ const MAX_REMEMBERED_REGISTRY_REPAIRS: usize = 64;
 const REPAIR_HOLD_BACKOFF_MS: u64 = 60_000;
 
 impl CatchupRuntime {
+    /// Fail-closed integration gate for repair transactions that still run synchronously while
+    /// the receiver owns Server/store custody. The store/core implementation remains available
+    /// for bounded tests, but live discovery, owner resume and repaired-seed installation must not
+    /// enter it until a shared-pool job owns capture, detached execution, result custody and the
+    /// mount/source/generation/authority revalidation at commit.
+    ///
+    /// Keep this as a function rather than a public/configurable flag: unfinished repair is not a
+    /// user option and must not be enabled accidentally by configuration or a renderer command.
+    pub(super) fn automatic_repair_execution_ready() -> bool {
+        false
+    }
+
     /// The visible exit (Flow X): `Repairing` has exactly this producer, after the application
     /// barrier, while a replacement is owed. A hold changed nothing, so it reports the saved
     /// phase like a terminal outcome does; before B2 a Fault therefore stays Fault.
@@ -137,6 +149,11 @@ impl CatchupRuntime {
         target: StudioTarget,
         request: StudioRepairRequest,
     ) -> Result<StudioControlResponse, AppError> {
+        if !Self::automatic_repair_execution_ready() {
+            return Err(invalid(
+                "fault repair awaits detached admitted runtime execution",
+            ));
+        }
         let snapshot = self.owner_snapshot.clone().ok_or_else(|| {
             invalid("only the current owner, with a durable snapshot, may decide")
         })?;
@@ -194,6 +211,11 @@ impl CatchupRuntime {
         target: StudioTarget,
         request: StudioRepairRequest,
     ) -> Result<StudioControlResponse, AppError> {
+        if !Self::automatic_repair_execution_ready() {
+            return Err(invalid(
+                "Registry fault repair awaits detached admitted runtime execution",
+            ));
+        }
         let snapshot = self.owner_snapshot.clone().ok_or_else(|| {
             invalid("only the current owner, with a durable snapshot, may decide")
         })?;
@@ -252,6 +274,9 @@ impl CatchupRuntime {
         repair: &ReceiptRepair,
         offered: Option<&Receipt>,
     ) -> Result<Option<(StudioRepairOutcome, [Receipt; 2])>, AppError> {
+        if !Self::automatic_repair_execution_ready() {
+            return Ok(None);
+        }
         let owner = server
             .sync
             .with_registry_context(|g, d, _, _| g.designated_committer() == Some(d.device_id()));
@@ -295,6 +320,9 @@ impl CatchupRuntime {
         repair: &ReceiptRepair,
         offered: Option<&Receipt>,
     ) -> Result<Option<(StudioRepairOutcome, [Receipt; 2])>, AppError> {
+        if !Self::automatic_repair_execution_ready() {
+            return Ok(None);
+        }
         let owner = server
             .sync
             .with_registry_context(|g, d, _, _| g.designated_committer() == Some(d.device_id()));
@@ -363,6 +391,9 @@ impl CatchupRuntime {
         target: StudioTarget,
         bucket: u8,
     ) -> Result<bool, AppError> {
+        if !Self::automatic_repair_execution_ready() {
+            return Ok(false);
+        }
         let now = server.runtime_clock().monotonic_ms();
         if now < self.registry_repair_next_at {
             return Ok(false);
@@ -423,6 +454,9 @@ impl CatchupRuntime {
         id: u64,
         watches: &VecDeque<(ServerStudioWatch, u128)>,
     ) -> Result<Option<StudioTarget>, AppError> {
+        if !Self::automatic_repair_execution_ready() {
+            return Ok(None);
+        }
         let now = server.runtime_clock().monotonic_ms();
         if now < self.repair_next_at || watches.is_empty() {
             return Ok(None);
@@ -542,6 +576,14 @@ impl CatchupRuntime {
             }
         };
         if let Some((repair, pair)) = owed {
+            if !Self::automatic_repair_execution_ready() {
+                // Do not let the ordinary installer consume the decision's selected checkpoint.
+                // The fetched pass is network-derived and disposable; durable repair/source state
+                // remains untouched for the future detached job.
+                self.checkpoint = None;
+                self.retry_discovery(now);
+                return Ok(Some(None));
+            }
             let fetched = self
                 .checkpoint
                 .as_ref()
