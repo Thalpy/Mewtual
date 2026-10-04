@@ -335,7 +335,7 @@ fn a_discarding_disposal_removes_the_branch_and_its_entries_in_one_replacement()
 
     // Reopen: the durable record is the one that matters.
     drop(store);
-    let store = open(root.path());
+    let mut store = open(root.path());
     let after = store.load_epoch_intents(SERVER, &f.logical).unwrap();
     assert!(
         after.overlay().is_none(),
@@ -358,6 +358,25 @@ fn a_discarding_disposal_removes_the_branch_and_its_entries_in_one_replacement()
             "intent {id:?} was never part of the branch and must survive its disposal"
         );
     }
+    drop(after);
+
+    // Terminal metadata retains the branch's historic provenance for diagnostics, but lifecycle
+    // capacity is about live branches. The inventory must therefore keep the authenticated byte
+    // charge while exposing no live provenance for this disposed record.
+    let physical =
+        fs::metadata(store.epoch_intent_path(
+            &crate::store::epoch_intents::scope_bytes(SERVER, &f.logical).unwrap(),
+        ))
+        .unwrap()
+        .len();
+    let observed = inventory(&mut store);
+    let facts = observed
+        .records()
+        .find(|entry| entry.kind == EpochRecordKind::Intents && entry.document == f.logical)
+        .and_then(|entry| entry.intent_facts())
+        .expect("the disposed Intents row must retain accounting facts");
+    assert_eq!(facts.provenance(), None);
+    assert_eq!(facts.charged_bytes(), physical);
 }
 
 /// D4: a preserving disposal requires a durable archive for this exact branch, and the manifest names

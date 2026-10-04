@@ -11,7 +11,7 @@ status documents and in Git history; they do not override this matrix.
 |---|---|
 | Shared baseline | `gate4-agent1-runtime` at `bcc88941a8677afa62957c258a127f35f328ff67`; unchanged |
 | Verified repair candidate | `gate4-agent4-repair-candidate` at `87629d6b72992254911a8e44f698d535bb5d7904`; PR #32, open and ready for review |
-| Completion line | `gate4-completion-integration`; starts from `87629d6b...` and merges the documentation checkpoint only |
+| Completion line | `gate4-completion-integration`; starts from `87629d6b...`, merges the documentation checkpoint, and adds the reviewed structural inventory seam |
 | Documentation checkpoint | `gate4-agent4-integration` at `f0af61c9b1247fa955300ac50545074e18e9b302`; PR #31 |
 | Preserved Agent 3 head | `15b715a10704a8dafc2cccef65854d4d45ad55ca`, second parent of merge `6a2f89792eecbf6ef2e65d683e6b515bbc65181d` |
 
@@ -23,9 +23,10 @@ where the code candidate and documentation checkpoint are combined.
 
 The remaining work is one ordered chain rather than four independent agent queues:
 
-1. **Agent 1 runtime foundation:** expose structural overlay provenance plus authenticated charged
-   bytes, parameterize Flow S over the accepted Closing/Unconfirmed bases, adopt the C-3 cursor at
-   the six runtime scan owners, and implement Flow R.
+1. **Agent 1 runtime foundation:** the structural inventory now exposes live overlay provenance plus
+   authenticated physical charged bytes. Next, parameterize Flow S over the accepted
+   Closing/Unconfirmed bases, adopt the C-3 cursor at the six runtime scan owners, and implement
+   Flow R.
 2. **Agent 2 product paths:** use those seams for awaiting-tenure local work, reconciliation and
    restart reconstruction; drive the real actor/Studio A -> B -> A' and newcomer path; obtain a
    whole-boundary lifecycle review.
@@ -43,7 +44,7 @@ either order. Native registration is downstream of both specialist acceptance an
 | ID | Requirement | Current state | Precise next action | Acceptance evidence still required |
 |---|---|---|---|---|
 | G4-A1-CORE | Detached typed handoff preparation and finite signing | **Implemented; dedicated independent acceptance still outstanding.** `e65bfd89...` is in the baseline. | Run the SHA-pinned core signing review from `GATE4-REVIEW-PREAMBLES.md`; preserve its prior focused evidence. | Bounded PASS for `8190dc4...e65bfd8`; do not infer it from later broad CI. |
-| G4-A1-S | Durable local Save through Flow S | **Closing path implemented; provenance-general path absent; native unavailable.** | Add a structural inventory result carrying provenance and physical charged bytes, then parameterize capture/prepare/commit over `StudioOverlayBasis` without changing Closing semantics. | Closing compatibility plus real Unconfirmed first append, rails, expiry/replacement and exact retry tests. |
+| G4-A1-S | Durable local Save through Flow S | **Closing path implemented; structural inventory seam implemented and reviewed; provenance-general Flow S absent; native unavailable.** Every authenticated Intents row now reports exact sealed-file bytes and live-branch provenance without turning terminal historic metadata into a live branch. | Parameterize capture/prepare/commit over `StudioOverlayBasis` without changing Closing semantics, then consume the inventory facts in Agent 2's capacity rails. | Closing compatibility plus real Unconfirmed first append, rails, expiry/replacement and exact retry tests. |
 | G4-A1-C3 | Resumable bounded inventory | **Storage cursor implemented and reviewed; six runtime owners still use direct structural loads/full scans.** | Convert the six production owners with identity, mount, generation, cancellation, restart limit and backoff checks. Coordinate repair writers already integrated from Agent 3. | Cursor invalidation, bounded progress, retained-input ownership and another-server progress. |
 | G4-A1-R | Resolve interrupted Prepared state | **Not implemented.** | Build Flow R on the adopted cursor and existing source/reference fences. | Restart at each Prepared/Source/Completed barrier; reads/copy remain available and destructive actions remain refused. |
 | G4-A1-MAP | Structured eligibility/manual reasons | **Agent 2 types exist; Agent 1 runtime still returns string refusals in relevant paths.** | Map runtime refusals to `StudioOverlayEligibility` / `StudioOverlayManualReason` without collapsing distinct cases. | Store -> actor -> native conversion coverage for every reason, including stale final delivery. |
@@ -83,12 +84,23 @@ fresh-request assertions. The exact-head Windows full suite proves the correctio
 native restart/partition failure reproduced on the pinned baseline; the exact candidate's required
 `studio-native` CI job is green.
 
+The completion line additionally passed the complete root suite locally after the inventory seam
+was added (test debug symbols were disabled only to fit the workspace volume), plus all 1,282
+frontend tests, frontend check and production build. The native suite passed 324 tests and repeated
+the known `six_client_recovery::six_client_native_restart_and_partition_recovery` failure; the exact
+test fails identically on baseline `bcc88941...`, while its reverse-order companion passes. This is
+recorded as inherited evidence, not as a candidate pass. Linux CI remains the authority for
+`check-no-ambient.sh`.
+
 ## Review ledger
 
 - Agent 4's independent full-candidate review found no remaining BLOCKER/HIGH/MEDIUM finding after
   the Windows durability and issuer-tenure sequence corrections. It retained one LOW coverage gap:
   no transaction-level MAX-issuance regression proves absence of signing, B1 and write side effects.
 - Re-review of the CI timeout and deterministic test-pool correction found no findings.
+- Independent review of the structural inventory seam initially found that terminal disposed
+  metadata could be mistaken for a live branch and that a ledger-only control was absent. Both
+  were fixed; re-review found no remaining finding.
 - These bounded reviews accept the candidate work they inspected; they do not supply the missing
   core-signing verdict, Agent 1/2/3 completion verdicts or Review 4.
 - P5 remains false, Gate 4 remains open, and Gate 5 remains closed.

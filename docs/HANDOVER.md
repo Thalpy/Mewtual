@@ -10,6 +10,17 @@ and ranks the live hazards in that path.
 
 ## Status (latest entry: 2026-10-04)
 
+- **Gate 4 structural inventory seam (2026-10-04).** The authenticated structural scan now exposes
+  the exact sealed-file charge for every Intents record and the provenance of a live overlay branch.
+  Ledger-only and terminal disposed records keep their byte charge but report no live provenance,
+  so historic diagnostic metadata cannot strand a lifecycle capacity slot. The seam grants no
+  mutation, source, tenure, replay or signing authority and changes no wire/persistence format.
+  Focused regressions cover a live Closing branch, a ledger without an overlay and disposed terminal
+  metadata. Independent review found and prompted the terminal-state and ledger controls; re-review
+  has no remaining finding. This completes only the first Agent 1 -> Agent 2 handoff. Generalized
+  Unconfirmed Flow S and its app-side custody/rail/restart consumers remain missing, P5 remains
+  false, native Save and repair remain unregistered, Gate 4 remains open and Gate 5 remains closed.
+
 - **Gate 4 repair CI integration checkpoint (2026-10-04).** The store mutation harness now has a
   dedicated, serial Linux/Windows workflow rather than extending the 30-minute core job. Each
   platform uses Rust 1.89.0, Python 3.11, the Rust cache, `RUSTFLAGS=-D warnings`, a 90-minute
@@ -26,9 +37,9 @@ and ranks the live hazards in that path.
 
   Registration and ownership are unchanged: P5 remains false, Save and native repair commands
   remain unregistered, and the app-side archived Observed-tenure consumer/historical repair is
-  still missing. Recovered Agent 1 work is also still open: expose structural overlay provenance
-  plus authenticated charged bytes, parameterize Flow S over the accepted overlay-basis variants,
-  map structured eligibility/manual reasons, migrate the six C-3 runtime scan owners to the
+  still missing. The structural provenance/charged-byte inventory seam is now complete on the
+  completion line. Remaining Agent 1 work is: parameterize Flow S over the accepted overlay-basis
+  variants, map structured eligibility/manual reasons, migrate the six C-3 runtime scan owners to the
   reviewed cursor, complete Flow R, and obtain the outstanding core-signing review. This ancestry
   does not implement C-3 adoption or any of those specialist requirements. Gate 4 and Gate 5 stay
   closed.

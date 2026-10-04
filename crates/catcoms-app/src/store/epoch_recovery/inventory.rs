@@ -176,6 +176,41 @@ pub struct EpochStorageInventoryEntry {
     pub document: LogicalDocument,
     /// Exact observed physical footprint, including vault framing and staged-slot bytes.
     pub record: StorageRecord,
+    /// Structural facts that only an authenticated Intents body can supply. Kept together so a
+    /// consumer cannot accidentally combine provenance from one record with accounting from
+    /// another. These facts describe local persisted bytes; they mint no source, tenure, replay
+    /// permit or signing authority.
+    intent: Option<EpochIntentInventoryFacts>,
+}
+
+/// The bounded facts lifecycle accounting needs from an authenticated Intents record.
+///
+/// Absence of `provenance` means the intent ledger has no overlay branch. `charged_bytes` is the
+/// physical sealed-file length already charged to the inventory, not a payload-size estimate.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct EpochIntentInventoryFacts {
+    provenance: Option<catcoms_replication::studio::StudioOverlayProvenance>,
+    charged_bytes: u64,
+}
+
+impl EpochIntentInventoryFacts {
+    /// The live branch's persisted provenance, or `None` when this ledger has no overlay branch.
+    pub fn provenance(self) -> Option<catcoms_replication::studio::StudioOverlayProvenance> {
+        self.provenance
+    }
+
+    /// Exact physical bytes charged for the authenticated sealed Intents file.
+    pub fn charged_bytes(self) -> u64 {
+        self.charged_bytes
+    }
+}
+
+impl EpochStorageInventoryEntry {
+    /// Authenticated structural facts for an Intents record, and `None` for every other family.
+    /// This is observation for quota/classification only, never authorization to mutate state.
+    pub fn intent_facts(&self) -> Option<EpochIntentInventoryFacts> {
+        self.intent
+    }
 }
 
 impl std::fmt::Debug for EpochStorageInventoryEntry {
@@ -962,6 +997,7 @@ impl EpochStorageCursor {
                     server,
                     document,
                     record: body.record,
+                    intent: body.intent,
                 },
             )
             .is_some()
@@ -1636,6 +1672,8 @@ impl CursorFailure {
 pub(in crate::store) struct ValidatedRecordBody {
     record: StorageRecord,
     cids: std::collections::BTreeSet<[u8; 32]>,
+    /// Present for every authenticated Intents body, including a ledger with no overlay.
+    intent: Option<EpochIntentInventoryFacts>,
     /// A Studio handoff metadata target this record *supplies*.
     metadata: Option<catcoms_replication::studio::StudioTarget>,
     /// A Studio handoff metadata target this record *depends on*.
@@ -1649,6 +1687,7 @@ impl ValidatedRecordBody {
         Self {
             record,
             cids: std::collections::BTreeSet::new(),
+            intent: None,
             metadata: None,
             required: None,
         }
@@ -1700,6 +1739,7 @@ pub(in crate::store) fn validate_record_body(
     references: bool,
 ) -> Result<ValidatedRecordBody, AppError> {
     let mut cids = std::collections::BTreeSet::new();
+    let mut intent = None;
     let mut metadata = None;
     let mut required = None;
     let record = match family {
@@ -1722,6 +1762,10 @@ pub(in crate::store) fn validate_record_body(
             // retained branch would otherwise be fully reconstructed on every five-family scan
             // in the vault, including scans for unrelated documents.
             let state = epoch_intents::EpochIntentState::decode_structural(plain, scope, document)?;
+            intent = Some(EpochIntentInventoryFacts {
+                provenance: state.live_overlay_provenance(),
+                charged_bytes: size,
+            });
             if references {
                 if let Some(held) = state.handoff_metadata() {
                     metadata = Some(held.target());
@@ -1789,6 +1833,7 @@ pub(in crate::store) fn validate_record_body(
     Ok(ValidatedRecordBody {
         record,
         cids,
+        intent,
         metadata,
         required,
     })

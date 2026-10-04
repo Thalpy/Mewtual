@@ -19,6 +19,9 @@ Agent 4 has completed the bounded repair integration checkpoint:
 - The mutation timeout is sufficient for the observed Windows duration without weakening a test.
 - The suite-only Registry preparation test uses a private fixture pool at
   `87629d6b72992254911a8e44f698d535bb5d7904`; production capacity is unchanged.
+- The Agent 1 structural inventory seam now returns authenticated physical Intents bytes and only
+  the provenance of a live overlay branch. Terminal disposed/transferred metadata retains its
+  diagnostic provenance internally but cannot consume a live-branch capacity slot.
 - All 19 exact-head PR #32 checks pass and the independent bounded review has no remaining
   BLOCKER/HIGH/MEDIUM finding.
 
@@ -48,13 +51,13 @@ storage half of C-3, scheduled Closing Flow S and automatic Flow H.
 
 Still required:
 
-1. expose overlay provenance and authenticated physical charged bytes in the structural inventory;
-2. parameterize Flow S over the accepted `StudioOverlayBasis` variants;
-3. map structured eligibility/manual reasons instead of returning only strings;
-4. adopt `EpochStorageCursor` at the six runtime scan owners;
-5. implement Flow R after cursor adoption;
-6. finish the required maximum-shape/custody measurements; and
-7. obtain the dedicated core-signing and coherent runtime reviews.
+1. parameterize Flow S over the accepted `StudioOverlayBasis` variants, using the now-complete
+   structural provenance/charged-byte inventory result;
+2. map structured eligibility/manual reasons instead of returning only strings;
+3. adopt `EpochStorageCursor` at the six runtime scan owners;
+4. implement Flow R after cursor adoption;
+5. finish the required maximum-shape/custody measurements; and
+6. obtain the dedicated core-signing and coherent runtime reviews.
 
 These are internal prerequisites and are not blocked by P5. P5 blocks exposure, not implementation.
 
@@ -72,7 +75,7 @@ Still required:
    diagnostic Low, and P1's copy-across-restart evidence; `ed8ab0a8` already closes M2, while
    `0335262e` closes the older D4/D1/object-probe/M-1 evidence items and supplies M3's
    successful-apply control, so none of those closures should be reopened or credited twice;
-2. consume Agent 1's two preview seams in the app;
+2. consume Agent 1's completed inventory seam and the still-missing generalized Flow S seam in the app;
 3. implement preview custody admission, rails, S3 re-entry, Save, reconciliation and restart rebuild;
 4. exclude non-Closing branches from automatic handoff selection;
 5. drive the returning owner through the real app actor and Studio rotation;
@@ -109,7 +112,8 @@ Review 4. Agent 4 must not turn dependency ancestry into an implementation claim
 
 The next execution order is:
 
-1. Build the Agent 1 structural provenance/charged-byte result and generalized Flow S seam.
+1. Build the Agent 1 generalized Flow S seam on the completed structural
+   provenance/charged-byte inventory result.
 2. In parallel only conceptually, build Agent 3's archived-tenure admission consumer; it does not
    depend on native registration or Agent 2's preview app path.
 3. Adopt the C-3 cursor at runtime call sites, then implement Flow R.
@@ -135,6 +139,13 @@ At `87629d6b72992254911a8e44f698d535bb5d7904`:
 
 `test:startup` and `test:flows` were not run because this candidate changes no setup, process,
 renderer or command-registration path. They become applicable when later work reaches those paths.
+
+On the completion line after the inventory seam, the complete root suite, all 1,282 frontend tests,
+frontend check and frontend production build pass locally. The native suite is 324 pass / 1 fail:
+`six_client_recovery::six_client_native_restart_and_partition_recovery` fails identically when run
+alone on pinned baseline `bcc88941...`; its reverse-order companion passes. Strict lint, cargo-deny
+and the new branch's Linux CI are recorded separately at publication time. The inventory seam's
+adversarial re-review has no remaining finding.
 
 ## Non-negotiable boundaries
 
