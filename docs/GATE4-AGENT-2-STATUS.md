@@ -13,7 +13,7 @@ whole-scope review of `510d0b54` (verdict: CHANGES REQUIRED, Agent 2 not complet
 | Goal | State | Evidence, and what is still missing | Owner |
 |---|---|---|---|
 | 1. Bounded inspection, export, copy, disposition | Implemented, not natively exposed | Two-visit inspect/export/archive/copy, D1-D6 disposal, release. Export, archive and copy preview now keep the job's permit and the actor's delivery fence through native conversion (`3168de6e`); an archive whose result cannot be delivered reports `outcome=uncertain`. The nine commands are unregistered (`510d0b54`). | Agent 2; registration Agent 4 |
-| 2. Lossless work and PIX across refusal and restart | Implemented except one platform barrier | Archive codec, binding, release, collector, evidence-before-removal ordering (`6bd76c13`). **Open:** `sync_directory` is a no-op on `not(unix)`, so on Windows a preserving disposal cannot establish the archive's directory entry. | Persistence owner via Agent 4; Agent 2 shows disposal honours the result |
+| 2. Lossless work and PIX across refusal and restart | Implemented on supported desktop platforms | Archive codec, binding, release, collector, evidence-before-removal ordering (`6bd76c13`). Agent 4's `5f141994` gives the shared `ServerStore` directory barrier a real Windows handle and flush; exact-head Windows tests and CI pass. Unsupported non-Unix/non-Windows targets retain only the narrower file-content guarantee. | Persistence owner via Agent 4; Agent 2 shows disposal honours the result |
 | 3. Recoverable stale, rewound and non-pristine branches, with actionable states (P2) | Classification implemented; first review fixed | `StudioOverlayEligibility` / `StudioOverlayManualReason`. Production classifies from each source record's HEADER (`overlay_successor_hold_in_vault`, `vault_holds_work`) and never restores, pinned by a zero-restore assertion; the structural hold, the full hold and `check_overlay_successor` agree on every fixture state. The store adds provenance, author, missing/unreadable source, an Index entry's missing Flipnote (`objectMissing`, agreeing with the real handoff in both directions), tenure and the live receipt owner. Lifecycle and inspection carry `eligibility` and `manualReason`. Agent 1's `StudioOverlayHold` was designed but never built; its runtime still refuses with strings. | Agent 2; Agent 1 maps its runtime refusals |
 | 4. Durable local work on an awaiting-tenure preview | **Not implemented** (first slice built) | Design section 8 accepted. Built (replication and sync): 8.1 parts 1-2, part 3 as re-scoped by the review of `47a73463` (the mint binds by receipt equality; every reconstruction re-parses), and the reviewed mint design.
 <br>- The exact seed bytes are retained and exposed only inside the scoped callback. This costs up to 2 MiB more per ready preview, and the true per-slot worst case is unmeasured.
@@ -965,7 +965,7 @@ destination fixture in the desktop tests or a store-backed copy fixture in the a
 
 That is now the single largest known hole in this scope's evidence, and it guards a durable write.
 
-### Preserving-disposal crash ordering: ordering CLOSED, platform barrier OPEN
+### Preserving-disposal crash ordering: CLOSED on Unix and Windows
 
 **Update.** A second re-review separated a real barrier from the order it runs in; fixing the
 Windows primitive alone would not have proved the ordering. The ordering is now this transaction's:
@@ -974,8 +974,10 @@ writer, whose exact-retry branch performs a guarded sync-only repair. A failure 
 removed. Anchored by two hook-observed tests and a tenth harness entry; skipping the barrier makes the
 disposal succeed and record `Preserved` with no durable archive, which is the defect demonstrated.
 
-Still open: `sync_directory` is `Ok(())` on `not(unix)`, so on Windows the repair establishes file
-contents and not the directory entry. Shared primitive; decision above this scope.
+**Agent 4 update (2026-10-04).** Commit `5f141994` replaced the Windows no-op with a real directory
+handle and flush, and exact-head Windows tests and CI pass. Unsupported non-Unix/non-Windows targets
+retain the narrower file-content guarantee. The historical analysis below explains the defect that
+was closed; it is not current platform status.
 
 *Original entry follows.*
 

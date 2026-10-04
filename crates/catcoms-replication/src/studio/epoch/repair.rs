@@ -125,13 +125,15 @@ impl StudioEpoch {
         self.opening.as_ref()
     }
 
-    /// Highest repair sequence this source has applied. An owner's next sequence must exceed it
-    /// even when its own record was lost; this is bookkeeping, not authority.
+    /// Sequence on the source's latest retained repair, irrespective of issuer tenure.
+    ///
+    /// This accessor is historical bookkeeping, not an issuance high-water or authority check.
+    /// Issuance must use [`Self::repair_sequence_for_issuer_tenure`] instead.
     pub fn repair_sequence(&self) -> u64 {
         self.receipts.repair_sequence()
     }
 
-    /// Highest repair sequence issued in this exact authenticated owner tenure.
+    /// Issuance and anti-replay high-water for this exact authenticated owner tenure.
     pub fn repair_sequence_for_issuer_tenure(&self, issuer_tenure_start: u64) -> u64 {
         self.receipts
             .repair_sequence_for_issuer_tenure(issuer_tenure_start)

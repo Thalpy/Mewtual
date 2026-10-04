@@ -2045,12 +2045,15 @@ and `Stage` is idempotent.
 Every retry row flushes the actual source rather than short-circuiting before a write, because
 visible bytes are not proof that a post-rename parent flush returned.
 
-**Owner sequence.** Strictly increasing per document; the next value is
-`1 + max(record.repair.repair_sequence, source_book.repair_sequence())`. Seeding from the book
-matters when the owner record is absent after a reinstall while peers hold a higher applied
-sequence. An exact retry re-signs deterministically (the transcript has no nonce), re-saves and
-returns the same bytes. A different selection for the same pair while a repair is held unapplied is
-refused.
+**Owner sequence.** Strictly increasing per document **within the authenticated issuer tenure**;
+the next value is the checked successor of the maximum sequence retained for that same signed
+`issuer_tenure_start_group_epoch` in the owner record or source book. Seeding from same-tenure book
+evidence matters when the owner record is absent after a reinstall while peers hold a higher
+applied sequence. Evidence from a predecessor tenure remains available for screening but cannot
+consume the successor's namespace; a real successor tenure begins at one. Exhaustion returns
+`RepairSequenceExhausted` before signing or B1 mutation. An exact retry re-signs deterministically
+(the transcript has no nonce), re-saves and returns the same bytes. A different selection for the
+same pair while a repair is held unapplied is refused.
 
 **Never**: restage under a new snapshot id, clear a different active fault, or lower a retained
 head (C-2 case 1a).
@@ -2835,7 +2838,10 @@ Store:
 - **N9** `prepare_epoch_repair` is idempotent on an exact retry, refuses a different pending repair
   and a non-increasing sequence, reconciles the journal and drops a close bound to the loser in the
   same write. `mark_epoch_repair_applied` refuses a stale hash and rewrites on an exact retry.
-- **N10** Sequence seeding from `ReceiptBook::repair_sequence()` when the record is absent.
+- **N10** Sequence seeding from
+  `ReceiptBook::repair_sequence_for_issuer_tenure(current_issuer_tenure_start)` when the record is
+  absent; predecessor-tenure MAX cannot poison a successor, and same-tenure exhaustion fails
+  before signing or B1 mutation.
 - **N11** Full replacement on a real store: two conflicting proved receipts produce Fault; the
   repair produces `AwaitingSeed`; the fetched seed produces `Installed`; the losing projection is
   readable through the recovery control; the installed source's **actual projection, doc id,

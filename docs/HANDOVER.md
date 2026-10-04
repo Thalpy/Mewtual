@@ -17,10 +17,12 @@ and ranks the live hazards in that path.
   all-target/all-feature Clippy for the separate Tauri workspace; its root `clippy.toml` therefore
   remains an enforced construction boundary. Existing harness and anchor corrections at
   `3e0dac09`, `db385014`, `f12b6aae` and `ef28d45b` are already in this candidate's ancestry and
-  were not copied or rewritten. These workflow edits have no CI result yet. In particular, the
-  earlier PR #32 Linux root job at `6a2f8979` failed its test step before `check-no-ambient.sh`, and
-  the local WSL launch failure establishes neither a code failure nor a pass; the ambient gate for
-  this exact candidate remains unexecuted until Linux CI reports it.
+  were not copied or rewritten. Exact candidate `2b6f716ef05fdf99bdc04da531eb0c0194682e65`
+  passes the complete Linux and Windows CI matrix on PR #32, including both store-mutation jobs,
+  strict desktop Clippy and the Linux `check-no-ambient.sh` step
+  ([main CI](https://github.com/Thalpy/Mewtual/actions/runs/37175644295),
+  [store mutations](https://github.com/Thalpy/Mewtual/actions/runs/37175644375)). The earlier
+  `6a2f8979` run and local WSL launch failure are superseded evidence, not the current result.
 
   Registration and ownership are unchanged: P5 remains false, Save and native repair commands
   remain unregistered, and the app-side archived Observed-tenure consumer/historical repair is

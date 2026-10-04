@@ -439,7 +439,7 @@ Caps: 64 KiB per intent, 10,000 intents and 4 MiB per logical document, 64 MiB p
 
 Implemented persistence prerequisite: `ServerStore::update_epoch_recovery` reloads and saves the
 complete slot record under exclusive mutable store access. It returns only after the existing
-file-sync/rename primitive succeeds (plus parent-directory sync on Unix). The sealed record binds
+file-sync/rename primitive succeeds (plus parent-directory sync on Unix and Windows). The sealed record binds
 local server id, full MLS group id, document type and logical key, and retains the last completed
 eviction pair so an acknowledgement can be retried after a post-rename flush failure. The original
 warning deadline survives reload and retries. Reads never evict. Encoders preflight the exact

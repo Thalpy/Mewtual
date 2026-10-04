@@ -128,13 +128,16 @@ impl ResolvedRepair {
 }
 
 impl ReceiptBook {
-    /// Latest resolved sequence, including after a cross-tenure repair removes the current head.
-    /// An absent owner journal must not let issuance restart below this durable anti-replay mark.
+    /// Sequence on the latest retained resolved repair, regardless of which tenure issued it.
+    ///
+    /// This raw value is historical bookkeeping and must not seed a new repair. Issuance and
+    /// replay checks use [`Self::repair_sequence_for_issuer_tenure`] so a predecessor tenure
+    /// cannot exhaust its successor's sequence namespace.
     pub fn repair_sequence(&self) -> u64 {
         self.repair_sequence
     }
 
-    /// Latest resolved sequence issued in this exact authenticated owner tenure.
+    /// Issuance and anti-replay high-water for this exact authenticated owner tenure.
     ///
     /// The raw persisted field remains the sequence of `resolved_repair`, preserving every
     /// existing codec. A successor tenure starts from zero for monotonic comparison while the

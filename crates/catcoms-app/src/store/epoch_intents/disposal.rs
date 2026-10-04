@@ -334,10 +334,10 @@ impl ServerStore {
                 // the caller must reconcile before its next write. That is the correct cost of an
                 // uncertain flush, and it is paid without anything having been destroyed.
                 //
-                // **Limit, stated rather than hidden:** on a platform where the parent-directory
-                // barrier is a no-op (`sync_directory` on `not(unix)`), this establishes the file
-                // contents but not the directory entry, so it narrows the gap without closing it
-                // there. That half is a shared persistence decision and is recorded as such.
+                // **Limit, stated rather than hidden:** on an unsupported non-Unix/non-Windows
+                // platform, where the parent-directory barrier remains a no-op, this establishes
+                // the file contents but not the directory entry. That half is a shared persistence
+                // decision and is recorded as such.
                 self.write_studio_draft_archive_with_io(
                     server,
                     document,
