@@ -10,6 +10,27 @@ and ranks the live hazards in that path.
 
 ## Status (latest entry: 2026-10-04)
 
+- **Gate 4 repair CI integration checkpoint (2026-10-04).** The store mutation harness now has a
+  dedicated, serial Linux/Windows workflow rather than extending the 30-minute core job. Each
+  platform uses Rust 1.89.0, Python 3.11, the Rust cache, `RUSTFLAGS=-D warnings`, a 90-minute
+  timeout and always-uploaded mutant/restored-control logs. The Linux desktop job also runs strict
+  all-target/all-feature Clippy for the separate Tauri workspace; its root `clippy.toml` therefore
+  remains an enforced construction boundary. Existing harness and anchor corrections at
+  `3e0dac09`, `db385014`, `f12b6aae` and `ef28d45b` are already in this candidate's ancestry and
+  were not copied or rewritten. These workflow edits have no CI result yet. In particular, the
+  earlier PR #32 Linux root job at `6a2f8979` failed its test step before `check-no-ambient.sh`, and
+  the local WSL launch failure establishes neither a code failure nor a pass; the ambient gate for
+  this exact candidate remains unexecuted until Linux CI reports it.
+
+  Registration and ownership are unchanged: P5 remains false, Save and native repair commands
+  remain unregistered, and the app-side archived Observed-tenure consumer/historical repair is
+  still missing. Recovered Agent 1 work is also still open: expose structural overlay provenance
+  plus authenticated charged bytes, parameterize Flow S over the accepted overlay-basis variants,
+  map structured eligibility/manual reasons, migrate the six C-3 runtime scan owners to the
+  reviewed cursor, complete Flow R, and obtain the outstanding core-signing review. This ancestry
+  does not implement C-3 adoption or any of those specialist requirements. Gate 4 and Gate 5 stay
+  closed.
+
 - **Gate 4 repair-sequence integration correction (2026-10-04).** Repair high-water and owner
   journal comparisons now use the issuer-tenure start already covered by the v2 signature and
   independently checked against current owner authority. Existing wire and persistence codecs are
@@ -566,11 +587,14 @@ and ranks the live hazards in that path.
   [CI](https://github.com/Thalpy/Mewtual/actions/runs/34844201267) have started for `b1b0ec9`;
   their result is pending at this evidence update. Local results above are not GitHub results.
 
-  The repository-wide `scripts/check-no-ambient.sh` fails on six verified pre-existing findings:
+  At this historical `b1b0ec9` checkpoint, `scripts/check-no-ambient.sh` reported six findings:
   `apps/desktop/src-tauri/src/media_decode.rs:333,426,444,504`,
   `crates/catcoms-app/src/studio_exchange/tests/scheduling.rs:150`, and
-  `crates/catcoms-app/tests/support/studio_preview.rs:329`. Each reported call is present in the
-  baseline HEAD, outside this change. No full-repository green or full Gate 4 acceptance is claimed.
+  `crates/catcoms-app/tests/support/studio_preview.rs:329`. That result describes this old entry,
+  not the current candidate. PR #32's later Linux root job failed the preceding test step and never
+  ran the ambient gate; the local WSL launcher failure is likewise not product evidence. A current
+  pass may be claimed only from the exact candidate's Linux CI job. No full-repository green or
+  full Gate 4 acceptance is claimed here.
 
   No frontend/native overlay command, automatic overlay replay/disposition, provisional-preview
   write or new historical-tenure authority is enabled. The UI keeps Closing/Fault/awaiting-tenure

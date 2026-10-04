@@ -38,6 +38,14 @@ witness, so only current-tenure (origin 0) evidence can be admitted.
   provenance still blocks turnover. Checked allocation returns `RepairSequenceExhausted` at MAX
   before signing/B1 mutation, while a verified successor tenure begins at one. Wire and persistence
   encodings remain byte-compatible.
+- **Agent 4 CI integration (2026-10-04; execution pending).** Store mutations now run in their own
+  90-minute serial Linux/Windows matrix with Rust 1.89.0, Python 3.11, cache, strict warnings and
+  always-uploaded logs. They were not appended to the 30-minute core job. The main Linux desktop
+  job now runs strict Clippy across every target/feature of the separate Tauri workspace under the
+  root `clippy.toml`. Existing harness fixes are inherited rather than duplicated. These are workflow
+  claims only until CI runs the exact commit: the earlier candidate's Linux root test failure
+  prevented `check-no-ambient.sh` from running. P5 remains false; Save/repair commands stay
+  unregistered; C-3 runtime adoption and the archived Observed-tenure consumer remain incomplete.
 
 - **Report path (W-1, 6.5, 6.6), current tenure only.** Scoped head query v2 (`2 | v1 fields |
   count(0|2) | receipts`); v1 bytes unchanged. The report is captured opaque at queue time and
