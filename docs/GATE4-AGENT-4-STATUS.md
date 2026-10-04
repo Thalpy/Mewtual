@@ -1,199 +1,150 @@
-# Gate 4 Agent 4 status: integration and combined acceptance
+# Gate 4 Agent 4 status: integration and completion coordination
 
-Current checkpoint: 2026-10-03. Gate 4 is **incomplete**; Gate 5 remains closed.
+Current checkpoint: 2026-10-04. The verified repair candidate is ready for review but is not
+merged into the shared baseline. Gate 4 remains incomplete and Gate 5 remains closed.
 
-## Integration-trial checkpoint
+The detailed live ledger is [GATE4-ACCEPTANCE](GATE4-ACCEPTANCE.md). This document records the
+integration history, current ownership boundaries and the single remaining execution sequence.
 
-- A no-commit merge of `origin/gate4-agent3-repair` at `15b715a10704a8dafc2cccef65854d4d45ad55ca` into the Agent 1 baseline at `bcc88941a8677afa62957c258a127f35f328ff67` is retained only in the isolated `gate4-agent4-repair-trial` worktree. It is not an accepted shared-line merge.
-- The merge was textually clean, but `cargo check -j 1 -p catcoms-app --lib --all-targets` exposed a semantic integration failure: Agent 3 added `StudioControlResponse::Fault` and `Repaired`, while Agent 2's exhaustive delivery-classification methods did not classify them.
-- The trial now classifies both variants as synchronous, non-detached responses in `delivery()` and `begin_delivery()`. A focused regression uses real fault/repair outcomes and pins both methods for both variants.
-- Focused verification passed: root formatting; the affected `catcoms-app` check; the corrected focused unit test (1 passed, 0 failed, 838 filtered); the separate Tauri workspace check; and the native repair-conversion test (1 passed, 0 failed, 324 filtered). An earlier `--exact` invocation selected zero tests and is not evidence.
-- The required read-only adversarial review found no defect in this narrow reconciliation. It identified a future native-boundary test gap that becomes actionable only when native repair commands are registered and P5 is true. The reviewer could not independently reopen the worktree because the shared process helper failed before creation, so this remains a constrained trial review rather than acceptance of Agent 3.
-- Reconciled-source inspection confirms the historical gap: `epoch_owner/repair.rs` admits only current-tenure pairs because it cannot access the archived Observed witness; `epoch_studio/repair.rs` rejects the historical branch as unavailable; and replication leaves historical authority to a future store adapter. CORE-005 is present but has no app-side consumer.
-- Frontend baseline dependencies were installed with `npm ci`; the complete frontend unit suite then passed: 1,282 passed, 0 failed. The initial dependency-missing run selected no meaningful assertions and remains recorded as an environment failure, not a product failure. `npm ci` also reported five dependency-audit findings (one low, four high), which this checkpoint has not triaged or changed.
-- Next unblocked Agent 4 task: inspect the CORE-005 historical-admission and overlay-provenance boundaries in the isolated merge, then run the broader repair paths. Do not register native Save/repair commands and do not claim Gate 4 completion.
+## Current state
 
-Agent 4 owns integration, shared registrations/contracts, combined acceptance, required gates and
-truthful status. Specialist implementation remains with Agents 1-3. The detailed requirement and
-suite ledger is [GATE4-ACCEPTANCE](GATE4-ACCEPTANCE.md).
+Agent 4 has completed the bounded repair integration checkpoint:
 
-## Current summary
+- Agent 3 history is preserved by merge `6a2f89792eecbf6ef2e65d683e6b515bbc65181d`.
+- The Windows directory durability gap is fixed at `5f141994a1cd6e54bf67ac6bf34f47296eeff6f3`.
+- Repair high-water is issuer-tenure scoped, with checked exhaustion, at
+  `43c1d8bee6d418a0dab6330723c32b8b2f76f6ab`.
+- Store repair mutations run in serial Linux/Windows CI and desktop strict Clippy is enforced at
+  `2b6f716ef05fdf99bdc04da531eb0c0194682e65`.
+- The mutation timeout is sufficient for the observed Windows duration without weakening a test.
+- The suite-only Registry preparation test uses a private fixture pool at
+  `87629d6b72992254911a8e44f698d535bb5d7904`; production capacity is unchanged.
+- All 19 exact-head PR #32 checks pass and the independent bounded review has no remaining
+  BLOCKER/HIGH/MEDIUM finding.
 
-The current integration line contains substantial Agent 1 and Agent 2 work, but it is not ready
-for native Save or a full-gate review. Agent 1 still owes Flow R, C-3 runtime adoption and a coherent
-runtime review. Agent 2's manual lifecycle is implemented but has no whole-scope PASS, awaiting-
-tenure work lacks its app path, repeated tenure lacks the real actor/Studio rotation, and P5 is
-explicitly false. Agent 3's current-tenure repair is on a draft branch with unresolved integration,
-historical-admission and bounded-runtime evidence; it does not include the newer CORE-005 witness.
+The code is still intentionally unavailable to the renderer. P5 is false; native Save and repair
+commands remain unregistered. The current-tenure repair implementation does not make historical
+repair complete, and merging ancestry does not supply the missing archived-tenure consumer.
 
-The only registered overlay command on the integration baseline is the accepted read-only
-`studio_overlay_read`. The lifecycle native functions exist but remain unregistered. There is no
-native overlay Save or repair command. This is the correct fail-closed state while P5 and the
-specialist reviews remain open.
+## Exact branch state
 
-## Exact baseline and branch state
-
-| Item | Inspected state |
+| Item | State |
 |---|---|
-| Remote integration line | `origin/gate4-agent1-runtime` at `bcc88941a8677afa62957c258a127f35f328ff67` (verified with `git ls-remote`) |
-| Agent 4 branch | `gate4-agent4-integration` at `bcc88941a8677afa62957c258a127f35f328ff67` |
-| Agent 4 worktree | `M:\Git (local)\CatComs\target\gate4-agent4-integration` |
-| Original shared checkout | `gate4-agent1-runtime` at `bcc88941...`, with unrelated untracked `.gitignore.bak`; untouched |
-| Agent 3 branch | `origin/gate4-agent3-repair` at `15b715a10704a8dafc2cccef65854d4d45ad55ca` |
-| Agent 3 merge base | `d1b05b37c568f5425d69f03259e6dfbbef22a502` |
-| CORE-005 witness | `066a6533` is an ancestor of the integration line and is **not** an ancestor of Agent 3's inspected head |
-| PR #28 | Open, draft, base `gate4-agent1-runtime`, head `gate4-agent3-repair`, GitHub reports mergeable/UNSTABLE, no submitted reviews |
+| Shared integration baseline | `gate4-agent1-runtime` at `bcc88941a8677afa62957c258a127f35f328ff67`; untouched |
+| Repair candidate | `gate4-agent4-repair-candidate` at `87629d6b72992254911a8e44f698d535bb5d7904`; PR #32 open, ready, clean |
+| Documentation checkpoint | `gate4-agent4-integration` at `f0af61c9b1247fa955300ac50545074e18e9b302`; PR #31 open |
+| Completion branch | `gate4-completion-integration`, based on `87629d6b...` with the documentation history merged |
+| Agent 3 source | `gate4-agent3-repair` at `15b715a10704a8dafc2cccef65854d4d45ad55ca`; preserved, not rewritten |
 
-GitHub's PR JSON reports `baseRefOid=d1b05b37...`, while the live base branch resolves to
-`bcc88941...`; the former is the current merge base, not the live integration tip. Evidence and
-future merge tests must name which SHA they use.
+PR #28 remains the Agent 3 source record. PR #32 is its integrated successor and documents that
+relationship. Neither PR #31 nor #32 has been merged into the shared baseline.
 
-PR #28's latest reported check set is mixed. Linux repair-core, Linux root build/test,
-studio-native, inspection, two-process Linux/Windows, both Linux NAT jobs and cargo-deny passed.
-Windows root build/test, the handoff job and Linux frontend/Tauri failed; Windows repair-core and
-the lifecycle job were cancelled. These are branch/PR results from 2026-10-01, not evidence for an
-Agent 4 integration head.
-
-## Evidence-backed agent state
+## What each agent actually leaves behind
 
 ### Agent 1
 
-- C-1 structural decode, C-4 transient reference holds, Flow S and Flow H are integrated.
-- The storage half of C-3 is implemented/reviewed; six runtime call sites still use the old
-  whole-scan ownership and need cursor adoption.
-- Flow R is not implemented.
-- Flow S accepts a `StudioClosingOverlayBasis`; it has not been generalized to the accepted
-  Closing/Unconfirmed provenance enum needed by Agent 2's preview-local work.
-- `load_epoch_intents_structural` returns only `EpochIntentState`; the lower store read returns
-  physical bytes, but no agreed inventory seam supplies Agent 2 with provenance plus charged bytes.
-- The core signing split at `e65bfd89...` is present, while its own review note, Agent 1 status and
-  the review preamble still record the independent acceptance as outstanding.
-- Native Save must remain unavailable while Agent 2 P5 is false.
+Completed: structural decode, transient reference protection, I-4 generation enforcement, the
+storage half of C-3, scheduled Closing Flow S and automatic Flow H.
+
+Still required:
+
+1. expose overlay provenance and authenticated physical charged bytes in the structural inventory;
+2. parameterize Flow S over the accepted `StudioOverlayBasis` variants;
+3. map structured eligibility/manual reasons instead of returning only strings;
+4. adopt `EpochStorageCursor` at the six runtime scan owners;
+5. implement Flow R after cursor adoption;
+6. finish the required maximum-shape/custody measurements; and
+7. obtain the dedicated core-signing and coherent runtime reviews.
+
+These are internal prerequisites and are not blocked by P5. P5 blocks exposure, not implementation.
 
 ### Agent 2
 
-- The authoritative completion matrix dated 2026-10-02 supersedes older implementation tables.
-- Inspect/export/copy/disposition are implemented but unregistered; review `510d0b54` returned
-  changes required, and later fixes have not received a whole-boundary PASS.
-- Structured `StudioOverlayEligibility` / `StudioOverlayManualReason` classification is present;
-  Agent 1 still returns string refusals and must map the structured result.
-- Replication/sync contain the reviewed `StudioUnconfirmedOverlayBasis`, retained exact seed and
-  gated mint. The app admission, quotas, S3 re-entry, Flow S use, reconciliation, restart rebuild,
-  native result and non-Closing handoff-selection skip are absent.
-- Repeated-tenure evidence reaches real MLS/sync/receipt behavior, and CORE-005 exists, but the
-  production actor plus real Studio rotation scenario is absent.
-- Windows preservation remains a real durability gap: both directory-sync helpers are no-ops on
-  `cfg(not(unix))`.
-- P5 is false.
+Completed: manual lifecycle implementation, structural eligibility, archive/reference plumbing,
+the sync/receipt preview basis, live-tenure substrate, CORE-005 witness and real MLS returning-owner
+fixture. Agent 4 supplied the missing Windows directory barrier.
+
+Still required:
+
+1. close or explicitly disposition the current lifecycle/copy findings before re-review: M3's
+   missing exact-retry half, M4's C1'/C4 transfer-hold mismatch, L2's vacuous provenance test,
+   L4's exact-retry kind misreport, L5's same-document copy gap, the wrong-object-channel
+   diagnostic Low, and P1's copy-across-restart evidence; `ed8ab0a8` already closes M2, while
+   `0335262e` closes the older D4/D1/object-probe/M-1 evidence items and supplies M3's
+   successful-apply control, so none of those closures should be reopened or credited twice;
+2. consume Agent 1's two preview seams in the app;
+3. implement preview custody admission, rails, S3 re-entry, Save, reconciliation and restart rebuild;
+4. exclude non-Closing branches from automatic handoff selection;
+5. drive the returning owner through the real app actor and Studio rotation;
+6. complete native result contracts without registering commands; and
+7. obtain a whole-boundary lifecycle/repeated-tenure review.
+
+P5 remains **FALSE** until those P1-P4 requirements have implementation PASSes.
 
 ### Agent 3
 
-- `gate4-agent3-repair` implements current-tenure Studio/Registry repair, owner records, serving,
-  distribution and unregistered native conversions.
-- Its latest status reports each repair step as one custody visit, partial runtime catch-up tests,
-  missing fetched-seed/positive Registry coverage, and historical admission blocked on CORE-005.
-- CORE-005 is now available on the integration line at `066a6533`; Agent 3's branch predates it.
-  That removes the dependency excuse but does not implement historical repair or its tests.
-- A read-only merge analysis shows overlapping shared files in native Studio, app Studio/control,
-  store Studio, replication Studio epoch and sync receipt-head. Integration must preserve both
-  lifecycle/provenance and repair contracts; the draft is not merged merely to simplify history.
-- PR #28 is draft and unstable and has no recorded Review 3 PASS.
+Completed and integrated in the candidate: signed current-tenure Studio/Registry repair, owner
+records, durable repair transitions, serving/distribution, catch-up routing, native conversion
+types, core/store mutation harnesses and the issuer-tenure sequence correction.
 
-## First Agent 4 changes
+Still required:
 
-1. Created the isolated `gate4-agent4-integration` branch/worktree without switching, resetting or
-   stashing another checkout.
-2. Added [GATE4-ACCEPTANCE](GATE4-ACCEPTANCE.md), including specialist requirements, all seven
-   combined scenarios, native integration, review status and a command-level evidence ledger.
-3. Added this current-state record with exact refs, PR state, source-verified blockers and handoffs.
-4. Kept all native write/repair commands unavailable. No security allowlist, invoke-handler,
-   interface or UI-hook row was promoted.
+1. consume CORE-005's archived Observed-tenure witness in app-side report admission;
+2. prove N17 and the malformed/wrong/Imported/Unknown negative cases;
+3. finish the detached S1-S4 custody split and C-3/source-fence integration;
+4. add fetched-seed, positive owed-Registry, real two-peer/newcomer and fairness evidence; and
+5. obtain the bounded Review 3 verdict for the completed boundary.
 
-The accepted integration branch still contains documentation-only changes. The response
-classification patch and regression exist only in the explicitly unaccepted trial worktree.
+### Agent 4
 
-## Verification at this checkpoint
+Completed: preserved-history integration, response classification, Windows durability, repair
+sequence correction, two-platform mutation CI, desktop Clippy, full exact-head suites, bounded
+review and truthful unavailable registration state.
 
-| Command | Result |
-|---|---|
-| `git fetch --all --prune`; direct `git ls-remote` | Passed; exact remote refs recorded above. |
-| `gh pr view 28 --json ...` | Passed; draft/open, mergeable/UNSTABLE and check state recorded above. |
-| Read-only `git merge-tree` of current integration and Agent 3 | Completed; shared-file overlap identified. A later no-commit merge was performed only in the isolated trial worktree. |
-| `cargo fmt --all -- --check` | Passed at `bcc88941...`. |
-| `cargo deny check` | Passed advisory/ban/licence/source checks; duplicate dependency warnings only. |
-| `bash scripts/check-no-ambient.sh` | Not executed: the host's WSL shim could not start `/bin/bash`. |
-| `npm --prefix apps/desktop test` | Initial setup run failed before assertions because `node_modules` was absent. After `npm ci`, the configured rerun passed: 1,282 passed, 0 failed. |
+Still required: integrate the specialist completions, maintain this ledger, register only approved
+commands after P5, implement/run the seven combined scenarios, update interface/UI truth and request
+Review 4. Agent 4 must not turn dependency ancestry into an implementation claim.
 
-The complete backend and native suites were not run for this documentation-only integration
-checkpoint. They remain mandatory after any accepted code integration and at the final Gate 4
-head. The first npm setup failure is retained separately from the configured passing run.
+## Unified completion sequence
 
-## Actionable specialist handoffs
+The next execution order is:
 
-There is no direct channel to the prior implementation agents in this session. The following are
-messages for the user to forward; they have not been sent and no agreement is claimed.
+1. Build the Agent 1 structural provenance/charged-byte result and generalized Flow S seam.
+2. In parallel only conceptually, build Agent 3's archived-tenure admission consumer; it does not
+   depend on native registration or Agent 2's preview app path.
+3. Adopt the C-3 cursor at runtime call sites, then implement Flow R.
+4. Close Agent 2's remaining lifecycle/copy findings and copy-restart evidence, then complete its
+   preview-local app path and real actor/Studio returning-owner path.
+5. Complete Agent 3's detached/runtime evidence, then obtain bounded reviews for Agents 1-3.
+6. If and only if Agent 2 records P5 true, add native registrations, ACLs, interface rows and UI
+   hooks in one reviewable checkpoint.
+7. Run the combined Index/Flipnote/Registry scenarios and all required suites, then request Review 4.
 
-### Agent 1
+## Verification for the current code candidate
 
-> Integration baseline is `bcc88941a8677afa62957c258a127f35f328ff67`; Agent 2's accepted
-> preview basis/mint is present through `330c16ed`. Please implement two SHA-pinned seams without
-> waiting for P5: (1) a structural inventory result that exposes the overlay provenance and the
-> authenticated physical bytes charged to the Intents budget without reconstructing the branch,
-> and (2) provenance-parameterized Flow S accepting the existing `StudioOverlayBasis` variants,
-> with Closing behavior byte/semantics compatible. Preserve branch-generation classification,
-> S1b media admission, S3 fresh preview re-entry/no-installed-source check, shared permit ownership
-> and the receiver selector's non-Closing skip. Acceptance: focused Closing controls stay green;
-> an Unconfirmed first append is detached; per-document/server/vault rails are charged; preview
-> replacement/expiry cannot erase the durable branch; no native Save is registered. Then complete
-> C-3 runtime adoption and Flow R, coordinating repair writers against Agent 3's `15b715a1...`.
+At `87629d6b72992254911a8e44f698d535bb5d7904`:
 
-### Agent 2
+- all 19 GitHub checks pass;
+- complete root suites pass on Ubuntu and Windows;
+- Linux ambient-dependency checking passes in CI;
+- root and desktop strict Clippy, native, frontend test/check/build and cargo-deny pass;
+- repair-core and repair-store mutations pass on Ubuntu and Windows;
+- lifecycle, lifecycle mutations, handoff, inspection, overlay, prepared signing, NAT and
+  two-process workflows pass; and
+- the independent bounded review has no unresolved BLOCKER/HIGH/MEDIUM finding.
 
-> Integration baseline is `bcc88941a8677afa62957c258a127f35f328ff67`; your current matrix at
-> 2026-10-02 and P5=FALSE are authoritative. Once Agent 1 supplies the provenance/charged-byte and
-> Flow S seams, complete section 8 app admission, 8.3 rails, S3 current-preview re-entry, 8.6
-> reconciliation, restart reconstruction, native results and the non-Closing handoff-selector M1
-> guard. Add the real actor/Studio A -> B -> A' plus newcomer scenario. Separately, provide a
-> bounded lifecycle re-review request covering the fixes after `510d0b54`, including copy restart
-> evidence. Do not change P5 or request registration until P1-P4 have implementation PASSes.
+`test:startup` and `test:flows` were not run because this candidate changes no setup, process,
+renderer or command-registration path. They become applicable when later work reaches those paths.
 
-### Agent 3
+## Non-negotiable boundaries
 
-> Your inspected head is `15b715a10704a8dafc2cccef65854d4d45ad55ca`; current integration is
-> `bcc88941a8677afa62957c258a127f35f328ff67`, merge base `d1b05b37...`. Reconcile onto the current
-> line and reassess CORE-005: archived Observed-tenure witness `066a6533` now exists on integration
-> but is absent from your branch. Implement the app-side historical admission consumer and N17
-> rather than merely clearing the dependency label. Preserve Agent 2's provenance/archive/tenure
-> contracts and Agent 1's mutation-generation/Prepared/source fences. Also close the detached
-> processing, fetched-seed/positive owed-Registry, full actor/native and fairness gaps, rerun the
-> focused workflows on the actual reconciled SHA, and request Review 3. Keep native commands
-> unregistered for Agent 4.
-
-## Persistence design review needed before code
-
-The Windows gap changes a persistence guarantee and therefore requires independent design review
-before implementation. Proposed narrow contract:
-
-1. A successful `EpochMutation` replacement that is relied on as preservation evidence must not
-   report success until both file contents and the parent-directory namespace entry have reached
-   the strongest supported durable barrier.
-2. On Windows, use a directory handle opened with backup-semantics and call the platform flush
-   primitive. If the platform/filesystem refuses directory flushing, return an error; never report
-   a successful no-op.
-3. Preserving disposal must execute this barrier before removing the original branch. A failure
-   leaves the branch and its references intact and returns a retryable/uncertain result consistent
-   with the existing transaction stage.
-4. Exact retry may repair a committed-but-not-confirmed archive, but may not overwrite mismatched
-   evidence. Unix behavior and persisted wire formats remain unchanged.
-5. Tests inject directory-open/flush failure at the `WriteHooks` seam, assert no removal and exact
-   retry, and run a real Windows replacement/reopen control in CI.
-
-This proposal is not an implementation or a design PASS.
-
-## Next unblocked Agent 4 task
-
-Continue the isolated Agent 3 reconciliation without registering commands or claiming
-integration: inspect the newer CORE-005 historical-admission and overlay-provenance boundaries for
-semantic conflicts, then run the broader repair paths that exercise those boundaries.
-The accepted branch remains documentation-only until Agent 3's dependency is reviewed and the
-shared merge resolution is ready for the mandatory complete suites.
+- Native Save stays unavailable while P5 is false.
+- Unfinished repair commands stay unregistered.
+- Imported and Unknown tenure never become authoring authority.
+- Preview-local work never becomes installed source, receipt, handoff or signing authority.
+- Historical repair must bind the actual archived Observed witness; current tenure or ancestry is
+  not a substitute.
+- The shared preparation pool, source/reference fences, Prepared -> Source -> Completed order and
+  exact retry identity remain intact.
+- PR #32 is not merged into `gate4-agent1-runtime` until the user chooses that integration action.
+- Gate 5 remains closed until full Gate 4 Review 4 passes and the user accepts it.
