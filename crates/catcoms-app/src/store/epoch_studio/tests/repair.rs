@@ -3,7 +3,7 @@
 use super::adoption::{adopt, checkpoint};
 use super::*;
 use catcoms_replication::studio::StudioRecovery;
-use catcoms_replication::{ReceiptRepair, RecoveryReason, RepairDisposition};
+use catcoms_replication::{ReceiptRepair, RecoveryReason, RepairDisposition, ReplError};
 use catcoms_rt::ManualClock;
 
 fn request(pair: [&Receipt; 2], selected: &Receipt) -> StudioRepairRequest {
@@ -96,6 +96,18 @@ fn faulted(f: &Fixture, store: &mut ServerStore) -> [Receipt; 2] {
 
 fn owner_is_ordinary(f: &Fixture, store: &ServerStore) -> bool {
     store.load_epoch_owner_receipts(SERVER, &f.logical).is_ok()
+}
+
+#[test]
+fn studio_repair_sequence_exhaustion_is_typed_and_never_wraps() {
+    use super::super::super::epoch_owner::next_repair_sequence;
+
+    assert_eq!(next_repair_sequence(u64::MAX - 1, 7).unwrap(), u64::MAX);
+    assert!(matches!(
+        next_repair_sequence(u64::MAX, 7),
+        Err(ReplError::RepairSequenceExhausted)
+    ));
+    assert_eq!(next_repair_sequence(3, 8).unwrap(), 9);
 }
 
 #[test]

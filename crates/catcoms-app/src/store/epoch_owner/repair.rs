@@ -7,7 +7,16 @@
 use super::fault_record::{BindingKind, Pair, ReportAdmission, ValidatedFaultAdmission};
 use super::*;
 use catcoms_crypto::DeviceId;
-use catcoms_replication::{ReceiptRepair, ReceiptRepairPlan};
+use catcoms_replication::{ReceiptRepair, ReceiptRepairPlan, ReplError};
+
+/// Allocate the next sequence from the two durable witnesses consulted by both typed stores.
+/// Both inputs must already be filtered to the current authenticated issuer tenure.
+pub(in crate::store) fn next_repair_sequence(
+    source_high_water: u64,
+    journal_high_water: u64,
+) -> Result<u64, ReplError> {
+    ReceiptRepair::next_sequence_after(source_high_water.max(journal_high_water))
+}
 
 /// Evidence that the Studio or Registry source for a repair is durably terminal: its saved
 /// `repair_state()` names exactly this repair, owes no replacement, and the flush returned.

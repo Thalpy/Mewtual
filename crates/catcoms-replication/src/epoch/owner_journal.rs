@@ -1,6 +1,7 @@
 //! Owner-local decision lifecycle. Publication facts, pending obligations and repair choices
 //! have separate roles. This leaf does not implement the store's atomic source/journal commit,
-//! historical report admission, permanent repair sequence, custody or current serving fences.
+//! historical report admission, per-issuer-tenure repair sequence, custody or current serving
+//! fences.
 
 use super::repair_state::ResolvedRepair;
 use super::*;
@@ -79,7 +80,9 @@ impl OwnerReceiptJournal {
         if self.provenance.as_ref().is_some_and(|p| {
             p.resolved.repair != *repair
                 && (!p.source_finalized
-                    || repair.repair_sequence <= p.resolved.repair.repair_sequence)
+                    || (repair.issuer_tenure_start_group_epoch
+                        == p.resolved.repair.issuer_tenure_start_group_epoch
+                        && repair.repair_sequence <= p.resolved.repair.repair_sequence))
         }) {
             return Err(ReplError::ReceiptConflict);
         }
@@ -188,6 +191,16 @@ impl OwnerReceiptJournal {
         self.provenance.as_ref().map(|p| &p.resolved.repair)
     }
 
+    /// Retained high-water for one authenticated repairing-owner tenure.
+    ///
+    /// Unfinished provenance remains a cross-tenure transaction barrier; this accessor only
+    /// scopes the numeric counter used once that source transaction is finalized.
+    pub fn repair_sequence_for_issuer_tenure(&self, issuer_tenure_start: u64) -> u64 {
+        self.retained_repair()
+            .filter(|repair| repair.issuer_tenure_start_group_epoch == Some(issuer_tenure_start))
+            .map_or(0, |repair| repair.repair_sequence)
+    }
+
     /// Full retired obligation and close, available only for matching source recovery.
     pub fn retired_pending(&self) -> Option<(&Receipt, &CloseRecord)> {
         self.provenance
@@ -200,7 +213,8 @@ impl OwnerReceiptJournal {
     /// Reconcile an exact loser or a provable differing-baseline descendant.
     ///
     /// The caller must have independently admitted the historical pair and must enforce global
-    /// sequence, source compatibility and nonterminal transaction fences even on `NoChange`.
+    /// issuer-tenure sequence, source compatibility and nonterminal transaction fences even on
+    /// `NoChange`.
     /// This leaf checks live repair authority before shortcuts; its self-signature checks do not
     /// establish that the pair's signer was historically an owner. Save the candidate with the
     /// source transaction at B1 before retiring any external obligation or serving the winner.
@@ -254,7 +268,10 @@ impl OwnerReceiptJournal {
             return Err(ReplError::EpochScope);
         }
         if self.provenance.as_ref().is_some_and(|p| {
-            !p.source_finalized || repair.repair_sequence <= p.resolved.repair.repair_sequence
+            !p.source_finalized
+                || (repair.issuer_tenure_start_group_epoch
+                    == p.resolved.repair.issuer_tenure_start_group_epoch
+                    && repair.repair_sequence <= p.resolved.repair.repair_sequence)
         }) {
             return Err(ReplError::ReceiptConflict);
         }

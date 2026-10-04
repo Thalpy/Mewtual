@@ -3,7 +3,9 @@
 //! matters because a faulted bucket blocks Index and Flipnote discovery outright. Outcomes are
 //! read back from the committed source; no intent is retired and nothing is inferred.
 
-use super::super::epoch_owner::{decidable_pair, TerminalRepairSource, ValidatedFaultAdmission};
+use super::super::epoch_owner::{
+    decidable_pair, next_repair_sequence, TerminalRepairSource, ValidatedFaultAdmission,
+};
 use super::*;
 use crate::store::{StudioRepairOutcome as RegistryRepairOutcome, StudioRepairRequest};
 use catcoms_replication::{
@@ -153,12 +155,11 @@ impl ServerStore {
                 }
                 None => return Err(invalid("historical owner authority is unavailable")),
             };
-            let sequence = 1 + unit.repair_sequence().max(
-                owner
-                    .journal()
-                    .retained_repair()
-                    .map_or(0, |r| r.repair_sequence),
-            );
+            let sequence = next_repair_sequence(
+                unit.repair_sequence_for_issuer_tenure(tenure),
+                owner.journal().repair_sequence_for_issuer_tenure(tenure),
+            )
+            .map_err(invalid)?;
             let repair = ReceiptRepair::sign_in_tenure(
                 document.clone(),
                 pair[0].tenure_id,

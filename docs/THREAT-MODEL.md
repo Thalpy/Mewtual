@@ -18,9 +18,13 @@ table with the commit that closed it.
   revalidates them on restart, and screens its named loser across all three receipt paths.
   Different inherited baselines identify a losing branch; identical baselines do not reveal
   descendant ancestry. Third baselines still fault. New progress survives exact retries, and a
-  newer fault cannot be cleared by replaying the old repair. Latest-only retention is not an
+  newer fault cannot be cleared by replaying the old repair. The monotonic repair sequence is
+  scoped to that authenticated issuer tenure, so a current owner can exhaust only its own tenure;
+  checked allocation refuses at MAX before signing or persistence, while a verified successor
+  starts at one. Unfinished source/journal provenance remains a cross-tenure barrier. No wire or
+  persistence field changed. Latest-only retention is not an
   audit chain: a no-longer-covered old conflict may require another repair. These primitives do
-  not change gates, persist recovery or rebase the owner's journal; runtime repair is unfinished.
+  not provide the missing archived Observed-tenure consumer, and native repair remains unavailable.
 
 - **Automatic recovery is conservative and author-local.** Studio replay checks the complete
   own envelope, every retained/staged historical selection and the fresh current projection.

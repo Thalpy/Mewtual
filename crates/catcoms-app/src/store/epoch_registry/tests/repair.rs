@@ -2,7 +2,7 @@
 //! transaction as Studio's: issuance at B1, application at B2, recycling back to ordinary.
 use super::*;
 use crate::store::{OfferedRepairEvidence, StudioRepairOutcome, StudioRepairRequest};
-use catcoms_replication::{ReceiptRepair, RepairDisposition};
+use catcoms_replication::{ReceiptRepair, RepairDisposition, ReplError};
 use catcoms_rt::ManualClock;
 
 fn faulted(f: &mut Fixture, store: &mut ServerStore) -> [Receipt; 2] {
@@ -53,6 +53,18 @@ fn issue(
         &mut rng(),
         &mut b,
     )
+}
+
+#[test]
+fn registry_repair_sequence_exhaustion_matches_studio_without_wrapping() {
+    use super::super::super::epoch_owner::next_repair_sequence;
+
+    assert_eq!(next_repair_sequence(7, u64::MAX - 1).unwrap(), u64::MAX);
+    assert!(matches!(
+        next_repair_sequence(7, u64::MAX),
+        Err(ReplError::RepairSequenceExhausted)
+    ));
+    assert_eq!(next_repair_sequence(8, 3).unwrap(), 9);
 }
 
 #[test]

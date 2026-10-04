@@ -896,7 +896,7 @@ pub struct ReceiptRepair {
     pub receipt_hashes: [Hash32; 2],
     /// One of `receipt_hashes`, selected by the current owner.
     pub selected_receipt_hash: Hash32,
-    /// Strictly increasing repair generation for this document/tenure.
+    /// Strictly increasing repair generation for this document and repairing-owner tenure.
     pub repair_sequence: u64,
     /// Current owner's raw Ed25519 leaf key.
     pub owner_public_key: Vec<u8>,
@@ -1250,6 +1250,17 @@ impl Receipt {
 }
 
 impl ReceiptRepair {
+    /// Allocate the next non-zero sequence inside one authenticated repairing-owner tenure.
+    ///
+    /// The issuer tenure is already signed into v2 repairs, so rollover belongs to a new tenure
+    /// rather than a wire-format counter extension. Exhaustion must fail before signing or any
+    /// durable mutation; wrapping to zero would create a permanently invalid repair.
+    pub fn next_sequence_after(high_water: u64) -> Result<u64, ReplError> {
+        high_water
+            .checked_add(1)
+            .ok_or(ReplError::RepairSequenceExhausted)
+    }
+
     /// Encode a legacy v1 repair for historical compatibility. New live repair must use
     /// [`Self::sign_in_tenure`]; a v1 record carries no proof of which tenure authorized it.
     pub fn sign(
@@ -1768,7 +1779,8 @@ impl ReceiptBook {
             || repair.document != b.document
             || repair.tenure_id != a.tenure_id
             || repair.tenure_id != b.tenure_id
-            || repair.repair_sequence <= self.repair_sequence
+            || repair.repair_sequence
+                <= self.repair_sequence_for_issuer_tenure(expected_issuer_tenure_start)
         {
             return Err(ReplError::ReceiptConflict);
         }

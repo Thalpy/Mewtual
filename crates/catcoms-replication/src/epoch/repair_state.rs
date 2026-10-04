@@ -134,6 +134,20 @@ impl ReceiptBook {
         self.repair_sequence
     }
 
+    /// Latest resolved sequence issued in this exact authenticated owner tenure.
+    ///
+    /// The raw persisted field remains the sequence of `resolved_repair`, preserving every
+    /// existing codec. A successor tenure starts from zero for monotonic comparison while the
+    /// retained historical repair continues screening its named losing branch.
+    pub fn repair_sequence_for_issuer_tenure(&self, issuer_tenure_start: u64) -> u64 {
+        self.resolved_repair
+            .as_ref()
+            .filter(|resolved| {
+                resolved.repair.issuer_tenure_start_group_epoch == Some(issuer_tenure_start)
+            })
+            .map_or(0, |resolved| resolved.repair.repair_sequence)
+    }
+
     /// Latest exact resolved repair, retained across ordinary head advancement/checkpointing.
     /// Historical bytes alone never authorize a new repair or prove the current owner's tenure.
     pub fn latest_repair(&self) -> Option<&ReceiptRepair> {

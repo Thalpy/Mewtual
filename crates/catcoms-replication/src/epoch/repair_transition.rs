@@ -305,7 +305,7 @@ impl RepairSource<'_> {
                 binding.disposition,
             )));
         }
-        if repair.repair_sequence <= self.book.repair_sequence {
+        if repair.repair_sequence <= self.book.repair_sequence_for_issuer_tenure(issuer_tenure) {
             return held(RepairHold::SequenceNotNewer);
         }
         if self

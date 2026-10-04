@@ -470,6 +470,105 @@ fn returning_to_published_winner_normalizes_and_retains_pending_evidence() {
 }
 
 #[test]
+fn journal_sequence_resets_only_after_finalized_source_and_real_issuer_turnover() {
+    let mut f = Fixture::new();
+    let (winner, _) = f.receipt(2, baseline(2, 1), 2);
+    let (loser, _) = f.receipt(3, baseline(2, 2), 3);
+    let mut journal = f.published(&winner);
+    let first = ReceiptRepair::sign_in_tenure(
+        f.document.clone(),
+        winner.tenure_id,
+        [winner.hash(), loser.hash()],
+        loser.hash(),
+        u64::MAX,
+        0,
+        &f.owner,
+    )
+    .unwrap();
+    assert_eq!(
+        journal
+            .resolve_repair(&first, &winner, &loser, None, &f.group, 0)
+            .unwrap(),
+        JournalRepairEffect::Replace
+    );
+    assert_eq!(journal.repair_sequence_for_issuer_tenure(0), u64::MAX);
+
+    let successor = MlsDevice::generate().unwrap();
+    let welcome = f
+        .group
+        .add_member(&f.owner, successor.key_package().unwrap())
+        .unwrap()
+        .welcome;
+    let mut successor_group = ServerGroup::join(&successor, &welcome).unwrap();
+    successor_group
+        .remove_member(&successor, &f.owner.device_id())
+        .unwrap();
+    let successor_tenure = successor_group.epoch();
+    let successor_repair = ReceiptRepair::sign_in_tenure(
+        f.document.clone(),
+        winner.tenure_id,
+        [winner.hash(), loser.hash()],
+        winner.hash(),
+        1,
+        successor_tenure,
+        &successor,
+    )
+    .unwrap();
+
+    // Numeric rollover never bypasses the source half of B1/B2.
+    let before = journal.encode();
+    assert!(journal
+        .resolve_repair(
+            &successor_repair,
+            &winner,
+            &loser,
+            None,
+            &successor_group,
+            successor_tenure,
+        )
+        .is_err());
+    assert_eq!(journal.encode(), before);
+    journal.mark_repair_source_finalized(first.hash()).unwrap();
+
+    // Finalization releases only the cross-tenure numeric high-water. A lower sequence signed in
+    // the original issuer tenure is still stale, while the authenticated successor starts at one.
+    let stale_same_tenure = ReceiptRepair::sign_in_tenure(
+        f.document.clone(),
+        winner.tenure_id,
+        [winner.hash(), loser.hash()],
+        winner.hash(),
+        1,
+        0,
+        &f.owner,
+    )
+    .unwrap();
+    assert!(journal.check_repair_progress(&stale_same_tenure).is_err());
+    journal.check_repair_progress(&successor_repair).unwrap();
+    assert_eq!(
+        journal.repair_sequence_for_issuer_tenure(successor_tenure),
+        0
+    );
+    assert_eq!(
+        journal
+            .resolve_repair(
+                &successor_repair,
+                &winner,
+                &loser,
+                None,
+                &successor_group,
+                successor_tenure,
+            )
+            .unwrap(),
+        JournalRepairEffect::Normalize
+    );
+    assert_eq!(
+        journal.repair_sequence_for_issuer_tenure(successor_tenure),
+        1
+    );
+    reopen(&mut journal);
+}
+
+#[test]
 fn unrelated_higher_pending_and_historical_tenure_repairs_preserve_every_role() {
     let f = Fixture::new();
     let (old, _) = f.receipt(2, baseline(2, 1), 2);

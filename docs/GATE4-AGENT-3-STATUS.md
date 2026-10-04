@@ -32,6 +32,12 @@ witness, so only current-tenure (origin 0) evidence can be admitted.
   application holds on Imported/Unknown. `ReadFault`/`RepairFault` and Registry-scoped equivalents,
   `Repairing`/`StorageRefused` with native mapping, a native response encoder (commands unregistered,
   Agent 4), and a catch-up step that resumes held decisions for sources and buckets.
+- **Agent 4 integration correction (2026-10-04).** Numeric repair high-water is now scoped to the
+  v2 record's signed and independently authenticated issuer tenure rather than carried globally
+  across owner succession. Same-tenure gaps and retry ordering are unchanged; unfinished journal
+  provenance still blocks turnover. Checked allocation returns `RepairSequenceExhausted` at MAX
+  before signing/B1 mutation, while a verified successor tenure begins at one. Wire and persistence
+  encodings remain byte-compatible.
 
 - **Report path (W-1, 6.5, 6.6), current tenure only.** Scoped head query v2 (`2 | v1 fields |
   count(0|2) | receipts`); v1 bytes unchanged. The report is captured opaque at queue time and

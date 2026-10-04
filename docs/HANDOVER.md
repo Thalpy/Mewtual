@@ -8,7 +8,18 @@ the protocol- vs honest-client-enforced boundary and the hardening backlog.
 [`MESSAGE-FLOW.md`](MESSAGE-FLOW.md) traces one message end to end (send, gossip, catch-up)
 and ranks the live hazards in that path.
 
-## Status (latest entry: 2026-09-15)
+## Status (latest entry: 2026-10-04)
+
+- **Gate 4 repair-sequence integration correction (2026-10-04).** Repair high-water and owner
+  journal comparisons now use the issuer-tenure start already covered by the v2 signature and
+  independently checked against current owner authority. Existing wire and persistence codecs are
+  unchanged. Same-tenure gaps remain valid; same-tenure replay remains stale; unfinished B1/B2
+  provenance still blocks across turnover; a real successor tenure starts at one. Allocation uses
+  checked addition and reports `RepairSequenceExhausted` before signing or B1 mutation rather than
+  panicking or wrapping at `u64::MAX`. Focused core, owner-journal, Studio and Registry regressions
+  cover MAX persistence, turnover, authority, gaps and typed exhaustion. Native Save/repair remains
+  unregistered with P5 false, and the archived Observed-tenure consumer remains missing. This is an
+  incremental candidate correction, not Gate 4 or Gate 5 acceptance.
 
 - **Four remaining-work handoffs prepared (2026-09-15).** The user requests commit/push and
   implementation/review prompts for four agents. [Implementation handoffs](GATE4-AGENT-HANDOFFS.md)

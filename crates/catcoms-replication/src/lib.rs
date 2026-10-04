@@ -86,6 +86,9 @@ pub enum ReplError {
     /// A receipt conflicts with already-persisted owner or peer state.
     #[error("conflicting epoch-close receipt")]
     ReceiptConflict,
+    /// The current owner's tenure has consumed every non-zero repair sequence.
+    #[error("repair sequence exhausted for this owner tenure")]
+    RepairSequenceExhausted,
     /// A recovery transition is already waiting in the one staged slot.
     #[error("recovery staging slot is occupied")]
     RecoveryPending,

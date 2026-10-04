@@ -591,6 +591,109 @@ fn repair_exact_retry_preserves_newer_head_and_named_pair_mismatch_holds() {
 }
 
 #[test]
+fn repair_sequence_is_monotonic_per_authenticated_issuer_tenure() {
+    let mut f = Fixture::new(true);
+    let max = ReceiptRepair::sign_in_tenure(
+        f.document.clone(),
+        f.selected.tenure_id,
+        [f.selected.hash(), f.losing.hash()],
+        f.selected.hash(),
+        u64::MAX,
+        0,
+        &f.owner,
+    )
+    .unwrap();
+    f.repair = max.clone();
+    f.apply();
+    assert_eq!(f.book.repair_sequence(), u64::MAX);
+    assert_eq!(f.book.repair_sequence_for_issuer_tenure(0), u64::MAX);
+    assert_eq!(f.book.repair_sequence_for_issuer_tenure(1), 0);
+    assert!(matches!(
+        ReceiptRepair::next_sequence_after(u64::MAX),
+        Err(ReplError::RepairSequenceExhausted)
+    ));
+
+    // MAX is a valid historical value and must retain its exact persisted representation.
+    let bytes = f.book.encode().unwrap();
+    assert_eq!(
+        ReceiptBook::decode(&bytes).unwrap().encode().unwrap(),
+        bytes
+    );
+
+    // A new fault remains resolvable after real owner turnover. The successor starts its own
+    // signed sequence at one; editing the old repair's issuer-tenure claim remains impossible
+    // because both the claim and sequence are covered by the signature.
+    let third = f.sign(4, baseline(2), 5);
+    assert_eq!(f.book.ingest_verified(third).unwrap(), ReceiptIngest::Fault);
+    let (a, b) = f.book.fault.clone().unwrap();
+    let successor = MlsDevice::generate().unwrap();
+    let welcome = f
+        .group
+        .add_member(&f.owner, successor.key_package().unwrap())
+        .unwrap()
+        .welcome;
+    let mut successor_group = ServerGroup::join(&successor, &welcome).unwrap();
+    successor_group
+        .remove_member(&successor, &f.owner.device_id())
+        .unwrap();
+    let successor_tenure = successor_group.epoch();
+    let successor_repair = ReceiptRepair::sign_in_tenure(
+        f.document.clone(),
+        a.tenure_id,
+        [a.hash(), b.hash()],
+        a.hash(),
+        1,
+        successor_tenure,
+        &successor,
+    )
+    .unwrap();
+    assert!(max
+        .verify_current_owner(&successor_group, successor_tenure)
+        .is_err());
+    assert_eq!(
+        f.book
+            .apply_repair(&successor_repair, &successor_group, successor_tenure)
+            .unwrap()
+            .0,
+        ReceiptRepairIngest::Applied
+    );
+    assert_eq!(f.book.repair_sequence(), 1);
+    assert_eq!(
+        f.book.repair_sequence_for_issuer_tenure(successor_tenure),
+        1
+    );
+    assert_eq!(f.book.repair_sequence_for_issuer_tenure(0), 0);
+}
+
+#[test]
+fn repair_sequence_allows_same_tenure_gaps_but_not_replay() {
+    let mut f = Fixture::new(true);
+    f.apply();
+    let first = f.repair.clone();
+    let third = f.sign(4, baseline(2), 5);
+    assert_eq!(f.book.ingest_verified(third).unwrap(), ReceiptIngest::Fault);
+    let (a, b) = f.book.fault.clone().unwrap();
+    let gap = ReceiptRepair::sign_in_tenure(
+        f.document.clone(),
+        a.tenure_id,
+        [a.hash(), b.hash()],
+        b.hash(),
+        3,
+        0,
+        &f.owner,
+    )
+    .unwrap();
+    assert_eq!(
+        f.book.apply_repair(&gap, &f.group, 0).unwrap().0,
+        ReceiptRepairIngest::Applied
+    );
+    assert_eq!(f.book.repair_sequence_for_issuer_tenure(0), 3);
+    let before = f.book.encode().unwrap();
+    assert!(f.book.apply_repair(&first, &f.group, 0).is_err());
+    assert_eq!(f.book.encode().unwrap(), before);
+}
+
+#[test]
 fn repair_v1_is_byte_compatible_but_live_apply_requires_v2_current_tenure() {
     let mut f = Fixture::new(true);
     let legacy = ReceiptRepair::sign(

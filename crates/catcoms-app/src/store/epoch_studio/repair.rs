@@ -5,8 +5,8 @@
 //! touches a `DraftArchive`: a replacement preserves the losing version as `Repair` recovery.
 
 use super::super::epoch_owner::{
-    decidable_pair, BindingKind, EpochOwnerReceiptState, TerminalRepairSource,
-    ValidatedFaultAdmission,
+    decidable_pair, next_repair_sequence, BindingKind, EpochOwnerReceiptState,
+    TerminalRepairSource, ValidatedFaultAdmission,
 };
 use super::*;
 use catcoms_replication::studio::StudioTarget;
@@ -189,12 +189,11 @@ impl ServerStore {
                 )?,
                 None => return Err(invalid("historical owner authority is unavailable")),
             };
-            let sequence = 1 + source.unit.repair_sequence().max(
-                owner
-                    .journal()
-                    .retained_repair()
-                    .map_or(0, |r| r.repair_sequence),
-            );
+            let sequence = next_repair_sequence(
+                source.unit.repair_sequence_for_issuer_tenure(tenure),
+                owner.journal().repair_sequence_for_issuer_tenure(tenure),
+            )
+            .map_err(invalid)?;
             let repair = ReceiptRepair::sign_in_tenure(
                 document.clone(),
                 pair[0].tenure_id,

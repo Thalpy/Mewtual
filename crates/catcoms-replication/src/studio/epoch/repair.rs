@@ -130,6 +130,12 @@ impl StudioEpoch {
     pub fn repair_sequence(&self) -> u64 {
         self.receipts.repair_sequence()
     }
+
+    /// Highest repair sequence issued in this exact authenticated owner tenure.
+    pub fn repair_sequence_for_issuer_tenure(&self, issuer_tenure_start: u64) -> u64 {
+        self.receipts
+            .repair_sequence_for_issuer_tenure(issuer_tenure_start)
+    }
 }
 
 #[cfg(test)]

@@ -863,9 +863,13 @@ P1 core repair now uses `ReceiptRepair::sign_in_tenure` and
 `verify_current_owner(group, expected_issuer_tenure_start)`. V1 decoding/hashing stays compatible
 but is not live authority. `ReceiptBook::apply_repair` takes the same independent tenure and
 returns `(Applied | Duplicate, losing_receipt)`; an exact duplicate preserves later progress,
-and an active different fault refuses it. The latest full signed evidence survives book
-encoding/checkpoint copies under the existing 8 KiB cap. This remains a bookkeeping prerequisite,
-not a callable native repair, gate transition, owner-journal rebase or recovery persistence API.
+and an active different fault refuses it. Repair-sequence monotonicity is scoped to the signed,
+independently authenticated issuer tenure: same-tenure gaps are valid, replay is stale, and a real
+successor tenure starts at one even if historical state retained `u64::MAX`. MAX in the current
+issuer tenure returns `RepairSequenceExhausted` before signing or B1 mutation. The existing repair
+and book encodings are unchanged. The latest full signed evidence survives book
+encoding/checkpoint copies under the existing 8 KiB cap. Native repair commands remain
+unregistered, and the archived Observed-tenure consumer remains missing.
 
 `studio_recovery_list`, `studio_recovery_read`, `studio_recovery_export`, and
 `studio_recovery_acknowledge` use the same actor/native custody as Save. They authenticate all
