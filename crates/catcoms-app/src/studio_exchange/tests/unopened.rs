@@ -11,6 +11,13 @@ async fn studio_registry_preparation_outliving_head_needs_a_fresh_request() {
     drop(p.a_store);
     p.a_store = open(p._a_root.path());
     let mut receiver = StudioReceiver::default();
+    // This fixture models its own process and ManualClock. Keep its preparation capacity in the
+    // same private resource domain so parallel tests retaining production-pool permits cannot turn
+    // the required cold preparation into the production "retry on a later idle turn" path.
+    receiver.preparation_pools_for_test(
+        std::sync::Arc::new(tokio::sync::Semaphore::new(4)),
+        std::sync::Arc::new(tokio::sync::Semaphore::new(3)),
+    );
     receiver
         .run(&mut p.alice, &mut p.a_store, SERVER, None)
         .unwrap();
