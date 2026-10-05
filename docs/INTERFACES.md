@@ -868,8 +868,15 @@ independently authenticated issuer tenure: same-tenure gaps are valid, replay is
 successor tenure starts at one even if historical state retained `u64::MAX`. MAX in the current
 issuer tenure returns `RepairSequenceExhausted` before signing or B1 mutation. The existing repair
 and book encodings are unchanged. The latest full signed evidence survives book
-encoding/checkpoint copies under the existing 8 KiB cap. Native repair commands remain
-unregistered, and the archived Observed-tenure consumer remains missing.
+encoding/checkpoint copies under the existing 8 KiB cap. The trusted head-service source context
+now carries the one archived Observed-tenure witness from the same durable owner snapshot. Shared
+Studio/Registry admission checks an exact retained attestation first, otherwise requires the pair's
+full owner key/start/tenure id to match the live or archived tuple and records the admission origin.
+Both head adapters authenticate the exact source and its physical inventory, persist B0, and only
+then ask whether that source may serve a head. A valid Registry Fault therefore retains the report
+but still refuses service; failed or uncertain B0 takes precedence over that expected refusal, and
+the prepared adapter does not reconstruct the source. Historical evidence never becomes a live
+source seal or current-tenure overflow hold. Native repair commands remain unregistered.
 
 `studio_recovery_list`, `studio_recovery_read`, `studio_recovery_export`, and
 `studio_recovery_acknowledge` use the same actor/native custody as Save. They authenticate all

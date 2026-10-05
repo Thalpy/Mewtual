@@ -99,7 +99,6 @@ impl Drop for CancelOnDrop {
 /// Evidence that the trusted local persistence callback saved this exact owner/MLS observation.
 /// Created by explicit local preparation, NEVER by a remotely triggered source request. Later
 /// membership commits invalidate it; ordinary document edits do not change the owner evidence.
-#[derive(Clone)]
 pub struct DurableOwnerSnapshot {
     instance: RegistrySyncInstance,
     epoch: u64,
@@ -109,6 +108,22 @@ pub struct DurableOwnerSnapshot {
     /// save, so a witness minted after it, or held only in memory, is never handed out. Boxed
     /// because this permit rides inside `ReceiptHeadServed::Owner`, which must stay small.
     archive: Option<Box<ArchivedOwnerTenure>>,
+}
+impl Clone for DurableOwnerSnapshot {
+    fn clone(&self) -> Self {
+        // Cloning the opaque permit does not expose its witness: every use still revalidates the
+        // runtime instance, epoch, live owner tenure and current one-entry archive.
+        Self {
+            instance: self.instance.clone(),
+            epoch: self.epoch,
+            owner: self.owner,
+            tenure: self.tenure,
+            archive: self
+                .archive
+                .as_deref()
+                .map(|archive| Box::new(archive.duplicate())),
+        }
+    }
 }
 impl fmt::Debug for DurableOwnerSnapshot {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -141,14 +156,17 @@ pub enum ReceiptHeadServed {
     Owner(ReceiptHeadHandoff),
 }
 
-/// Trusted synchronous source context. `tenure` is present only with a still-current durable
-/// snapshot permit. The source must separately persist its selected irrevocable decision and
-/// check its registry/inventory before asking sync to sign a fresh proof.
+/// Trusted synchronous source context. `tenure` and `archived_owner` are available only from a
+/// still-current durable snapshot permit. The source must separately persist its selected
+/// irrevocable decision and check its registry/inventory before asking sync to sign a fresh proof.
 pub struct ReceiptHeadSource<'a> {
     pub document: &'a LogicalDocument,
     pub requester: DeviceId,
     pub nonce: [u8; 16],
     pub tenure: Option<u64>,
+    /// The single locally observed retired owner carried by the same durable snapshot. This is
+    /// historical provenance for exact fault-pair admission, never current signing authority.
+    pub archived_owner: Option<&'a ArchivedOwnerTenure>,
     /// A faulted requester's complete frozen pair, decoded only after both request rails. It is
     /// self-signed evidence, not authority: the trusted provider decides whether it is provable.
     pub fault_report: Option<&'a [Receipt; 2]>,
@@ -157,6 +175,7 @@ impl fmt::Debug for ReceiptHeadSource<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("ReceiptHeadSource")
             .field("durable_tenure", &self.tenure.is_some())
+            .field("archived_owner", &self.archived_owner.is_some())
             .finish_non_exhaustive()
     }
 }
@@ -568,9 +587,9 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             return Err(SyncError::Unauthorized);
         }
         let document = watch.target.document(&self.group.group_id())?;
-        let tenure = snapshot
-            .filter(|p| self.head_snapshot_is_current(p))
-            .map(|p| p.tenure);
+        let snapshot = snapshot.filter(|p| self.head_snapshot_is_current(p));
+        let tenure = snapshot.map(|p| p.tenure);
+        let archived_owner = snapshot.and_then(|p| p.archive.as_deref());
         // Both rails are paid; only now are the reported receipts decoded. A malformed report
         // is the requester's error and refuses this request without a response.
         let fault_report = item
@@ -588,6 +607,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
                 requester: item.requester,
                 nonce: item.nonce,
                 tenure,
+                archived_owner,
                 fault_report: fault_report.as_ref(),
             },
         ) {

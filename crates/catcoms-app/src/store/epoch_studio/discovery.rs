@@ -1,7 +1,7 @@
 //! Checkpoint service uses the same sole prepared source and owner journal as other P1 paths.
 //! A remote query cannot trigger cold reconstruction, create epoch zero or serialize a server.
 use super::*;
-use catcoms_sync::receipt_head::ReceiptHeadSelection;
+use catcoms_sync::{receipt_head::ReceiptHeadSelection, ArchivedOwnerTenure};
 
 impl ServerStore {
     pub(crate) fn prepared_studio_maintenance_state(
@@ -195,6 +195,7 @@ impl ServerStore {
             device,
             durable_tenure,
             None,
+            None,
             rng,
             budget,
             hooks,
@@ -212,6 +213,7 @@ impl ServerStore {
         target: StudioTarget,
         device: &MlsDevice,
         durable_tenure: Option<u64>,
+        archived_owner: Option<&ArchivedOwnerTenure>,
         fault_report: Option<&[Receipt; 2]>,
         rng: &mut impl CryptoRngCore,
         budget: &mut EpochStudioBudget,
@@ -228,6 +230,7 @@ impl ServerStore {
             target,
             device,
             durable_tenure,
+            archived_owner,
             fault_report,
             rng,
             budget,
@@ -242,6 +245,7 @@ impl ServerStore {
         target: StudioTarget,
         device: &MlsDevice,
         durable_tenure: Option<u64>,
+        archived_owner: Option<&ArchivedOwnerTenure>,
         fault_report: Option<&[Receipt; 2]>,
         rng: &mut impl CryptoRngCore,
         budget: &mut EpochStudioBudget,
@@ -259,7 +263,15 @@ impl ServerStore {
             let document = target.document(&group.group_id()).map_err(invalid)?;
             self.with_studio_protocol_budget(server, group, budget, |store, storage| {
                 store.admit_fault_report(
-                    server, &document, group, device, tenure, report, rng, storage,
+                    server,
+                    &document,
+                    group,
+                    device,
+                    tenure,
+                    archived_owner,
+                    report,
+                    rng,
+                    storage,
                 )
             })?;
         }

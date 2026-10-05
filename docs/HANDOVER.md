@@ -10,6 +10,32 @@ and ranks the live hazards in that path.
 
 ## Status (latest entry: 2026-10-05)
 
+- **Gate 4 archived-owner admission candidate (2026-10-05).** The app now consumes the single
+  archived Observed-tenure witness only through the still-current durable owner snapshot used by
+  head service. Studio and Registry report admission first perform a bounded contextual owner-record
+  read, accept an exact retained attestation without depending on the current archive, otherwise
+  require both full receipts to match either the live Observed owner tuple or the archived tuple,
+  and seal the receiver-local attestation in B0. Historical evidence never enters the live source
+  seal or current-tenure overflow hold. A real A -> B -> C MLS regression persists/reopens C,
+  admits B for both document families, refuses the Unknown A tenure with absent and wrong archive,
+  retries B from its retained attestation, and signs a current-C screening repair. Complete root
+  and frontend suites, strict root/desktop Clippy, desktop check/build and `cargo deny` pass.
+  Independent review's MEDIUM cloneable-capability escape was fixed with a non-cloneable,
+  snapshot-borrowed witness and compile-fail regression. PR #34 review then found that Registry's
+  explicit and prepared adapters asked a valid Fault source for a head before persisting B0, while
+  one wrong-archive negative could be masked by already-occupied capacity. Both adapters now
+  authenticate/account their exact source, attempt B0 with failed and uncertain writer errors
+  taking precedence, and only then preserve Fault as a hard service refusal. Empty-capacity
+  absent/wrong-authority checks, a post-write/reopen retained-attestation regression and a direct
+  prepared no-reconstruction counter close the review gaps. Final adversarial re-review reports no
+  finding at any severity. The correction bytes pass the complete root suite, root/desktop strict
+  Clippy, desktop check, all 1,282 frontend tests, Svelte check, production build and `cargo deny`.
+  The complete native run passes 324/325 and a focused retry reproduces the already baseline-
+  observed normal-order six-client final-convergence flake; its reverse-order companion passes, so
+  native is not claimed green locally. Linux ambient and repair-store mutations remain exact-head
+  CI-owned. The detached S1-S4 repair runtime remains absent, P5 is false, commands remain
+  unregistered, Gate 4 remains open and Gate 5 remains closed.
+
 - **PR #33 repair-integration review response (2026-10-05).** Whole-candidate review found two
   HIGH issues outside the structural inventory seam. First, a repair-only head response could
   return a visible B2 replacement without repeating the source and owner-record durability
@@ -79,9 +105,10 @@ and ranks the live hazards in that path.
   provenance still blocks across turnover; a real successor tenure starts at one. Allocation uses
   checked addition and reports `RepairSequenceExhausted` before signing or B1 mutation rather than
   panicking or wrapping at `u64::MAX`. Focused core, owner-journal, Studio and Registry regressions
-  cover MAX persistence, turnover, authority, gaps and typed exhaustion. Native Save/repair remains
-  unregistered with P5 false, and the archived Observed-tenure consumer remains missing. This is an
-  incremental candidate correction, not Gate 4 or Gate 5 acceptance.
+  cover MAX persistence, turnover, authority, gaps and typed exhaustion. At that checkpoint native
+  Save/repair remained unregistered with P5 false and the archived Observed-tenure consumer was
+  still missing; the newer entry above records its bounded implementation. This was an incremental
+  candidate correction, not Gate 4 or Gate 5 acceptance.
 
 - **Four remaining-work handoffs prepared (2026-09-15).** The user requests commit/push and
   implementation/review prompts for four agents. [Implementation handoffs](GATE4-AGENT-HANDOFFS.md)

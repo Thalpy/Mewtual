@@ -8,6 +8,7 @@ use super::fault_record::{BindingKind, Pair, ReportAdmission, ValidatedFaultAdmi
 use super::*;
 use catcoms_crypto::DeviceId;
 use catcoms_replication::{ReceiptRepair, ReceiptRepairPlan, ReplError};
+use catcoms_sync::ArchivedOwnerTenure;
 
 /// Allocate the next sequence from the two durable witnesses consulted by both typed stores.
 /// Both inputs must already be filtered to the current authenticated issuer tenure.
@@ -380,10 +381,11 @@ impl ServerStore {
 
     /// S-3 provider admission (design 6.5, CORE-005) for a reported pair, under the caller's
     /// durable owner tenure and before the response is decided. Only a pair both of whose
-    /// receipts verify under the CURRENT owner tenure is admissible: a historical pair needs the
-    /// archived Observed witness this store does not hold. `Ok(None)` writes nothing (not the
-    /// owner, unprovable, foreign or malformed); `Err` is a failed or uncertain B0 write, which
-    /// the caller must turn into a fail-closed answer.
+    /// receipts match either the current Observed owner or the one archived Observed witness from
+    /// the same durable snapshot is admissible. An exact retained attestation is checked first, so
+    /// an unresolved pair survives archive turnover. `Ok(None)` writes nothing (not the owner,
+    /// unprovable, foreign, malformed, or unavailable historical capacity); `Err` is a failed or
+    /// uncertain B0 write, which the caller must turn into a fail-closed answer.
     #[allow(clippy::too_many_arguments)]
     pub(in crate::store) fn admit_fault_report(
         &mut self,
@@ -392,18 +394,79 @@ impl ServerStore {
         group: &ServerGroup,
         device: &catcoms_mls::MlsDevice,
         tenure: u64,
+        archived_owner: Option<&ArchivedOwnerTenure>,
         report: &[Receipt; 2],
         rng: &mut impl CryptoRngCore,
         budget: &mut EpochStorageBudget,
     ) -> Result<Option<ReportAdmission>, AppError> {
+        self.admit_fault_report_with_writer(
+            server,
+            document,
+            group,
+            device,
+            tenure,
+            archived_owner,
+            report,
+            rng,
+            budget,
+            &mut WriteHooks::None,
+        )
+    }
+
+    /// The production admission path with the owner-record writer exposed only for deterministic
+    /// crash-boundary tests. Callers must propagate every writer error: a visible or uncertain B0
+    /// replacement is not permission to answer the request that carried the report.
+    #[allow(clippy::too_many_arguments)]
+    pub(in crate::store) fn admit_fault_report_with_writer(
+        &mut self,
+        server: u64,
+        document: &LogicalDocument,
+        group: &ServerGroup,
+        device: &catcoms_mls::MlsDevice,
+        tenure: u64,
+        archived_owner: Option<&ArchivedOwnerTenure>,
+        report: &[Receipt; 2],
+        rng: &mut impl CryptoRngCore,
+        budget: &mut EpochStorageBudget,
+        hooks: &mut WriteHooks<'_>,
+    ) -> Result<Option<ReportAdmission>, AppError> {
         let observer = device.device_id();
-        if group.designated_committer() != Some(observer) {
+        if group.designated_committer() != Some(observer)
+            || group.member_signature_key(&observer).as_deref()
+                != Some(device.public_key_bytes().as_slice())
+        {
             return Ok(None);
         }
-        let Ok(admission) = ValidatedFaultAdmission::current(
-            document, &report[0], &report[1], group, &observer, tenure,
-        ) else {
+        let Ok(hashes) =
+            ValidatedFaultAdmission::canonical_hashes(document, &report[0], &report[1])
+        else {
             return Ok(None);
+        };
+        // This bounded read is deliberately before fresh authority and before any writer. A
+        // retained exact attestation remains sufficient after the single archive has turned over.
+        let state =
+            self.checked_owner_repair_state(server, document, &observer, group.epoch(), budget)?;
+        let admission = match state.retained_admission(hashes, &observer, group.epoch())? {
+            Some(admission) => admission,
+            None => match ValidatedFaultAdmission::current(
+                document, &report[0], &report[1], group, &observer, tenure,
+            ) {
+                Ok(admission) => admission,
+                Err(_) => {
+                    let Some(archived) = archived_owner else {
+                        return Ok(None);
+                    };
+                    let Ok(admission) = ValidatedFaultAdmission::historical(
+                        document, &report[0], &report[1], group, &observer, archived,
+                    ) else {
+                        return Ok(None);
+                    };
+                    if state.retained_pairs().1.is_some() {
+                        return Ok(None);
+                    }
+                    admission
+                }
+            },
         };
         let current = catcoms_replication::epoch::tenure_id(
             &group.group_id(),
@@ -419,14 +482,15 @@ impl ServerStore {
             group.epoch(),
             rng,
             budget,
-            &mut WriteHooks::None,
+            hooks,
         )
         .map(Some)
     }
 
-    /// Barrier B0: durably stage an admitted current-tenure report before the response is
-    /// decided. An exact retained pair re-saves unchanged; the reserved slot takes a new pair,
-    /// otherwise only its fingerprint enters the overflow hold. Nothing here chooses a winner.
+    /// Barrier B0: durably stage an admitted current- or archived-tenure report before the response
+    /// is decided. An exact retained pair re-saves unchanged; the reserved slot takes a new pair.
+    /// Only a competing current-tenure report may enter the bounded live overflow hold; historical
+    /// evidence refuses when its complete attestation cannot fit. Nothing here chooses a winner.
     #[allow(clippy::too_many_arguments)]
     pub(in crate::store) fn stage_epoch_fault_report_with_writer(
         &mut self,

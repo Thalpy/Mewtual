@@ -9,6 +9,7 @@ use super::{invalid, AppError, Decoder, Encoder, LogicalDocument, Receipt, Zeroi
 use catcoms_crypto::DeviceId;
 use catcoms_mls::ServerGroup;
 use catcoms_replication::{epoch::conflicting_receipt_pair, ReceiptRepair};
+use catcoms_sync::ArchivedOwnerTenure;
 
 pub(super) const MAX_FAULT_ADMISSION_ATTESTATION_BYTES: usize = 256;
 const MAX_OVERFLOW_FINGERPRINTS: usize = 4;
@@ -227,7 +228,8 @@ impl ValidatedFaultAdmission {
     /// Fresh admission of a pair signed in the CURRENT owner tenure. `authoring_start` must be
     /// the authoring tenure read from a durable owner snapshot in this same custody visit; both
     /// receipts must pass live current-owner verification against it. This never admits a
-    /// historical pair: that needs an archived Observed witness this store does not hold.
+    /// historical pair: that requires [`Self::historical`] and the archived witness from the
+    /// same durable owner snapshot.
     pub(in crate::store) fn current(
         document: &LogicalDocument,
         a: &Receipt,
@@ -267,6 +269,73 @@ impl ValidatedFaultAdmission {
                 attestation,
             },
         })
+    }
+
+    /// Fresh admission of a pair signed by the one archived owner tenure this observer positively
+    /// watched retire. The witness is private, receiver-local snapshot evidence; the receipts'
+    /// self-signatures are necessary but cannot substitute for an exact full-tuple match.
+    pub(in crate::store) fn historical(
+        document: &LogicalDocument,
+        a: &Receipt,
+        b: &Receipt,
+        group: &ServerGroup,
+        observer: &DeviceId,
+        archived: &ArchivedOwnerTenure,
+    ) -> Result<Self, AppError> {
+        if document.server_id != group.group_id()
+            || archived.start() >= archived.retired_at()
+            || archived.retired_at() > group.epoch()
+            || catcoms_replication::epoch::tenure_id(
+                &group.group_id(),
+                archived.owner_key(),
+                archived.start(),
+            ) != *archived.tenure_id()
+        {
+            return Err(invalid(
+                "archived owner witness does not match this group snapshot",
+            ));
+        }
+        let mut receipts = [a.clone(), b.clone()];
+        receipts.sort_by_key(Receipt::hash);
+        let evidence = Evidence::new(receipts, document)?;
+        if evidence.receipts.iter().any(|receipt| {
+            receipt.owner_public_key.as_slice() != archived.owner_key()
+                || receipt.tenure_start_group_epoch != archived.start()
+                || receipt.tenure_id != *archived.tenure_id()
+        }) {
+            return Err(invalid(
+                "fault pair does not match the archived owner tenure",
+            ));
+        }
+        let attestation = Attestation {
+            observer: *observer.as_bytes(),
+            owner: *archived.owner_key(),
+            start: archived.start(),
+            tenure: *archived.tenure_id(),
+            hashes: evidence.hashes,
+            admission_epoch: group.epoch(),
+            retired_at: Some(archived.retired_at()),
+        };
+        let attestation = evidence.check_attestation(&attestation.encode()?)?;
+        Ok(Self {
+            pair: Pair {
+                receipts: evidence.receipts,
+                hashes: evidence.hashes,
+                attestation,
+            },
+        })
+    }
+
+    /// Canonical identity used for the read-only retained-attestation lookup before fresh
+    /// current or historical authority is required.
+    pub(in crate::store) fn canonical_hashes(
+        document: &LogicalDocument,
+        a: &Receipt,
+        b: &Receipt,
+    ) -> Result<[[u8; 32]; 2], AppError> {
+        let mut receipts = [a.clone(), b.clone()];
+        receipts.sort_by_key(Receipt::hash);
+        Ok(Evidence::new(receipts, document)?.hashes)
     }
 
     pub(in crate::store) fn hashes(&self) -> [[u8; 32]; 2] {
@@ -562,7 +631,7 @@ impl InertFaultRecord {
         Ok(record)
     }
 
-    /// Stage an admitted current-tenure report (barrier B0). An exact pair already retained
+    /// Stage an admitted report (barrier B0). An exact pair already retained
     /// anywhere is a no-op. Otherwise it takes the free reserved slot; with that slot occupied
     /// by a different pair, only its fingerprint enters the overflow hold, under the derived
     /// current tenure: a stale hold is replaced, a current one accumulates and never forgets.
@@ -580,9 +649,7 @@ impl InertFaultRecord {
             applied: false,
         });
         let hashes = admission.pair.hashes;
-        if admission.pair.receipts[0].tenure_id != current_tenure {
-            return Err(invalid("only a current-tenure pair can be staged as live"));
-        }
+        let current = admission.pair.receipts[0].tenure_id == current_tenure;
         let fingerprint = fingerprint(hashes);
         // A fingerprint stands in for a pair only until that exact pair is stored (AG3-DES-048).
         let stored = |record: &mut Self| {
@@ -601,6 +668,12 @@ impl InertFaultRecord {
             record.reserved = Some(admission.pair);
             stored(&mut record);
             return Ok((record, ReportAdmission::Reserved));
+        }
+        // Overflow is deliberately a current-tenure proof hold. A historical pair remains
+        // admissible only while its complete attested bytes fit; reducing it to a fingerprint
+        // would retain no repair authority and would misclassify old evidence as a live dispute.
+        if !current {
+            return Err(invalid("historical fault evidence capacity is occupied"));
         }
         let outcome = match &mut record.overflow {
             Some(hold) if hold.tenure == current_tenure => {

@@ -35,6 +35,9 @@ An installed, flushed checkpoint with an exactly matching current-owner journal 
 that journal's pending publication slot locally: it is available through keyed head/seed service,
 not claimed delivered to another member. This lets a solo owner keep rotating. A Registry Fault
 remains a per-bucket hold; it does not invalidate otherwise authenticated storage accounting.
+Registry head adapters therefore authenticate/account the source, persist any independently
+authorized B0 report, and only then preserve Fault as a no-head result. The prepared adapter reuses
+the verified detached graph rather than reconstructing it for this ordering.
 Actual changed Registry wrappers refresh the existing inventory-validation cache before the next
 Studio turn. No second mutable document cache, budget owner or network protocol is introduced.
 

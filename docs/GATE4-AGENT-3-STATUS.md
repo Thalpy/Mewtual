@@ -4,6 +4,22 @@ Owner: Agent 3 ([assignment](GATE4-AGENT-HANDOFFS.md#agent-3-runtime-signed-faul
 Proposal: [GATE4-AGENT-3-DESIGN](GATE4-AGENT-3-DESIGN.md), revision 16 follow-up.
 Review preamble: 3. Current entries override older ones.
 
+## Archived Observed-tenure integration candidate, 2026-10-05
+
+On `gate4-finalization`, the shared Studio/Registry report admission consumes CORE-005's private
+archived witness from the same still-current durable owner snapshot used by head service. It checks
+retained exact-pair attestations before archive lookup, otherwise requires the complete
+owner-key/start/tenure tuple to match current or archived Observed authority. Historical pairs are
+stored with origin/retirement attestation but never become a live source seal or current-tenure
+overflow hold. A real A -> B -> C MLS, persist/reopen regression covers both document families,
+Unknown/no-archive/wrong-archive refusal, exact retained retry and a current-C screening repair.
+The complete root and frontend suites, strict root/desktop Clippy, desktop check/build and
+`cargo deny` pass. Independent review's one MEDIUM cloneable-capability finding was fixed by making
+the witness non-`Clone`/non-`Copy`, exposing only a snapshot-bound borrow to application code and
+pinning that boundary with a compile-fail doctest; re-review has no remaining BLOCKER/HIGH/MEDIUM.
+Exact-head Linux ambient and repair-store mutations remain CI-owned. The detached S1-S4 runtime
+remains unavailable, P5 remains false and commands remain unregistered.
+
 ## Current-tenure runtime repair, Studio and Registry, 2026-10-01
 
 Implemented on `gate4-agent3-repair` (merge of base `9bfb7c79`/`94af29df` at `14dccacf`). Historical
@@ -55,8 +71,8 @@ historical and must not be read as current availability.
   root `clippy.toml`. Existing harness fixes are inherited rather than duplicated. Exact candidate
   `2b6f716ef05fdf99bdc04da531eb0c0194682e65` passes both store-mutation jobs, both root jobs,
   desktop Clippy and Linux `check-no-ambient.sh` on PR #32. P5 remains false; Save/repair commands
-  stay unregistered; C-3 runtime adoption and the archived Observed-tenure consumer remain
-  incomplete.
+  stay unregistered; at that checkpoint C-3 runtime adoption and the archived Observed-tenure
+  consumer remained incomplete.
 
 - **Report path (W-1, 6.5, 6.6), current tenure only.** Scoped head query v2 (`2 | v1 fields |
   count(0|2) | receipts`); v1 bytes unchanged. The report is captured opaque at queue time and
@@ -74,8 +90,8 @@ the loser converges by case 6c's retarget. A non-live reserved pair is not migra
 slot, so a new live pair waits in overflow until it is decided. The legacy ordinary guard still
 refuses any tag 3, so ordinary rotation for that document waits for the decision (stricter than 5.2).
 
-Not implemented: historical admission (CORE-005), the detached S1-S4 split (every step is one
-custody visit), and Imported coverage at the app boundary (no migrated-v1 Server fixture; the seam's
+Not implemented at that source checkpoint: historical admission (CORE-005), the detached S1-S4
+split (every step is one custody visit), and Imported coverage at the app boundary (no migrated-v1 Server fixture; the seam's
 own `require` anchor covers it). Runtime-level tests of the catch-up repair step are partial: the
 install router has one (an owed source with an unfetched pass, and the hold backoff); Flow D and
 the resume steps are covered only through their store predicates, transactions and the sync
@@ -1065,7 +1081,7 @@ design section 10.1 are **unverified**.
 | Design verdict on revision 2 | user / independent reviewer | requested | no implementation starts |
 | Core handoff signing split `e65bfd8` | Agent 1 / core | unreviewed | unaffected: no repair path uses it |
 | Live tenure contract T1 to T5 (design 13.2) | Agent 2 | **implemented on base**: sync split (`verification_`/`authoring_owner_tenure_start`) and the app seam `require_observed_owner_tenure()` / `observed_owner_tenure()` (`23465a17`, V5) | available; no Agent 3 consumer yet. Repair issuance, application and drain bind to the **authoring** side, where `Imported` and `Unknown` are holds |
-| CORE-005 archived Observed-tenure witness | Agent 2 | not implemented | historical report admission and N17 stay blocked; only current-tenure issuance is constructible |
+| CORE-005 archived Observed-tenure witness | Agent 2 / integration | witness and app consumer implemented; bounded re-review passes, exact-head CI pending | bounded one-witness historical admission is available internally; native exposure and detached automatic repair remain blocked |
 | Prepared overlay fence and source custody (design 13.1) | Agent 1 | design revision 3, unreviewed | repair relies only on the existing `resolve_studio_handoff` and `save_studio_source_checked`; if `inventory_generation` lands, rotating it becomes mandatory over the full list in design 10.3 |
 | Native registration, UI hooks, INTERFACES rows | Agent 4 | not started | commands stay unregistered and nothing is callable from the renderer |
 
