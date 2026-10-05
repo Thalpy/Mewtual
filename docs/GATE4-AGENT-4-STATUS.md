@@ -28,7 +28,13 @@ currently isolated pending the detached runtime boundary:
   findings outside the inventory seam: repair-only durability and unadmitted synchronous runtime
   execution. The durability gate is corrected; automatic execution is now fail-closed pending the
   required detached job. Commit `3fcde979...` carries the correction and its uncertain-B2/B3 and
-  full-pool regressions; independent re-review found no remaining finding or mutation bypass.
+  full-pool regressions. Re-review closed those defects but retained one MEDIUM residual because
+  the disabled Registry router still reconstructed the full source before the gate. Correction
+  `f7c74cb2...` reuses only exact-current prepared state, treats missing/cold/stale state as unknown,
+  and defers unknown or pending repair without mutation. Its first rereview found that a fresh
+  receiver with a small source never scheduled that preparation; `164a94d7...` makes classification
+  preparation size-independent and preserves exact checked absence separately from cold state.
+  Final bounded re-review found no remaining BLOCKER, HIGH, MEDIUM or LOW finding.
 
 The code is still intentionally unavailable to the renderer. P5 is false; native Save and repair
 commands remain unregistered. The current-tenure repair implementation does not make historical
@@ -41,7 +47,7 @@ repair complete, and merging ancestry does not supply the missing archived-tenur
 | Shared integration baseline | `gate4-agent1-runtime` at `bcc88941a8677afa62957c258a127f35f328ff67`; untouched |
 | Repair candidate | `gate4-agent4-repair-candidate` at `87629d6b72992254911a8e44f698d535bb5d7904`; PR #32 open, ready, clean |
 | Documentation checkpoint | `gate4-agent4-integration` at `f0af61c9b1247fa955300ac50545074e18e9b302`; PR #31 open |
-| Completion branch | `gate4-completion-integration`; draft PR #33, with review response at `3fcde979...` and documentation history merged |
+| Completion branch | `gate4-completion-integration`; draft PR #33, with review responses at `3fcde979...`, `f7c74cb2...` and `164a94d7...`, and documentation history merged |
 | Agent 3 source | `gate4-agent3-repair` at `15b715a10704a8dafc2cccef65854d4d45ad55ca`; preserved, not rewritten |
 
 PR #28 remains the Agent 3 source record. PR #32 is its first integrated successor; draft PR #33
@@ -110,8 +116,10 @@ Still required:
 ### Agent 4
 
 Completed: preserved-history integration, response classification, Windows durability, repair
-sequence correction, two-platform mutation CI, desktop Clippy, full exact-head suites, bounded
-review and truthful unavailable registration state.
+sequence correction, two-platform mutation CI, desktop Clippy, final local exact-head suites, the
+Registry pre-gate reconstruction and fresh-receiver liveness corrections, and truthful unavailable
+registration state. The final bounded rereview is clear; pushed-head Linux ambient and mutation CI
+remain required before merge readiness is claimed.
 
 Still required: integrate the specialist completions, maintain this ledger, register only approved
 commands after P5, implement/run the seven combined scenarios, update interface/UI truth and request
@@ -154,9 +162,17 @@ frontend check and frontend production build pass locally. The native suite is 3
 `six_client_recovery::six_client_native_restart_and_partition_recovery` fails identically when run
 alone on pinned baseline `bcc88941...`; its reverse-order companion passes. At correction commit
 `3fcde979...`, root and desktop strict Clippy, desktop check, cargo-deny, the two final uncertain-B3
-regressions and the full frontend test/check/build gates pass. Independent re-review has no remaining
-finding. Linux ambient and repair-mutation evidence remain exact-head CI checks and are not claimed
-from Windows.
+regressions and the full frontend test/check/build gates pass. Re-review closed those findings but
+identified the Registry pre-gate reconstruction residual. At `f7c74cb2...`, focused prepared-source,
+ordinary Registry-pass routing and repair tests plus strict affected-crate Clippy pass. The first
+rereview then found the fresh-small-source liveness loop; `164a94d7...` adds the requester-bound
+fresh-receiver and exact-absence regressions, which pass with the focused repair set and strict
+affected-crate Clippy. On the final local candidate, the complete root suite, complete native suite
+(325 library and 5 command-ACL tests), all 1,282 frontend tests, root and desktop strict
+all-target/all-feature Clippy, desktop `cargo check`, root formatting, Svelte check, production build
+and `cargo deny` pass. Final bounded rereview has no remaining finding. Startup/flow remain
+inapplicable because no setup, process, renderer or command-registration path changed. Linux ambient
+and repair-mutation evidence remain exact-head CI checks and are not claimed from Windows.
 
 ## Non-negotiable boundaries
 

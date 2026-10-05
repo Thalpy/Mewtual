@@ -22,12 +22,21 @@ and ranks the live hazards in that path.
   capture/detach/revalidate/commit job owns shared admission through result handling. A warm valid
   owed-repair regression occupies every shared slot and pins that fail-closed behavior. Core/store
   repair and its mutation harness remain present, but automatic repair is not a current product
-  capability. The correction is commit `3fcde979...`; independent re-review found no remaining
-  finding or automatic-mutation bypass. The complete root suite, root/desktop strict Clippy,
-  desktop check, frontend test/check/build and cargo-deny pass locally. The native suite repeats the
-  baseline-identical 324-pass/1-fail six-client result. Exact-head Linux ambient and repair-mutation
-  checks remain CI-owned. P5 is false, commands are unregistered, Gate 4 remains open and Gate 5
-  remains closed.
+  capability. The correction is commit `3fcde979...`; independent re-review closed the durability
+  and automatic-mutation bypasses but retained one MEDIUM residual because Registry routing still
+  reconstructed the full source before reaching the disabled gate. `f7c74cb2...` now reuses the
+  exact-current verified prepared source, treats absent/cold/stale/retargeted preparation as
+  unknown, and defers pending or unknown state without mutation. Rereview closed the reconstruction
+  defect but found that a fresh receiver with a small source did not schedule classification and
+  could defer forever. `164a94d7...` makes the detached preparation size-independent and keeps
+  exact checked absence separate from cold state. Its fresh requester-bound ordinary-pass,
+  classifier/absence, pending no-write and repair regressions pass. Final bounded re-review found no
+  remaining BLOCKER, HIGH, MEDIUM or LOW finding. The complete root suite, complete native suite
+  (325 library and 5 command-ACL tests), all 1,282 frontend tests, root and desktop strict Clippy,
+  desktop check, root formatting, frontend check/build and cargo-deny pass on the final local
+  candidate. Startup/flow remain inapplicable because no setup, process, renderer or command-
+  registration path changed. Exact-head Linux ambient and repair-mutation checks remain CI-owned.
+  P5 is false, commands are unregistered, Gate 4 remains open and Gate 5 remains closed.
 
 - **Gate 4 structural inventory seam (2026-10-04).** The authenticated structural scan now exposes
   the exact sealed-file charge for every Intents record and the provenance of a live overlay branch.

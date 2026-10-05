@@ -25,6 +25,14 @@ table with the commit that closed it.
   persistence field changed. Latest-only retention is not an
   audit chain: a no-longer-covered old conflict may require another repair. These primitives do
   not provide the missing archived Observed-tenure consumer, and native repair remains unavailable.
+  While automatic repair execution is disabled, Registry checkpoint routing classifies a pending
+  replacement only from the exact-current verified source already retained by the bounded
+  preparation boundary. Missing, cold, stale, retargeted or unreadable preparation is unknown and
+  defers the pass; it is never treated as proof that ordinary installation is safe, and the router
+  does not synchronously reconstruct the full Registry graph merely to reach the disabled gate.
+  Classification preparation is scheduled even when the local file is small; a custody-checked
+  absent source is tracked separately and rechecked by path, so first installation can proceed
+  without turning cold or stale state into a false absence claim.
 
 - **Automatic recovery is conservative and author-local.** Studio replay checks the complete
   own envelope, every retained/staged historical selection and the fresh current projection.
