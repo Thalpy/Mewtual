@@ -3,7 +3,8 @@
 use super::*;
 use crate::checkpoint_exchange::CheckpointTarget;
 use catcoms_replication::{
-    registry::registry_document, LogicalDocument, Receipt, ReceiptHeadProof, VerifiedReceipt,
+    registry::registry_document, LogicalDocument, Receipt, ReceiptHeadProof, ReceiptRepair,
+    VerifiedReceipt,
 };
 use catcoms_rt::Responder;
 use registry_ingress::Rate;
@@ -44,6 +45,8 @@ struct Pending {
     generation: Arc<()>,
     inner: Vec<u8>,
     nonce: [u8; 16],
+    // The v2 report section, bounds-checked but not parsed until admission.
+    report: Option<Vec<u8>>,
     requester: DeviceId,
     key: Vec<u8>,
     auth: RequestAuth,
@@ -146,6 +149,9 @@ pub struct ReceiptHeadSource<'a> {
     pub requester: DeviceId,
     pub nonce: [u8; 16],
     pub tenure: Option<u64>,
+    /// A faulted requester's complete frozen pair, decoded only after both request rails. It is
+    /// self-signed evidence, not authority: the trusted provider decides whether it is provable.
+    pub fault_report: Option<&'a [Receipt; 2]>,
 }
 impl fmt::Debug for ReceiptHeadSource<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -398,7 +404,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         responder: Responder,
     ) {
         let now = self.receipt_heads.expire(self.clock.monotonic_ms());
-        if data.len() > MAX_QUERY + 144
+        if data.len() > MAX_QUERY_V2 + 144
             || (self.receipt_heads.watches.is_empty() && self.epoch_service.generation.is_none())
             || self.receipt_heads.pending.len() >= MAX_PENDING
             || !self
@@ -418,7 +424,10 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         {
             return;
         }
-        let Ok((target, nonce)) = decode_scoped_query(kind, &inner, &self.group.group_id()) else {
+        // Header only: the report section is captured as bounded opaque bytes and never parsed
+        // before this requester has paid its per-requester rail below.
+        let Ok((target, nonce, report)) = decode_scoped_query(kind, &inner, &self.group.group_id())
+        else {
             return;
         };
         // At most 256 fixed-size hashes, after authentication and the global preauth rail.
@@ -466,6 +475,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             generation,
             inner,
             nonce,
+            report,
             requester,
             key,
             auth,
@@ -507,6 +517,26 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             ReceiptHeadSource<'_>,
         ) -> Result<ReceiptHeadSelection, E>,
     ) -> Result<Option<Result<ReceiptHeadServed, E>>, SyncError> {
+        self.serve_receipt_head_with_fault_repair(watch, snapshot, |g, d, rng, source| {
+            serve(g, d, rng, source).map(|selected| (selected, None))
+        })
+    }
+
+    /// The same serving transaction, additionally carrying a signed fault repair the trusted
+    /// caller found durably servable: applied locally, never merely signed. Serving it claims
+    /// availability only; the receiver verifies it under its own observed tenure before use, and
+    /// a repair never mints a proof or a journal handoff.
+    pub fn serve_receipt_head_with_fault_repair<E>(
+        &mut self,
+        watch: &RegistryHeadWatch,
+        snapshot: Option<&DurableOwnerSnapshot>,
+        serve: impl FnOnce(
+            &ServerGroup,
+            &MlsDevice,
+            &mut R,
+            ReceiptHeadSource<'_>,
+        ) -> Result<(ReceiptHeadSelection, Option<ReceiptRepair>), E>,
+    ) -> Result<Option<Result<ReceiptHeadServed, E>>, SyncError> {
         if !self.registry_head_watch_is_current(watch) {
             return Err(SyncError::NoSuchDoc);
         }
@@ -541,7 +571,15 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         let tenure = snapshot
             .filter(|p| self.head_snapshot_is_current(p))
             .map(|p| p.tenure);
-        let selected = match serve(
+        // Both rails are paid; only now are the reported receipts decoded. A malformed report
+        // is the requester's error and refuses this request without a response.
+        let fault_report = item
+            .report
+            .as_deref()
+            .map(|bytes| decode_fault_report(bytes, &document))
+            .transpose()?
+            .flatten();
+        let (selected, fault_repair) = match serve(
             &self.group,
             &self.device,
             &mut self.rng,
@@ -550,11 +588,18 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
                 requester: item.requester,
                 nonce: item.nonce,
                 tenure,
+                fault_report: fault_report.as_ref(),
             },
         ) {
             Ok(value) => value,
             Err(error) => return Ok(Some(Err(error))),
         };
+        if fault_repair
+            .as_ref()
+            .is_some_and(|r| r.document != document)
+        {
+            return Err(SyncError::Malformed);
+        }
         // Synchronous disk work can consume the request's lifetime. Never send stale success.
         if !self.head_request_current(&item) || self.clock.monotonic_ms() >= item.expires {
             return Err(SyncError::Unauthorized);
@@ -582,7 +627,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         };
         let answer = ReceiptHeadAnswer {
             receipt,
-            repair: None,
+            repair: fault_repair,
             proof,
         };
         let bytes = encode_answer(&answer, &document)?;

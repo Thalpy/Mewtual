@@ -34,12 +34,13 @@ use thiserror::Error;
 pub use checkpoint::{CheckpointOrigin, CheckpointSeed, VerifiedCheckpoint, MAX_CHECKPOINT_BYTES};
 pub use doc::{AppliedOp, EncryptedDoc, MAX_DELIVERY_TARGETS};
 pub use epoch::{
-    epoch_id, epoch_zero_id, tenure_id, Admission, AdmittedOperation, CloseRecord, ClosureStats,
-    DomainOp, EpochGate, EpochPhase, InheritedCheckpoint, IntentLedger, LocalIntent,
-    LogicalDocument, OwnerReceiptJournal, Receipt, ReceiptBook, ReceiptHeadProof, ReceiptIngest,
-    ReceiptRepair, ReceiptRepairIngest, RecoveryConflict, RecoveryConflictValue, RecoveryElement,
-    RecoveryReason, RecoverySlots, RecoverySnapshot, RecoveryTombstone, RecoveryTransition,
-    VerifiedReceipt,
+    conflicting_receipt_pair, epoch_id, epoch_zero_id, tenure_id, Admission, AdmittedOperation,
+    CloseRecord, ClosureStats, DomainOp, EpochGate, EpochPhase, InheritedCheckpoint, IntentLedger,
+    JournalRepairEffect, LocalIntent, LogicalDocument, OwnerReceiptJournal, Receipt, ReceiptBook,
+    ReceiptHeadProof, ReceiptIngest, ReceiptRepair, ReceiptRepairIngest, ReceiptRepairPlan,
+    RecoveryConflict, RecoveryConflictValue, RecoveryElement, RecoveryReason, RecoverySlots,
+    RecoverySnapshot, RecoveryTombstone, RecoveryTransition, RepairDisposition, RepairHold,
+    SourceRepairOutcome, SourceRepairState, VerifiedReceipt,
 };
 pub use op::{SealedOp, SignedOp};
 
@@ -85,6 +86,9 @@ pub enum ReplError {
     /// A receipt conflicts with already-persisted owner or peer state.
     #[error("conflicting epoch-close receipt")]
     ReceiptConflict,
+    /// The current owner's tenure has consumed every non-zero repair sequence.
+    #[error("repair sequence exhausted for this owner tenure")]
+    RepairSequenceExhausted,
     /// A recovery transition is already waiting in the one staged slot.
     #[error("recovery staging slot is occupied")]
     RecoveryPending,

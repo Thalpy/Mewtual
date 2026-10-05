@@ -158,7 +158,18 @@ impl StudioReceiver {
         // Both applies publish through the ordinary Save path rather than writing in the control
         // transaction, so both are intercepted here. Copy's `target` is the SOURCE it copied from;
         // the request it produces publishes to the destination.
-        if let StudioControlAction::Apply(apply) = request.action {
+        if let StudioControlAction::RepairFault(decision) = request.action {
+            // Only the catch-up runtime holds the durable owner snapshot issuance requires.
+            let response =
+                self.catchup
+                    .repair_fault(server, store, id, request.target, *decision)?;
+            Ok((StudioSavedTransaction::empty(), None, Some(response)))
+        } else if let StudioControlAction::RepairRegistryFault(decision) = request.action {
+            let response =
+                self.catchup
+                    .repair_registry_fault(server, store, id, request.target, *decision)?;
+            Ok((StudioSavedTransaction::empty(), None, Some(response)))
+        } else if let StudioControlAction::Apply(apply) = request.action {
             let (edit, already_saved) =
                 server.prepare_studio_recovery_apply(store, id, request.target, *apply)?;
             let (saved, updated) = self.run(server, store, id, Some(edit))?;
@@ -258,6 +269,39 @@ impl StudioReceiver {
         let mut receiver = Self::default();
         receiver.catchup.registry_cache_for_test(provider, until);
         receiver
+    }
+    /// Exercise the pre-install router with a transport-produced pass while keeping all of the
+    /// otherwise private runtime custody explicit in the test. The returned pass survives only
+    /// when the router permits the ordinary installer to continue.
+    #[cfg(test)]
+    pub(crate) fn route_registry_checkpoint_for_test<T: MeshTransport, R: CryptoRngCore>(
+        &mut self,
+        server: &mut Server<T, R>,
+        store: &mut ServerStore,
+        id: u64,
+        pass: crate::studio_exchange::discovery::ServerCheckpointFetch,
+    ) -> Result<
+        (
+            bool,
+            Option<crate::studio_exchange::discovery::ServerCheckpointFetch>,
+        ),
+        AppError,
+    > {
+        self.catchup
+            .route_registry_checkpoint_for_test(server, store, id, pass)
+    }
+    #[cfg(test)]
+    pub(crate) fn hold_checkpoint_for_test(
+        &mut self,
+        pass: crate::studio_exchange::discovery::ServerCheckpointFetch,
+    ) {
+        self.catchup.hold_checkpoint_for_test(pass);
+    }
+    #[cfg(test)]
+    pub(crate) fn take_checkpoint_for_test(
+        &mut self,
+    ) -> Option<crate::studio_exchange::discovery::ServerCheckpointFetch> {
+        self.catchup.take_checkpoint_for_test()
     }
     fn catchup_step<T: MeshTransport + 'static, R: CryptoRngCore>(
         &mut self,

@@ -195,6 +195,30 @@ fn prepare_restart_and_exact_retry_preserve_ids_newer_intents_and_sealed_content
 }
 
 #[test]
+fn inventory_keeps_physical_intent_facts_when_no_overlay_branch_exists() {
+    let root = tempfile::tempdir().unwrap();
+    let (device, group, doc) = fixture();
+    let mut store = open(root.path());
+    let mut limits = budgets(&mut store, &doc);
+    prepare(&mut store, &doc, op(&doc, 1), &device, &group, &mut limits).unwrap();
+
+    let path = store.epoch_intent_path(&scope_bytes(SERVER, &doc).unwrap());
+    let physical = fs::metadata(path).unwrap().len();
+    let observed = inventory(&mut store);
+    let entry = observed
+        .records()
+        .find(|entry| entry.kind == EpochRecordKind::Intents)
+        .expect("the ordinary ledger must be inventoried");
+    let facts = entry
+        .intent_facts()
+        .expect("every Intents row must preserve its structural facts");
+
+    assert_eq!(facts.provenance(), None);
+    assert_eq!(facts.charged_bytes(), physical);
+    assert_eq!(entry.record.footprint.content, physical);
+}
+
+#[test]
 fn conflicting_nonce_scope_author_and_oversized_operation_reject_before_io() {
     let root = tempfile::tempdir().unwrap();
     let (device, group, doc) = fixture();

@@ -193,6 +193,24 @@ impl ServerStore {
         }))
     }
 
+    /// Recheck a preparation-time absence without opening or reconstructing a newly-created
+    /// Registry source. A present non-regular entry is an integrity error, never absence.
+    pub(crate) fn registry_page_source_is_absent(
+        &self,
+        server: u64,
+        group: &[u8],
+        bucket: u8,
+    ) -> Result<bool, AppError> {
+        let logical = registry_document(group, bucket).map_err(invalid)?;
+        let scope = scope_bytes(server, &logical)?;
+        match fs::symlink_metadata(self.registry_epoch_path(&scope)) {
+            Ok(meta) if !regular_file(&meta) => Err(invalid("file is not regular")),
+            Ok(_) => Ok(false),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(true),
+            Err(error) => Err(AppError::Io(error.to_string())),
+        }
+    }
+
     /// No history replay here. Missing/replaced/corrupt records never authorize cached content.
     /// Hashing the FULL authenticated plaintext detects receipt faults even with unchanged ops.
     pub(crate) fn registry_page_source_is_current(

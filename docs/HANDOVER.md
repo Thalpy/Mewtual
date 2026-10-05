@@ -8,7 +8,80 @@ the protocol- vs honest-client-enforced boundary and the hardening backlog.
 [`MESSAGE-FLOW.md`](MESSAGE-FLOW.md) traces one message end to end (send, gossip, catch-up)
 and ranks the live hazards in that path.
 
-## Status (latest entry: 2026-09-15)
+## Status (latest entry: 2026-10-05)
+
+- **PR #33 repair-integration review response (2026-10-05).** Whole-candidate review found two
+  HIGH issues outside the structural inventory seam. First, a repair-only head response could
+  return a visible B2 replacement without repeating the source and owner-record durability
+  barriers. Studio and Registry service now flush the exact authenticated source and re-save the
+  contextual owner record before carrying a repair; injected uncertain-B2 and uncertain-B3,
+  source-sync and journal-save regressions cover both families. Second, offered-repair application,
+  owner resume and repaired-seed installation performed substantial synchronous work outside a
+  shared preparation permit.
+  Those automatic paths now refuse or defer without source mutation until the designed
+  capture/detach/revalidate/commit job owns shared admission through result handling. A warm valid
+  owed-repair regression occupies every shared slot and pins that fail-closed behavior. Core/store
+  repair and its mutation harness remain present, but automatic repair is not a current product
+  capability. The correction is commit `3fcde979...`; independent re-review closed the durability
+  and automatic-mutation bypasses but retained one MEDIUM residual because Registry routing still
+  reconstructed the full source before reaching the disabled gate. `f7c74cb2...` now reuses the
+  exact-current verified prepared source, treats absent/cold/stale/retargeted preparation as
+  unknown, and defers pending or unknown state without mutation. Rereview closed the reconstruction
+  defect but found that a fresh receiver with a small source did not schedule classification and
+  could defer forever. `164a94d7...` makes the detached preparation size-independent and keeps
+  exact checked absence separate from cold state. Its fresh requester-bound ordinary-pass,
+  classifier/absence, pending no-write and repair regressions pass. Final bounded re-review found no
+  remaining BLOCKER, HIGH, MEDIUM or LOW finding. The complete root suite, complete native suite
+  (325 library and 5 command-ACL tests), all 1,282 frontend tests, root and desktop strict Clippy,
+  desktop check, root formatting, frontend check/build and cargo-deny pass on the final local
+  candidate. Startup/flow remain inapplicable because no setup, process, renderer or command-
+  registration path changed. Exact-head Linux ambient and repair-mutation checks remain CI-owned.
+  P5 is false, commands are unregistered, Gate 4 remains open and Gate 5 remains closed.
+
+- **Gate 4 structural inventory seam (2026-10-04).** The authenticated structural scan now exposes
+  the exact sealed-file charge for every Intents record and the provenance of a live overlay branch.
+  Ledger-only and terminal disposed records keep their byte charge but report no live provenance,
+  so historic diagnostic metadata cannot strand a lifecycle capacity slot. The seam grants no
+  mutation, source, tenure, replay or signing authority and changes no wire/persistence format.
+  Focused regressions cover a live Closing branch, a ledger without an overlay and disposed terminal
+  metadata. Independent review found and prompted the terminal-state and ledger controls; re-review
+  has no remaining finding. This completes only the first Agent 1 -> Agent 2 handoff. Generalized
+  Unconfirmed Flow S and its app-side custody/rail/restart consumers remain missing, P5 remains
+  false, native Save and repair remain unregistered, Gate 4 remains open and Gate 5 remains closed.
+
+- **Gate 4 repair CI integration checkpoint (2026-10-04).** The store mutation harness now has a
+  dedicated, serial Linux/Windows workflow rather than extending the 30-minute core job. Each
+  platform uses Rust 1.89.0, Python 3.11, the Rust cache, `RUSTFLAGS=-D warnings`, a 90-minute
+  timeout and always-uploaded mutant/restored-control logs. The Linux desktop job also runs strict
+  all-target/all-feature Clippy for the separate Tauri workspace; its root `clippy.toml` therefore
+  remains an enforced construction boundary. Existing harness and anchor corrections at
+  `3e0dac09`, `db385014`, `f12b6aae` and `ef28d45b` are already in this candidate's ancestry and
+  were not copied or rewritten. Exact candidate `2b6f716ef05fdf99bdc04da531eb0c0194682e65`
+  passes the complete Linux and Windows CI matrix on PR #32, including both store-mutation jobs,
+  strict desktop Clippy and the Linux `check-no-ambient.sh` step
+  ([main CI](https://github.com/Thalpy/Mewtual/actions/runs/37175644295),
+  [store mutations](https://github.com/Thalpy/Mewtual/actions/runs/37175644375)). The earlier
+  `6a2f8979` run and local WSL launch failure are superseded evidence, not the current result.
+
+  Registration and ownership are unchanged: P5 remains false, Save and native repair commands
+  remain unregistered, and the app-side archived Observed-tenure consumer/historical repair is
+  still missing. The structural provenance/charged-byte inventory seam is now complete on the
+  completion line. Remaining Agent 1 work is: parameterize Flow S over the accepted overlay-basis
+  variants, map structured eligibility/manual reasons, migrate the six C-3 runtime scan owners to the
+  reviewed cursor, complete Flow R, and obtain the outstanding core-signing review. This ancestry
+  does not implement C-3 adoption or any of those specialist requirements. Gate 4 and Gate 5 stay
+  closed.
+
+- **Gate 4 repair-sequence integration correction (2026-10-04).** Repair high-water and owner
+  journal comparisons now use the issuer-tenure start already covered by the v2 signature and
+  independently checked against current owner authority. Existing wire and persistence codecs are
+  unchanged. Same-tenure gaps remain valid; same-tenure replay remains stale; unfinished B1/B2
+  provenance still blocks across turnover; a real successor tenure starts at one. Allocation uses
+  checked addition and reports `RepairSequenceExhausted` before signing or B1 mutation rather than
+  panicking or wrapping at `u64::MAX`. Focused core, owner-journal, Studio and Registry regressions
+  cover MAX persistence, turnover, authority, gaps and typed exhaustion. Native Save/repair remains
+  unregistered with P5 false, and the archived Observed-tenure consumer remains missing. This is an
+  incremental candidate correction, not Gate 4 or Gate 5 acceptance.
 
 - **Four remaining-work handoffs prepared (2026-09-15).** The user requests commit/push and
   implementation/review prompts for four agents. [Implementation handoffs](GATE4-AGENT-HANDOFFS.md)
@@ -555,11 +628,14 @@ and ranks the live hazards in that path.
   [CI](https://github.com/Thalpy/Mewtual/actions/runs/34844201267) have started for `b1b0ec9`;
   their result is pending at this evidence update. Local results above are not GitHub results.
 
-  The repository-wide `scripts/check-no-ambient.sh` fails on six verified pre-existing findings:
+  At this historical `b1b0ec9` checkpoint, `scripts/check-no-ambient.sh` reported six findings:
   `apps/desktop/src-tauri/src/media_decode.rs:333,426,444,504`,
   `crates/catcoms-app/src/studio_exchange/tests/scheduling.rs:150`, and
-  `crates/catcoms-app/tests/support/studio_preview.rs:329`. Each reported call is present in the
-  baseline HEAD, outside this change. No full-repository green or full Gate 4 acceptance is claimed.
+  `crates/catcoms-app/tests/support/studio_preview.rs:329`. That result describes this old entry,
+  not the current candidate. PR #32's later Linux root job failed the preceding test step and never
+  ran the ambient gate; the local WSL launcher failure is likewise not product evidence. A current
+  pass may be claimed only from the exact candidate's Linux CI job. No full-repository green or
+  full Gate 4 acceptance is claimed here.
 
   No frontend/native overlay command, automatic overlay replay/disposition, provisional-preview
   write or new historical-tenure authority is enabled. The UI keeps Closing/Fault/awaiting-tenure
@@ -4012,8 +4088,9 @@ the reciprocal control protocol is not a dual-key device↔transport ownership p
   separate store coverage.) Linux-only store tests abort a subprocess
   after the staged record is synced and immediately after rename; readers observe either the
   complete previous or complete replacement record. The persistence primitive uses unique
-  create-new siblings, rejects staging symlinks, syncs the staged file and, on Unix, its parent
-  directory; a post-rename sync failure is explicitly classified as committed-but-not-durable.
+  create-new siblings, rejects staging symlinks, syncs the staged file and, on Unix and Windows,
+  its parent directory; a post-rename sync failure is explicitly classified as
+  committed-but-not-durable.
   The root `vault.bin` now uses the same durable staging shape plus an OS-backed interprocess lock;
   it fails lock contention promptly as `VaultBusy`, and real child-process tests prove concurrent
   first creation cannot return mismatched DEKs or hang and conflicting rewraps cannot both succeed.

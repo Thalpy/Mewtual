@@ -96,6 +96,17 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         peer: PeerId,
         target: CheckpointTarget,
     ) -> Result<PendingCheckpointHead<T>, SyncError> {
+        self.prepare_checkpoint_head_with_fault_report(peer, target, None)
+    }
+
+    /// The same request, carrying this faulted requester's complete frozen pair (W-1). It asserts
+    /// nothing about authority and chooses nothing; the provider decides what it can attest.
+    pub fn prepare_checkpoint_head_with_fault_report(
+        &mut self,
+        peer: PeerId,
+        target: CheckpointTarget,
+        fault_report: Option<&[Receipt; 2]>,
+    ) -> Result<PendingCheckpointHead<T>, SyncError> {
         if !self.head_member(&self.device.public_key_bytes()) {
             return Err(SyncError::Unauthorized);
         }
@@ -104,7 +115,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             .ok_or(SyncError::Unauthorized)?;
         let mut nonce = [0; 16];
         self.rng.fill_bytes(&mut nonce);
-        let inner = encode_scoped_query(target, &self.group.group_id(), nonce)?;
+        let inner = encode_scoped_query(target, &self.group.group_id(), nonce, fault_report)?;
         let (request, auth) = self.build_authed_request(target.head_kind(), &inner)?;
         let slot = self
             .receipt_heads
@@ -213,6 +224,53 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         };
         // Fresh proof is a one-shot selection, never a lease or a pruning grant.
         Ok(Some((outcome, selection)))
+    }
+    /// A seed-fetch selection minted from a locally verified fault repair rather than a fresh
+    /// owner proof (design 5.6). Fails closed unless the repair AND its selected receipt verify
+    /// under the current owner and this device's authoring tenure, so a cross-tenure repair can
+    /// never drive an installation. One-shot like a proof selection; never a lease.
+    pub(crate) fn repaired_head_selection(
+        &mut self,
+        target: CheckpointTarget,
+        fault_repair: &catcoms_replication::ReceiptRepair,
+        selected: &Receipt,
+    ) -> Result<HeadSelection, SyncError> {
+        // Authoring: driving an installation from a repair is authoring, so Imported holds.
+        let tenure = self
+            .authoring_owner_tenure_start()
+            .ok_or(SyncError::Unauthorized)?;
+        let owner = self
+            .group
+            .designated_committer()
+            .ok_or(SyncError::Unauthorized)?;
+        let document = target.document(&self.group.group_id())?;
+        if fault_repair.document != document
+            || selected.document != document
+            || selected.hash() != fault_repair.selected_receipt_hash
+            || !self.head_member(&self.device.public_key_bytes())
+        {
+            return Err(SyncError::Unauthorized);
+        }
+        fault_repair.verify_current_owner(&self.group, tenure)?;
+        let verified = selected.verify_current_owner(&self.group, tenure)?;
+        let generation = Arc::new(());
+        self.receipt_heads
+            .selections
+            .retain(|_, g| g.strong_count() != 0);
+        self.receipt_heads
+            .selections
+            .insert(target, Arc::downgrade(&generation));
+        Ok(HeadSelection {
+            instance: self.registry_instance(),
+            epoch: self.group.epoch(),
+            owner,
+            requester: self.device.device_id(),
+            generation,
+            target,
+            receipt: selected.clone(),
+            verified,
+            tenure,
+        })
     }
     /// Does not mint or supersede an owner selection, even if a proof was supplied. Owner-proof
     /// and repair answers need the normal authoritative path, with a fresh discovery request.

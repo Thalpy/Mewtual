@@ -1,6 +1,8 @@
 use super::*;
 use crate::studio::StudioOwnerTenure;
-use catcoms_replication::studio::{StudioClosingOverlayBasis, StudioLocalDraft};
+use catcoms_replication::studio::{
+    StudioClosingOverlayBasis, StudioLocalDraft, StudioOverlayProvenance,
+};
 use catcoms_replication::CloseRecord;
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -101,6 +103,43 @@ fn save(
             )
             .unwrap(),
     )
+}
+
+/// Agent 1 -> Agent 2 inventory seam. The lifecycle rails must count only authenticated
+/// Unconfirmed branches and charge their real sealed bytes. Pin the generic extraction here on a
+/// real Closing branch; Agent 2's acceptance tests provide the corresponding Unconfirmed control
+/// once that app-side path exists.
+#[test]
+fn studio_inventory_exposes_intent_provenance_with_physical_charge() {
+    let root = tempfile::tempdir().unwrap();
+    let mut store = open(root.path());
+    let f = Fixture::new(false);
+    let (close, basis) = closing(&f, &mut store);
+    save(&f, &mut store, &close, basis.fingerprint(), f.title(), 300);
+
+    let path = store
+        .epoch_intent_path(&crate::store::epoch_intents::scope_bytes(SERVER, &f.logical).unwrap());
+    let physical = fs::metadata(path).unwrap().len();
+    let observed = inventory(&mut store);
+    let intent = observed
+        .records()
+        .find(|entry| {
+            entry.kind == EpochRecordKind::Intents
+                && entry.server == SERVER
+                && entry.document == f.logical
+        })
+        .expect("the accepted branch must have an inventoried Intents record");
+    let facts = intent
+        .intent_facts()
+        .expect("an Intents row must carry its structural facts");
+
+    assert_eq!(facts.provenance(), Some(StudioOverlayProvenance::Closing));
+    assert_eq!(facts.charged_bytes(), physical);
+    assert_eq!(intent.record.footprint.content, physical);
+    assert!(observed
+        .records()
+        .filter(|entry| entry.kind != EpochRecordKind::Intents)
+        .all(|entry| entry.intent_facts().is_none()));
 }
 
 /// The branch and S1b decision for the first Save of a document that has no overlay record yet,

@@ -241,10 +241,12 @@ impl ServerStore {
                 //
                 // That argument is wrong in two ways, and a re-review was right about both.
                 //
-                // 1. **`sync_directory` is `Ok(())` on `not(unix)`** (see `store.rs`). On Windows -
-                //    the platform this scope is developed on - there is no parent barrier at all, so
-                //    there is no shared barrier to rely on. `fs::rename` does not supply one either:
-                //    the pinned toolchain's `MoveFileExW` call does not request write-through.
+                // 1. **`sync_directory` used to be `Ok(())` on `not(unix)`** (see `store.rs`). On
+                //    Windows - the platform this scope is developed on - there was no parent barrier
+                //    at all, so there was no shared barrier to rely on. `fs::rename` did not supply
+                //    one either: the pinned toolchain's `MoveFileExW` call does not request
+                //    write-through. The shared primitive now opens and flushes a Windows directory
+                //    handle; unsupported non-Unix/non-Windows targets still have no such barrier.
                 // 2. It said "either the shared fsync succeeds and both are durable, or it fails and
                 //    neither is". The second half is not a property of `fsync`. A failed flush means
                 //    completion is *not guaranteed*, not that nothing reached stable storage - and
@@ -252,10 +254,10 @@ impl ServerStore {
                 //    not rolled back**.
                 //
                 // So what holds today is narrower than the preservation guarantee this scope claims:
-                // on Unix, a *successfully completed* replacement does make both namespace changes
-                // durable, because the archive's contents were synced before its rename and the final
-                // directory flush covers both entries. Interrupted executions, and every execution on
-                // a platform where the barrier is a no-op, are not covered.
+                // on Unix and Windows, a *successfully completed* replacement does make both namespace
+                // changes durable, because the archive's contents were synced before its rename and
+                // the final directory flush covers both entries. Interrupted executions, and every
+                // execution on an unsupported platform where the barrier is a no-op, are not covered.
                 //
                 // A second review then separated two obligations that this comment had run together:
                 // a real barrier, and the ORDER in which it runs. Fixing `sync_directory` alone would
@@ -264,16 +266,16 @@ impl ServerStore {
                 // and it now does: the explicit sync-only repair below runs after matching and before
                 // anything is removed, and refuses if it cannot complete.
                 //
-                // **What remains open is the platform barrier itself.** `sync_directory` is shared by
-                // every record family rather than owned here, and on `not(unix)` it is still a no-op,
-                // so the repair below establishes the archive's file contents but not its directory
-                // entry there. The decision - implement a real Windows barrier, refuse a preserving
-                // disposal before removal where none exists, or narrow the stated guarantee - belongs
-                // to whoever owns persistence.
+                // **The platform barrier is shared rather than owned here.** `sync_directory` now has
+                // real Unix and Windows implementations, so the repair below establishes both the
+                // archive's file contents and its directory entry on supported desktop targets.
+                // Unsupported targets retain the narrower file-only guarantee and must not infer this
+                // ordering property from a successful no-op.
                 //
                 // The assertion below is kept for what it does prove - that the two families are
-                // co-located, so a later move cannot silently invalidate the Unix half of the
-                // argument. It proves nothing about durability, and must not be read as doing so.
+                // co-located, so a later move cannot silently invalidate the supported-platform
+                // half of the argument. It proves nothing about durability, and must not be read as
+                // doing so.
                 debug_assert_eq!(
                     self.epoch_draft_archive_path(&super::super::epoch_draft_archive::scope_bytes(
                         server, document
@@ -332,10 +334,10 @@ impl ServerStore {
                 // the caller must reconcile before its next write. That is the correct cost of an
                 // uncertain flush, and it is paid without anything having been destroyed.
                 //
-                // **Limit, stated rather than hidden:** on a platform where the parent-directory
-                // barrier is a no-op (`sync_directory` on `not(unix)`), this establishes the file
-                // contents but not the directory entry, so it narrows the gap without closing it
-                // there. That half is a shared persistence decision and is recorded as such.
+                // **Limit, stated rather than hidden:** on an unsupported non-Unix/non-Windows
+                // platform, where the parent-directory barrier remains a no-op, this establishes
+                // the file contents but not the directory entry. That half is a shared persistence
+                // decision and is recorded as such.
                 self.write_studio_draft_archive_with_io(
                     server,
                     document,

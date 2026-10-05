@@ -6,6 +6,7 @@ use rand_chacha::ChaCha20Rng;
 use rand_core::SeedableRng;
 
 type Node = ChannelSync<MemNetwork, ChaCha20Rng>;
+mod repaired;
 mod studio;
 fn rng() -> ChaCha20Rng {
     ChaCha20Rng::seed_from_u64(819)

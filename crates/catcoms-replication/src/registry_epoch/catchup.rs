@@ -76,6 +76,18 @@ impl RegistryPageSource {
     pub fn receipt_head(&self) -> Result<Option<&Receipt>, ReplError> {
         self.0.receipt_head()
     }
+    /// The signed repair this verified source carries as its resolved disposition. Historical:
+    /// a provider must still verify it under current owner authority before serving it.
+    pub fn fault_repair(&self) -> Option<crate::ReceiptRepair> {
+        self.0.repair_state().map(|state| state.repair)
+    }
+    /// Whether this verified source has committed a repair but still owes installation of the
+    /// selected checkpoint. This is a local scheduling fact only: callers must keep the source
+    /// bound to the exact current vault bytes and must not treat `false` as authority from an
+    /// absent or stale preparation.
+    pub fn repair_install_pending(&self) -> bool {
+        self.0.repair_install_pending()
+    }
     pub fn checkpoint_bytes_by_hash(
         &mut self,
         id: u128,

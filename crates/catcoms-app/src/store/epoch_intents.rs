@@ -72,6 +72,16 @@ impl EpochIntentState {
     ) -> Option<&catcoms_replication::studio::StudioOverlayState> {
         self.overlay.as_ref()
     }
+    /// Provenance of the live branch only. Terminal transferred/disposed metadata deliberately
+    /// retains its historic provenance, but must not be counted as a retained branch by lifecycle
+    /// capacity rails.
+    pub(crate) fn live_overlay_provenance(
+        &self,
+    ) -> Option<catcoms_replication::studio::StudioOverlayProvenance> {
+        let metadata = self.overlay.as_ref()?;
+        metadata.overlay()?;
+        Some(metadata.provenance())
+    }
     /// The live branch's identity and content digest, or `None` when no branch is live.
     ///
     /// Read as a pair rather than separately because they are only meaningful together: `dispose`

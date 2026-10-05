@@ -13,7 +13,7 @@ whole-scope review of `510d0b54` (verdict: CHANGES REQUIRED, Agent 2 not complet
 | Goal | State | Evidence, and what is still missing | Owner |
 |---|---|---|---|
 | 1. Bounded inspection, export, copy, disposition | Implemented, not natively exposed | Two-visit inspect/export/archive/copy, D1-D6 disposal, release. Export, archive and copy preview now keep the job's permit and the actor's delivery fence through native conversion (`3168de6e`); an archive whose result cannot be delivered reports `outcome=uncertain`. The nine commands are unregistered (`510d0b54`). | Agent 2; registration Agent 4 |
-| 2. Lossless work and PIX across refusal and restart | Implemented except one platform barrier | Archive codec, binding, release, collector, evidence-before-removal ordering (`6bd76c13`). **Open:** `sync_directory` is a no-op on `not(unix)`, so on Windows a preserving disposal cannot establish the archive's directory entry. | Persistence owner via Agent 4; Agent 2 shows disposal honours the result |
+| 2. Lossless work and PIX across refusal and restart | Implemented on supported desktop platforms | Archive codec, binding, release, collector, evidence-before-removal ordering (`6bd76c13`). Agent 4's `5f141994` gives the shared `ServerStore` directory barrier a real Windows handle and flush; exact-head Windows tests and CI pass. Unsupported non-Unix/non-Windows targets retain only the narrower file-content guarantee. | Persistence owner via Agent 4; Agent 2 shows disposal honours the result |
 | 3. Recoverable stale, rewound and non-pristine branches, with actionable states (P2) | Classification implemented; first review fixed | `StudioOverlayEligibility` / `StudioOverlayManualReason`. Production classifies from each source record's HEADER (`overlay_successor_hold_in_vault`, `vault_holds_work`) and never restores, pinned by a zero-restore assertion; the structural hold, the full hold and `check_overlay_successor` agree on every fixture state. The store adds provenance, author, missing/unreadable source, an Index entry's missing Flipnote (`objectMissing`, agreeing with the real handoff in both directions), tenure and the live receipt owner. Lifecycle and inspection carry `eligibility` and `manualReason`. Agent 1's `StudioOverlayHold` was designed but never built; its runtime still refuses with strings. | Agent 2; Agent 1 maps its runtime refusals |
 | 4. Durable local work on an awaiting-tenure preview | **Not implemented** (first slice built) | Design section 8 accepted. Built (replication and sync): 8.1 parts 1-2, part 3 as re-scoped by the review of `47a73463` (the mint binds by receipt equality; every reconstruction re-parses), and the reviewed mint design.
 <br>- The exact seed bytes are retained and exposed only inside the scoped callback. This costs up to 2 MiB more per ready preview, and the true per-slot worst case is unmeasured.
@@ -21,7 +21,7 @@ whole-scope review of `510d0b54` (verdict: CHANGES REQUIRED, Agent 2 not complet
 <br>- The fingerprint is domain-separated by provenance; the kind is not persisted, so a reload restores it from the record.
 <br>- `new_admitted` refuses a provenance that disagrees with its basis.
 <br>- `clippy.toml` and a source-scan test pin both hidden constructors.
-<br>Missing, all app-side: "no installed source" under custody, the S3 re-entry, the 8.3 rails, the 8.7 save path, and the receiver handoff selector's skip of non-Closing branches (review M1, required before any app mint). Both wait on Agent 1's structural decode exposing provenance and charged bytes, and on its provenance-parameterized Flow S. Also missing: 8.6 reconciliation, restart reconstruction through the store, and native results. Its absence is a Gate 4 gap, not a deferral. | Agent 2; Agent 1 for the two hand-offs |
+<br>Missing, all app-side: "no installed source" under custody, the S3 re-entry, the 8.3 rails, the 8.7 save path, and the receiver handoff selector's skip of non-Closing branches (review M1, required before any app mint). The structural inventory now exposes live provenance and exact charged bytes; these consumers still wait on Agent 1's provenance-parameterized Flow S. Also missing: 8.6 reconciliation, restart reconstruction through the store, and native results. Its absence is a Gate 4 gap, not a deferral. | Agent 2; Agent 1 for Flow S |
 | 5. Repeated owner tenure, rejoin, newcomers, legitimate progress | Implemented at the sync and receipt layer; not yet through the app actor | Leaf-aware tenure, v1 import, app seam, CORE-005 archived witness (`066a6533`), M-1 on the receive path with its own error (`0335262e`). **The product never rejoins with the same identity**: join and found both mint a fresh `MlsDevice`, so a returning owner is a new `DeviceId`. `returning::a_removed_owner_returns_as_a_new_device_with_a_new_tenure_everywhere` drives that form with real MLS and real receipts: A' lands in the vacated leaf, A' and every witness agree on the new start across restart, A' can author, its receipt verifies on witnesses and a newcomer, and A's first-tenure receipt and A's old key claiming the new tenure are refused everywhere. **Missing:** the same flow through the actor and a real Studio rotation. | Agent 2 |
 | 6. Truthful native results and events | Partial | Results and settlement notices exist; no command beyond `studio_overlay_read` is registered; UI-hooks rows not applied. | Agent 2 contract; Agent 4 registration and rows |
 
@@ -965,7 +965,7 @@ destination fixture in the desktop tests or a store-backed copy fixture in the a
 
 That is now the single largest known hole in this scope's evidence, and it guards a durable write.
 
-### Preserving-disposal crash ordering: ordering CLOSED, platform barrier OPEN
+### Preserving-disposal crash ordering: CLOSED on Unix and Windows
 
 **Update.** A second re-review separated a real barrier from the order it runs in; fixing the
 Windows primitive alone would not have proved the ordering. The ordering is now this transaction's:
@@ -974,8 +974,10 @@ writer, whose exact-retry branch performs a guarded sync-only repair. A failure 
 removed. Anchored by two hook-observed tests and a tenth harness entry; skipping the barrier makes the
 disposal succeed and record `Preserved` with no durable archive, which is the defect demonstrated.
 
-Still open: `sync_directory` is `Ok(())` on `not(unix)`, so on Windows the repair establishes file
-contents and not the directory entry. Shared primitive; decision above this scope.
+**Agent 4 update (2026-10-04).** Commit `5f141994` replaced the Windows no-op with a real directory
+handle and flush, and exact-head Windows tests and CI pass. Unsupported non-Unix/non-Windows targets
+retain the narrower file-content guarantee. The historical analysis below explains the defect that
+was closed; it is not current platform status.
 
 *Original entry follows.*
 

@@ -18,9 +18,21 @@ table with the commit that closed it.
   revalidates them on restart, and screens its named loser across all three receipt paths.
   Different inherited baselines identify a losing branch; identical baselines do not reveal
   descendant ancestry. Third baselines still fault. New progress survives exact retries, and a
-  newer fault cannot be cleared by replaying the old repair. Latest-only retention is not an
+  newer fault cannot be cleared by replaying the old repair. The monotonic repair sequence is
+  scoped to that authenticated issuer tenure, so a current owner can exhaust only its own tenure;
+  checked allocation refuses at MAX before signing or persistence, while a verified successor
+  starts at one. Unfinished source/journal provenance remains a cross-tenure barrier. No wire or
+  persistence field changed. Latest-only retention is not an
   audit chain: a no-longer-covered old conflict may require another repair. These primitives do
-  not change gates, persist recovery or rebase the owner's journal; runtime repair is unfinished.
+  not provide the missing archived Observed-tenure consumer, and native repair remains unavailable.
+  While automatic repair execution is disabled, Registry checkpoint routing classifies a pending
+  replacement only from the exact-current verified source already retained by the bounded
+  preparation boundary. Missing, cold, stale, retargeted or unreadable preparation is unknown and
+  defers the pass; it is never treated as proof that ordinary installation is safe, and the router
+  does not synchronously reconstruct the full Registry graph merely to reach the disabled gate.
+  Classification preparation is scheduled even when the local file is small; a custody-checked
+  absent source is tracked separately and rechecked by path, so first installation can proceed
+  without turning cold or stale state into a false absence claim.
 
 - **Automatic recovery is conservative and author-local.** Studio replay checks the complete
   own envelope, every retained/staged historical selection and the fresh current projection.
@@ -264,8 +276,9 @@ table with the commit that closed it.
   durable source history/intents until that success. Cleanup does not parse/promote those bytes,
   delete logical staged snapshots, or authorize pruning. Errors and caught panics can leave
   partial removals, but never a completed pass or accounting credit. Retry runs the directory
-  flush even when no siblings remain; this retains the existing Unix-only directory-durability
-  guarantee, not a stronger Windows claim. A new inventory is mandatory after traversal because
+  flush even when no siblings remain; this retains the existing Unix/Windows directory-durability
+  guarantee, not a universal filesystem or hardware guarantee. A new inventory is mandatory after
+  traversal because
   deletion can affect directory iteration. Observed deleted lengths are not promised reclaimed
   disk space. This API remains unwired to startup and network input.
 - **Owner receipt persistence is a publication prerequisite, not proof of current authority.**
@@ -283,8 +296,9 @@ table with the commit that closed it.
   with both the same namespace and digest, and owner bodies keep their own small pre-read cap.
   Cleanup can remove unpublished attempts only; saved pending/high-water decisions are never targets.
   The explicit registry owner driver and checked head-response preparation invoke it, but no
-  automatic actor/startup scheduler owns those paths yet. Durability remains file-sync/atomic replacement plus Unix parent sync, not protection from
-  device failure or restoration of an older vault backup.
+  automatic actor/startup scheduler owns those paths yet. Durability remains file-sync/atomic
+  replacement plus Unix/Windows parent sync, not protection from device failure or restoration of
+  an older vault backup.
 - **Owner issuance resumes exact heads, not a new decision from changed content.** The explicit
   registry driver requires the current physical mount/server and a durable runtime/MLS/full-owner/
   tenure snapshot permit, not merely an observed tenure number. It validates and flushes the source
@@ -326,8 +340,8 @@ table with the commit that closed it.
   Exact retries sync an authenticated unchanged final and parent without a replacement copy,
   so a committed write at the cap can still pass its durability barrier. Cleanup removes only
   unpublished siblings, not saved intents, and still needs a fresh scan before credit is released.
-  Parent sync remains Unix-only; hostile local path replacement, device failure and backup
-  rollback remain outside these guarantees. Storage admission across other record types,
+  Parent sync is implemented on Unix and Windows; hostile local path replacement, device failure
+  and backup rollback remain outside these guarantees. Storage admission across other record types,
   live settlement scheduling, replay and network/editor integration are still unwired. The checked
   registry store transaction below now performs receipt-covered retirement before source replacement.
 - **Registry restart consistency is not settlement durability.** The `RegistryEpoch` coordinator
@@ -401,7 +415,7 @@ table with the commit that closed it.
   that fault pair; old readers explicitly reject it, and ordinary v1 records stay compatible.
   Conservative per-record content reserves and physical intent replacement headroom can still
   refuse at full quota. No live actor/discovery, repair or automatic replay is wired. The existing
-  file-sync/Unix-parent-sync durability and local-path threat boundary apply.
+  file-sync plus Unix/Windows-parent-sync durability and local-path threat boundary apply.
 - **Newcomer adoption preserves the whole source before replacement.** The registry core can seal a
   whole source against a distant or new-tenure checkpoint, retaining every signed operation.
   Ordinary restart remains v1; explicit adoption v2 contains an adoption-only bounded receipt
@@ -526,9 +540,13 @@ table with the commit that closed it.
   complete the exact owner publication journal, without proving driver admission or peer delivery.
   Eight fixed-lifetime queued requests,
   full-identity rates, four driver-owned outbound slots and source service rails bound resources;
-  rate debt is process-local and Sybils still reach aggregate caps. Signed repair bytes are not
-  served yet. Registry seed fetching and explicit recovery-first installation are implemented;
-  head hints alone still authorize neither replacement nor an editing lease.
+  rate debt is process-local and Sybils still reach aggregate caps. Authenticated current-tenure
+  repair bytes may be carried only after the exact replacement source is synchronized and the
+  contextual owner record is re-saved durably. Automatic receiving-side repair application,
+  continuation and repaired-seed installation remain disabled until they can retain shared
+  preparation admission across detached capture, revalidation and commit. Registry seed fetching
+  and explicit recovery-first installation are implemented; head hints alone still authorize
+  neither replacement nor an editing lease.
 - **Registry page cursors are continuation claims, not remote possession or currency proofs.**
   Cooperative page serving binds an ephemeral HMAC-SHA256 key to the exact provider/requester,
   full group/logical/concrete scope, initial heads/seed, fixed accepted-log prefix and monotonic
@@ -1123,7 +1141,7 @@ table with the commit that closed it.
 | Forward secrecy on removal | A removal is a real MLS Remove commit → epoch advance + routing-secret rotation; the removed member is genuinely cut off | `catcoms-sync` removal path |
 | Blob integrity | Content-addressed; served bytes are re-hashed against the requested CID before storing (no cache poisoning) | `catcoms-sync::request_blob` |
 | File-at-rest encryption | Per-group file-wrap key; sealed at rest under the vault key | `catcoms-storage` (Phase 9h) |
-| UI continuity and backup confidentiality | Drafts/read positions are vault-sealed and bounded; sealed records use destination-specific create-new siblings, file sync, rename and parent-directory sync on Unix, so concurrent record types cannot alias, pre-planted staging symlinks are rejected, and abrupt termination exposes a complete predecessor or replacement rather than a partial record. A failed post-rename directory flush is disclosed as committed-but-not-durable. Offline backup copies only the already-sealed vault tree without following links. Export creates another offline guessing target and exposes filesystem metadata; it does not weaken record encryption. Catastrophic filesystem/hardware failure remains outside the guarantee. | `catcoms-app::ServerStore`; desktop `create_backup` |
+| UI continuity and backup confidentiality | Drafts/read positions are vault-sealed and bounded; sealed records use destination-specific create-new siblings, file sync, rename and parent-directory sync on Unix and Windows, so concurrent record types cannot alias, pre-planted staging symlinks are rejected, and abrupt termination exposes a complete predecessor or replacement rather than a partial record. A failed post-rename directory flush is disclosed as committed-but-not-durable. Offline backup copies only the already-sealed vault tree without following links. Export creates another offline guessing target and exposes filesystem metadata; it does not weaken record encryption. Catastrophic filesystem/hardware failure and unsupported targets remain outside the directory-durability guarantee. | `catcoms-app::ServerStore`; desktop `create_backup` |
 | Vault creation and secret rotation | A non-blocking OS-backed sibling lock serializes first creation and rewrap across processes; contention returns `VaultBusy` for retry instead of hanging behind a suspended process. The current wrapper is authenticated; the same root DEK is published through a unique create-new, file-synced staging sibling with rename and Unix directory sync, so concurrent app instances cannot return mismatched first-run DEKs or both report a conflicting rewrap. New/replacement secrets are capped at 4096 bytes. A v1 wrapper with a legacy 4097..65536-byte secret receives one bounded compatibility open and is atomically migrated to fixed-input v2; larger inputs are rejected. This intentionally loses downgrade compatibility with v1-only builds, not ciphertext confidentiality. Wrapper reads accept exactly 89 bytes and never allocate from a hostile file length. | `catcoms-storage::{open_or_create_vault,change_vault_passphrase}`; desktop `change_vault_secret` |
 | Vault single-writer lifetime | `ServerStore::open` acquires a separate non-blocking OS session lock before unsealing and retains it until drop/process exit. A second desktop cannot start duplicate MLS, registry, invite-ledger or transport writers from the same snapshot; it receives `VaultBusy`. Normal exit and abort release the OS lock. Explicit UI lock keeps the native mount but closes IPC; re-unlock performs verify-only authentication against `vault.bin`, and a wrong secret cannot reopen the session. This is same-host installation exclusion, not distributed consensus or protection from malware with the user's OS authority. | `catcoms-storage::{acquire_vault_session,verify_vault_passphrase}`; `catcoms-app::ServerStore`; desktop `unlock` |
 | Desktop explicit-lock IPC boundary | Every non-bootstrap Tauri command requires both a mounted vault and an open UI session. Lock atomically saves bounded continuity state then closes the command boundary; actor events are dropped, late frontend/native cache publications are exact-generation gated, and plaintext export publication holds the exact-generation commit guard while actors continue native background network/persistence work. Native window-close attempts serialize, and a duplicate caller cannot overtake an unacknowledged continuity failure to destroy the window. | desktop `require_unlocked_session`; `require_ui_session_generation`; `lock_session`; `close_vault_window`; `forward_events` |

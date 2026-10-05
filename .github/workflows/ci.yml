@@ -52,6 +52,8 @@ jobs:
           printf 'must-not-enter-build-context\n' > .claude/review-secret
           docker build --target context-audit -f docker/linux-test.Dockerfile .
       - uses: dtolnay/rust-toolchain@1.89.0
+        with:
+          components: clippy
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: apps/desktop/src-tauri -> target
@@ -67,3 +69,7 @@ jobs:
       - name: Run Linux desktop checks
         shell: bash
         run: bash scripts/linux-container-test.sh desktop --install
+      - name: Strict desktop Clippy
+        run: >-
+          cargo clippy --locked --manifest-path apps/desktop/src-tauri/Cargo.toml
+          --all-targets --all-features -- -D warnings

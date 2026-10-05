@@ -6,6 +6,103 @@ fn cold(f: &mut Fixture) -> ServerRegistryPageProvider {
         .unwrap()
 }
 
+#[tokio::test]
+async fn prepared_registry_repair_classification_reuses_the_verified_graph() {
+    let mut healthy = Fixture::new();
+    healthy.edit(1);
+    let mut provider = cold(&mut healthy);
+    prepare_test_source(&mut healthy.server, &healthy.store, &mut provider)
+        .await
+        .unwrap();
+    let full_loads = crate::store::registry_full_loads_for_test();
+    assert_eq!(
+        healthy
+            .server
+            .prepared_registry_repair_install_pending(
+                &healthy.store,
+                SERVER,
+                healthy.key.bucket(),
+                &mut provider,
+            )
+            .unwrap(),
+        Some(false),
+        "a current prepared healthy source permits ordinary routing"
+    );
+    assert_eq!(
+        crate::store::registry_full_loads_for_test(),
+        full_loads,
+        "classification must not reconstruct the Registry under actor/store custody"
+    );
+
+    let mut pending = Fixture::new();
+    pending.edit(1);
+    pending.make_repair_install_pending();
+    let mut provider = cold(&mut pending);
+    prepare_test_source(&mut pending.server, &pending.store, &mut provider)
+        .await
+        .unwrap();
+    let full_loads = crate::store::registry_full_loads_for_test();
+    assert_eq!(
+        pending
+            .server
+            .prepared_registry_repair_install_pending(
+                &pending.store,
+                SERVER,
+                pending.key.bucket(),
+                &mut provider,
+            )
+            .unwrap(),
+        Some(true),
+        "a current prepared source exposes its owed replacement"
+    );
+    assert_eq!(
+        crate::store::registry_full_loads_for_test(),
+        full_loads,
+        "pending-repair classification must reuse the detached reconstruction"
+    );
+
+    let mut cold_provider = cold(&mut pending);
+    let full_loads = crate::store::registry_full_loads_for_test();
+    assert_eq!(
+        pending
+            .server
+            .prepared_registry_repair_install_pending(
+                &pending.store,
+                SERVER,
+                pending.key.bucket(),
+                &mut cold_provider,
+            )
+            .unwrap(),
+        None,
+        "missing preparation stays unknown rather than being classified as healthy"
+    );
+    assert_eq!(crate::store::registry_full_loads_for_test(), full_loads);
+
+    let mut absent = Fixture::new();
+    let mut provider = cold(&mut absent);
+    assert!(
+        !prepare_test_source(&mut absent.server, &absent.store, &mut provider)
+            .await
+            .unwrap(),
+        "checked absence needs no detached graph"
+    );
+    let full_loads = crate::store::registry_full_loads_for_test();
+    assert_eq!(
+        absent
+            .server
+            .prepared_registry_repair_install_pending(
+                &absent.store,
+                SERVER,
+                absent.key.bucket(),
+                &mut provider,
+            )
+            .unwrap(),
+        Some(false),
+        "exact checked absence permits first ordinary installation"
+    );
+    assert_eq!(crate::store::registry_full_loads_for_test(), full_loads);
+}
+
 /// The half the test below does not cover: that a quiet actor **asks for** the releasing visit.
 ///
 /// `expire_registry_source` drops a retained provider and its process-wide permit, but it runs

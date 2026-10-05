@@ -107,6 +107,15 @@ pub enum StudioControlAction {
         mode: StudioRecoveryMode,
     },
     Apply(Box<StudioRecoveryApply>),
+    /// Read both fault candidates and any held or resolved repair. Reads only.
+    ReadFault,
+    /// The owner's explicit decision. Intercepted by the receiver, which holds the durable
+    /// owner snapshot this needs; the actor re-derives the pair and refuses a stale echo.
+    RepairFault(Box<crate::store::StudioRepairRequest>),
+    /// The same two actions for the target's Registry bucket, whose fault blocks discovery of
+    /// a healthy Index or Flipnote. A separate scope, never inferred from the receipt hashes.
+    ReadRegistryFault,
+    RepairRegistryFault(Box<crate::store::StudioRepairRequest>),
     /// Read metadata for both retained slots and the optional staged slot. Never evicts.
     List,
     Read {
@@ -307,6 +316,14 @@ pub enum StudioControlResponse {
         bytes: Vec<u8>,
     },
     Acknowledged(StudioRecoveryListing),
+    /// Both candidates and any repair, for a person to choose between. Reading is not authority.
+    Fault(Box<super::StudioFaultView>),
+    /// What the repair step durably achieved, read back from the committed source.
+    Repaired {
+        target: StudioTarget,
+        scope: super::StudioFaultScope,
+        outcome: crate::store::StudioRepairOutcome,
+    },
 }
 impl std::fmt::Debug for StudioControlResponse {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -329,6 +346,8 @@ impl std::fmt::Debug for StudioControlResponse {
             Self::Version(_) => "Version { .. }",
             Self::Export { .. } => "Export { .. }",
             Self::Acknowledged(_) => "Acknowledged { .. }",
+            Self::Fault(_) => "Fault { .. }",
+            Self::Repaired { .. } => "Repaired { .. }",
         })
     }
 }
@@ -358,7 +377,13 @@ impl StudioControlResponse {
             | Self::List(_)
             | Self::Version(_)
             | Self::Export { .. }
-            | Self::Acknowledged(_) => None,
+            | Self::Acknowledged(_)
+            // Fault reads and repair results are produced entirely during the control custody
+            // visit. They do not retain a detached preparation permit or a `StudioDelivered`
+            // final-conversion fence, so native must treat them like the other immediate
+            // control responses rather than attempting to begin a nonexistent handoff.
+            | Self::Fault(_)
+            | Self::Repaired { .. } => None,
         }
     }
     /// The actor's half: begin the bounded handoff for any variant that carries a job's
@@ -385,7 +410,11 @@ impl StudioControlResponse {
             | Self::List(_)
             | Self::Version(_)
             | Self::Export { .. }
-            | Self::Acknowledged(_) => None,
+            | Self::Acknowledged(_)
+            // Keep this classification paired with `delivery`: neither response owns a
+            // preparation slot for the actor to transfer to native conversion.
+            | Self::Fault(_)
+            | Self::Repaired { .. } => None,
         }
     }
 }
@@ -532,6 +561,21 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
             StudioControlAction::ApplyOverlayCopy(_) => {
                 return Err(invalid("copy Apply requires the ordinary publication path"))
             }
+            StudioControlAction::ReadFault => {
+                return self
+                    .read_studio_fault(store, server, target)
+                    .map(|view| StudioControlResponse::Fault(Box::new(view)))
+            }
+            StudioControlAction::ReadRegistryFault => {
+                return self
+                    .read_registry_fault(store, server, target)
+                    .map(|view| StudioControlResponse::Fault(Box::new(view)))
+            }
+            StudioControlAction::RepairFault(_) | StudioControlAction::RepairRegistryFault(_) => {
+                return Err(invalid(
+                    "a fault repair requires the owner's durable snapshot",
+                ))
+            }
             StudioControlAction::ExportOverlay => {
                 return self
                     .begin_studio_inspection(store, server, target)
@@ -600,6 +644,12 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
                         unreachable!(
                             "inspection, archiving, export and copy route before recovery decoding"
                         )
+                    }
+                    StudioControlAction::ReadFault
+                    | StudioControlAction::RepairFault(_)
+                    | StudioControlAction::ReadRegistryFault
+                    | StudioControlAction::RepairRegistryFault(_) => {
+                        unreachable!("fault read and repair route before recovery decoding")
                     }
                     // Read-only. It deliberately does NOT rebuild the branch: the whole point is to
                     // tell a caller what it is looking at cheaply enough to do before deciding
