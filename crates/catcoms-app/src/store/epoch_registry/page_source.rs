@@ -230,6 +230,7 @@ impl ServerStore {
 
     /// Reuse the read-only graph's already-verified facts, but reauthenticate its exact wrapper
     /// and physical inventory first. A missing preparation may report ONLY checked true absence.
+    /// Seed consumers that call this helper deliberately retain Fault as a refusal.
     pub(super) fn checked_registry_checkpoint_source(
         &self,
         server: u64,
@@ -251,7 +252,7 @@ impl ServerStore {
 
     /// Authenticate the physical source and its inventory independently of whether its
     /// receipt book currently permits serving a checkpoint (Fault deliberately does not).
-    fn checked_registry_prepared_record(
+    pub(super) fn checked_registry_prepared_record(
         &self,
         server: u64,
         group: &ServerGroup,

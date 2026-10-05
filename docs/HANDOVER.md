@@ -21,11 +21,20 @@ and ranks the live hazards in that path.
   retries B from its retained attestation, and signs a current-C screening repair. Complete root
   and frontend suites, strict root/desktop Clippy, desktop check/build and `cargo deny` pass.
   Independent review's MEDIUM cloneable-capability escape was fixed with a non-cloneable,
-  snapshot-borrowed witness and compile-fail regression; re-review has no unresolved
-  BLOCKER/HIGH/MEDIUM. Linux ambient and repair-store mutations remain exact-head CI-owned. Two
-  native runs each pass 324/325 and hit the documented pre-Gate-4 six-client convergence flake, so
-  native is not claimed green locally. The detached S1-S4 repair runtime remains absent, P5 is
-  false, commands remain unregistered, Gate 4 remains open and Gate 5 remains closed.
+  snapshot-borrowed witness and compile-fail regression. PR #34 review then found that Registry's
+  explicit and prepared adapters asked a valid Fault source for a head before persisting B0, while
+  one wrong-archive negative could be masked by already-occupied capacity. Both adapters now
+  authenticate/account their exact source, attempt B0 with failed and uncertain writer errors
+  taking precedence, and only then preserve Fault as a hard service refusal. Empty-capacity
+  absent/wrong-authority checks, a post-write/reopen retained-attestation regression and a direct
+  prepared no-reconstruction counter close the review gaps. Final adversarial re-review reports no
+  finding at any severity. The correction bytes pass the complete root suite, root/desktop strict
+  Clippy, desktop check, all 1,282 frontend tests, Svelte check, production build and `cargo deny`.
+  The complete native run passes 324/325 and a focused retry reproduces the already baseline-
+  observed normal-order six-client final-convergence flake; its reverse-order companion passes, so
+  native is not claimed green locally. Linux ambient and repair-store mutations remain exact-head
+  CI-owned. The detached S1-S4 repair runtime remains absent, P5 is false, commands remain
+  unregistered, Gate 4 remains open and Gate 5 remains closed.
 
 - **PR #33 repair-integration review response (2026-10-05).** Whole-candidate review found two
   HIGH issues outside the structural inventory seam. First, a repair-only head response could

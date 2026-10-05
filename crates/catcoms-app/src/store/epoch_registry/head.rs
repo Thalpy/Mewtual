@@ -97,7 +97,7 @@ impl ServerStore {
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub(super) fn prepare_registry_head_and_repair(
+    pub(in crate::store) fn prepare_registry_head_and_repair(
         &mut self,
         server: u64,
         group: &ServerGroup,
@@ -118,8 +118,9 @@ impl ServerStore {
         let document = registry_document(&group.group_id(), bucket).map_err(invalid)?;
         let scope = scope_bytes(server, &document)?;
         let storage_scope = StorageScope::new(server, &document.server_id).map_err(invalid)?;
-        // Validate the saved source once; neither a missing indexed source nor corruption can
-        // hide a fault. Absence is checked against the complete inventory before a None answer.
+        // Restore and account the saved source before accepting any report. Head eligibility is
+        // deliberately checked later: a valid Fault must refuse service, but it must not prevent
+        // an independently authorized report from crossing B0 first.
         let loaded = (|| {
             let bytes = self.read_registry_record(&scope)?;
             let unit = bytes
@@ -143,19 +144,9 @@ impl ServerStore {
                     )
                 })
                 .transpose()?;
-            let held = unit
-                .as_ref()
-                .map(RegistryEpoch::receipt_head)
-                .transpose()
-                .map_err(invalid)?
-                .flatten()
-                .cloned();
-            let applied = unit
-                .as_ref()
-                .and_then(|u| u.repair_state().map(|state| state.repair));
-            Ok::<_, AppError>((held, record, applied))
+            Ok::<_, AppError>((unit, record))
         })();
-        let (held, record, applied) = match loaded {
+        let (unit, record) = match loaded {
             Ok(value) => value,
             Err(error) => {
                 budget.invalidate();
@@ -165,21 +156,78 @@ impl ServerStore {
         budget
             .verify_record(&storage_scope, *blake3::hash(&scope).as_bytes(), record)
             .map_err(invalid)?;
+        self.admit_registry_head_report(
+            server,
+            &document,
+            group,
+            device,
+            durable_tenure,
+            archived_owner,
+            fault_report,
+            rng,
+            budget,
+            hooks,
+        )?;
+        // Preserve Fault as an explicit service refusal. Admission above is evidence persistence,
+        // not permission to reconstruct, relabel, or serve a head from this source.
+        let held = unit
+            .as_ref()
+            .map(RegistryEpoch::receipt_head)
+            .transpose()
+            .map_err(invalid)
+            .inspect_err(|_| budget.invalidate())?
+            .flatten()
+            .cloned();
+        let applied = unit
+            .as_ref()
+            .and_then(|u| u.repair_state().map(|state| state.repair));
         self.finish_registry_head_source(
             server,
             group,
             bucket,
             device,
             durable_tenure,
-            archived_owner,
             rng,
             budget,
             held,
             record,
             applied,
-            fault_report,
             hooks,
         )
+    }
+
+    /// Persist independently provable fault evidence only after the exact source and its complete
+    /// inventory have been authenticated. This barrier intentionally precedes head selection so a
+    /// correctly faulted source can refuse service without discarding the report that explains it.
+    #[allow(clippy::too_many_arguments)]
+    fn admit_registry_head_report(
+        &mut self,
+        server: u64,
+        document: &catcoms_replication::LogicalDocument,
+        group: &ServerGroup,
+        device: &MlsDevice,
+        durable_tenure: Option<u64>,
+        archived_owner: Option<&ArchivedOwnerTenure>,
+        fault_report: Option<&[Receipt; 2]>,
+        rng: &mut impl CryptoRngCore,
+        budget: &mut EpochStorageBudget,
+        hooks: &mut WriteHooks<'_>,
+    ) -> Result<(), AppError> {
+        if let (Some(report), Some(tenure)) = (fault_report, durable_tenure) {
+            self.admit_fault_report_with_writer(
+                server,
+                document,
+                group,
+                device,
+                tenure,
+                archived_owner,
+                report,
+                rng,
+                budget,
+                hooks,
+            )?;
+        }
+        Ok(())
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -190,32 +238,16 @@ impl ServerStore {
         bucket: u8,
         device: &MlsDevice,
         durable_tenure: Option<u64>,
-        archived_owner: Option<&ArchivedOwnerTenure>,
         rng: &mut impl CryptoRngCore,
         budget: &mut EpochStorageBudget,
         held: Option<Receipt>,
         record: Option<StorageRecord>,
         applied: Option<ReceiptRepair>,
-        fault_report: Option<&[Receipt; 2]>,
         hooks: &mut WriteHooks<'_>,
     ) -> Result<(ReceiptHeadSelection, Option<ReceiptRepair>), AppError> {
         let document = registry_document(&group.group_id(), bucket).map_err(invalid)?;
         let scope = scope_bytes(server, &document)?;
         let storage_scope = StorageScope::new(server, &document.server_id).map_err(invalid)?;
-        // S-3 before the response is decided (U-7); a failed stage refuses the whole answer.
-        if let (Some(report), Some(tenure)) = (fault_report, durable_tenure) {
-            self.admit_fault_report(
-                server,
-                &document,
-                group,
-                device,
-                tenure,
-                archived_owner,
-                report,
-                rng,
-                budget,
-            )?;
-        }
         // Contextual, so a record a repair transaction holds is read rather than refused; a held
         // repair never permits a proof, and before B2 not even a hint.
         let (journal, owner_record) = self
@@ -384,8 +416,30 @@ impl ServerStore {
         )>,
         budget: &mut EpochStorageBudget,
     ) -> Result<(ReceiptHeadSelection, Option<ReceiptRepair>), AppError> {
-        let (head, record) = self
-            .checked_registry_checkpoint_source(server, group, bucket, device, prepared, budget)?;
+        // Reauthenticate the exact prepared wrapper and complete physical inventory before the
+        // report can write anything. Head eligibility remains a later, separate question.
+        let record =
+            self.checked_registry_prepared_record(server, group, bucket, device, prepared, budget)?;
+        let document = registry_document(&group.group_id(), bucket).map_err(invalid)?;
+        self.admit_registry_head_report(
+            server,
+            &document,
+            group,
+            device,
+            tenure,
+            archived_owner,
+            fault_report,
+            rng,
+            budget,
+            &mut WriteHooks::None,
+        )?;
+        // Fault remains a hard refusal and invalidates this budget exactly as before; successful
+        // B0 persistence does not manufacture a head or permit synchronous reconstruction.
+        let head = prepared
+            .map(|(_, source)| source.receipt_head().map(|r| r.cloned()).map_err(invalid))
+            .transpose()
+            .inspect_err(|_| budget.invalidate())?
+            .flatten();
         let applied = prepared.and_then(|(_, source)| source.fault_repair());
         self.finish_registry_head_source(
             server,
@@ -393,13 +447,11 @@ impl ServerStore {
             bucket,
             device,
             tenure,
-            archived_owner,
             rng,
             budget,
             head,
             record,
             applied,
-            fault_report,
             &mut WriteHooks::None,
         )
     }

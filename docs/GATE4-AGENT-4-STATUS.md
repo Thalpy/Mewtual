@@ -35,6 +35,12 @@ currently isolated pending the detached runtime boundary:
   receiver with a small source never scheduled that preparation; `164a94d7...` makes classification
   preparation size-independent and preserves exact checked absence separately from cold state.
   Final bounded re-review found no remaining BLOCKER, HIGH, MEDIUM or LOW finding.
+- PR #34 review found one later MEDIUM integration defect: both Registry head adapters asked a
+  valid Fault source for a head before persisting the independently authorized report, and one
+  negative could be capacity-masked. The candidate now authenticates/accounts the exact source,
+  attempts B0 with full failed/uncertain writer propagation, and only then preserves Fault as a
+  hard service refusal. Real explicit/prepared, empty-capacity authority, post-write/reopen and
+  no-reconstruction regressions pass. Final re-review has no finding at any severity.
 
 The code is still intentionally unavailable to the renderer. P5 is false; native Save and repair
 commands remain unregistered. The finalization candidate supplies the archived-tenure consumer and
@@ -108,11 +114,10 @@ detached admitted runtime exists; ancestry alone does not make those paths safe 
 Still required:
 
 1. require exact-head Linux ambient and repair-store mutation CI for the archived Observed-tenure consumer;
-2. retain the review's LOW production-head-service and negative-matrix coverage as follow-up;
-3. build the detached S1-S4 custody split and C-3/source-fence integration, then re-enable the
+2. build the detached S1-S4 custody split and C-3/source-fence integration, then re-enable the
    currently fail-closed automatic repair paths;
-4. add fetched-seed, positive owed-Registry, real two-peer/newcomer and fairness evidence; and
-5. obtain the bounded Review 3 verdict for the completed boundary.
+3. add fetched-seed, positive owed-Registry, real two-peer/newcomer and fairness evidence; and
+4. obtain the bounded Review 3 verdict for the completed boundary.
 
 ### Agent 4
 
@@ -182,6 +187,19 @@ baseline `9d2f3e34...` and failed on the candidate, while older pre-Gate-4 evide
 PR #29 itself. This is an inherited timing flake, not a claimed native pass. Independent review's
 one MEDIUM cloneable-witness finding was fixed; re-review reports no BLOCKER/HIGH/MEDIUM. Linux
 ambient and repair-store mutation evidence remains exact-head CI-owned.
+
+PR #34's Registry ordering correction additionally passes the focused current-tenure uncertain-B0
+restart regression and the expanded real A -> B -> C explicit/prepared adapter regression. The
+latter pins absent/wrong authority before capacity, B0 failure precedence, exact retained retry,
+unchanged Fault state and zero prepared-path full loads. Final adversarial re-review has no remaining
+finding at any severity. Merge readiness records final local gates on the correction bytes; Linux
+ambient and repair-store mutations remain authoritative only on the pushed exact head.
+
+Those final correction-byte gates now pass for the complete root suite, root/desktop strict Clippy,
+desktop check, all 1,282 frontend tests, Svelte check, production build and `cargo deny`. The
+complete native run passes 324/325; a focused retry reproduces the same normal-order six-client
+final-convergence flake already observed on the pinned baseline, while the reverse-order companion
+passes. Native is therefore not claimed green locally; exact-head CI remains the merge authority.
 
 ## Non-negotiable boundaries
 

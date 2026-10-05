@@ -10,7 +10,7 @@ status documents and in Git history; they do not override this matrix.
 | Item | Exact state |
 |---|---|
 | Shared baseline | `gate4-agent1-runtime` at merged PR #33 commit `9d2f3e341d9fa503e2917de61fab348dc29850d0`; unchanged by this candidate |
-| Finalization candidate | `gate4-finalization`, based exactly on `9d2f3e34...`; adds the archived Observed-tenure consumer and its regression |
+| Finalization candidate | PR #34 / `gate4-finalization`, based exactly on `9d2f3e34...`; adds the archived Observed-tenure consumer and the reviewed Registry B0-before-Fault ordering correction |
 | Verified repair history | Historical PR #32 checkpoint `87629d6b72992254911a8e44f698d535bb5d7904`; incorporated through merged PR #33 |
 | Documentation history | Historical PR #31 checkpoint `f0af61c9b1247fa955300ac50545074e18e9b302`; incorporated through merged PR #33 |
 | Preserved Agent 3 head | `15b715a10704a8dafc2cccef65854d4d45ad55ca`, second parent of merge `6a2f89792eecbf6ef2e65d683e6b515bbc65181d` |
@@ -29,9 +29,9 @@ The remaining work is one ordered chain rather than four independent agent queue
 2. **Agent 2 product paths:** use those seams for awaiting-tenure local work, reconciliation and
    restart reconstruction; drive the real actor/Studio A -> B -> A' and newcomer path; obtain a
    whole-boundary lifecycle review.
-3. **Agent 3 completion:** consume CORE-005's archived Observed-tenure witness for historical report
-   admission, finish the bounded detached runtime/evidence gaps, and obtain the bounded repair
-   verdict.
+3. **Agent 3 completion:** the CORE-005 archived Observed-tenure consumer is implemented and its
+   Registry integration correction is independently accepted; finish the bounded detached
+   runtime/evidence gaps and obtain the bounded repair verdict.
 4. **Agent 4 exposure and acceptance:** only after P1-P4 pass, change P5, register the approved
    native commands, update UI/interface truth, run the combined scenarios and request Review 4.
 
@@ -52,7 +52,7 @@ either order. Native registration is downstream of both specialist acceptance an
 | G4-A2-TENURE | Real repeated owner/rejoin/newcomer | **Sync/receipt fixture passes; production actor and Studio rotation absent.** | Drive real MLS A -> B -> A' through actor, Studio, restart and newcomer. | Distinct observed tenures, first receipt, old key/receipt refusal, hidden higher history and convergence. |
 | G4-A2-P5 | Permission to expose native Save | **FALSE.** | Change only after P1-P4 have implementation PASSes recorded by Agent 2. | Security allow/deny negatives while false; positive native evidence only after promotion. |
 | G4-A3-CURRENT | Signed current-tenure Studio/Registry repair | **Core/store implementation integrated; automatic runtime execution now fail-closed pending its detached boundary.** PR #33 review found that repair-only service skipped the durability retry and that active repair ran synchronously outside shared admission. Commit `3fcde979...` makes repair carriage repeat exact source and authenticated owner-record durability, including uncertain B2/B3 writes, and disables automatic apply, owner resume and repaired-seed installation rather than pretending source preparation covers repair execution. A later re-review retained one MEDIUM residual because the disabled Registry router still rebuilt the full source before its gate; `f7c74cb2...` classifies only from exact-current prepared state. Review then found a fresh-small-source liveness loop; `164a94d7...` schedules that detached classification independently of size and represents exact checked absence separately from cold/unknown state. | Preserve the store/core behavior, build the capture/detach/revalidate/commit runtime, then re-enable automatic execution only with shared-pool ownership through result handling. | Interrupted-B2/B3 Studio/Registry service, warm full-pool deferral/no mutation, cancellation/result holding, unrelated-actor progress and real two-peer Fault -> decision -> replacement -> restart/newcomer. |
-| G4-A3-HIST | Historical report admission with archived Observed witness | **Implemented and independently accepted on `gate4-finalization`; exact-head CI pending.** The durable head-service context carries CORE-005's private, non-cloneable witness to shared Studio/Registry admission. Exact retained attestations survive archive lookup loss; new historical evidence must match the full archived tuple and is never treated as live overflow/source authority. A real A -> B -> C, persist/reopen regression admits B for both document families, refuses the Unknown A tenure with absent/wrong archive, retries B from its attestation and signs a current-C screening repair. | Require exact-head Linux ambient and repair-mutation CI before merging this bounded candidate. Retain the review's LOW production-head-service/negative-matrix gap as follow-up coverage. | Historical pair accepted only for the archived Observed tenure; Imported/Unknown/wrong/older tenure and malformed evidence refuse without writes. |
+| G4-A3-HIST | Historical report admission with archived Observed witness | **Implemented and independently accepted on `gate4-finalization`; exact-head CI pending.** The durable head-service context carries CORE-005's private, non-cloneable witness to shared Studio/Registry admission. Exact retained attestations survive archive lookup loss; new historical evidence must match the full archived tuple and is never treated as live overflow/source authority. Studio and both Registry head adapters authenticate/account their exact source before B0, propagate failed or uncertain B0, and only then retain Fault as a service refusal. Real A -> B -> C and restart regressions cover both document families, absent/wrong authority before capacity is occupied, explicit/prepared adapters, no prepared reconstruction, exact retained retry and unchanged Fault state. | Require exact-head Linux ambient and repair-mutation CI before merging this bounded candidate. | Historical pair accepted only for the archived Observed tenure; Imported/Unknown/wrong/older tenure and malformed evidence refuse without writes. |
 | G4-A3-BOUND | Detached bounded repair runtime | **Not active; safely isolated.** Repair core/store mutation coverage is strong, but the required capture/detach/revalidate/commit job does not exist. Automatic offered-repair application, owner resume and repaired-seed installation therefore refuse/defer without mutation. | Implement the S1-S4 detached job with admission/target claim, mount/source/generation/authority revalidation and result custody; integrate C-3/source fences. | Full-pool warm/cold deferral, cancellation/result holding, unrelated-actor progress, large repair fairness, retry/teardown and full actor/native delivery. |
 | G4-I-NATIVE | Shared registrations and truthful interfaces | **Correctly fail-closed.** Save and unfinished repair commands are unregistered. | Register only reviewed commands after P5; update command ACL, invoke handler, interfaces and UI hooks together. | Command-security allow/deny tests, session/final-delivery tests and production conversion for each command. |
 | G4-I-E2E | Combined Gate 4 scenarios | **Not executed because prerequisite product paths remain absent.** | After bounded specialist verdicts, implement the seven scenarios in the handoff document. | Rotate/save/restart/handoff/catch-up; stale/unconfirmed lifecycle; succession; repair; concurrency; references/quotas; earlier regressions. |
@@ -121,6 +121,20 @@ on PR #29's own head, so this is recorded as an inherited timing flake, not a na
 Linux ambient and repair-store mutation results remain exact-head CI checks. Startup/flow remain
 inapplicable because this candidate changes no setup, process, renderer or command-registration path.
 
+PR #34 review then found that both Registry adapters attempted `receipt_head()` on a valid Fault
+source before B0, and that one wrong-archive negative ran only after the bounded slot was occupied.
+The correction authenticates and accounts the explicit or prepared source, attempts B0 with its
+full writer error semantics, and only then preserves Fault as a hard no-head refusal. The negative
+matrix now runs before valid admission; a post-write uncertain B0 regression reopens and proves the
+exact attestation was retained; and the prepared regression directly proves no full reconstruction.
+The focused Registry and real A -> B -> C regressions, definitive complete root suite, root and
+desktop strict Clippy, desktop check, all 1,282 frontend tests, Svelte check, production build and
+`cargo deny` pass on the correction bytes. The complete native run passes 324/325 and its focused
+retry reproduces only the already baseline-observed normal-order six-client final-convergence
+flake; the reverse-order companion passes, so no green native-suite claim is made locally. Merge
+readiness additionally requires Linux ambient/store-mutation and native evidence against the
+pushed correction head.
+
 ## Review ledger
 
 - Agent 4's independent full-candidate review found no remaining BLOCKER/HIGH/MEDIUM finding after
@@ -144,8 +158,12 @@ inapplicable because this candidate changes no setup, process, renderer or comma
   the public archived witness was cloneable and could outlive the one-entry durable archive. The
   witness is now non-`Clone`/non-`Copy`, application code receives only a snapshot-bound borrow,
   internal snapshot duplication remains private, and a compile-fail doctest pins the boundary.
-  Re-review found no remaining BLOCKER/HIGH/MEDIUM finding. Its LOW request for more direct
-  production-head-service and negative-matrix coverage remains an explicit follow-up.
+  Re-review found no remaining BLOCKER/HIGH/MEDIUM finding. PR #34 review subsequently found one
+  MEDIUM Registry integration defect: valid Fault sources refused before B0, and the wrong-archive
+  negative could be masked by occupied capacity. Both adapters now persist or fail B0 before the
+  unchanged Fault refusal, and the negative runs against an empty owner record. Final re-review of
+  the implementation plus the uncertain-write and no-reconstruction additions found no remaining
+  BLOCKER, HIGH, MEDIUM or LOW finding.
 - These bounded reviews accept the candidate work they inspected; they do not supply the missing
   core-signing verdict, Agent 1/2/3 completion verdicts or Review 4.
 - P5 remains false, Gate 4 remains open, and Gate 5 remains closed.

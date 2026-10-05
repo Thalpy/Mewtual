@@ -27,7 +27,10 @@ table with the commit that closed it.
   now consumes the one archived Observed witness only from a still-current durable sync snapshot,
   matches the receipts' full owner/start/tenure tuple, and seals a receiver-local exact-pair
   attestation before storage. Unknown, Imported, wrong and evicted unadmitted history remain
-  unavailable by design; native repair remains unavailable.
+  unavailable by design. Registry head service authenticates and accounts its source before this
+  B0 write, propagates every failed or uncertain write before classifying the source, and preserves
+  Fault as a hard refusal afterward; prepared service does not cold-reconstruct that source. Native
+  repair remains unavailable.
   While automatic repair execution is disabled, Registry checkpoint routing classifies a pending
   replacement only from the exact-current verified source already retained by the bounded
   preparation boundary. Missing, cold, stale, retargeted or unreadable preparation is unknown and

@@ -116,6 +116,74 @@ fn a_faulted_bucket_is_repaired_recycled_and_served_without_a_held_proof() {
 }
 
 #[test]
+fn faulted_head_propagates_uncertain_b0_and_retains_the_exact_pair() {
+    let root = tempfile::tempdir().unwrap();
+    let mut f = Fixture::new();
+    let mut store = open(root.path());
+    let pair = faulted(&mut f, &mut store);
+    let mut b = budget(&mut store, &f);
+
+    // The owner-record replacement is visible, but its durability acknowledgement is not. The
+    // adapter must surface B0's uncertainty before the expected Fault service refusal; otherwise
+    // a caller could answer while being unable to prove that the report survived a crash.
+    let error = store
+        .prepare_registry_head_and_repair(
+            SERVER,
+            &f.group,
+            f.key.bucket(),
+            &f.device,
+            Some(0),
+            None,
+            Some(&pair),
+            &mut rng(),
+            &mut b,
+            &mut WriteHooks::fail_after_write(FailError::NotDurable("uncertain Registry B0"))
+                .at(WriteTag::Journal),
+        )
+        .unwrap_err();
+    assert!(matches!(error, AppError::CommittedButNotDurable(_)));
+    drop(store);
+
+    // Reopening observes the visible record, authenticates its exact retained attestation, and
+    // repeats B0 before the unchanged Fault source refuses head service. Neither outcome repairs
+    // or relabels the source.
+    let mut store = open(root.path());
+    let (owner, _) = store
+        .load_epoch_owner_repair_state(SERVER, &f.document, &f.device.device_id(), f.group.epoch())
+        .unwrap();
+    let hashes = [pair[0].hash(), pair[1].hash()];
+    assert!(
+        owner
+            .retained_admission(hashes, &f.device.device_id(), f.group.epoch())
+            .unwrap()
+            .is_some(),
+        "the uncertain B0 replacement did not retain the exact report"
+    );
+
+    let mut b = budget(&mut store, &f);
+    let error = store
+        .prepare_registry_head_with_fault_repair(
+            SERVER,
+            &f.group,
+            f.key.bucket(),
+            &f.device,
+            Some(0),
+            None,
+            Some(&pair),
+            &mut rng(),
+            &mut b,
+        )
+        .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("conflicting epoch-close receipt"),
+        "the retry did not reach the unchanged Fault refusal: {error}"
+    );
+    assert_eq!(f.load(&store).unwrap().phase(), EpochPhase::Fault);
+}
+
+#[test]
 fn repair_only_registry_head_repeats_uncertain_b2_durability_before_service() {
     let root = tempfile::tempdir().unwrap();
     let mut f = Fixture::new();

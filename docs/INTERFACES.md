@@ -872,8 +872,11 @@ encoding/checkpoint copies under the existing 8 KiB cap. The trusted head-servic
 now carries the one archived Observed-tenure witness from the same durable owner snapshot. Shared
 Studio/Registry admission checks an exact retained attestation first, otherwise requires the pair's
 full owner key/start/tenure id to match the live or archived tuple and records the admission origin.
-Historical evidence never becomes a live source seal or current-tenure overflow hold. Native repair
-commands remain unregistered.
+Both head adapters authenticate the exact source and its physical inventory, persist B0, and only
+then ask whether that source may serve a head. A valid Registry Fault therefore retains the report
+but still refuses service; failed or uncertain B0 takes precedence over that expected refusal, and
+the prepared adapter does not reconstruct the source. Historical evidence never becomes a live
+source seal or current-tenure overflow hold. Native repair commands remain unregistered.
 
 `studio_recovery_list`, `studio_recovery_read`, `studio_recovery_export`, and
 `studio_recovery_acknowledge` use the same actor/native custody as Save. They authenticate all

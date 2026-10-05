@@ -2,11 +2,13 @@
 //! recovery-gated replacement (B4 to B6) and terminal recycling back to ordinary owner state.
 use super::adoption::{adopt, checkpoint};
 use super::*;
+use catcoms_replication::registry::{registry_document, PointerKey, RegistryOp};
 use catcoms_replication::studio::StudioRecovery;
 use catcoms_replication::{
     InheritedCheckpoint, ReceiptRepair, RecoveryReason, RepairDisposition, ReplError,
 };
 use catcoms_rt::{Hub, ManualClock, MemNetwork, PeerId};
+use catcoms_wire::DocType;
 
 type HistoricalNode = crate::Server<MemNetwork, rand_chacha::ChaCha20Rng>;
 
@@ -41,6 +43,128 @@ fn historical_pair(node: &mut HistoricalNode, document: &LogicalDocument) -> [Re
         pair.sort_by_key(Receipt::hash);
         pair
     })
+}
+
+fn distinct_historical_registry_key(prefix: &str, excluded: Option<u8>) -> PointerKey {
+    (0_u16..=u16::MAX)
+        .find_map(|suffix| {
+            let key = PointerKey::new(
+                DocType::StudioObject,
+                format!("{prefix}-{suffix}").into_bytes(),
+            )
+            .unwrap();
+            (Some(key.bucket()) != excluded).then_some(key)
+        })
+        .expect("the Registry key space contains another bucket")
+}
+
+fn historical_storage_budget(
+    store: &mut ServerStore,
+    node: &mut HistoricalNode,
+) -> EpochStorageBudget {
+    let current = inventory(store);
+    node.sync.with_registry_context(|group, _, _, _| {
+        store
+            .studio_storage_budget(SERVER, group, &current)
+            .unwrap()
+            .storage
+    })
+}
+
+/// Persist a real Registry source observed by `observer` while `owner` is still live, then feed
+/// it two owner-valid conflicting receipts. The resulting Fault therefore predates succession;
+/// the later archived witness is not manufactured by this store fixture.
+fn fault_historical_registry_source(
+    store: &mut ServerStore,
+    observer: &mut HistoricalNode,
+    owner: &mut HistoricalNode,
+    key: &PointerKey,
+    budget: &mut EpochStorageBudget,
+) -> [Receipt; 2] {
+    let bucket = key.bucket();
+    let document = registry_document(&observer.group_id(), bucket).unwrap();
+    let sealed = observer
+        .sync
+        .with_registry_context(|group, device, _, random| {
+            let mut source = catcoms_replication::registry_epoch::RegistryEpoch::new(
+                group,
+                bucket,
+                device.device_id(),
+            )
+            .unwrap();
+            let operation = RegistryOp::Put {
+                key: key.clone(),
+                epoch: 1,
+            }
+            .domain_op(&group.group_id(), [bucket; 16])
+            .unwrap();
+            source.edit(device, group, random, &operation).unwrap()
+        });
+    observer
+        .sync
+        .with_registry_context(|group, device, _, random| {
+            store
+                .ingest_registry_epoch(SERVER, group, bucket, device, &sealed, random, budget)
+                .unwrap();
+        });
+
+    let (closed_epoch, seeds) = observer.sync.with_registry_context(|group, device, _, _| {
+        let state = store
+            .load_registry_epoch(SERVER, group, bucket, device)
+            .unwrap()
+            .expect("the observer persisted the Registry source");
+        let projection = state.projection().unwrap();
+        (
+            state.epoch(),
+            [71_u8, 72_u8].map(|close| projection.checkpoint([close; 32]).unwrap().change_hash()),
+        )
+    });
+    let tenure = owner
+        .sync
+        .authoring_owner_tenure_start()
+        .expect("the Registry receipt owner tenure was observed");
+    let mut pair = owner.sync.with_registry_context(|_, device, _, _| {
+        [71_u8, 72_u8].map(|close| {
+            Receipt::sign(
+                document.clone(),
+                closed_epoch,
+                [close; 32],
+                seeds[usize::from(close - 71)],
+                tenure,
+                InheritedCheckpoint::EpochZero,
+                device,
+            )
+            .unwrap()
+        })
+    });
+    observer
+        .sync
+        .with_registry_context(|group, device, _, random| {
+            for receipt in &pair {
+                store
+                    .seal_registry_epoch(
+                        SERVER,
+                        group,
+                        bucket,
+                        device,
+                        receipt.clone(),
+                        tenure,
+                        random,
+                        budget,
+                    )
+                    .unwrap();
+            }
+            assert_eq!(
+                store
+                    .load_registry_epoch(SERVER, group, bucket, device)
+                    .unwrap()
+                    .unwrap()
+                    .phase(),
+                EpochPhase::Fault
+            );
+        });
+    pair.sort_by_key(Receipt::hash);
+    pair
 }
 
 async fn join_historical_member(
@@ -815,9 +939,23 @@ async fn archived_observed_tenure_admits_only_its_exact_pair_after_restart() {
         bob.sync_once().await.unwrap();
     }
     let document = target(false).document(&alice.group_id()).unwrap();
-    let registry_document =
-        catcoms_replication::registry::registry_document(&alice.group_id(), 7).unwrap();
+    let prepared_registry_key = distinct_historical_registry_key("historical-prepared", None);
+    let explicit_registry_key = distinct_historical_registry_key(
+        "historical-explicit",
+        Some(prepared_registry_key.bucket()),
+    );
+    let prepared_registry_document = catcoms_replication::registry::registry_document(
+        &alice.group_id(),
+        prepared_registry_key.bucket(),
+    )
+    .unwrap();
+    let explicit_registry_document = catcoms_replication::registry::registry_document(
+        &alice.group_id(),
+        explicit_registry_key.bucket(),
+    )
+    .unwrap();
     let alice_pair = historical_pair(&mut alice, &document);
+    let alice_registry_pair = historical_pair(&mut alice, &prepared_registry_document);
     let alice_id = alice
         .sync
         .with_registry_context(|_, device, _, _| device.device_id());
@@ -841,7 +979,28 @@ async fn archived_observed_tenure_admits_only_its_exact_pair_after_restart() {
     }
     assert!(bob.is_owner());
     let bob_pair = historical_pair(&mut bob, &document);
-    let bob_registry_pair = historical_pair(&mut bob, &registry_document);
+
+    // Carol's physical Registry sources enter Fault while B is still the real current owner.
+    // Their later service refusal therefore cannot be dismissed as a synthetic post-succession
+    // state, and neither source needs to be reconstructed inside either head adapter.
+    let root = tempfile::tempdir().unwrap();
+    let mut store = open(root.path());
+    let mut registry_budget = historical_storage_budget(&mut store, &mut carol);
+    let bob_prepared_registry_pair = fault_historical_registry_source(
+        &mut store,
+        &mut carol,
+        &mut bob,
+        &prepared_registry_key,
+        &mut registry_budget,
+    );
+    let bob_explicit_registry_pair = fault_historical_registry_source(
+        &mut store,
+        &mut carol,
+        &mut bob,
+        &explicit_registry_key,
+        &mut registry_budget,
+    );
+    drop(registry_budget);
 
     // B -> C retires the tenure Carol saw begin. Carol is now the live owner and the only
     // historical tuple its snapshot may expose is B's exact key/start/id.
@@ -850,8 +1009,6 @@ async fn archived_observed_tenure_admits_only_its_exact_pair_after_restart() {
     assert!(carol.is_owner());
     carol.sync.set_config(Default::default());
 
-    let root = tempfile::tempdir().unwrap();
-    let store = open(root.path());
     let snapshot = carol.snapshot().unwrap();
     carol.sync.with_registry_context(|_, _, _, random| {
         store.save_server(SERVER, &snapshot, random).unwrap()
@@ -917,59 +1074,14 @@ async fn archived_observed_tenure_admits_only_its_exact_pair_after_restart() {
         store.retain_studio_source(group, device, source)
     });
     let permit = carol.prepare_owner_head_snapshot(&store, SERVER).unwrap();
-    let (admitted, registry_admitted) = carol
-        .sync
-        .with_durable_owner_history(&permit.inner, |group, device, random, tenure, archive| {
-            let archived = archive.expect("B's observed retirement survived restart");
-            assert_eq!(archived.tenure_id(), &bob_pair[0].tenure_id);
-            let studio = store.admit_fault_report(
-                SERVER,
-                &document,
-                group,
-                device,
-                tenure,
-                Some(archived),
-                &bob_pair,
-                random,
-                &mut studio_budget.storage,
-            )?;
-            let registry = store.admit_fault_report(
-                SERVER,
-                &registry_document,
-                group,
-                device,
-                tenure,
-                Some(archived),
-                &bob_registry_pair,
-                random,
-                &mut studio_budget.storage,
-            )?;
-            Ok::<_, AppError>((studio, registry))
-        })
-        .unwrap()
-        .unwrap();
-    assert!(
-        admitted.is_some(),
-        "the exact archived B pair was not staged"
-    );
-    assert!(
-        registry_admitted.is_some(),
-        "the Registry consumer did not stage the exact archived B pair"
-    );
 
-    // Alice's fully self-signed conflict has no matching Observed witness. It must refuse before
-    // changing the one retained pair, and the retained attestation must independently authorize
-    // an exact retry even when no archive lookup is supplied.
-    let before = carol.sync.with_registry_context(|group, device, _, _| {
-        store
-            .load_epoch_owner_repair_state(SERVER, &document, &device.device_id(), group.epoch())
-            .unwrap()
-            .0
-            .retained_pairs()
-            .1
-            .unwrap()
-            .hashes()
-    });
+    // Alice's fully self-signed conflict has no matching Observed witness. Exercise both
+    // negatives while the historical slot is genuinely empty, then assert that B0 wrote no file;
+    // a later capacity refusal must not be able to mask a broken authority check.
+    let studio_owner_record = store.epoch_owner_path(
+        &super::super::super::epoch_owner::scope_bytes(SERVER, &document).unwrap(),
+    );
+    assert!(!studio_owner_record.exists());
     let refused_without_archive = carol
         .sync
         .with_durable_owner_history(&permit.inner, |group, device, random, tenure, _| {
@@ -1012,7 +1124,35 @@ async fn archived_observed_tenure_admits_only_its_exact_pair_after_restart() {
         refused_wrong_archive.is_none(),
         "the archive for B authorized the Unknown founder tenure"
     );
-    let after_refusals = carol.sync.with_registry_context(|group, device, _, _| {
+    assert!(
+        !studio_owner_record.exists(),
+        "a rejected historical report created an owner record"
+    );
+
+    let admitted = carol
+        .sync
+        .with_durable_owner_history(&permit.inner, |group, device, random, tenure, archive| {
+            let archived = archive.expect("B's observed retirement survived restart");
+            assert_eq!(archived.tenure_id(), &bob_pair[0].tenure_id);
+            store.admit_fault_report(
+                SERVER,
+                &document,
+                group,
+                device,
+                tenure,
+                Some(archived),
+                &bob_pair,
+                random,
+                &mut studio_budget.storage,
+            )
+        })
+        .unwrap()
+        .unwrap();
+    assert!(
+        admitted.is_some(),
+        "the exact archived B pair was not staged"
+    );
+    let before = carol.sync.with_registry_context(|group, device, _, _| {
         store
             .load_epoch_owner_repair_state(SERVER, &document, &device.device_id(), group.epoch())
             .unwrap()
@@ -1022,10 +1162,6 @@ async fn archived_observed_tenure_admits_only_its_exact_pair_after_restart() {
             .unwrap()
             .hashes()
     });
-    assert_eq!(
-        after_refusals, before,
-        "a refused pair changed retained evidence"
-    );
     let retry = carol
         .sync
         .with_durable_owner_history(&permit.inner, |group, device, random, tenure, _| {
@@ -1048,9 +1184,197 @@ async fn archived_observed_tenure_admits_only_its_exact_pair_after_restart() {
         "retained exact admission depended on archive lookup"
     );
     assert_eq!(before, [bob_pair[0].hash(), bob_pair[1].hash()]);
+    drop(studio_budget);
+
+    // Exercise both production Registry adapters against real sources already frozen on B's
+    // receipts. Wrong historical authority and a failed B0 must leave no owner record; a valid
+    // archived report must survive the expected ReceiptConflict refusal and remain durable.
+    let (prepared_stamp, prepared_source) = store
+        .capture_registry_page_source(SERVER, &carol.group_id(), prepared_registry_key.bucket())
+        .unwrap()
+        .expect("the faulted prepared Registry source is present")
+        .rebuild()
+        .unwrap();
+    let prepared_owner_record = store.epoch_owner_path(
+        &super::super::super::epoch_owner::scope_bytes(SERVER, &prepared_registry_document)
+            .unwrap(),
+    );
+    let explicit_owner_record = store.epoch_owner_path(
+        &super::super::super::epoch_owner::scope_bytes(SERVER, &explicit_registry_document)
+            .unwrap(),
+    );
+    assert!(!prepared_owner_record.exists());
+    assert!(!explicit_owner_record.exists());
+
+    let mut registry_budget = historical_storage_budget(&mut store, &mut carol);
+    let wrong_archive = carol
+        .sync
+        .with_durable_owner_history(&permit.inner, |group, device, random, tenure, archive| {
+            store.prepare_registry_head_prepared_with_fault_repair(
+                SERVER,
+                group,
+                prepared_registry_key.bucket(),
+                device,
+                Some(tenure),
+                archive,
+                Some(&alice_registry_pair),
+                random,
+                Some((&prepared_stamp, &prepared_source)),
+                &mut registry_budget,
+            )
+        })
+        .unwrap()
+        .unwrap_err();
+    assert!(
+        wrong_archive
+            .to_string()
+            .contains("conflicting epoch-close receipt"),
+        "wrong archive did not reach the ordinary Fault refusal: {wrong_archive}"
+    );
+    assert!(
+        !prepared_owner_record.exists(),
+        "a wrong archived Registry authority wrote B0"
+    );
+    drop(registry_budget);
+
+    let mut registry_budget = historical_storage_budget(&mut store, &mut carol);
+    let failed_b0 = carol
+        .sync
+        .with_durable_owner_history(&permit.inner, |group, device, random, tenure, archive| {
+            store.prepare_registry_head_and_repair(
+                SERVER,
+                group,
+                explicit_registry_key.bucket(),
+                device,
+                Some(tenure),
+                archive,
+                Some(&bob_explicit_registry_pair),
+                random,
+                &mut registry_budget,
+                &mut WriteHooks::fail_before_write(FailError::Io("injected historical B0 failure"))
+                    .at(WriteTag::Journal),
+            )
+        })
+        .unwrap()
+        .unwrap_err();
+    assert!(
+        failed_b0
+            .to_string()
+            .contains("injected historical B0 failure"),
+        "the later Fault refusal masked the B0 failure: {failed_b0}"
+    );
+    assert!(
+        !explicit_owner_record.exists(),
+        "a failed B0 left a claimed durable owner record"
+    );
+    drop(registry_budget);
+
+    let mut registry_budget = historical_storage_budget(&mut store, &mut carol);
+    let prepared_full_loads = crate::store::registry_full_loads_for_test();
+    let prepared_fault = carol
+        .sync
+        .with_durable_owner_history(&permit.inner, |group, device, random, tenure, archive| {
+            store.prepare_registry_head_prepared_with_fault_repair(
+                SERVER,
+                group,
+                prepared_registry_key.bucket(),
+                device,
+                Some(tenure),
+                archive,
+                Some(&bob_prepared_registry_pair),
+                random,
+                Some((&prepared_stamp, &prepared_source)),
+                &mut registry_budget,
+            )
+        })
+        .unwrap()
+        .unwrap_err();
+    assert!(
+        prepared_fault
+            .to_string()
+            .contains("conflicting epoch-close receipt"),
+        "the prepared Fault source did not refuse head service: {prepared_fault}"
+    );
+    assert_eq!(
+        crate::store::registry_full_loads_for_test(),
+        prepared_full_loads,
+        "archived B0 admission reconstructed a prepared Registry source"
+    );
+    assert!(
+        prepared_owner_record.exists(),
+        "prepared service skipped B0"
+    );
+    drop(registry_budget);
+
+    let mut registry_budget = historical_storage_budget(&mut store, &mut carol);
+    let explicit_fault = carol
+        .sync
+        .with_durable_owner_history(&permit.inner, |group, device, random, tenure, archive| {
+            store.prepare_registry_head_with_fault_repair(
+                SERVER,
+                group,
+                explicit_registry_key.bucket(),
+                device,
+                Some(tenure),
+                archive,
+                Some(&bob_explicit_registry_pair),
+                random,
+                &mut registry_budget,
+            )
+        })
+        .unwrap()
+        .unwrap_err();
+    assert!(
+        explicit_fault
+            .to_string()
+            .contains("conflicting epoch-close receipt"),
+        "the explicit Fault source did not refuse head service: {explicit_fault}"
+    );
+    assert!(
+        explicit_owner_record.exists(),
+        "explicit service skipped B0"
+    );
+    drop(registry_budget);
+
+    // An exact retry can use the retained attestation after archive lookup disappears, but it
+    // still cannot turn a faulted Registry source into a hint or proof.
+    let mut registry_budget = historical_storage_budget(&mut store, &mut carol);
+    let retained_retry = carol
+        .sync
+        .with_durable_owner_history(&permit.inner, |group, device, random, tenure, _| {
+            store.prepare_registry_head_with_fault_repair(
+                SERVER,
+                group,
+                explicit_registry_key.bucket(),
+                device,
+                Some(tenure),
+                None,
+                Some(&bob_explicit_registry_pair),
+                random,
+                &mut registry_budget,
+            )
+        })
+        .unwrap()
+        .unwrap_err();
+    assert!(
+        retained_retry
+            .to_string()
+            .contains("conflicting epoch-close receipt"),
+        "retained admission incorrectly made the Fault servable: {retained_retry}"
+    );
+    drop(registry_budget);
 
     // The live owner can now make an explicit signed decision for the retained historical pair.
     // Its healthy current source is screened rather than faulted or rewritten as if B were live.
+    let mut studio_budget = {
+        let current = inventory(&mut store);
+        carol
+            .sync
+            .with_registry_context(|group, _, _, _| {
+                store.studio_storage_budget(SERVER, group, &current)
+            })
+            .unwrap()
+    };
     let request = StudioRepairRequest {
         receipt_a: bob_pair[0].hash(),
         receipt_b: bob_pair[1].hash(),
@@ -1076,6 +1400,46 @@ async fn archived_observed_tenure_admits_only_its_exact_pair_after_restart() {
         .unwrap();
     assert_eq!(outcome, StudioRepairOutcome::Screened);
     assert_eq!(repair.tenure_id, bob_pair[0].tenure_id);
+
+    drop(studio_budget);
+    drop(permit);
+    drop(prepared_source);
+    drop(prepared_stamp);
+    drop(store);
+    let store = open(root.path());
+    carol.sync.with_registry_context(|group, device, _, _| {
+        for (document, pair, bucket) in [
+            (
+                &prepared_registry_document,
+                &bob_prepared_registry_pair,
+                prepared_registry_key.bucket(),
+            ),
+            (
+                &explicit_registry_document,
+                &bob_explicit_registry_pair,
+                explicit_registry_key.bucket(),
+            ),
+        ] {
+            let retained = store
+                .load_epoch_owner_repair_state(SERVER, document, &device.device_id(), group.epoch())
+                .unwrap()
+                .0
+                .retained_pairs()
+                .1
+                .expect("the service path persisted its archived pair")
+                .hashes();
+            assert_eq!(retained, [pair[0].hash(), pair[1].hash()]);
+            assert_eq!(
+                store
+                    .load_registry_epoch(SERVER, group, bucket, device)
+                    .unwrap()
+                    .expect("the faulted Registry source survived reopen")
+                    .phase(),
+                EpochPhase::Fault,
+                "B0 admission must not repair or relabel the source"
+            );
+        }
+    });
 }
 
 #[test]

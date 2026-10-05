@@ -399,6 +399,37 @@ impl ServerStore {
         rng: &mut impl CryptoRngCore,
         budget: &mut EpochStorageBudget,
     ) -> Result<Option<ReportAdmission>, AppError> {
+        self.admit_fault_report_with_writer(
+            server,
+            document,
+            group,
+            device,
+            tenure,
+            archived_owner,
+            report,
+            rng,
+            budget,
+            &mut WriteHooks::None,
+        )
+    }
+
+    /// The production admission path with the owner-record writer exposed only for deterministic
+    /// crash-boundary tests. Callers must propagate every writer error: a visible or uncertain B0
+    /// replacement is not permission to answer the request that carried the report.
+    #[allow(clippy::too_many_arguments)]
+    pub(in crate::store) fn admit_fault_report_with_writer(
+        &mut self,
+        server: u64,
+        document: &LogicalDocument,
+        group: &ServerGroup,
+        device: &catcoms_mls::MlsDevice,
+        tenure: u64,
+        archived_owner: Option<&ArchivedOwnerTenure>,
+        report: &[Receipt; 2],
+        rng: &mut impl CryptoRngCore,
+        budget: &mut EpochStorageBudget,
+        hooks: &mut WriteHooks<'_>,
+    ) -> Result<Option<ReportAdmission>, AppError> {
         let observer = device.device_id();
         if group.designated_committer() != Some(observer)
             || group.member_signature_key(&observer).as_deref()
@@ -451,7 +482,7 @@ impl ServerStore {
             group.epoch(),
             rng,
             budget,
-            &mut WriteHooks::None,
+            hooks,
         )
         .map(Some)
     }
