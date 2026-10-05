@@ -532,13 +532,24 @@ impl StudioReceiver {
             };
             // Structural: the probe needs the branch's author and basis, never its projection.
             match store.load_epoch_intents_structural(id, &logical) {
-                Ok(state) => match state.handoff_metadata().and_then(|m| m.overlay()) {
-                    Some(overlay) if overlay.author() == device => {
-                        found = Some((target, overlay.basis()));
+                Ok(state) => {
+                    let metadata = state.handoff_metadata();
+                    let closing = metadata.as_ref().is_some_and(|metadata| {
+                        matches!(
+                            metadata.provenance(),
+                            catcoms_replication::studio::StudioOverlayProvenance::Closing
+                        )
+                    });
+                    let overlay = metadata.as_ref().and_then(|metadata| metadata.overlay());
+                    if closing && overlay.is_some_and(|overlay| overlay.author() == device) {
+                        found = Some((target, overlay.expect("checked above").basis()));
                         break;
                     }
-                    _ => quiet.push(target),
-                },
+                    // Unconfirmed history is deliberately quiet, not a failed handoff. Core also
+                    // refuses it, but selecting it here would repeatedly spend a full detached
+                    // reconstruction and advertise an automatic transfer that can never happen.
+                    quiet.push(target);
+                }
                 Err(_) => unreadable = unreadable.or(Some(target)),
             }
         }
@@ -774,6 +785,25 @@ impl StudioReceiver {
                 None
             }
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn handoff_probe_for_test<T: MeshTransport + 'static, R: CryptoRngCore>(
+        &mut self,
+        server: &mut Server<T, R>,
+        store: &mut ServerStore,
+        id: u64,
+    ) {
+        self.handoff_probe(server, store, id);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn handoff_is_quiet_for_test(
+        &self,
+        store: &ServerStore,
+        target: StudioTarget,
+    ) -> bool {
+        self.handoff.is_quiet(&store.intent_generation(), target)
     }
 
     /// A detached handoff stage came back.

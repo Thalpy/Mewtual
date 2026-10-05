@@ -1,5 +1,6 @@
 mod runtime;
 use super::*;
+use crate::studio::{StudioOverlaySaveVisit, StudioReceiver};
 use crate::studio_exchange::provisional::{
     ProvisionalStudioTailAttempt, ProvisionalStudioTailCompletion,
     ServerPreparedProvisionalStudioSeed,
@@ -78,6 +79,297 @@ async fn ready(
         (op, source.projection().unwrap())
     });
     (seed_result, op, projection)
+}
+
+async fn complete_preview(p: &mut Pair) -> ServerPreparedProvisionalStudioSeed {
+    let (seed, tail, _) = ready(p).await;
+    let pending = p
+        .bob
+        .prepare_provisional_studio_tail(&p.b_store, SERVER, seed)
+        .unwrap();
+    let completed = tail_response(p, pending, tail).await;
+    let preparation = p
+        .bob
+        .complete_provisional_studio_tail(&p.b_store, SERVER, completed)
+        .unwrap()
+        .unwrap();
+    let preview = tokio::task::spawn_blocking(move || preparation.prepare())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(preview.tail_complete());
+    preview
+}
+
+/// The first app-side consumer of an archived awaiting-tenure preview. The fixture obtains a real
+/// current seed and complete authenticated tail, then runs all three Flow S stages. The source
+/// remains absent and the durable branch records Unconfirmed provenance; neither fact is inferred
+/// from a fabricated basis.
+#[tokio::test]
+async fn complete_preview_can_save_an_unconfirmed_draft_only_through_detached_flow_s() {
+    let mut p = pages::proven_pair().await;
+    let target = p.watch.target;
+    let preview = complete_preview(&mut p).await;
+
+    let mut budget = budget(&mut p.bob, &mut p.b_store);
+    let wrong_target = StudioTarget::Index { channel: channel() };
+    assert!(p
+        .bob
+        .prepare_studio_unconfirmed_overlay(
+            &mut p.b_store,
+            SERVER,
+            wrong_target,
+            &preview,
+            &mut budget,
+        )
+        .is_err());
+    let ticket = p
+        .bob
+        .prepare_studio_unconfirmed_overlay(&mut p.b_store, SERVER, target, &preview, &mut budget)
+        .unwrap();
+    let operation = title(10, "local while awaiting tenure");
+    let mut receiver = StudioReceiver::default();
+    assert!(matches!(
+        receiver
+            .save_unconfirmed_overlay(
+                &mut p.bob,
+                &mut p.b_store,
+                SERVER,
+                target,
+                &preview,
+                ticket.basis,
+                ticket.branch,
+                operation.clone(),
+                &mut budget,
+            )
+            .unwrap(),
+        StudioOverlaySaveVisit::Scheduled
+    ));
+
+    let work = receiver
+        .detach(&mut p.bob)
+        .expect("the first append must be detached");
+    assert_eq!(work.kind_for_test(), "overlay-plan");
+    let result = work.run(None).await;
+    receiver.complete(&mut p.bob, result);
+
+    let saved = receiver
+        .save_unconfirmed_overlay(
+            &mut p.bob,
+            &mut p.b_store,
+            SERVER,
+            target,
+            &preview,
+            ticket.basis,
+            ticket.branch,
+            operation.clone(),
+            &mut budget,
+        )
+        .unwrap();
+    let StudioOverlaySaveVisit::Saved(saved) = saved else {
+        panic!("the completed detached plan was not committed")
+    };
+    let catcoms_replication::studio::StudioOverlaySave::Local(draft) = *saved else {
+        panic!("new Unconfirmed authoring returned a terminal acknowledgement")
+    };
+    assert_eq!(draft.basis(), ticket.basis);
+    assert_eq!(draft.accepted(), 1);
+
+    // V8: once durable, the exact request is an acknowledgement path. Expiring the preview must
+    // not turn it into new authoring or make it require a fresh basis.
+    p.clock.advance_ms(60_000);
+    assert!(!preview.unconfirmed_is_unexpired());
+    let retry = receiver
+        .save_unconfirmed_overlay(
+            &mut p.bob,
+            &mut p.b_store,
+            SERVER,
+            target,
+            &preview,
+            ticket.basis,
+            ticket.branch,
+            operation,
+            &mut budget,
+        )
+        .unwrap();
+    assert!(matches!(retry, StudioOverlaySaveVisit::Saved(_)));
+    assert!(receiver
+        .save_unconfirmed_overlay(
+            &mut p.bob,
+            &mut p.b_store,
+            SERVER,
+            target,
+            &preview,
+            ticket.basis,
+            ticket.branch,
+            title(11, "must not save from an expired preview"),
+            &mut budget,
+        )
+        .is_err());
+
+    let (group, author) = p
+        .bob
+        .sync
+        .with_registry_context(|group, device, _, _| (group.group_id(), device.device_id()));
+    let capture = p
+        .b_store
+        .capture_studio_inspection(SERVER, &group, target, author)
+        .unwrap();
+    let (_, inspected) = capture.rebuild().unwrap();
+    assert!(matches!(
+        inspected.provenance,
+        Some(catcoms_replication::studio::StudioOverlayProvenance::Unconfirmed { .. })
+    ));
+    assert!(p
+        .bob
+        .sync
+        .with_registry_context(|group, device, _, _| {
+            p.b_store
+                .capture_studio_source(SERVER, group, target, device)
+        })
+        .unwrap()
+        .is_none());
+
+    receiver
+        .observe_for_test(
+            &mut p.bob,
+            &p.b_store,
+            SERVER,
+            target,
+            preview.unconfirmed_doc_id(),
+        )
+        .unwrap();
+    receiver.handoff_probe_for_test(&mut p.bob, &mut p.b_store, SERVER);
+    assert!(
+        receiver.handoff_is_quiet_for_test(&p.b_store, target),
+        "automatic handoff must memoize Unconfirmed history as quiet"
+    );
+
+    // A fresh complete inventory, rather than the in-memory writer counters, must recover both
+    // rails from authenticated durable facts. This is the restart/reconciliation authority used
+    // by subsequent Save visits.
+    let mut refreshed = crate::studio_exchange::tests::budget(&mut p.bob, &mut p.b_store);
+    let (branches, bytes) = refreshed.unconfirmed_usage_for_test();
+    assert_eq!(branches, 1);
+    assert!(bytes > 0);
+
+    // Disposal is the only supported transition that removes a live Unconfirmed branch. It must
+    // release the in-memory rails only after the terminal replacement lands, and a fresh scan must
+    // derive the same zero usage from the retained terminal record.
+    let request = crate::store::StudioOverlayDisposalRequest {
+        branch: inspected.branch.unwrap(),
+        content: inspected.content.unwrap(),
+        accepted: inspected.draft.as_ref().unwrap().accepted(),
+        mode: crate::store::StudioDisposalRequestMode::Discard(
+            catcoms_replication::studio::StudioDiscardConfirmation::parse(
+                catcoms_replication::studio::StudioDiscardConfirmation::TOKEN,
+            )
+            .unwrap(),
+        ),
+    };
+    p.bob
+        .sync
+        .with_registry_context(|group, device, clock, rng| {
+            let document = target.document(&group.group_id()).unwrap();
+            p.b_store.dispose_studio_overlay(
+                SERVER,
+                &document,
+                target,
+                group,
+                device,
+                request,
+                clock.now_ms(),
+                rng,
+                &mut refreshed,
+            )
+        })
+        .unwrap();
+    assert_eq!(refreshed.unconfirmed_usage_for_test(), (0, 0));
+    let rescanned = crate::studio_exchange::tests::budget(&mut p.bob, &mut p.b_store);
+    assert_eq!(rescanned.unconfirmed_usage_for_test(), (0, 0));
+}
+
+/// The app rail is intentionally narrower than replication's general overlay bound. Pin the
+/// boundary through the real preview and detached scheduler so a future caller cannot bypass the
+/// 64-operation policy by invoking another stage directly.
+#[tokio::test]
+async fn unconfirmed_preview_refuses_a_sixty_fifth_operation_before_scheduling() {
+    let mut p = pages::proven_pair().await;
+    let target = p.watch.target;
+    let preview = complete_preview(&mut p).await;
+    let mut budget = budget(&mut p.bob, &mut p.b_store);
+    let ticket = p
+        .bob
+        .prepare_studio_unconfirmed_overlay(&mut p.b_store, SERVER, target, &preview, &mut budget)
+        .unwrap();
+    let mut receiver = StudioReceiver::default();
+
+    for accepted in 1..=64u8 {
+        let operation = title(
+            accepted.wrapping_add(80),
+            &format!("unconfirmed {accepted}"),
+        );
+        assert!(matches!(
+            receiver
+                .save_unconfirmed_overlay(
+                    &mut p.bob,
+                    &mut p.b_store,
+                    SERVER,
+                    target,
+                    &preview,
+                    ticket.basis,
+                    ticket.branch,
+                    operation.clone(),
+                    &mut budget,
+                )
+                .unwrap(),
+            StudioOverlaySaveVisit::Scheduled
+        ));
+        let work = receiver
+            .detach(&mut p.bob)
+            .expect("each admitted append must run detached");
+        receiver.complete(&mut p.bob, work.run(None).await);
+        let saved = receiver
+            .save_unconfirmed_overlay(
+                &mut p.bob,
+                &mut p.b_store,
+                SERVER,
+                target,
+                &preview,
+                ticket.basis,
+                ticket.branch,
+                operation,
+                &mut budget,
+            )
+            .unwrap();
+        let StudioOverlaySaveVisit::Saved(saved) = saved else {
+            panic!("detached append {accepted} was not committed")
+        };
+        let catcoms_replication::studio::StudioOverlaySave::Local(draft) = *saved else {
+            panic!("new authoring unexpectedly returned a terminal acknowledgement")
+        };
+        assert_eq!(draft.accepted(), accepted as usize);
+    }
+
+    let refused = match receiver.save_unconfirmed_overlay(
+        &mut p.bob,
+        &mut p.b_store,
+        SERVER,
+        target,
+        &preview,
+        ticket.basis,
+        ticket.branch,
+        title(200, "one operation too many"),
+        &mut budget,
+    ) {
+        Err(error) => error,
+        Ok(_) => panic!("a sixty-fifth Unconfirmed operation was admitted"),
+    };
+    assert!(refused.to_string().contains("64 accepted operations"));
+    assert!(
+        receiver.detach(&mut p.bob).is_none(),
+        "the rejected operation must not consume detached capacity"
+    );
 }
 async fn tail_response(
     p: &mut Pair,

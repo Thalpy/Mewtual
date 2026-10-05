@@ -12,10 +12,12 @@ use crate::store::creative_references::CreativeHold;
 use crate::store::epoch_intents::{self, EpochIntentState};
 use catcoms_crypto::DeviceId;
 use catcoms_replication::studio::{
-    StudioClosingOverlayBasis, StudioLocalDraft, StudioOverlayAdmission, StudioOverlayProvenance,
-    StudioOverlayState,
+    StudioClosingOverlayBasis, StudioLocalDraft, StudioOverlayAdmission, StudioOverlayBasis,
+    StudioOverlayProvenance, StudioOverlayState, StudioUnconfirmedOverlayBasis,
 };
 use catcoms_replication::LocalIntent;
+
+pub(super) const MAX_UNCONFIRMED_OVERLAY_OPS: usize = 64;
 
 /// Which branch an authorized new acceptance joins, as S1b decided it under custody.
 ///
@@ -131,13 +133,53 @@ impl std::fmt::Debug for StudioOverlayStamp {
     }
 }
 
-/// Authenticated zeroizing plaintext, public context, the private Closing basis and the job-owned
+/// The owned form of [`StudioOverlayBasis`]. Captures cross a detached worker boundary, so they
+/// cannot retain the borrowed facade used by the replication crate. Keeping the two concrete
+/// basis types as variants also makes provenance a property of the capability itself: callers
+/// cannot pair an Unconfirmed base with a Closing label (or the reverse).
+pub(crate) enum CapturedStudioOverlayBasis {
+    Closing(StudioClosingOverlayBasis),
+    Unconfirmed(StudioUnconfirmedOverlayBasis),
+}
+
+impl CapturedStudioOverlayBasis {
+    pub(crate) fn borrowed(&self) -> StudioOverlayBasis<'_> {
+        match self {
+            Self::Closing(basis) => StudioOverlayBasis::Closing(basis),
+            Self::Unconfirmed(basis) => StudioOverlayBasis::Unconfirmed(basis),
+        }
+    }
+
+    pub(crate) fn fingerprint(&self) -> [u8; 32] {
+        self.borrowed().fingerprint()
+    }
+
+    fn provenance(&self) -> StudioOverlayProvenance {
+        self.borrowed().provenance()
+    }
+}
+
+impl From<StudioClosingOverlayBasis> for CapturedStudioOverlayBasis {
+    fn from(basis: StudioClosingOverlayBasis) -> Self {
+        Self::Closing(basis)
+    }
+}
+
+impl From<StudioUnconfirmedOverlayBasis> for CapturedStudioOverlayBasis {
+    fn from(basis: StudioUnconfirmedOverlayBasis) -> Self {
+        Self::Unconfirmed(basis)
+    }
+}
+
+/// Authenticated zeroizing plaintext, public context, the private typed basis and the job-owned
 /// media hold. The basis grants permission to prepare local draft data only; the commit re-derives
 /// and re-matches it from actual durable state before anything is written.
 pub(crate) struct StudioOverlayCapture {
     stamp: StudioOverlayStamp,
     intent_bytes: Option<Zeroizing<Vec<u8>>>,
-    basis: StudioClosingOverlayBasis,
+    basis: CapturedStudioOverlayBasis,
+    unconfirmed: bool,
+    opens_unconfirmed_branch: bool,
     /// The branch the request named, and what S1b decided it joins.
     branch: [u8; 32],
     joins: OverlayBranch,
@@ -161,6 +203,20 @@ pub(crate) struct StudioOverlayPlan {
     state: EpochIntentState,
     draft: StudioLocalDraft,
     media: AdmittedOverlayMedia,
+    unconfirmed: bool,
+    opens_unconfirmed_branch: bool,
+}
+
+/// A plan after the commit visit has reauthenticated its mount, target, member, owner, MLS epoch
+/// and exact intent-record version. It remains non-authoritative until the provenance-specific S3
+/// check re-mints the basis and, for Unconfirmed history, proves source absence.
+struct CheckedStudioOverlayPlan {
+    stamp: StudioOverlayStamp,
+    state: EpochIntentState,
+    draft: StudioLocalDraft,
+    media: AdmittedOverlayMedia,
+    unconfirmed: bool,
+    opens_unconfirmed_branch: bool,
 }
 
 impl std::fmt::Debug for StudioOverlayPlan {
@@ -198,12 +254,20 @@ impl StudioOverlayCapture {
             return Err(invalid("ordinary intent cannot become an accepted overlay"));
         }
         let mut overlay = self.joined_branch(state.overlay.as_ref())?;
+        if self.unconfirmed
+            && overlay.overlay().map(|held| held.accepted()).unwrap_or(0)
+                >= MAX_UNCONFIRMED_OVERLAY_OPS
+        {
+            return Err(invalid(
+                "Unconfirmed draft operation limit reached (64 accepted operations)",
+            ));
+        }
         state
             .ledger
             .prepare(self.intent.author, self.intent.operation.clone())
             .map_err(invalid)?;
         let draft = overlay
-            .append(&self.basis, &state.ledger, op_id, self.ts)
+            .append(self.basis.borrowed(), &state.ledger, op_id, self.ts)
             .map_err(invalid)?;
         state.overlay = Some(overlay);
         Ok(StudioOverlayPlan {
@@ -211,6 +275,8 @@ impl StudioOverlayCapture {
             state,
             draft,
             media: self.media,
+            unconfirmed: self.unconfirmed,
+            opens_unconfirmed_branch: self.opens_unconfirmed_branch,
         })
     }
 
@@ -233,7 +299,7 @@ impl StudioOverlayCapture {
             )),
             (OverlayBranch::Admitted(admission), Some(state)) => {
                 if state
-                    .admit_new_branch(self.stamp.target, self.branch, &self.basis)
+                    .admit_new_branch(self.stamp.target, self.branch, self.basis.borrowed())
                     .map_err(invalid)?
                     != *admission
                 {
@@ -242,16 +308,18 @@ impl StudioOverlayCapture {
                     ));
                 }
                 state
-                    .new_admitted(&self.basis, *admission, StudioOverlayProvenance::Closing)
+                    .new_admitted(self.basis.borrowed(), *admission, self.basis.provenance())
                     .map_err(invalid)
             }
             (OverlayBranch::Admitted(admission), None) => {
-                if StudioOverlayState::admit_first_branch(self.branch, &self.basis) != *admission {
+                if StudioOverlayState::admit_first_branch(self.branch, self.basis.borrowed())
+                    != *admission
+                {
                     return Err(invalid(
                         "the record no longer admits the branch this request named",
                     ));
                 }
-                Ok(StudioOverlayState::new(&self.basis))
+                Ok(StudioOverlayState::new(self.basis.borrowed()))
             }
         }
     }
@@ -362,7 +430,7 @@ impl ServerStore {
         group: &ServerGroup,
         target: StudioTarget,
         device: &MlsDevice,
-        basis: StudioClosingOverlayBasis,
+        basis: impl Into<CapturedStudioOverlayBasis>,
         branch: [u8; 32],
         joins: OverlayBranch,
         authoring: AdmittedOverlayAuthoring,
@@ -388,6 +456,9 @@ impl ServerStore {
             ));
         }
         let scope = epoch_intents::scope_bytes(server, &document)?;
+        let basis = basis.into();
+        let unconfirmed = matches!(basis, CapturedStudioOverlayBasis::Unconfirmed(_));
+        let opens_unconfirmed_branch = unconfirmed && matches!(&joins, OverlayBranch::Admitted(_));
         // Authenticate the bounded record without decoding it: the detached stage owns the decode.
         let record = self.read_scoped_intent_plain(&scope)?;
         Ok(StudioOverlayCapture {
@@ -408,6 +479,8 @@ impl ServerStore {
             },
             intent_bytes: record.map(|r| r.plain),
             basis,
+            unconfirmed,
+            opens_unconfirmed_branch,
             branch,
             joins,
             intent,
@@ -442,27 +515,18 @@ impl ServerStore {
         Ok(version == stamp.intent)
     }
 
-    /// Commit a planned acceptance. Re-mints the Closing basis from actual durable state and
-    /// requires the same fingerprint, so the accepted rule "recheck the same source and authority
-    /// immediately before the first durable acceptance" survives the detach. Then installs the
-    /// ordinary conservative reference holds (I-3) and performs one accounted intent write.
-    ///
-    /// The plan's media hold is released only when this call returns, on success, error and
-    /// unwinding alike.
-    #[allow(clippy::too_many_arguments)]
-    pub(in crate::store) fn commit_studio_overlay_save(
+    /// Reauthenticate a detached plan before any provenance-specific S3 work. This deliberately
+    /// does not inspect a Closing source or an Unconfirmed preview: doing so belongs after the
+    /// structural stamp check, and the caller must still re-mint the exact kind of basis it needs.
+    fn check_studio_overlay_plan(
         &mut self,
         server: u64,
         group: &ServerGroup,
         target: StudioTarget,
         device: &MlsDevice,
-        close: &catcoms_replication::CloseRecord,
-        tenure: crate::studio::StudioOwnerTenure,
         plan: StudioOverlayPlan,
-        rng: &mut impl CryptoRngCore,
         budget: &mut EpochStudioBudget,
-        hooks: &mut WriteHooks<'_>,
-    ) -> Result<StudioLocalDraft, AppError> {
+    ) -> Result<CheckedStudioOverlayPlan, AppError> {
         current_member(group, device)?;
         self.enter_studio_budget(server, group, budget)?;
         let StudioOverlayPlan {
@@ -470,19 +534,13 @@ impl ServerStore {
             state,
             draft,
             media,
+            unconfirmed,
+            opens_unconfirmed_branch,
         } = plan;
-        let AdmittedOverlayMedia {
-            origin,
-            frame,
-            hold,
-        } = media;
         if stamp.server != server || stamp.target != target {
             return Err(invalid("overlay plan belongs to another target"));
         }
-        // The plan's own copy of the binding capture already checked. A plan is a value the
-        // receiver will hold across a detach and hand back here, so the commit does not take the
-        // capture's word for which operation these media facts protect.
-        if origin.target != target || origin.document != stamp.document {
+        if media.origin.target != target || media.origin.document != stamp.document {
             return Err(invalid(
                 "admitted media does not belong to this authoring request",
             ));
@@ -490,35 +548,62 @@ impl ServerStore {
         if !self.studio_overlay_is_current(group, device, &stamp)? {
             return Err(invalid("overlay record or context changed; retry"));
         }
+        Ok(CheckedStudioOverlayPlan {
+            stamp,
+            state,
+            draft,
+            media,
+            unconfirmed,
+            opens_unconfirmed_branch,
+        })
+    }
+
+    /// Finish the common S3 transaction after the caller has revalidated the typed basis. The
+    /// transient media hold outlives the physical-presence check, reference transfer and intent
+    /// write attempt on every success and error path.
+    fn finish_studio_overlay_plan(
+        &mut self,
+        server: u64,
+        checked: CheckedStudioOverlayPlan,
+        rng: &mut impl CryptoRngCore,
+        budget: &mut EpochStudioBudget,
+        hooks: &mut WriteHooks<'_>,
+    ) -> Result<StudioLocalDraft, AppError> {
+        let CheckedStudioOverlayPlan {
+            stamp,
+            state,
+            draft,
+            media,
+            unconfirmed,
+            opens_unconfirmed_branch,
+        } = checked;
+        let AdmittedOverlayMedia {
+            origin: _,
+            frame,
+            hold,
+        } = media;
         let document = stamp.document.clone();
-        // Re-derive the basis under the same custody as the write. A changed Closing source, a
-        // replaced signed close, a changed owner or a tenure that is not Known all discard the
-        // plan. S3 is a V1 site: the requirement is applied here, at the stage, so Imported and
-        // Unknown are refused with their own messages.
-        let tenure = crate::studio::require_owner_tenure(tenure)?;
-        let (mut source, observed, _) =
-            self.checked_studio_source(server, group, target, device, false, &mut budget.storage)?;
-        if observed.is_none() {
-            return Err(invalid("Closing overlay source is missing"));
-        }
-        let fresh = source
-            .prepare_closing_overlay(close, group, tenure)
-            .map_err(invalid)?;
-        if fresh.fingerprint() != draft.basis() {
-            return Err(invalid("Closing overlay basis changed"));
-        }
-        drop(source);
-        // S3: the referenced pixels must still be physically present. The transient hold is a
-        // liveness claim over an address, not proof the bytes survived the detached stage, so
-        // this runs before the ordinary holds and before the intent barrier. A missing blob must
-        // not become a newly accepted durable reference.
+        let old_unconfirmed_charge = if unconfirmed && !opens_unconfirmed_branch {
+            stamp.intent.map(|(_, size)| size)
+        } else {
+            None
+        };
+        let next_unconfirmed_charge = if unconfirmed {
+            let scope = epoch_intents::scope_bytes(server, &document)?;
+            let next = state
+                .encode(&scope)?
+                .len()
+                .checked_add(40)
+                .ok_or_else(|| invalid("Unconfirmed draft accounting overflow"))?
+                as u64;
+            budget.preflight_unconfirmed(opens_unconfirmed_branch, old_unconfirmed_charge, next)?;
+            Some(next)
+        } else {
+            None
+        };
         if let Some((cid, bytes)) = &frame {
             self.check_studio_frame_pixels(&stamp.document.server_id, cid, *bytes)?;
         }
-        // I-3, second half: the protection transfer. These run BEFORE the write attempt and while
-        // the plan's job-owned hold is still alive, so dropping that hold below is safe whatever
-        // the write does. A durable record alone does not repair a reference set that a complete
-        // scan installed while this acceptance was in flight.
         self.hold_creative(
             &document.server_id,
             state
@@ -545,9 +630,80 @@ impl ServerStore {
             WriteStep::new(WriteTag::Intents),
             hooks,
         );
-        // Explicit: the hold outlives the write attempt, including its error path.
         drop(hold);
         written?;
+        if let Some(next) = next_unconfirmed_charge {
+            budget.commit_unconfirmed(opens_unconfirmed_branch, old_unconfirmed_charge, next);
+        }
         Ok(draft)
+    }
+
+    /// Commit a planned acceptance. Re-mints the Closing basis from actual durable state and
+    /// requires the same fingerprint, so the accepted rule "recheck the same source and authority
+    /// immediately before the first durable acceptance" survives the detach. Then installs the
+    /// ordinary conservative reference holds (I-3) and performs one accounted intent write.
+    ///
+    /// The plan's media hold is released only when this call returns, on success, error and
+    /// unwinding alike.
+    #[allow(clippy::too_many_arguments)]
+    pub(in crate::store) fn commit_studio_overlay_save(
+        &mut self,
+        server: u64,
+        group: &ServerGroup,
+        target: StudioTarget,
+        device: &MlsDevice,
+        close: &catcoms_replication::CloseRecord,
+        tenure: crate::studio::StudioOwnerTenure,
+        plan: StudioOverlayPlan,
+        rng: &mut impl CryptoRngCore,
+        budget: &mut EpochStudioBudget,
+        hooks: &mut WriteHooks<'_>,
+    ) -> Result<StudioLocalDraft, AppError> {
+        let checked =
+            self.check_studio_overlay_plan(server, group, target, device, plan, budget)?;
+        // Re-derive the basis under the same custody as the write. A changed Closing source, a
+        // replaced signed close, a changed owner or a tenure that is not Known all discard the
+        // plan. S3 is a V1 site: the requirement is applied here, at the stage, so Imported and
+        // Unknown are refused with their own messages.
+        let tenure = crate::studio::require_owner_tenure(tenure)?;
+        let (mut source, observed, _) =
+            self.checked_studio_source(server, group, target, device, false, &mut budget.storage)?;
+        if observed.is_none() {
+            return Err(invalid("Closing overlay source is missing"));
+        }
+        let fresh = source
+            .prepare_closing_overlay(close, group, tenure)
+            .map_err(invalid)?;
+        if fresh.fingerprint() != checked.draft.basis() {
+            return Err(invalid("Closing overlay basis changed"));
+        }
+        drop(source);
+        self.finish_studio_overlay_plan(server, checked, rng, budget, hooks)
+    }
+
+    /// Commit an Unconfirmed plan. The app has just re-minted `fresh` from the live complete
+    /// preview; this visit independently reauthenticates the plan and proves that no installed
+    /// source exists before comparing the basis and performing the common intent transaction.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn commit_studio_unconfirmed_overlay_save(
+        &mut self,
+        server: u64,
+        group: &ServerGroup,
+        target: StudioTarget,
+        device: &MlsDevice,
+        fresh: StudioUnconfirmedOverlayBasis,
+        plan: StudioOverlayPlan,
+        rng: &mut impl CryptoRngCore,
+        budget: &mut EpochStudioBudget,
+    ) -> Result<StudioLocalDraft, AppError> {
+        let checked =
+            self.check_studio_overlay_plan(server, group, target, device, plan, budget)?;
+        self.check_studio_source_absent(server, group, target, &mut budget.storage)?;
+        if fresh.fingerprint() != checked.draft.basis() {
+            return Err(invalid(
+                "Unconfirmed overlay basis changed; refresh the preview",
+            ));
+        }
+        self.finish_studio_overlay_plan(server, checked, rng, budget, &mut WriteHooks::None)
     }
 }

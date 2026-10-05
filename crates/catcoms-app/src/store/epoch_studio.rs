@@ -10,7 +10,7 @@ use super::*;
 use catcoms_mls::{MlsDevice, ServerGroup};
 use catcoms_replication::epoch::{MAX_RECEIPT_BYTES, MAX_SIGNED_EPOCH_OP_BYTES};
 use catcoms_replication::studio::{
-    FlipnoteOp, IndexOp, StudioEpoch, StudioProjection, StudioTarget,
+    FlipnoteOp, IndexOp, StudioEpoch, StudioOverlayProvenance, StudioProjection, StudioTarget,
     MAX_STUDIO_EPOCH_SNAPSHOT_BYTES,
 };
 use catcoms_replication::{
@@ -31,7 +31,7 @@ pub(crate) use handoff_capture::{
     MAX_SIGNING_TURNS_PER_VISIT, SIGNING_SLICE_BUDGET_MS,
 };
 mod overlay;
-pub(crate) use overlay::StudioOverlayStart;
+pub(crate) use overlay::{StudioOverlayClassification, StudioOverlayStart};
 mod overlay_capture;
 pub(crate) use overlay_capture::{StudioOverlayCapture, StudioOverlayPlan};
 mod preparation;
@@ -67,7 +67,15 @@ pub struct EpochStudioBudget {
     generation: Arc<()>,
     storage: EpochStorageBudget,
     intents: EpochIntentBudget,
+    /// Live Unconfirmed branches for this numeric server/group in the inventory that minted this
+    /// budget. Updated after each successful write made through the same sole coordinator.
+    unconfirmed_server_branches: usize,
+    /// Exact physical Intents bytes for live Unconfirmed branches across this mounted vault.
+    unconfirmed_vault_bytes: u64,
 }
+
+const MAX_UNCONFIRMED_BRANCHES_PER_SERVER: usize = 3;
+const MAX_UNCONFIRMED_VAULT_BYTES: u64 = 8 * 1024 * 1024;
 impl std::fmt::Debug for EpochStudioBudget {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("EpochStudioBudget")
@@ -84,6 +92,92 @@ impl EpochStudioBudget {
     /// mutation independently checks the store's live generation before spending any bytes.
     pub fn requires_reconciliation(&self) -> bool {
         self.storage.requires_reconciliation()
+    }
+
+    /// Check the Unconfirmed rails against the exact replacement size before any durable write.
+    /// `old_charge` is present only when this write extends an already-live Unconfirmed branch;
+    /// a terminal or Closing record did not contribute to the inventory's Unconfirmed total.
+    fn preflight_unconfirmed(
+        &self,
+        opens_branch: bool,
+        old_charge: Option<u64>,
+        next_charge: u64,
+    ) -> Result<(), AppError> {
+        if opens_branch && self.unconfirmed_server_branches >= MAX_UNCONFIRMED_BRANCHES_PER_SERVER {
+            return Err(invalid(
+                "Unconfirmed draft limit reached for this server (3 branches)",
+            ));
+        }
+        let retained = self
+            .unconfirmed_vault_bytes
+            .checked_sub(old_charge.unwrap_or(0))
+            .ok_or_else(|| invalid("Unconfirmed draft inventory does not match the record"))?;
+        let next = retained
+            .checked_add(next_charge)
+            .ok_or_else(|| invalid("Unconfirmed draft accounting overflow"))?;
+        if next > MAX_UNCONFIRMED_VAULT_BYTES {
+            return Err(invalid(
+                "Unconfirmed draft storage limit reached for this vault (8 MiB)",
+            ));
+        }
+        Ok(())
+    }
+
+    fn preflight_unconfirmed_branch_count(&self) -> Result<(), AppError> {
+        if self.unconfirmed_server_branches >= MAX_UNCONFIRMED_BRANCHES_PER_SERVER {
+            return Err(invalid(
+                "Unconfirmed draft limit reached for this server (3 branches)",
+            ));
+        }
+        Ok(())
+    }
+
+    /// Apply the already-preflighted accounting only after the replacement is durable.
+    fn commit_unconfirmed(
+        &mut self,
+        opens_branch: bool,
+        old_charge: Option<u64>,
+        next_charge: u64,
+    ) {
+        self.unconfirmed_vault_bytes = self
+            .unconfirmed_vault_bytes
+            .checked_sub(old_charge.unwrap_or(0))
+            .and_then(|bytes| bytes.checked_add(next_charge))
+            .expect("preflighted Unconfirmed byte accounting");
+        if opens_branch {
+            self.unconfirmed_server_branches += 1;
+        }
+    }
+
+    /// Release a live Unconfirmed branch's quota only after its terminal disposal record is
+    /// durable. Terminal metadata stays in the Intents file, but the inventory deliberately no
+    /// longer classifies that file as live Unconfirmed occupancy.
+    fn commit_unconfirmed_disposal(&mut self, old_charge: u64) {
+        self.unconfirmed_vault_bytes = self
+            .unconfirmed_vault_bytes
+            .checked_sub(old_charge)
+            .expect("authenticated live Unconfirmed record was charged by this budget");
+        self.unconfirmed_server_branches = self
+            .unconfirmed_server_branches
+            .checked_sub(1)
+            .expect("authenticated live Unconfirmed branch was charged by this budget");
+    }
+
+    fn unconfirmed_quota_snapshot(&self) -> (usize, u64) {
+        (
+            self.unconfirmed_server_branches,
+            self.unconfirmed_vault_bytes,
+        )
+    }
+
+    /// Expose the inventory-derived counters only to crate tests. Production callers must use
+    /// the admission methods above so a stale observation cannot become quota authority.
+    #[cfg(test)]
+    pub(crate) fn unconfirmed_usage_for_test(&self) -> (usize, u64) {
+        (
+            self.unconfirmed_server_branches,
+            self.unconfirmed_vault_bytes,
+        )
     }
 }
 /// Detached read-only persisted state. No mutable document/gate/book escapes the store.
@@ -178,12 +272,36 @@ impl ServerStore {
         )
         .map_err(invalid)?;
         let intents = EpochIntentBudget::from_inventory(inventory)?;
+        let group_id = group.group_id();
+        let mut unconfirmed_server_branches = 0usize;
+        let mut unconfirmed_vault_bytes = 0u64;
+        for entry in inventory.records() {
+            let Some(facts) = entry.intent_facts() else {
+                continue;
+            };
+            if !matches!(
+                facts.provenance(),
+                Some(StudioOverlayProvenance::Unconfirmed { .. })
+            ) {
+                continue;
+            }
+            unconfirmed_vault_bytes = unconfirmed_vault_bytes
+                .checked_add(facts.charged_bytes())
+                .ok_or_else(|| invalid("Unconfirmed draft accounting overflow"))?;
+            if entry.server == server && entry.document.server_id == group_id {
+                unconfirmed_server_branches = unconfirmed_server_branches
+                    .checked_add(1)
+                    .ok_or_else(|| invalid("Unconfirmed draft accounting overflow"))?;
+            }
+        }
         self.studio_generation = Arc::new(());
         Ok(EpochStudioBudget {
             scope,
             generation: self.studio_generation.clone(),
             storage,
             intents,
+            unconfirmed_server_branches,
+            unconfirmed_vault_bytes,
         })
     }
     fn enter_studio_budget(
@@ -987,7 +1105,8 @@ impl ServerStore {
         rng: &mut impl CryptoRngCore,
         budget: &mut EpochStudioBudget,
     ) -> Result<catcoms_replication::studio::StudioOverlayDisposal, AppError> {
-        self.dispose_studio_overlay_with_io(
+        let unconfirmed_quota = budget.unconfirmed_quota_snapshot();
+        let (disposed, unconfirmed_charge) = self.dispose_studio_overlay_accounted_with_io(
             server,
             document,
             target,
@@ -998,8 +1117,13 @@ impl ServerStore {
             rng,
             &mut budget.storage,
             &mut budget.intents,
+            Some(unconfirmed_quota),
             &mut WriteHooks::None,
-        )
+        )?;
+        if let Some(old_charge) = unconfirmed_charge {
+            budget.commit_unconfirmed_disposal(old_charge);
+        }
+        Ok(disposed)
     }
 
     /// App-facing archive write. The control layer holds a `StudioDraftArchive` built on the

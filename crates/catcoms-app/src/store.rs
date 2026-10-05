@@ -96,8 +96,9 @@ pub use epoch_studio::{
 };
 pub(crate) use epoch_studio::{
     PreparedStudioSource, SigningSlice, StudioHandoffCapture, StudioHandoffCommit,
-    StudioHandoffPlan, StudioHandoffStart, StudioOverlayCapture, StudioOverlayPlan,
-    StudioOverlayStart, StudioSourceCapture, MAX_SIGNING_TURNS_PER_VISIT, SIGNING_SLICE_BUDGET_MS,
+    StudioHandoffPlan, StudioHandoffStart, StudioOverlayCapture, StudioOverlayClassification,
+    StudioOverlayPlan, StudioOverlayStart, StudioSourceCapture, MAX_SIGNING_TURNS_PER_VISIT,
+    SIGNING_SLICE_BUDGET_MS,
 };
 pub use epoch_studio::{StudioFaultEvidence, StudioRepairOutcome, StudioRepairRequest};
 pub mod epoch_budget;

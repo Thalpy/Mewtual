@@ -42,6 +42,51 @@ fn budget(store: &mut ServerStore, f: &Fixture) -> EpochStudioBudget {
     let inv = inventory(store);
     store.studio_storage_budget(SERVER, &f.group, &inv).unwrap()
 }
+
+#[test]
+fn unconfirmed_quota_preflight_is_replacement_aware_and_updates_only_after_commit() {
+    let root = tempfile::tempdir().unwrap();
+    let mut store = open(root.path());
+    let fixture = Fixture::new(true);
+    let mut budget = budget(&mut store, &fixture);
+
+    budget.unconfirmed_server_branches = MAX_UNCONFIRMED_BRANCHES_PER_SERVER;
+    assert!(budget.preflight_unconfirmed_branch_count().is_err());
+    budget.unconfirmed_server_branches = MAX_UNCONFIRMED_BRANCHES_PER_SERVER - 1;
+    budget.preflight_unconfirmed_branch_count().unwrap();
+
+    budget.unconfirmed_vault_bytes = MAX_UNCONFIRMED_VAULT_BYTES;
+    budget
+        .preflight_unconfirmed(false, Some(128), 128)
+        .expect("an equal-size replacement spends no additional vault bytes");
+    assert!(budget.preflight_unconfirmed(false, Some(128), 129).is_err());
+    assert_eq!(budget.unconfirmed_vault_bytes, MAX_UNCONFIRMED_VAULT_BYTES);
+
+    budget.commit_unconfirmed(false, Some(128), 64);
+    assert_eq!(
+        budget.unconfirmed_vault_bytes,
+        MAX_UNCONFIRMED_VAULT_BYTES - 64
+    );
+    budget
+        .preflight_unconfirmed(true, None, 64)
+        .expect("the released bytes admit one new branch");
+    budget.commit_unconfirmed(true, None, 64);
+    assert_eq!(
+        budget.unconfirmed_server_branches,
+        MAX_UNCONFIRMED_BRANCHES_PER_SERVER
+    );
+    assert_eq!(budget.unconfirmed_vault_bytes, MAX_UNCONFIRMED_VAULT_BYTES);
+
+    budget.commit_unconfirmed_disposal(64);
+    assert_eq!(
+        budget.unconfirmed_server_branches,
+        MAX_UNCONFIRMED_BRANCHES_PER_SERVER - 1
+    );
+    assert_eq!(
+        budget.unconfirmed_vault_bytes,
+        MAX_UNCONFIRMED_VAULT_BYTES - 64
+    );
+}
 struct Fixture {
     device: MlsDevice,
     group: ServerGroup,

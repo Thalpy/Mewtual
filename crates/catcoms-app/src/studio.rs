@@ -57,8 +57,9 @@ pub(crate) use dispatch::{StudioDispatch, StudioReply, StudioResponse};
 mod receiver;
 #[cfg(test)]
 pub(crate) use receiver::PreviewHarness;
-pub(crate) use receiver::StudioBackgroundResult;
-pub(crate) use receiver::StudioReceiver;
+#[cfg(test)]
+pub(crate) use receiver::StudioOverlaySaveVisit;
+pub(crate) use receiver::{StudioBackgroundResult, StudioReceiver};
 
 /// Bounded before entering the actor queue. Bodies are the existing canonical Studio JSON,
 /// not renderer-authored Automerge changes. Keep ids/nonces/bodies stable across retries.

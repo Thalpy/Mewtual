@@ -1,13 +1,35 @@
 //! No source writes accompany local acceptance. Eligibility is checked under the same
 //! exclusive store/group borrow as the shared intent transaction, with no detached gap.
-use super::overlay_capture::OverlayBranch;
+use super::overlay_capture::{CapturedStudioOverlayBasis, OverlayBranch};
 use super::*;
 use crate::studio::{require_owner_tenure, StudioOwnerTenure};
 use catcoms_replication::studio::{
-    StudioClosingOverlayBasis, StudioOverlayAdmission, StudioOverlayRequestClass,
-    StudioOverlaySave, StudioOverlayState,
+    StudioClosingOverlayBasis, StudioOverlayAdmission, StudioOverlayBasis,
+    StudioOverlayRequestClass, StudioOverlaySave, StudioOverlayState,
 };
 use catcoms_replication::{CloseRecord, LocalIntent};
+
+/// Result of Flow S's basis-independent classification visit. Terminal acknowledgements are
+/// already durable. New authoring carries the authenticated record and the exact public request
+/// forward to S1b, but no basis has been minted and no media has been touched yet.
+pub(crate) enum StudioOverlayClassification {
+    Settled(Box<StudioOverlaySave>),
+    Authoring(Box<StudioOverlayAuthoringRequest>),
+}
+
+/// Basis-independent state captured by S1. This value never leaves store custody: a caller must
+/// mint the provenance-specific basis from current authority, then immediately return it to
+/// `authorize_studio_overlay_save` for branch and media admission.
+pub(crate) struct StudioOverlayAuthoringRequest {
+    document: LogicalDocument,
+    target: StudioTarget,
+    basis: [u8; 32],
+    branch: [u8; 32],
+    operation: DomainOp,
+    ts: u64,
+    state: super::super::epoch_intents::EpochIntentState,
+    joins_live: bool,
+}
 
 impl ServerStore {
     #[allow(clippy::too_many_arguments)]
@@ -130,6 +152,42 @@ impl ServerStore {
             .map_err(invalid)
     }
 
+    /// Prove that this target has no installed source against the current five-family inventory.
+    /// The zero-body probe refuses before allocating an existing record's body; absence is then
+    /// matched to the inventory entry. Unconfirmed authoring calls this before every preview mint
+    /// and again immediately before its first durable acceptance.
+    pub(crate) fn require_studio_source_absent(
+        &mut self,
+        server: u64,
+        group: &ServerGroup,
+        target: StudioTarget,
+        device: &MlsDevice,
+        budget: &mut EpochStudioBudget,
+    ) -> Result<(), AppError> {
+        current_member(group, device)?;
+        self.enter_studio_budget(server, group, budget)?;
+        self.check_studio_source_absent(server, group, target, &mut budget.storage)
+    }
+
+    pub(super) fn check_studio_source_absent(
+        &self,
+        server: u64,
+        group: &ServerGroup,
+        target: StudioTarget,
+        budget: &mut EpochStorageBudget,
+    ) -> Result<(), AppError> {
+        let document = target.document(&group.group_id()).map_err(invalid)?;
+        let scope = scope_bytes(server, &document)?;
+        let storage_scope = StorageScope::new(server, &document.server_id).map_err(invalid)?;
+        let result = (|| {
+            self.read_studio_record_bounded(&scope, 0)?;
+            budget
+                .verify_record(&storage_scope, *blake3::hash(&scope).as_bytes(), None)
+                .map_err(invalid)
+        })();
+        result.inspect_err(|_| budget.invalidate())
+    }
+
     /// The branch a Save prepared against `fresh` must name.
     ///
     /// A thin read over [`StudioOverlayState::request_branch_id`], which owns the derivation; this
@@ -139,12 +197,12 @@ impl ServerStore {
     /// **Not for retries.** A retry must resend the branch its original request named. After a
     /// transfer or a disposal this returns the *next* branch, because that is what a fresh Save
     /// would open, and a retry that re-asked here would name a branch it never wrote to.
-    pub(crate) fn studio_overlay_request_branch(
+    pub(crate) fn studio_overlay_request_branch<'a>(
         &mut self,
         server: u64,
         group: &ServerGroup,
         target: StudioTarget,
-        fresh: &StudioClosingOverlayBasis,
+        fresh: impl Into<StudioOverlayBasis<'a>>,
         budget: &mut EpochStudioBudget,
     ) -> Result<[u8; 32], AppError> {
         let logical = target.document(&group.group_id()).map_err(invalid)?;
@@ -162,6 +220,243 @@ impl ServerStore {
             }
         }
         StudioOverlayState::request_branch_id(metadata, fresh).map_err(invalid)
+    }
+
+    /// S0 and S1 of Flow S, shared by every provenance. No source, tenure, preview or media is
+    /// consulted here. That ordering keeps terminal acknowledgements and exact retries available
+    /// even when the authority needed for new authoring has disappeared or changed.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn classify_studio_overlay_save(
+        &mut self,
+        server: u64,
+        group: &ServerGroup,
+        target: StudioTarget,
+        device: &MlsDevice,
+        basis: [u8; 32],
+        branch: [u8; 32],
+        operation: DomainOp,
+        ts: u64,
+        rng: &mut impl CryptoRngCore,
+        budget: &mut EpochStudioBudget,
+    ) -> Result<StudioOverlayClassification, AppError> {
+        self.classify_studio_overlay_save_with_io(
+            server,
+            group,
+            target,
+            device,
+            basis,
+            branch,
+            operation,
+            ts,
+            rng,
+            budget,
+            &mut WriteHooks::None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(in crate::store) fn classify_studio_overlay_save_with_io(
+        &mut self,
+        server: u64,
+        group: &ServerGroup,
+        target: StudioTarget,
+        device: &MlsDevice,
+        basis: [u8; 32],
+        branch: [u8; 32],
+        operation: DomainOp,
+        ts: u64,
+        rng: &mut impl CryptoRngCore,
+        budget: &mut EpochStudioBudget,
+        hooks: &mut WriteHooks<'_>,
+    ) -> Result<StudioOverlayClassification, AppError> {
+        current_member(group, device)?;
+        let document = target.document(&group.group_id()).map_err(invalid)?;
+        // Bound the caller's public Vec before making a LocalIntent copy.
+        match target {
+            StudioTarget::Index { .. } => {
+                IndexOp::decode_domain(&document, &operation, &device.device_id())
+                    .map_err(invalid)?;
+            }
+            StudioTarget::Flipnote { .. } => {
+                FlipnoteOp::decode_domain(&document, &operation).map_err(invalid)?;
+            }
+        }
+        self.enter_studio_budget(server, group, budget)?;
+        let state = self.checked_epoch_replay_state(
+            server,
+            &document,
+            &mut budget.storage,
+            &mut budget.intents,
+        )?;
+        let intent = LocalIntent {
+            author: device.device_id(),
+            operation: operation.clone(),
+        };
+        let class = match state.handoff_metadata() {
+            Some(metadata) => metadata
+                .classify_request(target, branch, &intent)
+                .map_err(invalid)?,
+            None => StudioOverlayRequestClass::Unmatched,
+        };
+        let joins_live = match class {
+            StudioOverlayRequestClass::Transferred(outcome) => {
+                self.flush_acknowledged_overlay(server, &document, state, rng, budget, hooks)?;
+                return Ok(StudioOverlayClassification::Settled(Box::new(
+                    StudioOverlaySave::HandedOff(outcome),
+                )));
+            }
+            StudioOverlayRequestClass::Disposed(disposal) => {
+                self.flush_acknowledged_overlay(server, &document, state, rng, budget, hooks)?;
+                return Ok(StudioOverlayClassification::Settled(Box::new(
+                    StudioOverlaySave::Disposed(disposal),
+                )));
+            }
+            StudioOverlayRequestClass::Active => true,
+            StudioOverlayRequestClass::Unmatched => {
+                // A terminal transfer retry is keyed on the retained basis and full envelope, so
+                // it remains recognizable after a newer branch advances the generation.
+                if let Some(outcome) = match state.handoff_metadata() {
+                    Some(metadata) => metadata
+                        .completed_retry(target, basis, &intent)
+                        .map_err(invalid)?,
+                    None => None,
+                } {
+                    self.flush_acknowledged_overlay(server, &document, state, rng, budget, hooks)?;
+                    return Ok(StudioOverlayClassification::Settled(Box::new(
+                        StudioOverlaySave::HandedOff(outcome),
+                    )));
+                }
+                false
+            }
+        };
+        // Accepted exact retries remain available before provenance-specific authority checks.
+        if joins_live {
+            let overlay = state
+                .overlay()
+                .ok_or_else(|| invalid("classified Active with no live branch"))?;
+            if overlay.exact_retry(basis, &intent).map_err(invalid)? {
+                drop(state);
+                let draft = self.write_studio_overlay_intent(
+                    server,
+                    &document,
+                    target,
+                    device,
+                    group,
+                    basis,
+                    operation,
+                    rng,
+                    &mut budget.storage,
+                    &mut budget.intents,
+                    hooks,
+                )?;
+                return Ok(StudioOverlayClassification::Settled(Box::new(
+                    StudioOverlaySave::Local(draft),
+                )));
+            }
+        }
+        if state
+            .pending()
+            .any(|(id, _)| *id == intent.operation.id(&intent.author))
+        {
+            return Err(invalid("ordinary intent cannot become an accepted overlay"));
+        }
+        Ok(StudioOverlayClassification::Authoring(Box::new(
+            StudioOverlayAuthoringRequest {
+                document,
+                target,
+                basis,
+                branch,
+                operation,
+                ts,
+                state,
+                joins_live,
+            },
+        )))
+    }
+
+    /// S1b after a provenance-specific caller has minted a fresh basis under current authority.
+    /// Branch admission precedes media work, and the typed basis is carried intact into S2.
+    pub(crate) fn authorize_studio_overlay_save(
+        &self,
+        server: u64,
+        group: &ServerGroup,
+        device: &MlsDevice,
+        request: StudioOverlayAuthoringRequest,
+        fresh: CapturedStudioOverlayBasis,
+        budget: &EpochStudioBudget,
+    ) -> Result<StudioOverlayCapture, AppError> {
+        let StudioOverlayAuthoringRequest {
+            document,
+            target,
+            basis,
+            branch,
+            operation,
+            ts,
+            state,
+            joins_live,
+        } = request;
+        if fresh.fingerprint() != basis {
+            return Err(invalid(match fresh {
+                CapturedStudioOverlayBasis::Closing(_) => "Closing overlay basis changed",
+                CapturedStudioOverlayBasis::Unconfirmed(_) => {
+                    "Unconfirmed overlay basis changed; refresh the preview"
+                }
+            }));
+        }
+        let joins =
+            if joins_live {
+                let metadata = state
+                    .handoff_metadata()
+                    .ok_or_else(|| invalid("classified Active with no overlay record"))?;
+                if metadata.is_prepared() {
+                    return Err(invalid(catcoms_replication::ReplError::EpochClosed));
+                }
+                if state.overlay().map(|live| live.basis()) != Some(fresh.fingerprint()) {
+                    return Err(invalid(catcoms_replication::ReplError::EpochScope));
+                }
+                OverlayBranch::Live
+            } else {
+                let admission = match state.handoff_metadata() {
+                    Some(metadata) => metadata
+                        .admit_new_branch(target, branch, fresh.borrowed())
+                        .map_err(invalid)?,
+                    None => StudioOverlayState::admit_first_branch(branch, fresh.borrowed()),
+                };
+                match admission {
+                    StudioOverlayAdmission::New { .. } => OverlayBranch::Admitted(admission),
+                    StudioOverlayAdmission::Stale => return Err(invalid(match fresh {
+                        CapturedStudioOverlayBasis::Closing(_) => {
+                            "Closing overlay request names a stale branch; prepare it again"
+                        }
+                        CapturedStudioOverlayBasis::Unconfirmed(_) => {
+                            "Unconfirmed overlay request names a stale branch; refresh the preview"
+                        }
+                    })),
+                }
+            };
+        if matches!(&fresh, CapturedStudioOverlayBasis::Unconfirmed(_)) {
+            match &joins {
+                OverlayBranch::Live
+                    if state
+                        .overlay()
+                        .map(|overlay| overlay.accepted())
+                        .unwrap_or(0)
+                        >= super::overlay_capture::MAX_UNCONFIRMED_OVERLAY_OPS =>
+                {
+                    return Err(invalid(
+                        "Unconfirmed draft operation limit reached (64 accepted operations)",
+                    ));
+                }
+                OverlayBranch::Admitted(_) => budget.preflight_unconfirmed_branch_count()?,
+                OverlayBranch::Live => {}
+            }
+        }
+        drop(state);
+        let authoring =
+            self.admit_studio_overlay_authoring(target, &document, device, operation)?;
+        self.capture_studio_overlay_save(
+            server, group, target, device, fresh, branch, joins, authoring, ts,
+        )
     }
 
     /// Everything Flow S does under the first custody visit: S0 validation, S1 classification,
@@ -193,130 +488,16 @@ impl ServerStore {
         budget: &mut EpochStudioBudget,
         hooks: &mut WriteHooks<'_>,
     ) -> Result<StudioOverlayStart, AppError> {
-        current_member(group, device)?;
-        let logical = target.document(&group.group_id()).map_err(invalid)?;
-        // Bound the caller's public Vec before making a LocalIntent copy.
-        match target {
-            StudioTarget::Index { .. } => {
-                IndexOp::decode_domain(&logical, &operation, &device.device_id())
-                    .map_err(invalid)?;
+        let request = match self.classify_studio_overlay_save_with_io(
+            server, group, target, device, basis, branch, operation, ts, rng, budget, hooks,
+        )? {
+            StudioOverlayClassification::Settled(saved) => {
+                return Ok(StudioOverlayStart::Settled(saved))
             }
-            StudioTarget::Flipnote { .. } => {
-                FlipnoteOp::decode_domain(&logical, &operation).map_err(invalid)?;
-            }
-        }
-        self.enter_studio_budget(server, group, budget)?;
-        let state = self.checked_epoch_replay_state(
-            server,
-            &logical,
-            &mut budget.storage,
-            &mut budget.intents,
-        )?;
-        let intent = LocalIntent {
-            author: device.device_id(),
-            operation: operation.clone(),
+            StudioOverlayClassification::Authoring(request) => *request,
         };
-        // S1: which terminal event, if any, is this request about? Structural, against the branch
-        // the request names - no basis, no tenure, no source, no media. `Unmatched` is not a
-        // verdict: it means no acknowledgement is owed, and S1b decides between a new branch and
-        // a stale request. A record for another channel refuses here with `EpochScope`, from the
-        // classifier's own target check - the same answer `completed_retry` used to give.
-        let class = match state.handoff_metadata() {
-            Some(metadata) => metadata
-                .classify_request(target, branch, &intent)
-                .map_err(invalid)?,
-            // No overlay record at all: nothing to acknowledge and nothing live to join.
-            None => StudioOverlayRequestClass::Unmatched,
-        };
-        let joins_live = match class {
-            StudioOverlayRequestClass::Transferred(outcome) => {
-                self.flush_acknowledged_overlay(server, &logical, state, rng, budget, hooks)?;
-                return Ok(StudioOverlayStart::Settled(Box::new(
-                    StudioOverlaySave::HandedOff(outcome),
-                )));
-            }
-            StudioOverlayRequestClass::Disposed(disposal) => {
-                self.flush_acknowledged_overlay(server, &logical, state, rng, budget, hooks)?;
-                return Ok(StudioOverlayStart::Settled(Box::new(
-                    StudioOverlaySave::Disposed(disposal),
-                )));
-            }
-            StudioOverlayRequestClass::Active => true,
-            StudioOverlayRequestClass::Unmatched => {
-                // A transferred branch's acknowledgement outlives the next admission; the
-                // classifier's recognition of it does not. `classify_request` derives the
-                // transferred identity from the *current* generation, so once a newer branch is
-                // admitted it can no longer match, and the request lands here. `completed_retry`
-                // keys the same acknowledgement on basis and operation instead, which a later
-                // admission does not disturb. Without this, the first version of this wiring
-                // refused such a retry - before tenure, at the pending check below, because a
-                // transferred operation stays pending until a rotation retires it - which broke
-                // V8 for good on an `Imported` device.
-                //
-                // This only ever acknowledges an exact author-and-envelope match in the retained
-                // transfer manifest. It accepts nothing and opens nothing, so the namespace's
-                // guarantee - no delayed request is accepted into a new branch - is untouched.
-                if let Some(outcome) = match state.handoff_metadata() {
-                    Some(metadata) => metadata
-                        .completed_retry(target, basis, &intent)
-                        .map_err(invalid)?,
-                    None => None,
-                } {
-                    self.flush_acknowledged_overlay(server, &logical, state, rng, budget, hooks)?;
-                    return Ok(StudioOverlayStart::Settled(Box::new(
-                        StudioOverlaySave::HandedOff(outcome),
-                    )));
-                }
-                false
-            }
-        };
-        // An accepted exact retry, recognized BEFORE eligibility. An installed successor, a later
-        // fault or a tenure that is not Known cannot turn a saved exact request into a new append.
-        // Only a request naming the live branch can be one: an operation enters that branch only
-        // through a request that named it.
-        if joins_live {
-            let overlay = state
-                .overlay()
-                .ok_or_else(|| invalid("classified Active with no live branch"))?;
-            if overlay.exact_retry(basis, &intent).map_err(invalid)? {
-                drop(state);
-                return self
-                    .write_studio_overlay_intent(
-                        server,
-                        &logical,
-                        target,
-                        device,
-                        group,
-                        basis,
-                        operation,
-                        rng,
-                        &mut budget.storage,
-                        &mut budget.intents,
-                        hooks,
-                    )
-                    .map(|draft| {
-                        StudioOverlayStart::Settled(Box::new(StudioOverlaySave::Local(draft)))
-                    });
-            }
-        }
-        // Equal nonce and body from an ordinary failed Save is not accepted local draft evidence.
-        // That is classification rather than authoring, so it also precedes media admission; the
-        // plan keeps its own copy of this check as defence in depth.
-        if state
-            .pending()
-            .any(|(id, _)| *id == intent.operation.id(&intent.author))
-        {
-            return Err(invalid("ordinary intent cannot become an accepted overlay"));
-        }
-        // Everything from here is new authoring. Authorization comes BEFORE media admission:
-        // "not previously accepted" is not the same as "authorized to author now". A request
-        // carrying a basis the document has legitimately moved past is stale, and must be told so
-        // without reading, promoting or holding any pixels, and without consulting the reference
-        // rails. Otherwise a stale request reports a media error, or promotes a blob into the
-        // durable namespace, on its way to being refused for an unrelated reason.
-        //
-        // S1b is a V1 site, so this is where the tenure is required, and not before: everything
-        // above must stay reachable under Imported and Unknown.
+        // Closing S1b is a V1 site. It is intentionally after the shared classification above,
+        // so terminal acknowledgements remain reachable under Imported and Unknown tenure.
         let tenure_value = require_owner_tenure(tenure)?;
         let (mut source, observed, _) =
             self.checked_studio_source(server, group, target, device, false, &mut budget.storage)?;
@@ -326,61 +507,9 @@ impl ServerStore {
         let fresh = source
             .prepare_closing_overlay(close, group, tenure_value)
             .map_err(invalid)?;
-        if fresh.fingerprint() != basis {
-            return Err(invalid("Closing overlay basis changed"));
-        }
         drop(source);
-        // S1b, the branch half: resolve `Unmatched` against the basis just minted. A new branch is
-        // admitted only when the request names exactly the identity the next admission would mint;
-        // anything else - an older generation, a skipped one, a disposed or transferred branch the
-        // request no longer matches, an unrelated basis - is stale, and is refused before any media
-        // work. This is the only place a branch is opened.
-        let joins = if joins_live {
-            // The live branch must be able to take an append on this basis, decided here and not
-            // after media admission. A ticket names the live branch whenever one exists, even if
-            // the Closing source has since moved, so a request can carry a fresh basis and a branch
-            // opened on an older one; and a branch being handed off is Prepared. The plan's
-            // `append` refuses both - `EpochScope` and `EpochClosed` - but only after S1b has
-            // promoted and held this request's pixels. Same refusals, moved ahead of the media
-            // work, which is the rule for anything that cannot succeed.
-            let metadata = state
-                .handoff_metadata()
-                .ok_or_else(|| invalid("classified Active with no overlay record"))?;
-            if metadata.is_prepared() {
-                return Err(invalid(catcoms_replication::ReplError::EpochClosed));
-            }
-            if state.overlay().map(|live| live.basis()) != Some(fresh.fingerprint()) {
-                return Err(invalid(catcoms_replication::ReplError::EpochScope));
-            }
-            OverlayBranch::Live
-        } else {
-            let admission = match state.handoff_metadata() {
-                Some(metadata) => metadata
-                    .admit_new_branch(target, branch, &fresh)
-                    .map_err(invalid)?,
-                None => StudioOverlayState::admit_first_branch(branch, &fresh),
-            };
-            match admission {
-                StudioOverlayAdmission::New { .. } => OverlayBranch::Admitted(admission),
-                StudioOverlayAdmission::Stale => {
-                    return Err(invalid(
-                        "Closing overlay request names a stale branch; prepare it again",
-                    ))
-                }
-            }
-        };
-        drop(state);
-        // S1b, the media half, now that this request is unaccepted, authorized and admitted to a
-        // branch: validate and promote the referenced pixels into the durable namespace, then take
-        // the job-owned hold. The intent, the frame facts and the hold are minted as one value
-        // bound to this operation, target and document, so no caller can hold verified frame facts
-        // without the hold that protects them or pair either with a different operation. The hold
-        // is carried through the detached stage and released only when the commit returns.
-        let authoring = self.admit_studio_overlay_authoring(target, &logical, device, operation)?;
-        self.capture_studio_overlay_save(
-            server, group, target, device, fresh, branch, joins, authoring, ts,
-        )
-        .map(|capture| StudioOverlayStart::Captured(Box::new(capture)))
+        self.authorize_studio_overlay_save(server, group, device, request, fresh.into(), budget)
+            .map(|capture| StudioOverlayStart::Captured(Box::new(capture)))
     }
 
     /// The flush barrier a terminal acknowledgement owes before it answers: the record it read is

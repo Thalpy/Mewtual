@@ -130,6 +130,54 @@ impl StudioReceiver {
         }
     }
 
+    /// Scheduled Flow S for an awaiting-tenure preview. Like the Closing path, the first append is
+    /// always a detached job; this method never calls `StudioOverlayCapture::plan` under actor or
+    /// store custody. The caller must present the same live preview on the later commit visit.
+    ///
+    /// P5 remains false: this is an internal runtime seam and is intentionally not registered as
+    /// a native command until the lifecycle and capacity acceptance rows are complete. A later
+    /// visit may present a refreshed current preview of the same target/base; the S3 fingerprint
+    /// comparison, rather than object identity, decides whether it still authorizes the plan.
+    #[allow(dead_code)]
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn save_unconfirmed_overlay<T: MeshTransport + 'static, R: CryptoRngCore>(
+        &mut self,
+        server: &mut Server<T, R>,
+        store: &mut ServerStore,
+        id: u64,
+        target: StudioTarget,
+        preview: &crate::studio_exchange::provisional::ServerPreparedProvisionalStudioSeed,
+        basis: [u8; 32],
+        branch: [u8; 32],
+        operation: catcoms_replication::DomainOp,
+        budget: &mut crate::store::EpochStudioBudget,
+    ) -> Result<StudioOverlaySaveVisit, AppError> {
+        if let Some((plan, ownership)) = self.catchup.take_planned_overlay(target) {
+            let committed =
+                server.commit_studio_unconfirmed_overlay(store, id, target, preview, *plan, budget);
+            drop(ownership);
+            return committed.map(|draft| {
+                StudioOverlaySaveVisit::Saved(Box::new(
+                    catcoms_replication::studio::StudioOverlaySave::Local(draft),
+                ))
+            });
+        }
+        let Some(ownership) = self.catchup.reserve_overlay() else {
+            return Ok(StudioOverlaySaveVisit::Busy);
+        };
+        match server.start_studio_unconfirmed_overlay(
+            store, id, target, preview, basis, branch, operation, budget,
+        )? {
+            crate::store::StudioOverlayStart::Settled(saved) => {
+                Ok(StudioOverlaySaveVisit::Saved(saved))
+            }
+            crate::store::StudioOverlayStart::Captured(capture) => {
+                self.catchup.schedule_overlay(*capture, ownership, target);
+                Ok(StudioOverlaySaveVisit::Scheduled)
+            }
+        }
+    }
+
     #[cfg(test)]
     pub(crate) fn observe_hints_for_test(
         &mut self,
@@ -581,6 +629,18 @@ impl StudioReceiver {
             epoch,
         ));
         Ok(())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn observe_for_test<T: MeshTransport, R: CryptoRngCore>(
+        &mut self,
+        server: &mut Server<T, R>,
+        store: &ServerStore,
+        id: u64,
+        target: StudioTarget,
+        epoch: u128,
+    ) -> Result<(), AppError> {
+        self.observe(server, store, id, target, epoch)
     }
 
     /// Executed only inside the same off-executor Server/vault/native lease as ordinary Save.

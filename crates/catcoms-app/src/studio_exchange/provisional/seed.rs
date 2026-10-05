@@ -124,6 +124,25 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
             .sync
             .with_provisional_studio_seed(&prepared.inner, inspect)?)
     }
+
+    /// Mint the app's Unconfirmed authoring capability only while the prepared preview is still
+    /// current in this exact mount/server/channel scope. The store-side caller separately proves
+    /// source absence before this call and repeats that proof at commit.
+    pub(crate) fn mint_unconfirmed_overlay_basis(
+        &self,
+        store: &ServerStore,
+        server: u64,
+        target: StudioTarget,
+        prepared: &ServerPreparedProvisionalStudioSeed,
+    ) -> Result<catcoms_replication::studio::StudioUnconfirmedOverlayBasis, AppError> {
+        self.check_provisional_seed_scope(store, server, &prepared.scope)?;
+        if prepared.scope.target != target {
+            return Err(invalid("provisional seed belongs to another Studio target"));
+        }
+        self.sync
+            .mint_unconfirmed_overlay_basis(&prepared.inner)
+            .map_err(Into::into)
+    }
 }
 impl ServerPreparedProvisionalStudioSeed {
     pub(crate) fn unconfirmed_projection(&self) -> &catcoms_replication::studio::StudioProjection {
