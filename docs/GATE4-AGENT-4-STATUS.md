@@ -1,14 +1,16 @@
 # Gate 4 Agent 4 status: integration and completion coordination
 
-Current checkpoint: 2026-10-04. The verified repair candidate is ready for review but is not
-merged into the shared baseline. Gate 4 remains incomplete and Gate 5 remains closed.
+Current checkpoint: 2026-10-05. The repair-integration review response is complete on the draft
+candidate but is not merged into the shared baseline. Gate 4 remains incomplete and Gate 5 remains
+closed.
 
 The detailed live ledger is [GATE4-ACCEPTANCE](GATE4-ACCEPTANCE.md). This document records the
 integration history, current ownership boundaries and the single remaining execution sequence.
 
 ## Current state
 
-Agent 4 has completed the bounded repair integration checkpoint:
+Agent 4 has assembled the bounded repair integration checkpoint, with its automatic execution
+currently isolated pending the detached runtime boundary:
 
 - Agent 3 history is preserved by merge `6a2f89792eecbf6ef2e65d683e6b515bbc65181d`.
 - The Windows directory durability gap is fixed at `5f141994a1cd6e54bf67ac6bf34f47296eeff6f3`.
@@ -22,8 +24,11 @@ Agent 4 has completed the bounded repair integration checkpoint:
 - The Agent 1 structural inventory seam now returns authenticated physical Intents bytes and only
   the provenance of a live overlay branch. Terminal disposed/transferred metadata retains its
   diagnostic provenance internally but cannot consume a live-branch capacity slot.
-- All 19 exact-head PR #32 checks pass and the independent bounded review has no remaining
-  BLOCKER/HIGH/MEDIUM finding.
+- All 19 exact-head PR #32 checks pass. A later whole-PR review of #33 found two HIGH integration
+  findings outside the inventory seam: repair-only durability and unadmitted synchronous runtime
+  execution. The durability gate is corrected; automatic execution is now fail-closed pending the
+  required detached job. Commit `3fcde979...` carries the correction and its uncertain-B2/B3 and
+  full-pool regressions; independent re-review found no remaining finding or mutation bypass.
 
 The code is still intentionally unavailable to the renderer. P5 is false; native Save and repair
 commands remain unregistered. The current-tenure repair implementation does not make historical
@@ -36,11 +41,12 @@ repair complete, and merging ancestry does not supply the missing archived-tenur
 | Shared integration baseline | `gate4-agent1-runtime` at `bcc88941a8677afa62957c258a127f35f328ff67`; untouched |
 | Repair candidate | `gate4-agent4-repair-candidate` at `87629d6b72992254911a8e44f698d535bb5d7904`; PR #32 open, ready, clean |
 | Documentation checkpoint | `gate4-agent4-integration` at `f0af61c9b1247fa955300ac50545074e18e9b302`; PR #31 open |
-| Completion branch | `gate4-completion-integration`, based on `87629d6b...` with the documentation history merged |
+| Completion branch | `gate4-completion-integration`; draft PR #33, with review response at `3fcde979...` and documentation history merged |
 | Agent 3 source | `gate4-agent3-repair` at `15b715a10704a8dafc2cccef65854d4d45ad55ca`; preserved, not rewritten |
 
-PR #28 remains the Agent 3 source record. PR #32 is its integrated successor and documents that
-relationship. Neither PR #31 nor #32 has been merged into the shared baseline.
+PR #28 remains the Agent 3 source record. PR #32 is its first integrated successor; draft PR #33
+preserves the same ancestry and adds the structural seam plus the bounded review response. None of
+PRs #31-#33 has been merged into the shared baseline.
 
 ## What each agent actually leaves behind
 
@@ -86,15 +92,18 @@ P5 remains **FALSE** until those P1-P4 requirements have implementation PASSes.
 
 ### Agent 3
 
-Completed and integrated in the candidate: signed current-tenure Studio/Registry repair, owner
-records, durable repair transitions, serving/distribution, catch-up routing, native conversion
-types, core/store mutation harnesses and the issuer-tenure sequence correction.
+Completed and integrated in the candidate: signed current-tenure Studio/Registry repair core/store
+transactions, owner records, durable transitions, durability-gated serving, native conversion
+types, core/store mutation harnesses and the issuer-tenure sequence correction. Automatic catch-up
+application, owner resume and repaired-seed installation are deliberately disabled until the
+detached admitted runtime exists; ancestry alone does not make those paths safe to activate.
 
 Still required:
 
 1. consume CORE-005's archived Observed-tenure witness in app-side report admission;
 2. prove N17 and the malformed/wrong/Imported/Unknown negative cases;
-3. finish the detached S1-S4 custody split and C-3/source-fence integration;
+3. build the detached S1-S4 custody split and C-3/source-fence integration, then re-enable the
+   currently fail-closed automatic repair paths;
 4. add fetched-seed, positive owed-Registry, real two-peer/newcomer and fairness evidence; and
 5. obtain the bounded Review 3 verdict for the completed boundary.
 
@@ -143,9 +152,11 @@ renderer or command-registration path. They become applicable when later work re
 On the completion line after the inventory seam, the complete root suite, all 1,282 frontend tests,
 frontend check and frontend production build pass locally. The native suite is 324 pass / 1 fail:
 `six_client_recovery::six_client_native_restart_and_partition_recovery` fails identically when run
-alone on pinned baseline `bcc88941...`; its reverse-order companion passes. Strict lint, cargo-deny
-and the new branch's Linux CI are recorded separately at publication time. The inventory seam's
-adversarial re-review has no remaining finding.
+alone on pinned baseline `bcc88941...`; its reverse-order companion passes. At correction commit
+`3fcde979...`, root and desktop strict Clippy, desktop check, cargo-deny, the two final uncertain-B3
+regressions and the full frontend test/check/build gates pass. Independent re-review has no remaining
+finding. Linux ambient and repair-mutation evidence remain exact-head CI checks and are not claimed
+from Windows.
 
 ## Non-negotiable boundaries
 

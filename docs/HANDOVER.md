@@ -8,7 +8,26 @@ the protocol- vs honest-client-enforced boundary and the hardening backlog.
 [`MESSAGE-FLOW.md`](MESSAGE-FLOW.md) traces one message end to end (send, gossip, catch-up)
 and ranks the live hazards in that path.
 
-## Status (latest entry: 2026-10-04)
+## Status (latest entry: 2026-10-05)
+
+- **PR #33 repair-integration review response (2026-10-05).** Whole-candidate review found two
+  HIGH issues outside the structural inventory seam. First, a repair-only head response could
+  return a visible B2 replacement without repeating the source and owner-record durability
+  barriers. Studio and Registry service now flush the exact authenticated source and re-save the
+  contextual owner record before carrying a repair; injected uncertain-B2 and uncertain-B3,
+  source-sync and journal-save regressions cover both families. Second, offered-repair application,
+  owner resume and repaired-seed installation performed substantial synchronous work outside a
+  shared preparation permit.
+  Those automatic paths now refuse or defer without source mutation until the designed
+  capture/detach/revalidate/commit job owns shared admission through result handling. A warm valid
+  owed-repair regression occupies every shared slot and pins that fail-closed behavior. Core/store
+  repair and its mutation harness remain present, but automatic repair is not a current product
+  capability. The correction is commit `3fcde979...`; independent re-review found no remaining
+  finding or automatic-mutation bypass. The complete root suite, root/desktop strict Clippy,
+  desktop check, frontend test/check/build and cargo-deny pass locally. The native suite repeats the
+  baseline-identical 324-pass/1-fail six-client result. Exact-head Linux ambient and repair-mutation
+  checks remain CI-owned. P5 is false, commands are unregistered, Gate 4 remains open and Gate 5
+  remains closed.
 
 - **Gate 4 structural inventory seam (2026-10-04).** The authenticated structural scan now exposes
   the exact sealed-file charge for every Intents record and the provenance of a live overlay branch.

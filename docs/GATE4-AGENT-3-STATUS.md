@@ -10,6 +10,16 @@ Implemented on `gate4-agent3-repair` (merge of base `9bfb7c79`/`94af29df` at `14
 report admission and N17 remain blocked: `94af29df` is a rejoin *test*, not the CORE-005 archived
 witness, so only current-tenure (origin 0) evidence can be admitted.
 
+**Integration correction (2026-10-05, PR #33):** a whole-candidate review found that repair-only
+head responses could carry a readable source without repeating an uncertain B2 durability barrier,
+and that Flow D/owner resume/repaired-seed installation still ran synchronously outside the shared
+preparation pool. The candidate now flushes the exact source and re-saves the contextual owner
+record before carrying any repair. Automatic repair execution is fail-closed until the designed
+capture/detach/revalidate/commit job actually exists. The correction is commit `3fcde979...`;
+independent re-review found no remaining finding or automatic-mutation bypass. The core/store
+implementation and mutation harness remain integrated, but the active-runtime claims below are
+historical and must not be read as current availability.
+
 - **Owner record (5.2).** Tag 3 is a parsed canonical model; decode also requires
   `encode(decode(bytes)) == bytes`. Retained attestations are usable only after contextual restore
   against the local device and the durable snapshot epoch. New evidence enters only through
