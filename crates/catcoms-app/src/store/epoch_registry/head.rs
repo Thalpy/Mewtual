@@ -2,7 +2,7 @@
 //! never seals a source, changes the selected checkpoint, retires intents or completes publication.
 use super::*;
 use catcoms_replication::ReceiptRepair;
-use catcoms_sync::receipt_head::ReceiptHeadSelection;
+use catcoms_sync::{receipt_head::ReceiptHeadSelection, ArchivedOwnerTenure};
 
 impl ServerStore {
     #[allow(clippy::too_many_arguments)]
@@ -47,6 +47,7 @@ impl ServerStore {
             device,
             durable_tenure,
             None,
+            None,
             rng,
             budget,
             hooks,
@@ -76,6 +77,7 @@ impl ServerStore {
         bucket: u8,
         device: &MlsDevice,
         durable_tenure: Option<u64>,
+        archived_owner: Option<&ArchivedOwnerTenure>,
         fault_report: Option<&[Receipt; 2]>,
         rng: &mut impl CryptoRngCore,
         budget: &mut EpochStorageBudget,
@@ -86,6 +88,7 @@ impl ServerStore {
             bucket,
             device,
             durable_tenure,
+            archived_owner,
             fault_report,
             rng,
             budget,
@@ -101,6 +104,7 @@ impl ServerStore {
         bucket: u8,
         device: &MlsDevice,
         durable_tenure: Option<u64>,
+        archived_owner: Option<&ArchivedOwnerTenure>,
         fault_report: Option<&[Receipt; 2]>,
         rng: &mut impl CryptoRngCore,
         budget: &mut EpochStorageBudget,
@@ -167,6 +171,7 @@ impl ServerStore {
             bucket,
             device,
             durable_tenure,
+            archived_owner,
             rng,
             budget,
             held,
@@ -185,6 +190,7 @@ impl ServerStore {
         bucket: u8,
         device: &MlsDevice,
         durable_tenure: Option<u64>,
+        archived_owner: Option<&ArchivedOwnerTenure>,
         rng: &mut impl CryptoRngCore,
         budget: &mut EpochStorageBudget,
         held: Option<Receipt>,
@@ -199,7 +205,15 @@ impl ServerStore {
         // S-3 before the response is decided (U-7); a failed stage refuses the whole answer.
         if let (Some(report), Some(tenure)) = (fault_report, durable_tenure) {
             self.admit_fault_report(
-                server, &document, group, device, tenure, report, rng, budget,
+                server,
+                &document,
+                group,
+                device,
+                tenure,
+                archived_owner,
+                report,
+                rng,
+                budget,
             )?;
         }
         // Contextual, so a record a repair transaction holds is read rather than refused; a held
@@ -361,6 +375,7 @@ impl ServerStore {
         bucket: u8,
         device: &MlsDevice,
         tenure: Option<u64>,
+        archived_owner: Option<&ArchivedOwnerTenure>,
         fault_report: Option<&[Receipt; 2]>,
         rng: &mut impl CryptoRngCore,
         prepared: Option<(
@@ -378,6 +393,7 @@ impl ServerStore {
             bucket,
             device,
             tenure,
+            archived_owner,
             rng,
             budget,
             head,

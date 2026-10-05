@@ -60,7 +60,18 @@ const _: () = assert!(4 + WITNESS_BYTES <= MAX_HISTORICAL_OWNER_WITNESS_BYTES);
 /// The application must not read this off a live `ChannelSync`. It reaches it only through
 /// [`ChannelSync::with_durable_owner_history`], under a [`DurableOwnerSnapshot`] that exists only
 /// after the snapshot carrying this witness was durably saved.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+///
+/// The borrow deliberately cannot be retained as an owned witness. An older archive must stop
+/// authorizing fresh admission as soon as the one-entry archive turns over:
+///
+/// ```compile_fail
+/// use catcoms_sync::ArchivedOwnerTenure;
+///
+/// fn retain(witness: Option<&ArchivedOwnerTenure>) -> Option<ArchivedOwnerTenure> {
+///     witness.cloned()
+/// }
+/// ```
+#[derive(Debug, PartialEq, Eq)]
 pub struct ArchivedOwnerTenure {
     owner_key: [u8; 32],
     start: u64,
@@ -75,6 +86,18 @@ impl ArchivedOwnerTenure {
             start,
             tenure_id: catcoms_replication::tenure_id(&group.group_id(), &owner_key, start),
             retired_at,
+        }
+    }
+    /// Duplicate the witness only inside sync, where the copy remains tied to either owner-tenure
+    /// state or a freshly checked durable permit. Deliberately do not implement `Clone` or `Copy`:
+    /// application code must not retain historical admission authority after the one-entry archive
+    /// has turned over.
+    pub(super) fn duplicate(&self) -> Self {
+        Self {
+            owner_key: self.owner_key,
+            start: self.start,
+            tenure_id: self.tenure_id,
+            retired_at: self.retired_at,
         }
     }
     /// The retired owner's full signature key.
@@ -262,7 +285,7 @@ impl OwnerTenure {
         if self.position != Position::of(group) {
             return None;
         }
-        self.archive
+        self.archive.as_ref().map(ArchivedOwnerTenure::duplicate)
     }
 
     pub(super) fn observed(&self, group: &ServerGroup) -> ObservedOwnerTenure {

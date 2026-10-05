@@ -9,15 +9,14 @@ status documents and in Git history; they do not override this matrix.
 
 | Item | Exact state |
 |---|---|
-| Shared baseline | `gate4-agent1-runtime` at `bcc88941a8677afa62957c258a127f35f328ff67`; unchanged |
-| Verified repair candidate | `gate4-agent4-repair-candidate` at `87629d6b72992254911a8e44f698d535bb5d7904`; PR #32, open and ready for review |
-| Completion line | `gate4-completion-integration`; starts from `87629d6b...`, merges the documentation checkpoint, adds the reviewed structural inventory seam, and carries the PR #33 review responses through Registry routing/liveness correction `164a94d7...` |
-| Documentation checkpoint | `gate4-agent4-integration` at `f0af61c9b1247fa955300ac50545074e18e9b302`; PR #31 |
+| Shared baseline | `gate4-agent1-runtime` at merged PR #33 commit `9d2f3e341d9fa503e2917de61fab348dc29850d0`; unchanged by this candidate |
+| Finalization candidate | `gate4-finalization`, based exactly on `9d2f3e34...`; adds the archived Observed-tenure consumer and its regression |
+| Verified repair history | Historical PR #32 checkpoint `87629d6b72992254911a8e44f698d535bb5d7904`; incorporated through merged PR #33 |
+| Documentation history | Historical PR #31 checkpoint `f0af61c9b1247fa955300ac50545074e18e9b302`; incorporated through merged PR #33 |
 | Preserved Agent 3 head | `15b715a10704a8dafc2cccef65854d4d45ad55ca`, second parent of merge `6a2f89792eecbf6ef2e65d683e6b515bbc65181d` |
 
-PR #32 has not been merged into the shared baseline. Its code history preserves Agent 3's ancestry
-and keeps the Agent 4 corrections separately identifiable. The completion line is the only place
-where the code candidate and documentation checkpoint are combined.
+PR #33 preserves Agent 3's ancestry and keeps the Agent 4 corrections separately identifiable.
+PRs #31 and #32 remain historical source checkpoints, not additional merge instructions.
 
 ## Dependency order
 
@@ -53,7 +52,7 @@ either order. Native registration is downstream of both specialist acceptance an
 | G4-A2-TENURE | Real repeated owner/rejoin/newcomer | **Sync/receipt fixture passes; production actor and Studio rotation absent.** | Drive real MLS A -> B -> A' through actor, Studio, restart and newcomer. | Distinct observed tenures, first receipt, old key/receipt refusal, hidden higher history and convergence. |
 | G4-A2-P5 | Permission to expose native Save | **FALSE.** | Change only after P1-P4 have implementation PASSes recorded by Agent 2. | Security allow/deny negatives while false; positive native evidence only after promotion. |
 | G4-A3-CURRENT | Signed current-tenure Studio/Registry repair | **Core/store implementation integrated; automatic runtime execution now fail-closed pending its detached boundary.** PR #33 review found that repair-only service skipped the durability retry and that active repair ran synchronously outside shared admission. Commit `3fcde979...` makes repair carriage repeat exact source and authenticated owner-record durability, including uncertain B2/B3 writes, and disables automatic apply, owner resume and repaired-seed installation rather than pretending source preparation covers repair execution. A later re-review retained one MEDIUM residual because the disabled Registry router still rebuilt the full source before its gate; `f7c74cb2...` classifies only from exact-current prepared state. Review then found a fresh-small-source liveness loop; `164a94d7...` schedules that detached classification independently of size and represents exact checked absence separately from cold/unknown state. | Preserve the store/core behavior, build the capture/detach/revalidate/commit runtime, then re-enable automatic execution only with shared-pool ownership through result handling. | Interrupted-B2/B3 Studio/Registry service, warm full-pool deferral/no mutation, cancellation/result holding, unrelated-actor progress and real two-peer Fault -> decision -> replacement -> restart/newcomer. |
-| G4-A3-HIST | Historical report admission with archived Observed witness | **Not implemented.** CORE-005 exists in `catcoms-sync`; app store admission still returns `historical owner authority is unavailable`. | Consume the durable archived witness under the existing owner snapshot and implement N17 plus negative substitutes. | Historical pair accepted only for the archived Observed tenure; Imported/Unknown/wrong/older tenure and malformed evidence refuse without writes. |
+| G4-A3-HIST | Historical report admission with archived Observed witness | **Implemented and independently accepted on `gate4-finalization`; exact-head CI pending.** The durable head-service context carries CORE-005's private, non-cloneable witness to shared Studio/Registry admission. Exact retained attestations survive archive lookup loss; new historical evidence must match the full archived tuple and is never treated as live overflow/source authority. A real A -> B -> C, persist/reopen regression admits B for both document families, refuses the Unknown A tenure with absent/wrong archive, retries B from its attestation and signs a current-C screening repair. | Require exact-head Linux ambient and repair-mutation CI before merging this bounded candidate. Retain the review's LOW production-head-service/negative-matrix gap as follow-up coverage. | Historical pair accepted only for the archived Observed tenure; Imported/Unknown/wrong/older tenure and malformed evidence refuse without writes. |
 | G4-A3-BOUND | Detached bounded repair runtime | **Not active; safely isolated.** Repair core/store mutation coverage is strong, but the required capture/detach/revalidate/commit job does not exist. Automatic offered-repair application, owner resume and repaired-seed installation therefore refuse/defer without mutation. | Implement the S1-S4 detached job with admission/target claim, mount/source/generation/authority revalidation and result custody; integrate C-3/source fences. | Full-pool warm/cold deferral, cancellation/result holding, unrelated-actor progress, large repair fairness, retry/teardown and full actor/native delivery. |
 | G4-I-NATIVE | Shared registrations and truthful interfaces | **Correctly fail-closed.** Save and unfinished repair commands are unregistered. | Register only reviewed commands after P5; update command ACL, invoke handler, interfaces and UI hooks together. | Command-security allow/deny tests, session/final-delivery tests and production conversion for each command. |
 | G4-I-E2E | Combined Gate 4 scenarios | **Not executed because prerequisite product paths remain absent.** | After bounded specialist verdicts, implement the seven scenarios in the handoff document. | Rotate/save/restart/handoff/catch-up; stale/unconfirmed lifecycle; succession; repair; concurrency; references/quotas; earlier regressions. |
@@ -111,6 +110,17 @@ and `cargo deny` all pass. Startup/flow remain inapplicable because no setup, pr
 command-registration path changed. Exact-head Linux ambient and repair-mutation results remain
 CI-owned and must pass on the pushed PR #33 head.
 
+The `gate4-finalization` archived-tenure candidate passes the complete root suite, root and desktop
+strict all-target/all-feature Clippy, desktop `cargo check`, `cargo deny`, all 1,282 frontend tests,
+Svelte check and production build. Its focused sync archive/doctest and real A -> B -> C
+Studio/Registry persist-reopen regression pass. Two complete native runs each passed 324 of 325
+library tests and all command-ACL tests, alternating between the two known six-client final-
+convergence scenarios; the normal-order test then failed twice alone while it passed once alone on
+the exact `9d2f3e34...` baseline. Historical evidence predating Gate 4 records the same test at 2/5
+on PR #29's own head, so this is recorded as an inherited timing flake, not a native-suite pass.
+Linux ambient and repair-store mutation results remain exact-head CI checks. Startup/flow remain
+inapplicable because this candidate changes no setup, process, renderer or command-registration path.
+
 ## Review ledger
 
 - Agent 4's independent full-candidate review found no remaining BLOCKER/HIGH/MEDIUM finding after
@@ -130,6 +140,12 @@ CI-owned and must pass on the pushed PR #33 head.
   first rereview closed that defect but found a fresh-small-source defer loop; `164a94d7...` schedules
   the detached classification and preserves a separately rechecked absence state. Final bounded
   re-review found no remaining BLOCKER, HIGH, MEDIUM or LOW finding.
+- Independent review of the archived-tenure consumer found one MEDIUM capability-lifetime defect:
+  the public archived witness was cloneable and could outlive the one-entry durable archive. The
+  witness is now non-`Clone`/non-`Copy`, application code receives only a snapshot-bound borrow,
+  internal snapshot duplication remains private, and a compile-fail doctest pins the boundary.
+  Re-review found no remaining BLOCKER/HIGH/MEDIUM finding. Its LOW request for more direct
+  production-head-service and negative-matrix coverage remains an explicit follow-up.
 - These bounded reviews accept the candidate work they inspected; they do not supply the missing
   core-signing verdict, Agent 1/2/3 completion verdicts or Review 4.
 - P5 remains false, Gate 4 remains open, and Gate 5 remains closed.

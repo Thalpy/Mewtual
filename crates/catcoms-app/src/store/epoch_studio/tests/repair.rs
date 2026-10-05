@@ -3,8 +3,70 @@
 use super::adoption::{adopt, checkpoint};
 use super::*;
 use catcoms_replication::studio::StudioRecovery;
-use catcoms_replication::{ReceiptRepair, RecoveryReason, RepairDisposition, ReplError};
-use catcoms_rt::ManualClock;
+use catcoms_replication::{
+    InheritedCheckpoint, ReceiptRepair, RecoveryReason, RepairDisposition, ReplError,
+};
+use catcoms_rt::{Hub, ManualClock, MemNetwork, PeerId};
+
+type HistoricalNode = crate::Server<MemNetwork, rand_chacha::ChaCha20Rng>;
+
+fn historical_pair(node: &mut HistoricalNode, document: &LogicalDocument) -> [Receipt; 2] {
+    let tenure = node
+        .sync
+        .authoring_owner_tenure_start()
+        .expect("the signing owner tenure was observed");
+    node.sync.with_registry_context(|_, device, _, _| {
+        let mut pair = [
+            Receipt::sign(
+                document.clone(),
+                0,
+                [21; 32],
+                [31; 32],
+                tenure,
+                InheritedCheckpoint::EpochZero,
+                device,
+            )
+            .unwrap(),
+            Receipt::sign(
+                document.clone(),
+                0,
+                [22; 32],
+                [32; 32],
+                tenure,
+                InheritedCheckpoint::EpochZero,
+                device,
+            )
+            .unwrap(),
+        ];
+        pair.sort_by_key(Receipt::hash);
+        pair
+    })
+}
+
+async fn join_historical_member(
+    hub: &std::sync::Arc<Hub>,
+    founder: &mut HistoricalNode,
+    peer: u64,
+    name: &str,
+    nonce: u8,
+    clock: &ManualClock,
+) -> HistoricalNode {
+    let invite = founder.mint_invite([nonce; 16], u64::MAX, vec![]).unwrap();
+    let (joined, tick) = tokio::join!(
+        HistoricalNode::join(
+            hub.join(PeerId::from_u64(peer)),
+            MlsDevice::generate().unwrap(),
+            rng(),
+            Box::new(clock.clone()),
+            name,
+            founder.local_peer(),
+            &invite,
+        ),
+        founder.sync_once(),
+    );
+    tick.unwrap();
+    joined.unwrap()
+}
 
 fn request(pair: [&Receipt; 2], selected: &Receipt) -> StudioRepairRequest {
     StudioRepairRequest {
@@ -441,6 +503,7 @@ fn head_service_serves_an_applied_repair_but_never_proves_while_it_is_held() {
             &f.device,
             Some(0),
             None,
+            None,
             &mut rng(),
             &mut b,
         )
@@ -456,6 +519,7 @@ fn head_service_serves_an_applied_repair_but_never_proves_while_it_is_held() {
             &f.group,
             f.target,
             &f.device,
+            None,
             None,
             None,
             &mut rng(),
@@ -555,6 +619,7 @@ fn head_service_serves_an_applied_repair_but_never_proves_while_it_is_held() {
             &f.device,
             Some(0),
             None,
+            None,
             &mut rng(),
             &mut b,
         )
@@ -613,6 +678,7 @@ fn repair_only_head_repeats_uncertain_b2_durability_before_service() {
         &f.device,
         Some(0),
         None,
+        None,
         &mut rng(),
         &mut b,
         &mut WriteHooks::fail_before_sync(FailError::NotDurable(
@@ -629,6 +695,7 @@ fn repair_only_head_repeats_uncertain_b2_durability_before_service() {
         f.target,
         &f.device,
         Some(0),
+        None,
         None,
         &mut rng(),
         &mut b,
@@ -649,6 +716,7 @@ fn repair_only_head_repeats_uncertain_b2_durability_before_service() {
         f.target,
         &f.device,
         Some(0),
+        None,
         None,
         &mut rng(),
         &mut b,
@@ -682,6 +750,7 @@ fn repair_only_head_repeats_uncertain_b2_durability_before_service() {
             &f.device,
             Some(0),
             None,
+            None,
             &mut rng(),
             &mut b,
         )
@@ -703,6 +772,7 @@ fn head(
             f.target,
             &f.device,
             Some(0),
+            None,
             report,
             &mut rng(),
             &mut b,
@@ -715,6 +785,297 @@ fn sorted_pair(a: &Receipt, b: &Receipt) -> [Receipt; 2] {
     let mut pair = [a.clone(), b.clone()];
     pair.sort_by_key(Receipt::hash);
     pair
+}
+
+/// N50 / CORE-005: the application consumes only the witness produced by a real, contiguous MLS
+/// retirement and carried through a durably saved sync snapshot. No test constructor or receipt
+/// claim supplies historical authority here.
+#[tokio::test]
+async fn archived_observed_tenure_admits_only_its_exact_pair_after_restart() {
+    let hub = Hub::new();
+    let clock = ManualClock::new(1000);
+    let mut alice = HistoricalNode::found(
+        hub.join(PeerId::from_u64(301)),
+        MlsDevice::generate().unwrap(),
+        rng(),
+        Box::new(clock.clone()),
+        "historical alice",
+    )
+    .unwrap();
+    alice.subscribe_control().await.unwrap();
+    let mut bob = join_historical_member(&hub, &mut alice, 302, "historical bob", 41, &clock).await;
+    bob.subscribe_control().await.unwrap();
+    let mut carol =
+        join_historical_member(&hub, &mut alice, 303, "historical carol", 42, &clock).await;
+    carol.subscribe_control().await.unwrap();
+
+    // Bob must first learn Carol's admission. Otherwise Alice's removal would leave two peers
+    // with different rosters and the later retirement would not be the contiguous B -> C path.
+    while bob.epoch() != alice.epoch() {
+        bob.sync_once().await.unwrap();
+    }
+    let document = target(false).document(&alice.group_id()).unwrap();
+    let registry_document =
+        catcoms_replication::registry::registry_document(&alice.group_id(), 7).unwrap();
+    let alice_pair = historical_pair(&mut alice, &document);
+    let alice_id = alice
+        .sync
+        .with_registry_context(|_, device, _, _| device.device_id());
+    let bob_id = bob
+        .sync
+        .with_registry_context(|_, device, _, _| device.device_id());
+    let contested = catcoms_sync::SyncConfig {
+        max_committer_rank: 1,
+        stage_decision_window_ms: 0,
+        ..Default::default()
+    };
+    bob.sync.set_config(contested);
+    carol.sync.set_config(contested);
+
+    // A -> B is observed by Carol, establishing B's start. Alice was known to the joiners only
+    // through Welcome, so her otherwise-valid pair must never be covered by the later archive.
+    bob.sync.remove(&alice_id).await.unwrap();
+    bob.sync_once().await.unwrap();
+    while carol.epoch() != bob.epoch() {
+        carol.sync_once().await.unwrap();
+    }
+    assert!(bob.is_owner());
+    let bob_pair = historical_pair(&mut bob, &document);
+    let bob_registry_pair = historical_pair(&mut bob, &registry_document);
+
+    // B -> C retires the tenure Carol saw begin. Carol is now the live owner and the only
+    // historical tuple its snapshot may expose is B's exact key/start/id.
+    carol.sync.remove(&bob_id).await.unwrap();
+    carol.sync_once().await.unwrap();
+    assert!(carol.is_owner());
+    carol.sync.set_config(Default::default());
+
+    let root = tempfile::tempdir().unwrap();
+    let store = open(root.path());
+    let snapshot = carol.snapshot().unwrap();
+    carol.sync.with_registry_context(|_, _, _, random| {
+        store.save_server(SERVER, &snapshot, random).unwrap()
+    });
+    drop(store);
+    drop(carol);
+
+    // Reopen both the authenticated sync snapshot and the application store before admitting.
+    // This pins the durability boundary rather than trusting an in-memory transition.
+    let mut store = open(root.path());
+    let mut carol = HistoricalNode::restore(
+        &store.load_server(SERVER).unwrap(),
+        hub.join(PeerId::from_u64(304)),
+        rng(),
+        Box::new(clock.clone()),
+        "historical carol reopened",
+    )
+    .unwrap();
+    let mut studio_budget = {
+        let current = inventory(&mut store);
+        carol
+            .sync
+            .with_registry_context(|group, _, _, _| {
+                store.studio_storage_budget(SERVER, group, &current)
+            })
+            .unwrap()
+    };
+    let operation = carol
+        .sync
+        .with_registry_context(|_, device, _, _| DomainOp {
+            nonce: [61; 16],
+            doc_type: document.doc_type,
+            logical_key: document.logical_key.clone(),
+            body: IndexOp::PutObject {
+                object: [62; 16],
+                kind: StudioKind::Flipnote,
+                title: "current healthy source".into(),
+                created_by: device.device_id(),
+                ts: 1000,
+                expiry: StudioExpiry::Never,
+            }
+            .encode()
+            .unwrap(),
+        });
+    let (_, source) = carol
+        .sync
+        .with_registry_context(|group, device, _, random| {
+            store
+                .edit_studio_epoch(
+                    SERVER,
+                    group,
+                    target(false),
+                    epoch_zero_id(document.doc_type, &document.logical_key),
+                    device,
+                    operation,
+                    1000,
+                    random,
+                    &mut studio_budget,
+                )
+                .unwrap()
+        });
+    carol.sync.with_registry_context(|group, device, _, _| {
+        store.retain_studio_source(group, device, source)
+    });
+    let permit = carol.prepare_owner_head_snapshot(&store, SERVER).unwrap();
+    let (admitted, registry_admitted) = carol
+        .sync
+        .with_durable_owner_history(&permit.inner, |group, device, random, tenure, archive| {
+            let archived = archive.expect("B's observed retirement survived restart");
+            assert_eq!(archived.tenure_id(), &bob_pair[0].tenure_id);
+            let studio = store.admit_fault_report(
+                SERVER,
+                &document,
+                group,
+                device,
+                tenure,
+                Some(archived),
+                &bob_pair,
+                random,
+                &mut studio_budget.storage,
+            )?;
+            let registry = store.admit_fault_report(
+                SERVER,
+                &registry_document,
+                group,
+                device,
+                tenure,
+                Some(archived),
+                &bob_registry_pair,
+                random,
+                &mut studio_budget.storage,
+            )?;
+            Ok::<_, AppError>((studio, registry))
+        })
+        .unwrap()
+        .unwrap();
+    assert!(
+        admitted.is_some(),
+        "the exact archived B pair was not staged"
+    );
+    assert!(
+        registry_admitted.is_some(),
+        "the Registry consumer did not stage the exact archived B pair"
+    );
+
+    // Alice's fully self-signed conflict has no matching Observed witness. It must refuse before
+    // changing the one retained pair, and the retained attestation must independently authorize
+    // an exact retry even when no archive lookup is supplied.
+    let before = carol.sync.with_registry_context(|group, device, _, _| {
+        store
+            .load_epoch_owner_repair_state(SERVER, &document, &device.device_id(), group.epoch())
+            .unwrap()
+            .0
+            .retained_pairs()
+            .1
+            .unwrap()
+            .hashes()
+    });
+    let refused_without_archive = carol
+        .sync
+        .with_durable_owner_history(&permit.inner, |group, device, random, tenure, _| {
+            store.admit_fault_report(
+                SERVER,
+                &document,
+                group,
+                device,
+                tenure,
+                None,
+                &alice_pair,
+                random,
+                &mut studio_budget.storage,
+            )
+        })
+        .unwrap()
+        .unwrap();
+    assert!(
+        refused_without_archive.is_none(),
+        "a self-signed historical pair was admitted without an archive"
+    );
+    let refused_wrong_archive = carol
+        .sync
+        .with_durable_owner_history(&permit.inner, |group, device, random, tenure, archive| {
+            store.admit_fault_report(
+                SERVER,
+                &document,
+                group,
+                device,
+                tenure,
+                archive,
+                &alice_pair,
+                random,
+                &mut studio_budget.storage,
+            )
+        })
+        .unwrap()
+        .unwrap();
+    assert!(
+        refused_wrong_archive.is_none(),
+        "the archive for B authorized the Unknown founder tenure"
+    );
+    let after_refusals = carol.sync.with_registry_context(|group, device, _, _| {
+        store
+            .load_epoch_owner_repair_state(SERVER, &document, &device.device_id(), group.epoch())
+            .unwrap()
+            .0
+            .retained_pairs()
+            .1
+            .unwrap()
+            .hashes()
+    });
+    assert_eq!(
+        after_refusals, before,
+        "a refused pair changed retained evidence"
+    );
+    let retry = carol
+        .sync
+        .with_durable_owner_history(&permit.inner, |group, device, random, tenure, _| {
+            store.admit_fault_report(
+                SERVER,
+                &document,
+                group,
+                device,
+                tenure,
+                None,
+                &bob_pair,
+                random,
+                &mut studio_budget.storage,
+            )
+        })
+        .unwrap()
+        .unwrap();
+    assert!(
+        retry.is_some(),
+        "retained exact admission depended on archive lookup"
+    );
+    assert_eq!(before, [bob_pair[0].hash(), bob_pair[1].hash()]);
+
+    // The live owner can now make an explicit signed decision for the retained historical pair.
+    // Its healthy current source is screened rather than faulted or rewritten as if B were live.
+    let request = StudioRepairRequest {
+        receipt_a: bob_pair[0].hash(),
+        receipt_b: bob_pair[1].hash(),
+        selected: bob_pair[0].hash(),
+    };
+    let (repair, outcome, _) = carol
+        .sync
+        .with_durable_owner_snapshot(&permit.inner, |group, device, random, tenure| {
+            store.issue_studio_repair(
+                SERVER,
+                group,
+                target(false),
+                device,
+                tenure,
+                request,
+                None,
+                &clock,
+                random,
+                &mut studio_budget,
+            )
+        })
+        .unwrap()
+        .unwrap();
+    assert_eq!(outcome, StudioRepairOutcome::Screened);
+    assert_eq!(repair.tenure_id, bob_pair[0].tenure_id);
 }
 
 #[test]

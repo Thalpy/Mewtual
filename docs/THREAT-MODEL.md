@@ -23,8 +23,11 @@ table with the commit that closed it.
   checked allocation refuses at MAX before signing or persistence, while a verified successor
   starts at one. Unfinished source/journal provenance remains a cross-tenure barrier. No wire or
   persistence field changed. Latest-only retention is not an
-  audit chain: a no-longer-covered old conflict may require another repair. These primitives do
-  not provide the missing archived Observed-tenure consumer, and native repair remains unavailable.
+  audit chain: a no-longer-covered old conflict may require another repair. The app-side candidate
+  now consumes the one archived Observed witness only from a still-current durable sync snapshot,
+  matches the receipts' full owner/start/tenure tuple, and seals a receiver-local exact-pair
+  attestation before storage. Unknown, Imported, wrong and evicted unadmitted history remain
+  unavailable by design; native repair remains unavailable.
   While automatic repair execution is disabled, Registry checkpoint routing classifies a pending
   replacement only from the exact-current verified source already retained by the bounded
   preparation boundary. Missing, cold, stale, retargeted or unreadable preparation is unknown and

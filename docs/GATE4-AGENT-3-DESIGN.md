@@ -1178,7 +1178,7 @@ expanded matrix cover every publication ordering and restart. No version-2 codec
 
 ### 5.2 Store: durable owner issuance and reconciliation
 
-**CORE-005 accepted bounded-design admission boundary (unimplemented):** each `FaultPair`
+**CORE-005 accepted bounded-design admission boundary (implemented in the integration candidate):** each `FaultPair`
 includes a private receiver-local authority attestation binding its exact full pair and record
 scope. Self-signature alone cannot
 mint it. Its current/archived Observed-witness construction, legacy refusal, exact retry and
@@ -1220,8 +1220,10 @@ a peer has nowhere to live. This slot is that home: it is the issuance input, it
 report path before any decision exists, and it survives independently of the source.
 
 The proposed encoding appends an optional tag-3 section after `2 | hash | close`. Revision 15
-adds private admission attestations to every pair. The inert structural decoder is now implemented;
-contextual admission and production writes remain unimplemented.
+adds private admission attestations to every pair. The inert structural decoder, contextual
+admission and production writes are now implemented. Complete local root/frontend, lint and
+dependency-policy evidence passes; bounded independent re-review has no unresolved
+BLOCKER/HIGH/MEDIUM finding. Exact-head Linux ambient and mutation evidence remains CI-owned.
 An old un-attested tag-3 payload is not accepted as the new format; add an explicit section
 format-version byte (value 1) so no legacy pair can acquire authority by reinterpretation:
 

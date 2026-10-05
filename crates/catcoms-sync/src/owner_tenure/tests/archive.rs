@@ -109,7 +109,7 @@ async fn an_observer_archives_a_retirement_it_watched_and_only_that_one() {
     let want = expected(&reopened.group, b_key, b_start, reopened.epoch());
     assert_eq!(
         reopened.owner_tenure.archived(&reopened.group),
-        Some(want),
+        Some(want.duplicate()),
         "the witness must survive a save and reload exactly"
     );
     let failed: Result<DurableOwnerSnapshot, &str> = reopened
@@ -125,7 +125,7 @@ async fn an_observer_archives_a_retirement_it_watched_and_only_that_one() {
         .unwrap();
     let seen = reopened
         .with_durable_owner_history(&permit, |_, _, _, tenure, archive| {
-            (tenure, archive.copied())
+            (tenure, archive.map(ArchivedOwnerTenure::duplicate))
         })
         .unwrap();
     assert_eq!(seen, (reopened.epoch(), Some(want)));
@@ -168,7 +168,7 @@ async fn only_a_fully_observed_contiguous_retirement_mints_or_replaces_the_witne
         state.position = before;
         state.start = start;
         state.imported = imported;
-        state.archive = Some(prior);
+        state.archive = Some(prior.duplicate());
         state.applied(before, group);
         state.archive
     };
@@ -180,22 +180,22 @@ async fn only_a_fully_observed_contiguous_retirement_mints_or_replaces_the_witne
     );
     assert_eq!(
         run(new_tenure, Some(0), true),
-        Some(prior),
+        Some(prior.duplicate()),
         "an Imported tenure cannot mint or replace"
     );
     assert_eq!(
         run(new_tenure, None, false),
-        Some(prior),
+        Some(prior.duplicate()),
         "an Unknown tenure cannot mint or replace"
     );
     assert_eq!(
         run(gap, Some(0), false),
-        Some(prior),
+        Some(prior.duplicate()),
         "a gap cannot mint or replace"
     );
     assert_eq!(
         run(preserve, Some(0), false),
-        Some(prior),
+        Some(prior.duplicate()),
         "a same-owner commit that ends no tenure leaves the witness alone"
     );
 
@@ -203,7 +203,7 @@ async fn only_a_fully_observed_contiguous_retirement_mints_or_replaces_the_witne
     let mut stale = OwnerTenure::unknown(group);
     stale.position = preserve;
     stale.start = Some(0);
-    stale.archive = Some(prior);
+    stale.archive = Some(prior.duplicate());
     stale.applied(new_tenure, group);
     assert_eq!(stale.archive, Some(prior));
 }
@@ -227,7 +227,7 @@ async fn the_witness_round_trips_exactly_and_corruption_refuses_instead_of_readi
     state.position = before;
     state.start = Some(0);
     state.applied(before, group);
-    let witness = state.archive.expect("this step mints");
+    let witness = state.archive.as_ref().expect("this step mints");
 
     let without = OwnerTenure {
         archive: None,
@@ -252,7 +252,7 @@ async fn the_witness_round_trips_exactly_and_corruption_refuses_instead_of_readi
     assert!(bytes.len() - 98 <= MAX_HISTORICAL_OWNER_WITNESS_BYTES);
     assert_eq!(
         OwnerTenure::decode(&bytes, group).unwrap().archive,
-        Some(witness)
+        Some(witness.duplicate())
     );
     assert_eq!(OwnerTenure::decode(&v2, group).unwrap().archive, None);
 
