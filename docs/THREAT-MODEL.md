@@ -741,6 +741,16 @@ table with the commit that closed it.
   a sole coordinator remains required. Blobs/legacy snapshots are outside this inventory. No
   network snapshot authority, completed Studio settlement, live publication, retention guarantee
   or actor/native Save/Load follows from these store APIs alone.
+  Awaiting-tenure overlay authoring is likewise an internal local-draft capability, not source or
+  signing authority. New work requires checked source absence plus a current complete prepared
+  preview at both authorization and commit; detached plans bind mount, numeric server, complete
+  target, member key, owner, MLS epoch and exact authenticated Intents bytes. Unconfirmed history
+  is excluded from automatic handoff and is capped at three live branches per server, 8 MiB of
+  authenticated physical Intents bytes per vault and 64 accepted operations per branch. Exact
+  retry is classified before preview expiry, while any new operation after expiry refuses.
+  Accounting changes only after a durable replacement and terminal disposal releases the live
+  quota; fresh complete inventory reconstructs it. This slice has no actor/native/UI reachability,
+  no reconciliation claim and no permission to promote P5.
   The new explicit native Index/art transactions lend the sole mounted store only AFTER the
   actor's Ready rendezvous. Numeric-server persistence, UI commit and exact registry-incarnation
   locks are acquired without awaiting; a busy fence drops Ready and writes nothing. The blocking

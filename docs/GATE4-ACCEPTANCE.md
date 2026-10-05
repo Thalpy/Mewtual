@@ -1,6 +1,6 @@
 # Gate 4 acceptance matrix
 
-Current checkpoint: 2026-10-05. Gate 4 is **not accepted** and Gate 5 remains closed.
+Current checkpoint: 2026-10-06. Gate 4 is **not accepted** and Gate 5 remains closed.
 
 This is the current completion ledger. Historical implementation notes remain in the four agent
 status documents and in Git history; they do not override this matrix.
@@ -9,46 +9,48 @@ status documents and in Git history; they do not override this matrix.
 
 | Item | Exact state |
 |---|---|
-| Shared baseline | `gate4-agent1-runtime` at merged PR #33 commit `9d2f3e341d9fa503e2917de61fab348dc29850d0`; unchanged by this candidate |
-| Finalization candidate | PR #34 / `gate4-finalization`, based exactly on `9d2f3e34...`; adds the archived Observed-tenure consumer and the reviewed Registry B0-before-Fault ordering correction |
+| Shared baseline | `gate4-agent1-runtime` at merged PR #34 commit `c6f7fea0af1392da37e484067a3c8c9131c328a4`; unchanged by this candidate |
+| Runtime completion candidate | `gate4-runtime-completion` at `eef69729ae4b4200a6060b9f91719d44538094e5`, based exactly on `c6f7fea0...`; adds only the bounded internal generalized Flow S / awaiting-tenure Save slice described below |
+| Archived-tenure history | Merged PR #34 / `gate4-finalization`; supplies the archived Observed-tenure consumer and reviewed Registry B0-before-Fault correction now present in the baseline |
 | Verified repair history | Historical PR #32 checkpoint `87629d6b72992254911a8e44f698d535bb5d7904`; incorporated through merged PR #33 |
 | Documentation history | Historical PR #31 checkpoint `f0af61c9b1247fa955300ac50545074e18e9b302`; incorporated through merged PR #33 |
 | Preserved Agent 3 head | `15b715a10704a8dafc2cccef65854d4d45ad55ca`, second parent of merge `6a2f89792eecbf6ef2e65d683e6b515bbc65181d` |
 
-PR #33 preserves Agent 3's ancestry and keeps the Agent 4 corrections separately identifiable.
-PRs #31 and #32 remain historical source checkpoints, not additional merge instructions.
+PR #33 preserves Agent 3's ancestry and keeps the Agent 4 corrections separately identifiable;
+merged PR #34 builds on that history rather than replacing it. PRs #28, #31 and #32 remain
+historical source checkpoints, not additional merge instructions.
 
 ## Dependency order
 
 The remaining work is one ordered chain rather than four independent agent queues:
 
-1. **Agent 1 runtime foundation:** the structural inventory now exposes live overlay provenance plus
-   authenticated physical charged bytes. Next, parameterize Flow S over the accepted
-   Closing/Unconfirmed bases, adopt the C-3 cursor at the six runtime scan owners, and implement
-   Flow R.
-2. **Agent 2 product paths:** use those seams for awaiting-tenure local work, reconciliation and
-   restart reconstruction; drive the real actor/Studio A -> B -> A' and newcomer path; obtain a
-   whole-boundary lifecycle review.
+1. **Agent 1 runtime foundation:** structural inventory and the internal provenance-general Flow S
+   are implemented. Next, adopt the C-3 cursor at the six runtime scan owners, implement Flow R,
+   map structured reasons and obtain the bounded runtime/signing reviews.
+2. **Agent 2 product paths:** the bounded internal Flipnote awaiting-tenure Save path, rails,
+   fresh-inventory reconstruction and handoff exclusion are implemented. Add Index evidence,
+   reconciliation, actor/native result wiring and the real actor/Studio A -> B -> A' and newcomer
+   path; close lifecycle findings and obtain a whole-boundary review.
 3. **Agent 3 completion:** the CORE-005 archived Observed-tenure consumer is implemented and its
    Registry integration correction is independently accepted; finish the bounded detached
    runtime/evidence gaps and obtain the bounded repair verdict.
 4. **Agent 4 exposure and acceptance:** only after P1-P4 pass, change P5, register the approved
    native commands, update UI/interface truth, run the combined scenarios and request Review 4.
 
-Agent 1's first two seams and Agent 3's historical consumer are independent and can be developed in
-either order. Native registration is downstream of both specialist acceptance and P5.
+The remaining Agent 1 cursor/Flow R work and Agent 3 detached repair runtime can progress
+independently. Native registration is downstream of every specialist acceptance and P5.
 
 ## Requirement matrix
 
 | ID | Requirement | Current state | Precise next action | Acceptance evidence still required |
 |---|---|---|---|---|
 | G4-A1-CORE | Detached typed handoff preparation and finite signing | **Implemented; dedicated independent acceptance still outstanding.** `e65bfd89...` is in the baseline. | Run the SHA-pinned core signing review from `GATE4-REVIEW-PREAMBLES.md`; preserve its prior focused evidence. | Bounded PASS for `8190dc4...e65bfd8`; do not infer it from later broad CI. |
-| G4-A1-S | Durable local Save through Flow S | **Closing path implemented; structural inventory seam implemented and reviewed; provenance-general Flow S absent; native unavailable.** Every authenticated Intents row now reports exact sealed-file bytes and live-branch provenance without turning terminal historic metadata into a live branch. | Parameterize capture/prepare/commit over `StudioOverlayBasis` without changing Closing semantics, then consume the inventory facts in Agent 2's capacity rails. | Closing compatibility plus real Unconfirmed first append, rails, expiry/replacement and exact retry tests. |
+| G4-A1-S | Durable local Save through Flow S | **Bounded internal generalized path implemented; native unavailable.** Shared classification reaches terminal acknowledgements and exact retries before provenance-specific authority. Capture/plan/commit carries a typed Closing or Unconfirmed basis, reauthenticates the exact record and context, and preserves Closing behavior. | Obtain the independent bounded implementation/integration review; then connect only reviewed product callers. | Closing compatibility is covered by the full suite. Real Flipnote Unconfirmed first append, expiry, exact retry, wrong-target refusal, operation rail and disposal accounting pass; Index preview evidence remains. |
 | G4-A1-C3 | Resumable bounded inventory | **Storage cursor implemented and reviewed; six runtime owners still use direct structural loads/full scans.** | Convert the six production owners with identity, mount, generation, cancellation, restart limit and backoff checks. Coordinate repair writers already integrated from Agent 3. | Cursor invalidation, bounded progress, retained-input ownership and another-server progress. |
 | G4-A1-R | Resolve interrupted Prepared state | **Not implemented.** | Build Flow R on the adopted cursor and existing source/reference fences. | Restart at each Prepared/Source/Completed barrier; reads/copy remain available and destructive actions remain refused. |
 | G4-A1-MAP | Structured eligibility/manual reasons | **Agent 2 types exist; Agent 1 runtime still returns string refusals in relevant paths.** | Map runtime refusals to `StudioOverlayEligibility` / `StudioOverlayManualReason` without collapsing distinct cases. | Store -> actor -> native conversion coverage for every reason, including stale final delivery. |
 | G4-A2-P1 | Inspect/export/copy/dispose lifecycle | **Implemented with unresolved behavior/test findings; unregistered; whole-boundary review not passed.** Windows preservation is fixed by `5f141994...`; `ed8ab0a8` closes M2; and `0335262e` closes the historical D4/D1/object-probe/M-1 evidence items and supplies a successful-apply control. It does not close the remaining list in Agent 2 status. | Before re-review, close or explicitly disposition the missing exact-retry half of M3, the C1'/C4 transfer-hold mismatch (M4), the vacuous provenance test (L2), exact-retry kind misreport (L4), same-document copy coverage (L5), the wrong-object-channel diagnostic Low, and P1 copy-across-restart evidence. Then request bounded lifecycle review. | Both document kinds, exact copy retry, same-document copy, restart/refusal, exact envelopes, wrong authority/scope/session, quota and crash barriers. |
-| G4-A2-PREVIEW | Durable work from awaiting-tenure preview | **Replication/sync basis exists; app path absent.** | After G4-A1-S, implement custody admission, rails, S3 re-entry, save, reconciliation, restart reconstruction, native results and non-Closing selector exclusion. | Real preview Save for Index/Flipnote; expiry/replacement/restart; no handoff/signing authority. |
+| G4-A2-PREVIEW | Durable work from awaiting-tenure preview | **Partial internal app/store slice implemented; not actor/native exposed.** New authoring proves no installed source, re-mints the current complete preview at S1b and S3, uses detached Flow S, enforces 3/server, 8 MiB/vault and 64-op rails, reconstructs quota from fresh inventory, releases it after durable disposal and keeps Unconfirmed history out of automatic handoff. | Add real Index preview coverage, 8.6 reconciliation, true reopen/restart reconstruction, actor scheduling and truthful native results; review the whole boundary before exposure. | Real Index and Flipnote preview Save; expiry/replacement/reopen; reconciliation outcomes; no handoff/signing authority; actor/native cancellation and stale-delivery cases. |
 | G4-A2-TENURE | Real repeated owner/rejoin/newcomer | **Sync/receipt fixture passes; production actor and Studio rotation absent.** | Drive real MLS A -> B -> A' through actor, Studio, restart and newcomer. | Distinct observed tenures, first receipt, old key/receipt refusal, hidden higher history and convergence. |
 | G4-A2-P5 | Permission to expose native Save | **FALSE.** | Change only after P1-P4 have implementation PASSes recorded by Agent 2. | Security allow/deny negatives while false; positive native evidence only after promotion. |
 | G4-A3-CURRENT | Signed current-tenure Studio/Registry repair | **Core/store implementation integrated; automatic runtime execution now fail-closed pending its detached boundary.** PR #33 review found that repair-only service skipped the durability retry and that active repair ran synchronously outside shared admission. Commit `3fcde979...` makes repair carriage repeat exact source and authenticated owner-record durability, including uncertain B2/B3 writes, and disables automatic apply, owner resume and repaired-seed installation rather than pretending source preparation covers repair execution. A later re-review retained one MEDIUM residual because the disabled Registry router still rebuilt the full source before its gate; `f7c74cb2...` classifies only from exact-current prepared state. Review then found a fresh-small-source liveness loop; `164a94d7...` schedules that detached classification independently of size and represents exact checked absence separately from cold/unknown state. | Preserve the store/core behavior, build the capture/detach/revalidate/commit runtime, then re-enable automatic execution only with shared-pool ownership through result handling. | Interrupted-B2/B3 Studio/Registry service, warm full-pool deferral/no mutation, cancellation/result holding, unrelated-actor progress and real two-peer Fault -> decision -> replacement -> restart/newcomer. |
@@ -59,6 +61,17 @@ either order. Native registration is downstream of both specialist acceptance an
 | G4-I-REVIEW | Full Review 4 | **Not ready.** | Pin the final integrated SHA after all implementation and suites, then send the filled Review 4 preamble. | Independent full-gate PASS. |
 
 ## Verified candidate evidence
+
+The `gate4-runtime-completion` candidate at `eef69729ae4b4200a6060b9f91719d44538094e5` passes the definitive complete root suite,
+the complete desktop/Tauri suite (325 library and 5 command-ACL tests), all 1,282 frontend tests,
+root and desktop strict all-target/all-feature Clippy, desktop `cargo check`, root formatting,
+Svelte check, production build and `cargo deny`. The real complete Flipnote preview and 65th-
+operation regressions pass inside that root run. An earlier root run had one order-sensitive
+`studio_held_registry_page_is_discarded_after_fault_or_checkpoint_replacement` failure; the exact
+test passed alone on candidate and exact base and passed in the definitive full rerun. Startup/flow
+remain inapplicable because setup, process, renderer and command-registration paths are unchanged.
+Linux ambient and both repair-store mutation jobs remain exact-head PR checks and are not claimed
+from Windows.
 
 The following evidence is pinned to code head
 `87629d6b72992254911a8e44f698d535bb5d7904` on PR #32. The documentation-only merge on the
@@ -136,6 +149,13 @@ readiness additionally requires Linux ambient/store-mutation and native evidence
 pushed correction head.
 
 ## Review ledger
+
+- A structured actual-diff self-review found and fixed three candidate defects before this
+  checkpoint: a preview could be paired with another target, quota refusal could mask stale branch
+  authorization, and successful Unconfirmed disposal failed to release same-budget quota. Focused
+  regressions pin all three. This is not the required independent bounded review; merge readiness
+  remains conditional on that review covering generalized Flow S, the awaiting-tenure behavior,
+  merge resolutions and these classification/accounting corrections.
 
 - Agent 4's independent full-candidate review found no remaining BLOCKER/HIGH/MEDIUM finding after
   the Windows durability and issuer-tenure sequence corrections. It retained one LOW coverage gap:

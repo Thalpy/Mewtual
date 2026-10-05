@@ -2128,8 +2128,31 @@ flushed before publication or normal source rewrites. Rotation/adoption resolve 
 journal/recovery/retirement work; the common source writer also fences evidence loss.
 
 The bounded store handoff is accepted; HANDOFF-002 is closed. Read-only `studio_overlay_read`
-is separately accepted, with INSPECTION-TEST-001 now closed. Native overlay writes, automatic
-handoff scheduling, manual disposition and preview-based overlays remain unavailable.
+is separately accepted, with INSPECTION-TEST-001 now closed. Native overlay writes and manual
+disposition remain unavailable. Automatic Closing handoff scheduling exists, but its selector now
+memoizes Unconfirmed history as quiet rather than attempting to transfer it.
+
+#### Awaiting-tenure overlay Save slice (Gate 4, internal only)
+
+The internal app/store path generalizes Flow S over an owned typed Closing or Unconfirmed basis.
+`prepare_studio_unconfirmed_overlay` proves the installed source absent against the current
+five-family inventory, mints a basis only through the current complete prepared preview, repeats
+absence before deriving the branch, and returns only the basis fingerprint plus branch identity.
+Classification remains provenance-independent, so terminal acknowledgements and exact accepted
+retries precede preview/source/media work. New authoring re-mints the preview at S1b, captures the
+exact authenticated Intents version and context, plans off custody, then at S3 rechecks mount,
+server, complete target, member/device key, owner, MLS epoch, exact record bytes and source absence
+before re-minting the preview and writing.
+
+Live Unconfirmed work is limited to three branches per numeric server/group, 8 MiB of exact
+physical Intents bytes per mounted vault and 64 accepted operations per branch. A fresh complete
+inventory derives the live counters from authenticated provenance and charged bytes. Replacement
+preflight subtracts the authenticated old charge; counters change only after a successful durable
+write, and disposal releases the live charge only after its terminal replacement succeeds.
+Unconfirmed provenance grants no handoff, signing, receipt, installed-source or publication
+authority. The implementation has real complete-preview Flipnote coverage but not yet real Index,
+8.6 reconciliation, true reopen/restart, actor/native result or UI coverage. Its functions and
+ticket remain crate-private; P5 is false and no Save command is registered.
 
 The [prepared-signing checkpoint](GATE4-HANDOFF-SIGNING-REVIEW.md), awaiting review, adds:
 

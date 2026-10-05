@@ -8,7 +8,31 @@ the protocol- vs honest-client-enforced boundary and the hardening backlog.
 [`MESSAGE-FLOW.md`](MESSAGE-FLOW.md) traces one message end to end (send, gossip, catch-up)
 and ranks the live hazards in that path.
 
-## Status (latest entry: 2026-10-05)
+## Status (latest entry: 2026-10-06)
+
+- **Gate 4 internal awaiting-tenure Save candidate (2026-10-06).** Branch
+  `gate4-runtime-completion` starts exactly at merged PR #34 / `gate4-agent1-runtime`
+  `c6f7fea0af1392da37e484067a3c8c9131c328a4`; implementation commit
+  `eef69729ae4b4200a6060b9f91719d44538094e5`
+  generalizes detached Flow S over typed Closing and Unconfirmed bases without changing the
+  Closing wire or persistence formats. For new Unconfirmed work the app proves the installed
+  source absent, re-enters the current complete preview at S1b and S3, reauthenticates the detached
+  plan, and applies three branches per server, 8 MiB per vault and 64 operations per branch rails.
+  Successful disposal releases the live-branch counters only after its terminal replacement is
+  durable. Fresh five-family inventory reconstructs the counters, and automatic handoff memoizes
+  Unconfirmed history as quiet. A real complete Flipnote preview regression covers first append,
+  wrong-target refusal, expiry, exact retry, detached scheduling, durable provenance, fresh-
+  inventory reconstruction and disposal; a second real-flow regression refuses operation 65
+  before scheduling. The candidate remains internal: no actor/native command or renderer path was
+  registered, P5 is false, unfinished repair commands remain unavailable, and the UI is unchanged.
+  Index preview evidence, 8.6 reconciliation, actor/native result wiring, the remaining lifecycle,
+  tenure, C-3/Flow R and detached repair work, specialist reviews and combined Review 4 remain
+  open. The definitive local root rerun, complete native suite, all 1,282 frontend tests, root and
+  desktop strict Clippy, desktop check, Svelte check, production build, formatting and `cargo deny`
+  pass. An earlier root run had one order-sensitive Registry assertion fail; the exact test passed
+  alone on both candidate and pinned base, and the definitive full rerun passed it. Linux ambient
+  and repair-store mutation evidence is intentionally left to exact-head PR CI. Startup/flow are
+  inapplicable because no setup, process, renderer behavior or command registration changed.
 
 - **Gate 4 archived-owner admission candidate (2026-10-05).** The app now consumes the single
   archived Observed-tenure witness only through the still-current durable owner snapshot used by
