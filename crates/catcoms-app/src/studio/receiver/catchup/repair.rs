@@ -16,6 +16,21 @@ const MAX_REMEMBERED_REGISTRY_REPAIRS: usize = 64;
 const REPAIR_HOLD_BACKOFF_MS: u64 = 60_000;
 
 impl CatchupRuntime {
+    #[cfg(test)]
+    pub(in crate::studio::receiver) fn hold_checkpoint_for_test(
+        &mut self,
+        pass: crate::studio_exchange::discovery::ServerCheckpointFetch,
+    ) {
+        self.checkpoint = Some(pass);
+    }
+
+    #[cfg(test)]
+    pub(in crate::studio::receiver) fn take_checkpoint_for_test(
+        &mut self,
+    ) -> Option<crate::studio_exchange::discovery::ServerCheckpointFetch> {
+        self.checkpoint.take()
+    }
+
     /// Test-only bridge for exercising this private router with a transport-produced pass.
     #[cfg(test)]
     pub(in crate::studio::receiver) fn route_registry_checkpoint_for_test<

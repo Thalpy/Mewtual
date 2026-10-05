@@ -303,7 +303,12 @@ impl CatchupRuntime {
             let CheckpointTarget::Registry(bucket) = pass.inner.target() else {
                 unreachable!()
             };
-            if !store.registry_receive_source_fits(id, &server.group_id(), bucket)?
+            let source_fits = store.registry_receive_source_fits(id, &server.group_id(), bucket)?;
+            // Disabled automatic repair still needs an exact local classification before an
+            // ordinary pass can install. Prepare even a small source; otherwise a fresh receiver
+            // would repeatedly discard the pass as unknown without ever scheduling the detached
+            // work that can resolve it. Checked absence is retained separately from cold state.
+            if (!Self::automatic_repair_execution_ready() || !source_fits)
                 && !self.prepare_registry_inventory(server, store, id, bucket)?
             {
                 return Ok(None);

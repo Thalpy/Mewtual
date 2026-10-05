@@ -290,6 +290,19 @@ impl StudioReceiver {
         self.catchup
             .route_registry_checkpoint_for_test(server, store, id, pass)
     }
+    #[cfg(test)]
+    pub(crate) fn hold_checkpoint_for_test(
+        &mut self,
+        pass: crate::studio_exchange::discovery::ServerCheckpointFetch,
+    ) {
+        self.catchup.hold_checkpoint_for_test(pass);
+    }
+    #[cfg(test)]
+    pub(crate) fn take_checkpoint_for_test(
+        &mut self,
+    ) -> Option<crate::studio_exchange::discovery::ServerCheckpointFetch> {
+        self.catchup.take_checkpoint_for_test()
+    }
     fn catchup_step<T: MeshTransport + 'static, R: CryptoRngCore>(
         &mut self,
         server: &mut Server<T, R>,

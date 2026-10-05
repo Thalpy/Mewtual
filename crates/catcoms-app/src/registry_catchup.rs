@@ -106,6 +106,9 @@ pub struct ServerRegistryPageProvider {
     server: u64,
     bucket: u8,
     prepared: Option<PreparedSource>,
+    /// A custody-checked missing source is distinct from a cold/stale provider. It authorizes
+    /// only the local fact that no repair can be owed, and is rechecked by path before use.
+    prepared_absent: bool,
     preparation_generation: Arc<()>,
 }
 impl ServerRegistryPageProvider {
@@ -218,9 +221,17 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
         bucket: u8,
         provider: &mut ServerRegistryPageProvider,
     ) -> Result<Option<bool>, AppError> {
-        if !self.registry_page_provider_matches(store, server, bucket, provider)
-            || !self.registry_page_preparation_is_warm(store, provider)?
-        {
+        if !self.registry_page_provider_matches(store, server, bucket, provider) {
+            return Ok(None);
+        }
+        if provider.prepared_absent {
+            if store.registry_page_source_is_absent(server, &self.group_id(), bucket)? {
+                return Ok(Some(false));
+            }
+            provider.prepared_absent = false;
+            return Ok(None);
+        }
+        if !self.registry_page_preparation_is_warm(store, provider)? {
             return Ok(None);
         }
         Ok(provider
@@ -356,6 +367,7 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
         self.check_page_provider(store, provider)?;
         // Refresh keeps the cursor MAC but releases the previous full source BEFORE reserving.
         provider.prepared = None;
+        provider.prepared_absent = false;
         provider.preparation_generation = Arc::new(());
         let permit = pool.clone().try_acquire_owned().map_err(|_| {
             AppError::Invalid("registry page preparation capacity exhausted".into())
@@ -373,6 +385,7 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
     ) -> Result<Option<ServerRegistryPagePreparation>, AppError> {
         self.check_page_provider(store, provider)?;
         provider.prepared = None;
+        provider.prepared_absent = false;
         provider.preparation_generation = Arc::new(());
         let capture = store.capture_registry_page_source(
             provider.server,
@@ -380,6 +393,7 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
             provider.bucket,
         )?;
         let Some(capture) = capture else {
+            provider.prepared_absent = true;
             return Ok(None);
         };
         Ok(Some(ServerRegistryPagePreparation {
@@ -558,6 +572,7 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
             server,
             bucket,
             prepared: None,
+            prepared_absent: false,
             preparation_generation: Arc::new(()),
         })
     }

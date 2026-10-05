@@ -7,7 +7,7 @@ use catcoms_sync::checkpoint_exchange::CheckpointTarget;
 async fn studio_registry_preparation_outliving_head_needs_a_fresh_request() {
     let mut p = super::pages::proven_pair().await;
     super::discovery::prepared_checkpoint(&mut p, target());
-    let bucket = prepared_registry(&mut p, target(), false);
+    let (bucket, receipt, seed) = prepared_registry_material(&mut p, target(), false);
     drop(p.a_store);
     p.a_store = open(p._a_root.path());
     let mut receiver = StudioReceiver::default();
@@ -84,25 +84,82 @@ async fn studio_registry_preparation_outliving_head_needs_a_fresh_request() {
     else {
         panic!("current ordinary Registry proof")
     };
-
-    // The disabled automatic-repair gate must not reconstruct Registry state merely to decide
-    // whether this ordinary, authenticated pass can proceed. Healthy exact-current preparation
-    // permits the ordinary installer; a prepared pending repair defers the same pass without a
-    // write. This pins the actual router arm, not only the prepared-source classifier.
-    let full_loads = crate::store::registry_full_loads_for_test();
-    let (ordinary, pass) = receiver
-        .route_registry_checkpoint_for_test(&mut p.alice, &mut p.a_store, SERVER, pass)
-        .unwrap();
-    assert!(
-        ordinary,
-        "a healthy prepared source permits ordinary progress"
+    // Mirror the owner's ordinary checkpoint to Bob, the actual requester named by `pass`.
+    // Alice's serving receiver is deliberately distinct from Bob's fresh installing receiver;
+    // service cannot accidentally warm the client's provider.
+    let mut b = budget(&mut p.bob, &mut p.b_store);
+    p.bob.sync.with_registry_context(|group, device, _, rng| {
+        p.b_store
+            .with_studio_protocol_budget(SERVER, group, &mut b, |store, budget| {
+                store.adopt_registry_checkpoint(
+                    SERVER,
+                    group,
+                    bucket,
+                    device,
+                    &receipt,
+                    Some(seed.bytes()),
+                    0,
+                    &p.clock,
+                    rng,
+                    budget,
+                )?;
+                Ok(())
+            })
+            .unwrap();
+    });
+    // The fresh receiver must schedule detached classification even though this healthy Registry
+    // source fits the inline read limit. Completion reaches ordinary seed installation without an
+    // actor-thread full load or a rediscovery loop.
+    let mut client = StudioReceiver::default();
+    client.preparation_pools_for_test(
+        std::sync::Arc::new(tokio::sync::Semaphore::new(4)),
+        std::sync::Arc::new(tokio::sync::Semaphore::new(3)),
     );
+    client.hold_checkpoint_for_test(pass);
+    let full_loads = crate::store::registry_full_loads_for_test();
+    client
+        .run(&mut p.bob, &mut p.b_store, SERVER, None)
+        .unwrap();
+    let job = client
+        .detach(&mut p.bob)
+        .expect("fresh small-source receiver schedules detached classification");
+    assert!(job.is_preparation_for_test());
+    client.complete(&mut p.bob, job.run(None).await);
+    client
+        .run(&mut p.bob, &mut p.b_store, SERVER, None)
+        .unwrap();
     assert_eq!(
         crate::store::registry_full_loads_for_test(),
         full_loads,
-        "routing must reuse the detached Registry reconstruction"
+        "fresh-receiver routing must not reconstruct Registry state under actor custody"
     );
-    let pass = pass.expect("ordinary routing retains the checkpoint pass");
+    assert!(
+        client.take_checkpoint_for_test().is_none(),
+        "healthy routing consumes the pass through ordinary installation"
+    );
+
+    let pending_attempt = p
+        .bob
+        .prepare_checkpoint_discovery(
+            &p.b_store,
+            SERVER,
+            p.alice.local_peer(),
+            CheckpointTarget::Registry(bucket),
+        )
+        .unwrap();
+    let (pending_completed, ()) = tokio::join!(pending_attempt.fetch(), async {
+        p.alice.sync_once().await.unwrap();
+        receiver
+            .run(&mut p.alice, &mut p.a_store, SERVER, None)
+            .unwrap();
+    });
+    let Some(ServerCheckpointDiscovery::Selected(pending_pass)) = p
+        .bob
+        .complete_checkpoint_discovery(&p.b_store, SERVER, pending_completed)
+        .unwrap()
+    else {
+        panic!("second ordinary Registry proof")
+    };
 
     make_registry_repair_install_pending(&mut p, bucket);
     let mut provider = p
@@ -112,7 +169,7 @@ async fn studio_registry_preparation_outliving_head_needs_a_fresh_request() {
     crate::registry_catchup::prepare_test_source(&mut p.alice, &p.a_store, &mut provider)
         .await
         .unwrap();
-    receiver = StudioReceiver::retaining_registry_for_test(provider, u64::MAX);
+    client = StudioReceiver::retaining_registry_for_test(provider, u64::MAX);
     let path = std::fs::read_dir(p._a_root.path().join("servers"))
         .unwrap()
         .map(|entry| entry.unwrap().path())
@@ -123,8 +180,8 @@ async fn studio_registry_preparation_outliving_head_needs_a_fresh_request() {
         .unwrap();
     let before = std::fs::read(&path).unwrap();
     let full_loads = crate::store::registry_full_loads_for_test();
-    let (ordinary, pass) = receiver
-        .route_registry_checkpoint_for_test(&mut p.alice, &mut p.a_store, SERVER, pass)
+    let (ordinary, pass) = client
+        .route_registry_checkpoint_for_test(&mut p.alice, &mut p.a_store, SERVER, pending_pass)
         .unwrap();
     assert!(!ordinary, "an owed Registry replacement must defer");
     assert!(pass.is_none(), "the deferred ordinary pass is discarded");
@@ -134,7 +191,7 @@ async fn studio_registry_preparation_outliving_head_needs_a_fresh_request() {
         before,
         "disabled automatic repair performs no durable write"
     );
-    assert!(!receiver.take_pause_notice());
+    assert!(!client.take_pause_notice());
 }
 
 fn make_registry_repair_install_pending(p: &mut Pair, bucket: u8) {
@@ -650,7 +707,15 @@ async fn actor_newcomer(selected_target: StudioTarget, restart_closing: bool) {
     });
 }
 
-pub(super) fn prepared_registry(p: &mut Pair, target: StudioTarget, large: bool) -> u8 {
+fn prepared_registry_material(
+    p: &mut Pair,
+    target: StudioTarget,
+    large: bool,
+) -> (
+    u8,
+    catcoms_replication::Receipt,
+    catcoms_replication::CheckpointSeed,
+) {
     use catcoms_replication::{
         registry::{registry_document, PointerKey, RegistryOp},
         registry_epoch::RegistryEpoch,
@@ -715,12 +780,16 @@ pub(super) fn prepared_registry(p: &mut Pair, target: StudioTarget, large: bool)
                     rng,
                     budget,
                 )?;
-                store.prepare_epoch_owner_receipt(SERVER, receipt, g, 0, rng, budget)?;
+                store.prepare_epoch_owner_receipt(SERVER, receipt.clone(), g, 0, rng, budget)?;
                 Ok(())
             })
             .unwrap();
     });
-    bucket
+    (bucket, receipt, seed)
+}
+
+pub(super) fn prepared_registry(p: &mut Pair, target: StudioTarget, large: bool) -> u8 {
+    prepared_registry_material(p, target, large).0
 }
 
 #[tokio::test]

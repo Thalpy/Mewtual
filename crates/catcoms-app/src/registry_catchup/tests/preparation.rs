@@ -77,6 +77,30 @@ async fn prepared_registry_repair_classification_reuses_the_verified_graph() {
         "missing preparation stays unknown rather than being classified as healthy"
     );
     assert_eq!(crate::store::registry_full_loads_for_test(), full_loads);
+
+    let mut absent = Fixture::new();
+    let mut provider = cold(&mut absent);
+    assert!(
+        !prepare_test_source(&mut absent.server, &absent.store, &mut provider)
+            .await
+            .unwrap(),
+        "checked absence needs no detached graph"
+    );
+    let full_loads = crate::store::registry_full_loads_for_test();
+    assert_eq!(
+        absent
+            .server
+            .prepared_registry_repair_install_pending(
+                &absent.store,
+                SERVER,
+                absent.key.bucket(),
+                &mut provider,
+            )
+            .unwrap(),
+        Some(false),
+        "exact checked absence permits first ordinary installation"
+    );
+    assert_eq!(crate::store::registry_full_loads_for_test(), full_loads);
 }
 
 /// The half the test below does not cover: that a quiet actor **asks for** the releasing visit.
