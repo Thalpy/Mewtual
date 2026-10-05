@@ -1107,6 +1107,33 @@ fn a_current_tenure_report_stages_suppresses_proof_and_is_decided_from_the_reser
         "baseline: the owner proves its head"
     );
 
+    // A pair the owner cannot attest, signed outside its tenure, writes nothing even while the
+    // reserved slot is empty. Keeping this before the valid report is load-bearing mutation
+    // coverage: the historical-capacity fence below must not mask removal of current admission.
+    let owner_record = store.epoch_owner_path(
+        &super::super::super::epoch_owner::scope_bytes(SERVER, &f.logical).unwrap(),
+    );
+    let before = fs::read(&owner_record).unwrap();
+    let outsider = MlsDevice::generate().unwrap();
+    let foreign = |close: u8| {
+        Receipt::sign(
+            f.logical.clone(),
+            0,
+            [close; 32],
+            [close; 32],
+            0,
+            InheritedCheckpoint::EpochZero,
+            &outsider,
+        )
+        .unwrap()
+    };
+    head(&f, &mut store, Some(&sorted_pair(&foreign(1), &foreign(2))));
+    assert_eq!(
+        fs::read(&owner_record).unwrap(),
+        before,
+        "only a current-tenure pair can be staged as live"
+    );
+
     // A peer reports a current-tenure equivocation it is frozen on.
     let first = sorted_pair(&r1, &r2);
     let gated = head(&f, &mut store, Some(&first));
@@ -1126,27 +1153,6 @@ fn a_current_tenure_report_stages_suppresses_proof_and_is_decided_from_the_reser
         !head(&f, &mut store, None).prove,
         "suppression is durable, not a property of the reporting exchange"
     );
-
-    // A pair the owner cannot attest, signed outside its tenure, writes nothing.
-    let owner_record = store.epoch_owner_path(
-        &super::super::super::epoch_owner::scope_bytes(SERVER, &f.logical).unwrap(),
-    );
-    let before = fs::read(&owner_record).unwrap();
-    let outsider = MlsDevice::generate().unwrap();
-    let foreign = |close: u8| {
-        Receipt::sign(
-            f.logical.clone(),
-            0,
-            [close; 32],
-            [close; 32],
-            0,
-            InheritedCheckpoint::EpochZero,
-            &outsider,
-        )
-        .unwrap()
-    };
-    head(&f, &mut store, Some(&sorted_pair(&foreign(1), &foreign(2))));
-    assert_eq!(fs::read(&owner_record).unwrap(), before);
 
     // A second pair while the reserved slot is occupied: only its fingerprint is kept.
     let second = sorted_pair(&r1, &r3);
