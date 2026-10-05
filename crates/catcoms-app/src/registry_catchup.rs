@@ -205,6 +205,29 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
         provider.prepared = Some(prepared);
         Ok(true)
     }
+    /// Classify an owed Registry replacement from the already detached and verified source.
+    ///
+    /// `None` is deliberately "unknown", not "healthy": the provider may be absent, retargeted,
+    /// cold or stale. The automatic receiver must defer in that case. A returned fact is bound to
+    /// the current Server/mount/member context and to an exact reread of the saved wrapper, while
+    /// avoiding a second synchronous Registry reconstruction under actor/store custody.
+    pub(crate) fn prepared_registry_repair_install_pending(
+        &mut self,
+        store: &ServerStore,
+        server: u64,
+        bucket: u8,
+        provider: &mut ServerRegistryPageProvider,
+    ) -> Result<Option<bool>, AppError> {
+        if !self.registry_page_provider_matches(store, server, bucket, provider)
+            || !self.registry_page_preparation_is_warm(store, provider)?
+        {
+            return Ok(None);
+        }
+        Ok(provider
+            .prepared
+            .as_ref()
+            .map(|prepared| prepared.source.repair_install_pending()))
+    }
     /// Head/seed/page service from the existing one prepared Registry source. Its semaphore
     /// permit follows the graph's actual lifetime, including cancellation and queued results.
     pub(crate) fn serve_registry_interest(

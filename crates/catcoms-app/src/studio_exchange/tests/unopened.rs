@@ -77,12 +77,127 @@ async fn studio_registry_preparation_outliving_head_needs_a_fresh_request() {
             "new request uses checked warm source"
         );
     });
-    assert!(matches!(
-        p.bob
-            .complete_checkpoint_discovery(&p.b_store, SERVER, completed),
-        Ok(Some(ServerCheckpointDiscovery::Selected(_)))
-    ));
+    let Some(ServerCheckpointDiscovery::Selected(pass)) = p
+        .bob
+        .complete_checkpoint_discovery(&p.b_store, SERVER, completed)
+        .unwrap()
+    else {
+        panic!("current ordinary Registry proof")
+    };
+
+    // The disabled automatic-repair gate must not reconstruct Registry state merely to decide
+    // whether this ordinary, authenticated pass can proceed. Healthy exact-current preparation
+    // permits the ordinary installer; a prepared pending repair defers the same pass without a
+    // write. This pins the actual router arm, not only the prepared-source classifier.
+    let full_loads = crate::store::registry_full_loads_for_test();
+    let (ordinary, pass) = receiver
+        .route_registry_checkpoint_for_test(&mut p.alice, &mut p.a_store, SERVER, pass)
+        .unwrap();
+    assert!(
+        ordinary,
+        "a healthy prepared source permits ordinary progress"
+    );
+    assert_eq!(
+        crate::store::registry_full_loads_for_test(),
+        full_loads,
+        "routing must reuse the detached Registry reconstruction"
+    );
+    let pass = pass.expect("ordinary routing retains the checkpoint pass");
+
+    make_registry_repair_install_pending(&mut p, bucket);
+    let mut provider = p
+        .alice
+        .begin_registry_page_provider(&p.a_store, SERVER, bucket)
+        .unwrap();
+    crate::registry_catchup::prepare_test_source(&mut p.alice, &p.a_store, &mut provider)
+        .await
+        .unwrap();
+    receiver = StudioReceiver::retaining_registry_for_test(provider, u64::MAX);
+    let path = std::fs::read_dir(p._a_root.path().join("servers"))
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .find(|path| {
+            path.extension()
+                .is_some_and(|extension| extension == "registry-epoch")
+        })
+        .unwrap();
+    let before = std::fs::read(&path).unwrap();
+    let full_loads = crate::store::registry_full_loads_for_test();
+    let (ordinary, pass) = receiver
+        .route_registry_checkpoint_for_test(&mut p.alice, &mut p.a_store, SERVER, pass)
+        .unwrap();
+    assert!(!ordinary, "an owed Registry replacement must defer");
+    assert!(pass.is_none(), "the deferred ordinary pass is discarded");
+    assert_eq!(crate::store::registry_full_loads_for_test(), full_loads);
+    assert_eq!(
+        std::fs::read(path).unwrap(),
+        before,
+        "disabled automatic repair performs no durable write"
+    );
     assert!(!receiver.take_pause_notice());
+}
+
+fn make_registry_repair_install_pending(p: &mut Pair, bucket: u8) {
+    use crate::store::{StudioRepairOutcome, StudioRepairRequest};
+    use catcoms_replication::{InheritedCheckpoint, Receipt};
+
+    let receipts = p.alice.sync.with_registry_context(|group, device, _, _| {
+        let logical =
+            catcoms_replication::registry::registry_document(&group.group_id(), bucket).unwrap();
+        let state = p
+            .a_store
+            .load_registry_epoch(SERVER, group, bucket, device)
+            .unwrap()
+            .unwrap();
+        [71u8, 72].map(|salt| {
+            let mut projection = state.projection().unwrap();
+            projection.epoch = 10;
+            let seed = projection.checkpoint([salt; 32]).unwrap();
+            Receipt::sign(
+                logical.clone(),
+                10,
+                [salt; 32],
+                seed.change_hash(),
+                0,
+                InheritedCheckpoint::EpochZero,
+                device,
+            )
+            .unwrap()
+        })
+    });
+    let clock = p.clock.clone();
+    let mut storage = budget(&mut p.alice, &mut p.a_store);
+    p.alice.sync.with_registry_context(|group, device, _, rng| {
+        p.a_store
+            .with_studio_protocol_budget(SERVER, group, &mut storage, |store, budget| {
+                for receipt in &receipts {
+                    store.adopt_registry_checkpoint(
+                        SERVER, group, bucket, device, receipt, None, 0, &clock, rng, budget,
+                    )?;
+                }
+                let mut pair = receipts;
+                pair.sort_by_key(Receipt::hash);
+                let (_, outcome, _) = store.issue_registry_repair(
+                    SERVER,
+                    group,
+                    bucket,
+                    device,
+                    0,
+                    StudioRepairRequest {
+                        receipt_a: pair[0].hash(),
+                        receipt_b: pair[1].hash(),
+                        selected: pair[0].hash(),
+                    },
+                    None,
+                    &clock,
+                    rng,
+                    budget,
+                )?;
+                assert_eq!(outcome, StudioRepairOutcome::AwaitingSeed);
+                Ok(())
+            })
+            .unwrap();
+    });
 }
 
 #[tokio::test]

@@ -16,6 +16,31 @@ const MAX_REMEMBERED_REGISTRY_REPAIRS: usize = 64;
 const REPAIR_HOLD_BACKOFF_MS: u64 = 60_000;
 
 impl CatchupRuntime {
+    /// Test-only bridge for exercising this private router with a transport-produced pass.
+    #[cfg(test)]
+    pub(in crate::studio::receiver) fn route_registry_checkpoint_for_test<
+        T: MeshTransport,
+        R: CryptoRngCore,
+    >(
+        &mut self,
+        server: &mut Server<T, R>,
+        store: &mut ServerStore,
+        id: u64,
+        pass: crate::studio_exchange::discovery::ServerCheckpointFetch,
+    ) -> Result<
+        (
+            bool,
+            Option<crate::studio_exchange::discovery::ServerCheckpointFetch>,
+        ),
+        AppError,
+    > {
+        self.checkpoint = Some(pass);
+        let ordinary = self
+            .route_checkpoint_install(server, store, id, None)?
+            .is_none();
+        Ok((ordinary, self.checkpoint.take()))
+    }
+
     /// Fail-closed integration gate for repair transactions that still run synchronously while
     /// the receiver owns Server/store custody. The store/core implementation remains available
     /// for bounded tests, but live discovery, owner resume and repaired-seed installation must not
@@ -561,12 +586,42 @@ impl CatchupRuntime {
         let target = pass.inner.target();
         let selected = pass.inner.selected_receipt().clone();
         let now = server.runtime_clock().monotonic_ms();
-        let owed = server
-            .sync
-            .with_registry_context(|g, d, _, _| match target {
-                CheckpointTarget::Studio(studio) => Ok(store.owed_studio_repair(id, g, studio, d)),
-                CheckpointTarget::Registry(bucket) => store.owed_registry_repair(id, g, bucket, d),
-            });
+        let automatic_repair_ready = Self::automatic_repair_execution_ready();
+        let owed = match target {
+            CheckpointTarget::Studio(studio) => server
+                .sync
+                .with_registry_context(|g, d, _, _| Ok(store.owed_studio_repair(id, g, studio, d))),
+            CheckpointTarget::Registry(bucket) if !automatic_repair_ready => {
+                // Registry reconstruction is detached and already retained by the page provider.
+                // Rebuilding it here, under actor/store custody, would defeat that boundary even
+                // though automatic repair execution is disabled. Unknown classification is not
+                // "no repair": a missing/cold/stale provider must defer rather than fall through
+                // to ordinary installation.
+                let classification = match self.registry_provider.as_mut() {
+                    Some(provider) => {
+                        server.prepared_registry_repair_install_pending(store, id, bucket, provider)
+                    }
+                    None => Ok(None),
+                };
+                match classification {
+                    Ok(Some(false)) => Ok(None),
+                    Ok(Some(true) | None) => {
+                        self.checkpoint = None;
+                        self.retry_discovery(now);
+                        return Ok(Some(None));
+                    }
+                    Err(error) => {
+                        self.note_repair_failure_for(failure_target, &error);
+                        self.checkpoint = None;
+                        self.retry_discovery(now);
+                        return Ok(Some(None));
+                    }
+                }
+            }
+            CheckpointTarget::Registry(bucket) => server
+                .sync
+                .with_registry_context(|g, d, _, _| store.owed_registry_repair(id, g, bucket, d)),
+        };
         let owed = match owed {
             Ok(owed) => owed,
             Err(error) => {
@@ -576,7 +631,7 @@ impl CatchupRuntime {
             }
         };
         if let Some((repair, pair)) = owed {
-            if !Self::automatic_repair_execution_ready() {
+            if !automatic_repair_ready {
                 // Do not let the ordinary installer consume the decision's selected checkpoint.
                 // The fetched pass is network-derived and disposable; durable repair/source state
                 // remains untouched for the future detached job.

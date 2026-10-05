@@ -270,6 +270,26 @@ impl StudioReceiver {
         receiver.catchup.registry_cache_for_test(provider, until);
         receiver
     }
+    /// Exercise the pre-install router with a transport-produced pass while keeping all of the
+    /// otherwise private runtime custody explicit in the test. The returned pass survives only
+    /// when the router permits the ordinary installer to continue.
+    #[cfg(test)]
+    pub(crate) fn route_registry_checkpoint_for_test<T: MeshTransport, R: CryptoRngCore>(
+        &mut self,
+        server: &mut Server<T, R>,
+        store: &mut ServerStore,
+        id: u64,
+        pass: crate::studio_exchange::discovery::ServerCheckpointFetch,
+    ) -> Result<
+        (
+            bool,
+            Option<crate::studio_exchange::discovery::ServerCheckpointFetch>,
+        ),
+        AppError,
+    > {
+        self.catchup
+            .route_registry_checkpoint_for_test(server, store, id, pass)
+    }
     fn catchup_step<T: MeshTransport + 'static, R: CryptoRngCore>(
         &mut self,
         server: &mut Server<T, R>,
