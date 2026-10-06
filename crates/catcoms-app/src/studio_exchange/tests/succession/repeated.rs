@@ -36,7 +36,7 @@ use catcoms_replication::{CheckpointSeed, Receipt};
 
 /// Ordinary actor idle passes until `target`'s source is at `epoch`, Open, and the Registry
 /// pointer names it. Returns whether that state was reached in the bounded window.
-async fn rotate_to(
+pub(super) async fn rotate_to(
     actor: &crate::ServerActor,
     store: &Arc<Mutex<Option<ServerStore>>>,
     verifier: &mut Node,
@@ -82,7 +82,7 @@ async fn rotate_to(
 }
 
 /// The receipt `store` published for `target`, with no decision still pending.
-fn published(store: &ServerStore, group_id: &[u8], target: StudioTarget) -> Receipt {
+pub(super) fn published(store: &ServerStore, group_id: &[u8], target: StudioTarget) -> Receipt {
     let logical = target.document(group_id).unwrap();
     let journal = store.load_epoch_owner_receipts(SERVER, &logical).unwrap();
     assert!(journal.pending().is_none());
@@ -92,7 +92,7 @@ fn published(store: &ServerStore, group_id: &[u8], target: StudioTarget) -> Rece
 /// One ordinary tick to flush what the previous one queued. A tick drains its outbox (queued commit
 /// broadcasts) at the top, then blocks on the next transport event, so the wait is cut short here.
 /// A tick is cancel-safe by design: its network waits stay owned on the node.
-async fn flush(node: &mut Node) {
+pub(super) async fn flush(node: &mut Node) {
     let _ = tokio::time::timeout(std::time::Duration::from_millis(500), node.sync_once()).await;
 }
 
@@ -104,7 +104,7 @@ async fn flush(node: &mut Node) {
 /// resolves, and that tick returns early, so a removal's routing-label rotation is only noted. The
 /// member subscribes to the new label's topics on its NEXT tick. Without that tick it would miss
 /// every later commit, which is published on the new label.
-async fn catch_up(node: &mut Node, epoch: u64, who: &str) {
+pub(super) async fn catch_up(node: &mut Node, epoch: u64, who: &str) {
     for _ in 0..50 {
         if node.epoch() == epoch {
             break;
@@ -121,7 +121,7 @@ async fn catch_up(node: &mut Node, epoch: u64, who: &str) {
 /// The contested-commit setting the transitions use: a member at committer rank 1 may commit, with
 /// no stage window. It is how B removes A here while A is still the designated committer. Every
 /// member that must accept such a commit carries it too.
-fn contested() -> catcoms_sync::SyncConfig {
+pub(super) fn contested() -> catcoms_sync::SyncConfig {
     catcoms_sync::SyncConfig {
         max_committer_rank: 1,
         stage_decision_window_ms: 0,

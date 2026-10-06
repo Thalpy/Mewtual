@@ -9,6 +9,7 @@ use catcoms_replication::studio::StudioRecovery;
 use catcoms_replication::{EpochPhase, InheritedCheckpoint};
 use tokio::sync::Mutex;
 
+mod hidden;
 mod interrupted;
 mod joining;
 mod repeated;

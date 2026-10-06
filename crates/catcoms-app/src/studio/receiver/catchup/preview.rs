@@ -137,6 +137,19 @@ impl PreviewRuntime {
         self.pools = Some((shared, preview));
     }
 
+    /// Forget every preview and its queue, as the actor's reset does.
+    ///
+    /// In production this is exactly `Default`. A test runtime keeps its private pools: they stand
+    /// for the process's own pools, which no reset replaces. Without them a later preparation would
+    /// silently fall back to the process-wide pools that every parallel test draws on.
+    pub(in crate::studio::receiver) fn reset(&mut self) {
+        *self = Self {
+            #[cfg(test)]
+            pools: self.pools.take(),
+            ..Default::default()
+        };
+    }
+
     pub(super) fn generation(&self) -> Arc<()> {
         self.generation.clone()
     }
@@ -606,5 +619,25 @@ mod pool_tests {
         drop((retried, others));
         assert_eq!(shared.available_permits(), 4);
         assert_eq!(preview.available_permits(), 3);
+    }
+
+    /// Clearing previews forgets the previews, not the pools a test runtime was given. A reset that
+    /// fell back to the process-wide pools would let a later preparation in a parallel test contend
+    /// with every other test, silently (review of the restart coverage, LOW-6).
+    #[test]
+    fn clearing_previews_keeps_a_test_runtimes_private_pools() {
+        let mut receiver = PreviewHarness::default().into_receiver(Vec::new());
+        let (shared, preview) = receiver.catchup.preview.preparation_pools();
+        let global = crate::registry_catchup::preparation_pool();
+        assert!(
+            !Arc::ptr_eq(&shared, global),
+            "precondition: the harness pools are private"
+        );
+        receiver.clear_previews();
+        let (after_shared, after_preview) = receiver.catchup.preview.preparation_pools();
+        assert!(
+            Arc::ptr_eq(&after_shared, &shared) && Arc::ptr_eq(&after_preview, &preview),
+            "a cleared test runtime still prepares on its own pools"
+        );
     }
 }

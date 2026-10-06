@@ -774,11 +774,35 @@ There is **no C5**: copy writes nothing to the branch's record (findings 1, 2, 8
   handoff completed.
   - *As built (2026-10-06), and how each clause is met.* Only the transfer-hold clause has a check
     of its own: `refuse_held_destination` at C1, C3 and C4. No copy stage consults the live-job
-    reservation. The live-hold clause is met by other guards. A live overlay job that lands on the
-    **source** changes its stamp, so C3 and C4 refuse the preview as stale. A live job on a
-    cross-document **destination** means the destination is Closing, which C3 and C4 refuse as not
-    Open. Review 2 (L-1) found no behavioural hole, but the stamp-based half has no regression of
-    its own yet (a recorded follow-up).
+    reservation. The live-hold clause is met by other guards, and at C4 only in part:
+    - A live overlay job that lands on the **source** changes the source stamp, so C3 refuses the
+      preview as changed (`studio_copy_is_current`).
+    - C4 compares no source stamp. It re-plans from the records it reads now and requires the same
+      epoch, destination projection, a `Ready` disposition and the same body. A landed job that
+      replaced or removed the selected value is refused by that re-plan:
+      - for a value-addressed item (`Title`, `Fps`, `Frame`, `ObjectTitle`, `ObjectExpiry`), the
+        planner no longer resolves the named value ("recovery value is not in this version"), or the
+        element is gone ("missing recovery ...");
+      - for an Index `Object`, the rebuilt body differs ("no longer Ready or body differs").
+
+      A job that touched only other elements lets the copy apply. What it applies is the value the
+      source holds now, so nothing untrue is written, but it is not a refusal. (Corrected
+      2026-10-06: this note used to say C4 refuses every such job as stale.)
+    - A live job on a cross-document **destination** means the destination is Closing, which C3
+      and C4 refuse as not Open.
+
+    Review 2 (L-1) found no behavioural hole. *Regressions (2026-10-06):* `copy::tests::cross`
+    copies between two Flipnotes, X a source whose branch can still take Saves and Y the
+    destination.
+    - The stamp half: a Save on X after C1 is refused at C3 as changed (mutation entry
+      `copy-c3-source-stamp`). After C3, a Save of another element lets C4 apply X's current
+      value, and a Save that replaced the selected value is refused at C4.
+    - L-2: a hold on Y refuses at C1, C3 and C4 by message. A hold on X permits the copy and leaves
+      X `Prepared` on the same branch, with its whole intent ledger unchanged
+      (`copy-hold-names-the-destination`).
+    - A hold on X staged mid-copy: staging it rewrites X's intent record. So before C3 it costs a
+      fresh preview (C3 refuses as changed), and after C3 the copy applies. "Permitted" for a hold
+      that lands before C3 therefore means "after a fresh preview".
   - The remedy for a refusal is a fresh preview once the handoff resolves, not a resend: a resolved
     handoff rotates the destination, so the old preview cannot apply. An exact retry of a copy that
     already landed therefore loses its acknowledgement across a hold, though nothing is written
@@ -1841,6 +1865,14 @@ reviewer and the receipt-protocol owners (Agents 1 and 3):
      new history.
    - **Not yet driven through the actor** (N-T5 there is still missing). Until it is, "preserved
      in recovery" is the design's stated rule, not demonstrated behaviour for this path.
+     *Update (2026-10-06):* N-T5 is now demonstrated for a continuously present successor that
+     missed the former owner's later closes (`succession::hidden`). It runs over the real
+     discovery wire, through the Server discovery stages the receiver drives, but not through the
+     receiver's own scheduling loop, which is still untested for a cross-tenure rewind. The member
+     two closes ahead adopts the new tenure's lower-epoch receipt, and keeps the former owner's
+     higher history only as a `Rewound` recovery snapshot. A join-born owner's
+     `EpochZero` receipt reaches members through the same tenure-first ingest
+     (`ReceiptBook::ingest_verified`), but that shape is not itself tested.
 
 Recommendation, revised: decide between (1) and (3) explicitly, with the product owner, before
 Gate 4 acceptance. (3) is the cheaper default, and is safe for content because recovery preserves
@@ -1963,8 +1995,9 @@ Agent 1's `LocalDraftRetained` and `LocalDraftHandedOff` are separate.
 | After the disposal rename, before its flush | The exact retry reloads the record, sees `disposed`, and performs the sync-only flush `retire_included_with_io` already implements for `removed == 0`. |
 | Copy interrupted at any point | The ordinary Save retry contract applies unchanged; there is no bookkeeping write to be inconsistent with (findings 1, 8). |
 | Disposal requested while `Prepared` | Refused by D2. |
-| Restart with a retained unconfirmed branch and no preview | Reconstructs by re-parsing its own persisted seed bytes against its receipt (8.1 part 3); `AwaitingSource` until an installed source exists. |
-| Restart mid-copy with the destination rotated | The destination stamp, `epoch_id` and fingerprint refuse; re-preview against the new Open epoch. |
+| Restart with a retained unconfirmed branch and no preview | Reconstructs by re-parsing its own persisted seed bytes against its receipt (8.1 part 3); `AwaitingSource` until an installed source exists. An exact retry of accepted work is answered without a preview. New work is refused ("no live preview") until a fresh preview exists, and that preview's ticket names the same branch. *As built (2026-10-06), through the actor:* `unconfirmed_actor::studio_actor_unconfirmed_branch_resumes_after_a_restart_from_what_it_persisted`. It reopens the store and rebuilds the actor; the `Server` and its sync are kept, so it speaks for actor and store state. |
+| Restart with an Unconfirmed Save planned but not committed (8.7) | The parked plan lives only in the actor, so it dies with the process, and its media hold with it. Nothing durable was written (RT-001). The identical request is a fresh first visit: it plans again and lands once. Same test. |
+| Restart mid-copy with the destination rotated | There is no C3 after a restart, and C4 compares no stamp. C4 refuses on `epoch_id`: the exact-retry shortcut's epoch check, or the re-plan's `epoch_id` and projection fingerprint. Re-preview against the new Open epoch. (Corrected 2026-10-06: this row used to credit the destination stamp.) |
 | **Release: unlink succeeded, parent-directory sync failed** | `CommittedButNotDurable`. **Not exact-retryable; see 12.1.** Both budgets are already closed. The caller reconciles and re-reads the archive state; it does not resend the request. |
 
 ### 12.1 Release is exempt from the exact-retry contract
@@ -2145,7 +2178,7 @@ not see. Added, changed or corrected:
 | N6 | actor | Same-document copy after rotation, per item | Each item routes through the ordinary Save path, is authored by the copier with a fresh nonce, and appears in the destination projection; **nothing that records the branch changes at any point**: its id, content hash, accepted count and overlay metadata bytes (findings 1, 2, 8). *Corrected 2026-10-06:* this used to say "no byte of the branch's record". For a same-document copy the ordinary intent lands in the same intents file as the branch, so the file's bytes do change; the branch does not. |
 | N7 | actor | Copy exact retry after a lost response | `already_saved` true, no second destination operation; still no branch-record write. |
 | N8 | actor | Stale `expected_projection` or `epoch_id` | Refused; nothing saved; re-preview succeeds. |
-| N8b | store | **Finding 4 destination currency.** Change the destination's source record, then its recovery record, between C1 and C3, and again between C3 and C4, each with an authenticated same-size replacement | Each refuses at `studio_destination_is_current` with its own digest or size comparison; each fixture passes the source stamp check first. |
+| N8b | store | **Finding 4 destination currency.** Change the destination's source record, then its recovery record, between C1 and C3, and again between C3 and C4, each with an authenticated same-size replacement | Each refuses at `studio_destination_is_current` with its own digest or size comparison; each fixture passes the source stamp check first. *Corrected 2026-10-06:* that holds at C3 only. C4 does not call `studio_destination_is_current`: it re-captures and re-plans, and refuses a changed destination on its `epoch_id`, projection fingerprint, disposition or body. The N8b tests call the store function directly, so they pin C3's check, not a C4 one. |
 | N9 | store | Copy admission failures: `FLIPNOTE_MAX_FRAMES`, `FLIPNOTE_FRAME_BYTES`, `MAX_INDEX_OBJECTS`, over-cap, tombstoned target, missing PIX | Each yields its specific disposition or refusal; no partial destination write; branch and references intact. |
 | N9b | store | **Finding 2 derived source ids.** A branch with one accepted `InsertFrame` referencing CID X and a base title. Request a Title copy | `source_ops` names the title's source operation and **not** the insertion; no request field can name a different entry, because `source_entry` does not exist; the native result reports the derived ids. Then assert that no copy count or `source_ops` value permits a `Preserve` disposal. |
 | N10 | store | Cross-document copy while `Prepared` | Permitted into a genuinely distinct Flipnote in the same channel; refused when the destination is the branch's own document reached through another channel label; `prepared` never cleared. |

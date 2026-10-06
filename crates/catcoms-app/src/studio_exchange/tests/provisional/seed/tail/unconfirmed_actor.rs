@@ -82,20 +82,7 @@ async fn ready_receiver() -> (Pair, StudioReceiver, StudioTarget, [u8; 32], [u8;
         .bob
         .watch_studio_epoch(&p.b_store, SERVER, target)
         .unwrap();
-    let mut runtime = PreviewHarness::default();
-    drive(&mut p, &mut runtime).await;
-    let watch = ServerStudioWatch {
-        inner: p.watch.inner.copy_binding(),
-        mount: p.watch.mount.clone(),
-        server: SERVER,
-        target,
-    };
-    let logical = target.document(&p.bob.group_id()).unwrap();
-    let epoch_id = epoch_zero_id(logical.doc_type, &logical.logical_key);
-    let mut receiver = runtime.into_receiver(vec![(watch, epoch_id)]);
-    // These tests park plans, and each holds a preparation permit while it waits. On the one
-    // process-wide pool, parallel tests would see each other's plans as `busy`.
-    receiver.inject_overlay_pool_for_test(4);
+    let mut receiver = previewing_receiver(&mut p, target).await;
     assert_eq!(
         p.bob.observed_owner_tenure(),
         crate::studio::StudioOwnerTenure::Unknown
@@ -117,6 +104,27 @@ async fn ready_receiver() -> (Pair, StudioReceiver, StudioTarget, [u8; 32], [u8;
     };
     assert_eq!(ticketed, target);
     (p, receiver, target, basis, branch)
+}
+
+/// A new receiver watching `p.watch`, whose one ready preview of `target` was fetched by the
+/// production queue and jobs. Also how a restarted actor is rebuilt: everything it holds comes from
+/// this fetch and the store, nothing from an earlier receiver.
+async fn previewing_receiver(p: &mut Pair, target: StudioTarget) -> StudioReceiver {
+    let mut runtime = PreviewHarness::default();
+    drive(p, &mut runtime).await;
+    let watch = ServerStudioWatch {
+        inner: p.watch.inner.copy_binding(),
+        mount: p.watch.mount.clone(),
+        server: SERVER,
+        target,
+    };
+    let logical = target.document(&p.bob.group_id()).unwrap();
+    let epoch_id = epoch_zero_id(logical.doc_type, &logical.logical_key);
+    let mut receiver = runtime.into_receiver(vec![(watch, epoch_id)]);
+    // These tests park plans, and each holds a preparation permit while it waits. On the one
+    // process-wide pool, parallel tests would see each other's plans as `busy`.
+    receiver.inject_overlay_pool_for_test(4);
+    receiver
 }
 
 /// A new Index entry, as a Save request under the given ticket.
@@ -671,6 +679,143 @@ async fn studio_actor_unconfirmed_branch_reconciles_superseded_then_unreadable()
         reconciliation(&mut receiver, &mut p, target),
         Some(U::SourceUnreadable),
         "a source that is there but unreadable is neither awaited nor compared"
+    );
+}
+
+/// Design 12's restart row, through the actor on the real Index.
+///
+/// The store is reopened and a new receiver is built, so nothing the first actor held in memory
+/// survives: not its preview, not a parked plan, and not the fingerprint of the request that
+/// scheduled one. The `Server` and its sync are kept, as in Agent 1's store-level restart test, so
+/// this speaks for actor and store state, not sync state. None of what it asserts reads sync memory:
+/// the exact retry is settled from the store before any mint, the fresh preview registers its own
+/// hint, and provenance and 8.6 are store reads. Before the restart, one Save has landed and a second
+/// has been planned but not committed.
+///
+/// - The landed Save's exact retry is acknowledged after the restart and adds nothing. A caller
+///   whose answer was lost in the crash can resend safely, with or without a live preview; new
+///   work without one is refused.
+/// - The planned Save died with the process. Nothing durable was written (RT-001), so its identical
+///   request is a fresh first visit: it plans again and lands once.
+/// - The branch is rebuilt from what it persisted. The fresh preview's ticket names the same basis
+///   and branch, new work appends to it, and its admission provenance is unchanged.
+/// - Design 8.6 needs nothing the first process held: the row reads `AwaitingSource`, then
+///   `BaseConfirmed` once the confirmed checkpoint is installed.
+#[tokio::test]
+async fn studio_actor_unconfirmed_branch_resumes_after_a_restart_from_what_it_persisted() {
+    use catcoms_replication::studio::StudioOverlayUnconfirmedState as U;
+    let (mut p, mut receiver, target, basis, branch) = ready_receiver().await;
+    let landed = new_entry(&mut p, (basis, branch), 101, [8; 16]);
+    assert!(matches!(
+        save(&mut receiver, &mut p, target, &landed).unwrap(),
+        StudioUnconfirmedSaveOutcome::Scheduled
+    ));
+    settle(&mut receiver, &mut p).await;
+    assert!(matches!(
+        save(&mut receiver, &mut p, target, &landed).unwrap(),
+        StudioUnconfirmedSaveOutcome::Saved { accepted: 1, .. }
+    ));
+    let admitted = recorded_provenance(&mut p, target);
+    assert!(matches!(
+        admitted,
+        Some(StudioOverlayProvenance::Unconfirmed { .. })
+    ));
+    let planned = new_entry(&mut p, (basis, branch), 102, [9; 16]);
+    assert!(matches!(
+        save(&mut receiver, &mut p, target, &planned).unwrap(),
+        StudioUnconfirmedSaveOutcome::Scheduled
+    ));
+    settle(&mut receiver, &mut p).await;
+    assert_eq!(
+        pending(&mut p, target),
+        1,
+        "precondition: the second Save is planned and parked, not committed"
+    );
+
+    // --- The restart.
+    drop(receiver);
+    drop(p.b_store);
+    p.b_store = open(p.b_root.path());
+    p.watch = p
+        .bob
+        .watch_studio_epoch(&p.b_store, SERVER, target)
+        .unwrap();
+    let mut receiver = previewing_receiver(&mut p, target).await;
+
+    assert_eq!(
+        recorded_provenance(&mut p, target),
+        admitted,
+        "the reopened branch keeps its admission's facts"
+    );
+    assert_eq!(
+        reconciliation(&mut receiver, &mut p, target),
+        Some(U::AwaitingSource)
+    );
+    assert!(
+        matches!(
+            save(&mut receiver, &mut p, target, &landed).unwrap(),
+            StudioUnconfirmedSaveOutcome::Saved { accepted: 1, .. }
+        ),
+        "work that landed before the restart is answered as an exact retry"
+    );
+    assert_eq!(pending(&mut p, target), 1, "and its retry adds nothing");
+    let StudioControlResponse::UnconfirmedOverlaySaveTicket {
+        basis: reopened_basis,
+        branch: reopened_branch,
+        ..
+    } = control(
+        &mut receiver,
+        &mut p,
+        target,
+        StudioControlAction::BeginUnconfirmedOverlaySave,
+    )
+    .unwrap()
+    else {
+        panic!("expected a ticket")
+    };
+    assert_eq!(
+        (reopened_basis, reopened_branch),
+        (basis, branch),
+        "the fresh preview's ticket names the branch rebuilt from disk"
+    );
+
+    let visit = save(&mut receiver, &mut p, target, &planned).unwrap();
+    assert!(
+        matches!(visit, StudioUnconfirmedSaveOutcome::Scheduled),
+        "the parked plan died with the process, so its retry plans again: {visit:?}"
+    );
+    settle(&mut receiver, &mut p).await;
+    assert!(matches!(
+        save(&mut receiver, &mut p, target, &planned).unwrap(),
+        StudioUnconfirmedSaveOutcome::Saved { accepted: 2, .. }
+    ));
+    assert_eq!(pending(&mut p, target), 2, "it landed once");
+    assert_eq!(recorded_provenance(&mut p, target), admitted);
+
+    // With the preview gone again, both accepted Saves are still answered, and new work is
+    // refused for want of one.
+    receiver.clear_previews();
+    for request in [&landed, &planned] {
+        assert!(
+            matches!(
+                save(&mut receiver, &mut p, target, request).unwrap(),
+                StudioUnconfirmedSaveOutcome::Saved { accepted: 2, .. }
+            ),
+            "an exact retry after a restart needs no live preview"
+        );
+    }
+    let fresh = new_entry(&mut p, (basis, branch), 103, [10; 16]);
+    let refused = save(&mut receiver, &mut p, target, &fresh)
+        .unwrap_err()
+        .to_string();
+    assert!(refused.contains("no live preview"), "{refused}");
+    assert_eq!(pending(&mut p, target), 2);
+
+    install_confirmed_checkpoint(&mut p, target);
+    assert_eq!(
+        reconciliation(&mut receiver, &mut p, target),
+        Some(U::BaseConfirmed),
+        "after a restart too, the installed source is the checkpoint the branch was based on"
     );
 }
 

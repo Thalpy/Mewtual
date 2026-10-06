@@ -16,6 +16,10 @@ use catcoms_rt::{Hub, ManualClock, MemNetwork, PeerId};
 use rand_chacha::ChaCha20Rng;
 use rand_core::SeedableRng;
 
+/// Copy between two Flipnotes: the source and destination holds told apart (L-2), and a Save
+/// landing on the source mid-copy (L-1).
+mod cross;
+
 const SERVER: u64 = 7;
 const OBJECT: [u8; 16] = [6; 16];
 
@@ -33,6 +37,142 @@ fn budget(store: &mut ServerStore, server: &mut Node) -> EpochStudioBudget {
         .sync
         .with_registry_context(|g, _, _, _| store.studio_storage_budget(SERVER, g, &inventory))
         .unwrap()
+}
+
+/// One document's epoch 0, made large enough to reach the production rotation threshold, sealed,
+/// and given `accepted` as a real Closing-overlay entry. Returns the close the overlay is on.
+///
+/// The successor is NOT installed, so the branch is still live and further Closing-overlay Saves
+/// can land on it. [`install_successor`] makes the document Open with the branch retained.
+///
+/// `seed` opens the history. `padding` is applied ten times, under nonces 10 to 19, each change
+/// carrying a 220 KB message, which is what crosses the threshold. `accepted` lands under nonce 3.
+fn closing_branch(
+    server: &mut Node,
+    store: &mut ServerStore,
+    target: StudioTarget,
+    seed: Vec<u8>,
+    padding: Vec<u8>,
+    accepted: Vec<u8>,
+) -> catcoms_replication::CloseRecord {
+    let logical = target.document(&server.group_id()).unwrap();
+    let domain = |body: Vec<u8>, nonce: u8| DomainOp {
+        body,
+        nonce: [nonce; 16],
+        doc_type: logical.doc_type,
+        logical_key: logical.logical_key.clone(),
+    };
+    let mut b = budget(store, server);
+    let close = server
+        .sync
+        .with_registry_context(|g, d, _, r| {
+            let mut source =
+                catcoms_replication::studio::StudioEpoch::new(g, target, d.device_id()).unwrap();
+            let packet = source
+                .edit_or_reseal(d, g, r, &domain(seed, 1), 100)
+                .unwrap();
+            store.ingest_studio_epoch(SERVER, g, target, d, &packet, r, &mut b)?;
+            for n in 10..20u8 {
+                let op = domain(padding.clone(), n);
+                let mut copy = catcoms_replication::studio::StudioEpoch::restore(
+                    &source.snapshot().unwrap(),
+                    g,
+                    target,
+                    d.device_id(),
+                )
+                .unwrap();
+                let packet = copy.edit_or_reseal(d, g, r, &op, 100).unwrap();
+                let opened = packet
+                    .open(&g.channel_secret(d, packet.doc_type, packet.doc_id).unwrap())
+                    .unwrap();
+                let mut change = automerge::Change::from_bytes(opened.delta)
+                    .unwrap()
+                    .decode();
+                change.message = Some("x".repeat(220_000));
+                let change = automerge::Change::from(change);
+                let signed = catcoms_replication::SignedOp::sign_domain(
+                    d,
+                    logical.doc_type,
+                    source.doc_id(),
+                    change.raw_bytes().to_vec(),
+                    &op,
+                )
+                .unwrap();
+                let packet = catcoms_replication::SealedOp::seal(&signed, g, d, r).unwrap();
+                source.ingest(&packet, g, d).unwrap();
+                store.ingest_studio_epoch(SERVER, g, target, d, &packet, r, &mut b)?;
+            }
+            let decision = source.new_owner_decision(g, d, 0, None).unwrap();
+            store.seal_studio_epoch(
+                SERVER,
+                g,
+                target,
+                d,
+                decision.receipt().clone(),
+                0,
+                r,
+                &mut b,
+            )?;
+            Ok::<_, AppError>(decision.close().clone())
+        })
+        .unwrap();
+    closing_save(server, store, target, &close, domain(accepted, 3));
+    close
+}
+
+/// A real Closing-overlay Save of `operation` onto `target`'s live branch.
+fn closing_save(
+    server: &mut Node,
+    store: &mut ServerStore,
+    target: StudioTarget,
+    close: &catcoms_replication::CloseRecord,
+    operation: DomainOp,
+) {
+    let mut b = budget(store, server);
+    let ticket = server
+        .prepare_studio_closing_overlay(store, SERVER, target, close, &mut b)
+        .unwrap();
+    let StudioOverlaySave::Local(_) = server
+        .save_studio_closing_overlay(
+            store,
+            SERVER,
+            target,
+            close,
+            ticket.basis.fingerprint(),
+            ticket.branch,
+            operation,
+            &mut b,
+        )
+        .unwrap()
+    else {
+        panic!("expected actual local acceptance")
+    };
+}
+
+/// Install `target`'s pristine successor, so the document is Open and its branch is retained.
+fn install_successor(
+    server: &mut Node,
+    store: &mut ServerStore,
+    target: StudioTarget,
+    close: &catcoms_replication::CloseRecord,
+) {
+    let capture = server
+        .sync
+        .with_registry_context(|g, d, _, _| store.capture_studio_source(SERVER, g, target, d))
+        .unwrap()
+        .expect("the installed source is present");
+    let prepared = capture.rebuild().unwrap();
+    assert!(server
+        .sync
+        .with_registry_context(|g, d, _, _| store.install_prepared_studio_source(g, d, prepared))
+        .unwrap());
+    let mut b = budget(store, server);
+    server
+        .sync
+        .with_registry_context(|g, d, _, r| {
+            store.install_sealed_studio_successor_for_test(SERVER, g, target, d, close, r, &mut b)
+        })
+        .unwrap();
 }
 
 /// An Index Closing overlay holding one accepted `PutObject` for `OBJECT`, retained across an
@@ -67,14 +207,8 @@ impl Fixture {
         };
         let root = tempfile::tempdir().unwrap();
         let mut store = ServerStore::open(root.path(), b"copy-probe", &mut rng()).unwrap();
-        let logical = index.document(&server.group_id()).unwrap();
-        let domain = |body: Vec<u8>, nonce: u8| DomainOp {
-            body,
-            nonce: [nonce; 16],
-            doc_type: logical.doc_type,
-            logical_key: logical.logical_key.clone(),
-        };
-        let put = |object: [u8; 16], title: &str, device: crate::DeviceId| {
+        let device = server.device_id();
+        let put = |object: [u8; 16], title: &str| {
             IndexOp::PutObject {
                 object,
                 kind: StudioKind::Flipnote,
@@ -86,117 +220,22 @@ impl Fixture {
             .encode()
             .unwrap()
         };
-
-        let mut b = budget(&mut store, &mut server);
-        let close = server
-            .sync
-            .with_registry_context(|g, d, _, r| {
-                let mut source =
-                    catcoms_replication::studio::StudioEpoch::new(g, index, d.device_id()).unwrap();
-                let seed = domain(put([4; 16], "shared seed", d.device_id()), 1);
-                let packet = source.edit_or_reseal(d, g, r, &seed, 100).unwrap();
-                store.ingest_studio_epoch(SERVER, g, index, d, &packet, r, &mut b)?;
-                let title = domain(
-                    IndexOp::SetTitle {
-                        object: [4; 16],
-                        title: "padding".into(),
-                    }
-                    .encode()
-                    .unwrap(),
-                    9,
-                );
-                for n in 10..20u8 {
-                    let mut op = title.clone();
-                    op.nonce = [n; 16];
-                    let mut copy = catcoms_replication::studio::StudioEpoch::restore(
-                        &source.snapshot().unwrap(),
-                        g,
-                        index,
-                        d.device_id(),
-                    )
-                    .unwrap();
-                    let packet = copy.edit_or_reseal(d, g, r, &op, 100).unwrap();
-                    let opened = packet
-                        .open(&g.channel_secret(d, packet.doc_type, packet.doc_id).unwrap())
-                        .unwrap();
-                    let mut change = automerge::Change::from_bytes(opened.delta)
-                        .unwrap()
-                        .decode();
-                    change.message = Some("x".repeat(220_000));
-                    let change = automerge::Change::from(change);
-                    let signed = catcoms_replication::SignedOp::sign_domain(
-                        d,
-                        logical.doc_type,
-                        source.doc_id(),
-                        change.raw_bytes().to_vec(),
-                        &op,
-                    )
-                    .unwrap();
-                    let packet = catcoms_replication::SealedOp::seal(&signed, g, d, r).unwrap();
-                    source.ingest(&packet, g, d).unwrap();
-                    store.ingest_studio_epoch(SERVER, g, index, d, &packet, r, &mut b)?;
-                }
-                let decision = source.new_owner_decision(g, d, 0, None).unwrap();
-                store.seal_studio_epoch(
-                    SERVER,
-                    g,
-                    index,
-                    d,
-                    decision.receipt().clone(),
-                    0,
-                    r,
-                    &mut b,
-                )?;
-                Ok::<_, AppError>(decision.close().clone())
-            })
-            .unwrap();
-
         // The overlay entry the copy will take: a PutObject naming a Flipnote nobody created.
-        let accepted = domain(put(OBJECT, "accepted overlay", server.device_id()), 3);
-        let mut b = budget(&mut store, &mut server);
-        let ticket = server
-            .prepare_studio_closing_overlay(&mut store, SERVER, index, &close, &mut b)
-            .unwrap();
-        let StudioOverlaySave::Local(_) = server
-            .save_studio_closing_overlay(
-                &mut store,
-                SERVER,
-                index,
-                &close,
-                ticket.basis.fingerprint(),
-                ticket.branch,
-                accepted,
-                &mut b,
-            )
-            .unwrap()
-        else {
-            panic!("expected actual local acceptance")
-        };
-
-        // Install the pristine successor so the destination is Open.
-        let capture = server
-            .sync
-            .with_registry_context(|g, d, _, _| store.capture_studio_source(SERVER, g, index, d))
-            .unwrap()
-            .expect("the installed source is present");
-        let prepared = capture.rebuild().unwrap();
-        assert!(
-            server
-                .sync
-                .with_registry_context(
-                    |g, d, _, _| store.install_prepared_studio_source(g, d, prepared)
-                )
-                .unwrap()
+        let close = closing_branch(
+            &mut server,
+            &mut store,
+            index,
+            put([4; 16], "shared seed"),
+            IndexOp::SetTitle {
+                object: [4; 16],
+                title: "padding".into(),
+            }
+            .encode()
+            .unwrap(),
+            put(OBJECT, "accepted overlay"),
         );
-        let mut b = budget(&mut store, &mut server);
-        server
-            .sync
-            .with_registry_context(|g, d, _, r| {
-                store.install_sealed_studio_successor_for_test(
-                    SERVER, g, index, d, &close, r, &mut b,
-                )
-            })
-            .unwrap();
+        // Install the pristine successor so the destination is Open.
+        install_successor(&mut server, &mut store, index, &close);
 
         Self {
             _hub: hub,

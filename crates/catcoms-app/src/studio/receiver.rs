@@ -48,7 +48,7 @@ pub(crate) enum StudioOverlaySaveVisit {
 
 impl StudioReceiver {
     pub(crate) fn clear_previews(&mut self) {
-        self.catchup.preview = Default::default();
+        self.catchup.preview.reset();
     }
 
     /// Scheduled local Save (Flow S), under the actor's custody lease.

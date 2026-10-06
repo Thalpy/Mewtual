@@ -163,8 +163,9 @@ impl StudioOverlayCopyCapture {
     ///
     /// Everything it needs is public context captured under custody: the group id from the
     /// destination document, the actor, and the designated owner that a vault snapshot is scoped
-    /// to. The result is a proposal and nothing more; C3 and C4 revalidate every stamp before
-    /// anything durable happens.
+    /// to. The result is a proposal and nothing more. C3 revalidates every stamp. C4 compares no
+    /// stamp: it re-plans from the records it reads then and requires the same epoch, destination
+    /// projection, a `Ready` disposition and the same body before anything durable happens.
     pub(crate) fn plan(
         self,
         choice: StudioOverlayCopyChoice,
@@ -242,11 +243,14 @@ impl StudioOverlayCopyCapture {
             choice,
             plan,
         })
-        // No branch identity is carried, deliberately. The source stamp already requires the
-        // branch's intent record to be byte-identical at C3 and C4, which covers every way the
-        // branch could move; a second branch check would be a second representation of the same
-        // fact, and the kind that drifts. Copy is also not a preservation claim (C-P), so binding
-        // it to a branch generation would suggest an accounting relationship it does not have.
+        // No branch identity is carried, deliberately. At C3 the source stamp already requires the
+        // branch's intent record to be byte-identical, which covers every way the branch could
+        // move. A second branch check would be a second representation of the same fact, and the
+        // kind that drifts. At C4 there is no stamp. A branch that moved is refused only if the
+        // re-plan no longer resolves the named value or rebuilds a different body; otherwise the
+        // copy carries the value the branch holds then (design C1'). Copy is also not a
+        // preservation claim (C-P), so binding it to a branch generation would suggest an
+        // accounting relationship it does not have.
     }
 }
 
@@ -378,9 +382,10 @@ impl ServerStore {
 
     /// Re-read **both** destination records and compare digest and physical size.
     ///
-    /// Run at C3 and again at C4, alongside the source capture's own
-    /// `studio_inspection_is_current`. Three records have to be unchanged for a copy proposal to
-    /// still describe reality: the branch it came from, and the destination's two.
+    /// Run at C3, alongside the source capture's own `studio_inspection_is_current`. Three records
+    /// have to be unchanged for a copy proposal to still describe reality: the branch it came from,
+    /// and the destination's two. C4 does not call it: it re-captures and re-plans, and a changed
+    /// destination is refused there on its `epoch_id`, projection fingerprint, disposition or body.
     pub(crate) fn studio_destination_is_current(
         &self,
         server: u64,
@@ -492,5 +497,20 @@ impl ServerStore {
             metadata.overlay().expect("a live branch").accepted(),
             metadata.encode_vault(&state.ledger).unwrap(),
         )
+    }
+
+    /// `document`'s whole intent ledger, encoded. The branch identity above covers the branch's own
+    /// entries and handoff; this covers every other intent too, so a test can show that a copy
+    /// retired or added nothing anywhere in the source's record.
+    pub(crate) fn studio_intent_ledger_for_test(
+        &self,
+        server: u64,
+        document: &LogicalDocument,
+    ) -> Vec<u8> {
+        self.load_epoch_intents(server, document)
+            .unwrap()
+            .ledger
+            .encode()
+            .unwrap()
     }
 }

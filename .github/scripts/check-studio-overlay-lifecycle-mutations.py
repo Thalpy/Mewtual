@@ -6,7 +6,9 @@ passes". It does not establish isolation - no sibling test is selected, so a mut
 one would go unnoticed here. Isolation rests on the hand-runs behind each entry.
 
 Covers Agent 2's scope: the draft archive and its release, the disposal transaction, copy into
-current, the branch-generation namespace, and the owner-tenure observation rule.
+current, the branch-generation namespace, the owner-tenure observation rule and the receipt order
+across tenures (N-T5, in `catcoms-replication`'s `ReceiptBook`), and the Unconfirmed Save: its
+operation rail, its reconciliation and its actor slot and park deadline.
 
 Optional entry names on the command line run a subset; with none, every entry runs (the CI default).
 
@@ -204,6 +206,28 @@ MUTATIONS = [
         "a_transfer_hold_on_the_destination_refuses_the_copy_at_c1_c3_and_c4",
         "C4 must refuse while the destination is held",
     ),
+    # Review 2, L-2: only a cross-document pair tells the source's hold from the destination's. The
+    # mutant points C1's check at the source, so a copy from a held source, which C1' permits, is
+    # refused.
+    (
+        "copy-hold-names-the-destination", "catcoms-app", "studio::copy::tests::cross::",
+        "crates/catcoms-app/src/studio/copy.rs",
+        "            Self::refuse_held_destination(store, server, group, choice.destination)?;\n",
+        "            Self::refuse_held_destination(store, server, group, source)?;\n",
+        "a_cross_document_copy_from_a_held_source_applies_and_leaves_its_handoff_prepared",
+        "C1' permits a copy from a held source",
+    ),
+    # Review 2, L-1, the stamp half: C3 compares the source branch's stamp, so a Save that landed
+    # on the source after C1 is refused as changed. The mutant skips that comparison; the source
+    # is another document, so the destination's own currency check cannot stand in for it.
+    (
+        "copy-c3-source-stamp", "catcoms-app", "studio::copy::tests::cross::",
+        "crates/catcoms-app/src/store/epoch_studio/copy_capture.rs",
+        "            &plan.source,\n        )? {\n            return Ok(false);\n",
+        "            &plan.source,\n        )? && false {\n            return Ok(false);\n",
+        "a_save_landing_on_the_source_mid_copy_is_refused_at_c3_and_at_c4_only_if_it_moved_the_value",
+        "C3 must refuse a source that a Save moved after C1",
+    ),
     # M3: the exact-retry shortcut. Without it a landed copy's identical echo re-plans against a
     # destination that already holds it and is refused as stale.
     (
@@ -281,6 +305,34 @@ MUTATIONS = [
         "                    .is_some_and(|t| t != proof.tenure_start_group_epoch && false)\n",
         "a_member_refuses_a_fresh_proof_of_the_same_owners_earlier_tenure_receipt",
         "a proof claiming the owner's earlier tenure is refused by a member that observed the later",
+    ),
+    # N-T5 (design 9.2 T4): a new tenure's receipt advances a member whatever its epoch, so history
+    # hidden above the new owner's inherited checkpoint is rewound into recovery. The mutant orders
+    # receipts by epoch across tenures: it keeps the old tenure's high-water and refuses a lower
+    # epoch of another tenure as stale, so the member stays on the former owner's history. One
+    # contiguous block, because the rule is the take and the tenure-scoped comparison together.
+    (
+        "hidden-history-new-tenure-advances", "catcoms-app",
+        "studio_exchange::tests::succession::hidden::",
+        "crates/catcoms-replication/src/epoch.rs",
+        "            self.previous_until_installed = self.latest.take();\n"
+        "            self.tenure = Some(selection);\n"
+        "        } else if self.tenure.is_none() {\n"
+        "            self.tenure = Some(selection);\n"
+        "        }\n"
+        "\n"
+        "        if let Some(latest) = &self.latest {\n"
+        "            if latest.tenure_id == receipt.tenure_id {\n",
+        "            self.previous_until_installed = self.latest.clone();\n"
+        "            self.tenure = Some(selection);\n"
+        "        } else if self.tenure.is_none() {\n"
+        "            self.tenure = Some(selection);\n"
+        "        }\n"
+        "\n"
+        "        if let Some(latest) = &self.latest {\n"
+        "            if latest.tenure_id == receipt.tenure_id || latest.closed_epoch > receipt.closed_epoch {\n",
+        "studio_discovery_rewinds_hidden_old_tenure_history_into_recovery_never_adopting_it",
+        "a new tenure's receipt advances C whatever its epoch",
     ),
     # --- design 8.3's per-branch rail for an Unconfirmed branch ---
     #

@@ -15,13 +15,13 @@ whole-scope review of `510d0b54` (verdict: CHANGES REQUIRED, Agent 2 not complet
 | 1. Bounded inspection, export, copy, disposition | Implemented, not natively exposed; **every G4-A2-P1 finding closed 2026-10-06**; bounded lifecycle review next | Two-visit inspect/export/archive/copy, D1-D6 disposal, release. Export, archive and copy preview now keep the job's permit and the actor's delivery fence through native conversion (`3168de6e`); an archive whose result cannot be delivered reports `outcome=uncertain`. The 2026-10-06 copy slice closes the remaining findings, listed under "Disposition, 2026-10-06" in the review record below: M3's exact retry, also across a restart; M4/C1'; L2; L4, with copies now reported as `overlayCopyApplied`; L5/N6; and the wrong-object-channel Low. The nine commands are unregistered (`510d0b54`). | Agent 2; registration Agent 4 |
 | 2. Lossless work and PIX across refusal and restart | Implemented on supported desktop platforms | Archive codec, binding, release, collector, evidence-before-removal ordering (`6bd76c13`). Agent 4's `5f141994` gives the shared `ServerStore` directory barrier a real Windows handle and flush; exact-head Windows tests and CI pass. Unsupported non-Unix/non-Windows targets retain only the narrower file-content guarantee. | Persistence owner via Agent 4; Agent 2 shows disposal honours the result |
 | 3. Recoverable stale, rewound and non-pristine branches, with actionable states (P2) | Classification implemented; first review fixed | `StudioOverlayEligibility` / `StudioOverlayManualReason`. Production classifies from each source record's HEADER (`overlay_successor_hold_in_vault`, `vault_holds_work`) and never restores, pinned by a zero-restore assertion; the structural hold, the full hold and `check_overlay_successor` agree on every fixture state. The store adds provenance, author, missing/unreadable source, an Index entry's missing Flipnote (`objectMissing`, agreeing with the real handoff in both directions), tenure and the live receipt owner. Lifecycle and inspection carry `eligibility` and `manualReason`. Agent 1's `StudioOverlayHold` was designed but never built; its runtime still refuses with strings. | Agent 2; Agent 1 maps its runtime refusals |
-| 4. Durable local work on an awaiting-tenure preview | **Not implemented**: the store path exists (Agent 1's Flow S); the Server/actor Save, two of the rails and native results do not | Design section 8 accepted. Built (replication and sync): 8.1 parts 1-2, part 3 as re-scoped by the review of `47a73463` (the mint binds by receipt equality; every reconstruction re-parses), and the reviewed mint design.
+| 4. Durable local work on an awaiting-tenure preview | **Partly implemented, not natively registered.** The store path (Agent 1's Flow S), the Save through the actor, 8.6 reconciliation and the native results exist (pushed in `3b795bf7`). The per-server and vault-wide rails do not, and neither does the handoff selector's skip | Design section 8 accepted. Built (replication and sync): 8.1 parts 1-2, part 3 as re-scoped by the review of `47a73463` (the mint binds by receipt equality; every reconstruction re-parses), and the reviewed mint design.
 <br>- The exact seed bytes are retained and exposed only inside the scoped callback. This costs up to 2 MiB more per ready preview, and the true per-slot worst case is unmeasured.
 <br>- `StudioUnconfirmedOverlayBasis` is minted only by `ChannelSync::mint_unconfirmed_overlay_basis` inside the live hint. The mint requires a complete tail and binds by equality to the receipt the seed was proven against; every reconstruction, including each `append`, re-parses off the actor.
 <br>- The fingerprint is domain-separated by provenance; the kind is not persisted, so a reload restores it from the record.
 <br>- `new_admitted` refuses a provenance that disagrees with its basis.
 <br>- `clippy.toml` and a source-scan test pin both hidden constructors.
-<br>**Agent 1's Flow S landed (`c9566b82`, local, not yet pushed).** It runs over either basis, and its store stages enforce for Unconfirmed: no installed source under custody (a metadata probe), the S3 re-entry of the live check, the exact target, and a mint of the current MLS epoch. It has nine tests on a real fetched preview, including restart and exact retry with no preview.
+<br>**Agent 1's Flow S landed (`c9566b82`, pushed with `d319b37b`).** It runs over either basis, and its store stages enforce for Unconfirmed: no installed source under custody (a metadata probe), the S3 re-entry of the live check, the exact target, and a mint of the current MLS epoch. It has nine tests on a real fetched preview, including restart and exact retry with no preview.
 <br>**Built since (2026-10-06):**
 <br>- The 8.3 per-branch rail: 64 operations, by kind, at append and on read. Both are mutation-pinned, and a compile-time assert keeps it within the formats' bound.
 <br>- `author()` and `document()` on the basis (Agent 1's Flow S review, L1). The S1b check that uses them is Agent 1's to add.
@@ -37,11 +37,12 @@ whole-scope review of `510d0b54` (verdict: CHANGES REQUIRED, Agent 2 not complet
 <br>&nbsp;&nbsp;- Not natively registered: Agent 4 does that, and P5 stays false.
 <br>- **8.6's app call and native `unconfirmedState`**, on the inspection and the lifecycle row, with a fourth value, `sourceUnreadable`. Tests on a branch saved through the actor reach every state: `awaitingSource`, then `baseConfirmed` or `baseSuperseded`, then `sourceUnreadable`. The installs use `adopt_studio_checkpoint` directly, with the proof's tenure handed in.
 <br>- **A parked plan has a deadline** (re-review of `5ccc4647`, MEDIUM): 30 s, as for a retained Registry source. It sits in the actor's wake schedule, and the expiry drops the plan, releasing admission and the process-wide permit. It covers the Closing `save_overlay`'s plans too. Tested and mutation-pinned (`unconfirmed-save-park-deadline`).
+<br>- **A restart through the actor** (design 12's restart row; added after `3b795bf7`). The store is reopened and a new receiver fetches its own preview; the `Server` and its sync are kept, so this covers actor and store state. Work that landed before the restart is answered as an exact retry and adds nothing. A plan parked at the restart died with the process, and its identical request plans again and lands once. The fresh ticket names the branch rebuilt from disk, new work appends to it with its admission provenance unchanged, and 8.6 reads `awaitingSource`, then `baseConfirmed`. This is coverage of the composition: no new guard, so no new mutation entry.
 <br>**Still missing:**
 <br>- The per-server count and the vault-wide byte rails.
 <br>- The receiver handoff selector's skip of non-Closing branches (review M1), taken by Agent 1 and not in `c9566b82`. Until it lands, an Unconfirmed branch is refused at `start_studio_handoff` and backed off, not skipped.
 <br>Its absence is a Gate 4 gap, not a deferral. | Agent 2; Agent 1 for Flow S and the selector skip |
-| 5. Repeated owner tenure, rejoin, newcomers, legitimate progress | Sync and receipt layer implemented. **Through the actor:** succession and first receipts, in both of a same-key owner's tenures. **Not through the actor:** the same-key refusals, the newcomer, the product's fresh-key A', and hidden higher history. Review 2 (at `1d888fa8`): **PARTIAL** | Leaf-aware tenure, v1 import, app seam, CORE-005 archived witness (`066a6533`), M-1 on the receive path with its own error (`0335262e`). **The product never rejoins with the same identity**: join and found both mint a fresh `MlsDevice`, so a returning owner is a new `DeviceId`. `returning::a_removed_owner_returns_as_a_new_device_with_a_new_tenure_everywhere` drives that form with real MLS and real receipts: A' lands in the vacated leaf, A' and every witness agree on the new start across restart, A' can author, its receipt verifies on witnesses and a newcomer, and A's first-tenure receipt and A's old key claiming the new tenure are refused everywhere.
+| 5. Repeated owner tenure, rejoin, newcomers, legitimate progress | Sync and receipt layer implemented. **Through the actor:** succession and first receipts, in both of a same-key owner's tenures. **Over the real discovery wire:** hidden higher history (N-T5, added after `3b795bf7`). **Not through the actor:** the same-key refusals, the newcomer and the product's fresh-key A'. Review 2 (at `1d888fa8`): **PARTIAL** | Leaf-aware tenure, v1 import, app seam, CORE-005 archived witness (`066a6533`), M-1 on the receive path with its own error (`0335262e`). **The product never rejoins with the same identity**: join and found both mint a fresh `MlsDevice`, so a returning owner is a new `DeviceId`. `returning::a_removed_owner_returns_as_a_new_device_with_a_new_tenure_everywhere` drives that form with real MLS and real receipts: A' lands in the vacated leaf, A' and every witness agree on the new start across restart, A' can author, its receipt verifies on witnesses and a newcomer, and A's first-tenure receipt and A's old key claiming the new tenure are refused everywhere.
 <br>**`succession::repeated` (2026-10-06), on a legacy group.** What runs where (narrowed after Review 2's M-1):
 <br>- *Through the actor, with a restart at each transition:* B issues its first receipt R1 under its observed tenure t1, by ordinary idle passes, inheriting A's checkpoint. In the second test (B -> A -> B) B owns a second time and issues R2 under t3: the same key, the new start, inheriting R1's checkpoint across A's tenure in between.
 <br>- *On hand-ticked app `Server`s, not through the actor:* the membership changes. A's key is admitted again and owns again at t2, then B removes it.
@@ -49,15 +50,21 @@ whole-scope review of `510d0b54` (verdict: CHANGES REQUIRED, Agent 2 not complet
 <br>- *Newcomer (N-T2), on a hand-ticked app `Server`, its tenure read through the app seam:* C joins during A's first tenure and reads `Unknown`, with no verification value, and cannot author. It learns t1, t2 and t3 only by observing each transition, holds the owner's value, and keeps it across a restart.
 <br>- *The production gate (Review 2, M-1):* adoption in production is handed a fresh owner proof's claim, and the member's proof gate in `complete_checkpoint_head_scoped` compares it with the observed start. `receipt_head::tests::tenure` pins that gate at the sync layer: B, owning again, proves its first-tenure receipt fresh, and C refuses it, while the same proof of R2 under t3 is accepted. Not driven end to end through the actor's discovery path.
 <br>- *Mutation entries:* `repeated-tenure-comparison` and `repeated-tenure-comparison-returning-owner` (the comparison in `Receipt::verify_current_owner`), `newcomer-joined-unknown` (design M22), `proof-claimed-tenure-gate` (the proof gate).
+<br>**`succession::hidden` (N-T5, design 9.2 T4; added after `3b795bf7`), on a legacy group.**
+<br>- *Setup:* B and C adopt A's first checkpoint. C then catches up to A's later checkpoint, so it holds A's epoch 3 with work B never saw. B removes A, and B's first receipt is issued by ordinary actor idle passes after a restart. It closes epoch 1 and inherits the checkpoint B's tenure started from.
+<br>- *Discovery:* C binds B's restarted peer through the authenticated directory catch-up. It then discovers B's head and fetches its seed over the real wire, through the Server discovery stages the receiver drives. It verifies under the tenure C observed. This is not the receiver's own scheduling loop.
+<br>- *Result at C:* B's receipt advances C even though C's latest receipt closed a higher epoch. C converges on exactly B's history. A's hidden work is only in recovery, as a `Rewound` snapshot of epoch 3, also after C's vault is reopened (the node and sync are kept). None of it is current, and a later adoption of A's latest receipt is refused by the receipt-authority check and installs nothing.
+<br>- *Mutation entry:* `hidden-history-new-tenure-advances`. It orders receipts by epoch across tenures, which makes C refuse B's receipt as stale.
+<br>- *Not covered:* 9.6's join-born owner. Its first receipt inherits `EpochZero`, and it reaches members through the same tenure-first ingest, but that is untested. Also untested: a member whose recovery journal is full. There, the adoption waits on an eviction warning first (`RecoveryPending`).
 <br>**Two gaps, recorded for review in design 9.6:**
 <br>- A provider that already holds the GroupId cannot process the Welcome (pinned; not a product path).
 <br>- A join-born owner cannot continue the former owner's documents. Its first edit supersedes them instead, and for a singleton (the channel's Index) that is the only outcome. Needs a product decision.
-<br>**Still missing:** the product's fresh-key A' through the actor, the same-key proof refusal through the actor's discovery path, and hidden higher old-tenure history (N-T5) through the actor. | Agent 2 |
+<br>**Still missing:** the product's fresh-key A' through the actor; the same-key proof refusal through the actor's discovery path; N-T5 through the receiver's own scheduling loop. | Agent 2 |
 | 6. Truthful native results and events | Partial | Results and settlement notices exist; no command beyond `studio_overlay_read` is registered; UI-hooks rows not applied. | Agent 2 contract; Agent 4 registration and rows |
 
 | Prerequisite | State |
 |---|---|
-| P1 reviewed manual lifecycle | **Review 2 (bounded implementation and finding re-review, base `510d0b54`, head `1d888fa8`): bounded PASS, no blocker or high.** Every G4-A2-P1 item is verified closed with pinned regressions and verified mutation evidence. Its LOW findings are dispositioned in "The copy review" below; two regressions stay open as follow-ups (L-1's stamp-based live-hold half, L-2's cross-document hold). A bounded PASS is one input to P5, not P5 |
+| P1 reviewed manual lifecycle | **Review 2 (bounded implementation and finding re-review, base `510d0b54`, head `1d888fa8`): bounded PASS, no blocker or high.** Every G4-A2-P1 item is verified closed with pinned regressions and verified mutation evidence. Its LOW findings are dispositioned in "The copy review" below; its two follow-up regressions (L-1's stamp-based live-hold half, L-2's cross-document hold) were added on 2026-10-06 in `copy::tests::cross`. A bounded PASS is one input to P5, not P5 |
 | P2 hold mapping | Implemented. Agent 1's two questions answered in `f158c17b` (`TenureImported`, `PreparedStuck`). Its re-review found no blocker and two mediums, both fixed in the next commit: a Prepared branch with Absent evidence now runs every active check H1 runs after returning it to active, and the tenure copy no longer claims waiting cures one reason but not the other (both end at the next observed owner transition). |
 | P3 native results and events | Partial (goal 6) |
 | P4 live-tenure contract | Implemented: `StudioOwnerTenure`, `require_owner_tenure`, CORE-005 witness |
@@ -167,6 +174,9 @@ over, not the contract. Reasoning from either row as FALSE remains correct today
 | 2026-09-16 | Design revision 7 | Accepted refinements only: A-1's scope sentence and N-T7b's diagnostics. No reviewed decision changes. |
 | 2026-10-06 | Review 2, bounded implementation (`510d0b54`..`1d888fa8`) | **(a) P1 manual lifecycle: bounded PASS** with seven LOWs. **(b) Repeated tenure through the actor: PARTIAL**, one MEDIUM (M-1: the same-key refusal was not through the actor, and production's proof gate was unpinned). Reviewer ran 8 focused tests and inspected the 16 mutation logs; no full suites. Native Save conditions: not yet satisfied. Dispositions in "The copy review". |
 | 2026-10-06 | Review of the deadline (`5ccc4647`..`265b0756`) | **No blocker or high; the MEDIUM is closed.** Six LOWs, fixed next: the bound held only while unpaused; the `pending` term at the deadline was unpinned; the ticket's Closing refusal was untested; a misplaced doc block; the PIX republish cost unstated; one stale status line. Reviewer ran the 8 actor tests. |
+| 2026-10-06 | Review of the cross-document copy regressions (after `3b795bf7`) | **No blocker, high or medium.** It confirmed several things. C3's refusal is the source stamp's, and Y's currency check cannot stand in. The "other element" case really leaves the echo's body identical. The replaced-value refusal is the honest one. Both mutants are meaningful and uniquely anchored, and the fixture refactor is equivalent. Four LOWs, fixed in the same commit. (1) Design C1', STATUS, HANDOVER and a `copy_capture` comment named the wrong C4 message. A replaced value is "recovery value is not in this version"; "no longer Ready or body differs" is only for an Index `Object`. (2) A hold staged on the source mid-copy was untested; it is now tested, and it costs a fresh preview before C3 and nothing after. (3) The source's whole intent ledger is now compared, and each Save on X must land as new work. (4) One unwrapped line. Static only. |
+| 2026-10-06 | Review of N-T5 and the restart-review fixes (after `3b795bf7`) | **No blocker, high or medium.** It traced that C verifies B's head under the tenure C observed, with nothing handed in by the fixture. The rule is exercised rather than bypassed, the recovery assertions are robust, the harness entry is unique and warning-free, and `reset` is `Default` outside tests. Four LOWs. Fixed in the same commit: HANDOVER and 9.6 now say what N-T5 runs through and that the vault, not the node, is reopened. The vacuous "nothing pending" assertion is replaced by A's latest receipt being refused at C afterwards. The harness scope line is updated. Three `copy_capture.rs` comments and design N8b no longer credit C4 with a stamp check. Static only. |
+| 2026-10-06 | Review of the restart coverage and doc corrections (after `3b795bf7`) | **No blocker, high or medium.** It confirmed the C1' correction, the flake attribution, the restart test's non-vacuity and the helper extraction. Six LOWs, all fixed in the same commit: the flake note's permit site; the restart's "as in the product" wording, since `Server` and sync are kept; C4 also refuses on presence; the mid-copy restart row credited a stamp; no HANDOVER entry; `clear_previews` dropped a test runtime's private pools (`PreviewRuntime::reset`, with a regression). Static only. |
 | 2026-10-06 | Re-review of the slice 2 fixes (`b35e23d2`..`5ccc4647`) | **No blocker or high.** HIGH-1 is closed for the actor slot, and MEDIUM-1 to MEDIUM-3 are closed. One MEDIUM remained: an abandoned parked plan still pinned a process-wide permit with no time bound. It was fixed by Agent 2 in `265b0756` with a park deadline, and Agent 1 was told, since the slot is shared. Five LOWs, fixed in `7f73b8eb`. Reviewer ran 7 focused tests and checked both workspaces. |
 | 2026-10-06 | Preview-local slice 2 (`b35e23d2`: the Unconfirmed Save through the actor) | **No blocker. One HIGH:** an abandoned plan on one target blocked Saves on every other target and pinned a process-wide permit. Also three MEDIUMs: a Closing draft reported as Unconfirmed, no refresh notice for another request's commit, and a full scan on every visit. Five LOWs. All fixed in the next commit, with regressions and mutation entries; `b35e23d2` was not pushed before them. Reviewer: static inspection only. |
 | 2026-10-06 | Preview-local slice 1 (`f3ce1758`: the rail, the basis accessors, 8.6's core) | **No blocker or high.** Two MEDIUM test gaps, each with an overstating doc line: the reader's wiring of each 8.6 half, and the read-side rail. Three LOWs: a compile-time bound, `BaseSuperseded` also naming a source behind the base, and phase and adopting left to the app. All fixed or recorded in the next commit, which also makes `f3ce1758`'s two unformatted replication files fmt-clean. Reviewer ran the 13 Unconfirmed tests. |
@@ -954,12 +964,22 @@ which closes every item the acceptance matrix's G4-A2-P1 row names):
 > - **L-1, C1' promises a live-hold refusal it does not implement.** Design C1' now says how each
 >   clause is met: only the transfer hold has its own check; a live job is caught by the source
 >   stamp or the destination's Open requirement. *Follow-up:* a regression for the stamp half
->   (overlay Save lands on the source between preview and apply; C3 and C4 refuse it as changed).
+>   (overlay Save lands on the source between preview and apply; C3 refuses it as changed).
+>   *Corrected 2026-10-06:* C4 checks no source stamp. It refuses such a job only when the job
+>   replaced or removed the selected value, by re-planning. A value-addressed item is no longer
+>   resolved ("recovery value is not in this version"). An Index `Object` rebuilds a different
+>   body. Otherwise C4 applies the source's current value. Design C1' now says so.
+>   *Closed 2026-10-06* by
+>   `copy::tests::cross::a_save_landing_on_the_source_mid_copy_is_refused_at_c3_and_at_c4_only_if_it_moved_the_value`.
+>   It covers the C3 refusal, C4 applying the current value after a Save of another element, and
+>   C4 refusing after the selected value was replaced. Mutation entry `copy-c3-source-stamp`.
 > - **L-2, the C1' regression is same-document only.** *Follow-up:* a cross-document Flipnote
 >   fixture, asserting (a) a hold on the destination refuses at C3 by message, and (b) a hold on the
->   source still previews Ready, applies, and leaves `handoff_prepared()` true. The app-level copy
->   fixture is Index-only. Building a second Flipnote with its own staged handoff is not in this
->   round.
+>   source still previews Ready, applies, and leaves `handoff_prepared()` true.
+>   *Closed 2026-10-06* by `copy::tests::cross`. Both Flipnotes are built with the Index fixture's
+>   construction, now shared as `closing_branch` / `install_successor`. (a) refuses at C1, C3 and
+>   C4, by message. (b) applies and leaves the source `Prepared` on the same branch. Mutation
+>   entry `copy-hold-names-the-destination`.
 > - **L-3, the adoption refusal was a broad `is_err()`.** It now asserts the receipt-authority
 >   error by its text. That text covers four conditions in `verify_current_owner`, so the tenure
 >   as cause rests on the positive oracle (the re-review's L-B).
@@ -1051,6 +1071,9 @@ No blocker. `b35e23d2` was held back from origin until these were fixed, in the 
 - **LOW-5, test gaps.** Added: the oversized-body refusal, a Flipnote target, the own-plan retry
   and the two-target case. Not added: a receiver restart. A fresh receiver has no parked plan and
   no remembered request, so its first visit is the fresh-visit path the other tests cover.
+  *Added later (after `3b795bf7`):*
+  `studio_actor_unconfirmed_branch_resumes_after_a_restart_from_what_it_persisted`, which restarts
+  with one Save landed and one parked.
 
 **Re-review of the fixes (`b35e23d2`..`5ccc4647`): no blocker or high.**
 
@@ -1094,6 +1117,28 @@ safe. Its six LOWs, fixed in the next commit:
   parks a plan, so with ten of them in parallel some saw others' plans as `busy`. `ready_receiver`
   now gives each test a private pool (`inject_overlay_pool_for_test`, as the catch-up tests do).
   The full-suite run at `265b0756` predates this and may show that contention.
+
+**Full suites at `3b795bf7` (2026-10-06).**
+- *Workspace:* one failure, in 3 of 3 runs:
+  `registry_runtime::studio_held_registry_page_is_discarded_after_fault_or_checkpoint_replacement`
+  (assert at `registry_runtime.rs:164`). It passes serially and in three `studio_exchange`-only
+  runs. Everything else is green.
+- *Desktop:* only the known six-client flake.
+- *Not this range.* That test, and its sibling
+  `receiver::studio_receiver_displaced_large_art_prepares_off_actor_and_keeps_its_gossip`
+  (`receiver.rs:68`), build on `StudioReceiver::default()`. They share the process-wide
+  four-permit preparation pool. The permit is a `try_acquire` in the `run` pass: `prepare_for` for
+  a Studio source, `prepare_registry_inventory` for a Registry graph. When that pool is busy,
+  nothing is scheduled, so `detach` has nothing to return.
+- *Controls, run under the same load:*
+  - the suite at `3b795bf7` with the new actor module skipped still failed it;
+  - the suite at `f3ce1758`, before this range, failed the sibling instead.
+
+  Which of the two fails shifts as tests are added, because added tests change which tests
+  overlap. Nothing in this range touches the Registry page path. The new park terms act only
+  while a Save plan is parked.
+- *Fix, left to the tests' owners:* a private pool for those receivers, as the newer actor tests
+  already use.
 
 | Finding | What |
 |---|---|

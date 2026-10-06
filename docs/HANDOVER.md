@@ -8,7 +8,42 @@ the protocol- vs honest-client-enforced boundary and the hardening backlog.
 [`MESSAGE-FLOW.md`](MESSAGE-FLOW.md) traces one message end to end (send, gossip, catch-up)
 and ranks the live hazards in that path.
 
-## Status (latest entry: 2026-10-05)
+## Status (latest entry: 2026-10-06)
+
+- **Gate 4 Agent 2: the Unconfirmed Save through the actor, 8.6 reconciliation, N-T5 and the
+  cross-document copy regressions (2026-10-06).** This updates the 2026-10-05 entry's "Unconfirmed Flow S and its app-side
+  consumers remain missing". Agent 1's Flow S (`c9566b82`) is now consumed through the actor
+  (`b35e23d2`..`3b795bf7`, pushed):
+  - Save, through the receiver: `BeginUnconfirmedOverlaySave` and `SaveUnconfirmedOverlay`. Each
+    stage mints from the actor's live preview in its own visit. The actor has one overlay slot: a
+    visit finishes any parked plan and reports only its own request's outcome. A parked plan has a
+    30 s deadline that holds while the receiver is paused. A Closing draft is refused.
+  - Rail: an Unconfirmed branch takes at most 64 operations.
+  - Design 8.6: the state is derived on every read from headers, with four values, `awaitingSource`,
+    `baseConfirmed`, `baseSuperseded` and `sourceUnreadable`. It is carried as `unconfirmedState`
+    on the native lifecycle row and inspection.
+  - Restart: through the actor, landed work is answered as an exact retry, and a parked plan dies
+    with the process and re-plans once.
+  - N-T5 (hidden higher old-tenure history). This runs over the real discovery wire, through the
+    Server discovery stages the receiver drives, but not the receiver's own scheduling loop. A
+    member two closes ahead on the former owner's history adopts the new owner's lower-epoch
+    receipt and converges on the new owner's history. It keeps the former owner's history only as
+    a `Rewound` recovery snapshot, also after its vault is reopened, and refuses the former owner's
+    receipt from then on.
+  - Copy, Review 2's L-1 and L-2: cross-document Flipnote regressions. A hold on the destination
+    refuses, and a hold on the source permits and stays `Prepared`. A Save landing on the source
+    mid-copy is refused at C3. C4 compares no source stamp. It refuses only if its re-plan no
+    longer resolves the selected value (replaced or removed) or rebuilds a different body;
+    otherwise it applies the source's current value.
+  - **Still missing:** the per-server and vault-wide Unconfirmed rails (placement with Agent 1),
+    the handoff selector's skip of non-Closing branches (Agent 1), and native registration
+    (Agent 4). P5 remains false.
+  - **Known local flake class:** tests on `StudioReceiver::default()` share the process-wide
+    preparation pool and can fail under full-suite load
+    (`registry_runtime.rs:164`, `receiver.rs:68`).
+
+  Ledger: `docs/GATE4-AGENT-2-STATUS.md`. Design: `docs/GATE4-AGENT-2-DESIGN.md` 8.3, 8.6, 8.7,
+  12.
 
 - **Gate 4 archived-owner admission candidate (2026-10-05).** The app now consumes the single
   archived Observed-tenure witness only through the still-current durable owner snapshot used by
