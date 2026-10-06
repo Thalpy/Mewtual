@@ -2144,11 +2144,22 @@ exact authenticated Intents version and context, plans off custody, then at S3 r
 server, complete target, member/device key, owner, MLS epoch, exact record bytes and source absence
 before re-minting the preview and writing.
 
+The actor's parked-request key is exact rather than advisory: it includes target, provenance,
+basis fingerprint, branch identity and a domain-separated BLAKE3 digest of the complete canonical
+`DomainOp::encode()` bytes (nonce, type, logical key and body). A request that differs in any of
+those fields returns busy without consuming the parked plan or its ownership; the exact request can
+still complete afterward.
+
 Live Unconfirmed work is limited to three branches per numeric server/group, 8 MiB of exact
 physical Intents bytes per mounted vault and 64 accepted operations per branch. A fresh complete
 inventory derives the live counters from authenticated provenance and charged bytes. Replacement
 preflight subtracts the authenticated old charge; counters change only after a successful durable
 write, and disposal releases the live charge only after its terminal replacement succeeds.
+While a live Unconfirmed branch exists, the central ordinary intent writer refuses every non-sync
+replacement that would preserve it unless the caller uses the sole private, quota-accounted Flow S
+writer. The separate retirement writer applies the same rule before reservation or I/O. Exact sync
+retry and terminal disposal remain available. This is deliberately fail-closed until any future
+coexistence writer can carry the outer `EpochStudioBudget` accounting itself.
 Unconfirmed provenance grants no handoff, signing, receipt, installed-source or publication
 authority. The implementation has real complete-preview Flipnote coverage but not yet real Index,
 8.6 reconciliation, true reopen/restart, actor/native result or UI coverage. Its functions and

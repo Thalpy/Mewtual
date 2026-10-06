@@ -13,7 +13,8 @@ and ranks the live hazards in that path.
 - **Gate 4 internal awaiting-tenure Save candidate (2026-10-06).** Branch
   `gate4-runtime-completion` starts exactly at merged PR #34 / `gate4-agent1-runtime`
   `c6f7fea0af1392da37e484067a3c8c9131c328a4`; implementation commit
-  `eef69729ae4b4200a6060b9f91719d44538094e5`
+  `eef69729ae4b4200a6060b9f91719d44538094e5`, followed by review-response commit
+  `6aee00046e35410ba42c9290c0d1f52fd41dd86b`,
   generalizes detached Flow S over typed Closing and Unconfirmed bases without changing the
   Closing wire or persistence formats. For new Unconfirmed work the app proves the installed
   source absent, re-enters the current complete preview at S1b and S3, reauthenticates the detached
@@ -23,16 +24,26 @@ and ranks the live hazards in that path.
   Unconfirmed history as quiet. A real complete Flipnote preview regression covers first append,
   wrong-target refusal, expiry, exact retry, detached scheduling, durable provenance, fresh-
   inventory reconstruction and disposal; a second real-flow regression refuses operation 65
-  before scheduling. The candidate remains internal: no actor/native command or renderer path was
-  registered, P5 is false, unfinished repair commands remain unavailable, and the UI is unchanged.
+  before scheduling. The response binds parked work to target, provenance, basis, branch and the
+  full canonical operation digest, and makes ordinary replacement plus retirement fail closed when
+  either would preserve live Unconfirmed work outside quota-accounted Flow S. Exact sync retry and
+  terminal disposal remain available. The candidate remains internal: no actor/native command or
+  renderer path was registered, P5 is false, unfinished repair commands remain unavailable, and the
+  UI is unchanged.
   Index preview evidence, 8.6 reconciliation, actor/native result wiring, the remaining lifecycle,
   tenure, C-3/Flow R and detached repair work, specialist reviews and combined Review 4 remain
-  open. The definitive local root rerun, complete native suite, all 1,282 frontend tests, root and
-  desktop strict Clippy, desktop check, Svelte check, production build, formatting and `cargo deny`
-  pass. An earlier root run had one order-sensitive Registry assertion fail; the exact test passed
-  alone on both candidate and pinned base, and the definitive full rerun passed it. Linux ambient
-  and repair-store mutation evidence is intentionally left to exact-head PR CI. Startup/flow are
-  inapplicable because no setup, process, renderer behavior or command registration changed.
+  open. The definitive local root rerun, all 1,282 frontend tests, root and desktop strict Clippy,
+  desktop check, Svelte check, production build, formatting and `cargo deny` pass. The first root
+  run's single unopened-new-member assertion passed alone and in the complete rerun. The complete
+  native run passes 324/325; its normal-order six-client partition convergence failure repeats in
+  focused runs on both candidate and exact `c6f7fea0...` base, so native is not claimed green and no
+  assertion was weakened; all five command-ACL tests pass separately. Independent review found two
+  request-correlation/accounting MEDIUMs, then
+  two residual full-operation/retirement MEDIUMs; `6aee00046...` closes all four and final re-review
+  reports no BLOCKER/HIGH/MEDIUM. A LOW receipt-covered-retirement test gap remains recorded. Local
+  WSL launch is denied, so Linux ambient and repair-store mutation evidence is intentionally left to
+  exact-head PR CI. Startup/flow are inapplicable because no setup, process, renderer behavior or
+  command registration changed.
 
 - **Gate 4 archived-owner admission candidate (2026-10-05).** The app now consumes the single
   archived Observed-tenure witness only through the still-current durable owner snapshot used by

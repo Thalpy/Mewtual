@@ -744,12 +744,19 @@ table with the commit that closed it.
   Awaiting-tenure overlay authoring is likewise an internal local-draft capability, not source or
   signing authority. New work requires checked source absence plus a current complete prepared
   preview at both authorization and commit; detached plans bind mount, numeric server, complete
-  target, member key, owner, MLS epoch and exact authenticated Intents bytes. Unconfirmed history
+  target, member key, owner, MLS epoch and exact authenticated Intents bytes. A parked request also
+  binds target, provenance, basis, branch and a domain-separated digest of the full canonical
+  operation, including its body; a mismatched request cannot consume the plan or its ownership.
+  Unconfirmed history
   is excluded from automatic handoff and is capped at three live branches per server, 8 MiB of
   authenticated physical Intents bytes per vault and 64 accepted operations per branch. Exact
   retry is classified before preview expiry, while any new operation after expiry refuses.
   Accounting changes only after a durable replacement and terminal disposal releases the live
-  quota; fresh complete inventory reconstructs it. This slice has no actor/native/UI reachability,
+  quota; fresh complete inventory reconstructs it. Non-sync ordinary intent replacement and
+  retirement that would preserve a live Unconfirmed branch fail closed outside the sole private,
+  quota-accounted Flow S writer; exact sync and terminal disposal remain possible. This prevents
+  untracked physical-byte changes until any future coexistence path owns the outer budget. This
+  slice has no actor/native/UI reachability,
   no reconciliation claim and no permission to promote P5.
   The new explicit native Index/art transactions lend the sole mounted store only AFTER the
   actor's Ready rendezvous. Numeric-server persistence, UI commit and exact registry-incarnation

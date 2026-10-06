@@ -10,7 +10,7 @@ status documents and in Git history; they do not override this matrix.
 | Item | Exact state |
 |---|---|
 | Shared baseline | `gate4-agent1-runtime` at merged PR #34 commit `c6f7fea0af1392da37e484067a3c8c9131c328a4`; unchanged by this candidate |
-| Runtime completion candidate | `gate4-runtime-completion` at `eef69729ae4b4200a6060b9f91719d44538094e5`, based exactly on `c6f7fea0...`; adds only the bounded internal generalized Flow S / awaiting-tenure Save slice described below |
+| Runtime completion candidate | `gate4-runtime-completion`, based exactly on `c6f7fea0...`; implementation `eef69729...` plus separately identifiable review response `6aee00046...`, with this documentation checkpoint above them; adds only the bounded internal generalized Flow S / awaiting-tenure Save slice described below |
 | Archived-tenure history | Merged PR #34 / `gate4-finalization`; supplies the archived Observed-tenure consumer and reviewed Registry B0-before-Fault correction now present in the baseline |
 | Verified repair history | Historical PR #32 checkpoint `87629d6b72992254911a8e44f698d535bb5d7904`; incorporated through merged PR #33 |
 | Documentation history | Historical PR #31 checkpoint `f0af61c9b1247fa955300ac50545074e18e9b302`; incorporated through merged PR #33 |
@@ -45,7 +45,7 @@ independently. Native registration is downstream of every specialist acceptance 
 | ID | Requirement | Current state | Precise next action | Acceptance evidence still required |
 |---|---|---|---|---|
 | G4-A1-CORE | Detached typed handoff preparation and finite signing | **Implemented; dedicated independent acceptance still outstanding.** `e65bfd89...` is in the baseline. | Run the SHA-pinned core signing review from `GATE4-REVIEW-PREAMBLES.md`; preserve its prior focused evidence. | Bounded PASS for `8190dc4...e65bfd8`; do not infer it from later broad CI. |
-| G4-A1-S | Durable local Save through Flow S | **Bounded internal generalized path implemented; native unavailable.** Shared classification reaches terminal acknowledgements and exact retries before provenance-specific authority. Capture/plan/commit carries a typed Closing or Unconfirmed basis, reauthenticates the exact record and context, and preserves Closing behavior. | Obtain the independent bounded implementation/integration review; then connect only reviewed product callers. | Closing compatibility is covered by the full suite. Real Flipnote Unconfirmed first append, expiry, exact retry, wrong-target refusal, operation rail and disposal accounting pass; Index preview evidence remains. |
+| G4-A1-S | Durable local Save through Flow S | **Bounded internal generalized path implemented and independently reviewed; native unavailable.** Shared classification reaches terminal acknowledgements and exact retries before provenance-specific authority. Capture/plan/commit carries a typed Closing or Unconfirmed basis, reauthenticates the exact record and context, and preserves Closing behavior. Parked work is bound to target, provenance, basis, branch and the full canonical operation digest. Non-sync ordinary replacements and retirement that would preserve live Unconfirmed work fail closed outside accounted Flow S. | Preserve this accepted boundary while completing its still-missing product callers and wider Agent 1 review. | Closing compatibility is covered by the full suite. Real Flipnote Unconfirmed first append, expiry, exact retry, wrong-target, same-nonce/different-body, source-arrival ordinary-write refusal, retirement refusal, operation rail and disposal accounting pass; Index preview evidence remains. |
 | G4-A1-C3 | Resumable bounded inventory | **Storage cursor implemented and reviewed; six runtime owners still use direct structural loads/full scans.** | Convert the six production owners with identity, mount, generation, cancellation, restart limit and backoff checks. Coordinate repair writers already integrated from Agent 3. | Cursor invalidation, bounded progress, retained-input ownership and another-server progress. |
 | G4-A1-R | Resolve interrupted Prepared state | **Not implemented.** | Build Flow R on the adopted cursor and existing source/reference fences. | Restart at each Prepared/Source/Completed barrier; reads/copy remain available and destructive actions remain refused. |
 | G4-A1-MAP | Structured eligibility/manual reasons | **Agent 2 types exist; Agent 1 runtime still returns string refusals in relevant paths.** | Map runtime refusals to `StudioOverlayEligibility` / `StudioOverlayManualReason` without collapsing distinct cases. | Store -> actor -> native conversion coverage for every reason, including stale final delivery. |
@@ -62,16 +62,19 @@ independently. Native registration is downstream of every specialist acceptance 
 
 ## Verified candidate evidence
 
-The `gate4-runtime-completion` candidate at `eef69729ae4b4200a6060b9f91719d44538094e5` passes the definitive complete root suite,
-the complete desktop/Tauri suite (325 library and 5 command-ACL tests), all 1,282 frontend tests,
-root and desktop strict all-target/all-feature Clippy, desktop `cargo check`, root formatting,
-Svelte check, production build and `cargo deny`. The real complete Flipnote preview and 65th-
-operation regressions pass inside that root run. An earlier root run had one order-sensitive
-`studio_held_registry_page_is_discarded_after_fault_or_checkpoint_replacement` failure; the exact
-test passed alone on candidate and exact base and passed in the definitive full rerun. Startup/flow
+The `gate4-runtime-completion` candidate through correction
+`6aee00046e35410ba42c9290c0d1f52fd41dd86b` passes the definitive complete root suite, all 1,282
+frontend tests, root and desktop strict all-target/all-feature Clippy, desktop `cargo check`, root
+formatting, Svelte check, production build and `cargo deny`. The first full root run had one
+order-sensitive unopened-new-member assertion fail; the focused test passed and the complete rerun
+passed. The complete desktop/Tauri run passes 324 of 325 library tests and reproduces only the
+normal-order six-client partition convergence failure. It also fails alone on the candidate and on
+exact base `c6f7fea0...` with the same missing cross-partition histories, so it is an unresolved
+baseline defect rather than a candidate regression or a green native-suite claim. All five command
+ACL integration tests pass separately. Startup/flow
 remain inapplicable because setup, process, renderer and command-registration paths are unchanged.
-Linux ambient and both repair-store mutation jobs remain exact-head PR checks and are not claimed
-from Windows.
+Local WSL launch is denied, so Linux ambient and both repair-store mutation jobs remain exact-head
+PR checks and are not claimed from Windows.
 
 The following evidence is pinned to code head
 `87629d6b72992254911a8e44f698d535bb5d7904` on PR #32. The documentation-only merge on the
@@ -156,6 +159,15 @@ pushed correction head.
   regressions pin all three. This is not the required independent bounded review; merge readiness
   remains conditional on that review covering generalized Flow S, the awaiting-tenure behavior,
   merge resolutions and these classification/accounting corrections.
+- The required independent review of the current runtime candidate then found two MEDIUM defects:
+  parked work was not correlated to provenance/full operation identity, and ordinary intent
+  replacement could bypass live-Unconfirmed physical accounting. Its first correction still used
+  `DomainOp::id` (which omits the body) and left the independent retirement writer unguarded, so
+  re-review retained two MEDIUMs. Commit `6aee00046...` hashes the full canonical operation and
+  makes both replacement paths fail closed outside the sole accounted Flow S seam. Final re-review
+  reports no BLOCKER/HIGH/MEDIUM. One LOW coverage gap remains: receipt-covered retirement is not
+  independently exercised with live Unconfirmed work, but it shares the tested private writer used
+  by manual-recovery retirement. This accepts only the bounded correction, not full Gate 4.
 
 - Agent 4's independent full-candidate review found no remaining BLOCKER/HIGH/MEDIUM finding after
   the Windows durability and issuer-tenure sequence corrections. It retained one LOW coverage gap:

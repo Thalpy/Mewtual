@@ -47,11 +47,19 @@ currently isolated pending the detached runtime boundary:
   3/server, 8 MiB/vault and 64-op rails, reconstructs those counters from fresh inventory, releases
   them after durable disposal, and excludes Unconfirmed history from automatic handoff. Real
   Flipnote preview, expiry/retry, operation-limit, inventory and disposal regressions pass.
+- Review-response commit `6aee00046e35410ba42c9290c0d1f52fd41dd86b` binds each parked
+  plan to target, provenance, basis, branch and a domain-separated digest of the full canonical
+  operation. It also makes the central ordinary intent writer and the independent retirement writer
+  fail closed when a replacement would preserve live Unconfirmed work outside the sole accounted
+  Flow S path. Exact sync retry and terminal disposal remain available. Independent re-review closes
+  every BLOCKER/HIGH/MEDIUM finding; the only residual LOW is that receipt-covered retirement is not
+  separately exercised with a live Unconfirmed branch, although it uses the same guarded writer as
+  the real manual-recovery regression.
 
 The new code is still intentionally unavailable to the renderer. P5 is false; native Save and
 repair commands remain unregistered. Merged PR #34 supplies the archived-tenure consumer. The new
-runtime candidate still needs exact-head Linux CI and an independent bounded review; the detached
-automatic repair runtime remains absent.
+runtime candidate has its bounded implementation/integration review and still needs exact-head
+Linux CI; the detached automatic repair runtime remains absent.
 
 ## Exact branch state
 
@@ -61,7 +69,7 @@ automatic repair runtime remains absent.
 | Repair candidate | Historical PR #32 checkpoint `87629d6b72992254911a8e44f698d535bb5d7904`; its reviewed ancestry is in merged PR #33 |
 | Documentation checkpoint | Historical PR #31 checkpoint `f0af61c9b1247fa955300ac50545074e18e9b302`; its documentation ancestry is in merged PR #33 |
 | Archived-tenure branch | PR #34 merged; `gate4-finalization` is historical at `7f80815e...` |
-| Runtime completion branch | `gate4-runtime-completion` at `eef69729ae4b4200a6060b9f91719d44538094e5`, from exact base `c6f7fea0...` |
+| Runtime completion branch | `gate4-runtime-completion`, from exact base `c6f7fea0...`; implementation `eef69729...` plus separately identifiable review response `6aee00046...`, with this documentation checkpoint above them |
 | Agent 3 source | `gate4-agent3-repair` at `15b715a10704a8dafc2cccef65854d4d45ad55ca`; preserved, not rewritten |
 
 PR #28 remains the Agent 3 source record. PR #32 was its first integrated successor; merged PR #33
@@ -83,8 +91,9 @@ Still required:
 2. adopt `EpochStorageCursor` at the six runtime scan owners;
 3. implement Flow R after cursor adoption;
 4. finish the required maximum-shape/custody measurements; and
-5. obtain the dedicated core-signing and coherent runtime reviews, including the generalized
-   Flow S boundary introduced by `eef69729ae4b4200a6060b9f91719d44538094e5`.
+5. obtain the dedicated core-signing and final coherent runtime reviews. The bounded generalized
+   Flow S / awaiting-tenure review is complete through `6aee00046...`, but it does not substitute
+   for those wider verdicts.
 
 These are internal prerequisites and are not blocked by P5. P5 blocks exposure, not implementation.
 
@@ -132,8 +141,8 @@ Still required:
 Completed: preserved-history integration, response classification, Windows durability, repair
 sequence correction, two-platform mutation CI, desktop Clippy, the Registry pre-gate reconstruction
 and fresh-receiver liveness corrections, truthful unavailable registration state, and the bounded
-internal generalized Flow S / awaiting-tenure candidate. Pushed-head Linux ambient and mutation CI
-plus independent review of this newest boundary remain required before merge readiness is claimed.
+internal generalized Flow S / awaiting-tenure candidate and its bounded review response. Pushed-head
+Linux ambient and mutation CI remain required before merge readiness is claimed.
 
 Still required: integrate the specialist completions, maintain this ledger, register only approved
 commands after P5, implement/run the seven combined scenarios, update interface/UI truth and request
@@ -143,7 +152,8 @@ Review 4. Agent 4 must not turn dependency ancestry into an implementation claim
 
 The next execution order is:
 
-1. Obtain bounded review and exact-head CI for the generalized Flow S / internal preview candidate.
+1. Obtain exact-head Linux CI for the independently reviewed generalized Flow S / internal preview
+   candidate.
 2. Adopt the C-3 cursor at runtime call sites, then implement Flow R.
 3. Close Agent 2's remaining lifecycle/copy findings and copy-restart evidence, then complete Index
    preview evidence, reconciliation, actor/native result wiring and the real actor/Studio
@@ -155,17 +165,29 @@ The next execution order is:
 
 ## Verification for the current code candidate
 
-On `gate4-runtime-completion` at `eef69729ae4b4200a6060b9f91719d44538094e5`, the definitive complete root suite passes. The complete
-desktop/Tauri suite passes 325 library and 5 command-ACL tests; all 1,282 frontend tests, root and
-desktop strict all-target/all-feature Clippy, desktop `cargo check`, root formatting, Svelte check,
-production build and `cargo deny` pass. The real complete Flipnote preview regression and the
-65th-operation refusal pass in the root run. An earlier full root run had one order-sensitive
-Registry assertion fail; that exact test passed alone on both candidate and `c6f7fea0...`, then
-passed in the definitive full rerun. Startup/flow remain inapplicable because setup, process,
-renderer and command-registration paths are unchanged. Linux ambient and both repair-store
-mutation jobs remain exact-head PR checks. The implementation received a structured actual-diff
-self-review and corrections for target binding, authorization-before-quota ordering and disposal
-accounting; this is not the required independent bounded review.
+On `gate4-runtime-completion` through correction
+`6aee00046e35410ba42c9290c0d1f52fd41dd86b`, the definitive complete root suite passes, as do all
+1,282 frontend tests, root and desktop strict all-target/all-feature Clippy, desktop `cargo check`,
+root formatting, Svelte check, production build and `cargo deny`. The first root run had one
+order-sensitive `studio_actors_new_member_after_checkpoint_discovers_installs_and_receives_tail`
+failure; the exact test passed alone and the complete rerun passed. The desktop/Tauri run passes 324
+of 325 library tests and reproduces only
+`six_client_recovery::six_client_native_restart_and_partition_recovery`; a focused candidate rerun
+and a focused run on exact base `c6f7fea0...` fail with the same partition-boundary convergence
+shape, so this is recorded as an unresolved baseline defect, not a candidate pass. No assertion was
+weakened; the five command-ACL integration tests pass separately. Startup/flow remain inapplicable
+because setup, process, renderer and command-registration
+paths are unchanged. Local `bash scripts/check-no-ambient.sh` could not start WSL (`E_ACCESSDENIED`),
+so Linux ambient and both repair-store mutation jobs remain exact-head PR checks.
+
+The independent bounded review initially found two MEDIUM defects: parked-plan correlation omitted
+provenance/operation identity, and ordinary replacements could change live-Unconfirmed physical
+bytes without updating the outer counters. Re-review found two residual MEDIUMs: `DomainOp::id`
+did not bind the body, and the separate retirement writer bypassed the central guard. Commit
+`6aee00046...` fixes all four with the full canonical-operation digest, sole accounted Flow S seam,
+and shared fail-closed retirement rule. Final re-review reports no remaining BLOCKER/HIGH/MEDIUM;
+the receipt-covered-retirement LOW test gap is recorded above. This verdict accepts only this
+bounded candidate, not the remaining Agent 1-3 work or full Gate 4.
 
 At `87629d6b72992254911a8e44f698d535bb5d7904`:
 
