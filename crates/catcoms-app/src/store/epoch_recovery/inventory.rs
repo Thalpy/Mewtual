@@ -869,6 +869,36 @@ impl ServerStore {
         Ok(EpochInventoryStep::Restarted)
     }
 
+    /// Sync an unchanged Intents record, unless this mount already made it durable and has
+    /// written no five-family file since (I-4 audit M-3).
+    ///
+    /// For a path on a read-only route, such as the publication check every page serve of a
+    /// completed handoff makes. The sync itself must stay a mutation for inventory purposes
+    /// (it rotates the token, I-4), but once a cursor spans visits every rotation costs it a
+    /// restart, so repeating an already-made sync on each serve let a polling peer keep any job
+    /// from finishing. A skipped sync does no I/O at all, so there is nothing to rotate for.
+    pub(in crate::store) fn sync_intent_unless_durable(
+        &mut self,
+        path: &Path,
+        bytes: u64,
+    ) -> Result<(), AppError> {
+        if self
+            .repeat_syncs
+            .is_durable(path, bytes, &self.inventory_generation)
+        {
+            return Ok(());
+        }
+        // These two lines must stay adjacent: carrying entries from `before` to the new token is
+        // sound only because this flush is the one five-family operation between them.
+        let before = self.inventory_generation.clone();
+        self.epoch_mutation_guard().sync_intent(path, bytes)?;
+        // Noted only after success: a failed sync proves nothing, and since its guard already
+        // rotated the token, nothing noted earlier is carried past it either.
+        self.repeat_syncs
+            .note(path, bytes, &before, &self.inventory_generation);
+        Ok(())
+    }
+
     /// Drive a job for one visit against an **absolute** deadline (C-3 runtime design, S-3).
     ///
     /// The caller samples its clock once per visit to fix `deadline_ms`, and every owner that runs
@@ -1865,6 +1895,63 @@ pub enum EpochInventoryOutcome {
     Restarted(Box<EpochInventoryJob>),
     /// The restart budget is spent.
     Unstable,
+}
+
+/// Sync-repairs this mount has already made durable (I-4 audit M-3), for
+/// [`ServerStore::sync_intent_unless_durable`].
+///
+/// Each entry is a path, the length that was synced, and `inventory_generation` as it stands
+/// since that sync. While the token is still that one, I-4 says no five-family file has been
+/// created, replaced, renamed, unlinked or synced since, except by flushes this memo itself
+/// carried entries across (see `note`), so the same file at the same length is exactly what was
+/// made durable and a repeat sync can be skipped. The token is what makes this exact; the length
+/// is a cheap second check. Any other five-family write rotates the token and makes every entry
+/// stale at once.
+#[derive(Default)]
+pub(in crate::store) struct RepeatSyncMemo {
+    entries: Vec<(std::path::PathBuf, u64, std::sync::Arc<()>)>,
+}
+
+/// Enough for every completed-handoff target a peer is likely to poll in turn. A peer cycling
+/// through more than this evicts entries before they are reused, and each serve then flushes
+/// and rotates again: the pre-memo behaviour, bounded, and recorded as a residual.
+const REPEAT_SYNC_ENTRIES: usize = 64;
+
+impl RepeatSyncMemo {
+    fn is_durable(&self, path: &Path, bytes: u64, token: &std::sync::Arc<()>) -> bool {
+        self.entries
+            .iter()
+            .any(|(p, b, t)| p == path && *b == bytes && std::sync::Arc::ptr_eq(t, token))
+    }
+
+    /// Record a successful flush of `path` that moved the token from `before` to `after`.
+    ///
+    /// Entries current at `before` are carried forward to `after`, which is sound because the
+    /// only five-family operation between the two tokens is this flush, and it changes no file's
+    /// contents or names: `sync_intent` opens the existing file without create or truncate and
+    /// syncs it and its parent. Without the carry the memo could never hold more than one entry,
+    /// because each note follows its own rotation, and two completed targets served in turn
+    /// would still rotate on every serve (review of this memo, HIGH). Entries stamped with any
+    /// other token are stale for good and dropped, as is this path's previous entry.
+    fn note(
+        &mut self,
+        path: &Path,
+        bytes: u64,
+        before: &std::sync::Arc<()>,
+        after: &std::sync::Arc<()>,
+    ) {
+        self.entries.retain_mut(|(p, _, t)| {
+            if p == path || !std::sync::Arc::ptr_eq(t, before) {
+                return false;
+            }
+            *t = after.clone();
+            true
+        });
+        if self.entries.len() == REPEAT_SYNC_ENTRIES {
+            self.entries.remove(0);
+        }
+        self.entries.push((path.to_owned(), bytes, after.clone()));
+    }
 }
 
 impl std::fmt::Debug for EpochInventoryJob {
@@ -4225,6 +4312,118 @@ mod tests {
             store.finish_epoch_inventory_job(job).unwrap(),
             EpochInventoryOutcome::Restarted(_)
         ));
+    }
+
+    /// Two files to flush, as two completed-handoff records would be. `sync_intent` checks only
+    /// that each is a regular file of the stated length, so their contents do not matter here.
+    fn two_synced_files(root: &Path) -> [(std::path::PathBuf, u64); 2] {
+        ["a", "b"].map(|name| {
+            let path = root.join(format!("{name}.flush"));
+            fs::write(&path, name.repeat(40)).unwrap();
+            (path, 40)
+        })
+    }
+
+    /// I-4 audit M-3, and its review's HIGH. A repeat flush of an unchanged file is skipped, for
+    /// every file the memo holds, not only the last: each flush rotates the token, so without the
+    /// carry-forward the memo could never hold two entries, and two completed targets served in
+    /// turn rotated on every serve. Any other five-family write still makes every entry stale.
+    #[test]
+    fn repeat_syncs_are_remembered_across_the_memos_own_flushes() {
+        let root = tempfile::tempdir().unwrap();
+        let mut store = open(root.path());
+        let [(a, a_len), (b, b_len)] = two_synced_files(root.path());
+        let rotated = |store: &mut ServerStore, path: &Path, len: u64| {
+            let before = store.inventory_generation();
+            store.sync_intent_unless_durable(path, len).unwrap();
+            !std::sync::Arc::ptr_eq(&before, &store.inventory_generation())
+        };
+        assert!(
+            rotated(&mut store, &a, a_len),
+            "the first flush of a was skipped"
+        );
+        assert!(
+            rotated(&mut store, &b, b_len),
+            "the first flush of b was skipped"
+        );
+        for _ in 0..3 {
+            assert!(!rotated(&mut store, &a, a_len), "a was flushed again");
+            assert!(!rotated(&mut store, &b, b_len), "b was flushed again");
+        }
+        // Another five-family write: both must be flushed once more.
+        let _ = store.epoch_mutation_guard();
+        assert!(
+            rotated(&mut store, &a, a_len),
+            "a stale entry for a was trusted"
+        );
+        assert!(
+            rotated(&mut store, &b, b_len),
+            "a stale entry for b was trusted"
+        );
+        assert!(!rotated(&mut store, &a, a_len));
+        // A different length is a different file: never skipped on an entry for another one.
+        fs::write(&a, "a".repeat(41)).unwrap();
+        assert!(rotated(&mut store, &a, 41), "a changed length was skipped");
+    }
+
+    /// The memo's one unsafe direction is remembering a flush that failed. The failed attempt's
+    /// guard has already rotated, so an entry noted anyway would carry the current token and the
+    /// next check would skip a flush that never happened. The failure is a read-only file, which
+    /// assumes the tests do not run as root on Unix; there the precondition fails loudly.
+    #[test]
+    fn a_failed_sync_is_not_remembered() {
+        let root = tempfile::tempdir().unwrap();
+        let mut store = open(root.path());
+        let [(a, len), _] = two_synced_files(root.path());
+        let mut permissions = fs::metadata(&a).unwrap().permissions();
+        permissions.set_readonly(true);
+        fs::set_permissions(&a, permissions.clone()).unwrap();
+        assert!(
+            store.sync_intent_unless_durable(&a, len).is_err(),
+            "precondition: a read-only file cannot be opened to flush"
+        );
+        #[allow(clippy::permissions_set_readonly_false)]
+        permissions.set_readonly(false);
+        fs::set_permissions(&a, permissions).unwrap();
+        let before = store.inventory_generation();
+        store.sync_intent_unless_durable(&a, len).unwrap();
+        assert!(
+            !std::sync::Arc::ptr_eq(&before, &store.inventory_generation()),
+            "a flush that failed was remembered as made"
+        );
+    }
+
+    /// The bound evicts the oldest entry; an evicted file is flushed again, never wrongly
+    /// trusted, and the newest entries survive.
+    #[test]
+    fn the_repeat_sync_memo_is_bounded_and_evicts_the_oldest() {
+        let mut memo = RepeatSyncMemo::default();
+        let mut token = std::sync::Arc::new(());
+        let path = |n: usize| std::path::PathBuf::from(format!("{n}.flush"));
+        for n in 0..=REPEAT_SYNC_ENTRIES {
+            let next = std::sync::Arc::new(());
+            memo.note(&path(n), 1, &token, &next);
+            token = next;
+        }
+        assert_eq!(memo.entries.len(), REPEAT_SYNC_ENTRIES);
+        assert!(
+            !memo.is_durable(&path(0), 1, &token),
+            "the oldest entry was not evicted"
+        );
+        assert!(
+            memo.is_durable(&path(1), 1, &token),
+            "a carried entry was lost"
+        );
+        assert!(memo.is_durable(&path(REPEAT_SYNC_ENTRIES), 1, &token));
+        // A token that moved without a flush of ours makes the whole memo stale.
+        let moved = std::sync::Arc::new(());
+        assert!(!memo.is_durable(&path(1), 1, &moved));
+        memo.note(&path(0), 1, &moved, &std::sync::Arc::new(()));
+        assert_eq!(
+            memo.entries.len(),
+            1,
+            "stale entries were carried across a foreign write"
+        );
     }
 
     /// A restart absorbs an invalidation and nothing else.

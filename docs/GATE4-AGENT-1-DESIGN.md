@@ -902,7 +902,10 @@ page ingest, the Registry page receive sync, and the Registry maintenance flush.
 the safe direction and stays allowed, but once a job spans visits it costs liveness, so a peer
 polling pages can keep restarting a job. No owner may therefore depend on quiescence alone; the
 runtime document's section 12 records how replay's manual move does not. Memoising the
-already-durable sync-repairs per mount is a recorded follow-up.
+already-durable sync-repairs per mount is done for the completed-handoff publication check, the
+site a polling peer drives (`sync_intent_unless_durable`); the duplicate page ingest (which a peer
+drives by pushing pages), Registry
+receive sync and maintenance flush sites remain a recorded follow-up.
 
 Changing the scanner from an exclusive borrow to an owned cursor is a **semantic consistency
 change**, not a mechanical signature change: it is the introduction of I-4 that makes cross-visit

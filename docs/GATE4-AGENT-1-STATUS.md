@@ -1560,7 +1560,8 @@ Section 8 of the runtime design requires the audit to be re-run before the first
 that parks a cursor, because only then does an under-rotating writer become unsafe. No blocker or
 high. Findings and their dispositions are in the runtime design's section 12 (M-1 raw `std::fs`
 now refused by `scripts/check-store-raw-fs.sh` in CI; M-2 a finish-time names-only listing check;
-M-3 read-path rotations recorded, memo a follow-up; L-1 fixed; L-2 and L-3 follow-ups). The
+M-3 read-path rotations recorded, the completed-handoff serve memoised and its three sibling
+sites a follow-up; L-1 fixed; L-2 and L-3 follow-ups). The
 audited writer list, which is what proves coverage beside the type-level guard:
 
 | writer | kinds touched | rotates before first mutating I/O | evidence |
@@ -1573,7 +1574,8 @@ audited writer list, which is what proves coverage beside the type-level guard:
 | `flush_checked_epoch_intents` | Intents | yes | `epoch_intents.rs:568` |
 | Retirement replace / zero-removal sync | Intents | yes | `retirement.rs:352→354`, `312→314` |
 | Handoff completed sync (source precheck) | Intents | yes | `epoch_studio/handoff.rs:702` |
-| Handoff publication sync (read-only serve) | Intents | yes, over-rotates (M-3) | `handoff.rs:749` via `source.rs:158` |
+| Handoff publication sync (read-only serve) | Intents | yes; a repeat of a flush this mount already made, with no five-family write since, is now skipped with no I/O (M-3) | `handoff.rs:749` (now `:751`) via `source.rs:158`, through `sync_intent_unless_durable` |
+| `sync_intent_unless_durable` (added for M-3) | Intents | yes, through its own guard, when it flushes at all | store `epoch_recovery/inventory.rs`, `RepeatSyncMemo` beside it |
 | Draft archive write | DraftArchive + temp | yes | `epoch_draft_archive.rs:255→257` |
 | Draft archive exact-retry sync | DraftArchive | yes | `epoch_draft_archive.rs:209→211` |
 | Draft archive release (unlink + parent sync) | DraftArchive | yes | `epoch_draft_archive.rs:370→372,379` |

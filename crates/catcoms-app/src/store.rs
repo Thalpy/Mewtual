@@ -1348,6 +1348,9 @@ pub struct ServerStore {
     // make it unsound. A budget mint or entry alone must not rotate this, which is what keeps
     // I-4 separate from budget ownership.
     inventory_generation: std::sync::Arc<()>,
+    // Sync-repairs this mount already made durable, so a read-only path need not repeat one
+    // (and rotate the token) for a file nothing has written since (I-4 audit M-3).
+    repeat_syncs: epoch_recovery::inventory::RepeatSyncMemo,
     // Pure validation metadata; every reuse requires freshly authenticated identical bytes.
     // Never substitutes for an inventory, generation check, source load or write budget.
     inventory_cache: epoch_recovery::inventory::cache::RecordCache,
@@ -1394,6 +1397,7 @@ impl ServerStore {
             intent_generation: std::sync::Arc::new(()),
             studio_generation: std::sync::Arc::new(()),
             inventory_generation: std::sync::Arc::new(()),
+            repeat_syncs: Default::default(),
             inventory_cache: Default::default(),
             studio_source: None,
             #[cfg(test)]
