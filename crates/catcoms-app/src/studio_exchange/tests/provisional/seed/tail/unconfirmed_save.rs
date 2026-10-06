@@ -1007,3 +1007,76 @@ async fn unconfirmed_branch_accepts_a_fresh_mint_after_an_mls_epoch_change() {
         "the branch keeps its first admission's facts across the membership change"
     );
 }
+
+/// The S1b binding beyond the target (review L1): a basis is refused before any media work when it
+/// was minted for another device, or names another group's document.
+///
+/// The sanctioned mint always uses the minting device and its own group, so both are built by
+/// handing the store a real basis from the wrong place. For the author, the provider Alice offers
+/// the store Bob's basis; without the check it would be refused only at S2 by `append`, with a
+/// different error, after media admission. For the document, a basis from a second, independent
+/// group is offered to the first; without that check the author check would answer instead, since
+/// the other group's member is another device.
+#[tokio::test]
+async fn unconfirmed_save_refuses_a_basis_for_another_device_or_group_at_s1b() {
+    let target = target();
+    let mut p = preview_pair(target).await;
+    let prepared = complete_preview(&mut p).await;
+    let basis = mint(&p, &prepared).unwrap();
+    let ticket = ticket(&mut p, target, &basis);
+    let operation = draft_op(&p, target, 0xd1, "under another device");
+    let mints = (mint(&p, &prepared), mint(&p, &prepared));
+    let mut b = budget(&mut p.bob, &mut p.b_store);
+    let store = &mut p.b_store;
+    let refused = p
+        .alice
+        .sync
+        .with_registry_context(|g, d, clock, rng| {
+            store.save_studio_overlay(
+                SERVER,
+                g,
+                target,
+                d,
+                StudioOverlayMint::unconfirmed(mints.0),
+                StudioOverlayMint::unconfirmed(mints.1),
+                ticket.0,
+                ticket.1,
+                operation,
+                clock.now_ms(),
+                rng,
+                &mut b,
+            )
+        })
+        .unwrap_err();
+    assert_eq!(
+        refused.to_string(),
+        "epoch studio: unconfirmed overlay basis was minted for another device"
+    );
+
+    let mut other = preview_pair(target).await;
+    assert_ne!(
+        other.bob.group_id(),
+        p.bob.group_id(),
+        "precondition: two independent groups"
+    );
+    let elsewhere_preview = complete_preview(&mut other).await;
+    let elsewhere = (
+        mint(&other, &elsewhere_preview),
+        mint(&other, &elsewhere_preview),
+    );
+    let fingerprint = elsewhere.0.as_ref().unwrap().fingerprint();
+    let operation = draft_op(&p, target, 0xd2, "from another group");
+    let refused = save_with(
+        &mut p,
+        target,
+        elsewhere,
+        (fingerprint, ticket.1),
+        operation,
+    )
+    .unwrap_err();
+    assert_eq!(
+        refused.to_string(),
+        "epoch studio: unconfirmed overlay basis is for another group or document"
+    );
+    assert_eq!(recorded(&mut p, target), None, "nothing was written");
+}

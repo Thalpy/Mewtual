@@ -162,14 +162,25 @@ exactly one test executed, restore byte-for-byte and pass again.
 | SIGN-TEST-001, editor cap (`:39`) | `..._refuses_a_vault_decoded_branch_over_the_local_cap`: an Index branch built honestly to `MAX_INDEX_OBJECTS`, its last entry retargeted in the record bytes at one more `PutObject`, decoded structurally; `EpochBound` from preparation; the replaying decoder refuses the same bytes; the honest record is the positive control | `local-policy`: the result ignored |
 | SIGN-TEST-001, aggregate (`:83`) | `..._refuses_an_honest_branch_over_the_successor_gate`: 48 honest near-maximal title edits within `MAX_INTENT_BYTES_PER_DOCUMENT`, whose signed form exceeds the successor's `MAX_EPOCH_BYTES`; `EpochBound` from preparation, before any signature | `probe-gate`: the admission skipped |
 
-**Not done, and why.**
+**SIGN-TEST-001b: regressions and mutants submitted.** A second member joins the owner's group.
+The member's copy of the owner's sealed Closing source is the owner's snapshot restored under the
+member's group with the member as actor, an approximation of a fully synced member that skips the
+member's own inbound decrypt and admission and its own receipt seal. The member then settles and
+checkpoints **its own** copy, so the successor checked against the basis is one the member built.
 
-- **SIGN-TEST-001b (open): a positive handoff by a non-owner author.** Nothing tests the
-  author/owner split in `check_overlay_successor` or the probe gate's per-device branch for a
-  non-owner (`EpochGate::admit_open`), so a mutant requiring the actor to be the gate owner, or
-  charging the owner the per-device cap, would survive every handoff test. It needs a second
-  member with its own re-sealed signed log, the owner's receipt sealed into the member's source,
-  and a member Closing basis and successor; that fixture does not exist yet.
+| regression | pins | mutant |
+|---|---|---|
+| `..._signs_a_branch_authored_by_a_non_owner_member` (Index and Flipnote) | the member's branch on the owner's close prepares, signs every turn and assembles, and every signed operation is the member's | `author-is-owner`: requiring the source's actor to be the gate owner |
+| `..._charges_only_a_non_owner_the_per_device_cap` | an owner-authored branch between `MAX_DEVICE_BYTES` and `MAX_EPOCH_BYTES` once signed (asserted) hands off; a member-authored branch of the same shape by construction (the same deterministic titles) is refused `EpochBound` before signing | `owner-charged` (local admission charges the owner the cap; it mutates `admit_local` only, because the shared `admit_open` would also charge the owner during the fixture's own inbound fill) and `device-exempt` (no one is charged it) |
+
+**Harness run** (at `d319b37b` plus this change, in an isolated worktree): all eight mutants
+(`mls`, `owner`, `receipt`, `local-policy`, `probe-gate`, `author-is-owner`, `owner-charged`,
+`device-exempt`) detected at their named assertions with exactly one test executed, restored
+byte-for-byte, and the restored tests passed. The first version of `owner-charged` mutated the
+shared `admit_open`, and the harness refused it as the short re-review predicted: it died in the
+fixture's own fill instead of at its assertion. It now mutates `admit_local` only.
+
+**Not done, and why.**
 - **Residual, not part of the original correction:** no isolated mutant for the per-operation
   `recovery::preflight` in `PreparedOverlayChanges::prepare`, nor for the manifest framing probe
   (the `set_prepared` call in `prepare_handoff_detached`). Signed bytes are about twice the live

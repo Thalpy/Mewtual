@@ -34,6 +34,36 @@ MUTATIONS = [
      b"            if false && probe.admit_local(crate::AdmittedOperation {\n",
      "studio_handoff_preparation_refuses_an_honest_branch_over_the_successor_gate",
      "a branch over the successor's epoch budget reached signing"),
+    # SIGN-TEST-001b: the source's actor is the branch's author, not necessarily the gate owner.
+    ("author-is-owner", "crates/catcoms-replication/src/studio/epoch/handoff.rs",
+     b"        if self.actor != overlay.author()\n",
+     b"        if self.actor != overlay.author() || self.actor != self.gate.owner()\n",
+     "studio_handoff_preparation_signs_a_branch_authored_by_a_non_owner_member",
+     "a member's branch on the owner's close prepares"),
+    # SIGN-TEST-001b: only a non-owner is charged the per-device cap, in either direction.
+    # `owner-charged` mutates the LOCAL admission entry point only (the probe and `finish`):
+    # mutating the shared `admit_open` would also charge the owner during the fixture's own
+    # inbound fill, which dies in setup rather than at the assertion this mutant names.
+    ("owner-charged", "crates/catcoms-replication/src/epoch.rs",
+     b"    pub fn admit_local(&self, op: AdmittedOperation) -> Result<Admission, ReplError> {\n"
+     b"        let mut inner = self.inner.lock().expect(\"epoch gate poisoned\");\n"
+     b"        if inner.phase != EpochPhase::Open {\n"
+     b"            return Err(ReplError::EpochClosed);\n"
+     b"        }\n"
+     b"        let owner = inner.owner;\n",
+     b"    pub fn admit_local(&self, op: AdmittedOperation) -> Result<Admission, ReplError> {\n"
+     b"        let mut inner = self.inner.lock().expect(\"epoch gate poisoned\");\n"
+     b"        if inner.phase != EpochPhase::Open {\n"
+     b"            return Err(ReplError::EpochClosed);\n"
+     b"        }\n"
+     b"        let owner = { let _ = inner.owner; DeviceId::from_bytes([0; 32]) };\n",
+     "studio_handoff_preparation_charges_only_a_non_owner_the_per_device_cap",
+     "the owner is exempt from the per-device cap"),
+    ("device-exempt", "crates/catcoms-replication/src/epoch.rs",
+     b"        if op.author != owner\n            && (per_device.0",
+     b"        if (op.author != owner && op.author == owner)\n            && (per_device.0",
+     "studio_handoff_preparation_charges_only_a_non_owner_the_per_device_cap",
+     "a member's branch over its per-device cap reached signing"),
 ]
 
 

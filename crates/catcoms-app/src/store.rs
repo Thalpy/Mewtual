@@ -70,8 +70,8 @@ pub use epoch_recovery::inventory::{
     EpochStorageScanProgress, EpochStorageScanProgress as RecoveryScanProgress,
 };
 pub use epoch_recovery::inventory::{
-    EpochInventoryJob, EpochInventoryOutcome, EpochInventoryStep, ParkedEpochRecord,
-    ValidatedEpochRecord, MAX_INVENTORY_RESTARTS,
+    EpochInventoryJob, EpochInventoryOutcome, EpochInventoryProfile, EpochInventoryStep,
+    ParkedEpochRecord, ValidatedEpochRecord, MAX_INVENTORY_RESTARTS,
 };
 pub use epoch_recovery::{EpochRecoveryAction, EpochRecoveryState, EpochRecoveryUpdate};
 pub use epoch_registry::{

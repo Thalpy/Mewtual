@@ -1286,6 +1286,48 @@ fn a_budgeted_reference_scan_collects_the_same_cids_as_an_unbudgeted_one() {
     );
 }
 
+/// C-3 runtime design S-2. An inventory finished before a five-family write cannot mint after it.
+///
+/// The write here is the mutation guard alone, which every five-family writer takes before its
+/// first possible I/O and which touches neither the Studio nor the Intents generation. Before the
+/// inventory carried the generation it was finished under, the two older checks both passed in
+/// this case, so the stale inventory minted a budget for a vault that had since changed. Within
+/// one visit finish and mint are adjacent; this is what makes splitting them across visits safe.
+#[test]
+fn an_inventory_finished_before_a_five_family_write_cannot_mint_after_it() {
+    let root = tempfile::tempdir().unwrap();
+    let f = Fixture::new(false);
+    let mut store = open(root.path());
+    let mut b = budget(&mut store, &f);
+    f.edit(&mut store, &mut b, f.insert());
+    drop(b);
+    let finished = |store: &mut ServerStore| {
+        let mut scan = store.scan_epoch_storage_with_studio().unwrap();
+        while !scan.step().unwrap().complete {}
+        scan.finish().unwrap()
+    };
+
+    let control = finished(&mut store);
+    assert!(
+        store
+            .studio_storage_budget(SERVER, &f.group, &control)
+            .is_ok(),
+        "control: a finish followed directly by a mint is fresh"
+    );
+
+    let stale = finished(&mut store);
+    store.epoch_mutation_guard();
+    let refused = store
+        .studio_storage_budget(SERVER, &f.group, &stale)
+        .unwrap_err();
+    assert!(
+        refused
+            .to_string()
+            .contains("fresh five-family inventory required"),
+        "an inventory finished before a write minted after it: {refused}"
+    );
+}
+
 /// The surviving cursor must also be *usable*, not merely un-refused.
 ///
 /// `studio_generation` rotates on a budget mint and on budget entry - bookkeeping that touches no

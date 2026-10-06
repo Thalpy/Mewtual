@@ -158,6 +158,11 @@ impl ServerStore {
     }
     /// Mint once from a completed CURRENT five-family scan. Minting again requires a new scan
     /// and supersedes the previous wrapper; reopening the vault invalidates all old handles.
+    ///
+    /// "Current" includes the inventory generation (C-3 runtime design, S-2): an inventory
+    /// finished before any five-family write cannot mint after it. Within one visit the finish and
+    /// the mint are adjacent, so this changes nothing there; it is what keeps a finish in one
+    /// visit and a mint in a later one from minting a budget for a vault that has since changed.
     pub fn studio_storage_budget(
         &mut self,
         server: u64,
@@ -168,6 +173,7 @@ impl ServerStore {
             != EpochInventoryCoverage::RecoveryOwnerReceiptsIntentsRegistryAndStudio
             || !Arc::ptr_eq(&inventory.studio_generation, &self.studio_generation)
             || !Arc::ptr_eq(&inventory.intent_generation, &self.intent_generation)
+            || !Arc::ptr_eq(&inventory.inventory_generation, &self.inventory_generation)
         {
             return Err(invalid("fresh five-family inventory required"));
         }

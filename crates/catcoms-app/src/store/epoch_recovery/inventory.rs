@@ -265,6 +265,10 @@ impl std::fmt::Debug for EpochStorageOrphan {
 pub struct EpochStorageInventory {
     pub(in crate::store) intent_generation: std::sync::Arc<()>,
     pub(in crate::store) studio_generation: std::sync::Arc<()>,
+    /// The `inventory_generation` this inventory was finished under (C-3 runtime design, S-2).
+    /// A budget mint compares it with the store's, so an inventory issued before a five-family
+    /// write cannot mint after it, even when the finish and the mint fall in different visits.
+    pub(in crate::store) inventory_generation: std::sync::Arc<()>,
     coverage: EpochInventoryCoverage,
     records: BTreeMap<(EpochRecordKind, [u8; 32]), EpochStorageInventoryEntry>,
     orphans: BTreeMap<String, EpochStorageOrphan>,
@@ -282,10 +286,15 @@ impl std::fmt::Debug for EpochStorageInventory {
 }
 
 impl EpochStorageInventory {
-    fn empty(coverage: EpochInventoryCoverage, intent_generation: std::sync::Arc<()>) -> Self {
+    fn empty(
+        coverage: EpochInventoryCoverage,
+        intent_generation: std::sync::Arc<()>,
+        inventory_generation: std::sync::Arc<()>,
+    ) -> Self {
         Self {
             intent_generation,
             studio_generation: std::sync::Arc::new(()),
+            inventory_generation,
             coverage,
             records: BTreeMap::new(),
             orphans: BTreeMap::new(),
@@ -647,18 +656,23 @@ impl ServerStore {
     pub(crate) fn scan_studio_receive_inventory(
         &mut self,
     ) -> Result<EpochStorageScan<'_>, AppError> {
-        let mut scan = self.scan_epoch_storage_with_studio()?;
-        scan.cursor.entry_limit = 1024;
-        scan.cursor.record_limit = 64;
-        scan.cursor.byte_limit = STUDIO_RECEIVE_READ_BYTES;
-        scan.cursor.cold_byte_limit = Some(STUDIO_RECEIVE_COLD_BYTES);
-        Ok(scan)
+        self.scan_epoch_files_with(EpochInventoryProfile::receive())
     }
 
     pub(in crate::store) fn scan_epoch_files(
         &mut self,
         coverage: EpochInventoryCoverage,
     ) -> Result<EpochStorageScan<'_>, AppError> {
+        self.scan_epoch_files_with(EpochInventoryProfile::full(coverage))
+    }
+
+    /// Every scan's one constructor: the profile's coverage and limits are applied here, before
+    /// the first entry is read, so no path can start a scan under limits it did not choose.
+    pub(in crate::store) fn scan_epoch_files_with(
+        &mut self,
+        profile: EpochInventoryProfile,
+    ) -> Result<EpochStorageScan<'_>, AppError> {
+        let coverage = profile.coverage;
         let path = self.dir.join("servers");
         let metadata = fs::symlink_metadata(&path).map_err(|e| AppError::Io(e.to_string()))?;
         if !metadata.is_dir() || is_link(&metadata) {
@@ -667,7 +681,13 @@ impl ServerStore {
             ));
         }
         let directory = fs::read_dir(path).map_err(|e| AppError::Io(e.to_string()))?;
-        let mut inventory = EpochStorageInventory::empty(coverage, self.intent_generation.clone());
+        // A fresh token that matches nothing: only `finish_with` stamps the real one, so an
+        // inventory issued by any other path, present or future, cannot mint a budget.
+        let mut inventory = EpochStorageInventory::empty(
+            coverage,
+            self.intent_generation.clone(),
+            std::sync::Arc::new(()),
+        );
         inventory.studio_generation = self.studio_generation.clone();
         Ok(EpochStorageScan {
             cursor: EpochStorageCursor {
@@ -675,10 +695,10 @@ impl ServerStore {
                 inventory,
                 progress: EpochStorageScanProgress::default(),
                 failed: false,
-                entry_limit: MAX_DIRECTORY_ENTRIES,
-                record_limit: MAX_ACCOUNTED_RECORDS,
-                byte_limit: MAX_AUTHENTICATED_BYTES,
-                cold_byte_limit: None,
+                entry_limit: profile.entry_limit,
+                record_limit: profile.record_limit,
+                byte_limit: profile.byte_limit,
+                cold_byte_limit: profile.cold_byte_limit,
                 references: None,
                 // Captured before the first entry is read, so any mutation concurrent with even
                 // the earliest part of this scan invalidates it.
@@ -698,7 +718,15 @@ impl ServerStore {
         &mut self,
         coverage: EpochInventoryCoverage,
     ) -> Result<EpochStorageCursor, AppError> {
-        Ok(self.scan_epoch_files(coverage)?.cursor)
+        self.begin_epoch_storage_scan_with(EpochInventoryProfile::full(coverage))
+    }
+
+    /// [`Self::begin_epoch_storage_scan`] under an explicit profile.
+    pub fn begin_epoch_storage_scan_with(
+        &mut self,
+        profile: EpochInventoryProfile,
+    ) -> Result<EpochStorageCursor, AppError> {
+        Ok(self.scan_epoch_files_with(profile)?.cursor)
     }
 
     /// Resume a parked cursor. Invalidation is checked **before** any traversal or record work,
@@ -730,18 +758,35 @@ impl ServerStore {
     ///
     /// Prefer this over driving a bare cursor: it is what keeps an overtaken scan from either
     /// failing the commit outright or restarting forever.
+    ///
+    /// **Vault-wide limits, not the background rail.** A background owner converting to the job
+    /// API must use [`Self::begin_epoch_inventory_job_with`] with `EpochInventoryProfile::receive()`,
+    /// or it widens silently from 64 records to the vault-wide 65,536.
     pub fn begin_epoch_inventory_job(
         &mut self,
         coverage: EpochInventoryCoverage,
     ) -> Result<EpochInventoryJob, AppError> {
+        self.begin_epoch_inventory_job_with(EpochInventoryProfile::full(coverage))
+    }
+
+    /// [`Self::begin_epoch_inventory_job`] under an explicit profile, which every restart of the
+    /// job reuses.
+    pub fn begin_epoch_inventory_job_with(
+        &mut self,
+        profile: EpochInventoryProfile,
+    ) -> Result<EpochInventoryJob, AppError> {
         Ok(EpochInventoryJob {
-            cursor: self.begin_epoch_storage_scan(coverage)?,
-            coverage,
+            cursor: self.begin_epoch_storage_scan_with(profile)?,
+            profile,
             restarts: 0,
         })
     }
 
     /// Step an inventory job, absorbing an invalidation into a restart while the budget allows.
+    ///
+    /// Keep its outcome mapping in sync with `step_job_until`, the absolute-deadline form. They
+    /// are separate on purpose: routing this through that one would add a clock read before the
+    /// readiness checks and shift every deadline the `SteppingClock` tests pin.
     pub fn step_epoch_inventory_job(
         &mut self,
         job: &mut EpochInventoryJob,
@@ -789,7 +834,7 @@ impl ServerStore {
         // finish, and could turn a completed scan into an error if that open happened to fail.
         let EpochInventoryJob {
             cursor,
-            coverage,
+            profile,
             restarts,
         } = job;
         match cursor.finish_with(self) {
@@ -800,8 +845,8 @@ impl ServerStore {
                 }
                 Ok(EpochInventoryOutcome::Restarted(Box::new(
                     EpochInventoryJob {
-                        cursor: self.begin_epoch_storage_scan(coverage)?,
-                        coverage,
+                        cursor: self.begin_epoch_storage_scan_with(profile)?,
+                        profile,
                         restarts: restarts + 1,
                     },
                 )))
@@ -816,8 +861,63 @@ impl ServerStore {
             return Ok(EpochInventoryStep::Unstable);
         }
         job.restarts += 1;
-        job.cursor = self.begin_epoch_storage_scan(job.coverage)?;
+        job.cursor = self.begin_epoch_storage_scan_with(job.profile)?;
         Ok(EpochInventoryStep::Restarted)
+    }
+
+    /// Drive a job for one visit against an **absolute** deadline (C-3 runtime design, S-3).
+    ///
+    /// The caller samples its clock once per visit to fix `deadline_ms`, and every owner that runs
+    /// in that visit passes the same value, so per-owner slices cannot add up. This loops the
+    /// one-record steps while time remains and returns at the first of: a parked body, a restart,
+    /// `Unstable`, traversal end, or no time left.
+    ///
+    /// It **never begins a step with no time remaining**. A step has a one-entry minimum, so
+    /// calling one with zero remaining would overrun by a whole entry on every visit; that is
+    /// why the check is here, before the call, rather than left to the step's own deadline test.
+    pub fn drive_epoch_inventory_job(
+        &mut self,
+        job: &mut EpochInventoryJob,
+        clock: &dyn catcoms_rt::Clock,
+        deadline_ms: u64,
+    ) -> Result<EpochInventoryStep, AppError> {
+        // A body already parked is the answer whatever the time: the caller must detach it.
+        if job.cursor.parked.is_some() {
+            return Ok(EpochInventoryStep::Parked);
+        }
+        let mut last = EpochInventoryStep::Stepped(job.cursor.progress);
+        loop {
+            if job.cursor.progress.complete {
+                return Ok(last);
+            }
+            if clock.monotonic_ms() >= deadline_ms {
+                return Ok(last);
+            }
+            last = self.step_job_until(job, usize::MAX, Some((clock, deadline_ms)))?;
+            if !matches!(last, EpochInventoryStep::Stepped(_)) {
+                return Ok(last);
+            }
+        }
+    }
+
+    /// [`Self::step_epoch_inventory_job`] against an absolute deadline; keep the two mappings in
+    /// sync. The same mapping of
+    /// outcomes: a park, an invalidation absorbed as a restart, any other failure surfaced.
+    fn step_job_until(
+        &mut self,
+        job: &mut EpochInventoryJob,
+        steps: usize,
+        deadline: Option<(&dyn catcoms_rt::Clock, u64)>,
+    ) -> Result<EpochInventoryStep, AppError> {
+        match job.cursor.step_until(self, steps, deadline) {
+            Ok(progress) => Ok(if job.cursor.parked.is_some() {
+                EpochInventoryStep::Parked
+            } else {
+                EpochInventoryStep::Stepped(progress)
+            }),
+            Err(CursorFailure::Invalidated(_)) => self.restart_job(job),
+            Err(other) => Err(other.into_error()),
+        }
     }
 
     /// Turn a cursor into a reference scan, before it has visited anything.
@@ -1069,14 +1169,7 @@ impl EpochStorageCursor {
         steps: usize,
         budget: Option<(&dyn catcoms_rt::Clock, u64)>,
     ) -> Result<EpochStorageScanProgress, CursorFailure> {
-        // Before resuming any expensive work, not after. A cursor that has been overtaken must
-        // not pay for traversal or record authentication it is going to throw away.
-        self.check_not_invalidated(store)?;
-        if self.awaiting.is_some() {
-            return Err(CursorFailure::Fault(invalid(
-                "this scan has a parked record; validate and install it before stepping",
-            )));
-        }
+        self.check_ready(store)?;
         // One clock read per visit, at entry. The deadline is then a fixed target rather than a
         // moving one, and the classifier below compares against what is left of it.
         let deadline = budget.map(|(clock, ms)| (clock, clock.monotonic_ms().saturating_add(ms)));
@@ -1084,6 +1177,37 @@ impl EpochStorageCursor {
         // or a vanished file is not fixed by starting again.
         self.guarded_step(store, steps, deadline, Self::step_inner)
             .map_err(CursorFailure::Fault)
+    }
+
+    /// [`Self::step_with`] against an **absolute** deadline, which the caller has already fixed.
+    ///
+    /// The relative form converts a budget to a deadline once, at entry; this takes the deadline
+    /// as given. The two must stay separate: passing an absolute deadline to the relative form
+    /// adds it to the current time, which silently disables the step's own expiry check and hands
+    /// the classifier an enormous remaining budget. That was the first cut of
+    /// `drive_epoch_inventory_job`.
+    fn step_until(
+        &mut self,
+        store: &mut ServerStore,
+        steps: usize,
+        deadline: Option<(&dyn catcoms_rt::Clock, u64)>,
+    ) -> Result<EpochStorageScanProgress, CursorFailure> {
+        self.check_ready(store)?;
+        self.guarded_step(store, steps, deadline, Self::step_inner)
+            .map_err(CursorFailure::Fault)
+    }
+
+    /// Before resuming any expensive work, not after. A cursor that has been overtaken must not
+    /// pay for traversal or record authentication it is going to throw away, and one with a
+    /// parked record must not move past it.
+    fn check_ready(&self, store: &ServerStore) -> Result<(), CursorFailure> {
+        self.check_not_invalidated(store)?;
+        if self.awaiting.is_some() {
+            return Err(CursorFailure::Fault(invalid(
+                "this scan has a parked record; validate and install it before stepping",
+            )));
+        }
+        Ok(())
     }
 
     #[allow(clippy::type_complexity)]
@@ -1355,6 +1479,9 @@ impl EpochStorageCursor {
         // `inventory_generation` moving too - and if that ever stopped being true, refreshing
         // here would silently mask the staleness instead of refusing.
         self.inventory.studio_generation = store.studio_generation.clone();
+        // The token this cursor was just confirmed current under. A mint compares it with the
+        // store's again, which is what makes a finish in one visit and a mint in a later one safe.
+        self.inventory.inventory_generation = self.generation.clone();
         Ok(self.inventory)
     }
 }
@@ -1576,6 +1703,52 @@ pub(super) fn invalid(error: impl std::fmt::Display) -> AppError {
 /// single-visit unbounded scan: that would trade the custody bound for the liveness problem.
 pub const MAX_INVENTORY_RESTARTS: usize = 3;
 
+/// The families a scan covers and the limits it scans under (C-3 runtime design, S-1).
+///
+/// A job keeps its profile for its whole life, including every restart. Before this existed the
+/// conservative background rail lived only in the fields `scan_studio_receive_inventory` set on a
+/// fresh cursor, and every job path, restarts included, re-began at the vault-wide defaults, so a
+/// background owner converted to the job API would have widened silently from 64 records to
+/// 65,536 and lost its cold-byte limit. A profile is a value, so it cannot be dropped on the way.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct EpochInventoryProfile {
+    coverage: EpochInventoryCoverage,
+    entry_limit: usize,
+    record_limit: usize,
+    byte_limit: u64,
+    cold_byte_limit: Option<u64>,
+}
+
+impl EpochInventoryProfile {
+    /// The vault-wide limits every scan used before profiles existed, over `coverage`.
+    pub fn full(coverage: EpochInventoryCoverage) -> Self {
+        Self {
+            coverage,
+            entry_limit: MAX_DIRECTORY_ENTRIES,
+            record_limit: MAX_ACCOUNTED_RECORDS,
+            byte_limit: MAX_AUTHENTICATED_BYTES,
+            cold_byte_limit: None,
+        }
+    }
+
+    /// The conservative background-service rail over all five families: lower limits checked
+    /// before any record is read or reconstructed. This is exactly what
+    /// `scan_studio_receive_inventory` has always applied.
+    pub fn receive() -> Self {
+        Self {
+            coverage: EpochInventoryCoverage::RecoveryOwnerReceiptsIntentsRegistryAndStudio,
+            entry_limit: 1024,
+            record_limit: 64,
+            byte_limit: STUDIO_RECEIVE_READ_BYTES,
+            cold_byte_limit: Some(STUDIO_RECEIVE_COLD_BYTES),
+        }
+    }
+
+    pub fn coverage(&self) -> EpochInventoryCoverage {
+        self.coverage
+    }
+}
+
 /// One commit attempt's inventory work: a cursor plus the restart budget that bounds it.
 ///
 /// The restart count belongs here rather than in the cursor because a restart *replaces* the
@@ -1591,7 +1764,8 @@ pub const MAX_INVENTORY_RESTARTS: usize = 3;
 /// says what they actually produce.
 pub struct EpochInventoryJob {
     cursor: EpochStorageCursor,
-    coverage: EpochInventoryCoverage,
+    /// Reused by every restart, so a restarted job scans under exactly the limits it began with.
+    profile: EpochInventoryProfile,
     restarts: usize,
 }
 
@@ -1622,7 +1796,7 @@ pub enum EpochInventoryOutcome {
 impl std::fmt::Debug for EpochInventoryJob {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("EpochInventoryJob")
-            .field("coverage", &self.coverage)
+            .field("profile", &self.profile)
             .field("restarts", &self.restarts)
             .finish_non_exhaustive()
     }
@@ -3574,6 +3748,330 @@ mod tests {
             panic!("a quiescent vault did not complete");
         };
         assert_eq!(inventory.records().count(), 1);
+    }
+
+    /// C-3 runtime design S-1. A job scans under the profile it began with, restarts included.
+    ///
+    /// The receive profile allows 64 records. Before profiles, every job path and every restart
+    /// re-began at the vault-wide defaults, so a background owner converted to the job API would
+    /// silently have widened to 65,536 records. Here the vault holds 65, and the job is overtaken
+    /// once before it reaches them: the restarted cursor must still refuse at the 65th. The
+    /// full-profile job over the same vault is the control that the 65 records are otherwise fine.
+    #[test]
+    fn an_inventory_job_keeps_its_profile_across_a_restart() {
+        let root = tempfile::tempdir().unwrap();
+        let mut store = open(root.path());
+        for n in 0..65u8 {
+            stage(&mut store, 7, &document(b"group", &[b'p', n]), 1);
+        }
+
+        let mut job = store
+            .begin_epoch_inventory_job_with(EpochInventoryProfile::receive())
+            .unwrap();
+        store.step_epoch_inventory_job(&mut job, 1, None).unwrap();
+        store.epoch_mutation_guard();
+        assert!(
+            matches!(
+                store.step_epoch_inventory_job(&mut job, 1, None).unwrap(),
+                EpochInventoryStep::Restarted
+            ),
+            "precondition: the job was overtaken and restarted"
+        );
+        let refused = loop {
+            match store.step_epoch_inventory_job(&mut job, ENTRIES_PER_STEP, None) {
+                Ok(EpochInventoryStep::Stepped(progress)) if progress.complete => {
+                    panic!("the restarted job completed past the receive profile's record limit")
+                }
+                Ok(_) => {}
+                Err(error) => break error,
+            }
+        };
+        assert!(
+            refused.to_string().contains("record limit reached"),
+            "the restarted job refused for another reason: {refused}"
+        );
+
+        // The finish path restarts too, and must also keep the profile. 64 records fit; the job
+        // completes its traversal; a 65th lands before the inventory is issued; the restarted job
+        // must still refuse it rather than scan on under the vault-wide limits.
+        let root64 = tempfile::tempdir().unwrap();
+        let mut store64 = open(root64.path());
+        for n in 0..64u8 {
+            stage(&mut store64, 7, &document(b"group", &[b'q', n]), 1);
+        }
+        let mut job = store64
+            .begin_epoch_inventory_job_with(EpochInventoryProfile::receive())
+            .unwrap();
+        while !matches!(
+            store64.step_epoch_inventory_job(&mut job, ENTRIES_PER_STEP, None).unwrap(),
+            EpochInventoryStep::Stepped(progress) if progress.complete
+        ) {}
+        stage(&mut store64, 7, &document(b"group", b"q-late"), 1);
+        let EpochInventoryOutcome::Restarted(mut job) =
+            store64.finish_epoch_inventory_job(job).unwrap()
+        else {
+            panic!("precondition: the write before issue restarted the job");
+        };
+        let refused = loop {
+            match store64.step_epoch_inventory_job(&mut job, ENTRIES_PER_STEP, None) {
+                Ok(EpochInventoryStep::Stepped(progress)) if progress.complete => {
+                    panic!("the job restarted at finish completed past the receive record limit")
+                }
+                Ok(_) => {}
+                Err(error) => break error,
+            }
+        };
+        assert!(refused.to_string().contains("record limit reached"));
+
+        let mut full = store
+            .begin_epoch_inventory_job(
+                EpochInventoryCoverage::RecoveryOwnerReceiptsIntentsRegistryAndStudio,
+            )
+            .unwrap();
+        while !matches!(
+            store.step_epoch_inventory_job(&mut full, ENTRIES_PER_STEP, None).unwrap(),
+            EpochInventoryStep::Stepped(progress) if progress.complete
+        ) {}
+        let EpochInventoryOutcome::Complete(inventory) =
+            store.finish_epoch_inventory_job(full).unwrap()
+        else {
+            panic!("the full-profile control did not complete");
+        };
+        assert_eq!(inventory.records().count(), 65);
+    }
+
+    /// C-3 runtime design S-3. One visit's drive never begins a step with no time left.
+    ///
+    /// A step has a one-entry minimum, so without the helper's own check a visit that arrives
+    /// already past its deadline would still process an entry, every visit. With time left it
+    /// loops one-record steps to traversal end; with a body to park it stops there.
+    #[test]
+    fn driving_a_job_respects_the_visit_deadline_and_stops_at_a_park() {
+        let root = tempfile::tempdir().unwrap();
+        let mut store = open(root.path());
+        let parent = root.path().join("servers");
+        for n in 0..8 {
+            fs::write(parent.join(format!("unrelated-{n}.bin")), []).unwrap();
+        }
+        let clock = SteppingClock {
+            ms: std::sync::atomic::AtomicU64::new(1_000),
+            step: 1,
+        };
+
+        // Past the deadline on arrival: nothing at all is visited.
+        let mut job = store
+            .begin_epoch_inventory_job(EpochInventoryCoverage::RecoveryOnly)
+            .unwrap();
+        let EpochInventoryStep::Stepped(progress) = store
+            .drive_epoch_inventory_job(&mut job, &clock, 500)
+            .unwrap()
+        else {
+            panic!("an expired visit did something other than return");
+        };
+        assert_eq!(
+            progress.visited_entries, 0,
+            "an expired visit still began a step"
+        );
+
+        // Time left: the loop runs one-record steps until the traversal ends.
+        let EpochInventoryStep::Stepped(progress) = store
+            .drive_epoch_inventory_job(&mut job, &clock, u64::MAX)
+            .unwrap()
+        else {
+            panic!("a quiet traversal did not simply step");
+        };
+        assert!(progress.complete, "the drive stopped before traversal end");
+        assert_eq!(progress.visited_entries, 8);
+
+        // A record whose validation is never classified as fitting parks, and the drive stops.
+        let doc = document(b"group", b"park");
+        stage(&mut store, 7, &doc, 1);
+        let mut job = store
+            .begin_epoch_inventory_job(EpochInventoryCoverage::RecoveryOnly)
+            .unwrap();
+        assert!(matches!(
+            store
+                .drive_epoch_inventory_job(&mut job, &clock, u64::MAX)
+                .unwrap(),
+            EpochInventoryStep::Parked
+        ));
+        // Still parked and out of time: the answer is the park, not a stale "stepped".
+        assert!(matches!(
+            store
+                .drive_epoch_inventory_job(&mut job, &clock, 0)
+                .unwrap(),
+            EpochInventoryStep::Parked
+        ));
+        assert!(store.take_parked_job_record(&mut job).is_some());
+    }
+
+    /// The deadline `drive` is given is **absolute**, and each step must honour it as such.
+    ///
+    /// The first cut passed it to the step's relative form, which adds it to the current time, so
+    /// a step's own expiry was effectively disabled: with an unbounded step allowance one step
+    /// ran every non-family name to the next record or EOF. The two legs above cannot see that,
+    /// because a deadline already past never starts a step, and `u64::MAX` saturates either way.
+    ///
+    /// The arithmetic, with a clock that advances 100 ms per read from 1000: the drive's own
+    /// check reads 1100, which is before 1250, so a step begins; the step processes its first
+    /// entry without a check (the one-entry minimum), reads 1200 and processes a second, then
+    /// reads 1300 and stops. The drive's next check reads 1400 and returns. Two entries, not
+    /// eight, and the traversal is not complete.
+    #[test]
+    fn driving_a_job_treats_its_deadline_as_absolute() {
+        let root = tempfile::tempdir().unwrap();
+        let mut store = open(root.path());
+        let parent = root.path().join("servers");
+        for n in 0..8 {
+            fs::write(parent.join(format!("unrelated-{n}.bin")), []).unwrap();
+        }
+        let clock = SteppingClock {
+            ms: std::sync::atomic::AtomicU64::new(1_000),
+            step: 100,
+        };
+        let mut job = store
+            .begin_epoch_inventory_job(EpochInventoryCoverage::RecoveryOnly)
+            .unwrap();
+        let EpochInventoryStep::Stepped(progress) = store
+            .drive_epoch_inventory_job(&mut job, &clock, 1_250)
+            .unwrap()
+        else {
+            panic!("a quiet traversal did not simply step");
+        };
+        assert!(
+            !progress.complete,
+            "the absolute deadline was read as a relative allowance"
+        );
+        assert_eq!(progress.visited_entries, 2);
+    }
+
+    /// `drive` really loops: one visit runs several one-record steps.
+    ///
+    /// A cache hit ends a step without parking, so two Studio sources whose validation is already
+    /// cached take at least two steps, and one drive with time to spare must complete both. A
+    /// drive that stepped only once would return after the first record.
+    #[test]
+    fn driving_a_job_loops_several_one_record_steps_in_one_visit() {
+        let root = tempfile::tempdir().unwrap();
+        let mut store = open(root.path());
+        let device = catcoms_mls::MlsDevice::generate().unwrap();
+        let group = catcoms_mls::ServerGroup::create(&device).unwrap();
+        for object in [[1u8; 16], [2u8; 16]] {
+            crate::store::save_studio_source_fixture(
+                &mut store,
+                7,
+                &group,
+                &device,
+                catcoms_replication::studio::StudioTarget::Flipnote {
+                    channel: [9; 16],
+                    object,
+                },
+            );
+        }
+        // Warm the validation cache: an unbudgeted scan validates inline and caches Studio
+        // records.
+        let mut scan = store.scan_epoch_storage_with_studio().unwrap();
+        while !scan.step().unwrap().complete {}
+        scan.finish().unwrap();
+
+        let clock = ManualClock::new(0);
+        let mut job = store
+            .begin_epoch_inventory_job(
+                EpochInventoryCoverage::RecoveryOwnerReceiptsIntentsRegistryAndStudio,
+            )
+            .unwrap();
+        let step = store
+            .drive_epoch_inventory_job(&mut job, &clock, u64::MAX)
+            .unwrap();
+        let EpochInventoryStep::Stepped(progress) = step else {
+            panic!("a warm traversal parked or restarted: {step:?}");
+        };
+        assert!(progress.complete, "the drive stopped after one step");
+        assert_eq!(
+            progress.reused_records, 2,
+            "precondition: both records were cache hits"
+        );
+    }
+
+    /// C-3 runtime design S-4. A cursor held open across visits tolerates the non-family files
+    /// that are written beside it in the same directory.
+    ///
+    /// `servers/` also holds each server's `.bin`, `.net` and `.cache` files, written without
+    /// the mutation guard because they are not inventoried. Whether the platform's directory
+    /// iterator returns an entry created after it was opened is unspecified, so this pins only
+    /// what must hold either way: no fault, and the records and authenticated bytes are exactly
+    /// those of an undisturbed scan. A non-family entry may count toward the entry limit, as
+    /// every visited entry does, but never toward records or bytes.
+    #[test]
+    fn a_held_cursor_tolerates_non_family_files_changing_beside_it() {
+        let root = tempfile::tempdir().unwrap();
+        let mut store = open(root.path());
+        let parent = root.path().join("servers");
+        for n in 0..4u8 {
+            stage(&mut store, 7, &document(b"group", &[b's', n]), 1);
+        }
+        for name in ["7.bin", "7.net", "7.cache", "8.bin"] {
+            fs::write(parent.join(name), b"not inventoried").unwrap();
+        }
+        let direct = {
+            let mut cursor = store
+                .begin_epoch_storage_scan(EpochInventoryCoverage::RecoveryOnly)
+                .unwrap();
+            let mut progress = store.step_epoch_storage_scan(&mut cursor, 1, None).unwrap();
+            while !progress.complete {
+                progress = store
+                    .step_epoch_storage_scan(&mut cursor, ENTRIES_PER_STEP, None)
+                    .unwrap();
+            }
+            (
+                progress.authenticated_bytes,
+                store
+                    .finish_epoch_storage_scan(cursor)
+                    .unwrap()
+                    .records()
+                    .count(),
+            )
+        };
+
+        let mut cursor = store
+            .begin_epoch_storage_scan(EpochInventoryCoverage::RecoveryOnly)
+            .unwrap();
+        store.step_epoch_storage_scan(&mut cursor, 1, None).unwrap();
+        // Between visits: create, replace and remove non-family siblings, and one real server
+        // snapshot write, which stages a `.mewtual-stage-*.tmp` sibling and renames it into place.
+        fs::write(parent.join("9.bin"), b"created mid-scan").unwrap();
+        fs::write(
+            parent.join("7.net"),
+            b"replaced mid-scan, longer than before",
+        )
+        .unwrap();
+        fs::remove_file(parent.join("8.bin")).unwrap();
+        store
+            .save_server(
+                11,
+                b"a server snapshot written mid-scan",
+                &mut ChaCha20Rng::seed_from_u64(5),
+            )
+            .unwrap();
+        let mut progress = store.step_epoch_storage_scan(&mut cursor, 1, None).unwrap();
+        while !progress.complete {
+            progress = store
+                .step_epoch_storage_scan(&mut cursor, ENTRIES_PER_STEP, None)
+                .unwrap();
+        }
+        assert_eq!(
+            progress.authenticated_bytes, direct.0,
+            "a non-family file was charged as authenticated bytes"
+        );
+        assert_eq!(
+            store
+                .finish_epoch_storage_scan(cursor)
+                .unwrap()
+                .records()
+                .count(),
+            direct.1,
+            "a non-family file changed the record set"
+        );
     }
 
     /// A restart absorbs an invalidation and nothing else.

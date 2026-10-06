@@ -1502,6 +1502,46 @@ So a budgeted scan currently does one record per visit. That is the safe directi
 cheap record costs a visit, inlining an expensive one costs an unbounded custody hold - but it
 means **13.7 is now load-bearing for throughput, not just a reporting obligation**.
 
+### The runtime half: designed in `GATE4-AGENT-1-C3-RUNTIME.md`, step 1 in progress
+
+The runtime adoption has its own design document, `GATE4-AGENT-1-C3-RUNTIME.md`, reviewed twice
+before any runtime code. Revision 1 (the scratch draft) was **not ready**: two blockers (a queue
+head gated on `replay_ready()` could wait on catch-up forever; a second pool permit for overlay
+jobs could wedge the four-slot pool) and five highs, among them that the job API silently dropped
+the receive limits and that the throughput premise was false (every uncached record parks, one per
+visit). Revision 2 answered all 22 findings; its re-review closed both blockers in principle and
+found four new highs, all in the later conversion steps. Revision 3 records the decisions for those
+steps, and **step 1, the storage prerequisites, was accepted for implementation**.
+
+The list of sites below is the historical one. The current, complete table (about thirty sites,
+classified explicit or background, with profile and what each retains when not ready) is in the
+design document's section 5.
+
+**Step 1, the storage prerequisites, is implemented** (no runtime owner converted yet):
+
+| piece | what it does | test | mutation, killed |
+|---|---|---|---|
+| S-1 `EpochInventoryProfile` | coverage plus the four limits as one value; every scan is built through `scan_epoch_files_with(profile)`; `receive()` is exactly the old receive rail; a job keeps its profile on both restart paths | `an_inventory_job_keeps_its_profile_across_a_restart`: 65 records, restart from a step and from finish, both still refuse at the 65th | widening either restart path to `full()` |
+| S-2 generation stamp | the issued inventory carries the `inventory_generation` it was finished under; the Studio budget mint refuses a mismatch | `an_inventory_finished_before_a_five_family_write_cannot_mint_after_it` | dropping the new comparison: the stale inventory minted |
+| S-3 `drive_epoch_inventory_job` | one visit's drive against an absolute deadline, through a cursor step that takes the deadline as given (`step_until`); never begins a step with no time left; reports an already-parked body as `Parked` | `driving_a_job_respects_the_visit_deadline_and_stops_at_a_park`, `..._treats_its_deadline_as_absolute`, `..._loops_several_one_record_steps_in_one_visit` | dropping the pre-check (8 entries instead of 0); calling the relative step (traversal completed past the deadline); stepping once (stopped after one record); dropping the parked check |
+| S-4 held cursor beside non-family files | pins that creating, replacing and removing `.bin`/`.net` siblings, and a real `save_server`, between steps neither faults nor changes records or authenticated bytes | `a_held_cursor_tolerates_non_family_files_changing_beside_it` | (pins platform behaviour; no guard to break) |
+
+**Its review: one high, fixed.** An Opus adversarial review of the first cut found that
+`drive_epoch_inventory_job` passed its **absolute** deadline to the step's **relative** form,
+which adds it to the current time. A step's own expiry was therefore disabled, one step could run
+every non-family name to the next record, and the classifier was handed an enormous remaining
+budget, harmless only while `validation_fits` refuses everything. Nothing called it yet; step 2
+would have built on it. My test missed it because it used only a deadline already past and
+`u64::MAX`, where the two readings coincide. Fixed with a cursor step that takes an absolute
+deadline, plus the regression above. Also from that review: a test that `drive` really loops (M1),
+an inventory that starts with a token matching nothing so only the finish stamp makes it mintable
+(L2), the parked report (L3), a real server write in the S-4 test (L4), a doc warning on the
+vault-wide job constructor (L5), and the misplaced test doc comment (L1). The re-review closed
+H1 and found nothing new. One residual, recorded rather than changed: with a body taken but not
+yet installed, `drive` reports `Stepped` when out of time and an error when time remains. The
+planned runtime cannot reach that state, because a job whose body is out for validation is not
+stepped (design section 4).
+
 ### What remains, and why it is a separate checkpoint
 
 The runtime still drives scans the old way at six sites: `studio/control.rs` (x2),
@@ -4376,7 +4416,7 @@ anchor in the six mutation harnesses still matches exactly once.
 | M1 | no test of an exact retry after a confirmed source arrives; moving the presence check ahead of classification would pass every test | **fixed**: `unconfirmed_save_exact_retry_is_answered_beside_a_newly_received_source` |
 | M2 | "a corrupt or unreadable source refuses" was claimed, not tested | **fixed, and the check itself changed** (see L4): `..._refuses_a_corrupt_or_unlinked_source_rather_than_reading_it_as_absent`, with a sentinel mint failure that must not be what comes back |
 | M3 | replacement and restart-append untested; the commit doc overclaimed ("survives the ready entry being replaced"); the acceptance row and Agent 2's 8.1 "not yet built" note are stale | **fixed**: `..._commits_from_a_replacement_preview_and_after_restart`; the doc now says exactly what holds (same seed and receipt match; another candidate does not); acceptance row corrected; Agent 2 asked to update their own 8.1 note |
-| L1 | S1b binds the target only; a basis with another author or group passes S1b and is refused at S2 after media work | **follow-up for Agent 2**: needs `author()`/`document()` on the basis, in their file. Unreachable through the sanctioned mint |
+| L1 | S1b binds the target only; a basis with another author or group passes S1b and is refused at S2 after media work | **fixed** once Agent 2 added `author()` and `document()` (`f3ce1758`): the Unconfirmed mint now refuses a basis naming another group's document, then one minted for another device, before media work. `unconfirmed_save_refuses_a_basis_for_another_device_or_group_at_s1b`: the provider offers the store the saver's basis, and a second independent group's basis is offered to the first. Dropping the document check lets the author check answer; dropping the author check moves the refusal to S2 as `EpochAuthority` |
 | L2 | the store has no evidence the mint attempt is fresh; a kept basis would skip every live recheck | **fixed**: the basis must record the current MLS epoch and a provider still in the group; `..._refuses_a_basis_minted_under_an_earlier_mls_epoch` hands the store a kept basis after a real membership commit |
 | L3 | the plan does not record its kind; a wrong-kind commit mint fails closed with misleading text | **fixed**: refused first, by name; `unconfirmed_plan_refuses_a_closing_commit_mint_by_name` |
 | L4 | the presence check ran a full `restore_unit` on the actor just to refuse | **fixed**: a metadata probe. Any entry at the record path refuses; absence must also agree with the budget, so a record unlinked while accounted refuses |
@@ -4420,9 +4460,11 @@ SIGN-TEST-001.
 - **SIGN-TEST-001, editor-cap and aggregate halves closed**: `local_policy` through a structurally
   decoded over-cap branch (`local-policy` mutant), and the probe gate through an **honest**
   branch (`probe-gate` mutant).
-- **SIGN-TEST-001b, open**: a positive handoff by a non-owner author, which needs a second-member
-  fixture. Residual and not part of the correction: no isolated mutant for the per-operation
-  preflight or the framing probe, neither of which is the first refusal for any cheap input.
+- **SIGN-TEST-001b, submitted**: a positive handoff by a non-owner member, and the per-device cap
+  pinned in both directions (owner exempt, member charged), with three mutants
+  (`author-is-owner`, `owner-charged`, `device-exempt`); short re-review outstanding. Residual and
+  not part of the correction: no isolated mutant for the per-operation preflight or the framing
+  probe, neither of which is the first refusal for any cheap input.
 - **A product gap, for Agent 2**: the honest over-gate branch is valid local work that can never be
   handed off automatically. For a non-owner author the binding limit is the 1 MiB per-device cap,
   a quarter of the epoch budget; P2's classifier reports such a branch as Transferable; and no 8.3

@@ -551,10 +551,16 @@ impl ServerStore {
     /// 3. The basis is for exactly this target. Admission compares identities only, and a
     ///    Flipnote's logical key omits its channel, so a basis minted for another channel would
     ///    otherwise open a branch recorded under the wrong one.
-    /// 4. The mint is of this moment: it observed the current MLS epoch, and its provider is still
-    ///    a member. The sanctioned mint rechecks both inside sync's hint callback, so this cannot
-    ///    fail for a basis minted in this visit. It exists for one minted earlier and kept, which
-    ///    would otherwise skip those rechecks at S1b and S3 alike.
+    /// 4. The basis names this group's document and was minted for this device. Without these the
+    ///    mismatch would surface only at S2, as `EpochAuthority` from `append` or `Malformed` from
+    ///    `checked_entries`, after S1b had already promoted and held the request's pixels. The
+    ///    sanctioned mint always uses this device and this group, so neither can fail for it.
+    /// 5. The mint is of this MLS epoch: it recorded the current epoch, and its provider is still a
+    ///    member. The sanctioned mint rechecks both inside sync's hint callback, so this cannot
+    ///    fail for a basis minted in this visit. It catches a basis kept across an MLS-epoch change
+    ///    and nothing more: one kept within an epoch, past its hint's expiry, still passes, so
+    ///    minting in the same custody visit as the stage is the caller's obligation. The member half
+    ///    cannot fire alone, since any membership change advances the epoch.
     pub(in crate::store) fn mint_studio_overlay_basis(
         &mut self,
         server: u64,
@@ -609,8 +615,19 @@ impl ServerStore {
                     )
                     .map_err(invalid)?;
                 let basis = *minted?;
-                if StudioOverlayBasis::from(&basis).target() != target {
+                let view = StudioOverlayBasis::from(&basis);
+                if view.target() != target {
                     return Err(invalid(catcoms_replication::ReplError::EpochScope));
+                }
+                if *view.document() != logical {
+                    return Err(invalid(
+                        "unconfirmed overlay basis is for another group or document",
+                    ));
+                }
+                if view.author() != device.device_id() {
+                    return Err(invalid(
+                        "unconfirmed overlay basis was minted for another device",
+                    ));
                 }
                 let StudioOverlayProvenance::Unconfirmed {
                     provider,
