@@ -14,8 +14,8 @@ use crate::epoch::{
     MAX_RECEIPT_BYTES, MAX_SIGNED_EPOCH_OP_BYTES,
 };
 use crate::{
-    epoch_zero_id, Admission, EncryptedDoc, EpochGate, EpochPhase, LocalIntent, Receipt,
-    ReceiptBook, ReceiptIngest, SealedOp, SignedOp, MAX_CHECKPOINT_BYTES,
+    epoch_zero_id, Admission, EncryptedDoc, EpochGate, EpochPhase, LocalIntent, OwnerAuthority,
+    Receipt, ReceiptBook, ReceiptIngest, SealedOp, SignedOp, MAX_CHECKPOINT_BYTES,
 };
 
 mod adoption;
@@ -124,7 +124,7 @@ impl StudioEpoch {
     /// Verify current authority and canonical typed bytes, constructing a SEPARATE successor.
     /// This grants no replacement/retirement permit; recovery-first installation is store-owned.
     pub fn from_checkpoint(
-        group: &ServerGroup,
+        group: &(impl OwnerAuthority + ?Sized),
         target: StudioTarget,
         actor: DeviceId,
         receipt: Receipt,
@@ -611,7 +611,7 @@ impl StudioEpoch {
         }
     }
 }
-fn owner(group: &ServerGroup) -> Result<DeviceId, ReplError> {
+fn owner(group: &(impl OwnerAuthority + ?Sized)) -> Result<DeviceId, ReplError> {
     group
         .designated_committer()
         .ok_or(ReplError::EpochAuthority)

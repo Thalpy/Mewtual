@@ -225,6 +225,7 @@ impl ReceiptBook {
 
 /// Exact private plan stamp, including accepted/quarantined work and accounting. The exclusive
 /// typed source borrow protects its document; this stamp additionally fences gate-only races.
+#[derive(Clone)]
 struct RepairStateStamp {
     gate: EpochGateInner,
     book: Vec<u8>,
@@ -233,6 +234,7 @@ struct RepairStateStamp {
     opening: Option<Receipt>,
 }
 
+#[derive(Clone)]
 struct RepairCandidate {
     expected: RepairStateStamp,
     book: ReceiptBook,
@@ -241,6 +243,7 @@ struct RepairCandidate {
     binding: RepairBinding,
 }
 
+#[derive(Clone)]
 enum RepairPlan {
     Candidate(Box<RepairCandidate>),
     Unchanged(SourceRepairOutcome),
@@ -264,7 +267,7 @@ impl RepairSource<'_> {
         repair: &ReceiptRepair,
         a: &Receipt,
         b: &Receipt,
-        group: &ServerGroup,
+        group: &(impl OwnerAuthority + ?Sized),
         issuer_tenure: u64,
     ) -> Result<SourceRepairOutcome, ReplError> {
         match self.plan(repair, a, b, group, issuer_tenure)? {
@@ -282,7 +285,7 @@ impl RepairSource<'_> {
         repair: &ReceiptRepair,
         a: &Receipt,
         b: &Receipt,
-        group: &ServerGroup,
+        group: &(impl OwnerAuthority + ?Sized),
         issuer_tenure: u64,
     ) -> Result<RepairPlan, ReplError> {
         repair.verify_current_owner(group, issuer_tenure)?;

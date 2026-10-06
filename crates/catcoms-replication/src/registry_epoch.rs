@@ -20,7 +20,8 @@ use crate::registry::{
 };
 use crate::{
     epoch_zero_id, Admission, DomainOp, EncryptedDoc, EpochGate, EpochPhase, LogicalDocument,
-    Receipt, ReceiptBook, ReceiptIngest, ReplError, SealedOp, SignedOp, MAX_CHECKPOINT_BYTES,
+    OwnerAuthority, Receipt, ReceiptBook, ReceiptIngest, ReplError, SealedOp, SignedOp,
+    MAX_CHECKPOINT_BYTES,
 };
 
 mod adoption;
@@ -98,7 +99,7 @@ impl RegistryEpoch {
     /// This does NOT replace, settle or discard a predecessor. The caller must first satisfy
     /// recovery/durable-install ordering before selecting this as its current epoch.
     pub fn from_checkpoint(
-        group: &ServerGroup,
+        group: &(impl OwnerAuthority + ?Sized),
         bucket: u8,
         actor: DeviceId,
         receipt: Receipt,

@@ -3,7 +3,8 @@
 
 use super::*;
 use crate::{
-    registry::RegistryRecovery, LocalIntent, RecoveryReason, RecoverySnapshot, VerifiedCheckpoint,
+    registry::RegistryRecovery, LocalIntent, OwnerAuthority, RecoveryReason, RecoverySnapshot,
+    VerifiedCheckpoint,
 };
 use std::collections::BTreeMap;
 
@@ -131,7 +132,7 @@ impl RegistryEpoch {
         &mut self,
         receipt: &Receipt,
         raw_seed: &[u8],
-        group: &ServerGroup,
+        group: &(impl OwnerAuthority + ?Sized),
         expected_tenure_start: u64,
     ) -> Result<RegistryAdoptionPlan, ReplError> {
         let state = self.repair_state().ok_or(ReplError::ReceiptConflict)?;
@@ -154,7 +155,7 @@ impl RegistryEpoch {
         &mut self,
         receipt: &Receipt,
         raw_seed: &[u8],
-        group: &ServerGroup,
+        group: &(impl OwnerAuthority + ?Sized),
         expected_tenure_start: u64,
         reason: RecoveryReason,
     ) -> Result<RegistryAdoptionPlan, ReplError> {
@@ -199,7 +200,7 @@ impl RegistryEpoch {
     pub fn adopted_successor(
         &mut self,
         plan: &RegistryAdoptionPlan,
-        group: &ServerGroup,
+        group: &(impl OwnerAuthority + ?Sized),
         expected_tenure_start: u64,
     ) -> Result<Self, ReplError> {
         let expected_reason = if self.repair_install_pending() {
