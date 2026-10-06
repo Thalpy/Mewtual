@@ -548,6 +548,17 @@ pub(super) fn response_value(response: Response) -> Result<Value, String> {
             json!({"v":1,"kind":"overlayArchiveReleased","reconcileRequired":true})
         }
         Response::OverlayDisposed(v) => disposal_value(&v)?,
+        // Not `recoveryApplied`: a copy is an ordinary provisional Save of a value taken from a
+        // draft, and the renderer must not read it as a recovery. `branchPreserved` is stated
+        // rather than left for a renderer to infer: no copy, nor any count of them, preserves the
+        // branch it came from (design 6.3 C-P); only an archive does.
+        Response::OverlayCopyApplied {
+            destination,
+            already_saved,
+        } => json!({"v":1,"kind":"overlayCopyApplied",
+            "channel":channel_of(destination),"object":object_of(destination),
+            "contentSaved":true,"alreadySaved":already_saved,"provisional":true,
+            "branchPreserved":false}),
         _ => return Err("mismatched overlay lifecycle response".into()),
     };
     bounded_view(value)

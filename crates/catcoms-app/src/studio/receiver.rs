@@ -189,9 +189,9 @@ impl StudioReceiver {
             Ok((
                 saved,
                 updated,
-                Some(StudioControlResponse::Applied {
+                Some(StudioControlResponse::OverlayCopyApplied {
                     // The destination is what changed, so it is what the caller is told about.
-                    target: destination,
+                    destination,
                     already_saved,
                 }),
             ))

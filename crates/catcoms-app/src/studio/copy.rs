@@ -140,11 +140,15 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
     /// Run at C3 **and** C4 rather than once. At C3 it downgrades, so the user is told the target
     /// is missing instead of being offered a copy that will fail; at C4 it refuses, because the
     /// object can disappear between the two.
+    ///
+    /// Answered from the object record's header (`studio_object_holds_work`), with the same
+    /// predicate a full load would apply and no restore of a whole Flipnote on the actor. An
+    /// object stored under another channel's label is missing in this channel, not an error that
+    /// fails the preview (the review's wrong-object-channel Low).
     fn probe_copy_object(
-        store: &mut ServerStore,
+        store: &ServerStore,
         server: u64,
         group: &catcoms_mls::ServerGroup,
-        device: &catcoms_mls::MlsDevice,
         plan: &StudioOverlayCopyPlan,
     ) -> Result<bool, AppError> {
         let StudioRecoveryItem::Object { id } = plan.choice().item else {
@@ -157,11 +161,38 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
             channel: plan.destination_target().channel(),
             object: id,
         };
-        Ok(store
-            .with_studio_source(server, group, object, device, |s| {
-                Ok(s.op_count() > 0 || s.epoch() > 0)
-            })?
-            .unwrap_or(false))
+        store.studio_object_holds_work(server, group, object)
+    }
+
+    /// The operation nonce a copy publishes under, derived from the renderer's nonce in a domain
+    /// of its own (the review's L4).
+    ///
+    /// A copy is an ordinary Apply, so with the renderer's nonce it would be byte-identical to an
+    /// ordinary Save of the same body under the same nonce. C4's exact-retry shortcut then
+    /// reported that Save as this copy, `already_saved`, which misstates what happened. Derived
+    /// this way, a copy's operation can coincide only with an earlier copy under the same
+    /// renderer nonce and body, so "already saved" now means "this copy already landed". An exact
+    /// retry still resends the same renderer nonce and so finds the same operation.
+    fn copy_nonce(nonce: [u8; 16]) -> [u8; 16] {
+        let hash = blake3::derive_key("catcoms/studio-overlay-copy-nonce/v1", &nonce);
+        let mut out = [0; 16];
+        out.copy_from_slice(&hash[..16]);
+        out
+    }
+
+    /// C1' (design 6.3): refused, retryably, while the destination is under a transfer hold.
+    fn refuse_held_destination(
+        store: &ServerStore,
+        server: u64,
+        group: &catcoms_mls::ServerGroup,
+        destination: StudioTarget,
+    ) -> Result<(), AppError> {
+        if store.studio_copy_destination_held(server, group, destination)? {
+            return Err(invalid(
+                "the copy destination is under a transfer hold; retry once its handoff resolves",
+            ));
+        }
+        Ok(())
     }
 
     /// The destination's scope, decided here rather than accepted from a caller.
@@ -220,6 +251,7 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
             .try_acquire_owned()
             .map_err(|_| invalid("overlay copy capacity exhausted; retry"))?;
         let capture = self.sync.with_registry_context(|group, device, _, _| {
+            Self::refuse_held_destination(store, server, group, choice.destination)?;
             store.capture_studio_overlay_copy(server, group, source, choice.destination, device)
         })?;
         Ok(StudioCopyPreparation {
@@ -260,6 +292,8 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
         }
         let mut plan = plan;
         let current = self.sync.with_registry_context(|group, device, _, _| {
+            // A hold staged since C1 is refused here too, before the preview says Ready.
+            Self::refuse_held_destination(store, server, group, plan.destination_target())?;
             store.studio_copy_is_current(server, group, device, &plan)
         })?;
         if !current {
@@ -270,8 +304,8 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
         if plan.phase() != EpochPhase::Open {
             return Err(invalid("Studio copy requires an Open destination epoch"));
         }
-        if !self.sync.with_registry_context(|group, device, _, _| {
-            Self::probe_copy_object(store, server, group, device, &plan)
+        if !self.sync.with_registry_context(|group, _, _, _| {
+            Self::probe_copy_object(store, server, group, &plan)
         })? {
             plan.hold(StudioRecoveryDisposition::MissingTarget);
         }
@@ -318,12 +352,14 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
             mode: apply.mode,
         };
         let scope = Self::copy_scope(source, apply.destination)?;
+        // Published, and looked for by the exact-retry shortcut, under the copy's own nonce domain.
+        let nonce = Self::copy_nonce(apply.nonce);
         // The publication targets the DESTINATION. The source is where the value came from and has
         // nothing written to it: copy writes nothing to the branch's record.
         let request = StudioRequest::Apply {
             target: apply.destination,
             epoch_id: apply.epoch_id,
-            nonce: apply.nonce,
+            nonce,
             body: apply.body.clone(),
         };
         request.validate()?;
@@ -333,7 +369,7 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
             store.capture_studio_overlay_copy(server, group, source, apply.destination, device)
         })?;
         let already_saved = self.sync.with_registry_context(|group, device, _, _| {
-            let op = super::domain(apply.destination, apply.nonce, apply.body.clone());
+            let op = super::domain(apply.destination, nonce, apply.body.clone());
             let exact = store
                 .with_studio_source(server, group, apply.destination, device, |state| {
                     if state.doc_id() != apply.epoch_id || state.phase() != EpochPhase::Open {
@@ -358,9 +394,10 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
             // Refused rather than downgraded here: at C4 there is nothing left to offer the user,
             // and an object that vanished between the preview and the apply is exactly the race
             // this probe exists for.
-            if !Self::probe_copy_object(store, server, group, device, &plan)? {
+            if !Self::probe_copy_object(store, server, group, &plan)? {
                 return Err(invalid(
-                    "the object this copy would publish no longer exists; re-preview",
+                    "the object this copy would publish no longer exists in this channel; \
+                     re-preview",
                 ));
             }
             Ok(false)

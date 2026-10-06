@@ -140,16 +140,17 @@ MUTATIONS = [
     (
         "copy-probe-preview", "catcoms-app", "studio::copy::tests::",
         "crates/catcoms-app/src/studio/copy.rs",
-        "Self::probe_copy_object(store, server, group, device, &plan)\n        })? {",
-        "Self::probe_copy_object(store, server, group, device, &plan).map(|_| true)\n        })? {",
+        # The probe reads the object record's header and no longer needs the device.
+        "Self::probe_copy_object(store, server, group, &plan)\n        })? {",
+        "Self::probe_copy_object(store, server, group, &plan).map(|_| true)\n        })? {",
         "the_copy_probe_refuses_an_object_that_is_missing_or_disappears_before_apply",
         "C3 must tell the user the object is missing",
     ),
     (
         "copy-probe-apply", "catcoms-app", "studio::copy::tests::",
         "crates/catcoms-app/src/studio/copy.rs",
-        "if !Self::probe_copy_object(store, server, group, device, &plan)? {",
-        "if !Self::probe_copy_object(store, server, group, device, &plan).map(|_| true)? {",
+        "if !Self::probe_copy_object(store, server, group, &plan)? {",
+        "if !Self::probe_copy_object(store, server, group, &plan).map(|_| true)? {",
         "the_copy_probe_refuses_an_object_that_is_missing_or_disappears_before_apply",
         "C4 must refuse to publish an entry",
     ),

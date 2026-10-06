@@ -12,7 +12,7 @@ whole-scope review of `510d0b54` (verdict: CHANGES REQUIRED, Agent 2 not complet
 
 | Goal | State | Evidence, and what is still missing | Owner |
 |---|---|---|---|
-| 1. Bounded inspection, export, copy, disposition | Implemented, not natively exposed | Two-visit inspect/export/archive/copy, D1-D6 disposal, release. Export, archive and copy preview now keep the job's permit and the actor's delivery fence through native conversion (`3168de6e`); an archive whose result cannot be delivered reports `outcome=uncertain`. The nine commands are unregistered (`510d0b54`). | Agent 2; registration Agent 4 |
+| 1. Bounded inspection, export, copy, disposition | Implemented, not natively exposed; **every G4-A2-P1 finding closed 2026-10-06**; bounded lifecycle review next | Two-visit inspect/export/archive/copy, D1-D6 disposal, release. Export, archive and copy preview now keep the job's permit and the actor's delivery fence through native conversion (`3168de6e`); an archive whose result cannot be delivered reports `outcome=uncertain`. The 2026-10-06 copy slice closes the remaining findings, listed under "Disposition, 2026-10-06" in the review record below: M3's exact retry, also across a restart; M4/C1'; L2; L4, with copies now reported as `overlayCopyApplied`; L5/N6; and the wrong-object-channel Low. The nine commands are unregistered (`510d0b54`). | Agent 2; registration Agent 4 |
 | 2. Lossless work and PIX across refusal and restart | Implemented on supported desktop platforms | Archive codec, binding, release, collector, evidence-before-removal ordering (`6bd76c13`). Agent 4's `5f141994` gives the shared `ServerStore` directory barrier a real Windows handle and flush; exact-head Windows tests and CI pass. Unsupported non-Unix/non-Windows targets retain only the narrower file-content guarantee. | Persistence owner via Agent 4; Agent 2 shows disposal honours the result |
 | 3. Recoverable stale, rewound and non-pristine branches, with actionable states (P2) | Classification implemented; first review fixed | `StudioOverlayEligibility` / `StudioOverlayManualReason`. Production classifies from each source record's HEADER (`overlay_successor_hold_in_vault`, `vault_holds_work`) and never restores, pinned by a zero-restore assertion; the structural hold, the full hold and `check_overlay_successor` agree on every fixture state. The store adds provenance, author, missing/unreadable source, an Index entry's missing Flipnote (`objectMissing`, agreeing with the real handoff in both directions), tenure and the live receipt owner. Lifecycle and inspection carry `eligibility` and `manualReason`. Agent 1's `StudioOverlayHold` was designed but never built; its runtime still refuses with strings. | Agent 2; Agent 1 maps its runtime refusals |
 | 4. Durable local work on an awaiting-tenure preview | **Not implemented** (first slice built) | Design section 8 accepted. Built (replication and sync): 8.1 parts 1-2, part 3 as re-scoped by the review of `47a73463` (the mint binds by receipt equality; every reconstruction re-parses), and the reviewed mint design.
@@ -27,7 +27,7 @@ whole-scope review of `510d0b54` (verdict: CHANGES REQUIRED, Agent 2 not complet
 
 | Prerequisite | State |
 |---|---|
-| P1 reviewed manual lifecycle | Implemented; review at `510d0b54` returned CHANGES REQUIRED, items above |
+| P1 reviewed manual lifecycle | Implemented; review at `510d0b54` returned CHANGES REQUIRED. Every listed item is now closed or dispositioned (2026-10-06); a bounded whole-boundary lifecycle review is the next step, and P1 is not reviewed until it passes |
 | P2 hold mapping | Implemented. Agent 1's two questions answered in `f158c17b` (`TenureImported`, `PreparedStuck`). Its re-review found no blocker and two mediums, both fixed in the next commit: a Prepared branch with Absent evidence now runs every active check H1 runs after returning it to active, and the tenure copy no longer claims waiting cures one reason but not the other (both end at the next observed owner transition). |
 | P3 native results and events | Partial (goal 6) |
 | P4 live-tenure contract | Implemented: `StudioOwnerTenure`, `require_owner_tenure`, CORE-005 witness |
@@ -833,7 +833,44 @@ recorded below.
   fixture had no `SetTitle`/`SetExpiry`.
 - **Medium (part).** The destination channel was checked at C1 and C4 but not C3.
 
-**Outstanding, not yet addressed:**
+**Outstanding, not yet addressed** (historical list; see the 2026-10-06 disposition right below,
+which closes every item the acceptance matrix's G4-A2-P1 row names):
+
+> **Disposition, 2026-10-06** (one commit, the G4-A2-P1 list):
+>
+> - **M2:** closed earlier by `ed8ab0a8`.
+> - **M3:** the exact-retry half is closed by
+>   `studio::copy::tests::a_copy_lands_once_and_its_exact_retry_is_acknowledged_without_a_second_write`.
+>   The copy is published through the real Apply, lands as exactly one operation, and its
+>   identical echo is acknowledged `already_saved` and adds no operation, also after a store
+>   restart (the P1 copy-across-restart evidence). At the actor and native level,
+>   `an_applied_copy_crosses_as_a_copy_and_its_exact_retry_as_already_saved` shows the same:
+>   no new record and an unchanged destination. An exact retry re-seals and re-persists the
+>   held operation by design, so it is not byte-silent.
+> - **M4 (C1'):** a transfer hold on the destination now refuses at C1, and a hold staged since C1
+>   refuses C3, before any preview says Ready
+>   (`a_transfer_hold_on_the_destination_refuses_the_copy_at_c1_and_again_at_c3`). Copying out
+>   of a *source* under a hold stays permitted, as designed. That case is cross-document only and
+>   not separately tested.
+> - **L2:** the vacuous restore test now pins each refusal to its own reason ("recovery value is
+>   not in this version", "recovery document scope differs").
+> - **L4:** copies publish under their own nonce domain, `copy_nonce`. An ordinary Save of the same
+>   bytes can no longer be acknowledged as the copy
+>   (`an_ordinary_save_of_the_same_bytes_is_never_reported_as_this_copy`). A copy apply also now
+>   crosses as its own `overlayCopyApplied` result with `branchPreserved: false`. It used to come
+>   back as a recovery (`Applied`, `recoveryApplied`).
+> - **L5:** the same-document path (Index) is now carried through to a landed copy, and N6 is
+>   asserted on everything that records the branch: id, content, accepted count and metadata
+>   bytes. Coverage is now Index same-document at app level and Flipnote cross-document at actor
+>   and native level. A same-document *Flipnote* copy is not separately exercised. Cross-document
+>   Index is impossible by design.
+> - **Wrong-object-channel Low:** the probe answers from the object record's header
+>   (`studio_object_holds_work`, shared with P2's `ObjectMissing`). An object stored under
+>   another channel's label is now a missing target at C3 and a probe refusal at C4, not a failed
+>   preview (`an_object_stored_under_another_channel_label_is_missing_here_not_an_error`). It also
+>   no longer restores a whole Flipnote on the actor to ask.
+>
+> Every new guard was broken once to confirm its test fails.
 
 | Finding | What |
 |---|---|

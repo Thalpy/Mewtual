@@ -363,6 +363,88 @@ async fn the_copy_probe_refuses_an_object_that_is_missing_or_disappears_before_a
 }
 
 impl Fixture {
+    fn logical(&self) -> catcoms_replication::LogicalDocument {
+        self.index.document(&self.server.group_id()).unwrap()
+    }
+
+    /// The branch the copies read from, as everything that records it.
+    fn branch_identity(&self) -> ([u8; 32], [u8; 32], usize, Vec<u8>) {
+        self.store
+            .studio_branch_identity_for_test(SERVER, &self.logical())
+    }
+
+    /// Operations in the destination's installed source.
+    fn destination_ops(&mut self) -> usize {
+        let (store, index) = (&mut self.store, self.index);
+        self.server
+            .sync
+            .with_registry_context(|g, d, _, _| {
+                store.with_studio_source(SERVER, g, index, d, |s| Ok(s.op_count()))
+            })
+            .unwrap()
+            .expect("the destination is installed")
+    }
+
+    /// What the actor does with C4's request: the ordinary Apply publication into the destination.
+    fn publish(&mut self, request: StudioRequest) {
+        self.server
+            .studio_transaction(&mut self.store, SERVER, request)
+            .unwrap();
+    }
+
+    /// A store restart: the same vault reopened. The previous handle is dropped first.
+    fn restart(&mut self) {
+        let placeholder_root = tempfile::tempdir().unwrap();
+        let placeholder =
+            ServerStore::open(placeholder_root.path(), b"placeholder", &mut rng()).unwrap();
+        drop(std::mem::replace(&mut self.store, placeholder));
+        self.store = ServerStore::open(self._root.path(), b"copy-probe", &mut rng()).unwrap();
+    }
+
+    /// A durable transfer hold on the index document, staged through the real handoff.
+    fn stage_transfer_hold(&mut self) {
+        let mut b = budget(&mut self.store, &mut self.server);
+        let (store, index) = (&mut self.store, self.index);
+        self.server
+            .sync
+            .with_registry_context(|g, d, _, r| {
+                store.stage_studio_transfer_hold_for_test(SERVER, g, index, d, 0, r, &mut b);
+                Ok::<_, AppError>(())
+            })
+            .unwrap();
+    }
+
+    /// The overlay entry's object, created for real but under ANOTHER channel's label. A
+    /// Flipnote's logical key omits its channel, so this is the very record the probe reads for
+    /// `OBJECT`, stored under a label that is not the copy's.
+    fn create_object_under(&mut self, channel: [u8; 16]) {
+        let target = StudioTarget::Flipnote {
+            channel,
+            object: OBJECT,
+        };
+        let mut b = budget(&mut self.store, &mut self.server);
+        let store = &mut self.store;
+        self.server
+            .sync
+            .with_registry_context(|g, d, _, r| {
+                let logical = target.document(&g.group_id()).unwrap();
+                let mut source =
+                    catcoms_replication::studio::StudioEpoch::new(g, target, d.device_id())
+                        .unwrap();
+                let op = DomainOp {
+                    body: FlipnoteOp::SetHeader(FlipnoteHeader::Title("elsewhere".into()))
+                        .encode()
+                        .unwrap(),
+                    nonce: [0x44; 16],
+                    doc_type: logical.doc_type,
+                    logical_key: logical.logical_key,
+                };
+                let packet = source.edit_or_reseal(d, g, r, &op, 100).unwrap();
+                store.ingest_studio_epoch(SERVER, g, target, d, &packet, r, &mut b)
+            })
+            .unwrap();
+    }
+
     /// A second copy of an echo, since the request is consumed by value.
     fn echo_for(&self, echo: &StudioOverlayCopyApply) -> StudioOverlayCopyApply {
         StudioOverlayCopyApply {
@@ -485,4 +567,162 @@ async fn export_archive_and_copy_preview_keep_their_slot_and_fence_through_deliv
         );
         drop(handoff);
     }
+}
+
+/// M3's missing half, N6 for a same-document copy, and the same retry across a store restart.
+///
+/// The copy is carried all the way through: C4's request is published exactly as the actor
+/// publishes it, so "landed" is an operation in the destination rather than an accepted echo.
+/// Then the identical echo is sent again, as a renderer does after an uncertain result. It must
+/// be acknowledged as already saved rather than refused, and it must write nothing. The same
+/// holds after the store is reopened. Throughout, the branch the value came from is untouched in
+/// everything that records it (N6): its id, its content, its accepted count and its metadata
+/// bytes.
+#[tokio::test]
+async fn a_copy_lands_once_and_its_exact_retry_is_acknowledged_without_a_second_write() {
+    let mut f = Fixture::new().await;
+    f.create_object();
+    let branch = f.branch_identity();
+
+    let prepared = f.plan().await;
+    let echo = f.echo(&prepared.plan);
+    let preview = f
+        .server
+        .finish_studio_copy_preview(&mut f.store, SERVER, f.index, prepared)
+        .unwrap();
+    assert_eq!(
+        preview.value().disposition,
+        StudioRecoveryDisposition::Ready
+    );
+    drop(preview);
+
+    let before = f.destination_ops();
+    let (request, already) = f.apply(f.echo_for(&echo)).unwrap();
+    assert!(!already, "nothing has landed yet");
+    f.publish(request);
+    assert_eq!(
+        f.destination_ops(),
+        before + 1,
+        "the copy lands as exactly one operation"
+    );
+    assert_eq!(
+        f.branch_identity(),
+        branch,
+        "N6: a same-document copy changes nothing that records the branch"
+    );
+
+    let (request, already) = f
+        .apply(f.echo_for(&echo))
+        .expect("an exact retry is acknowledged, not refused as stale");
+    assert!(already, "the retry must say the copy already landed");
+    f.publish(request);
+    assert_eq!(
+        f.destination_ops(),
+        before + 1,
+        "and publishing the retry writes nothing"
+    );
+
+    f.restart();
+    let (_, already) = f
+        .apply(f.echo_for(&echo))
+        .expect("the exact retry is acknowledged after a restart too");
+    assert!(already);
+    assert_eq!(f.branch_identity(), branch);
+}
+
+/// L4: an ordinary Save is never reported as this copy having landed.
+///
+/// The ordinary Save here carries the copy's exact body under the renderer's exact nonce. That is
+/// the one shape that used to be byte-identical to the copy's own operation, so C4's exact-retry
+/// shortcut answered `already_saved` for work the copy never did. Copies now publish under their
+/// own nonce domain. So the echo is re-planned instead: the ordinary Save moved the destination, so
+/// the plan's projection no longer matches the preview's, and the echo is refused as stale. That is
+/// what is actually true.
+#[tokio::test]
+async fn an_ordinary_save_of_the_same_bytes_is_never_reported_as_this_copy() {
+    let mut f = Fixture::new().await;
+    f.create_object();
+    let prepared = f.plan().await;
+    let echo = f.echo(&prepared.plan);
+    drop(prepared);
+
+    f.publish(StudioRequest::Apply {
+        target: f.index,
+        epoch_id: echo.epoch_id,
+        nonce: echo.nonce,
+        body: echo.body.clone(),
+    });
+    let result = f.apply(f.echo_for(&echo));
+    assert!(
+        !matches!(result, Ok((_, true))),
+        "an ordinary Save must not be acknowledged as this copy having landed"
+    );
+    let refused = result.unwrap_err().to_string();
+    assert!(
+        refused.contains("copy preview is stale"),
+        "the echo must be re-planned against the destination the Save moved: {refused}"
+    );
+}
+
+/// M4 / design 6.3 C1': a transfer hold on the destination refuses the copy at C1, and a hold
+/// staged between C1 and C3 refuses the preview, before it can tell the user the copy is Ready.
+/// Both refusals are by message, so neither the C4 publication guard nor the source-stamp
+/// currency check can stand in for the hold check.
+#[tokio::test]
+async fn a_transfer_hold_on_the_destination_refuses_the_copy_at_c1_and_again_at_c3() {
+    let mut f = Fixture::new().await;
+    f.create_object();
+
+    let prepared = f.plan().await;
+    f.stage_transfer_hold();
+    let refused = f
+        .server
+        .finish_studio_copy_preview(&mut f.store, SERVER, f.index, prepared)
+        .expect_err("a hold staged since C1 must refuse the preview")
+        .to_string();
+    assert!(refused.contains("transfer hold"), "C3 refusal: {refused}");
+
+    let (choice, pool) = (f.choice(), f.pool.clone());
+    let refused = f
+        .server
+        .begin_copy_with_pool(&f.store, SERVER, f.index, choice, &pool)
+        .expect_err("C1 must refuse while the destination is held")
+        .to_string();
+    assert!(refused.contains("transfer hold"), "C1 refusal: {refused}");
+    assert_eq!(
+        pool.available_permits(),
+        4,
+        "a refused begin keeps no preparation slot"
+    );
+}
+
+/// The wrong-object-channel Low: an object stored under another channel's label is a missing
+/// target in this channel, not an error that fails the preview. C3 downgrades it like an absent
+/// object, and C4 refuses the echo with the probe's own message.
+#[tokio::test]
+async fn an_object_stored_under_another_channel_label_is_missing_here_not_an_error() {
+    let mut f = Fixture::new().await;
+    f.create_object_under([0x77; 16]);
+
+    let prepared = f.plan().await;
+    assert_eq!(
+        prepared.plan.disposition(),
+        StudioRecoveryDisposition::Ready,
+        "the planner cannot see the store, so only the probe can downgrade this"
+    );
+    let echo = f.echo(&prepared.plan);
+    let preview = f
+        .server
+        .finish_studio_copy_preview(&mut f.store, SERVER, f.index, prepared)
+        .expect("a wrong-channel object is a missing target, not a failed preview");
+    assert_eq!(
+        preview.value().disposition,
+        StudioRecoveryDisposition::MissingTarget
+    );
+    drop(preview);
+    let refused = f.apply(echo).unwrap_err().to_string();
+    assert!(
+        refused.contains("no longer exists in this channel"),
+        "the C4 refusal must be the probe's: {refused}"
+    );
 }

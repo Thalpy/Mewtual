@@ -121,10 +121,11 @@ impl ServerStore {
             }
             for object in objects {
                 let flipnote = StudioTarget::Flipnote { channel, object };
-                let holds_work = self.with_vault_source(server, group, flipnote, |bytes| {
-                    StudioEpoch::vault_holds_work(bytes, flipnote)
-                });
-                if !matches!(holds_work, Ok(Some(true))) {
+                // An unreadable record is as unusable to the handoff as an absent one.
+                if !matches!(
+                    self.studio_object_holds_work(server, group, flipnote),
+                    Ok(true)
+                ) {
                     return manual(R::ObjectMissing);
                 }
             }
@@ -148,6 +149,35 @@ impl ServerStore {
             return manual(R::ReceiptChanged);
         }
         Ok(Some(StudioOverlayEligibility::Transferable))
+    }
+
+    /// Whether the Flipnote `object` names exists **in `object`'s channel** and holds work: an
+    /// operation, or an epoch past zero. The same predicate the handoff's Index object check
+    /// applies after a full load (`op_count() > 0 || epoch() > 0`), answered here from the record's
+    /// header with no restore, so it is cheap enough to run under custody per object.
+    ///
+    /// `false` for no record. `false` too for a record stored under **another channel's label**:
+    /// a Flipnote's logical key omits its channel, so one record answers for every label of that
+    /// object id, and an Index entry in this channel naming another channel's object would name
+    /// nothing here. Copy's probe reports that as a missing target rather than failing the whole
+    /// preview (the review's wrong-object-channel Low), and P2 calls it `ObjectMissing`. An
+    /// unreadable record is an error, for the caller to classify.
+    pub(crate) fn studio_object_holds_work(
+        &self,
+        server: u64,
+        group: &ServerGroup,
+        object: StudioTarget,
+    ) -> Result<bool, AppError> {
+        let logical = object.document(&group.group_id()).map_err(invalid)?;
+        let scope = scope_bytes(server, &logical)?;
+        let Some(record) = self.read_studio_record(&scope)? else {
+            return Ok(false);
+        };
+        let (stored, snapshot) = decode_record(&record.plain, &scope, &logical)?;
+        if stored != object {
+            return Ok(false);
+        }
+        StudioEpoch::vault_holds_work(snapshot, object).map_err(invalid)
     }
 
     /// Run `read` over `target`'s authenticated vault source bytes, unsealed but not restored.

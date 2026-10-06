@@ -309,6 +309,16 @@ pub enum StudioControlResponse {
         target: StudioTarget,
         already_saved: bool,
     },
+    /// A copy out of a local draft was saved into `destination`, or its exact retry found it
+    /// already there. Its own variant rather than `Applied`, which native reports as a recovery:
+    /// a copy is an ordinary provisional content Save of a value taken from a draft, and the
+    /// renderer must be able to tell the two apart. As with `Applied`, neither delivery,
+    /// settlement nor pointer restoration is implied. And no copy, nor any count of copies, is a
+    /// preservation claim for the branch (design 6.3 C-P); only an archive is.
+    OverlayCopyApplied {
+        destination: StudioTarget,
+        already_saved: bool,
+    },
     List(StudioRecoveryListing),
     Version(StudioRecoveryVersion),
     Export {
@@ -342,6 +352,7 @@ impl std::fmt::Debug for StudioControlResponse {
             Self::PointerRestored { .. } => "PointerRestored { .. }",
             Self::Preview(_) => "Preview { .. }",
             Self::Applied { .. } => "Applied { .. }",
+            Self::OverlayCopyApplied { .. } => "OverlayCopyApplied { .. }",
             Self::List(_) => "List { .. }",
             Self::Version(_) => "Version { .. }",
             Self::Export { .. } => "Export { .. }",
@@ -374,6 +385,7 @@ impl StudioControlResponse {
             | Self::PointerRestored { .. }
             | Self::Preview(_)
             | Self::Applied { .. }
+            | Self::OverlayCopyApplied { .. }
             | Self::List(_)
             | Self::Version(_)
             | Self::Export { .. }
@@ -407,6 +419,7 @@ impl StudioControlResponse {
             | Self::PointerRestored { .. }
             | Self::Preview(_)
             | Self::Applied { .. }
+            | Self::OverlayCopyApplied { .. }
             | Self::List(_)
             | Self::Version(_)
             | Self::Export { .. }

@@ -274,7 +274,9 @@ fn studio_restore_preview_fingerprint_tracks_provenance_not_just_visible_content
         a.recovery_fingerprint().unwrap(),
         b.recovery_fingerprint().unwrap()
     );
-    assert!(plan(
+    // Each refusal is pinned to its own reason (the review's L2). As bare `is_err()` checks they
+    // passed while failing for an unrelated one, so they proved nothing about the rule they name.
+    let unknown = plan(
         &a,
         &b,
         &[],
@@ -283,9 +285,14 @@ fn studio_restore_preview_fingerprint_tracks_provenance_not_just_visible_content
         f.device.device_id(),
         PlanScope::SameDocument,
     )
-    .is_err());
+    .unwrap_err()
+    .to_string();
+    assert!(
+        unknown.contains("recovery value is not in this version"),
+        "a value the historical version never held must be refused as such: {unknown}"
+    );
     let other = Fixture::new(false).projection(vec![]);
-    assert!(plan(
+    let foreign = plan(
         &a,
         &other,
         &[],
@@ -294,7 +301,12 @@ fn studio_restore_preview_fingerprint_tracks_provenance_not_just_visible_content
         f.device.device_id(),
         PlanScope::SameDocument,
     )
-    .is_err());
+    .unwrap_err()
+    .to_string();
+    assert!(
+        foreign.contains("recovery document scope differs"),
+        "another group's document must be refused by the scope check: {foreign}"
+    );
 }
 
 /// **CrossDocument must refuse a foreign server**, and the refusal must be the scope check itself.
