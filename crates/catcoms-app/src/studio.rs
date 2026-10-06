@@ -34,7 +34,7 @@ mod fault;
 pub use catcoms_replication::{RepairDisposition, RepairHold};
 pub use fault::{
     StudioFaultCandidate, StudioFaultScope, StudioFaultView, StudioRepairBlocker,
-    StudioRepairStatus,
+    StudioRepairReport, StudioRepairStart, StudioRepairStatus,
 };
 mod replay;
 /// Crate-visible because copy's detached planner lives in the store and calls `plan` directly.

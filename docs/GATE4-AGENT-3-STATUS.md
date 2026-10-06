@@ -4,6 +4,49 @@ Owner: Agent 3 ([assignment](GATE4-AGENT-HANDOFFS.md#agent-3-runtime-signed-faul
 Proposal: [GATE4-AGENT-3-DESIGN](GATE4-AGENT-3-DESIGN.md), revision 16 follow-up.
 Review preamble: 3. Current entries override older ones.
 
+## Detached S1-S4 repair runtime: progress, 2026-10-06
+
+**Studio job implemented** (C below). `catchup/repair_job.rs` holds the job: claims, inputs,
+stages, S1 `start_repair`, S2 `repair_detach` plus `RepairRebuild::run`, token-routed
+`repair_complete`, the per-turn `repair_check_authority`, and S3/S4 `repair_commit`. The S3
+handlers are `execute_decision`, `execute_resume`, `execute_offered` and `execute_replace` in
+`catchup/repair.rs`; each calls the existing Server transaction on the installed rebuild.
+
+**Entry points now scheduling the job:**
+- the explicit `RepairFault` (visit model, `RepairStarted`);
+- Flow D in the discovery arms (`offer_repair`, with a terminal-repair memo; the pass is dropped
+  when the job takes it);
+- `repair_owner`;
+- the owed-replacement install, with the seed extracted at S1 under the authoring check.
+
+The synchronous Studio install helper is removed.
+
+**Claim consulted by:** the router, page receive, target selection, owner rotation, and
+foreground `Apply` and `ApplyOverlayCopy`. The fault view gains a `Scheduled` blocker and a
+bounded `last_attempt`, encoded natively; INTERFACES documents the contract.
+
+**Registry stays fail-closed** behind `registry_repair_execution_ready()` until its job exists.
+
+**Tests** (`catchup/tests/repair.rs`). Each guard was verified by breaking it:
+- admission before any read: a capture before the reservation fails it;
+- flat full-pool retry and same-work `Scheduled`;
+- the owed replacement as a full job, with slot and claim released after S3;
+- a stale rebuild writes nothing;
+- a cancelled waiter keeps its worker's slot and claim;
+- an MLS epoch change abandons the job: removing the check fails it;
+- explicit decision, then fault view, then `last_attempt`;
+- the live claim where no durable claim exists: removing the consult fails it (the durable-claim
+  case alone could not show this);
+- HIGH-1: S2 detaches past in-flight work and an undue discovery, and S3 commits with a checkpoint
+  pass and discovery pending. Restoring either `replay_ready` gate fails it.
+
+**Remaining:**
+- the Registry job;
+- the two-peer Fault, decision, replacement, restart and newcomer run;
+- the in-custody S3 cost measurement;
+- the harness mutants;
+- removal of the Registry gate.
+
 ## Detached S1-S4 repair runtime: implementation plan, 2026-10-06
 
 Answers G4-A3-BOUND in [GATE4-ACCEPTANCE](GATE4-ACCEPTANCE.md). Today every repair runtime entry is

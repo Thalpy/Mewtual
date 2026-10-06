@@ -25,6 +25,14 @@ impl CatchupRuntime {
             .owner_target
             .filter(|t| watches.iter().any(|(w, _)| w.target == *t))
             .unwrap_or(watches[self.owner_selection % watches.len()].0.target);
+        if self.repair_claimed(CheckpointTarget::Studio(target)) {
+            // A repair job owns this source. The sticky target advances instead of waiting on
+            // it, so one repairing document cannot stall rotation for every other.
+            self.owner_target = None;
+            self.owner_selection = self.owner_selection.wrapping_add(1);
+            self.owner_next_at = now.saturating_add(5_000);
+            return Ok(None);
+        }
         self.owner_target = Some(target);
         if !self.prepare(server, store, id, target)? {
             // Captured, busy or superseded work must all pay the same local cadence. The

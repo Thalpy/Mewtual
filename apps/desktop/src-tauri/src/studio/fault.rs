@@ -5,7 +5,7 @@ use super::*;
 use catcoms_app::store::StudioRepairOutcome as Outcome;
 use catcoms_app::studio::{
     RepairDisposition, RepairHold, StudioControlResponse as Response, StudioFaultCandidate,
-    StudioFaultScope, StudioFaultView, StudioRepairBlocker,
+    StudioFaultScope, StudioFaultView, StudioRepairBlocker, StudioRepairReport, StudioRepairStart,
 };
 
 fn scope(v: StudioFaultScope) -> Value {
@@ -66,7 +66,12 @@ fn view(v: &StudioFaultView) -> Value {
     "blockedBy":v.blocked_by.map(|b|match b {
         StudioRepairBlocker::NotOwner=>"notOwner",StudioRepairBlocker::TenureUnverified=>"tenureUnverified",
         StudioRepairBlocker::TenureUnobserved=>"tenureUnobserved",StudioRepairBlocker::HeldRepair=>"heldRepair",
-        StudioRepairBlocker::NoFault=>"noFault",
+        StudioRepairBlocker::NoFault=>"noFault",StudioRepairBlocker::Scheduled=>"scheduled",
+    }),
+    // Volatile and local: what this device's last repair job for this fault did, if remembered.
+    "lastAttempt":v.last_attempt.as_ref().map(|a|match a {
+        StudioRepairReport::Completed(result)=>outcome(*result),
+        StudioRepairReport::Failed(error)=>json!({"outcome":"failed","error":error,"terminal":false}),
     }),
     "waiting":v.waiting,"preservedOperations":v.preserved_operations})
 }
@@ -88,6 +93,16 @@ pub(super) fn response_value(response: Response) -> Result<Value, String> {
             value["refreshRequired"] = true.into();
             value
         }
+        // A scheduled decision has decided nothing yet; its outcome arrives as the fault view's
+        // `lastAttempt`, so the renderer re-reads rather than waiting on this reply.
+        Response::RepairStarted {
+            target,
+            scope: fault_scope,
+            start,
+        } => json!({"v":1,"kind":"faultRepairStarted","scope":scope(fault_scope),
+            "channel":u128::from_be_bytes(target.channel()).to_string(),
+            "start":match start {StudioRepairStart::Scheduled=>"scheduled",StudioRepairStart::Busy=>"busy"},
+            "refreshRequired":true}),
         _ => return Err("mismatched fault response".into()),
     };
     bounded_view(value)
@@ -132,5 +147,25 @@ mod tests {
         // A bucket decision is never presented as the source's own.
         assert_eq!(held["scope"]["kind"], "registryBucket");
         assert_eq!(held["scope"]["bucket"], 9);
+    }
+
+    #[test]
+    fn a_scheduled_decision_names_only_whether_it_started() {
+        for (start, name) in [
+            (StudioRepairStart::Scheduled, "scheduled"),
+            (StudioRepairStart::Busy, "busy"),
+        ] {
+            let encoded = response_value(Response::RepairStarted {
+                target: StudioTarget::Index { channel: [1; 16] },
+                scope: StudioFaultScope::Source,
+                start,
+            })
+            .unwrap();
+            assert_eq!(encoded["kind"], "faultRepairStarted");
+            assert_eq!(encoded["start"], name);
+            assert_eq!(encoded["refreshRequired"], true);
+            // Nothing decided is claimed: no outcome or terminality on this reply.
+            assert!(encoded.get("outcome").is_none() && encoded.get("terminal").is_none());
+        }
     }
 }

@@ -4,6 +4,7 @@
 use super::*;
 use crate::studio_exchange::ServerStudioWatch;
 use catcoms_replication::Admission;
+use catcoms_sync::checkpoint_exchange::CheckpointTarget;
 use std::collections::VecDeque;
 use std::sync::Arc;
 mod catchup;
@@ -170,6 +171,7 @@ impl StudioReceiver {
                     .repair_registry_fault(server, store, id, request.target, *decision)?;
             Ok((StudioSavedTransaction::empty(), None, Some(response)))
         } else if let StudioControlAction::Apply(apply) = request.action {
+            self.refuse_while_repairing(request.target)?;
             let (edit, already_saved) =
                 server.prepare_studio_recovery_apply(store, id, request.target, *apply)?;
             let (saved, updated) = self.run(server, store, id, Some(edit))?;
@@ -183,6 +185,7 @@ impl StudioReceiver {
             ))
         } else if let StudioControlAction::ApplyOverlayCopy(apply) = request.action {
             let destination = apply.destination;
+            self.refuse_while_repairing(destination)?;
             let (edit, already_saved) =
                 server.prepare_studio_copy_apply(store, id, request.target, *apply)?;
             let (saved, updated) = self.run(server, store, id, Some(edit))?;
@@ -218,6 +221,21 @@ impl StudioReceiver {
                 self.settlement
                     .note(target, StudioSettlementState::RefreshRequired);
             }
+            let mut result = result;
+            if let Ok(StudioControlResponse::Fault(view)) = &mut result {
+                // Only the runtime knows whether its repair job for this scope is running and
+                // how its last one ended; the store's view cannot.
+                let scope = match view.scope {
+                    crate::studio::StudioFaultScope::Source => {
+                        CheckpointTarget::Studio(view.target)
+                    }
+                    crate::studio::StudioFaultScope::RegistryBucket(bucket) => {
+                        CheckpointTarget::Registry(bucket)
+                    }
+                };
+                let running = self.catchup.repair_job_target() == Some(scope);
+                view.annotate_runtime(running, self.catchup.repair_report(scope));
+            }
             if let Ok(StudioControlResponse::Acknowledged(list)) = &result {
                 if let Some(source) = &list.source {
                     self.settlement.note(target, source.phase.into());
@@ -233,6 +251,19 @@ impl StudioReceiver {
             }
             result.map(|r| (StudioSavedTransaction::empty(), None, Some(r)))
         }
+    }
+    /// A foreground write into a source a repair job owns would make the job's rebuild stale at
+    /// S3 at best, and race its commit at worst. Refuse it; the person retries once it ends.
+    fn refuse_while_repairing(&self, target: StudioTarget) -> Result<(), AppError> {
+        if self
+            .catchup
+            .repair_claimed(CheckpointTarget::Studio(target))
+        {
+            return Err(AppError::Invalid(
+                "a repair is in progress for this document; retry shortly".into(),
+            ));
+        }
+        Ok(())
     }
     pub(crate) fn take_settlement_notices(&mut self) -> Vec<(StudioTarget, StudioSettlementState)> {
         for (target, state) in self.catchup.settlement.take() {
@@ -534,6 +565,8 @@ impl StudioReceiver {
         self.pause_notice = true;
         self.handoff
             .release_if_stalled(server.runtime_clock().monotonic_ms());
+        // The same reason for a repair job that is not detached: it holds a pool slot.
+        self.catchup.repair_release_for_pause();
     }
     pub(crate) fn take_pause_notice(&mut self) -> bool {
         std::mem::take(&mut self.pause_notice)
@@ -692,6 +725,7 @@ impl StudioReceiver {
             // preparation permit until the user happens to open a Studio document.
             self.handoff
                 .release_if_stalled(server.runtime_clock().monotonic_ms());
+            self.catchup.repair_release_for_pause();
             return Ok((empty(), None));
         }
         let serving = server.sync.has_epoch_service_interest()

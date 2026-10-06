@@ -30,8 +30,10 @@ use preview::{PreviewCompletion, PreviewJob, PreviewRuntime};
 mod registry;
 mod registry_runtime;
 mod repair;
+mod repair_job;
 mod rotation;
 use discovery::DiscoveryPlan;
+use repair_job::{RepairClaims, RepairCompletion, RepairJob, RepairOwnership, RepairRebuild};
 
 /// Keep failure classification across detached work. A peer's bad service key must never
 /// turn into the local receiver's explicit-access-only storage pause when its worker fails.
@@ -119,6 +121,9 @@ pub(crate) enum StudioBackgroundJob<T: MeshTransport> {
     HandoffPrepare(Box<StudioHandoffCapture>, OverlayOwnership, OverlayContext),
     /// Flow H, stage H4: `finish`, `complete`, snapshot and the record encodings.
     HandoffAssemble(Box<StudioHandoffPlan>, OverlayOwnership, OverlayContext),
+    /// Repair job, stage S2: the detached source rebuild, tagged with the job's token. The
+    /// ownership (a pool slot and the target's live claim) moves into the worker with it.
+    RepairRebuild(u64, RepairRebuild, RepairOwnership),
 }
 
 /// A finished Flow H detached stage, tagged with the `HandoffJob::token` it was detached for.
@@ -149,6 +154,7 @@ pub(crate) enum StudioBackgroundResult {
     PreparedRegistry(Option<Arc<()>>, PreparedRegistryResult),
     OverlayPlanned(OverlayContext, OverlayPlanResult),
     Handoff(HandoffCompletion),
+    Repair(RepairCompletion),
     /// A cancelled overlay waiter carries **no** ownership, deliberately. The blocking closure
     /// still owns the bundle and is still running, so admission and the shared slot must stay
     /// occupied until it finishes. This variant exists to clear the actor's waiter bookkeeping
@@ -214,6 +220,7 @@ impl<T: MeshTransport + 'static> StudioBackgroundJob<T> {
             Self::OverlayPlan(..) => "overlay-plan",
             Self::HandoffPrepare(..) => "handoff-prepare",
             Self::HandoffAssemble(..) => "handoff-assemble",
+            Self::RepairRebuild(..) => "repair-rebuild",
         }
     }
 
@@ -243,6 +250,10 @@ impl<T: MeshTransport + 'static> StudioBackgroundJob<T> {
             // Same rule as the overlay plan: the worker owns the bundle and keeps it.
             Self::HandoffPrepare(_, _, context) | Self::HandoffAssemble(_, _, context) => {
                 StudioBackgroundResult::Handoff(HandoffCompletion::Cancelled(context.token))
+            }
+            // Same rule again: a cancelled waiter carries nothing, the worker keeps the bundle.
+            Self::RepairRebuild(token, ..) => {
+                StudioBackgroundResult::Repair(RepairCompletion::Cancelled(*token))
             }
             _ => StudioBackgroundResult::Cancelled { preparation: None },
         };
@@ -358,6 +369,15 @@ impl<T: MeshTransport + 'static> StudioBackgroundJob<T> {
                         Err(_) => HandoffCompletion::Cancelled(token),
                     })
                 }
+                // S2 of a repair job: authenticated plaintext and public context only. A failed
+                // rebuild releases its slot and claim inside the worker (RT-001).
+                Self::RepairRebuild(token, rebuild, ownership) => {
+                    let result = tokio::task::spawn_blocking(move || rebuild.run(ownership)).await;
+                    StudioBackgroundResult::Repair(match result {
+                        Ok(result) => RepairCompletion::Rebuilt(token, result),
+                        Err(_) => RepairCompletion::Cancelled(token),
+                    })
+                }
             }
         };
         tokio::select! {
@@ -454,6 +474,14 @@ pub(super) struct CatchupRuntime {
     repair_backoff: std::collections::BTreeMap<CheckpointTarget, u64>,
     // The Studio target a minted repaired pass reports to; a bucket pass may have no other.
     repair_failure_target: Option<StudioTarget>,
+    // The one detached repair job per actor (design 10.3), its target claims, the next job token,
+    // the flat full-pool retry, and the bounded memory of terminal repairs and last attempts.
+    repair_job: Option<RepairJob>,
+    repair_claims: RepairClaims,
+    repair_next_token: u64,
+    repair_capacity_at: u64,
+    repair_reports: std::collections::BTreeMap<CheckpointTarget, crate::studio::StudioRepairReport>,
+    repairs_seen: std::collections::BTreeSet<(CheckpointTarget, [u8; 32])>,
 }
 impl CatchupRuntime {
     /// Never evict the source of a ready/active page or checkpoint just to start replay.
@@ -463,6 +491,7 @@ impl CatchupRuntime {
         self.prepared.is_some()
             || self.registry_prepared.is_some()
             || self.overlay_planned.is_some()
+            || self.repair_parked()
     }
     pub(super) fn replay_ready(&self) -> bool {
         !self.in_flight
@@ -712,6 +741,10 @@ impl CatchupRuntime {
         if self.prepared.is_some() || self.registry_prepared.is_some() {
             return true;
         }
+        // A repair job waiting to detach or to commit owns a pool slot; give it its turn.
+        if self.repair_pending() {
+            return true;
+        }
         if self.head_result.is_some() {
             return true;
         }
@@ -949,6 +982,12 @@ impl CatchupRuntime {
     ) -> Result<Option<StudioTarget>, AppError> {
         let now = server.runtime_clock().monotonic_ms();
         self.complete_registry_preparation(server, store)?;
+        // A repair job's S3 is never parked behind catch-up for its own target: that catch-up
+        // is deferred until the job ends, so waiting on it would wait on itself (design 10.3).
+        self.repair_check_authority(server);
+        if let Some(updated) = self.repair_commit(server, store, id)? {
+            return Ok(Some(updated));
+        }
         if let Some((context, prepared)) = self.prepared.take() {
             let result = prepared.and_then(|(source, _permit)| {
                 server.sync.with_registry_context(|g, d, _, _| {
@@ -981,7 +1020,15 @@ impl CatchupRuntime {
             .as_ref()
             .is_some_and(|p| p.state() == StudioReceiveState::PageReady)
         {
-            if !self.prepare(server, store, id, self.target.expect("pass target"))? {
+            let target = self.target.expect("pass target");
+            if self.repair_claimed(CheckpointTarget::Studio(target)) {
+                // A repair job owns this source. The page is dropped, never saved under it;
+                // a later pass fetches again once the job has ended.
+                self.pass = None;
+                self.next_at = now.saturating_add(5_000);
+                return Ok(None);
+            }
+            if !self.prepare(server, store, id, target)? {
                 return Ok(None);
             }
             let mut budget = Self::budget(server, store, id)?;
@@ -1087,6 +1134,13 @@ impl CatchupRuntime {
         if watch.server != id || !Arc::ptr_eq(&watch.mount, &store.registry_mount()) {
             return Err(invalid("catch-up mount changed"));
         }
+        if self.repair_claimed(CheckpointTarget::Studio(watch.target)) {
+            // The repair job owns this source; move on rather than prepare a rival copy of it.
+            self.selection = self.selection.wrapping_add(1);
+            self.next_at = now.saturating_add(1_000);
+            self.work_registry(server, store, id, watches)?;
+            return Ok(None);
+        }
         if !self.prepare(server, store, id, watch.target)? {
             return Ok(None);
         }
@@ -1166,6 +1220,11 @@ impl StudioReceiver {
             Some(StudioBackgroundJob::Prepare(capture, permit, context))
         } else if let Some((job, generation)) = self.catchup.registry_preparation.take() {
             Some(StudioBackgroundJob::PrepareRegistry(job, generation))
+        } else if let Some(job) = self.catchup.repair_detach() {
+            // Above the discovery gate deliberately: catch-up for the claimed target defers until
+            // this job ends, so a pending discovery must never park its S2 (design 10.3, HIGH-1).
+            // It is already bounded by its own reserved slot.
+            Some(job)
         } else if self.catchup.in_flight
             || (self.catchup.discovery_plan.is_some()
                 && server.runtime_clock().monotonic_ms() < self.catchup.checkpoint_retry)
@@ -1281,6 +1340,8 @@ impl StudioReceiver {
             Some(
                 StudioBackgroundJob::HandoffPrepare(..) | StudioBackgroundJob::HandoffAssemble(..),
             ) => {}
+            // Likewise: the repair job moved its own stage to `Detached`.
+            Some(StudioBackgroundJob::RepairRebuild(..)) => {}
             Some(StudioBackgroundJob::Page(..) | StudioBackgroundJob::RegistryPage(..)) => {
                 self.catchup.in_flight = true
             }
@@ -1376,6 +1437,10 @@ impl StudioReceiver {
             StudioBackgroundResult::Handoff(completion) => {
                 let now = server.runtime_clock().monotonic_ms();
                 self.handoff_complete(completion, now);
+            }
+            StudioBackgroundResult::Repair(completion) => {
+                let now = server.runtime_clock().monotonic_ms();
+                self.catchup.repair_complete(completion, now);
             }
             StudioBackgroundResult::Page(completed) => {
                 self.catchup.in_flight = false;

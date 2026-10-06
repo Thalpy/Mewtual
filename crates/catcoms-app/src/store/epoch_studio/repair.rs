@@ -517,6 +517,24 @@ impl ServerStore {
     ///
     /// Warm sources only: the caller prepares the source through the detached pool first, and a
     /// cold source answers `None` rather than paying a full rebuild on the actor.
+    /// Whether this exact repair is already applied and owes nothing here, read from the warm
+    /// source only. A cold source answers `false`, so the caller does the work rather than
+    /// skipping it on a guess.
+    pub(crate) fn studio_repair_is_terminal(
+        &self,
+        server: u64,
+        group: &ServerGroup,
+        target: StudioTarget,
+        device: &MlsDevice,
+        repair: &ReceiptRepair,
+    ) -> bool {
+        self.warm_studio_unit(server, group, target, device, |unit| {
+            unit.repair_state()
+                .is_some_and(|s| s.repair == *repair && !s.install_pending)
+        })
+        .unwrap_or(false)
+    }
+
     pub(crate) fn studio_repair_evidence(
         &self,
         server: u64,

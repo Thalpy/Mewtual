@@ -135,31 +135,35 @@ impl CatchupRuntime {
             let result = server.complete_checkpoint_discovery(store, id, *completed);
             match result {
                 Ok(Some(ServerCheckpointDiscovery::Selected(pass))) => {
-                    // Flow D before the seed. If the source now owes a replacement, its selected
-                    // seed is fetched through a repaired pass INSTEAD of this one, even when the
-                    // owner proved that very receipt: the repaired selection is made under this
-                    // device's authoring tenure, not the proof's claim (6.3), and minting it
-                    // supersedes this pass's selection, so the two must never race.
+                    // Flow D before the seed. A repair this answer carries is offered to the
+                    // repair job; when the job takes it, this pass is dropped rather than raced:
+                    // the job's S3 applies the repair to a rebuilt source and, if a replacement is
+                    // then owed, fetches its selected seed through a repaired pass made under this
+                    // device's authoring tenure, never under this proof's own claim (6.3).
                     let mut keep = true;
                     if let Some(repair) = pass.inner.fault_repair().cloned() {
-                        if !Self::automatic_repair_execution_ready() {
-                            // The pass cannot fall through to ordinary installation: its repair
-                            // needs the not-yet-built admitted detached execution boundary.
-                            keep = false;
-                            self.retry_discovery(now);
-                        }
                         let offered = pass.inner.selected_receipt().clone();
-                        let applied = if keep {
-                            match target {
-                                CheckpointTarget::Studio(studio) => self.apply_offered_repair(
+                        match target {
+                            CheckpointTarget::Studio(studio) => {
+                                if self.offer_repair(
                                     server,
                                     store,
                                     id,
                                     studio,
                                     &repair,
                                     Some(&offered),
-                                )?,
-                                CheckpointTarget::Registry(bucket) => self
+                                ) {
+                                    keep = false;
+                                    self.retry_discovery(now);
+                                }
+                            }
+                            CheckpointTarget::Registry(bucket) => {
+                                if !Self::registry_repair_execution_ready() {
+                                    // The pass cannot fall through to ordinary installation: its
+                                    // repair needs the detached execution boundary.
+                                    keep = false;
+                                    self.retry_discovery(now);
+                                } else if let Some((StudioRepairOutcome::AwaitingSeed, pair)) = self
                                     .apply_offered_registry_repair(
                                         server,
                                         store,
@@ -167,29 +171,24 @@ impl CatchupRuntime {
                                         bucket,
                                         &repair,
                                         Some(&offered),
-                                    )?,
-                            }
-                        } else {
-                            None
-                        };
-                        let failure_target = match target {
-                            CheckpointTarget::Studio(studio) => Some(studio),
-                            CheckpointTarget::Registry(_) => self.target,
-                        };
-                        if let Some((StudioRepairOutcome::AwaitingSeed, pair)) = applied {
-                            keep = false;
-                            self.checkpoint = None;
-                            self.await_repaired_seed(
-                                server,
-                                store,
-                                id,
-                                target,
-                                failure_target,
-                                &repair,
-                                &pair,
-                            );
-                            if self.checkpoint.is_none() {
-                                self.retry_discovery(now);
+                                    )?
+                                {
+                                    keep = false;
+                                    self.checkpoint = None;
+                                    let failure_target = self.target;
+                                    self.await_repaired_seed(
+                                        server,
+                                        store,
+                                        id,
+                                        target,
+                                        failure_target,
+                                        &repair,
+                                        &pair,
+                                    );
+                                    if self.checkpoint.is_none() {
+                                        self.retry_discovery(now);
+                                    }
+                                }
                             }
                         }
                     }
@@ -252,25 +251,15 @@ impl CatchupRuntime {
                     if let (CheckpointTarget::Studio(studio), Some(repair)) =
                         (target, answer.repair.as_ref())
                     {
-                        let applied = self.apply_offered_repair(
+                        // A hint carries no pass to drop; the job does everything else.
+                        self.offer_repair(
                             server,
                             store,
                             id,
                             studio,
                             repair,
                             answer.receipt.as_ref(),
-                        )?;
-                        if let Some((StudioRepairOutcome::AwaitingSeed, pair)) = applied {
-                            self.await_repaired_seed(
-                                server,
-                                store,
-                                id,
-                                target,
-                                Some(studio),
-                                repair,
-                                &pair,
-                            );
-                        }
+                        );
                     }
                     if let (CheckpointTarget::Studio(target), Some(inner)) =
                         (target, &self.discovery_watch)
@@ -308,7 +297,7 @@ impl CatchupRuntime {
             // ordinary pass can install. Prepare even a small source; otherwise a fresh receiver
             // would repeatedly discard the pass as unknown without ever scheduling the detached
             // work that can resolve it. Checked absence is retained separately from cold state.
-            if (!Self::automatic_repair_execution_ready() || !source_fits)
+            if (!Self::registry_repair_execution_ready() || !source_fits)
                 && !self.prepare_registry_inventory(server, store, id, bucket)?
             {
                 return Ok(None);

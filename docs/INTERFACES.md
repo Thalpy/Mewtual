@@ -878,6 +878,21 @@ but still refuses service; failed or uncertain B0 takes precedence over that exp
 the prepared adapter does not reconstruct the source. Historical evidence never becomes a live
 source seal or current-tenure overflow hold. Native repair commands remain unregistered.
 
+Studio repair execution is a detached job, never a call inside the request (Agent 3 design 10.3).
+`RepairFault` answers `StudioControlResponse::RepairStarted { target, scope, start }`. Here `start`
+is `Scheduled`, either newly or because the identical decision's job is already running, or `Busy`:
+another repair job is running or the shared preparation pool is full, nothing was reserved, and the
+caller asks again. Nothing has been decided or written when the reply is sent. The native encoding
+is `kind: "faultRepairStarted"` with `start: "scheduled" | "busy"` and `refreshRequired: true`.
+
+The job's outcome reaches the renderer only through the fault view:
+- `blockedBy: "scheduled"` while the job runs;
+- `lastAttempt` afterwards. This is volatile, local and bounded: the store's repair outcome, or
+  `outcome: "failed"` with bounded error text.
+
+`RepairRegistryFault` and every Registry repair path stay fail-closed until the Registry job exists.
+While a job owns a target, foreground `Apply` and `ApplyOverlayCopy` into it are refused for retry.
+
 `studio_recovery_list`, `studio_recovery_read`, `studio_recovery_export`, and
 `studio_recovery_acknowledge` use the same actor/native custody as Save. They authenticate all
 retained/staged typed recovery slots; historical reads/backup export do not invent a current view.

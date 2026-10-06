@@ -1,16 +1,23 @@
 //! The repair step (design 5.7, 10.3). Only this runtime holds the durable owner snapshot, so the
 //! explicit decision reaches issuance here, and the owner resumes a persisted decision after a
-//! crash in the same slot as rotation, after discovery, seed and page work. One job per turn,
-//! round-robin over watched targets, with a 5 s cadence that backs off to 60 s on any hold; a
-//! persistent hold on an owed replacement also stops that target's seed refetches for 60 s. A
-//! hold is always a per-target wait: nothing here returns an error that would pause catch-up.
+//! crash in the same slot as rotation, after discovery, seed and page work. Studio repair work
+//! never runs in these entry points: each schedules the detached job in `repair_job`, and the
+//! `execute_*` handlers below are its S3. Round-robin over watched targets, with a 5 s cadence that
+//! backs off to 60 s on any hold; a persistent hold also stops that target's seed refetches and
+//! automatic jobs for 60 s. A hold is always a per-target wait: nothing here returns an error that
+//! would pause catch-up.
+use super::repair_job::{RepairInput, RepairSchedule};
 use super::*;
 use crate::store::{OfferedRepairEvidence, StudioRepairOutcome, StudioRepairRequest};
-use crate::studio::StudioFaultScope;
+use crate::studio::{StudioFaultScope, StudioRepairReport};
 use catcoms_replication::{Receipt, ReceiptRepair};
+use zeroize::Zeroizing;
 
 /// Remembered terminal Registry repairs, bounded; forgetting one only costs a reload.
 const MAX_REMEMBERED_REGISTRY_REPAIRS: usize = 64;
+/// Remembered terminal Studio repairs and last-attempt reports, each bounded the same way.
+/// Forgetting a terminal repair costs one more job; forgetting a report only hides it.
+const MAX_REMEMBERED_REPAIRS: usize = 64;
 /// How long a persistent repair hold suppresses refetching that target's selected seed. The same
 /// 60 s the ordinary installer waits after a recovery warning.
 const REPAIR_HOLD_BACKOFF_MS: u64 = 60_000;
@@ -56,16 +63,48 @@ impl CatchupRuntime {
         Ok((ordinary, self.checkpoint.take()))
     }
 
-    /// Fail-closed integration gate for repair transactions that still run synchronously while
-    /// the receiver owns Server/store custody. The store/core implementation remains available
-    /// for bounded tests, but live discovery, owner resume and repaired-seed installation must not
-    /// enter it until a shared-pool job owns capture, detached execution, result custody and the
-    /// mount/source/generation/authority revalidation at commit.
+    /// Fail-closed integration gate for the Registry repair transactions, which still run
+    /// synchronously while the receiver owns Server/store custody. Studio repair runs through the
+    /// detached job in `repair_job`; Registry live discovery, owner resume and repaired-seed
+    /// installation must not enter their transactions until the same job owns capture, detached
+    /// rebuild, result custody and the revalidation at commit for a bucket.
     ///
     /// Keep this as a function rather than a public/configurable flag: unfinished repair is not a
     /// user option and must not be enabled accidentally by configuration or a renderer command.
-    pub(super) fn automatic_repair_execution_ready() -> bool {
+    pub(super) fn registry_repair_execution_ready() -> bool {
         false
+    }
+
+    /// The bounded last-attempt report a fault view shows for `target`.
+    pub(in crate::studio::receiver) fn repair_report(
+        &self,
+        target: CheckpointTarget,
+    ) -> Option<StudioRepairReport> {
+        self.repair_reports.get(&target).cloned()
+    }
+
+    pub(super) fn report_repair(
+        &mut self,
+        target: CheckpointTarget,
+        outcome: Result<StudioRepairOutcome, &AppError>,
+    ) {
+        if self.repair_reports.len() >= MAX_REMEMBERED_REPAIRS
+            && !self.repair_reports.contains_key(&target)
+        {
+            self.repair_reports.clear();
+        }
+        let report = match outcome {
+            Ok(outcome) => StudioRepairReport::Completed(outcome),
+            Err(error) => StudioRepairReport::Failed(error.to_string().chars().take(256).collect()),
+        };
+        self.repair_reports.insert(target, report);
+    }
+
+    fn remember_repair(&mut self, target: CheckpointTarget, repair: &ReceiptRepair) {
+        if self.repairs_seen.len() >= MAX_REMEMBERED_REPAIRS {
+            self.repairs_seen.clear();
+        }
+        self.repairs_seen.insert((target, repair.hash()));
     }
 
     /// The visible exit (Flow X): `Repairing` has exactly this producer, after the application
@@ -106,7 +145,11 @@ impl CatchupRuntime {
     }
 
     /// A bucket pass may belong to no Studio target; its failure is then only held, not shown.
-    fn note_repair_failure_for(&mut self, target: Option<StudioTarget>, error: &AppError) {
+    pub(super) fn note_repair_failure_for(
+        &mut self,
+        target: Option<StudioTarget>,
+        error: &AppError,
+    ) {
         if let Some(target) = target {
             self.note_repair_failure(target, error);
         }
@@ -180,7 +223,9 @@ impl CatchupRuntime {
     }
 
     /// The owner's explicit `RepairFault`. Without a current durable snapshot this device is
-    /// not provably the owner, and it refuses rather than signing on in-memory tenure.
+    /// not provably the owner, and it refuses rather than signing on in-memory tenure. Those
+    /// refusals come first, before anything is reserved; the decision itself is a job, so the
+    /// answer is only whether it was scheduled. Its outcome is read back through the fault view.
     pub(in crate::studio::receiver) fn repair_fault<T: MeshTransport, R: CryptoRngCore>(
         &mut self,
         server: &mut Server<T, R>,
@@ -189,55 +234,28 @@ impl CatchupRuntime {
         target: StudioTarget,
         request: StudioRepairRequest,
     ) -> Result<StudioControlResponse, AppError> {
-        if !Self::automatic_repair_execution_ready() {
-            return Err(invalid(
-                "fault repair awaits detached admitted runtime execution",
-            ));
-        }
+        // V5 first, so an unobserved tenure is refused as such before any other reason.
+        server.require_observed_owner_tenure()?;
         let snapshot = self.owner_snapshot.clone().ok_or_else(|| {
             invalid("only the current owner, with a durable snapshot, may decide")
         })?;
         if !server.owner_head_snapshot_is_current(store, id, &snapshot) {
             return Err(invalid("the durable owner snapshot is stale; retry"));
         }
-        let mut budget = Self::inventory_budget(server, store, id)?;
-        // Even an error may follow B1 or B2: request a fresh view before any label.
-        self.settlement
-            .note(target, StudioSettlementState::RefreshRequired);
-        let (repair, outcome, state) = server.issue_studio_fault_repair(
-            store,
-            id,
-            target,
-            &snapshot,
-            request,
-            None,
-            &mut budget,
-        )?;
-        let phase = state.phase();
-        server
-            .sync
-            .with_registry_context(|g, d, _, _| store.retain_studio_source(g, d, state));
-        self.note_repair(target, outcome, phase);
-        if outcome == StudioRepairOutcome::AwaitingSeed {
-            let held = server
-                .sync
-                .with_registry_context(|g, d, _, _| store.held_studio_repair(id, g, target, d));
-            if let Ok(Some((_, pair))) = held {
-                self.await_repaired_seed(
-                    server,
-                    store,
-                    id,
-                    CheckpointTarget::Studio(target),
-                    Some(target),
-                    &repair,
-                    &pair,
-                );
-            }
-        }
-        Ok(StudioControlResponse::Repaired {
+        let start = self
+            .start_repair(
+                server,
+                store,
+                id,
+                CheckpointTarget::Studio(target),
+                Some(target),
+                RepairInput::Decide(request),
+            )
+            .start();
+        Ok(StudioControlResponse::RepairStarted {
             target,
             scope: StudioFaultScope::Source,
-            outcome,
+            start,
         })
     }
 
@@ -251,7 +269,7 @@ impl CatchupRuntime {
         target: StudioTarget,
         request: StudioRepairRequest,
     ) -> Result<StudioControlResponse, AppError> {
-        if !Self::automatic_repair_execution_ready() {
+        if !Self::registry_repair_execution_ready() {
             return Err(invalid(
                 "Registry fault repair awaits detached admitted runtime execution",
             ));
@@ -299,13 +317,16 @@ impl CatchupRuntime {
         })
     }
 
-    /// Flow D: an authenticated answer carried a repair. A peer applies it whatever its own
-    /// fault status; which case it lands in is the core's classification alone. The owner never
-    /// re-applies a decision from an answer: its own are resumed by `repair_owner`. The source is
-    /// prepared through the detached pool first, so evidence is read warm, never rebuilt here.
-    /// The caller decides what an `AwaitingSeed` needs: a proof pass for the selected receipt
-    /// already supplies its seed, so a repaired pass is minted only when none does.
-    pub(super) fn apply_offered_repair<T: MeshTransport, R: CryptoRngCore>(
+    /// Flow D: an authenticated answer carried a repair. A peer schedules a job that applies it
+    /// at S3, against its own rebuilt source and with the pair assembled there; which case it
+    /// lands in is the core's classification alone. The owner never re-applies a decision from an
+    /// answer: its own are resumed by `repair_owner`.
+    ///
+    /// Returns whether the repair took this target. When it did (scheduled, or another job or a
+    /// full pool made it wait), the caller must drop any pass from the same answer rather than
+    /// let it reach the installer. A repair already terminal here, or a target backing off,
+    /// leaves the pass to the router, which still defers for any durable or owed claim.
+    pub(super) fn offer_repair<T: MeshTransport, R: CryptoRngCore>(
         &mut self,
         server: &mut Server<T, R>,
         store: &mut ServerStore,
@@ -313,38 +334,21 @@ impl CatchupRuntime {
         target: StudioTarget,
         repair: &ReceiptRepair,
         offered: Option<&Receipt>,
-    ) -> Result<Option<(StudioRepairOutcome, [Receipt; 2])>, AppError> {
-        if !Self::automatic_repair_execution_ready() {
-            return Ok(None);
-        }
+    ) -> bool {
         let owner = server
             .sync
             .with_registry_context(|g, d, _, _| g.designated_committer() == Some(d.device_id()));
-        if owner || !self.prepare(server, store, id, target)? {
-            return Ok(None);
+        let scope = CheckpointTarget::Studio(target);
+        if owner || self.repairs_seen.contains(&(scope, repair.hash())) {
+            return false;
         }
-        let Some(pair) = server.sync.with_registry_context(|g, d, _, _| {
-            store.studio_repair_evidence(id, g, target, d, repair, offered)
-        }) else {
-            return Ok(None);
+        let input = RepairInput::Offered {
+            repair: Box::new(repair.clone()),
+            offered: offered.cloned().map(Box::new),
         };
-        let mut budget = Self::inventory_budget(server, store, id)?;
-        self.settlement
-            .note(target, StudioSettlementState::RefreshRequired);
-        match server.apply_studio_fault_repair(store, id, target, repair, &pair, None, &mut budget)
-        {
-            Ok((outcome, state)) => {
-                let phase = state.phase();
-                server
-                    .sync
-                    .with_registry_context(|g, d, _, _| store.retain_studio_source(g, d, state));
-                self.note_repair(target, outcome, phase);
-                Ok(Some((outcome, pair)))
-            }
-            Err(error) => {
-                self.note_repair_failure(target, &error);
-                Ok(None)
-            }
+        match self.start_repair(server, store, id, scope, Some(target), input) {
+            RepairSchedule::Scheduled | RepairSchedule::Busy => true,
+            RepairSchedule::Held => false,
         }
     }
 
@@ -360,7 +364,7 @@ impl CatchupRuntime {
         repair: &ReceiptRepair,
         offered: Option<&Receipt>,
     ) -> Result<Option<(StudioRepairOutcome, [Receipt; 2])>, AppError> {
-        if !Self::automatic_repair_execution_ready() {
+        if !Self::registry_repair_execution_ready() {
             return Ok(None);
         }
         let owner = server
@@ -431,7 +435,7 @@ impl CatchupRuntime {
         target: StudioTarget,
         bucket: u8,
     ) -> Result<bool, AppError> {
-        if !Self::automatic_repair_execution_ready() {
+        if !Self::registry_repair_execution_ready() {
             return Ok(false);
         }
         let now = server.runtime_clock().monotonic_ms();
@@ -486,7 +490,8 @@ impl CatchupRuntime {
     }
 
     /// Resume a persisted owner decision. A held B1 decision owns its target until terminal, so
-    /// leaving it unresumed after a restart would strand the fault; this step is that resume.
+    /// leaving it unresumed after a restart would strand the fault; this step schedules that
+    /// resume. Finding the decision is a bounded owner-record read; the source work is the job's.
     pub(super) fn repair_owner<T: MeshTransport, R: CryptoRngCore>(
         &mut self,
         server: &mut Server<T, R>,
@@ -494,9 +499,6 @@ impl CatchupRuntime {
         id: u64,
         watches: &VecDeque<(ServerStudioWatch, u128)>,
     ) -> Result<Option<StudioTarget>, AppError> {
-        if !Self::automatic_repair_execution_ready() {
-            return Ok(None);
-        }
         let now = server.runtime_clock().monotonic_ms();
         if now < self.repair_next_at || watches.is_empty() {
             return Ok(None);
@@ -513,64 +515,201 @@ impl CatchupRuntime {
         let held = server
             .sync
             .with_registry_context(|g, d, _, _| store.held_studio_repair(id, g, target, d));
-        let (repair, pair) = match held {
-            Ok(Some(held)) => held,
+        match held {
+            Ok(Some(_)) => {}
             Ok(None) => return Ok(None),
             Err(error) => {
                 self.note_repair_failure(target, &error);
                 self.repair_next_at = now.saturating_add(60_000);
                 return Ok(None);
             }
+        }
+        let scope = CheckpointTarget::Studio(target);
+        if self.start_repair(server, store, id, scope, Some(target), RepairInput::Resume)
+            != RepairSchedule::Scheduled
+        {
+            self.repair_next_at = now.saturating_add(60_000);
+        }
+        Ok(None)
+    }
+
+    /// S3 of an explicit decision: issuance, B1 and Flow A in the unchanged transaction, on the
+    /// source this job rebuilt. The durable snapshot must still be current at this moment.
+    pub(super) fn execute_decision<T: MeshTransport, R: CryptoRngCore>(
+        &mut self,
+        server: &mut Server<T, R>,
+        store: &mut ServerStore,
+        id: u64,
+        target: StudioTarget,
+        request: StudioRepairRequest,
+        budget: &mut crate::store::EpochStudioBudget,
+    ) -> Result<Option<StudioTarget>, AppError> {
+        let snapshot = self.current_owner_snapshot(server, store, id)?;
+        let (repair, outcome, state) = server
+            .issue_studio_fault_repair(store, id, target, &snapshot, request, None, budget)?;
+        self.finish_studio_repair(server, store, id, target, &repair, outcome, state);
+        Ok(Some(target))
+    }
+
+    /// S3 of an owner resume: the decision held at B1, read again at this moment.
+    pub(super) fn execute_resume<T: MeshTransport, R: CryptoRngCore>(
+        &mut self,
+        server: &mut Server<T, R>,
+        store: &mut ServerStore,
+        id: u64,
+        target: StudioTarget,
+        budget: &mut crate::store::EpochStudioBudget,
+    ) -> Result<Option<StudioTarget>, AppError> {
+        let snapshot = self.current_owner_snapshot(server, store, id)?;
+        let Some((repair, pair)) = server
+            .sync
+            .with_registry_context(|g, d, _, _| store.held_studio_repair(id, g, target, d))?
+        else {
+            // Completed or recycled since S1; nothing is owed.
+            return Ok(None);
         };
-        if !self.prepare(server, store, id, target)? {
+        let (outcome, state) = server.resume_studio_fault_repair(
+            store, id, target, &snapshot, &repair, &pair, None, budget,
+        )?;
+        self.finish_studio_repair(server, store, id, target, &repair, outcome, state);
+        Ok(Some(target))
+    }
+
+    /// S3 of Flow D. The pair comes from evidence this rebuilt source holds plus the offered
+    /// receipt; a device that cannot assemble it applies nothing and stops asking for a while.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn execute_offered<T: MeshTransport, R: CryptoRngCore>(
+        &mut self,
+        server: &mut Server<T, R>,
+        store: &mut ServerStore,
+        id: u64,
+        target: StudioTarget,
+        repair: &ReceiptRepair,
+        offered: Option<&Receipt>,
+        budget: &mut crate::store::EpochStudioBudget,
+    ) -> Result<Option<StudioTarget>, AppError> {
+        let scope = CheckpointTarget::Studio(target);
+        let now = server.runtime_clock().monotonic_ms();
+        let terminal = server.sync.with_registry_context(|g, d, _, _| {
+            store.studio_repair_is_terminal(id, g, target, d, repair)
+        });
+        if terminal {
+            self.remember_repair(scope, repair);
             return Ok(None);
         }
-        let mut budget = Self::inventory_budget(server, store, id)?;
-        self.settlement
-            .note(target, StudioSettlementState::RefreshRequired);
-        match server.resume_studio_fault_repair(
-            store,
-            id,
-            target,
-            &snapshot,
-            &repair,
-            &pair,
-            None,
-            &mut budget,
-        ) {
-            Ok((outcome, state)) => {
-                let phase = state.phase();
-                server
+        let Some(pair) = server.sync.with_registry_context(|g, d, _, _| {
+            store.studio_repair_evidence(id, g, target, d, repair, offered)
+        }) else {
+            // Unverifiable here today. Later answers go to the ordinary router for a while.
+            self.hold_repair(scope, now);
+            return Ok(None);
+        };
+        let (outcome, state) =
+            server.apply_studio_fault_repair(store, id, target, repair, &pair, None, budget)?;
+        self.finish_studio_repair(server, store, id, target, repair, outcome, state);
+        Ok(Some(target))
+    }
+
+    /// S3 of the owed replacement: the seed S1 extracted, installed through the repair
+    /// transaction itself. The owner goes through its current durable snapshot exactly as a
+    /// resume does; a peer through Flow A, which refuses the owner.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn execute_replace<T: MeshTransport, R: CryptoRngCore>(
+        &mut self,
+        server: &mut Server<T, R>,
+        store: &mut ServerStore,
+        id: u64,
+        target: StudioTarget,
+        repair: &ReceiptRepair,
+        pair: &[Receipt; 2],
+        seed: &[u8],
+        budget: &mut crate::store::EpochStudioBudget,
+    ) -> Result<Option<StudioTarget>, AppError> {
+        let owner = server
+            .sync
+            .with_registry_context(|g, d, _, _| g.designated_committer() == Some(d.device_id()));
+        let (outcome, state) = if owner {
+            let snapshot = self.current_owner_snapshot(server, store, id)?;
+            server.resume_studio_fault_repair(
+                store,
+                id,
+                target,
+                &snapshot,
+                repair,
+                pair,
+                Some(seed),
+                budget,
+            )?
+        } else {
+            server.apply_studio_fault_repair(store, id, target, repair, pair, Some(seed), budget)?
+        };
+        let now = server.runtime_clock().monotonic_ms();
+        if outcome.is_terminal() {
+            self.binding = Some((target, state.doc_id()));
+            self.discovery_needed = None;
+            self.discovery_watch = None;
+            self.next_at = now;
+        }
+        self.finish_studio_repair(server, store, id, target, repair, outcome, state);
+        Ok(Some(target))
+    }
+
+    /// The durable owner snapshot, required current at the moment it is used (design 6.3).
+    fn current_owner_snapshot<T: MeshTransport, R: CryptoRngCore>(
+        &self,
+        server: &mut Server<T, R>,
+        store: &ServerStore,
+        id: u64,
+    ) -> Result<ServerOwnerSnapshot, AppError> {
+        self.owner_snapshot
+            .clone()
+            .filter(|snapshot| server.owner_head_snapshot_is_current(store, id, snapshot))
+            .ok_or_else(|| invalid("the durable owner snapshot is stale; retry"))
+    }
+
+    /// Everything a committed repair transaction is followed by, whichever input ran it: retain
+    /// the saved source, label it, report it, remember it once terminal, back off from a
+    /// persistent hold, and fetch the selected seed when a replacement is owed.
+    #[allow(clippy::too_many_arguments)]
+    fn finish_studio_repair<T: MeshTransport, R: CryptoRngCore>(
+        &mut self,
+        server: &mut Server<T, R>,
+        store: &mut ServerStore,
+        id: u64,
+        target: StudioTarget,
+        repair: &ReceiptRepair,
+        outcome: StudioRepairOutcome,
+        state: crate::store::EpochStudioState,
+    ) {
+        let scope = CheckpointTarget::Studio(target);
+        let now = server.runtime_clock().monotonic_ms();
+        let phase = state.phase();
+        server
+            .sync
+            .with_registry_context(|g, d, _, _| store.retain_studio_source(g, d, state));
+        self.note_repair(target, outcome, phase);
+        self.report_repair(scope, Ok(outcome));
+        match outcome {
+            outcome if outcome.is_terminal() => {
+                self.repair_backoff.remove(&scope);
+                self.remember_repair(scope, repair);
+            }
+            StudioRepairOutcome::AwaitingSeed => {
+                let pair = server
                     .sync
-                    .with_registry_context(|g, d, _, _| store.retain_studio_source(g, d, state));
-                self.note_repair(target, outcome, phase);
-                if !outcome.is_terminal() {
-                    self.repair_next_at = now.saturating_add(60_000);
+                    .with_registry_context(|g, d, _, _| store.owed_studio_repair(id, g, target, d));
+                if let Some((owed, pair)) = pair {
+                    self.await_repaired_seed(server, store, id, scope, Some(target), &owed, &pair);
                 }
-                if outcome == StudioRepairOutcome::AwaitingSeed {
-                    self.await_repaired_seed(
-                        server,
-                        store,
-                        id,
-                        CheckpointTarget::Studio(target),
-                        Some(target),
-                        &repair,
-                        &pair,
-                    );
-                }
-                Ok(Some(target))
             }
-            Err(error) => {
-                self.note_repair_failure(target, &error);
-                self.repair_next_at = now.saturating_add(60_000);
-                Ok(None)
-            }
+            // Recovery warning, storage refusal or a hold: they need the user or the owner.
+            _ => self.hold_repair(scope, now),
         }
     }
 
     /// Stop refetching `target`'s repaired seed for a while; expired holds are dropped here, so
     /// the map stays as small as the set of targets currently held.
-    fn hold_repair(&mut self, target: CheckpointTarget, now: u64) {
+    pub(super) fn hold_repair(&mut self, target: CheckpointTarget, now: u64) {
         self.repair_backoff.retain(|_, until| now < *until);
         self.repair_backoff
             .insert(target, now.saturating_add(REPAIR_HOLD_BACKOFF_MS));
@@ -601,7 +740,17 @@ impl CatchupRuntime {
         let target = pass.inner.target();
         let selected = pass.inner.selected_receipt().clone();
         let now = server.runtime_clock().monotonic_ms();
-        let automatic_repair_ready = Self::automatic_repair_execution_ready();
+        if self.repair_claimed(target) {
+            // A live repair job owns this source between S1 and S4. Nothing installs into it,
+            // and this target's discovery is not rescheduled: the job is what unblocks it.
+            self.checkpoint = None;
+            self.retry_discovery(now);
+            return Ok(Some(None));
+        }
+        let automatic_repair_ready = match target {
+            CheckpointTarget::Studio(_) => true,
+            CheckpointTarget::Registry(_) => Self::registry_repair_execution_ready(),
+        };
         let owed = match target {
             CheckpointTarget::Studio(studio) => server
                 .sync
@@ -671,6 +820,29 @@ impl CatchupRuntime {
                 }
                 return Ok(Some(None));
             }
+            if let CheckpointTarget::Studio(studio) = target {
+                // S1 of the replacement: the seed is taken from the pass only if its selection was
+                // made under this device's observed tenure, and the pass is dropped either way.
+                // The install is the job's S3, on a source rebuilt detached.
+                let pass = self.checkpoint.take().expect("pass");
+                let seed = match server.repaired_seed_bytes(store, id, &pass, &repair) {
+                    Ok(seed) => seed,
+                    Err(error) => {
+                        self.note_repair_failure_for(failure_target, &error);
+                        self.hold_repair(target, now);
+                        self.retry_discovery(now);
+                        return Ok(Some(None));
+                    }
+                };
+                let input = RepairInput::Replace {
+                    repair: Box::new(repair),
+                    pair: Box::new(pair),
+                    seed: Zeroizing::new(seed),
+                };
+                self.start_repair(server, store, id, target, Some(studio), input);
+                self.retry_discovery(now);
+                return Ok(Some(None));
+            }
             let owner = server.sync.with_registry_context(|g, d, _, _| {
                 g.designated_committer() == Some(d.device_id())
             });
@@ -695,59 +867,25 @@ impl CatchupRuntime {
                 self.settlement
                     .note(failure_target, StudioSettlementState::RefreshRequired);
             }
-            let installed = match target {
-                CheckpointTarget::Studio(studio) => server
-                    .install_repaired_studio_seed(
-                        store,
-                        id,
-                        &pass,
-                        &repair,
-                        &pair,
-                        snapshot.as_ref(),
-                        &mut budget,
-                    )
-                    .map(|(outcome, state)| {
-                        let (phase, doc_id) = (state.phase(), state.doc_id());
-                        server.sync.with_registry_context(|g, d, _, _| {
-                            store.retain_received_studio_source(g, d, state)
-                        });
-                        self.note_repair(studio, outcome, phase);
-                        if outcome.is_terminal() {
-                            self.binding = Some((studio, doc_id));
-                        }
-                        outcome
-                    }),
-                CheckpointTarget::Registry(_) => {
-                    self.registry_provider = None;
-                    server
-                        .install_repaired_registry_seed(
-                            store,
-                            id,
-                            &pass,
-                            &repair,
-                            &pair,
-                            snapshot.as_ref(),
-                            &mut budget,
-                        )
-                        .map(|(outcome, _)| outcome)
-                }
-            };
+            // Registry only: the Studio replacement returned above as a job.
+            self.registry_provider = None;
+            let installed = server
+                .install_repaired_registry_seed(
+                    store,
+                    id,
+                    &pass,
+                    &repair,
+                    &pair,
+                    snapshot.as_ref(),
+                    &mut budget,
+                )
+                .map(|(outcome, _)| outcome);
             return Ok(Some(match installed {
                 Ok(outcome) if outcome.is_terminal() => {
                     self.repair_backoff.remove(&target);
-                    match target {
-                        CheckpointTarget::Registry(_) => {
-                            self.reset_registry_tail(server, now);
-                            self.discovery_plan = self.after_registry.take();
-                            None
-                        }
-                        CheckpointTarget::Studio(studio) => {
-                            self.discovery_needed = None;
-                            self.discovery_watch = None;
-                            self.next_at = now;
-                            Some(studio)
-                        }
-                    }
+                    self.reset_registry_tail(server, now);
+                    self.discovery_plan = self.after_registry.take();
+                    None
                 }
                 Ok(_) => {
                     // Recovery warning, storage refusal or a hold: everything is retained. They
