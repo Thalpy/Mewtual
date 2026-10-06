@@ -24,9 +24,10 @@ new workflow `agent3-repair-runtime.yml` runs it on Linux and Windows. It has 12
   - the claimed bucket's skipped turn;
   - queued-preparation stranding.
 
-Every replacement compiles under CI's `-D warnings`. A local run detected the first four and
-restored each byte for byte. The Studio stale mutant then failed, but at a message-less assertion
-rather than the expected one; that assertion now carries the message the harness matches.
+Every replacement compiles without warnings, as CI's `-D warnings` requires. A full local run on
+`53d167a0` detected all 12 at their intended assertions, restored every source byte for byte, and
+passed each restored control (an earlier run had stopped at the Studio stale mutant, whose
+assertion lacked a message; it now has one). The hosted workflow run is still to come.
 
 **Two-peer run through the actors**
 (`catchup/tests/repair/two_peer.rs`, `a_fault_is_decided_replaced_and_survives_restart_and_a_newcomer_through_the_actors`).
