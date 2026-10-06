@@ -223,9 +223,9 @@ async fn studio_actor_a_to_b_to_a_progresses_under_new_tenure_and_refuses_the_re
     // on the key alone. A device that keeps its key across a removal has no way back in until a
     // reviewed change lets it discard the stale group. When that lands, this assertion fails, and
     // the returning owner's own progress (its first receipt of the second tenure) belongs here.
-    let refused = joined
-        .err()
-        .expect("same-key re-entry needs a stale-group discard that does not exist yet");
+    let Err(refused) = joined else {
+        panic!("same-key re-entry needs a stale-group discard that does not exist yet");
+    };
     assert!(
         refused.to_string().contains("already exists"),
         "the returning device must fail on its stale group, not on anything else: {refused}"
