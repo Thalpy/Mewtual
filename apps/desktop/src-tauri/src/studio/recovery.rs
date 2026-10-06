@@ -300,7 +300,9 @@ pub(super) fn response_value(response: Response) -> Result<Value, String> {
         | Response::OverlayArchive { .. }
         | Response::OverlayArchiveReleased
         | Response::OverlayDisposed(_)
-        | Response::OverlayCopyApplied { .. }) => {
+        | Response::OverlayCopyApplied { .. }
+        | Response::UnconfirmedOverlaySaveTicket { .. }
+        | Response::UnconfirmedOverlaySaved { .. }) => {
             return super::lifecycle::response_value(response)
         }
         // Copy's two-visit preview converts at its own call site, which holds the context needed to

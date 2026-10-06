@@ -23,14 +23,19 @@ whole-scope review of `510d0b54` (verdict: CHANGES REQUIRED, Agent 2 not complet
 <br>- `clippy.toml` and a source-scan test pin both hidden constructors.
 <br>**Agent 1's Flow S landed (`c9566b82`, local, not yet pushed).** It runs over either basis, and its store stages enforce for Unconfirmed: no installed source under custody (a metadata probe), the S3 re-entry of the live check, the exact target, and a mint of the current MLS epoch. It has nine tests on a real fetched preview, including restart and exact retry with no preview.
 <br>**Built since (2026-10-06):**
-<br>- The 8.3 per-branch rail: 64 operations, by kind, mutation-pinned.
+<br>- The 8.3 per-branch rail: 64 operations, by kind, at append and on read. Both are mutation-pinned, and a compile-time assert keeps it within the formats' bound.
 <br>- `author()` and `document()` on the basis (Agent 1's Flow S review, L1). The S1b check that uses them is Agent 1's to add.
-<br>- 8.6's replication core: the state, the predicate and the header-only reader. Each half of the predicate is mutation-pinned.
+<br>- 8.6's replication core: the state, the predicate and the header-only reader. Each half is mutation-pinned at the predicate and at the reader.
+<br>- **The 8.7 Save through the actor's receiver.**
+<br>&nbsp;&nbsp;- Control actions `BeginUnconfirmedOverlaySave` (a ticket) and `SaveUnconfirmedOverlay` (one visit, repeated until saved).
+<br>&nbsp;&nbsp;- Each stage mints from the receiver's ready-preview cache in its own visit (Agent 1's L2 obligation).
+<br>&nbsp;&nbsp;- The detached plan runs through the production background path.
+<br>&nbsp;&nbsp;- Native results `unconfirmedOverlaySaveTicket` and `unconfirmedOverlaySave`.
+<br>&nbsp;&nbsp;- Tested on a real preview: schedule, plan, commit, exact retry, and an exact retry with no preview. Also tested: a commit that refuses when the preview goes during the plan, and the scope refusals.
+<br>&nbsp;&nbsp;- Not natively registered: Agent 4 does that, and P5 stays false.
 <br>**Still missing:**
-<br>- The 8.7 Save through the Server and actor, with the mint made in the same custody visit that consumes it (Agent 1's L2 obligation).
 <br>- The per-server count and the vault-wide byte rails.
 <br>- 8.6's app call and its native `unconfirmedState`.
-<br>- Native results.
 <br>- The receiver handoff selector's skip of non-Closing branches (review M1), taken by Agent 1 and not in `c9566b82`. Until it lands, an Unconfirmed branch is refused at `start_studio_handoff` and backed off, not skipped.
 <br>Its absence is a Gate 4 gap, not a deferral. | Agent 2; Agent 1 for Flow S and the selector skip |
 | 5. Repeated owner tenure, rejoin, newcomers, legitimate progress | Sync and receipt layer implemented. **Through the actor:** succession and first receipts, in both of a same-key owner's tenures. **Not through the actor:** the same-key refusals, the newcomer, the product's fresh-key A', and hidden higher history. Review 2 (at `1d888fa8`): **PARTIAL** | Leaf-aware tenure, v1 import, app seam, CORE-005 archived witness (`066a6533`), M-1 on the receive path with its own error (`0335262e`). **The product never rejoins with the same identity**: join and found both mint a fresh `MlsDevice`, so a returning owner is a new `DeviceId`. `returning::a_removed_owner_returns_as_a_new_device_with_a_new_tenure_everywhere` drives that form with real MLS and real receipts: A' lands in the vacated leaf, A' and every witness agree on the new start across restart, A' can author, its receipt verifies on witnesses and a newcomer, and A's first-tenure receipt and A's old key claiming the new tenure are refused everywhere.
@@ -158,6 +163,7 @@ over, not the contract. Reasoning from either row as FALSE remains correct today
 | 2026-09-16 | Design revision 6 (`a6d8170`) | **PASS for (a) and (c), no findings.** With (b)'s revision-4 PASS this accepts the whole design. Every finding from revisions 1 to 6 is closed at the design boundary. Two non-blocking refinements were offered and are adopted in revision 7. Reviewer ran no Cargo commands. |
 | 2026-09-16 | Design revision 7 | Accepted refinements only: A-1's scope sentence and N-T7b's diagnostics. No reviewed decision changes. |
 | 2026-10-06 | Review 2, bounded implementation (`510d0b54`..`1d888fa8`) | **(a) P1 manual lifecycle: bounded PASS** with seven LOWs. **(b) Repeated tenure through the actor: PARTIAL**, one MEDIUM (M-1: the same-key refusal was not through the actor, and production's proof gate was unpinned). Reviewer ran 8 focused tests and inspected the 16 mutation logs; no full suites. Native Save conditions: not yet satisfied. Dispositions in "The copy review". |
+| 2026-10-06 | Preview-local slice 1 (`f3ce1758`: the rail, the basis accessors, 8.6's core) | **No blocker or high.** Two MEDIUM test gaps, each with an overstating doc line: the reader's wiring of each 8.6 half, and the read-side rail. Three LOWs: a compile-time bound, `BaseSuperseded` also naming a source behind the base, and phase and adopting left to the app. All fixed or recorded in the next commit, which also makes `f3ce1758`'s two unformatted replication files fmt-clean. Reviewer ran the 13 Unconfirmed tests. |
 | 2026-10-06 | Review 2 finding re-review (`1d888fa8`..`bea7e701`) | **No blocker, high or medium.** (a) P1 bounded PASS stands. (b) Repeated tenure through the actor: **bounded PASS on the narrowed claim** (M-1 closed). Three doc and evidence LOWs, fixed next. Reviewer ran the three new tests (all pass) and inspected the mutation logs. |
 
 ### Revision-5 re-review findings and their disposition
@@ -976,6 +982,34 @@ which closes every item the acceptance matrix's G4-A2-P1 row names):
 >
 > It also flagged one residual risk: the wall-clock bounds in `catch_up` and `flush` could flake
 > under parallel load. They fail loudly and never silently.
+
+### Preview-local slice 1 review (`f3ce1758`) and its dispositions
+
+No blocker or high. Fixed in the commit after `f3ce1758`:
+
+- **MEDIUM-1, the reader's wiring of each 8.6 half was unpinned.** The only vault-level
+  `BaseSuperseded` case differed in both halves at once.
+  - A test-only re-framer swaps exactly one field of a real source's bytes.
+  - `reconciliation_supersedes_a_source_that_differs_in_only_the_document_or_only_the_seed` holds
+    each half on its own.
+  - Two mutation entries sit at the reader's call site: `reconcile-reader-document-half` and
+    `reconcile-reader-seed-half`.
+- **MEDIUM-2, the read-side rail was unpinned, and my harness note gave a false reason.**
+  - A test-only bypass builds an over-long Unconfirmed branch in memory. The rail test now requires
+    it to refuse to read, and the same entries relabelled Closing to read.
+  - Mutation entry `unconfirmed-read-rail`.
+  - The `max_ops` doc now says what actually guarantees no over-long Unconfirmed branch in memory:
+    `validate`, on every decode and encode.
+  - The decoder's kind wiring is pinned by the existing kind tests, not by byte surgery on a
+    65-entry record.
+- **LOW-1:** a compile-time assert keeps the rail within the formats' bound.
+- **LOW-2:** `BaseSuperseded` also names a source *behind* the base, for the interval before the
+  successor arrives. The variant doc says so, and design 8.6 records it as an app decision.
+- **LOW-3:** a faulted or adopting source can read `BaseConfirmed`. Combining the state with the
+  source's phase is recorded as an app decision.
+- **Found while fixing:** `f3ce1758` left `epoch/handoff.rs` and the replication `studio.rs`
+  unformatted, so `cargo fmt --check` fails at that commit. Fixed in the next commit, and
+  `cargo fmt --all -- --check` now runs in a worktree before every commit.
 
 | Finding | What |
 |---|---|

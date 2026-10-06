@@ -11,6 +11,7 @@ mod catchup;
 pub(crate) use catchup::PreviewHarness;
 mod handoff;
 mod replay;
+mod unconfirmed;
 pub(crate) use catchup::{HandoffCompletion, StudioBackgroundJob, StudioBackgroundResult};
 
 /// Recently accessed targets, bounded by the existing sync watch rail. Reopening the same exact
@@ -26,6 +27,11 @@ pub(crate) struct StudioReceiver {
     replay: replay::ReplayRuntime,
     replay_turn: bool,
     handoff: handoff::HandoffRuntime,
+    /// Which Unconfirmed Save request scheduled the plan now parked, if one did (design 8.7). A plan
+    /// does not record its request, and the overlay slot holds one plan for a target whichever
+    /// request made it. So a later visit must know whether that plan is its own before reporting
+    /// it saved.
+    unconfirmed_scheduled: Option<[u8; 32]>,
 }
 /// What one custody visit of the scheduled Flow S concluded.
 #[allow(dead_code)]
@@ -195,6 +201,14 @@ impl StudioReceiver {
                     already_saved,
                 }),
             ))
+        } else if matches!(
+            request.action,
+            StudioControlAction::BeginUnconfirmedOverlaySave
+                | StudioControlAction::SaveUnconfirmedOverlay(_)
+        ) {
+            // Design 8.7. Only the receiver holds the ready preview each stage mints from.
+            let response = self.unconfirmed_save_control(server, store, id, request)?;
+            Ok((StudioSavedTransaction::empty(), None, Some(response)))
         } else {
             let target = request.target;
             // Every action that can leave the vault different from what the renderer last read.

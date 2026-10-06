@@ -553,6 +553,19 @@ fn an_unconfirmed_branch_accepts_sixty_four_operations_and_refuses_the_sixty_fif
         .append(&b.closing, &ledger, last, RAIL as u64 + 1)
         .unwrap();
     assert_eq!(closing.overlay().unwrap().accepted(), RAIL + 1);
+
+    // The read-side half (review of f3ce1758, MEDIUM-2). An over-long Unconfirmed branch cannot be
+    // appended, but a crafted record could hold one, and every read and every decode-then-validate
+    // goes through `checked_entries`. Built past the rail in memory, it refuses to read. The same
+    // entries relabelled Closing read, so the refusal is the Unconfirmed cap and nothing else.
+    let mut over = unconfirmed.overlay().unwrap().clone();
+    over.append_unchecked_for_test(&ledger, last, RAIL as u64 + 1);
+    assert!(
+        matches!(over.read(&ledger), Err(ReplError::Malformed)),
+        "an Unconfirmed branch past the rail refuses to read"
+    );
+    over.set_basis_kind(crate::studio::overlay::BasisKind::Closing);
+    assert_eq!(over.read(&ledger).unwrap().accepted(), RAIL + 1);
 }
 
 /// Design 8.6's predicate on its own, over every combination. Design M21 asks that document identity
@@ -632,6 +645,79 @@ fn reconciliation_reads_the_installed_source_header_against_the_branch_base() {
         assert_eq!(f.source.epoch(), 2);
         assert_eq!(state(&mut f, &unconfirmed).unwrap(), U::BaseSuperseded);
     }
+}
+
+/// Review of f3ce1758, MEDIUM-1: the reader production calls, held to each half on its own.
+///
+/// No honest source differs in only one half: an installed checkpoint's seed hash already depends
+/// on its close. So each fixture re-frames the real confirmed source's bytes with exactly one field
+/// replaced. Either the opening receipt changes (the same close, another seed), or the gate does
+/// (another document id, the same opening). That is the crafted-record or writer-bug case "BOTH
+/// must agree" exists for.
+#[test]
+fn reconciliation_supersedes_a_source_that_differs_in_only_the_document_or_only_the_seed() {
+    use crate::studio::epoch::handoff::reframe_vault_for_test as reframe;
+    use crate::studio::StudioOverlayUnconfirmedState as U;
+    let mut f = Fixture::new(false);
+    let (closing, _, _) = transferable_branch(&mut f, 1);
+    let overlay = closing.overlay().unwrap();
+    let receipt = overlay.receipt().clone();
+    let seed =
+        UnconfirmedStudioSeed::parse_live_transfer(overlay.target(), &receipt, overlay.seed())
+            .unwrap();
+    let owner = f.owner.device_id();
+    let basis = StudioUnconfirmedOverlayBasis::mint_from_live_preview(
+        &seed,
+        &receipt,
+        owner,
+        owner,
+        1,
+        1_700_000_000_000,
+    )
+    .unwrap();
+    let (ledger, id) = one_intent(&mut f, "preview work");
+    let mut unconfirmed = StudioOverlayState::new(&basis);
+    unconfirmed.append(&basis, &ledger, id, 1).unwrap();
+    let branch = unconfirmed.overlay().unwrap();
+    let confirmed = f.source.snapshot().unwrap();
+    let state = |bytes: &[u8]| StudioEpoch::unconfirmed_base_state_in_vault(bytes, branch).unwrap();
+    assert_eq!(
+        state(&confirmed),
+        U::BaseConfirmed,
+        "precondition: the unmodified source confirms"
+    );
+    assert_eq!(
+        state(&reframe(&confirmed, None, None)),
+        U::BaseConfirmed,
+        "re-framing alone changes nothing"
+    );
+
+    // The base document id, but an opening checkpoint with another seed under the same close.
+    let other_seed = Receipt::sign(
+        receipt.document.clone(),
+        receipt.closed_epoch,
+        receipt.close_record_hash,
+        [0xEE; 32],
+        receipt.tenure_start_group_epoch,
+        receipt.inherited.clone(),
+        &f.owner,
+    )
+    .unwrap();
+    assert_eq!(
+        state(&reframe(&confirmed, Some(&other_seed.encode()), None)),
+        U::BaseSuperseded,
+        "the base document id with another opening seed is superseded"
+    );
+
+    // The same opening checkpoint, but a gate naming another document id.
+    let gate = crate::EpochGate::new(receipt.document.clone(), 0xD0C, f.source.epoch(), owner)
+        .encode()
+        .unwrap();
+    assert_eq!(
+        state(&reframe(&confirmed, None, Some(&gate))),
+        U::BaseSuperseded,
+        "the opening seed under another document id is superseded"
+    );
 }
 
 /// Agent 1's Flow S review, L1: the basis exposes the author and document a Save stage needs to

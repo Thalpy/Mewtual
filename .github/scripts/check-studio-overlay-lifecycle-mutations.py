@@ -284,9 +284,7 @@ MUTATIONS = [
     ),
     # --- design 8.3's per-branch rail for an Unconfirmed branch ---
     #
-    # The mutant gives an Unconfirmed branch the Closing cap. The decode-side half (`checked_entries`
-    # applying the same cap once the kind is known) has no entry: this build cannot write an
-    # Unconfirmed record past the rail, so there is no input that reaches it alone.
+    # The mutant gives an Unconfirmed branch the Closing cap.
     (
         "unconfirmed-op-rail", "catcoms-replication", REPL_TESTS,
         f"{REPL}/overlay.rs",
@@ -294,6 +292,17 @@ MUTATIONS = [
         "            BasisKind::Unconfirmed => MAX_STUDIO_OVERLAY_OPS,\n",
         "unconfirmed::an_unconfirmed_branch_accepts_sixty_four_operations_and_refuses_the_sixty_fifth",
         "the Unconfirmed rail refuses operation",
+    ),
+    # The read-side half: `checked_entries` applies the same cap once the kind is known. No
+    # production writer produces an over-long Unconfirmed branch, but a crafted record could, so the
+    # test builds one past the rail with a test-only bypass and requires it to refuse to read.
+    (
+        "unconfirmed-read-rail", "catcoms-replication", REPL_TESTS,
+        f"{REPL}/overlay.rs",
+        "            || self.entries.len() > self.max_ops()\n",
+        "            || self.entries.len() > MAX_STUDIO_OVERLAY_OPS\n",
+        "unconfirmed::an_unconfirmed_branch_accepts_sixty_four_operations_and_refuses_the_sixty_fifth",
+        "an Unconfirmed branch past the rail refuses to read",
     ),
     # --- design 8.6 reconciliation (design M21): each half of the predicate on its own ---
     #
@@ -314,6 +323,38 @@ MUTATIONS = [
         "    same_document && (opening_seed == Some(branch_seed) || true)\n",
         "unconfirmed::reconciliation_confirms_the_base_only_when_both_the_document_and_the_seed_agree",
         "the base document id with another seed is superseded",
+    ),
+    # The same two halves at the reader production calls (review of f3ce1758, MEDIUM-1): each mutant
+    # wires one half of the predicate to the branch's own value, so only a source that differs in
+    # that half alone can catch it. `|| true` and `|_|` keep every binding used.
+    (
+        "reconcile-reader-document-half", "catcoms-replication", REPL_TESTS,
+        f"{REPL}/epoch/handoff.rs",
+        "                shape.is_document(&base.document, base_doc_id),\n",
+        "                shape.is_document(&base.document, base_doc_id) || true,\n",
+        "unconfirmed::reconciliation_supersedes_a_source_that_differs_in_only_the_document_or_only_the_seed",
+        "the opening seed under another document id is superseded",
+    ),
+    (
+        "reconcile-reader-seed-half", "catcoms-replication", REPL_TESTS,
+        f"{REPL}/epoch/handoff.rs",
+        "                opening.as_ref().map(|r| r.seed_change_hash),\n",
+        "                opening.as_ref().map(|_| base.seed_change_hash),\n",
+        "unconfirmed::reconciliation_supersedes_a_source_that_differs_in_only_the_document_or_only_the_seed",
+        "the base document id with another opening seed is superseded",
+    ),
+    # --- design 8.7: a visit never reports another request's parked plan as its own ---
+    #
+    # The mutant reports whatever plan a visit commits as this request's `Saved`, which is how the
+    # Closing `save_overlay` behaves. `&& false` keeps `ours` used.
+    (
+        "unconfirmed-save-not-ours", "catcoms-app",
+        "studio_exchange::tests::provisional::seed::tail::unconfirmed_actor::",
+        "crates/catcoms-app/src/studio/receiver/unconfirmed.rs",
+        "            if !ours {\n",
+        "            if !ours && false {\n",
+        "studio_actor_unconfirmed_save_never_reports_another_requests_plan_as_its_own",
+        "B must not be told A's work was its own",
     ),
     # --- the branch-generation namespace ---
     (

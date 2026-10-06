@@ -19,8 +19,12 @@ pub enum StudioOverlayUnconfirmedState {
     /// Copy into that source becomes available once it is Open.
     BaseConfirmed,
     /// An installed source exists and is not that checkpoint: another checkpoint, a later epoch,
-    /// or one whose seed differs. Copy is still offered, against the actual current projection,
-    /// under an honest label.
+    /// one whose seed differs, **or an earlier epoch**. The last is not supersession in the plain
+    /// sense: catch-up can install the epoch the preview's receipt closes before the owner's close
+    /// lands, and then this reads `BaseSuperseded` until the successor arrives and it reads
+    /// `BaseConfirmed`. Design 8.6 names three states, so the label stays. Whether to show that
+    /// interval differently is the app's decision (review of `f3ce1758`, LOW-2). Copy is still
+    /// offered, against the actual current projection, under an honest label.
     BaseSuperseded,
 }
 

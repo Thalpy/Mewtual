@@ -1349,14 +1349,22 @@ attribution, tenure or signing authority.
 - **The state:** `StudioOverlayUnconfirmedState`.
 - **The predicate:** `unconfirmed_base_confirmed`, on its own, so each half can be mutated apart
   from the other (M21: entries `reconcile-document-half` and `reconcile-seed-half`).
+- **Each half at the reader production calls:** fixtures re-frame a real source with only the
+  opening or only the gate replaced, since no honest source differs in one half alone (entries
+  `reconcile-reader-document-half` and `reconcile-reader-seed-half`).
 - **The header-only reader:** `StudioEpoch::unconfirmed_base_state_in_vault`.
   - The base document id is `epoch_id(doc_type, logical_key, closed_epoch + 1, close_record_hash)`.
   - It refuses a Closing branch.
   - Absence of a source is the caller's `AwaitingSource`.
 - **Not built yet:** the app's per-read call and the native `unconfirmedState` field. Both wait on
   the Save path, since until then no Unconfirmed branch can exist in a production vault.
-- **One decision the app must make:** what to report when the installed source exists but cannot
-  be read. It is neither awaiting nor confirmable.
+- **Decisions the app must make** (review of `f3ce1758`):
+  - What to report when the installed source exists but cannot be read. It is neither awaiting
+    nor confirmable.
+  - How to combine `BaseConfirmed` with the source's phase. A faulted or adopting source at the
+    base id with the base seed reads `BaseConfirmed`, and copy is available only once it is Open.
+  - Whether to show the interval when catch-up has installed the epoch the receipt closes, before
+    the successor arrives. It reads `BaseSuperseded`, which is not supersession in the plain sense.
 
 ### 8.7 Acceptance path
 
@@ -1368,6 +1376,29 @@ substitutions: `studio_closing_basis` becomes the 8.1 mint; the S3 re-mint re-en
 `with_provisional_studio_seed` and requires the same fingerprint; and 8.3's rails are charged
 alongside the ordinary ones. The detached stage re-parses the captured seed bytes (8.1 part 3). If
 Agent 1's Flow S is not implemented, this path is not implemented either; it is not a second writer.
+
+*As built (2026-10-06), through the actor's receiver:* **two actions, not three.**
+- **`BeginUnconfirmedOverlaySave`** returns the ticket: the basis fingerprint and the branch, from
+  one fresh mint.
+- **`SaveUnconfirmedOverlay { basis, branch, nonce, body }`** is one custody visit, which the
+  caller repeats with the identical request until it is saved. That is the Closing runtime's
+  `save_overlay` contract. Prepare and Finish became one repeated visit because the actor
+  schedules the detached plan itself, on the production background path. A second action would
+  have let a caller try to finish a plan of a request it did not make.
+- **The two Saves stay apart.** Neither action is reachable through the control transaction: both
+  are refused there by name, and the receiver intercepts them. A Closing plan taken by an
+  Unconfirmed commit is refused by the store, by name.
+- **Each stage mints its own attempt** from the receiver's ready-preview cache, in its own visit:
+  the ticket, S1b and S3. Nothing carries a minted basis between visits. The attempt is made
+  eagerly before the store call, because the mint needs the sync borrow that the store stage holds
+  mutably. That costs one seed copy per visit (up to 2 MiB). Making it lazy needs an API change in
+  Agent 1's `StudioOverlayMint` (their review, L4b).
+- **Native results:**
+  - `unconfirmedOverlaySaveTicket`.
+  - `unconfirmedOverlaySave` with `state` saved, pending, busy, disposed or handedOff.
+  - A saved state says `localOnly`, `provisional` and `provenance:"unconfirmed"`, and carries no
+    content.
+  - Not natively registered (Agent 4; P5 false).
 
 ## 9. Repeated-owner tenure
 

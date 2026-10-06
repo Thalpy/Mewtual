@@ -83,6 +83,37 @@ impl<'a> VaultShape<'a> {
     }
 }
 
+/// Re-frame authenticated vault bytes with the opening receipt or the gate replaced, every other
+/// byte identical. Test-only, for fixtures that must differ in exactly one field: design M21 asks
+/// that reconciliation's document and seed halves be tested apart, and no honest source differs in
+/// only one of them.
+#[cfg(test)]
+pub(in crate::studio) fn reframe_vault_for_test(
+    bytes: &[u8],
+    opening: Option<&[u8]>,
+    gate: Option<&[u8]>,
+) -> Vec<u8> {
+    let mut d = Decoder::new(bytes);
+    let prefix = d.get_u8().unwrap();
+    let mut fields: Vec<Vec<u8>> = (0..5).map(|_| d.get_bytes().unwrap().to_vec()).collect();
+    // Field order as `StudioEpoch::snapshot` writes it: channel, opening, seed, book, gate.
+    if let Some(opening) = opening {
+        fields[1] = opening.to_vec();
+    }
+    if let Some(gate) = gate {
+        fields[4] = gate.to_vec();
+    }
+    let rest = &bytes[bytes.len() - d.remaining()..];
+    let mut e = Encoder::new();
+    e.put_u8(prefix);
+    for field in &fields {
+        e.put_bytes(field).unwrap();
+    }
+    let mut out = e.finish();
+    out.extend_from_slice(rest);
+    out
+}
+
 impl StudioEpoch {
     pub(in crate::studio) fn copy_handoff_source(
         &mut self,
@@ -252,15 +283,17 @@ impl StudioEpoch {
                 .ok_or(ReplError::EpochBound)?,
             &base.close_record_hash,
         );
-        Ok(if unconfirmed_base_confirmed(
-            shape.is_document(&base.document, base_doc_id),
-            opening.as_ref().map(|r| r.seed_change_hash),
-            base.seed_change_hash,
-        ) {
-            StudioOverlayUnconfirmedState::BaseConfirmed
-        } else {
-            StudioOverlayUnconfirmedState::BaseSuperseded
-        })
+        Ok(
+            if unconfirmed_base_confirmed(
+                shape.is_document(&base.document, base_doc_id),
+                opening.as_ref().map(|r| r.seed_change_hash),
+                base.seed_change_hash,
+            ) {
+                StudioOverlayUnconfirmedState::BaseConfirmed
+            } else {
+                StudioOverlayUnconfirmedState::BaseSuperseded
+            },
+        )
     }
 
     /// Whether authenticated vault bytes hold any work: a later epoch or at least one operation.

@@ -45,7 +45,7 @@ pub use control::{
     StudioControlResponse, StudioOverlayArchived, StudioOverlayExport, StudioOverlayLifecycle,
     StudioRecoveryApply, StudioRecoveryListing, StudioRecoveryPreview, StudioRecoverySummary,
     StudioRecoveryVersion, StudioReleaseConfirmation, StudioSettlementSource,
-    CONTROL_REPLY_DROPPED,
+    StudioUnconfirmedOverlaySaveRequest, StudioUnconfirmedSaveOutcome, CONTROL_REPLY_DROPPED,
 };
 pub use restore::{
     StudioRecoveryDisposition, StudioRecoveryItem, StudioRecoveryMode, StudioRecoveryPlan,

@@ -12,6 +12,9 @@ pub const MAX_STUDIO_OVERLAY_OPS: usize = 256;
 /// awaiting-tenure preview that may never be confirmed. It must never exceed
 /// [`MAX_STUDIO_OVERLAY_OPS`], which every archive and disposal format is sized for.
 pub const MAX_STUDIO_UNCONFIRMED_OVERLAY_OPS: usize = 64;
+// A rail above the formats' bound would let `append` accept a branch that its own decoder then
+// refuses on reload: a durable record that cannot be read back.
+const _: () = assert!(MAX_STUDIO_UNCONFIRMED_OVERLAY_OPS <= MAX_STUDIO_OVERLAY_OPS);
 const MAX_METADATA: usize = 64 * 1024;
 const MAX_EXTENSION: usize = MAX_CHECKPOINT_BYTES + MAX_METADATA;
 
@@ -396,10 +399,13 @@ impl StudioOverlay {
     /// for Unconfirmed, [`MAX_STUDIO_OVERLAY_OPS`] for Closing.
     ///
     /// Keyed on the kind, which is not persisted: the state decoder sets it from the record's outer
-    /// provenance, and `validate` requires agreement. A standalone decode starts as Closing, so
-    /// before that the looser cap applies. Every read goes through `checked_entries`, which applies
-    /// this again once the kind is known, so an over-long Unconfirmed record is refused at its
-    /// first read even if a decoder got that far.
+    /// provenance, and `validate` requires agreement. A standalone decode of the nested blob starts
+    /// as Closing, so the looser cap applies until then.
+    ///
+    /// What keeps an over-long Unconfirmed branch out of memory is `validate`, run on every state
+    /// decode and encode after the kind is set. It reads through `checked_entries`, which applies
+    /// this cap. Not every accessor does: `exact_retry`, `contains` and `accepted` read the
+    /// entries directly, which is safe only because no decoded state reaches them unvalidated.
     fn max_ops(&self) -> usize {
         match self.base.kind {
             BasisKind::Closing => MAX_STUDIO_OVERLAY_OPS,
@@ -505,6 +511,29 @@ impl StudioOverlay {
         let view = staged.read(ledger)?;
         *self = staged;
         Ok(view)
+    }
+    /// Append past every admission check, the rail included. Test-only: the one way to build an
+    /// over-long Unconfirmed branch in memory, so that the read-side cap in `checked_entries` can be
+    /// held to its own test. No production writer produces such a branch; a crafted record could.
+    #[cfg(test)]
+    pub(in crate::studio) fn append_unchecked_for_test(
+        &mut self,
+        ledger: &IntentLedger,
+        id: [u8; 32],
+        ts: u64,
+    ) {
+        let intent = ledger
+            .pending()
+            .find(|(key, _)| **key == id)
+            .map(|(_, i)| i)
+            .unwrap();
+        self.entries.push(Entry {
+            id,
+            envelope: envelope(intent).unwrap(),
+            sequence: self.next_sequence,
+            ts,
+        });
+        self.next_sequence += 1;
     }
     fn checked_entries<'a>(
         &self,

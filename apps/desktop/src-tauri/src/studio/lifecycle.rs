@@ -13,7 +13,7 @@ use catcoms_app::store::{StudioDisposalRequestMode, StudioOverlayDisposalRequest
 use catcoms_app::studio::{
     StudioArchiveReleaseRequest, StudioControlAction as Action, StudioControlRequest,
     StudioControlResponse as Response, StudioOverlayLifecycle, StudioPreparedInspection,
-    StudioReleaseConfirmation,
+    StudioReleaseConfirmation, StudioUnconfirmedSaveOutcome,
 };
 use recovery::{named_hash, target};
 
@@ -506,6 +506,43 @@ fn disposal_value(v: &StudioOverlayDisposal) -> Result<Value, String> {
 
 /// The lifecycle half of the one `StudioControlResponse` converter. Kept here rather than in
 /// `recovery` so that module stays about recovery; `response_value` delegates.
+/// One visit of an Unconfirmed Save (design 8.7), as `{kind:"unconfirmedOverlaySave", state}`.
+///
+/// What every `saved` result states, so a renderer cannot present it otherwise:
+/// - `localOnly` and `provisional`: the work is on this device, on unconfirmed history.
+/// - `provenance: "unconfirmed"`: it was never an owner's checkpoint, published or signed (8.5).
+/// - No content: the draft is read through the inspection, which has a delivery fence.
+///
+/// `pending` and `busy` both mean "send the identical request again". They are told apart because
+/// `pending` means this request's work is scheduled, and `busy` means none of this request was
+/// saved: capacity was full, or the visit finished another request's work.
+fn unconfirmed_save_value(
+    target: StudioTarget,
+    outcome: StudioUnconfirmedSaveOutcome,
+) -> Result<Value, String> {
+    let mut value = json!({"v":1,"kind":"unconfirmedOverlaySave",
+        "channel":channel_of(target),"object":object_of(target)});
+    let fields = match outcome {
+        StudioUnconfirmedSaveOutcome::Saved { basis, accepted } => json!({"state":"saved",
+            "basis":hex::encode(basis),"accepted":accepted,"localOnly":true,"provisional":true,
+            "provenance":"unconfirmed"}),
+        StudioUnconfirmedSaveOutcome::Disposed(manifest) => {
+            json!({"state":"disposed","disposal":disposal_value(&manifest)?})
+        }
+        StudioUnconfirmedSaveOutcome::HandedOff(outcome) => json!({"state":"handedOff",
+            "basis":hex::encode(outcome.basis),"epoch":outcome.epoch.to_string(),
+            "docId":format!("{:032x}",outcome.doc_id),"accepted":outcome.accepted}),
+        StudioUnconfirmedSaveOutcome::Scheduled => {
+            json!({"state":"pending","retry":"sameRequest"})
+        }
+        StudioUnconfirmedSaveOutcome::Busy => json!({"state":"busy","retry":"sameRequest"}),
+    };
+    for (key, field) in fields.as_object().expect("an object literal") {
+        value[key] = field.clone();
+    }
+    Ok(value)
+}
+
 pub(super) fn response_value(response: Response) -> Result<Value, String> {
     let value = match response {
         Response::OverlayLifecycle(v) => lifecycle_value(&v)?,
@@ -559,6 +596,17 @@ pub(super) fn response_value(response: Response) -> Result<Value, String> {
             "channel":channel_of(destination),"object":object_of(destination),
             "contentSaved":true,"alreadySaved":already_saved,"provisional":true,
             "branchPreserved":false}),
+        // Design 8.7. Never authority: the Save mints again from the live preview at each stage.
+        Response::UnconfirmedOverlaySaveTicket {
+            target,
+            basis,
+            branch,
+        } => json!({"v":1,"kind":"unconfirmedOverlaySaveTicket",
+            "channel":channel_of(target),"object":object_of(target),
+            "basis":hex::encode(basis),"branch":hex::encode(branch),"provenance":"unconfirmed"}),
+        Response::UnconfirmedOverlaySaved { target, outcome } => {
+            unconfirmed_save_value(target, outcome)?
+        }
         _ => return Err("mismatched overlay lifecycle response".into()),
     };
     bounded_view(value)

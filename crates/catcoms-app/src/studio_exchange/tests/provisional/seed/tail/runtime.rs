@@ -145,7 +145,9 @@ async fn studio_preview_cancelled_blocking_worker_retains_parser_and_seed_capaci
     drop((a, b, authoritative, finished));
 }
 
-async fn drive(p: &mut Pair, runtime: &mut PreviewHarness) -> StudioProjection {
+/// Drive one real preview of `p.watch.target` to ready through the production queue and jobs.
+/// Shared with the Unconfirmed Save's actor tests, which need exactly this ready-cache entry.
+pub(super) async fn drive(p: &mut Pair, runtime: &mut PreviewHarness) -> StudioProjection {
     p.clock.advance_ms(1000);
     let (parsed, op, projection) = ready(p).await;
     drop(parsed);

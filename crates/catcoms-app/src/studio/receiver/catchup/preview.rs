@@ -317,6 +317,30 @@ impl PreviewRuntime {
             .ok()?;
         Some(StudioPreview::new(ready.seed.clone()))
     }
+    /// The mint ATTEMPT for an Unconfirmed Save of `target`, made now from this actor's current ready
+    /// preview (design 8.7).
+    ///
+    /// Called once per Save stage and never cached. The store's guard only proves a basis is of the
+    /// current MLS epoch, not that its preview is still live within that epoch, so minting in the
+    /// same custody visit as the stage that consumes it is the caller's obligation (Agent 1's Flow S
+    /// review, L2). The mint re-checks the live hint itself.
+    ///
+    /// An absent preview is a failed attempt, not an error to return early: Flow S classifies a
+    /// retry before it opens the attempt, so an exact retry still succeeds with no live preview.
+    pub(in crate::studio::receiver) fn mint<T: MeshTransport, R: CryptoRngCore>(
+        &self,
+        server: &Server<T, R>,
+        store: &ServerStore,
+        id: u64,
+        target: StudioTarget,
+    ) -> Result<catcoms_replication::studio::StudioUnconfirmedOverlayBasis, AppError> {
+        let ready = self
+            .ready
+            .iter()
+            .find(|r| r.target == target)
+            .ok_or_else(|| invalid("no live preview of this document; refresh it to save"))?;
+        server.mint_unconfirmed_overlay_basis(store, id, &ready.seed)
+    }
     /// Called only after held authoritative pages/checkpoints/preparations have had their turn.
     pub(in crate::studio::receiver) fn schedule<T: MeshTransport + 'static, R: CryptoRngCore>(
         &mut self,
