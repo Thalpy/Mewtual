@@ -885,10 +885,15 @@ another repair job is running or the shared preparation pool is full, nothing wa
 caller asks again. Nothing has been decided or written when the reply is sent. The native encoding
 is `kind: "faultRepairStarted"` with `start: "scheduled" | "busy"` and `refreshRequired: true`.
 
-The job's outcome reaches the renderer only through the fault view:
-- `blockedBy: "scheduled"` while the job runs;
-- `lastAttempt` afterwards. This is volatile, local and bounded: the store's repair outcome, or
-  `outcome: "failed"` with bounded error text.
+When a decision cannot start at all, for example because the source cannot be captured,
+`RepairFault` returns that error instead; asking again would fail the same way. The job's
+outcome reaches the renderer only through the fault view:
+- `blockedBy: "scheduled"` while the job or its worker still owns the target;
+- `lastAttempt` afterwards, for every way the job ends: the store's repair outcome, or
+  `outcome: "failed"` with bounded text when it was abandoned (owner tenure or MLS epoch moved,
+  catch-up paused, cancelled), found the document changed mid-rebuild, or failed. A new decision
+  clears the previous report, so it is never shown as the new one's outcome. The report is
+  volatile, local and bounded.
 
 `RepairRegistryFault` and every Registry repair path stay fail-closed until the Registry job exists.
 While a job owns a target, foreground `Apply` and `ApplyOverlayCopy` into it are refused for retry.

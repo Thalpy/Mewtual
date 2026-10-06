@@ -265,20 +265,26 @@ impl CatchupRuntime {
         };
         let rebuild = match captured {
             Ok(Some(rebuild)) => rebuild,
-            Ok(None) => {
-                self.note_repair_failure_for(
-                    failure_target,
-                    &invalid("a repair never creates a source"),
-                );
+            // A device holding no copy of this document has nothing to repair. That is ordinary
+            // for automatic work, so it is only held; an explicit decision is told why.
+            Ok(None) if !input.explicit() => {
                 self.hold_repair(target, now);
+                return RepairSchedule::Held;
+            }
+            Ok(None) => {
+                let absent = invalid("a repair never creates a source");
+                self.end_repair_job(target, failure_target, &absent, now);
                 return RepairSchedule::Held;
             }
             Err(error) => {
-                self.note_repair_failure_for(failure_target, &error);
-                self.hold_repair(target, now);
+                self.end_repair_job(target, failure_target, &error, now);
                 return RepairSchedule::Held;
             }
         };
+        if input.explicit() {
+            // A new decision's outcome must never be read from an earlier job's report.
+            self.repair_reports.remove(&target);
+        }
         let tenure = server.sync.authoring_owner_tenure_start();
         let mls = server.sync.with_registry_context(|g, _, _, _| g.epoch());
         let token = self.repair_next_token;
@@ -332,16 +338,36 @@ impl CatchupRuntime {
             }
             RepairCompletion::Rebuilt(_, Err(error)) => {
                 let job = self.repair_job.take().expect("live job");
-                self.note_repair_failure_for(job.failure_target, &error);
-                self.hold_repair(job.target, now);
+                self.end_repair_job(job.target, job.failure_target, &error, now);
             }
-            RepairCompletion::Cancelled(_) => self.repair_job = None,
+            RepairCompletion::Cancelled(_) => {
+                let job = self.repair_job.take().expect("live job");
+                let cancelled = invalid("the repair was cancelled before it finished");
+                self.report_repair(job.target, Err(&cancelled));
+            }
         }
+    }
+
+    /// Every way a job can end without committing reports for its target, so a fault view never
+    /// shows an earlier job's outcome as this one's. Failures that persist also hold the target.
+    fn end_repair_job(
+        &mut self,
+        target: CheckpointTarget,
+        failure_target: Option<StudioTarget>,
+        error: &AppError,
+        now: u64,
+    ) {
+        self.note_repair_failure_for(failure_target, error);
+        self.report_repair(target, Err(error));
+        self.hold_repair(target, now);
     }
 
     /// Checked every turn: a new tenure or MLS epoch abandons the job at any stage. A detached
     /// worker keeps its bundle until it ends; its completion then matches no job.
-    pub(super) fn repair_check_authority<T: MeshTransport, R: CryptoRngCore>(
+    pub(in crate::studio::receiver) fn repair_check_authority<
+        T: MeshTransport,
+        R: CryptoRngCore,
+    >(
         &mut self,
         server: &mut Server<T, R>,
     ) {
@@ -351,14 +377,22 @@ impl CatchupRuntime {
         let tenure = server.sync.authoring_owner_tenure_start();
         let mls = server.sync.with_registry_context(|g, _, _, _| g.epoch());
         if job.tenure != tenure || job.mls != mls {
+            let target = job.target;
             self.repair_job = None;
+            let moved = invalid("abandoned: the owner tenure or MLS epoch changed; it will rerun");
+            self.report_repair(target, Err(&moved));
         }
     }
 
-    /// Pausing releases a job that is not detached; a detached worker keeps its bundle.
+    /// Pausing releases a job that is not detached; a detached worker keeps its bundle, and its
+    /// result is released the moment it arrives (see `StudioReceiver::complete`).
     pub(in crate::studio::receiver) fn repair_release_for_pause(&mut self) {
         if self.repair_pending() {
-            self.repair_job = None;
+            let target = self.repair_job.take().map(|job| job.target);
+            if let Some(target) = target {
+                let paused = invalid("abandoned: catch-up paused; it will rerun");
+                self.report_repair(target, Err(&paused));
+            }
         }
     }
 
@@ -397,8 +431,7 @@ impl CatchupRuntime {
         let mut budget = match budget {
             Ok(budget) => budget,
             Err(error) => {
-                self.note_repair_failure_for(failure_target, &error);
-                self.hold_repair(target, now);
+                self.end_repair_job(target, failure_target, &error, now);
                 return Ok(None);
             }
         };
@@ -408,9 +441,7 @@ impl CatchupRuntime {
         match result {
             Ok(updated) => Ok(updated),
             Err(error) => {
-                self.note_repair_failure_for(failure_target, &error);
-                self.report_repair(target, Err(&error));
-                self.hold_repair(target, now);
+                self.end_repair_job(target, failure_target, &error, now);
                 Ok(None)
             }
         }
@@ -439,6 +470,8 @@ impl CatchupRuntime {
             // The source moved during S2. Nothing was written; capture afresh later.
             self.repair_backoff
                 .insert(target, now.saturating_add(REPAIR_STALE_RETRY_MS));
+            let stale = invalid("the document changed during the repair; it will rerun");
+            self.report_repair(target, Err(&stale));
             return Ok(None);
         }
         self.settlement

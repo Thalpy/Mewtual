@@ -31,7 +31,18 @@ table with the commit that closed it.
   B0 write, propagates every failed or uncertain write before classifying the source, and preserves
   Fault as a hard refusal afterward; prepared service does not cold-reconstruct that source. Native
   repair remains unavailable.
-  While automatic repair execution is disabled, Registry checkpoint routing classifies a pending
+  Studio fault repair executes only as Agent 3's detached job (design 10.3). Each actor runs one
+  job at a time. A shared preparation-pool slot and a per-target live claim are reserved before
+  any body read. The source is rebuilt detached, holding no store, vault key or MLS state. At
+  commit the rebuild's context and plaintext digest are rechecked against disk and the unchanged
+  authority-checked transaction runs. An offered repair is verified against the live owner and
+  this device's authoring tenure before anything is captured, so a newcomer with `Unknown` or
+  `Imported` tenure, or a repair signed by anyone but the current owner, costs no capture and
+  holds nothing else. While a job owns a target, ordinary installs, page receive, owner rotation,
+  preparation and foreground Apply into it defer or refuse. Gossip ingest, own-operation replay
+  and Flow S/H writes are not claim-checked; a change from them makes the rebuild stale, and
+  the job writes nothing and retries.
+  Registry repair execution remains disabled. Registry checkpoint routing classifies a pending
   replacement only from the exact-current verified source already retained by the bounded
   preparation boundary. Missing, cold, stale, retargeted or unreadable preparation is unknown and
   defers the pass; it is never treated as proof that ordinary installation is safe, and the router

@@ -482,6 +482,9 @@ pub(super) struct CatchupRuntime {
     repair_capacity_at: u64,
     repair_reports: std::collections::BTreeMap<CheckpointTarget, crate::studio::StudioRepairReport>,
     repairs_seen: std::collections::BTreeSet<(CheckpointTarget, [u8; 32])>,
+    // Offered repairs this device could not assemble evidence for, held per repair (never per
+    // target) until the given time, so a bad or premature offer cannot stall other repair work.
+    repair_unverifiable: std::collections::BTreeMap<(CheckpointTarget, [u8; 32]), u64>,
 }
 impl CatchupRuntime {
     /// Never evict the source of a ready/active page or checkpoint just to start replay.
@@ -901,6 +904,11 @@ impl CatchupRuntime {
         context: PreparationContext,
     ) -> Result<bool, AppError> {
         let target = context.target;
+        if self.repair_claimed(CheckpointTarget::Studio(target)) {
+            // The repair job captured this source and evicted its warm copy. A rival rebuild in
+            // a second slot would cost a full reconstruction for nothing the job does not redo.
+            return Ok(false);
+        }
         let warm = server
             .sync
             .with_registry_context(|g, d, _, _| store.studio_source_is_warm(id, g, target, d));
@@ -1441,6 +1449,12 @@ impl StudioReceiver {
             StudioBackgroundResult::Repair(completion) => {
                 let now = server.runtime_clock().monotonic_ms();
                 self.catchup.repair_complete(completion, now);
+                // A paused receiver never reaches the commit visit, and nothing wakes it while
+                // paused, so a result arriving now would hold its pool slot and target claim until
+                // a person reopened something. Release it here, as `handoff_complete` does.
+                if self.paused {
+                    self.catchup.repair_release_for_pause();
+                }
             }
             StudioBackgroundResult::Page(completed) => {
                 self.catchup.in_flight = false;

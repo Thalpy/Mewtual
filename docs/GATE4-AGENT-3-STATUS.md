@@ -40,6 +40,28 @@ bounded `last_attempt`, encoded natively; INTERFACES documents the contract.
 - HIGH-1: S2 detaches past in-flight work and an undue discovery, and S3 commits with a checkpoint
   pass and discovery pending. Restoring either `replay_ready` gate fails it.
 
+### Adversarial review of `54c79846`: no BLOCKER, findings fixed
+
+| Finding | Disposition |
+|---|---|
+| H1 a rebuild finishing after a pause held its slot and claim indefinitely | Released in `complete` when paused, as `handoff_complete` does. The test pauses during S2; removing the release fails it. |
+| M1 owed replacement reran the whole job every few seconds | `repair_owner` and `offer_repair` fetch the owed seed when the warm source owes exactly this repair, and an owner `AwaitingSeed` backs the resume off 60 s. Removing the owner check fails the test. |
+| M2 unverified offers cost a capture and held the target | `offer_repair` requires authoring tenure and `verify_current_owner` before reserving anything. The unverifiable hold is per repair, not per target. The newcomer (N16) test: removing the pre-check fails it. |
+| M3 untruthful outcome reporting | Every ending is reported: stale, abandoned, paused, cancelled, capture, S2 and budget failure. A new decision clears the old report. A decision that cannot start returns its error, not `Busy`. Two tests; removing the clear fails one. |
+| M4 security docs said repair was off | THREAT-MODEL, HANDOVER and ACCEPTANCE updated. |
+| L1 S3 reset other targets' catch-up state | Resets are scoped to the job's target, and no seed pass is minted while a page pass exists. |
+| L2 rival preparation of a claimed source | `prepare_for` defers while claimed. Gossip, replay and Flow S/H writes are listed residuals. |
+| L3 fetched seed discarded on `Busy` | Kept, with a 1 s recheck. |
+| L4 one busy target paused resume for all | Only a hold slows the round-robin. |
+| L5 spurious error for a peer with no source | Automatic work holds silently; an explicit decision still reports. |
+| L6 view and claim disagreed | The blocker follows the claim; authority is checked before the view is annotated. |
+| L7 split doc comment | Restored. |
+
+Test gaps the review listed and that remain open: Flow D end to end through the job, the peer
+branch of `execute_replace`, mutant coverage of the remaining claim consult sites (page receive,
+selection, rotation, Apply), and a forged offer on a peer with observed tenure (this fixture's
+only peer is a newcomer).
+
 **Remaining:**
 - the Registry job;
 - the two-peer Fault, decision, replacement, restart and newcomer run;

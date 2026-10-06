@@ -477,6 +477,11 @@ async fn a_rebuild_that_went_stale_during_s2_writes_nothing_and_backs_off() {
         runtime.repair_backoff.contains_key(&scope),
         "that target retries later"
     );
+    assert!(
+        matches!(runtime.repair_report(scope), Some(StudioRepairReport::Failed(ref why)) if why.contains("changed")),
+        "a stale rebuild is reported, never silently lost: {:?}",
+        runtime.repair_report(scope)
+    );
     assert!(!runtime.repair_claimed(scope));
     assert_eq!(pool.available_permits(), 4);
 }
@@ -748,4 +753,191 @@ async fn a_repair_job_is_never_parked_behind_the_catch_up_it_blocks() {
             StudioRepairOutcome::AwaitingSeed
         ))
     );
+}
+
+/// Review H1 on `54c79846`: a paused receiver never reaches the commit visit and nothing wakes it,
+/// so a rebuild finishing after the pause must release its slot and claim as it arrives.
+#[tokio::test]
+async fn a_rebuild_arriving_after_a_pause_releases_its_slot_and_claim() {
+    let mut owed = Owed::new(true).await;
+    let snapshot = owed.snapshot();
+    let mut receiver = StudioReceiver::default();
+    receiver.catchup.owner_snapshot = Some(snapshot);
+    let pool = receiver.catchup.inject_overlay_pool_for_test(4);
+    let (scope, target) = (owed.scope(), owed.target);
+    receiver.catchup.start_repair(
+        &mut owed.alice,
+        &mut owed.store,
+        SERVER,
+        scope,
+        Some(target),
+        RepairInput::Resume,
+    );
+    let job = receiver.detach(&mut owed.alice).expect("S2 detaches");
+    // The production pause: it releases nothing that is detached.
+    receiver.pause_at_for_test(&owed.alice);
+    assert!(
+        receiver.catchup.repair_claimed(scope),
+        "the worker still owns it"
+    );
+    let result = job.run(None).await;
+    receiver.complete(&mut owed.alice, result);
+    assert!(!receiver.catchup.repair_claimed(scope));
+    assert_eq!(
+        pool.available_permits(),
+        4,
+        "the parked result released its slot"
+    );
+    assert!(matches!(
+        receiver.catchup.repair_report(scope),
+        Some(StudioRepairReport::Failed(ref why)) if why.contains("paused")
+    ));
+}
+
+/// Review M1 on `54c79846`: once B2 has crossed and only the seed is missing, the owner's resume
+/// fetches that seed instead of rerunning a job that would only flush the same source again.
+#[tokio::test]
+async fn an_owner_owing_only_a_seed_fetches_it_instead_of_rerunning_the_job() {
+    let mut owed = Owed::new(true).await;
+    let (mut runtime, pool) = owed.runtime(4);
+    let target = owed.target;
+    let watch = owed
+        .alice
+        .watch_studio_epoch(&owed.store, SERVER, target)
+        .unwrap();
+    let (store, alice) = (&owed.store, &mut owed.alice);
+    let doc_id = alice
+        .sync
+        .with_registry_context(|g, d, _, _| store.load_studio_epoch(SERVER, g, target, d))
+        .unwrap()
+        .unwrap()
+        .doc_id();
+    let watches = VecDeque::from([(watch, doc_id)]);
+    let source = owed.source();
+    let now = owed.clock.monotonic_ms();
+    runtime
+        .repair_owner(&mut owed.alice, &mut owed.store, SERVER, &watches)
+        .unwrap();
+    assert!(
+        runtime.repair_job_target().is_none(),
+        "no job, no rebuild, no flush"
+    );
+    assert_eq!(pool.available_permits(), 4);
+    let minted = runtime
+        .checkpoint
+        .as_ref()
+        .expect("the owed seed is fetched");
+    assert_eq!(minted.inner.selected_receipt(), &owed.chosen);
+    assert!(
+        runtime.repair_next_at >= now + 60_000,
+        "and the resume backs off"
+    );
+    assert_eq!(owed.source(), source);
+}
+
+/// Review M2 on `54c79846` and design N16: a newcomer that never observed the owner take office
+/// has no authoring tenure, so an offered repair is refused before anything is reserved or read,
+/// and nothing is held that could slow another repair.
+#[tokio::test]
+async fn a_newcomer_refuses_an_offered_repair_before_reserving_anything() {
+    let mut owed = Owed::new(true).await;
+    let repair = owed.repair.clone().unwrap();
+    let target = owed.target;
+    let scope = owed.scope();
+    let mut bob_store = ServerStore::open(
+        owed.root.path().join("bob").as_path(),
+        b"bob",
+        &mut ChaCha20Rng::seed_from_u64(34),
+    )
+    .unwrap();
+    assert_eq!(
+        owed._bob.observed_owner_tenure(),
+        StudioOwnerTenure::Unknown
+    );
+    let mut runtime = CatchupRuntime::default();
+    let pool = runtime.inject_overlay_pool_for_test(4);
+    let taken = runtime.offer_repair(
+        &mut owed._bob,
+        &mut bob_store,
+        SERVER,
+        target,
+        &repair,
+        Some(&owed.chosen),
+        true,
+    );
+    assert!(!taken, "the pass stays with the router");
+    assert!(runtime.repair_job_target().is_none());
+    assert_eq!(pool.available_permits(), 4, "no slot was reserved");
+    assert!(
+        runtime.repair_backoff.is_empty(),
+        "nothing was captured or held"
+    );
+    assert!(!runtime.repair_claimed(scope));
+}
+
+/// Review M3 on `54c79846`: every way a scheduled decision ends is reported, and a new decision
+/// never inherits an earlier job's report.
+#[tokio::test]
+async fn an_abandoned_decision_is_reported_and_a_new_one_starts_clean() {
+    let mut owed = Owed::new(false).await;
+    let snapshot = owed.snapshot();
+    let mut receiver = StudioReceiver::default();
+    receiver.catchup.owner_snapshot = Some(snapshot);
+    receiver.catchup.inject_overlay_pool_for_test(4);
+    let request = owed.request();
+    let target = owed.target;
+    let control = |action| StudioControlRequest { target, action };
+    let decide = |receiver: &mut StudioReceiver, owed: &mut Owed| {
+        receiver
+            .control(
+                &mut owed.alice,
+                &mut owed.store,
+                SERVER,
+                control(StudioControlAction::RepairFault(Box::new(request))),
+            )
+            .map(|(_, _, response)| response)
+    };
+    let read = |receiver: &mut StudioReceiver, owed: &mut Owed| {
+        let (_, _, response) = receiver
+            .control(
+                &mut owed.alice,
+                &mut owed.store,
+                SERVER,
+                control(StudioControlAction::ReadFault),
+            )
+            .unwrap();
+        match response {
+            Some(StudioControlResponse::Fault(view)) => view,
+            other => panic!("expected Fault, got {other:?}"),
+        }
+    };
+    assert!(matches!(
+        decide(&mut receiver, &mut owed).unwrap(),
+        Some(StudioControlResponse::RepairStarted {
+            start: StudioRepairStart::Scheduled,
+            ..
+        })
+    ));
+    // An MLS commit moves the epoch the job captured; the read abandons it and says so.
+    let bob = owed._bob.my_fingerprint();
+    owed.alice.remove_member(&bob).await.unwrap();
+    let view = read(&mut receiver, &mut owed);
+    assert!(
+        matches!(view.last_attempt, Some(StudioRepairReport::Failed(ref why)) if why.contains("abandoned")),
+        "{:?}",
+        view.last_attempt
+    );
+    assert_ne!(view.blocked_by, Some(StudioRepairBlocker::Scheduled));
+    // A fresh decision clears that report rather than showing it as its own outcome.
+    receiver.catchup.owner_snapshot = Some(owed.snapshot());
+    assert!(matches!(
+        decide(&mut receiver, &mut owed).unwrap(),
+        Some(StudioControlResponse::RepairStarted {
+            start: StudioRepairStart::Scheduled,
+            ..
+        })
+    ));
+    let view = read(&mut receiver, &mut owed);
+    assert!(view.last_attempt.is_none(), "{:?}", view.last_attempt);
+    assert_eq!(view.blocked_by, Some(StudioRepairBlocker::Scheduled));
 }

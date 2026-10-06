@@ -8,7 +8,25 @@ the protocol- vs honest-client-enforced boundary and the hardening backlog.
 [`MESSAGE-FLOW.md`](MESSAGE-FLOW.md) traces one message end to end (send, gossip, catch-up)
 and ranks the live hazards in that path.
 
-## Status (latest entry: 2026-10-05)
+## Status (latest entry: 2026-10-06)
+
+- **Gate 4 detached Studio repair job (2026-10-06).** Studio fault repair runs again, but only as
+  Agent 3's design 10.3 job; Agent 4's fail-closed gate (`3fcde979`) now covers Registry alone.
+  - **S1:** reserves a shared preparation-pool slot and a per-target live claim before any body
+    read, then captures the bounded plaintext.
+  - **S2:** rebuilds the source detached.
+  - **S3:** installs the rebuild only if its context and digest still match disk, then runs the
+    unchanged Server transaction (issuance, resume, Flow D or the owed replacement).
+  - **S4:** drops the slot and claim after the attempt.
+
+  Explicit decisions answer `RepairStarted`, and the fault view reports a `Scheduled` blocker and
+  a bounded `lastAttempt`. Offered repairs are authority-checked before capture. The repaired
+  replacement is installed through the same job. The core gained a sealed owner-authority view
+  for a later detached adoption half.
+
+  Still open: the Registry job, the two-peer scenario, the S3 cost measurement, and claims on
+  gossip ingest, replay and Flow S/H. Native repair commands remain unregistered, P5 is false and
+  Gate 4 remains open. Details are in `GATE4-AGENT-3-STATUS.md`.
 
 - **Gate 4 archived-owner admission candidate (2026-10-05).** The app now consumes the single
   archived Observed-tenure witness only through the still-current durable owner snapshot used by

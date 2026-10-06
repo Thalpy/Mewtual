@@ -152,6 +152,7 @@ impl CatchupRuntime {
                                     studio,
                                     &repair,
                                     Some(&offered),
+                                    true,
                                 ) {
                                     keep = false;
                                     self.retry_discovery(now);
@@ -251,7 +252,8 @@ impl CatchupRuntime {
                     if let (CheckpointTarget::Studio(studio), Some(repair)) =
                         (target, answer.repair.as_ref())
                     {
-                        // A hint carries no pass to drop; the job does everything else.
+                        // A hint carries no pass to drop; the job, or the owed seed fetch, does
+                        // everything else.
                         self.offer_repair(
                             server,
                             store,
@@ -259,6 +261,7 @@ impl CatchupRuntime {
                             studio,
                             repair,
                             answer.receipt.as_ref(),
+                            false,
                         );
                     }
                     if let (CheckpointTarget::Studio(target), Some(inner)) =

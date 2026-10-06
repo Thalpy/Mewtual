@@ -233,7 +233,12 @@ impl StudioReceiver {
                         CheckpointTarget::Registry(bucket)
                     }
                 };
-                let running = self.catchup.repair_job_target() == Some(scope);
+                // The blocker follows the claim, which is what the refusals follow too: a worker
+                // from an abandoned job still owns the target until it ends. A job whose
+                // authority already moved is abandoned first, so it is never shown as running.
+                self.catchup.repair_check_authority(server);
+                let running = self.catchup.repair_claimed(scope)
+                    || self.catchup.repair_job_target() == Some(scope);
                 view.annotate_runtime(running, self.catchup.repair_report(scope));
             }
             if let Ok(StudioControlResponse::Acknowledged(list)) = &result {

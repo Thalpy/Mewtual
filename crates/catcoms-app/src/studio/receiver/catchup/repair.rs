@@ -178,9 +178,14 @@ impl CatchupRuntime {
         pair: &[Receipt; 2],
     ) {
         let now = server.runtime_clock().monotonic_ms();
-        if self.checkpoint.is_some() || self.in_flight || self.discovery_plan.is_some() {
-            // One checkpoint pass at a time, and never under a pending discovery, whose
-            // completion would drop it; the next resume or discovery turn asks again.
+        if self.checkpoint.is_some()
+            || self.in_flight
+            || self.discovery_plan.is_some()
+            || self.pass.is_some()
+        {
+            // One checkpoint pass at a time, never under a pending discovery whose completion
+            // would drop it, and never at the cost of another target's page pass, which may
+            // already hold a fetched page (S3 runs at any time). The next turn asks again.
             return;
         }
         if self
@@ -207,7 +212,6 @@ impl CatchupRuntime {
         self.repair_seed_peer = self.repair_seed_peer.wrapping_add(1);
         match server.select_repaired_checkpoint(store, id, target, repair, selected) {
             Ok(pass) => {
-                self.pass = None;
                 self.checkpoint = Some(pass);
                 self.checkpoint_sealed = true;
                 self.checkpoint_peer = Some(peer);
@@ -242,16 +246,26 @@ impl CatchupRuntime {
         if !server.owner_head_snapshot_is_current(store, id, &snapshot) {
             return Err(invalid("the durable owner snapshot is stale; retry"));
         }
-        let start = self
-            .start_repair(
-                server,
-                store,
-                id,
-                CheckpointTarget::Studio(target),
-                Some(target),
-                RepairInput::Decide(request),
-            )
-            .start();
+        let scope = CheckpointTarget::Studio(target);
+        let start = match self.start_repair(
+            server,
+            store,
+            id,
+            scope,
+            Some(target),
+            RepairInput::Decide(request),
+        ) {
+            // An explicit decision ignores backoff, so a hold here means it could not start at
+            // all; asking again would fail the same way, so say why instead of "busy".
+            RepairSchedule::Held => {
+                let reason = match self.repair_report(scope) {
+                    Some(StudioRepairReport::Failed(reason)) => reason,
+                    _ => "the repair could not start".into(),
+                };
+                return Err(invalid(reason));
+            }
+            started => started.start(),
+        };
         Ok(StudioControlResponse::RepairStarted {
             target,
             scope: StudioFaultScope::Source,
@@ -324,8 +338,16 @@ impl CatchupRuntime {
     ///
     /// Returns whether the repair took this target. When it did (scheduled, or another job or a
     /// full pool made it wait), the caller must drop any pass from the same answer rather than
-    /// let it reach the installer. A repair already terminal here, or a target backing off,
-    /// leaves the pass to the router, which still defers for any durable or owed claim.
+    /// let it reach the installer. Otherwise the pass goes to the router, which still defers for
+    /// any durable or owed claim: a repair already terminal here, one this device cannot use, a
+    /// target backing off, or a replacement already owed for exactly this repair, whose selected
+    /// seed the router (or, with no pass, this call) fetches without rerunning the job.
+    ///
+    /// Before anything is reserved or read, the repair must verify against the live owner and
+    /// this device's own authoring tenure, the same first step the transaction takes. A newcomer
+    /// with `Unknown` or `Imported` tenure therefore schedules nothing (N16), and a repair signed
+    /// by anyone but the current owner costs no capture and holds nothing else.
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn offer_repair<T: MeshTransport, R: CryptoRngCore>(
         &mut self,
         server: &mut Server<T, R>,
@@ -334,12 +356,40 @@ impl CatchupRuntime {
         target: StudioTarget,
         repair: &ReceiptRepair,
         offered: Option<&Receipt>,
+        with_pass: bool,
     ) -> bool {
         let owner = server
             .sync
             .with_registry_context(|g, d, _, _| g.designated_committer() == Some(d.device_id()));
         let scope = CheckpointTarget::Studio(target);
-        if owner || self.repairs_seen.contains(&(scope, repair.hash())) {
+        let now = server.runtime_clock().monotonic_ms();
+        if owner
+            || self.repairs_seen.contains(&(scope, repair.hash()))
+            || self
+                .repair_unverifiable
+                .get(&(scope, repair.hash()))
+                .is_some_and(|until| now < *until)
+        {
+            return false;
+        }
+        let Some(tenure) = server.sync.authoring_owner_tenure_start() else {
+            return false;
+        };
+        let authorized = server
+            .sync
+            .with_registry_context(|g, _, _, _| repair.verify_current_owner(g, tenure).is_ok());
+        if !authorized {
+            return false;
+        }
+        let owed = server
+            .sync
+            .with_registry_context(|g, d, _, _| store.owed_studio_repair(id, g, target, d));
+        if let Some((owed, pair)) = owed.filter(|(owed, _)| owed.hash() == repair.hash()) {
+            // Already applied here and waiting only for its seed: rerunning the job would just
+            // flush the same B2 again. Fetch the seed instead.
+            if !with_pass {
+                self.await_repaired_seed(server, store, id, scope, Some(target), &owed, &pair);
+            }
             return false;
         }
         let input = RepairInput::Offered {
@@ -515,18 +565,30 @@ impl CatchupRuntime {
         let held = server
             .sync
             .with_registry_context(|g, d, _, _| store.held_studio_repair(id, g, target, d));
-        match held {
-            Ok(Some(_)) => {}
+        let held = match held {
+            Ok(Some((held, _))) => held,
             Ok(None) => return Ok(None),
             Err(error) => {
                 self.note_repair_failure(target, &error);
                 self.repair_next_at = now.saturating_add(60_000);
                 return Ok(None);
             }
-        }
+        };
         let scope = CheckpointTarget::Studio(target);
+        let owed = server
+            .sync
+            .with_registry_context(|g, d, _, _| store.owed_studio_repair(id, g, target, d));
+        if let Some((owed, pair)) = owed.filter(|(owed, _)| owed.hash() == held.hash()) {
+            // B2 already crossed for this decision; only its seed is missing. A resume would just
+            // flush the same source again, so fetch the seed and come back on the long cadence.
+            self.await_repaired_seed(server, store, id, scope, Some(target), &owed, &pair);
+            self.repair_next_at = now.saturating_add(60_000);
+            return Ok(None);
+        }
+        // `Busy` is another job or a full pool, retried on the ordinary cadence; only a hold on
+        // this target slows the round-robin.
         if self.start_repair(server, store, id, scope, Some(target), RepairInput::Resume)
-            != RepairSchedule::Scheduled
+            == RepairSchedule::Held
         {
             self.repair_next_at = now.saturating_add(60_000);
         }
@@ -600,8 +662,16 @@ impl CatchupRuntime {
         let Some(pair) = server.sync.with_registry_context(|g, d, _, _| {
             store.studio_repair_evidence(id, g, target, d, repair, offered)
         }) else {
-            // Unverifiable here today. Later answers go to the ordinary router for a while.
-            self.hold_repair(scope, now);
+            // Unverifiable here today. Only this repair is held, never the target: another
+            // repair, or this one's owed seed, must not wait behind it.
+            self.repair_unverifiable.retain(|_, until| now < *until);
+            if self.repair_unverifiable.len() >= MAX_REMEMBERED_REPAIRS {
+                self.repair_unverifiable.clear();
+            }
+            self.repair_unverifiable.insert(
+                (scope, repair.hash()),
+                now.saturating_add(REPAIR_HOLD_BACKOFF_MS),
+            );
             return Ok(None);
         };
         let (outcome, state) =
@@ -646,8 +716,12 @@ impl CatchupRuntime {
         let now = server.runtime_clock().monotonic_ms();
         if outcome.is_terminal() {
             self.binding = Some((target, state.doc_id()));
-            self.discovery_needed = None;
-            self.discovery_watch = None;
+            // The replacement opened a new epoch for this target. Its stale discovery binding
+            // goes, but S3 runs at any time: another target's discovery is left untouched.
+            if self.target == Some(target) {
+                self.discovery_needed = None;
+                self.discovery_watch = None;
+            }
             self.next_at = now;
         }
         self.finish_studio_repair(server, store, id, target, repair, outcome, state);
@@ -695,6 +769,9 @@ impl CatchupRuntime {
                 self.remember_repair(scope, repair);
             }
             StudioRepairOutcome::AwaitingSeed => {
+                // The owner's next resume would only flush the same B2 again; the seed fetch below
+                // and later offers carry the work from here (review M1).
+                self.repair_next_at = self.repair_next_at.max(now.saturating_add(60_000));
                 let pair = server
                     .sync
                     .with_registry_context(|g, d, _, _| store.owed_studio_repair(id, g, target, d));
@@ -822,8 +899,8 @@ impl CatchupRuntime {
             }
             if let CheckpointTarget::Studio(studio) = target {
                 // S1 of the replacement: the seed is taken from the pass only if its selection was
-                // made under this device's observed tenure, and the pass is dropped either way.
-                // The install is the job's S3, on a source rebuilt detached.
+                // made under this device's observed tenure. The install is the job's S3, on a
+                // source rebuilt detached.
                 let pass = self.checkpoint.take().expect("pass");
                 let seed = match server.repaired_seed_bytes(store, id, &pass, &repair) {
                     Ok(seed) => seed,
@@ -839,7 +916,15 @@ impl CatchupRuntime {
                     pair: Box::new(pair),
                     seed: Zeroizing::new(seed),
                 };
-                self.start_repair(server, store, id, target, Some(studio), input);
+                if self.start_repair(server, store, id, target, Some(studio), input)
+                    == RepairSchedule::Busy
+                {
+                    // Another job or a full pool: keep the fetched seed rather than fetch it
+                    // again, and look again shortly instead of on every turn.
+                    self.checkpoint = Some(pass);
+                    self.checkpoint_retry = now.saturating_add(1_000);
+                    return Ok(Some(None));
+                }
                 self.retry_discovery(now);
                 return Ok(Some(None));
             }

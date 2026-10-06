@@ -509,14 +509,6 @@ impl ServerStore {
         Ok((outcome, state))
     }
 
-    /// Assemble the complete pair a distributed repair names from evidence this device already
-    /// holds (its fault pair, current head and installed opening) plus the receipt the same
-    /// authenticated answer offered. `None` means there is nothing to do: either this repair is
-    /// already terminal here, or this device cannot verify it, which is never a reason to invent
-    /// the missing receipt.
-    ///
-    /// Warm sources only: the caller prepares the source through the detached pool first, and a
-    /// cold source answers `None` rather than paying a full rebuild on the actor.
     /// Whether this exact repair is already applied and owes nothing here, read from the warm
     /// source only. A cold source answers `false`, so the caller does the work rather than
     /// skipping it on a guess.
@@ -535,6 +527,14 @@ impl ServerStore {
         .unwrap_or(false)
     }
 
+    /// Assemble the complete pair a distributed repair names from evidence this device already
+    /// holds (its fault pair, current head and installed opening) plus the receipt the same
+    /// authenticated answer offered. `None` means there is nothing to do: either this repair is
+    /// already terminal here, or this device cannot verify it, which is never a reason to invent
+    /// the missing receipt.
+    ///
+    /// Warm sources only: the caller prepares the source through the detached pool first, and a
+    /// cold source answers `None` rather than paying a full rebuild on the actor.
     pub(crate) fn studio_repair_evidence(
         &self,
         server: u64,
