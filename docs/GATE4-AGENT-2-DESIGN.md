@@ -1356,8 +1356,14 @@ attribution, tenure or signing authority.
   - The base document id is `epoch_id(doc_type, logical_key, closed_epoch + 1, close_record_hash)`.
   - It refuses a Closing branch.
   - Absence of a source is the caller's `AwaitingSource`.
-- **Not built yet:** the app's per-read call and the native `unconfirmedState` field. Both wait on
-  the Save path, since until then no Unconfirmed branch can exist in a production vault.
+- **The app's per-read call, built:** `ServerStore::studio_overlay_unconfirmed_state`. It is
+  computed in the same custody visit as P2's eligibility, on the inspection and on the lifecycle
+  row. It is `None` for a Closing branch or no branch, and `AwaitingSource` with no source record.
+  It is `SourceUnreadable` when a source exists but cannot be read: a fourth value beyond section
+  11's three, for the reason P2 added `sourceUnreadable`. An actor test takes a real Unconfirmed
+  branch from `awaitingSource` to `baseConfirmed` when its confirmed checkpoint is installed.
+- **Native `unconfirmedState`, built:** `awaitingSource`, `baseConfirmed`, `baseSuperseded`,
+  `sourceUnreadable` or null, the same on the inspection and the lifecycle row.
 - **Decisions the app must make** (review of `f3ce1758`):
   - What to report when the installed source exists but cannot be read. It is neither awaiting
     nor confirmable.
@@ -1383,8 +1389,26 @@ Agent 1's Flow S is not implemented, this path is not implemented either; it is 
 - **`SaveUnconfirmedOverlay { basis, branch, nonce, body }`** is one custody visit, which the
   caller repeats with the identical request until it is saved. That is the Closing runtime's
   `save_overlay` contract. Prepare and Finish became one repeated visit because the actor
-  schedules the detached plan itself, on the production background path. A second action would
-  have let a caller try to finish a plan of a request it did not make.
+  schedules the detached plan itself, on the production background path.
+- **The overlay slot is one per actor** (review of `b35e23d2`).
+  - It holds one parked plan for one target and refuses every reservation while it does. So a
+    visit first finishes whatever plan is parked, for any target and any request. A caller who
+    never returns therefore cannot hold the slot, on its own target or any other.
+  - A visit reports only its own request's outcome. Finishing another request's plan returns
+    `busy` (nothing of this request was saved), emits a refresh notice for that plan's document,
+    and logs, rather than returns, a commit error. That request's caller learns its outcome on its
+    own retry, as an exact retry.
+  - A retry while this request's own plan is in flight is `pending`, not `busy`.
+  - The receiver remembers which request scheduled the plan, by a fingerprint of everything the
+    renderer sent. The Closing `save_overlay` clears it when it takes a plan.
+- **A Closing draft refuses this Save.** The store's exact-retry acknowledgement is kind-blind, so a
+  Closing branch's accepted operation resent through this action would otherwise be reported as
+  Unconfirmed work. The receiver refuses first, by what the document's live draft is.
+- **The inventory scan runs only when a store stage will spend the budget.** A `busy` visit
+  costs none. Each other visit still pays one complete scan, as every lifecycle control does,
+  until C-3's cursor makes the per-visit inventory cheaper; native must pace its retries.
+- **The ticket refuses a device that is no longer a member.** The mint checks the provider's
+  membership, not this device's.
 - **The two Saves stay apart.** Neither action is reachable through the control transaction: both
   are refused there by name, and the receiver intercepts them. A Closing plan taken by an
   Unconfirmed commit is refused by the store, by name.

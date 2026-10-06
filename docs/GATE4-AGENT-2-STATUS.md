@@ -32,10 +32,12 @@ whole-scope review of `510d0b54` (verdict: CHANGES REQUIRED, Agent 2 not complet
 <br>&nbsp;&nbsp;- The detached plan runs through the production background path.
 <br>&nbsp;&nbsp;- Native results `unconfirmedOverlaySaveTicket` and `unconfirmedOverlaySave`.
 <br>&nbsp;&nbsp;- Tested on a real preview: schedule, plan, commit, exact retry, and an exact retry with no preview. Also tested: a commit that refuses when the preview goes during the plan, and the scope refusals.
+<br>&nbsp;&nbsp;- The one-per-actor overlay slot (review of `b35e23d2`): a visit finishes any parked plan, for any target, and reports only its own request's outcome; a retry of its own in-flight plan is pending. Tested with interleaved requests and across two targets.
+<br>&nbsp;&nbsp;- A Closing draft refuses this Save, with an oracle showing the store alone would acknowledge it.
 <br>&nbsp;&nbsp;- Not natively registered: Agent 4 does that, and P5 stays false.
+<br>- **8.6's app call and native `unconfirmedState`**, on the inspection and the lifecycle row, with a fourth value, `sourceUnreadable`. An actor test goes from `awaitingSource` to `baseConfirmed`.
 <br>**Still missing:**
 <br>- The per-server count and the vault-wide byte rails.
-<br>- 8.6's app call and its native `unconfirmedState`.
 <br>- The receiver handoff selector's skip of non-Closing branches (review M1), taken by Agent 1 and not in `c9566b82`. Until it lands, an Unconfirmed branch is refused at `start_studio_handoff` and backed off, not skipped.
 <br>Its absence is a Gate 4 gap, not a deferral. | Agent 2; Agent 1 for Flow S and the selector skip |
 | 5. Repeated owner tenure, rejoin, newcomers, legitimate progress | Sync and receipt layer implemented. **Through the actor:** succession and first receipts, in both of a same-key owner's tenures. **Not through the actor:** the same-key refusals, the newcomer, the product's fresh-key A', and hidden higher history. Review 2 (at `1d888fa8`): **PARTIAL** | Leaf-aware tenure, v1 import, app seam, CORE-005 archived witness (`066a6533`), M-1 on the receive path with its own error (`0335262e`). **The product never rejoins with the same identity**: join and found both mint a fresh `MlsDevice`, so a returning owner is a new `DeviceId`. `returning::a_removed_owner_returns_as_a_new_device_with_a_new_tenure_everywhere` drives that form with real MLS and real receipts: A' lands in the vacated leaf, A' and every witness agree on the new start across restart, A' can author, its receipt verifies on witnesses and a newcomer, and A's first-tenure receipt and A's old key claiming the new tenure are refused everywhere.
@@ -163,6 +165,7 @@ over, not the contract. Reasoning from either row as FALSE remains correct today
 | 2026-09-16 | Design revision 6 (`a6d8170`) | **PASS for (a) and (c), no findings.** With (b)'s revision-4 PASS this accepts the whole design. Every finding from revisions 1 to 6 is closed at the design boundary. Two non-blocking refinements were offered and are adopted in revision 7. Reviewer ran no Cargo commands. |
 | 2026-09-16 | Design revision 7 | Accepted refinements only: A-1's scope sentence and N-T7b's diagnostics. No reviewed decision changes. |
 | 2026-10-06 | Review 2, bounded implementation (`510d0b54`..`1d888fa8`) | **(a) P1 manual lifecycle: bounded PASS** with seven LOWs. **(b) Repeated tenure through the actor: PARTIAL**, one MEDIUM (M-1: the same-key refusal was not through the actor, and production's proof gate was unpinned). Reviewer ran 8 focused tests and inspected the 16 mutation logs; no full suites. Native Save conditions: not yet satisfied. Dispositions in "The copy review". |
+| 2026-10-06 | Preview-local slice 2 (`b35e23d2`: the Unconfirmed Save through the actor) | **No blocker. One HIGH:** an abandoned plan on one target blocked Saves on every other target and pinned a process-wide permit. Also three MEDIUMs: a Closing draft reported as Unconfirmed, no refresh notice for another request's commit, and a full scan on every visit. Five LOWs. All fixed in the next commit, with regressions and mutation entries; `b35e23d2` was not pushed before them. Reviewer: static inspection only. |
 | 2026-10-06 | Preview-local slice 1 (`f3ce1758`: the rail, the basis accessors, 8.6's core) | **No blocker or high.** Two MEDIUM test gaps, each with an overstating doc line: the reader's wiring of each 8.6 half, and the read-side rail. Three LOWs: a compile-time bound, `BaseSuperseded` also naming a source behind the base, and phase and adopting left to the app. All fixed or recorded in the next commit, which also makes `f3ce1758`'s two unformatted replication files fmt-clean. Reviewer ran the 13 Unconfirmed tests. |
 | 2026-10-06 | Review 2 finding re-review (`1d888fa8`..`bea7e701`) | **No blocker, high or medium.** (a) P1 bounded PASS stands. (b) Repeated tenure through the actor: **bounded PASS on the narrowed claim** (M-1 closed). Three doc and evidence LOWs, fixed next. Reviewer ran the three new tests (all pass) and inspected the mutation logs. |
 
@@ -1010,6 +1013,41 @@ No blocker or high. Fixed in the commit after `f3ce1758`:
 - **Found while fixing:** `f3ce1758` left `epoch/handoff.rs` and the replication `studio.rs`
   unformatted, so `cargo fmt --check` fails at that commit. Fixed in the next commit, and
   `cargo fmt --all -- --check` now runs in a worktree before every commit.
+
+### Preview-local slice 2 review (`b35e23d2`) and its dispositions
+
+No blocker. `b35e23d2` was held back from origin until these were fixed, in the commit after it.
+
+- **HIGH-1, an abandoned plan on one target blocked every other target.** The slot is one per
+  actor, and a visit took only its own target's plan.
+  - The fix: a visit now takes any parked plan (`take_any_planned_overlay`), mints for that plan's
+    own target, finishes it, and reports `busy`.
+  - Tested by `studio_actor_unconfirmed_save_a_parked_plan_never_blocks_another_target`. Mutation
+    entry `unconfirmed-save-any-parked-plan`.
+- **MEDIUM-1, a Closing draft's accepted operation, resent through this action, was reported as
+  Unconfirmed work.** The receiver now refuses when the live draft is a Closing one.
+  - The regression is in the copy fixture, which holds a live Closing branch. Its oracle shows the
+    store alone acknowledging the resend.
+  - Mutation entry `unconfirmed-save-refuses-closing-draft`.
+- **MEDIUM-2, finishing another request's plan emitted no refresh notice and dropped its error.**
+  Any taken plan now notes `RefreshRequired` for its document, and an error in the not-ours arm is
+  logged.
+- **MEDIUM-3, a full inventory scan on every visit.** The scan now runs only when a store stage will
+  spend the budget, so a `busy` visit costs none. Design 8.7 records that the per-visit scan stays
+  until C-3, and that native must pace retries.
+- **LOW-1, a retry of its own in-flight plan said `busy`.** It now says `pending`. Mutation entry
+  `unconfirmed-save-own-plan-pending`.
+- **LOW-2, the remembered request went stale if the Closing `save_overlay` took the plan.** That
+  path now clears it.
+- **LOW-3, the ticket was minted for a removed device.** The ticket now refuses it.
+- **LOW-4, doc drift.**
+  - Fixed: the desktop converter's doc comment was misplaced, `StudioOverlaySaveVisit`'s stale
+    `dead_code` allow, and the design's absent-caller claim, which is now true across targets.
+  - Left to their owners: Agent 1's `cfg_attr(not(test), allow(dead_code))` markers, now that a
+    production caller exists, and `HANDOVER.md`'s "app-side consumers remain missing".
+- **LOW-5, test gaps.** Added: the oversized-body refusal, a Flipnote target, the own-plan retry
+  and the two-target case. Not added: a receiver restart. A fresh receiver has no parked plan and
+  no remembered request, so its first visit is the fresh-visit path the other tests cover.
 
 | Finding | What |
 |---|---|

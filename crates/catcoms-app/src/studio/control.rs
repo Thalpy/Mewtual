@@ -78,9 +78,11 @@ pub enum StudioUnconfirmedSaveOutcome {
     /// the shared preparation pool was full, or this visit finished another request's scheduled
     /// work first (that work's outcome belongs to its own caller's retry).
     ///
-    /// Never `Saved` for another request's work. The overlay slot holds one plan per target,
-    /// whichever request made it, so a visit can find a plan that is not its own. Reporting that
-    /// plan as saved would tell this caller an edit landed when it did not.
+    /// Never `Saved` for another request's work. The overlay slot holds one plan for the whole
+    /// actor, whichever request and target made it, and a visit finishes whatever is parked before
+    /// its own work so that an absent caller cannot hold the slot. Reporting that plan as saved
+    /// would tell this caller an edit landed when it did not. A retry while this request's own plan
+    /// is in flight is `Scheduled`, not `Busy`.
     Busy,
 }
 
@@ -272,6 +274,10 @@ pub struct StudioOverlayLifecycle {
     /// exactly when `branch` is. Structural: `NotReplayable` is only known after a rebuild, so it
     /// appears on an inspection and never here.
     pub eligibility: Option<types::StudioOverlayEligibility>,
+    /// Design 8.6: how an Unconfirmed branch's base relates to the installed source, derived on
+    /// read from the source's header. `None` for a Closing branch or no branch. Cheap enough for
+    /// this row, which is why it is here as well as on the inspection.
+    pub unconfirmed: Option<types::StudioOverlayUnconfirmedState>,
     /// The preserved archive, if this document has one. It is evidence for the branch it names,
     /// which need not be the live one.
     pub archive: Option<StudioLifecycleArchive>,
@@ -618,13 +624,21 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
             }
             StudioControlAction::FinishOverlayInspection(prepared) => {
                 let inspection = self.finish_studio_inspection(store, server, target, *prepared)?;
-                // P2, in the same custody visit that just proved the read current.
+                // P2 and design 8.6, in the same custody visit that just proved the read current.
                 let tenure = self.observed_owner_tenure();
-                let eligibility = self.sync.with_registry_context(|group, device, _, _| {
-                    store.studio_overlay_eligibility(server, group, target, device, tenure)
-                })?;
+                let (eligibility, unconfirmed) =
+                    self.sync.with_registry_context(|group, device, _, _| {
+                        Ok::<_, AppError>((
+                            store.studio_overlay_eligibility(
+                                server, group, target, device, tenure,
+                            )?,
+                            store.studio_overlay_unconfirmed_state(server, group, target)?,
+                        ))
+                    })?;
                 return Ok(StudioControlResponse::OverlayInspection(
-                    inspection.with_eligibility(eligibility),
+                    inspection
+                        .with_eligibility(eligibility)
+                        .with_unconfirmed(unconfirmed),
                 ));
             }
             // Archiving takes the same two visits as inspection and the same capture; only the
@@ -786,12 +800,15 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
                             device,
                             observed_tenure,
                         )?;
+                        let unconfirmed =
+                            store.studio_overlay_unconfirmed_state(server, group, target)?;
                         return Ok(StudioControlResponse::OverlayLifecycle(Box::new(
                             StudioOverlayLifecycle {
                                 target,
                                 branch,
                                 prepared: metadata.is_some_and(|m| m.is_prepared()),
                                 eligibility,
+                                unconfirmed,
                                 archive,
                                 disposed: metadata.and_then(|m| m.disposed()).map(|d| {
                                     StudioLifecycleDisposal {

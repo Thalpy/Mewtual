@@ -825,6 +825,21 @@ impl CatchupRuntime {
             .map(|(_, plan, ownership)| (plan, ownership))
     }
 
+    /// Take whatever plan is parked, for any target, with the target it was planned for.
+    ///
+    /// The slot holds one plan for the whole actor, and `reserve_overlay` refuses every target
+    /// while it is parked. So a Save on another target that could only take its own target's plan
+    /// would wait for as long as the plan's caller stayed away, which can be for ever. The
+    /// Unconfirmed Save takes it with this instead, finishes it, and reports nothing of it as its
+    /// own (design 8.7; review of `b35e23d2`, HIGH-1).
+    pub(super) fn take_any_planned_overlay(
+        &mut self,
+    ) -> Option<(StudioTarget, Box<StudioOverlayPlan>, OverlayOwnership)> {
+        self.overlay_planned
+            .take()
+            .map(|(context, plan, ownership)| (context.target, plan, ownership))
+    }
+
     #[cfg(test)]
     pub(super) fn overlay_admission_available_for_test(&mut self) -> bool {
         self.overlay_admission.can_admit()

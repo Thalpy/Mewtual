@@ -356,6 +356,38 @@ MUTATIONS = [
         "studio_actor_unconfirmed_save_never_reports_another_requests_plan_as_its_own",
         "B must not be told A's work was its own",
     ),
+    # Review of `b35e23d2`, HIGH-1: a visit finishes a parked plan of ANY target. The mutant leaves
+    # every parked plan where it is, so a plan parked for another target blocks the visit with
+    # nothing finishing it. Mutated inside the method, so the method stays used under -D warnings.
+    (
+        "unconfirmed-save-any-parked-plan", "catcoms-app",
+        "studio_exchange::tests::provisional::seed::tail::unconfirmed_actor::",
+        "crates/catcoms-app/src/studio/receiver/catchup.rs",
+        "            .take()\n            .map(|(context, plan, ownership)| (context.target, plan, ownership))\n",
+        "            .take_if(|_| false)\n            .map(|(context, plan, ownership)| (context.target, plan, ownership))\n",
+        "studio_actor_unconfirmed_save_a_parked_plan_never_blocks_another_target",
+        "finishing A's plan changed A's document, so its row is refreshed",
+    ),
+    # Review of `b35e23d2`, LOW-1: a retry of this request's own in-flight plan is `Scheduled`.
+    (
+        "unconfirmed-save-own-plan-pending", "catcoms-app",
+        "studio_exchange::tests::provisional::seed::tail::unconfirmed_actor::",
+        "crates/catcoms-app/src/studio/receiver/unconfirmed.rs",
+        "            return Ok(if self.unconfirmed_scheduled == Some(request) {\n",
+        "            return Ok(if self.unconfirmed_scheduled == Some(request) && false {\n",
+        "studio_actor_unconfirmed_save_retry_of_its_own_scheduled_plan_is_pending",
+        "a retry of its own in-flight plan is pending, not busy",
+    ),
+    # Review of `b35e23d2`, MEDIUM-1: a Closing draft refuses the Unconfirmed Save. The mutant lets it
+    # through, and the store's kind-blind acknowledgement answers it as saved.
+    (
+        "unconfirmed-save-refuses-closing-draft", "catcoms-app", "studio::copy::tests::",
+        "crates/catcoms-app/src/studio/receiver/unconfirmed.rs",
+        "            && matches!(metadata.provenance(), StudioOverlayProvenance::Closing)\n",
+        "            && matches!(metadata.provenance(), StudioOverlayProvenance::Closing)\n            && false\n",
+        "a_closing_drafts_operation_resent_as_an_unconfirmed_save_is_refused",
+        "a Closing draft must be refused by the Unconfirmed Save",
+    ),
     # --- the branch-generation namespace ---
     (
         "admission-not-trusted", "catcoms-replication", REPL_TESTS,

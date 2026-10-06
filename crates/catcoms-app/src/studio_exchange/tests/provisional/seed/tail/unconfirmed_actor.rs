@@ -9,7 +9,8 @@ use super::runtime::drive;
 use super::*;
 use crate::studio::{
     PreviewHarness, StudioControlAction, StudioControlRequest, StudioControlResponse,
-    StudioReceiver, StudioUnconfirmedOverlaySaveRequest, StudioUnconfirmedSaveOutcome,
+    StudioReceiver, StudioSettlementState, StudioUnconfirmedOverlaySaveRequest,
+    StudioUnconfirmedSaveOutcome,
 };
 use crate::studio_exchange::ServerStudioWatch;
 use catcoms_replication::studio::StudioOverlayProvenance;
@@ -325,6 +326,172 @@ async fn studio_actor_unconfirmed_save_never_reports_another_requests_plan_as_it
     assert_eq!(pending(&mut p, target), 2);
 }
 
+/// Review of `b35e23d2`, HIGH-1 and MEDIUM-2. The slot is one per actor, so a plan parked for one
+/// target whose caller never returns must not block a Save on another target.
+///
+/// A's plan for the Index is parked and A goes away. B, a Save on a Flipnote of the same channel,
+/// finishes A's plan in its visit and is told `Busy`, since none of B was saved. The commit emits
+/// a refresh notice for A's document. B's next visit is no longer blocked: it reaches its own mint,
+/// which refuses because this fixture has no preview of B's Flipnote. A's work is durable, and
+/// A's own retry is an exact retry.
+#[tokio::test]
+async fn studio_actor_unconfirmed_save_a_parked_plan_never_blocks_another_target() {
+    let (mut p, mut receiver, index, basis, branch) = ready_receiver().await;
+    let a = new_entry(&mut p, (basis, branch), 71, [8; 16]);
+    assert!(matches!(
+        save(&mut receiver, &mut p, index, &a).unwrap(),
+        StudioUnconfirmedSaveOutcome::Scheduled
+    ));
+    settle(&mut receiver, &mut p).await;
+    let _ = receiver.take_settlement_notices();
+
+    let flipnote = StudioTarget::Flipnote {
+        channel: channel(),
+        object: [0x77; 16],
+    };
+    let b = StudioUnconfirmedOverlaySaveRequest {
+        basis: [1; 32],
+        branch: [2; 32],
+        nonce: [72; 16],
+        body: FlipnoteOp::SetHeader(FlipnoteHeader::Title("b".into()))
+            .encode()
+            .unwrap(),
+    };
+    let visit = save(&mut receiver, &mut p, flipnote, &b).unwrap();
+    assert!(
+        matches!(visit, StudioUnconfirmedSaveOutcome::Busy),
+        "B is told nothing of it was saved: {visit:?}"
+    );
+    assert!(
+        receiver
+            .take_settlement_notices()
+            .contains(&(index, StudioSettlementState::RefreshRequired)),
+        "finishing A's plan changed A's document, so its row is refreshed"
+    );
+    assert_eq!(pending(&mut p, index), 1, "A's work landed in B's visit");
+
+    let refused = save(&mut receiver, &mut p, flipnote, &b)
+        .unwrap_err()
+        .to_string();
+    assert!(
+        refused.contains("no live preview"),
+        "B is no longer blocked by the slot; it reaches its own mint: {refused}"
+    );
+    assert!(matches!(
+        save(&mut receiver, &mut p, index, &a).unwrap(),
+        StudioUnconfirmedSaveOutcome::Saved { accepted: 1, .. }
+    ));
+}
+
+/// Review of `b35e23d2`, LOW-1: a retry while this request's own plan is in flight is `Scheduled`,
+/// not `Busy`. "Nothing of this request was saved" would be untrue of a plan already running.
+#[tokio::test]
+async fn studio_actor_unconfirmed_save_retry_of_its_own_scheduled_plan_is_pending() {
+    let (mut p, mut receiver, target, basis, branch) = ready_receiver().await;
+    let a = new_entry(&mut p, (basis, branch), 81, [8; 16]);
+    for _ in 0..2 {
+        let visit = save(&mut receiver, &mut p, target, &a).unwrap();
+        assert!(
+            matches!(visit, StudioUnconfirmedSaveOutcome::Scheduled),
+            "a retry of its own in-flight plan is pending, not busy: {visit:?}"
+        );
+    }
+    settle(&mut receiver, &mut p).await;
+    assert!(matches!(
+        save(&mut receiver, &mut p, target, &a).unwrap(),
+        StudioUnconfirmedSaveOutcome::Saved { accepted: 1, .. }
+    ));
+}
+
+/// The confirmed checkpoint arrives on this member: the very receipt and seed the preview was of,
+/// installed by checkpoint adoption, as discovery installs it after a fresh owner proof.
+///
+/// The fixture's preview is of a synthetic candidate that the owner never installs, so there are no
+/// pages to receive; adoption is the confirmed path this member really takes. The tenure is the
+/// proof's claim (the owner's start, 0 here), handed in directly. The proof exchange itself is
+/// discovery's, tested there.
+fn install_confirmed_checkpoint(p: &mut Pair, target: StudioTarget) {
+    let (receipt, seed) = candidate(p, target);
+    let mut b = budget(&mut p.bob, &mut p.b_store);
+    let clock = p.clock.clone();
+    let store = &mut p.b_store;
+    let (outcome, _) = p
+        .bob
+        .sync
+        .with_registry_context(|g, d, _, rng| {
+            store.adopt_studio_checkpoint(
+                SERVER,
+                g,
+                target,
+                d,
+                &receipt,
+                Some(seed.bytes()),
+                0,
+                &clock,
+                rng,
+                &mut b,
+            )
+        })
+        .unwrap();
+    assert_eq!(outcome, crate::store::StudioAdoptionOutcome::Installed);
+}
+
+/// The lifecycle row's design 8.6 field, read through the ordinary control transaction.
+fn reconciliation(
+    receiver: &mut StudioReceiver,
+    p: &mut Pair,
+    target: StudioTarget,
+) -> Option<catcoms_replication::studio::StudioOverlayUnconfirmedState> {
+    match control(receiver, p, target, StudioControlAction::OverlayLifecycle).unwrap() {
+        StudioControlResponse::OverlayLifecycle(lifecycle) => lifecycle.unconfirmed,
+        other => panic!("expected the lifecycle row, got {other:?}"),
+    }
+}
+
+/// Design 8.6 on a real Unconfirmed branch, derived on every read and never written. With no
+/// installed source it is awaiting one. When the confirmed checkpoint is installed, the installed
+/// source is the very checkpoint the branch was based on, and the row says so. Nothing about the
+/// branch changes: it is still Unconfirmed, still local, still this device's.
+#[tokio::test]
+async fn studio_actor_unconfirmed_branch_reconciles_from_awaiting_to_confirmed_on_read() {
+    use catcoms_replication::studio::StudioOverlayUnconfirmedState as U;
+    let (mut p, mut receiver, target, basis, branch) = ready_receiver().await;
+    assert_eq!(
+        reconciliation(&mut receiver, &mut p, target),
+        None,
+        "no branch, no reconciliation"
+    );
+    let request = new_entry(&mut p, (basis, branch), 61, [8; 16]);
+    assert!(matches!(
+        save(&mut receiver, &mut p, target, &request).unwrap(),
+        StudioUnconfirmedSaveOutcome::Scheduled
+    ));
+    settle(&mut receiver, &mut p).await;
+    assert!(matches!(
+        save(&mut receiver, &mut p, target, &request).unwrap(),
+        StudioUnconfirmedSaveOutcome::Saved { accepted: 1, .. }
+    ));
+    assert_eq!(
+        reconciliation(&mut receiver, &mut p, target),
+        Some(U::AwaitingSource)
+    );
+
+    install_confirmed_checkpoint(&mut p, target);
+    assert_eq!(
+        reconciliation(&mut receiver, &mut p, target),
+        Some(U::BaseConfirmed),
+        "the installed source is the checkpoint the branch was based on"
+    );
+    assert!(
+        matches!(
+            recorded_provenance(&mut p, target),
+            Some(StudioOverlayProvenance::Unconfirmed { .. })
+        ),
+        "a confirmed base promotes nothing: the branch is still Unconfirmed"
+    );
+    assert_eq!(pending(&mut p, target), 1);
+}
+
 /// Both actions go through the receiver and its scope checks; neither can be reached through the
 /// control transaction, and neither answers for a channel this server does not know.
 #[tokio::test]
@@ -370,4 +537,19 @@ async fn studio_unconfirmed_save_actions_refuse_outside_the_receiver_and_an_unkn
     .unwrap_err()
     .to_string();
     assert!(refused.contains("unknown Studio channel"), "{refused}");
+
+    // A body past the operation bound is refused by the request's own validation, before any
+    // channel check or store read.
+    let oversized = StudioControlAction::SaveUnconfirmedOverlay(Box::new(
+        StudioUnconfirmedOverlaySaveRequest {
+            basis: [1; 32],
+            branch: [2; 32],
+            nonce: [3; 16],
+            body: vec![0; catcoms_replication::epoch::MAX_DOMAIN_OP_BYTES + 1],
+        },
+    ));
+    let refused = control(&mut receiver, &mut p, target, oversized)
+        .unwrap_err()
+        .to_string();
+    assert!(refused.contains("exceeds the operation bound"), "{refused}");
 }

@@ -34,7 +34,6 @@ pub(crate) struct StudioReceiver {
     unconfirmed_scheduled: Option<[u8; 32]>,
 }
 /// What one custody visit of the scheduled Flow S concluded.
-#[allow(dead_code)]
 pub(crate) enum StudioOverlaySaveVisit {
     /// Terminal and already durable: an acknowledgement, an exact retry, or a commit that this
     /// visit completed from a plan an earlier visit left ready.
@@ -87,6 +86,9 @@ impl StudioReceiver {
         // A plan this actor already produced is finished first. Its transient hold is the only
         // thing protecting its pixels, and it occupies admission until it is consumed.
         if let Some((plan, ownership)) = self.catchup.take_planned_overlay(target) {
+            // Whatever plan this takes, it is no longer an Unconfirmed request's to claim
+            // (design 8.7's `unconfirmed_scheduled`; review of `b35e23d2`, LOW-2).
+            self.unconfirmed_scheduled = None;
             let committed = server.sync.with_registry_context(|group, device, _, rng| {
                 store.commit_studio_overlay(
                     id, group, target, device, close, tenure, *plan, rng, budget,

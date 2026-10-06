@@ -736,3 +736,97 @@ async fn an_object_stored_under_another_channel_label_is_missing_here_not_an_err
         "the C4 refusal must be the probe's: {refused}"
     );
 }
+
+/// Review of `b35e23d2`, MEDIUM-1: a Closing draft's accepted operation resent through the
+/// Unconfirmed Save action is refused, never answered as saved Unconfirmed work.
+///
+/// This fixture's live branch is a Closing one with one accepted operation. The store's exact-retry
+/// acknowledgement is kind-blind: it compares the request's basis and branch, and never reaches the
+/// mint. The oracle shows that the store alone, given that request and a failed Unconfirmed mint,
+/// does acknowledge it as `Local`, which the receiver would have reported as
+/// `provenance:"unconfirmed"`. So the refusal is the receiver's guard.
+#[tokio::test]
+async fn a_closing_drafts_operation_resent_as_an_unconfirmed_save_is_refused() {
+    let mut f = Fixture::new().await;
+    let logical = f.logical();
+    let state = f
+        .store
+        .load_epoch_intents_structural(SERVER, &logical)
+        .unwrap();
+    let metadata = state.handoff_metadata().unwrap();
+    let basis = metadata.overlay().unwrap().basis();
+    let branch = metadata.branch_id().unwrap();
+    let device = f.server.device_id();
+    let body = IndexOp::PutObject {
+        object: OBJECT,
+        kind: StudioKind::Flipnote,
+        title: "accepted overlay".into(),
+        created_by: device,
+        ts: 100,
+        expiry: StudioExpiry::Never,
+    }
+    .encode()
+    .unwrap();
+
+    // The oracle: the store acknowledges the resend.
+    let mut b = budget(&mut f.store, &mut f.server);
+    let store = &mut f.store;
+    let index = f.index;
+    let acknowledged = f
+        .server
+        .sync
+        .with_registry_context(|g, d, clock, rng| {
+            store.start_studio_overlay(
+                SERVER,
+                g,
+                index,
+                d,
+                crate::store::StudioOverlayMint::unconfirmed(Err(invalid("no preview"))),
+                basis,
+                branch,
+                crate::studio::domain(index, [3; 16], body.clone()),
+                clock.now_ms(),
+                rng,
+                &mut b,
+            )
+        })
+        .unwrap();
+    assert!(
+        matches!(
+            acknowledged,
+            crate::store::StudioOverlayStart::Settled(ref saved)
+                if matches!(**saved, StudioOverlaySave::Local(_))
+        ),
+        "precondition: the store alone acknowledges the resend"
+    );
+
+    let mut receiver = crate::studio::PreviewHarness::default().into_receiver(Vec::new());
+    let answered = receiver
+        .control(
+            &mut f.server,
+            &mut f.store,
+            SERVER,
+            crate::studio::StudioControlRequest {
+                target: f.index,
+                action: crate::studio::StudioControlAction::SaveUnconfirmedOverlay(Box::new(
+                    crate::studio::StudioUnconfirmedOverlaySaveRequest {
+                        basis,
+                        branch,
+                        nonce: [3; 16],
+                        body,
+                    },
+                )),
+            },
+        )
+        .map(|(_, _, response)| response);
+    let refused = match answered {
+        Err(error) => error.to_string(),
+        Ok(response) => {
+            panic!("a Closing draft must be refused by the Unconfirmed Save, got {response:?}")
+        }
+    };
+    assert!(
+        refused.contains("was not made on a preview"),
+        "a Closing draft is refused by the receiver, not reported as Unconfirmed work: {refused}"
+    );
+}

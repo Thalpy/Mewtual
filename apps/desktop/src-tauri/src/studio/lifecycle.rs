@@ -442,6 +442,7 @@ fn lifecycle_value(v: &StudioOverlayLifecycle) -> Result<Value, String> {
         "prepared":v.prepared,
         "eligibility":eligibility,
         "manualReason":manual_reason,
+        "unconfirmedState":unconfirmed_state_value(v.unconfirmed),
         "archive":v.archive.as_ref().map(|a| json!({"archive":hex::encode(a.id),
             "branch":hex::encode(a.branch),"generation":a.generation.to_string(),
             "replayable":a.replayable})),
@@ -452,6 +453,24 @@ fn lifecycle_value(v: &StudioOverlayLifecycle) -> Result<Value, String> {
             value
         }),
         "transferred":v.transferred}))
+}
+
+/// Design 8.6's `unconfirmedState`, one function for both reads like [`eligibility_fields`].
+///
+/// `null` for a Closing branch or no branch. `baseConfirmed` means two hashes agree, never that the
+/// preview's provider was ever owner. `sourceUnreadable` is not in design section 11's union; it is
+/// added for the same reason P2's `sourceUnreadable` reason is.
+pub(super) fn unconfirmed_state_value(
+    state: Option<catcoms_app::studio::types::StudioOverlayUnconfirmedState>,
+) -> Value {
+    use catcoms_app::studio::types::StudioOverlayUnconfirmedState as U;
+    match state {
+        None => Value::Null,
+        Some(U::AwaitingSource) => "awaitingSource".into(),
+        Some(U::BaseConfirmed) => "baseConfirmed".into(),
+        Some(U::BaseSuperseded) => "baseSuperseded".into(),
+        Some(U::SourceUnreadable) => "sourceUnreadable".into(),
+    }
 }
 
 /// P2's two fields, design section 11's `eligibility` and `manualReason`, from one classification.
@@ -504,8 +523,6 @@ fn disposal_value(v: &StudioOverlayDisposal) -> Result<Value, String> {
         "sequence":v.sequence.to_string(),"atMs":v.at.to_string(),"terminal":true}))
 }
 
-/// The lifecycle half of the one `StudioControlResponse` converter. Kept here rather than in
-/// `recovery` so that module stays about recovery; `response_value` delegates.
 /// One visit of an Unconfirmed Save (design 8.7), as `{kind:"unconfirmedOverlaySave", state}`.
 ///
 /// What every `saved` result states, so a renderer cannot present it otherwise:
@@ -543,6 +560,8 @@ fn unconfirmed_save_value(
     Ok(value)
 }
 
+/// The lifecycle half of the one `StudioControlResponse` converter. Kept here rather than in
+/// `recovery` so that module stays about recovery; `response_value` delegates.
 pub(super) fn response_value(response: Response) -> Result<Value, String> {
     let value = match response {
         Response::OverlayLifecycle(v) => lifecycle_value(&v)?,

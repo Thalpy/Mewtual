@@ -13,11 +13,57 @@ use super::*;
 use crate::studio::StudioOwnerTenure;
 use catcoms_replication::studio::{
     IndexOp, StudioEpoch, StudioHandoffEvidence, StudioOverlayEligibility,
-    StudioOverlayManualReason as R, StudioOverlayProvenance,
+    StudioOverlayManualReason as R, StudioOverlayProvenance, StudioOverlayUnconfirmedState,
 };
 use catcoms_replication::ReplError;
 
 impl ServerStore {
+    /// Design 8.6, computed on read: how the live Unconfirmed branch's base relates to the
+    /// installed source. Nothing is written, so there is no reconciliation crash window.
+    ///
+    /// `None` when the document has no live branch, or its branch is a Closing one (P2 classifies
+    /// that). Otherwise `AwaitingSource` with no source record, the header-only comparison when
+    /// there is one, and `SourceUnreadable` when there is one that cannot be read. Never a
+    /// promotion: `BaseConfirmed` says two hashes agree, and confers no tenure, signing or
+    /// provider authority.
+    ///
+    /// Two things the caller must combine it with, both recorded in design 8.6:
+    /// - the source's phase, since a faulted or adopting source at the base can read
+    ///   `BaseConfirmed`, and copy into it needs it Open (copy's C3 checks that);
+    /// - the interval when catch-up has installed the epoch the receipt closes, before the
+    ///   successor arrives, which reads `BaseSuperseded`.
+    pub(crate) fn studio_overlay_unconfirmed_state(
+        &self,
+        server: u64,
+        group: &ServerGroup,
+        target: StudioTarget,
+    ) -> Result<Option<StudioOverlayUnconfirmedState>, AppError> {
+        let document = target.document(&group.group_id()).map_err(invalid)?;
+        let state = self.load_epoch_intents_structural(server, &document)?;
+        let Some(metadata) = state.handoff_metadata() else {
+            return Ok(None);
+        };
+        metadata.check_target(target).map_err(invalid)?;
+        let Some(overlay) = metadata.overlay() else {
+            return Ok(None);
+        };
+        if !matches!(
+            metadata.provenance(),
+            StudioOverlayProvenance::Unconfirmed { .. }
+        ) {
+            return Ok(None);
+        }
+        Ok(Some(
+            match self.with_vault_source(server, group, target, |bytes| {
+                StudioEpoch::unconfirmed_base_state_in_vault(bytes, overlay)
+            }) {
+                Ok(None) => StudioOverlayUnconfirmedState::AwaitingSource,
+                Ok(Some(state)) => state,
+                Err(_) => StudioOverlayUnconfirmedState::SourceUnreadable,
+            },
+        ))
+    }
+
     /// `None` when the document has no live branch. Otherwise the most permanent applicable reason
     /// first: provenance, authorship, a Prepared branch's resolution evidence, then (unless that
     /// resolution settles the branch outright) the installed source against the branch's basis,

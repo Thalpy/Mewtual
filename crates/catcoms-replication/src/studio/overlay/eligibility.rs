@@ -26,6 +26,11 @@ pub enum StudioOverlayUnconfirmedState {
     /// interval differently is the app's decision (review of `f3ce1758`, LOW-2). Copy is still
     /// offered, against the actual current projection, under an honest label.
     BaseSuperseded,
+    /// An installed source exists but could not be read, so neither "awaiting" nor either
+    /// comparison is true. Never produced by the vault reader, which errors instead; the app
+    /// reports it rather than fail the read. The same choice as P2's `SourceUnreadable`: a branch
+    /// the user needs to export or archive must not hide behind an error about another record.
+    SourceUnreadable,
 }
 
 /// What a user can do about a retained draft right now.
