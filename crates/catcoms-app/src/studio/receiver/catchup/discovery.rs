@@ -295,6 +295,12 @@ impl CatchupRuntime {
             let CheckpointTarget::Registry(bucket) = pass.inner.target() else {
                 unreachable!()
             };
+            if self.repair_claimed(CheckpointTarget::Registry(bucket)) {
+                // Same rule for a bucket a repair job owns: drop before any preparation.
+                self.checkpoint = None;
+                self.retry_discovery(now);
+                return Ok(None);
+            }
             let source_fits = store.registry_receive_source_fits(id, &server.group_id(), bucket)?;
             // Disabled automatic repair still needs an exact local classification before an
             // ordinary pass can install. Prepare even a small source; otherwise a fresh receiver
@@ -331,6 +337,13 @@ impl CatchupRuntime {
             }
             return Ok(None);
         };
+        if self.repair_claimed(CheckpointTarget::Studio(target)) {
+            // Before `prepare`, which refuses a claimed target and would leave this pass parked
+            // (blocking `replay_ready`) for the job's whole length. The job is what unblocks it.
+            self.checkpoint = None;
+            self.retry_discovery(now);
+            return Ok(None);
+        }
         if !self.prepare(server, store, id, target)? {
             return Ok(None);
         }

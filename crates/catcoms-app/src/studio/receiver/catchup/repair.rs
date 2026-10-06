@@ -397,7 +397,7 @@ impl CatchupRuntime {
             offered: offered.cloned().map(Box::new),
         };
         match self.start_repair(server, store, id, scope, Some(target), input) {
-            RepairSchedule::Scheduled | RepairSchedule::Busy => true,
+            RepairSchedule::Scheduled | RepairSchedule::Busy | RepairSchedule::Full => true,
             RepairSchedule::Held => false,
         }
     }
@@ -565,8 +565,8 @@ impl CatchupRuntime {
         let held = server
             .sync
             .with_registry_context(|g, d, _, _| store.held_studio_repair(id, g, target, d));
-        let held = match held {
-            Ok(Some((held, _))) => held,
+        let (held, held_pair) = match held {
+            Ok(Some(held)) => held,
             Ok(None) => return Ok(None),
             Err(error) => {
                 self.note_repair_failure(target, &error);
@@ -575,14 +575,38 @@ impl CatchupRuntime {
             }
         };
         let scope = CheckpointTarget::Studio(target);
-        let owed = server
+        // Is only the seed missing? A warm source answers exactly; a cold one is classified from
+        // the owner record's B3 flag, which needs no source restore (review LOW-2 on 4bc753a6).
+        let warm = server
             .sync
-            .with_registry_context(|g, d, _, _| store.owed_studio_repair(id, g, target, d));
-        if let Some((owed, pair)) = owed.filter(|(owed, _)| owed.hash() == held.hash()) {
+            .with_registry_context(|g, d, _, _| store.studio_source_is_warm(id, g, target, d));
+        let owed = if warm {
+            server
+                .sync
+                .with_registry_context(|g, d, _, _| store.owed_studio_repair(id, g, target, d))
+                .filter(|(owed, _)| owed.hash() == held.hash())
+        } else {
+            let applied = server.sync.with_registry_context(|g, d, _, _| {
+                store.held_studio_repair_applied(id, g, target, d)
+            });
+            match applied {
+                Ok(true) => Some((held.clone(), held_pair)),
+                Ok(false) => None,
+                Err(error) => {
+                    self.note_repair_failure(target, &error);
+                    self.repair_next_at = now.saturating_add(60_000);
+                    return Ok(None);
+                }
+            }
+        };
+        if let Some((owed, pair)) = owed {
             // B2 already crossed for this decision; only its seed is missing. A resume would just
-            // flush the same source again, so fetch the seed and come back on the long cadence.
+            // flush the same source again, so fetch the seed instead. Only a fetch that actually
+            // started earns the long cadence; one that could not start yet asks again soon.
             self.await_repaired_seed(server, store, id, scope, Some(target), &owed, &pair);
-            self.repair_next_at = now.saturating_add(60_000);
+            if self.checkpoint.is_some() || self.repair_backoff.contains_key(&scope) {
+                self.repair_next_at = now.saturating_add(60_000);
+            }
             return Ok(None);
         }
         // `Busy` is another job or a full pool, retried on the ordinary cadence; only a hold on
@@ -628,6 +652,8 @@ impl CatchupRuntime {
             .with_registry_context(|g, d, _, _| store.held_studio_repair(id, g, target, d))?
         else {
             // Completed or recycled since S1; nothing is owed.
+            let scope = CheckpointTarget::Studio(target);
+            self.report_repair(scope, Ok(StudioRepairOutcome::AlreadyRepaired));
             return Ok(None);
         };
         let (outcome, state) = server.resume_studio_fault_repair(
@@ -657,6 +683,7 @@ impl CatchupRuntime {
         });
         if terminal {
             self.remember_repair(scope, repair);
+            self.report_repair(scope, Ok(StudioRepairOutcome::AlreadyRepaired));
             return Ok(None);
         }
         let Some(pair) = server.sync.with_registry_context(|g, d, _, _| {
@@ -672,6 +699,9 @@ impl CatchupRuntime {
                 (scope, repair.hash()),
                 now.saturating_add(REPAIR_HOLD_BACKOFF_MS),
             );
+            let unverifiable =
+                invalid("this device cannot verify that repair yet; it will be offered again");
+            self.report_repair(scope, Err(&unverifiable));
             return Ok(None);
         };
         let (outcome, state) =
@@ -919,8 +949,10 @@ impl CatchupRuntime {
                 if self.start_repair(server, store, id, target, Some(studio), input)
                     == RepairSchedule::Busy
                 {
-                    // Another job or a full pool: keep the fetched seed rather than fetch it
-                    // again, and look again shortly instead of on every turn.
+                    // Another repair job: keep the fetched seed rather than fetch it again, and
+                    // look again shortly. A full pool is not this: it may be this actor's own
+                    // overlay or handoff waiting for a slot, which a parked pass would hold back
+                    // (it blocks `replay_ready`), so that case drops the pass below.
                     self.checkpoint = Some(pass);
                     self.checkpoint_retry = now.saturating_add(1_000);
                     return Ok(Some(None));

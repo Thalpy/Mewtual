@@ -39,9 +39,11 @@ table with the commit that closed it.
   this device's authoring tenure before anything is captured, so a newcomer with `Unknown` or
   `Imported` tenure, or a repair signed by anyone but the current owner, costs no capture and
   holds nothing else. While a job owns a target, ordinary installs, page receive, owner rotation,
-  preparation and foreground Apply into it defer or refuse. Gossip ingest, own-operation replay
-  and Flow S/H writes are not claim-checked; a change from them makes the rebuild stale, and
-  the job writes nothing and retries.
+  preparation and foreground Apply into it defer or refuse. Own-operation replay and gossip
+  ingest that needs source preparation wait through the same preparation check. Gossip ingest
+  into an already warm source and Flow S/H writes are not claim-checked; a change from them makes
+  the rebuild stale, and the job writes nothing (an automatic job reruns; an explicit decision is
+  reported abandoned, to be made again).
   Registry repair execution remains disabled. Registry checkpoint routing classifies a pending
   replacement only from the exact-current verified source already retained by the bounded
   preparation boundary. Missing, cold, stale, retargeted or unreadable preparation is unknown and
@@ -559,9 +561,11 @@ table with the commit that closed it.
   full-identity rates, four driver-owned outbound slots and source service rails bound resources;
   rate debt is process-local and Sybils still reach aggregate caps. Authenticated current-tenure
   repair bytes may be carried only after the exact replacement source is synchronized and the
-  contextual owner record is re-saved durably. Automatic receiving-side repair application,
-  continuation and repaired-seed installation remain disabled until they can retain shared
-  preparation admission across detached capture, revalidation and commit. Registry seed fetching
+  contextual owner record is re-saved durably. For Studio sources, receiving-side repair
+  application, owner continuation and repaired-seed installation run only as the detached job
+  described under the Studio fault repair entry above, which holds shared preparation admission
+  from capture through commit. The same paths for Registry buckets remain disabled until their job
+  exists. Registry seed fetching
   and explicit recovery-first installation are implemented; head hints alone still authorize
   neither replacement nor an editing lease.
 - **Registry page cursors are continuation claims, not remote possession or currency proofs.**

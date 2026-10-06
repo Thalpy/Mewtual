@@ -146,8 +146,12 @@ pub(crate) enum RepairCompletion {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum RepairSchedule {
     Scheduled,
-    /// Another job, a full pool, or a claim still owned by an abandoned job's worker.
+    /// Another repair job, or a claim still owned by an abandoned job's worker.
     Busy,
+    /// The shared preparation pool is full, or its flat retry has not elapsed. Unlike `Busy`
+    /// this can be this actor's own other work waiting for a slot, so nothing should be parked
+    /// waiting on it.
+    Full,
     /// The target is backing off after a persistent hold, or its capture failed.
     Held,
 }
@@ -156,9 +160,19 @@ impl RepairSchedule {
     pub(super) fn start(self) -> StudioRepairStart {
         match self {
             Self::Scheduled => StudioRepairStart::Scheduled,
-            Self::Busy | Self::Held => StudioRepairStart::Busy,
+            Self::Busy | Self::Full | Self::Held => StudioRepairStart::Busy,
         }
     }
+}
+
+/// The report for a job that ended before committing anything. Only automatic work reruns by
+/// itself; an explicit decision persisted nothing before S3, so its person must decide again.
+fn abandoned(explicit: bool, why: &str) -> AppError {
+    invalid(if explicit {
+        format!("abandoned: {why}; nothing was decided, decide again")
+    } else {
+        format!("abandoned: {why}; it will rerun")
+    })
 }
 
 impl<T: MeshTransport> StudioBackgroundJob<T> {
@@ -238,13 +252,13 @@ impl CatchupRuntime {
             return RepairSchedule::Held;
         }
         if now < self.repair_capacity_at {
-            return RepairSchedule::Busy;
+            return RepairSchedule::Full;
         }
         // 10.3: the slot is reserved before the first body read, and a refusal costs nothing
         // but a flat retry.
         let Ok(permit) = self.preparation_pool().try_acquire_owned() else {
             self.repair_capacity_at = now.saturating_add(REPAIR_CAPACITY_RETRY_MS);
-            return RepairSchedule::Busy;
+            return RepairSchedule::Full;
         };
         let Some(claim) = self.repair_claims.claim(target) else {
             // An abandoned job's worker still owns this target. It releases where it ends.
@@ -377,9 +391,9 @@ impl CatchupRuntime {
         let tenure = server.sync.authoring_owner_tenure_start();
         let mls = server.sync.with_registry_context(|g, _, _, _| g.epoch());
         if job.tenure != tenure || job.mls != mls {
-            let target = job.target;
+            let (target, explicit) = (job.target, job.input.explicit());
             self.repair_job = None;
-            let moved = invalid("abandoned: the owner tenure or MLS epoch changed; it will rerun");
+            let moved = abandoned(explicit, "the owner tenure or MLS epoch changed");
             self.report_repair(target, Err(&moved));
         }
     }
@@ -388,10 +402,9 @@ impl CatchupRuntime {
     /// result is released the moment it arrives (see `StudioReceiver::complete`).
     pub(in crate::studio::receiver) fn repair_release_for_pause(&mut self) {
         if self.repair_pending() {
-            let target = self.repair_job.take().map(|job| job.target);
-            if let Some(target) = target {
-                let paused = invalid("abandoned: catch-up paused; it will rerun");
-                self.report_repair(target, Err(&paused));
+            if let Some(job) = self.repair_job.take() {
+                let paused = abandoned(job.input.explicit(), "catch-up paused");
+                self.report_repair(job.target, Err(&paused));
             }
         }
     }
@@ -467,10 +480,11 @@ impl CatchupRuntime {
             store.install_prepared_studio_source(g, d, *prepared)
         })?;
         if !installed {
-            // The source moved during S2. Nothing was written; capture afresh later.
+            // The source moved during S2. Nothing was written; automatic work captures afresh
+            // after a short wait, and an explicit decision is reported for its person to repeat.
             self.repair_backoff
                 .insert(target, now.saturating_add(REPAIR_STALE_RETRY_MS));
-            let stale = invalid("the document changed during the repair; it will rerun");
+            let stale = abandoned(input.explicit(), "the document changed during the repair");
             self.report_repair(target, Err(&stale));
             return Ok(None);
         }

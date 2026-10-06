@@ -57,6 +57,20 @@ bounded `last_attempt`, encoded natively; INTERFACES documents the contract.
 | L6 view and claim disagreed | The blocker follows the claim; authority is checked before the view is annotated. |
 | L7 split doc comment | Restored. |
 
+**Re-review of `4bc753a6`: no BLOCKER or HIGH; fixes below.**
+- **MEDIUM-1 (truthful reports):** an explicit decision abandoned before S3 now reads "decide
+  again" instead of "it will rerun". A decision while paused is refused. The quiet endings
+  (already applied, unverifiable, nothing held) are reported.
+- **LOW-1:** a fetched seed is kept only while another repair job is busy, not while the pool is
+  full.
+- **LOW-2:** a cold owed owner classifies from the B3 flag in its owner record.
+- **LOW-3:** the claim is checked before preparation in `advance_checkpoint`.
+- **LOW-4:** the owner backs off only when a seed fetch started.
+- **LOW-5:** doc drift fixed.
+- **Tests:** paused refusal, unverifiable report with a per-repair hold, preparation refusal and
+  pass drop for a claimed target, the cannot-start error, and the cold durable owner. The paused,
+  pre-preparation and durable guards were each broken to confirm their tests fail.
+
 Test gaps the review listed and that remain open: Flow D end to end through the job, the peer
 branch of `execute_replace`, mutant coverage of the remaining claim consult sites (page receive,
 selection, rotation, Apply), and a forged offer on a peer with observed tenure (this fixture's

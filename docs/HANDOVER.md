@@ -19,8 +19,9 @@ and ranks the live hazards in that path.
     unchanged Server transaction (issuance, resume, Flow D or the owed replacement).
   - **S4:** drops the slot and claim after the attempt.
 
-  Explicit decisions answer `RepairStarted`, and the fault view reports a `Scheduled` blocker and
-  a bounded `lastAttempt`. Offered repairs are authority-checked before capture. The repaired
+  Explicit decisions answer `RepairStarted`, or an error when they cannot start (including while
+  catch-up is paused). The fault view reports a `Scheduled` blocker and a bounded `lastAttempt`
+  for every way a job ends. Offered repairs are authority-checked before capture. The repaired
   replacement is installed through the same job. The core gained a sealed owner-authority view
   for a later detached adoption half.
 

@@ -922,8 +922,10 @@ async fn an_abandoned_decision_is_reported_and_a_new_one_starts_clean() {
     let bob = owed._bob.my_fingerprint();
     owed.alice.remove_member(&bob).await.unwrap();
     let view = read(&mut receiver, &mut owed);
+    // Nothing was persisted before S3, so nothing reruns: the report must say decide again.
     assert!(
-        matches!(view.last_attempt, Some(StudioRepairReport::Failed(ref why)) if why.contains("abandoned")),
+        matches!(view.last_attempt, Some(StudioRepairReport::Failed(ref why))
+            if why.contains("abandoned") && why.contains("decide again") && !why.contains("rerun")),
         "{:?}",
         view.last_attempt
     );
@@ -940,4 +942,199 @@ async fn an_abandoned_decision_is_reported_and_a_new_one_starts_clean() {
     let view = read(&mut receiver, &mut owed);
     assert!(view.last_attempt.is_none(), "{:?}", view.last_attempt);
     assert_eq!(view.blocked_by, Some(StudioRepairBlocker::Scheduled));
+}
+
+/// Re-review MEDIUM-1(b) on `4bc753a6`: a paused receiver runs no job, so a decision made then is
+/// refused honestly, reserving nothing, rather than answered `Scheduled` and released unrun.
+#[tokio::test]
+async fn a_decision_while_paused_is_refused_and_reserves_nothing() {
+    let mut owed = Owed::new(false).await;
+    let snapshot = owed.snapshot();
+    let mut receiver = StudioReceiver::default();
+    receiver.catchup.owner_snapshot = Some(snapshot);
+    let pool = receiver.catchup.inject_overlay_pool_for_test(4);
+    receiver.pause_at_for_test(&owed.alice);
+    let request = owed.request();
+    let refused = receiver
+        .control(
+            &mut owed.alice,
+            &mut owed.store,
+            SERVER,
+            StudioControlRequest {
+                target: owed.target,
+                action: StudioControlAction::RepairFault(Box::new(request)),
+            },
+        )
+        .map(|_| ())
+        .unwrap_err()
+        .to_string();
+    assert!(refused.contains("paused"), "{refused}");
+    assert_eq!(pool.available_permits(), 4);
+    assert!(!receiver.catchup.repair_claimed(owed.scope()));
+}
+
+/// Re-review MEDIUM-1(c) and the M2 per-repair hold: an offered repair this device cannot
+/// assemble evidence for is reported, and only that repair is held, never the target.
+#[tokio::test]
+async fn an_unverifiable_offer_is_reported_and_holds_only_that_repair() {
+    let mut owed = Owed::new(false).await;
+    let (mut runtime, _pool) = owed.runtime(4);
+    let (scope, target) = (owed.scope(), owed.target);
+    let StudioOwnerTenure::Known(start) = owed.alice.observed_owner_tenure() else {
+        panic!("observed tenure")
+    };
+    // A repair naming one receipt this source holds and one it has never seen.
+    let mut hashes = [owed.pair[0].hash(), [9; 32]];
+    hashes.sort();
+    let (chosen, alice) = (&owed.chosen, &mut owed.alice);
+    let unknown = alice.sync.with_registry_context(|_, d, _, _| {
+        ReceiptRepair::sign_in_tenure(
+            chosen.document.clone(),
+            chosen.tenure_id,
+            hashes,
+            hashes[0],
+            1,
+            start,
+            d,
+        )
+        .unwrap()
+    });
+    let input = RepairInput::Offered {
+        repair: Box::new(unknown.clone()),
+        offered: None,
+    };
+    let started = runtime.start_repair(
+        &mut owed.alice,
+        &mut owed.store,
+        SERVER,
+        scope,
+        Some(target),
+        input,
+    );
+    assert_eq!(started.start(), StudioRepairStart::Scheduled);
+    rebuild(&mut runtime, &owed).await;
+    runtime
+        .repair_commit(&mut owed.alice, &mut owed.store, SERVER)
+        .unwrap();
+    assert!(
+        matches!(runtime.repair_report(scope), Some(StudioRepairReport::Failed(ref why)) if why.contains("cannot verify")),
+        "{:?}",
+        runtime.repair_report(scope)
+    );
+    assert!(runtime.repair_backoff.is_empty(), "the target is not held");
+    assert!(runtime
+        .repair_unverifiable
+        .contains_key(&(scope, unknown.hash())));
+}
+
+/// Re-review LOW-6: the claim consult sites outside the router. Preparation refuses a claimed
+/// target, and a checkpoint pass for it is dropped by `run` before any preparation (LOW-3).
+#[tokio::test]
+async fn a_claimed_target_is_neither_prepared_nor_left_holding_a_pass() {
+    let mut owed = Owed::new(true).await;
+    let (mut runtime, pool) = owed.runtime(4);
+    let (scope, target) = (owed.scope(), owed.target);
+    runtime.start_repair(
+        &mut owed.alice,
+        &mut owed.store,
+        SERVER,
+        scope,
+        Some(target),
+        RepairInput::Resume,
+    );
+    assert_eq!(pool.available_permits(), 3);
+    assert!(
+        !runtime
+            .prepare(&mut owed.alice, &mut owed.store, SERVER, target)
+            .unwrap(),
+        "a claimed target is not prepared"
+    );
+    assert!(
+        runtime.preparation.is_none(),
+        "no rival rebuild was captured"
+    );
+    assert_eq!(pool.available_permits(), 3, "and no second slot was taken");
+    let repair = owed.repair.clone().unwrap();
+    runtime.checkpoint = Some(
+        owed.alice
+            .select_repaired_checkpoint(&owed.store, SERVER, scope, &repair, &owed.chosen)
+            .unwrap(),
+    );
+    runtime.checkpoint_sealed = false;
+    runtime
+        .run(&mut owed.alice, &mut owed.store, SERVER, &VecDeque::new())
+        .unwrap();
+    assert!(
+        runtime.checkpoint.is_none(),
+        "the claimed target's pass was dropped"
+    );
+}
+
+/// Re-review M3 "cannot start": an explicit decision that cannot even be captured returns why,
+/// instead of a retryable "busy" that would fail the same way again.
+#[tokio::test]
+async fn a_decision_that_cannot_start_says_why() {
+    let mut owed = Owed::new(false).await;
+    let snapshot = owed.snapshot();
+    let mut receiver = StudioReceiver::default();
+    receiver.catchup.owner_snapshot = Some(snapshot);
+    let pool = receiver.catchup.inject_overlay_pool_for_test(4);
+    // A document on the same channel that this device holds no copy of.
+    let absent = StudioTarget::Flipnote {
+        channel: owed.target.channel(),
+        object: [5; 16],
+    };
+    let request = owed.request();
+    let refused = receiver
+        .control(
+            &mut owed.alice,
+            &mut owed.store,
+            SERVER,
+            StudioControlRequest {
+                target: absent,
+                action: StudioControlAction::RepairFault(Box::new(request)),
+            },
+        )
+        .map(|_| ())
+        .unwrap_err()
+        .to_string();
+    assert!(refused.contains("never creates a source"), "{refused}");
+    assert_eq!(pool.available_permits(), 4);
+}
+
+/// Re-review LOW-2 on `4bc753a6`: with the source cold, the owner still recognises from its
+/// durable record (B3) that only the seed is missing, and fetches it without a job.
+#[tokio::test]
+async fn a_cold_owed_owner_fetches_the_seed_from_its_durable_record() {
+    let mut owed = Owed::new(true).await;
+    let (mut runtime, pool) = owed.runtime(4);
+    let target = owed.target;
+    // Evict the warm copy, as capturing any other work would.
+    let (store, alice) = (&mut owed.store, &mut owed.alice);
+    let _ = alice
+        .sync
+        .with_registry_context(|g, d, _, _| store.capture_studio_source(SERVER, g, target, d))
+        .unwrap();
+    let (store, alice) = (&owed.store, &mut owed.alice);
+    assert!(!alice
+        .sync
+        .with_registry_context(|g, d, _, _| store.studio_source_is_warm(SERVER, g, target, d)));
+    let watch = owed
+        .alice
+        .watch_studio_epoch(&owed.store, SERVER, target)
+        .unwrap();
+    let watches = VecDeque::from([(watch, 0)]);
+    runtime
+        .repair_owner(&mut owed.alice, &mut owed.store, SERVER, &watches)
+        .unwrap();
+    assert!(
+        runtime.repair_job_target().is_none(),
+        "no capture and rebuild"
+    );
+    assert_eq!(pool.available_permits(), 4);
+    let minted = runtime
+        .checkpoint
+        .as_ref()
+        .expect("the owed seed is fetched");
+    assert_eq!(minted.inner.selected_receipt(), &owed.chosen);
 }

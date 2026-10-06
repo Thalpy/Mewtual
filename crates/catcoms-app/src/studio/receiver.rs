@@ -159,6 +159,17 @@ impl StudioReceiver {
         // Both applies publish through the ordinary Save path rather than writing in the control
         // transaction, so both are intercepted here. Copy's `target` is the SOURCE it copied from;
         // the request it produces publishes to the destination.
+        if matches!(
+            request.action,
+            StudioControlAction::RepairFault(_) | StudioControlAction::RepairRegistryFault(_)
+        ) && self.paused
+        {
+            // A paused receiver runs no repair job, and a job scheduled now would only be
+            // released unrun. Say so rather than answer `Scheduled`.
+            return Err(AppError::Invalid(
+                "Studio catch-up is paused; open the document again before deciding".into(),
+            ));
+        }
         if let StudioControlAction::RepairFault(decision) = request.action {
             // Only the catch-up runtime holds the durable owner snapshot issuance requires.
             let response =
