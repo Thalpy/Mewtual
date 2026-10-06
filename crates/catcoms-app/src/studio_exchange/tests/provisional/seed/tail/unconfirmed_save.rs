@@ -861,6 +861,9 @@ async fn unconfirmed_plan_refuses_a_closing_commit_mint_by_name() {
     let operation = draft_op(&p, target, 0xb1, "wrong kind at commit");
     let start = mint(&p, &prepared);
     let tenure = p.bob.observed_owner_tenure();
+    // Minting `b` makes `stale` stale. The commit is handed `stale`, so if the kind check ever ran
+    // after budget entry the answer would be "Studio budget is stale" instead: this pins it first.
+    let mut stale = budget(&mut p.bob, &mut p.b_store);
     let mut b = budget(&mut p.bob, &mut p.b_store);
     let store = &mut p.b_store;
     let refused = p
@@ -897,7 +900,7 @@ async fn unconfirmed_plan_refuses_a_closing_commit_mint_by_name() {
                 },
                 plan,
                 rng,
-                &mut b,
+                &mut stale,
             )
         })
         .unwrap_err();
@@ -906,4 +909,101 @@ async fn unconfirmed_plan_refuses_a_closing_commit_mint_by_name() {
         "epoch studio: overlay plan and commit mint are for different kinds of draft"
     );
     assert_eq!(recorded(&mut p, target), None, "nothing was written");
+}
+
+/// The reverse pairing: a real Closing plan, made by the founder with a Known tenure on an
+/// installed Closing source, handed an Unconfirmed mint, refuses by name. The mint is a sentinel
+/// failure, and the fixture's own budget mints leave the commit's budget stale, so hearing either
+/// the sentinel or "stale" would mean the kind check no longer runs first.
+#[tokio::test]
+async fn closing_plan_refuses_an_unconfirmed_commit_mint_by_name() {
+    let mut p = pages::proven_pair().await;
+    // The capture fixture authors Flipnote title edits, so its target must be a Flipnote.
+    let target = target();
+    let mut b = budget(&mut p.alice, &mut p.a_store);
+    let store = &mut p.a_store;
+    let refused = p
+        .alice
+        .sync
+        .with_registry_context(|g, d, _, rng| {
+            let capture =
+                crate::store::studio_closing_capture_fixture(store, SERVER, g, d, target, false);
+            let plan = capture.plan()?;
+            store.commit_studio_overlay_with(
+                SERVER,
+                g,
+                target,
+                d,
+                StudioOverlayMint::unconfirmed(Err(invalid("sentinel mint failure"))),
+                plan,
+                rng,
+                &mut b,
+            )
+        })
+        .unwrap_err();
+    assert_eq!(
+        refused.to_string(),
+        "epoch studio: overlay plan and commit mint are for different kinds of draft"
+    );
+}
+
+/// A live Unconfirmed branch survives a membership change. The freshness guard compares a fresh
+/// mint with the CURRENT group, never with the epoch the branch recorded at admission, so after a
+/// third member joins, a preview fetched under the new MLS epoch appends to the same branch and the
+/// branch keeps its first admission's facts. Tightening the guard to the branch's recorded epoch
+/// would strand every live draft at the first membership change; this is what would catch it.
+#[tokio::test]
+async fn unconfirmed_branch_accepts_a_fresh_mint_after_an_mls_epoch_change() {
+    let target = index();
+    let mut p = preview_pair(target).await;
+    let first_preview = complete_preview(&mut p).await;
+    let basis = mint(&p, &first_preview).unwrap();
+    let admitted = basis.provenance();
+    let first_ticket = ticket(&mut p, target, &basis);
+    let first = draft_op(&p, target, 0xc1, "before the join");
+    assert_eq!(
+        local(save(&mut p, target, &first_preview, first_ticket, first).unwrap()).accepted(),
+        1
+    );
+    let epoch = p.bob.sync.with_registry_context(|g, _, _, _| g.epoch());
+
+    p.bob.subscribe_control().await.unwrap();
+    let invite = p.alice.mint_invite([93; 16], u64::MAX, vec![]).unwrap();
+    let (third, tick) = tokio::join!(
+        Server::join(
+            Net::new(p.hub.join(PeerId::from_u64(3))),
+            MlsDevice::generate().unwrap(),
+            rng(),
+            Box::new(p.clock.clone()),
+            "third",
+            p.alice.local_peer(),
+            &invite
+        ),
+        p.alice.sync_once()
+    );
+    third.unwrap();
+    tick.unwrap();
+    while p.bob.sync.with_registry_context(|g, _, _, _| g.epoch())
+        != p.alice.sync.with_registry_context(|g, _, _, _| g.epoch())
+    {
+        p.bob.sync_once().await.unwrap();
+    }
+    assert_ne!(
+        p.bob.sync.with_registry_context(|g, _, _, _| g.epoch()),
+        epoch,
+        "precondition: the MLS epoch moved"
+    );
+
+    drop(first_preview);
+    let after = complete_preview(&mut p).await;
+    let fresh = mint(&p, &after).unwrap();
+    assert_eq!(ticket(&mut p, target, &fresh), first_ticket);
+    let second = draft_op(&p, target, 0xc2, "after the join");
+    let draft = local(save(&mut p, target, &after, first_ticket, second).unwrap());
+    assert_eq!(draft.accepted(), 2);
+    assert_eq!(
+        recorded(&mut p, target).map(|(provenance, _)| provenance),
+        Some(Some(admitted)),
+        "the branch keeps its first admission's facts across the membership change"
+    );
 }

@@ -16,6 +16,24 @@ MUTATIONS = [
      b"            || { let _ = self.gate.owner(); false }\n",
      "studio_handoff_preparation_source_owner_must_match_verified_authority",
      "captured source owner bypassed verified handoff authority"),
+    # SIGN-TEST-002: the captured authority's receipt must be the branch's own.
+    ("receipt", "crates/catcoms-replication/src/studio/overlay/handoff/preparation.rs",
+     b"        if self.target != authority.target || active.receipt() != &authority.receipt {\n",
+     b"        if self.target != authority.target || { let _ = (active.receipt(), &authority.receipt); false } {\n",
+     "studio_handoff_preparation_refuses_authority_captured_for_another_receipt",
+     "authority captured for one receipt prepared a branch opened on another"),
+    # SIGN-TEST-001: pre-sign typed admission is the handoff path's only editor-cap check.
+    ("local-policy", "crates/catcoms-replication/src/studio/epoch/handoff/preparation.rs",
+     b"            source\n                .target\n                .local_policy(&projection, domain, &source.actor)?;\n",
+     b"            let _ = source\n                .target\n                .local_policy(&projection, domain, &source.actor);\n",
+     "studio_handoff_preparation_refuses_a_vault_decoded_branch_over_the_local_cap",
+     "an over-cap branch reached signing past the local editor cap"),
+    # SIGN-TEST-001, aggregate half: the probe gate's admission before any signature.
+    ("probe-gate", "crates/catcoms-replication/src/studio/epoch/handoff/preparation.rs",
+     b"            if probe.admit_local(crate::AdmittedOperation {\n",
+     b"            if false && probe.admit_local(crate::AdmittedOperation {\n",
+     "studio_handoff_preparation_refuses_an_honest_branch_over_the_successor_gate",
+     "a branch over the successor's epoch budget reached signing"),
 ]
 
 

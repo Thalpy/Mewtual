@@ -580,25 +580,26 @@ impl ServerStore {
             StudioOverlayMint::Unconfirmed(minted) => {
                 let logical = target.document(&group.group_id()).map_err(invalid)?;
                 let scope = scope_bytes(server, &logical)?;
-                let parent = fs::symlink_metadata(self.dir.join("servers"))
-                    .map_err(|e| AppError::Io(e.to_string()))?;
-                if !parent.is_dir() || is_link(&parent) {
-                    return Err(invalid("parent is not a regular directory"));
-                }
-                match fs::symlink_metadata(self.studio_epoch_path(&scope)) {
-                    Ok(_) => {
-                        return Err(invalid(
-                            "this document has an installed source; an unconfirmed draft cannot \
-                             start or continue beside it",
-                        ))
+                // Every probe failure invalidates the budget, as `checked_studio_source` does for a
+                // failed load: whatever this budget believed about the record is no longer known
+                // to be true. A present record is not a failure, so it leaves the budget alone.
+                let probed = (|| {
+                    let parent = fs::symlink_metadata(self.dir.join("servers"))
+                        .map_err(|e| AppError::Io(e.to_string()))?;
+                    if !parent.is_dir() || is_link(&parent) {
+                        return Err(invalid("parent is not a regular directory"));
                     }
-                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-                    Err(e) => {
-                        // As `checked_studio_source` does for a failed read: whatever this budget
-                        // believed about the record is no longer known to be true.
-                        storage.invalidate();
-                        return Err(AppError::Io(e.to_string()));
+                    match fs::symlink_metadata(self.studio_epoch_path(&scope)) {
+                        Ok(_) => Ok(true),
+                        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+                        Err(e) => Err(AppError::Io(e.to_string())),
                     }
+                })();
+                if probed.inspect_err(|_| storage.invalidate())? {
+                    return Err(invalid(
+                        "this document has an installed source; an unconfirmed draft cannot \
+                         start or continue beside it",
+                    ));
                 }
                 storage
                     .verify_record(

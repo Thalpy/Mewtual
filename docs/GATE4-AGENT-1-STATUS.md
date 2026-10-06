@@ -4397,9 +4397,9 @@ mutation-harness anchor moved.
 |---|---|---|
 | 1 | the freshness wording overclaimed: the guard catches a basis kept across an MLS-epoch change, not one kept within an epoch past expiry | wording **fixed** here; the same-visit mint is recorded as a G4-A2-PREVIEW obligation |
 | 2 | the membership half of the guard cannot fire alone | labelled defence in depth |
-| 3 | no test that a live Unconfirmed branch accepts a fresh mint's append after an MLS-epoch change; tightening the guard to the branch's recorded epoch would strand every branch unnoticed | **next commit** |
-| 4 | a failed parent-directory probe does not invalidate the budget, though the comment implies parity with `checked_studio_source` | **next commit** |
-| 5 | the kind check's position before the store reads is not pinned, and the reverse pairing is untested | **next commit** |
+| 3 | no test that a live Unconfirmed branch accepts a fresh mint's append after an MLS-epoch change; tightening the guard to the branch's recorded epoch would strand every branch unnoticed | **fixed** in the follow-up commit: `unconfirmed_branch_accepts_a_fresh_mint_after_an_mls_epoch_change` (third member joins, preview refetched, append accepted, provenance unchanged) |
+| 4 | a failed parent-directory probe does not invalidate the budget, though the comment implies parity with `checked_studio_source` | **fixed**: every probe failure invalidates the budget; a present record is not a failure. No test: it needs an IO fault on the vault directory |
+| 5 | the kind check's position before the store reads is not pinned, and the reverse pairing is untested | **fixed**: the Unconfirmed-plan test now hands the commit a stale budget, and `closing_plan_refuses_an_unconfirmed_commit_mint_by_name` is the reverse pairing on a real Closing capture. Moving the check after budget entry fails both with "Studio budget is stale" |
 | 6 | this section's tables and executed-checks line were stale | **fixed** here |
 | 7 | `catcoms-sync/.../provisional/seed.rs:229-230` (Agent 2's) says the app checks before minting; it checks after the attempt, before opening it | passed to Agent 2 |
 | 8 | no S3 test with a real preview of a different candidate | follow-up: the fixture's candidates are deterministic, so a different candidate needs a second fixture |
@@ -4407,6 +4407,26 @@ mutation-harness anchor moved.
 **Executed** at `e5a52386` plus this change, in `M:/catcoms-a1-verify`: see the commit message for
 the final run; the first cut's run at `c6f7fea0` passed 838 app and 344 replication library tests
 with every integration binary green, and frontend `npm test` passed 1282 of 1282.
+
+## G4-A1-CORE: the core signing review, and its two test findings
+
+The SHA-pinned review of `8190dc4..e65bfd8` returned a **bounded PASS for the production code**
+with two medium test-coverage findings; the verdict, findings and what was executed are recorded in
+`GATE4-HANDOFF-SIGNING-REVIEW.md`. A finding re-review then closed SIGN-TEST-002 and narrowed
+SIGN-TEST-001.
+
+- **SIGN-TEST-002, closed**: the authority/receipt binding, pinned through a real second close
+  cycle, with the `receipt` mutant.
+- **SIGN-TEST-001, editor-cap and aggregate halves closed**: `local_policy` through a structurally
+  decoded over-cap branch (`local-policy` mutant), and the probe gate through an **honest**
+  branch (`probe-gate` mutant).
+- **SIGN-TEST-001b, open**: a positive handoff by a non-owner author, which needs a second-member
+  fixture. Residual and not part of the correction: no isolated mutant for the per-operation
+  preflight or the framing probe, neither of which is the first refusal for any cheap input.
+- **A product gap, for Agent 2**: the honest over-gate branch is valid local work that can never be
+  handed off automatically. For a non-owner author the binding limit is the 1 MiB per-device cap,
+  a quarter of the epoch budget; P2's classifier reports such a branch as Transferable; and no 8.3
+  rail bounds signed size. The handoff refuses it safely before signing.
 
 ## A verification-scope failure of mine, recorded because the fix alone would hide it
 

@@ -141,6 +141,60 @@ metadata and reference fences unchanged.
 | SIGN-PERF-001 | LOW, production | The compatibility adapter restores the private copy before the cheap pristine check, so a refused `handoff_studio_overlay` against a successor with progress pays one extra full restore under custody, and it clones the ledger and metadata twice | follow-up: run `check_overlay_successor`, or a cheap op-count/phase/opening check, before `copy_handoff_source`. Not reachable from native today |
 | SIGN-DESIGN-001 | LOW, design | Authority binds at receipt level (target, author, receipt), not the branch fingerprint; the tenure equality in `check_live` is implied by the receipt check | note; binding `active.basis()` at capture would make provenance exact rather than relying on runtime stamps |
 
+### SIGN-TEST-001 and SIGN-TEST-002: re-reviewed; 002 closed, 001 narrowed to 001b
+
+**Finding re-review (2026-10-06, Opus, static, against the fix at `c9566b82` plus the tests and
+harness below):** SIGN-TEST-002 **CLOSED**. SIGN-TEST-001's editor-cap and aggregate halves
+**closed**; what remains is the positive handoff by a non-owner author, re-filed as
+**SIGN-TEST-001b** (open). The re-review confirmed each mutant changes only its own guard, so a
+killed mutant proves the unmutated error came from that guard, and that the over-gate branch is a
+faithful honest branch (valid local work under every append-path check).
+
+Fixed at the branch head, not at `e65bfd8`: the guards are unchanged, so these pin the pinned
+code's behaviour as it stands now. All in `studio/epoch/owner/tests/handoff.rs`, named
+`studio_handoff_preparation_*` so CI's `prepared-signing` job runs them, each with an isolated
+mutant in `check-studio-handoff-signing-mutations.py` that must fail at its named assertion with
+exactly one test executed, restore byte-for-byte and pass again.
+
+| finding | regression | mutant |
+|---|---|---|
+| SIGN-TEST-002 | `..._refuses_authority_captured_for_another_receipt`: authority from a branch on receipt R1, then a real second close cycle producing R2, its branch and successor; R1 still verifies as current, so only the receipt binding can refuse; `EpochScope` asserted; positive control signs with the second branch's own authority | `receipt`: the comparison replaced by `false` |
+| SIGN-TEST-001, editor cap (`:39`) | `..._refuses_a_vault_decoded_branch_over_the_local_cap`: an Index branch built honestly to `MAX_INDEX_OBJECTS`, its last entry retargeted in the record bytes at one more `PutObject`, decoded structurally; `EpochBound` from preparation; the replaying decoder refuses the same bytes; the honest record is the positive control | `local-policy`: the result ignored |
+| SIGN-TEST-001, aggregate (`:83`) | `..._refuses_an_honest_branch_over_the_successor_gate`: 48 honest near-maximal title edits within `MAX_INTENT_BYTES_PER_DOCUMENT`, whose signed form exceeds the successor's `MAX_EPOCH_BYTES`; `EpochBound` from preparation, before any signature | `probe-gate`: the admission skipped |
+
+**Not done, and why.**
+
+- **SIGN-TEST-001b (open): a positive handoff by a non-owner author.** Nothing tests the
+  author/owner split in `check_overlay_successor` or the probe gate's per-device branch for a
+  non-owner (`EpochGate::admit_open`), so a mutant requiring the actor to be the gate owner, or
+  charging the owner the per-device cap, would survive every handoff test. It needs a second
+  member with its own re-sealed signed log, the owner's receipt sealed into the member's source,
+  and a member Closing basis and successor; that fixture does not exist yet.
+- **Residual, not part of the original correction:** no isolated mutant for the per-operation
+  `recovery::preflight` in `PreparedOverlayChanges::prepare`, nor for the manifest framing probe
+  (the `set_prepared` call in `prepare_handoff_detached`). Signed bytes are about twice the live
+  title bytes, so the checkpoint bound and the probe gate are crossed at about the same
+  operation, and making preflight the first refusal needs a base seed near 2 MiB; the framing
+  bound only fails with large retained completed and disposed manifests, a third-generation
+  branch. Neither is cheap.
+
+**A product gap the aggregate test exposed, stated at its full width.** The branch it builds is
+valid local work: it fits the intent budget and every append accepts it. Its signed form can never
+fit the successor epoch, so it can never be handed off automatically. The handoff refuses safely
+before signing. But:
+
+- For a **non-owner** author the binding limit is the per-device `MAX_DEVICE_BYTES` (1 MiB), not
+  `MAX_EPOCH_BYTES` (4 MiB), so a member's branch becomes permanently untransferable at about a
+  quarter of the size. A rail sized at the epoch budget would leave that case open.
+- P2's classifier is not merely silent: `studio_overlay_eligibility` has no size reason and
+  reports such a branch as **Transferable**, and its comment classes capacity as a transient
+  retryable refusal. Here every retry fails the same way, because the successor must stay
+  untouched.
+- No existing 8.3 rail bounds a branch's signed size; this needs a new rail or a new manual reason.
+
+That is Agent 2's capacity rails and classifier. It is recorded here and in the Agent 1 status
+ledger, and handed to Agent 2 for their own documents.
+
 Residual risks recorded by the reviewer: `finish` does not re-check live authority, so the runtime
 must re-check before commit; strict MLS-epoch equality means membership churn can keep a large batch
 from completing; batch plaintext is not zeroized on drop (consistent with `StudioEpoch`); the
