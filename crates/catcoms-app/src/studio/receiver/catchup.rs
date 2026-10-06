@@ -57,13 +57,67 @@ type PreparedRegistryResult = Result<Box<ServerPreparedRegistryPageSource>, AppE
 /// happened to collect them, or forever if none ever came.
 type OverlayPlanResult = Result<(Box<StudioOverlayPlan>, OverlayOwnership), AppError>;
 
-/// Which overlay job a detached plan belongs to. Carries no plaintext, no key and no permit; it is
-/// only enough to route a completion back to the target that asked for it.
-pub(crate) struct OverlayContext {
+/// The exact local Save request that owns a detached Flow S plan.
+///
+/// A target alone is not an ownership key: two operations, or a Closing and an Unconfirmed Save,
+/// can legitimately name the same target. Consuming a target-matched plan would let request B
+/// commit request A and report A's result as B's, or destroy A while trying the other provenance.
+/// These public request facts are already reauthenticated by S3; carrying them here only keeps the
+/// receiver's transient result correlated with the call that scheduled it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct OverlayRequestKey {
     target: StudioTarget,
+    provenance: OverlayRequestProvenance,
+    basis: [u8; 32],
+    branch: [u8; 32],
+    operation_digest: [u8; 32],
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum OverlayRequestProvenance {
+    Closing,
+    Unconfirmed,
+}
+
+impl OverlayRequestKey {
+    pub(super) fn closing(
+        target: StudioTarget,
+        basis: [u8; 32],
+        branch: [u8; 32],
+        operation_digest: [u8; 32],
+    ) -> Self {
+        Self {
+            target,
+            provenance: OverlayRequestProvenance::Closing,
+            basis,
+            branch,
+            operation_digest,
+        }
+    }
+
+    pub(super) fn unconfirmed(
+        target: StudioTarget,
+        basis: [u8; 32],
+        branch: [u8; 32],
+        operation_digest: [u8; 32],
+    ) -> Self {
+        Self {
+            target,
+            provenance: OverlayRequestProvenance::Unconfirmed,
+            basis,
+            branch,
+            operation_digest,
+        }
+    }
+}
+
+/// Which overlay job a detached plan belongs to. Carries no plaintext, no key and no permit.
+pub(crate) struct OverlayContext {
+    /// Flow S only. Flow H uses its independently minted `token` below.
+    request: Option<OverlayRequestKey>,
     /// Flow H only: the `HandoffJob::token` this work was detached for, so a completion can be
     /// matched against the job that asked for it rather than against its target. Flow S leaves it
-    /// zero: a parked Save capture is user-initiated and there is only ever one.
+    /// zero and uses the exact request key above.
     token: u64,
     /// Test-only barrier, in the shape `PreviewJob::pause_for_test` established: the blocking
     /// worker signals once it has entered and then blocks until released. It is taken out of the
@@ -77,18 +131,18 @@ pub(crate) struct OverlayContext {
 }
 
 impl OverlayContext {
-    fn new(target: StudioTarget) -> Self {
+    fn new(request: OverlayRequestKey) -> Self {
         Self {
-            target,
+            request: Some(request),
             token: 0,
             #[cfg(test)]
             pause: None,
         }
     }
 
-    fn handoff(target: StudioTarget, token: u64) -> Self {
+    fn handoff(_target: StudioTarget, token: u64) -> Self {
         Self {
-            target,
+            request: None,
             token,
             #[cfg(test)]
             pause: None,
@@ -286,13 +340,12 @@ impl<T: MeshTransport + 'static> StudioBackgroundJob<T> {
                 // with the capture holding the job-owned reference hold alongside them. Those are
                 // two owners, not one, and they do not always end together: see the failure arm.
                 Self::OverlayPlan(capture, ownership, context) => {
-                    let OverlayContext {
-                        target,
-                        // Flow S routes on target; the handoff token is not used here.
-                        token: _,
-                        #[cfg(test)]
-                        pause,
-                    } = context;
+                    #[cfg(test)]
+                    let (context, pause) = {
+                        let mut context = context;
+                        let pause = context.pause.take();
+                        (context, pause)
+                    };
                     let result = tokio::task::spawn_blocking(move || {
                         // Ownership and the capture are already inside this closure.
                         #[cfg(test)]
@@ -314,10 +367,7 @@ impl<T: MeshTransport + 'static> StudioBackgroundJob<T> {
                     })
                     .await;
                     match result {
-                        Ok(result) => StudioBackgroundResult::OverlayPlanned(
-                            OverlayContext::new(target),
-                            result,
-                        ),
+                        Ok(result) => StudioBackgroundResult::OverlayPlanned(context, result),
                         // The worker itself died, taking both the bundle and the capture with it.
                         // Unwinding released them, so there is nothing to hand back.
                         Err(_) => StudioBackgroundResult::CancelledOverlay,
@@ -805,19 +855,22 @@ impl CatchupRuntime {
         &mut self,
         capture: StudioOverlayCapture,
         ownership: OverlayOwnership,
-        target: StudioTarget,
+        request: OverlayRequestKey,
     ) {
-        self.overlay = Some((Box::new(capture), ownership, OverlayContext::new(target)));
+        self.overlay = Some((Box::new(capture), ownership, OverlayContext::new(request)));
     }
 
-    /// Take a completed plan for the custody visit that will commit it, if it belongs to `target`.
+    /// Take a completed plan only for the exact custody request that scheduled it.
+    ///
+    /// A mismatch deliberately leaves the plan and its ownership parked. The original request can
+    /// still collect it, while the different request observes Busy instead of stale success.
     /// The ownership comes back with it so the caller releases admission and the shared slot only
     /// after the commit attempt, not before.
     pub(super) fn take_planned_overlay(
         &mut self,
-        target: StudioTarget,
+        request: OverlayRequestKey,
     ) -> Option<(Box<StudioOverlayPlan>, OverlayOwnership)> {
-        if !matches!(&self.overlay_planned, Some((c, _, _)) if c.target == target) {
+        if !matches!(&self.overlay_planned, Some((c, _, _)) if c.request == Some(request)) {
             return None;
         }
         self.overlay_planned
@@ -857,7 +910,13 @@ impl CatchupRuntime {
         ownership: OverlayOwnership,
         target: StudioTarget,
     ) {
-        self.overlay = Some((Box::new(capture), ownership, OverlayContext::new(target)));
+        self.overlay = Some((
+            Box::new(capture),
+            ownership,
+            OverlayContext::new(OverlayRequestKey::closing(
+                target, [0; 32], [0; 32], [0; 32],
+            )),
+        ));
     }
 
     fn prepare_for<T: MeshTransport, R: CryptoRngCore>(

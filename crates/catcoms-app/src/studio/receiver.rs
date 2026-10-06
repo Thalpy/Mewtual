@@ -41,6 +41,18 @@ pub(crate) enum StudioOverlaySaveVisit {
     Busy,
 }
 
+/// Correlate a parked Flow S result with the complete bounded request envelope. `DomainOp::id`
+/// deliberately omits the body (it is an idempotency slot), so it cannot distinguish a conflicting
+/// same-nonce operation here. The canonical encoding covers nonce, type, key and body; it is
+/// independent of current live membership so an authority change can still collect the old plan
+/// and let S3 perform the authoritative refusal and release its ownership.
+fn overlay_request_digest(operation: &catcoms_replication::DomainOp) -> Result<[u8; 32], AppError> {
+    let encoded = operation.encode().map_err(invalid)?;
+    let mut digest = blake3::Hasher::new_derive_key("mewtual/studio-flow-s-request/v1");
+    digest.update(&encoded);
+    Ok(*digest.finalize().as_bytes())
+}
+
 impl StudioReceiver {
     pub(crate) fn clear_previews(&mut self) {
         self.catchup.preview = Default::default();
@@ -75,12 +87,18 @@ impl StudioReceiver {
         operation: catcoms_replication::DomainOp,
         budget: &mut crate::store::EpochStudioBudget,
     ) -> Result<StudioOverlaySaveVisit, AppError> {
+        let request = catchup::OverlayRequestKey::closing(
+            target,
+            basis,
+            branch,
+            overlay_request_digest(&operation)?,
+        );
         // Read, never required here: S1b and S3 require it at their own points, and everything
         // before them - retries and acknowledgements - must keep working without it (V8).
         let tenure = server.observed_owner_tenure();
         // A plan this actor already produced is finished first. Its transient hold is the only
         // thing protecting its pixels, and it occupies admission until it is consumed.
-        if let Some((plan, ownership)) = self.catchup.take_planned_overlay(target) {
+        if let Some((plan, ownership)) = self.catchup.take_planned_overlay(request) {
             let committed = server.sync.with_registry_context(|group, device, _, rng| {
                 store.commit_studio_overlay(
                     id, group, target, device, close, tenure, *plan, rng, budget,
@@ -124,7 +142,7 @@ impl StudioReceiver {
                 Ok(StudioOverlaySaveVisit::Saved(saved))
             }
             crate::store::StudioOverlayStart::Captured(capture) => {
-                self.catchup.schedule_overlay(*capture, ownership, target);
+                self.catchup.schedule_overlay(*capture, ownership, request);
                 Ok(StudioOverlaySaveVisit::Scheduled)
             }
         }
@@ -152,7 +170,13 @@ impl StudioReceiver {
         operation: catcoms_replication::DomainOp,
         budget: &mut crate::store::EpochStudioBudget,
     ) -> Result<StudioOverlaySaveVisit, AppError> {
-        if let Some((plan, ownership)) = self.catchup.take_planned_overlay(target) {
+        let request = catchup::OverlayRequestKey::unconfirmed(
+            target,
+            basis,
+            branch,
+            overlay_request_digest(&operation)?,
+        );
+        if let Some((plan, ownership)) = self.catchup.take_planned_overlay(request) {
             let committed =
                 server.commit_studio_unconfirmed_overlay(store, id, target, preview, *plan, budget);
             drop(ownership);
@@ -172,7 +196,7 @@ impl StudioReceiver {
                 Ok(StudioOverlaySaveVisit::Saved(saved))
             }
             crate::store::StudioOverlayStart::Captured(capture) => {
-                self.catchup.schedule_overlay(*capture, ownership, target);
+                self.catchup.schedule_overlay(*capture, ownership, request);
                 Ok(StudioOverlaySaveVisit::Scheduled)
             }
         }

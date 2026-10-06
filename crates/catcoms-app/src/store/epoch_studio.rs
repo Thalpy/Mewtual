@@ -226,6 +226,61 @@ impl EpochStudioState {
     }
 }
 impl ServerStore {
+    /// Test-only adapter for constructing the real mixed ordinary/Unconfirmed ledger sequence.
+    /// Production Studio edits keep using `edit_studio_epoch`; this deliberately stops after the
+    /// first intent barrier so the retirement regression can model an edit stranded before its
+    /// source barrier.
+    #[cfg(test)]
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn prepare_studio_intent_for_test(
+        &mut self,
+        server: u64,
+        group: &ServerGroup,
+        device: &MlsDevice,
+        document: &LogicalDocument,
+        operation: DomainOp,
+        rng: &mut impl CryptoRngCore,
+        budget: &mut EpochStudioBudget,
+    ) -> Result<EpochIntentState, AppError> {
+        self.enter_studio_budget(server, group, budget)?;
+        self.prepare_epoch_intent(
+            server,
+            document,
+            operation,
+            device,
+            group,
+            rng,
+            &mut budget.storage,
+            &mut budget.intents,
+        )
+    }
+
+    /// Test-only entry to the real manual-recovery retirement writer. The test supplies exact
+    /// loaded envelopes; this grants no production authority and exists only to prove that the
+    /// independent physical writer observes the live-Unconfirmed fail-closed rule.
+    #[cfg(test)]
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn retire_studio_intents_for_test(
+        &mut self,
+        server: u64,
+        group: &ServerGroup,
+        document: &LogicalDocument,
+        recovered: &std::collections::BTreeMap<[u8; 32], catcoms_replication::LocalIntent>,
+        rng: &mut impl CryptoRngCore,
+        budget: &mut EpochStudioBudget,
+    ) -> Result<(), AppError> {
+        self.enter_studio_budget(server, group, budget)?;
+        self.write_studio_manual_recovery_disposition_with_io(
+            server,
+            document,
+            recovered,
+            rng,
+            &mut budget.storage,
+            &mut budget.intents,
+            &mut WriteHooks::None,
+        )
+    }
+
     /// Use the SAME live five-family budget for a registry protocol transaction. No second
     /// mutable accounting owner escapes; the generation and full server scope are checked first.
     pub(crate) fn with_studio_protocol_budget<V>(

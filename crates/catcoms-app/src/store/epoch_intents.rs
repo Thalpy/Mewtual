@@ -687,6 +687,48 @@ impl ServerStore {
         step: WriteStep,
         hooks: &mut WriteHooks<'_>,
     ) -> Result<EpochIntentState, AppError> {
+        self.write_prepared_intents_inner(
+            server, document, state, old, unchanged, rng, budget, intents, step, hooks, false,
+        )
+    }
+
+    /// Flow S's sole replacement seam. It has already authenticated the live overlay, preflighted
+    /// the complete old/new physical Unconfirmed charge, and commits that charge only after this
+    /// durable write returns successfully. No other writer may preserve a live Unconfirmed branch:
+    /// without the outer `EpochStudioBudget` it cannot keep the 8 MiB rail coherent.
+    #[allow(clippy::too_many_arguments)]
+    pub(in crate::store) fn write_prepared_flow_s_intents(
+        &mut self,
+        server: u64,
+        document: &LogicalDocument,
+        state: EpochIntentState,
+        old: Option<u64>,
+        rng: &mut impl CryptoRngCore,
+        budget: &mut EpochStorageBudget,
+        intents: &mut EpochIntentBudget,
+        step: WriteStep,
+        hooks: &mut WriteHooks<'_>,
+    ) -> Result<EpochIntentState, AppError> {
+        self.write_prepared_intents_inner(
+            server, document, state, old, false, rng, budget, intents, step, hooks, true,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn write_prepared_intents_inner(
+        &mut self,
+        server: u64,
+        document: &LogicalDocument,
+        state: EpochIntentState,
+        old: Option<u64>,
+        unchanged: bool,
+        rng: &mut impl CryptoRngCore,
+        budget: &mut EpochStorageBudget,
+        intents: &mut EpochIntentBudget,
+        step: WriteStep,
+        hooks: &mut WriteHooks<'_>,
+        flow_s_accounted: bool,
+    ) -> Result<EpochIntentState, AppError> {
         let scope = scope_bytes(server, document)?;
         let storage_scope = StorageScope::new(server, &document.server_id).map_err(invalid)?;
         let id = *blake3::hash(&scope).as_bytes();
@@ -717,6 +759,20 @@ impl ServerStore {
             intents.generation = self.intent_generation.clone();
             intents.ready = true;
             return Ok(state);
+        }
+        if matches!(
+            state.live_overlay_provenance(),
+            Some(catcoms_replication::studio::StudioOverlayProvenance::Unconfirmed { .. })
+        ) && !flow_s_accounted
+        {
+            // The Unconfirmed rail charges the whole authenticated physical Intents record, not
+            // just its overlay extension. An ordinary edit/retirement that preserved the branch
+            // would therefore change its charge without access to the outer Studio budget. Fail
+            // before encoding, reservation or I/O; exact sync retries and terminal disposal remain
+            // available, and Flow S above is the one accounted replacement path.
+            return Err(invalid(
+                "resolve the awaiting-tenure draft before changing its intent record",
+            ));
         }
         let plain = state.encode(&scope)?;
         let next = plain.len() as u64 + 40;

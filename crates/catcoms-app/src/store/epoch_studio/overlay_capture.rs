@@ -618,12 +618,11 @@ impl ServerStore {
             }
         }
         let old = stamp.intent.map(|(_, physical)| physical);
-        let written = self.write_prepared_intents(
+        let written = self.write_prepared_flow_s_intents(
             server,
             &document,
             state,
             old,
-            false,
             rng,
             &mut budget.storage,
             &mut budget.intents,

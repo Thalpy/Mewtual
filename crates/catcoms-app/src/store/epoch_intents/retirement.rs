@@ -319,6 +319,20 @@ impl ServerStore {
             }
             return Ok(());
         }
+        if matches!(
+            state.live_overlay_provenance(),
+            Some(catcoms_replication::studio::StudioOverlayProvenance::Unconfirmed { .. })
+        ) {
+            // This is a second physical Intents writer, separate from
+            // `write_prepared_intents_inner`. Retirement can shrink ordinary entries while
+            // preserving a live Unconfirmed overlay, but it does not own the outer Studio budget
+            // that charges the whole file. Refuse before encode/reservation/I/O so its in-memory
+            // charge cannot diverge from the authenticated replacement. Zero-removal exact sync
+            // retries returned above and terminal disposal remains the supported release path.
+            return Err(invalid(
+                "resolve the awaiting-tenure draft before retiring its intent record",
+            ));
+        }
         let plain = state.encode(&scope)?;
         let next = plain.len() as u64 + 40;
         // Even a shrinking ledger requires a full physical replacement copy. Refuse safely at

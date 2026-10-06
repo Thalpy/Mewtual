@@ -153,6 +153,28 @@ async fn complete_preview_can_save_an_unconfirmed_draft_only_through_detached_fl
     let result = work.run(None).await;
     receiver.complete(&mut p.bob, result);
 
+    // Request B names the same target and branch but a different operation. It must not consume
+    // A's parked plan or receive A's success. Admission remains occupied by A, so B observes Busy;
+    // the exact A request below must still be able to collect and commit the plan.
+    assert!(matches!(
+        receiver
+            .save_unconfirmed_overlay(
+                &mut p.bob,
+                &mut p.b_store,
+                SERVER,
+                target,
+                &preview,
+                ticket.basis,
+                ticket.branch,
+                // Same nonce as A, different body: `DomainOp::id` aliases these, while the
+                // receiver's complete canonical request digest must not.
+                title(10, "different body in the same idempotency slot"),
+                &mut budget,
+            )
+            .unwrap(),
+        StudioOverlaySaveVisit::Busy
+    ));
+
     let saved = receiver
         .save_unconfirmed_overlay(
             &mut p.bob,
@@ -287,6 +309,231 @@ async fn complete_preview_can_save_an_unconfirmed_draft_only_through_detached_fl
     assert_eq!(refreshed.unconfirmed_usage_for_test(), (0, 0));
     let rescanned = crate::studio_exchange::tests::budget(&mut p.bob, &mut p.b_store);
     assert_eq!(rescanned.unconfirmed_usage_for_test(), (0, 0));
+}
+
+/// The Unconfirmed 8 MiB rail charges the entire physical Intents record. Once the authenticated
+/// source arrives, an ordinary local edit would normally append to that same record while
+/// preserving the draft. Until ordinary writers carry the outer Studio accounting capability,
+/// that replacement must fail closed before either the intent or source durability barrier.
+#[tokio::test]
+async fn an_installed_source_cannot_mutate_an_unconfirmed_intent_record_off_flow_s() {
+    let mut p = pages::proven_pair().await;
+    let target = p.watch.target;
+    let preview = complete_preview(&mut p).await;
+    let mut budget = budget(&mut p.bob, &mut p.b_store);
+    let ticket = p
+        .bob
+        .prepare_studio_unconfirmed_overlay(&mut p.b_store, SERVER, target, &preview, &mut budget)
+        .unwrap();
+    let operation = title(31, "retained awaiting-tenure edit");
+    let mut receiver = StudioReceiver::default();
+    assert!(matches!(
+        receiver
+            .save_unconfirmed_overlay(
+                &mut p.bob,
+                &mut p.b_store,
+                SERVER,
+                target,
+                &preview,
+                ticket.basis,
+                ticket.branch,
+                operation.clone(),
+                &mut budget,
+            )
+            .unwrap(),
+        StudioOverlaySaveVisit::Scheduled
+    ));
+    let work = receiver.detach(&mut p.bob).unwrap();
+    receiver.complete(&mut p.bob, work.run(None).await);
+    assert!(matches!(
+        receiver
+            .save_unconfirmed_overlay(
+                &mut p.bob,
+                &mut p.b_store,
+                SERVER,
+                target,
+                &preview,
+                ticket.basis,
+                ticket.branch,
+                operation,
+                &mut budget,
+            )
+            .unwrap(),
+        StudioOverlaySaveVisit::Saved(_)
+    ));
+
+    // Install an authenticated ordinary source after the draft. The source and live Unconfirmed
+    // branch now coexist, which is the bypass precondition from the review.
+    let source_packet = p.bob.sync.with_registry_context(|group, device, _, rng| {
+        let mut source = StudioEpoch::new(group, target, device.device_id()).unwrap();
+        source
+            .edit_or_reseal(
+                device,
+                group,
+                rng,
+                &title(30, "source arrived after the preview"),
+                30,
+            )
+            .unwrap()
+    });
+    let (admission, before_source) = p
+        .bob
+        .sync
+        .with_registry_context(|group, device, _, rng| {
+            p.b_store.ingest_studio_epoch(
+                SERVER,
+                group,
+                target,
+                device,
+                &source_packet,
+                rng,
+                &mut budget,
+            )
+        })
+        .unwrap();
+    assert_eq!(admission, catcoms_replication::Admission::Accepted);
+    let usage = budget.unconfirmed_usage_for_test();
+    let edit = title(32, "must wait for draft resolution");
+    let error = p
+        .bob
+        .sync
+        .with_registry_context(|group, device, clock, rng| {
+            p.b_store.edit_studio_epoch(
+                SERVER,
+                group,
+                target,
+                before_source.doc_id(),
+                device,
+                edit,
+                clock.now_ms(),
+                rng,
+                &mut budget,
+            )
+        })
+        .unwrap_err();
+    assert!(error
+        .to_string()
+        .contains("resolve the awaiting-tenure draft"));
+    assert_eq!(budget.unconfirmed_usage_for_test(), usage);
+
+    let after_source = p.bob.sync.with_registry_context(|group, device, _, _| {
+        p.b_store
+            .load_studio_epoch(SERVER, group, target, device)
+            .unwrap()
+            .unwrap()
+    });
+    assert_eq!(after_source.op_count(), before_source.op_count());
+    assert_eq!(
+        after_source.projection().unwrap(),
+        before_source.projection().unwrap()
+    );
+    let rescanned = crate::studio_exchange::tests::budget(&mut p.bob, &mut p.b_store);
+    assert_eq!(rescanned.unconfirmed_usage_for_test(), usage);
+}
+
+/// Retirement is an independent Intents writer. A local edit may have crossed its intent barrier
+/// and failed before saving a source; a later Unconfirmed branch can then share that ledger. Until
+/// retirement owns the outer Unconfirmed byte accounting, removing the ordinary entry must refuse
+/// before replacing the still-live draft record.
+#[tokio::test]
+async fn retirement_cannot_shrink_a_mixed_live_unconfirmed_intent_record() {
+    let mut p = pages::proven_pair().await;
+    let target = p.watch.target;
+    let preview = complete_preview(&mut p).await;
+    let mut budget = budget(&mut p.bob, &mut p.b_store);
+    let ordinary_operation = title(40, "stranded before its source barrier");
+    let ordinary = p.bob.sync.with_registry_context(|group, device, _, rng| {
+        let document = target.document(&group.group_id()).unwrap();
+        p.b_store
+            .prepare_studio_intent_for_test(
+                SERVER,
+                group,
+                device,
+                &document,
+                ordinary_operation.clone(),
+                rng,
+                &mut budget,
+            )
+            .unwrap();
+        catcoms_replication::LocalIntent {
+            author: device.device_id(),
+            operation: ordinary_operation.clone(),
+        }
+    });
+
+    let ticket = p
+        .bob
+        .prepare_studio_unconfirmed_overlay(&mut p.b_store, SERVER, target, &preview, &mut budget)
+        .unwrap();
+    let overlay_operation = title(41, "live awaiting-tenure branch");
+    let mut receiver = StudioReceiver::default();
+    assert!(matches!(
+        receiver
+            .save_unconfirmed_overlay(
+                &mut p.bob,
+                &mut p.b_store,
+                SERVER,
+                target,
+                &preview,
+                ticket.basis,
+                ticket.branch,
+                overlay_operation.clone(),
+                &mut budget,
+            )
+            .unwrap(),
+        StudioOverlaySaveVisit::Scheduled
+    ));
+    let work = receiver.detach(&mut p.bob).unwrap();
+    receiver.complete(&mut p.bob, work.run(None).await);
+    assert!(matches!(
+        receiver
+            .save_unconfirmed_overlay(
+                &mut p.bob,
+                &mut p.b_store,
+                SERVER,
+                target,
+                &preview,
+                ticket.basis,
+                ticket.branch,
+                overlay_operation,
+                &mut budget,
+            )
+            .unwrap(),
+        StudioOverlaySaveVisit::Saved(_)
+    ));
+
+    let usage = budget.unconfirmed_usage_for_test();
+    let document = p
+        .bob
+        .sync
+        .with_registry_context(|group, _, _, _| target.document(&group.group_id()).unwrap());
+    let ordinary_id = ordinary.operation.id(&ordinary.author);
+    let recovered = std::collections::BTreeMap::from([(ordinary_id, ordinary.clone())]);
+    let error = p
+        .bob
+        .sync
+        .with_registry_context(|group, _, _, rng| {
+            p.b_store.retire_studio_intents_for_test(
+                SERVER,
+                group,
+                &document,
+                &recovered,
+                rng,
+                &mut budget,
+            )
+        })
+        .unwrap_err();
+    assert!(error
+        .to_string()
+        .contains("resolve the awaiting-tenure draft"));
+    assert_eq!(budget.unconfirmed_usage_for_test(), usage);
+    let state = p.b_store.load_epoch_intents(SERVER, &document).unwrap();
+    assert!(state
+        .pending()
+        .any(|(id, held)| { *id == ordinary_id && held == &ordinary }));
+    assert_eq!(state.local_draft().unwrap().unwrap().accepted(), 1);
+    let rescanned = crate::studio_exchange::tests::budget(&mut p.bob, &mut p.b_store);
+    assert_eq!(rescanned.unconfirmed_usage_for_test(), usage);
 }
 
 /// The app rail is intentionally narrower than replication's general overlay bound. Pin the
