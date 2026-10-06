@@ -80,6 +80,8 @@ pub enum StudioOverlayManualReason {
     /// it holds a partial or conflicting set of the branch's signed operations, or it is not the
     /// Prepared epoch's document at all. The resolution can neither complete it nor return it to
     /// active. Permanent: no automatic path resolves it. Disposal is refused too, since a
-    /// transfer hold may be an acceptance in flight; export, archive and copy remain.
+    /// transfer hold may be an acceptance in flight; export and archive remain. Copy remains only
+    /// into another document: the branch's own document is under the hold, and the app refuses a
+    /// copy into a held destination.
     PreparedStuck,
 }

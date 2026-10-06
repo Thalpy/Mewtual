@@ -38,6 +38,15 @@ async fn rotate_to(
 ) -> bool {
     let logical = target.document(&verifier.group_id()).unwrap();
     let pointer = PointerKey::new(logical.doc_type, logical.logical_key.clone()).unwrap();
+    // The actor models its own process, so it gets its own preparation pools rather than the
+    // process-wide ones every parallel test draws on. A bounded step window over the shared pool
+    // is the shape `joining.rs` measured refusing 72 times under parallel load.
+    actor
+        .studio_preparation_pools_for_test(
+            Arc::new(tokio::sync::Semaphore::new(4)),
+            Arc::new(tokio::sync::Semaphore::new(3)),
+        )
+        .await;
     // An ordinary Read first, as the UI would, so the actor's receiver knows the document.
     save(actor, store, StudioRequest::Read { target })
         .await
@@ -190,6 +199,12 @@ async fn studio_actor_a_to_b_to_a_progresses_under_new_tenure_and_refuses_the_re
             seed_change_hash: r0.seed_change_hash,
         }
     );
+    // The positive control for every later refusal of R1: under B's own tenure, while B owns, it
+    // verifies as the current owner's receipt. A malformed R1 would fail here, not pass below.
+    b_verifier.sync.with_registry_context(|g, _, _, _| {
+        r1.verify_current_owner(g, t1)
+            .expect("R1 is current while B owns");
+    });
 
     // --- B -> A. A returns with its own key and takes the founder's freed leaf, so it owns again,
     // from its join epoch. B, restarted, is the witness that admits it.
@@ -257,12 +272,59 @@ async fn studio_actor_a_to_b_to_a_progresses_under_new_tenure_and_refuses_the_re
                     .is_ok(),
                 "precondition: A's old receipt is otherwise valid now that A owns again"
             );
-            assert!(r0.verify_current_owner(g, t2).is_err());
+            assert!(
+                r0.verify_current_owner(g, t2).is_err(),
+                "A's earlier-tenure receipt is refused under the tenure the witness observed"
+            );
             assert!(r1.verify_current_owner(g, t1).is_err());
             assert!(r1.verify_current_owner(g, t2).is_err());
         })
     };
     refusals(&mut witness);
+
+    // --- The same refusal through a real consumer, not only the bare check (the review's M1).
+    // Adoption is what turns a receipt into installed history, and it verifies with whatever tenure
+    // its caller hands it. On an empty vault at the witness, handed the tenure R0 claims, it would
+    // install A's old checkpoint. That is the positive oracle, and it shows the tenure is the only
+    // difference. Handed the start the witness observed, it refuses and installs nothing.
+    let adopt = |witness: &mut Node, tenure: u64| {
+        let root = tempfile::tempdir().unwrap();
+        let mut vault = open(root.path());
+        let mut b = budget(witness, &mut vault);
+        let outcome = witness.sync.with_registry_context(|g, d, _, rng| {
+            vault
+                .adopt_studio_checkpoint(
+                    SERVER,
+                    g,
+                    target,
+                    d,
+                    &r0,
+                    Some(seed.bytes()),
+                    tenure,
+                    &clock,
+                    rng,
+                    &mut b,
+                )
+                .map(|(outcome, _)| outcome)
+        });
+        let installed = witness.sync.with_registry_context(|g, d, _, _| {
+            vault
+                .load_studio_epoch(SERVER, g, target, d)
+                .unwrap()
+                .is_some()
+        });
+        (outcome, installed)
+    };
+    let (claimed, installed) = adopt(&mut witness, r0.tenure_start_group_epoch);
+    assert!(
+        matches!(claimed, Ok(crate::store::StudioAdoptionOutcome::Installed)) && installed,
+        "precondition: a consumer that took R0's word for its tenure would install it: {claimed:?}"
+    );
+    let (observed, installed) = adopt(&mut witness, t2);
+    assert!(
+        observed.is_err() && !installed,
+        "adoption under the observed start must refuse A's same-key receipt: {observed:?}"
+    );
 
     // And across a restart of the witness (T2): the observed start survives, and so do the
     // refusals it decides.

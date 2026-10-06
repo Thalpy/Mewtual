@@ -369,15 +369,16 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
         self.copy_context(source)?;
         self.copy_context(apply.destination)?;
         let capture = self.sync.with_registry_context(|group, device, _, _| {
+            // C1' once more, first, as at C1, and before the capture so a held destination costs
+            // nothing. A hold staged after the preview would otherwise surface only as the
+            // publication path's generic "overlay handoff must resolve" refusal, after a full
+            // re-plan, and an exact retry under a hold would be an error rather than this copy's
+            // own retryable reason. It precedes the exact shortcut too: the publication that
+            // shortcut leads to refuses under a hold anyway.
+            Self::refuse_held_destination(store, server, group, apply.destination)?;
             store.capture_studio_overlay_copy(server, group, source, apply.destination, device)
         })?;
         let already_saved = self.sync.with_registry_context(|group, device, _, _| {
-            // C1' once more, first. A hold staged after the preview would otherwise surface only
-            // as the publication path's generic "overlay handoff must resolve" refusal, after a
-            // full re-plan, and an exact retry under a hold would be an error rather than this
-            // copy's own retryable reason. Checked before the exact shortcut on purpose: the
-            // publication that shortcut leads to refuses under a hold anyway.
-            Self::refuse_held_destination(store, server, group, apply.destination)?;
             let op = super::domain(apply.destination, nonce, apply.body.clone());
             let exact = store
                 .with_studio_source(server, group, apply.destination, device, |state| {

@@ -1658,9 +1658,12 @@ assignment's "reject an earlier tenure's otherwise valid same-key receipt", at a
 things the scenario could not reach are recorded here rather than guessed at, as assignment item 5
 asks.
 
-**Gap 1, same-key re-entry (low; recommend no change).** A device removed from a group keeps that
-group in its MLS provider storage. Processing a Welcome into the same GroupId then fails with
-"already exists", so a device that keeps its key cannot get back in. The test pins this failure.
+**Gap 1, same-key re-entry (low; recommend no change).** An MLS provider that already holds a
+group cannot process a Welcome into the same GroupId: it fails with "already exists". Nothing in
+`catcoms-mls` deletes a group, so a device that keeps its key and its provider across a removal
+cannot get back in. (The test's device is a pre-removal `duplicate()` that never processed the
+Remove, so it shows the general rule, a provider already holding the GroupId; the removed-device
+case follows because nothing deletes the group.) The test pins this failure.
 Product joins and founds always mint a fresh device, so a returning user is a new key, and every
 receipt of its earlier tenure fails on the key alone, before the tenure rule is needed. The rule
 still matters, and is proved at the witness, for any path that ever re-admits a key. Options:
@@ -1671,14 +1674,20 @@ to need same-key return. Recommendation: (a).
 **Gap 2, a join-born owner cannot continue the former owner's documents (needs a decision).**
 - **Why every later joiner owns.** MLS fills the leftmost blank leaf, and the lowest leaf is the
   committer. So once the founder has left, every later joiner takes the founder's leaf and owns
-  from its own join. Authenticated P2P policy refuses that admission outright
-  (`joining.rs`, negative case). Legacy groups admit it.
+  from its own join. On authenticated P2P groups `policy_admission_ready` refuses every admission
+  while the committer is not leaf 0 (`group_policy.rs`; `joining.rs`, negative case). Legacy
+  groups admit it.
 - **Why that owner is stuck.** It holds no Studio history. The former owner's checkpoints carry
   receipts whose key is no longer the owner's, so they carry no current-owner proof, and the new
   owner sees them only as unconfirmed previews (`joining.rs`, positive case). It cannot install
   them, so it can neither close them nor issue a receipt that inherits them.
 - **The effect.** Every Studio document the former owner held is readable as a preview but can
-  never be continued under the new tenure.
+  never be continued under the new tenure. It is not left alone either: the new owner's first
+  edit under the same logical key starts a new history that supersedes it (direction 3 below).
+- **Singleton documents have no way around it.** A channel's Index is one logical key per
+  channel, so "start a fresh document instead" is not available for it. The first Index edit a
+  join-born owner makes necessarily supersedes the former owner's Index. For an ordinary document
+  the owner could pick a new name; for a singleton, supersession is the only outcome under (3).
 
 This is a missing authority path, not a bug in an existing one. Three directions, for the
 reviewer and the receipt-protocol owners (Agents 1 and 3):
@@ -1693,14 +1702,30 @@ reviewer and the receipt-protocol owners (Agents 1 and 3):
    receipts while that owner was current attests the checkpoint to the new owner. This is the
    witnessed-transition protocol 9.5 rejected for a different case, with the same
    quorum-of-witnesses limits.
-3. **Accept the stranding.** A join-born owner starts fresh documents. Former history stays
-   readable as a preview, and goal 4's preview-local work keeps members' drafts. This is the
-   status quo, made explicit in native results.
+3. **Accept supersession, preserving what members held.** This is the status quo, and the
+   review of the first draft of this note showed it is *not* passive stranding.
+   - **What happens.** A join-born owner that holds nothing finds no source record, so
+     `checked_studio_source(.., allow_create = true, ..)` mints a fresh epoch-zero unit. The
+     inventory's "lost indexed file" guard does not apply: the absence is genuine, because the
+     record was never here. So the owner's first edit to an existing logical key is an epoch-zero
+     edit of a new history, and its first receipt (closing 0, `EpochZero`) is a valid
+     current-owner receipt under its tenure.
+   - **On members that held the former owner's history.** They receive that receipt as a rewind.
+     Under T4/N-T5, their higher history enters recovery: preserved, never silently adopted, but
+     superseded as current, with no user decision. Members that never held it simply follow the
+     new history.
+   - **Not yet driven through the actor** (N-T5 there is still missing). Until it is, "preserved
+     in recovery" is the design's stated rule, not demonstrated behaviour for this path.
 
-Recommendation: (3) for Gate 4, stated honestly in native results and the UI hooks, with (1)
-raised as a later reviewed protocol if continuity across a founder's departure is a product
-requirement. Until this is decided, the acceptance item "first-receipt inheritance" is proved for
-a continuously present successor (B inherits A's checkpoint) and not for a join-born one.
+Recommendation, revised: decide between (1) and (3) explicitly, with the product owner, before
+Gate 4 acceptance. (3) is the cheaper default, and is safe for content because recovery preserves
+the superseded history. Its cost falls hardest on singletons: after a founder leaves, the channel's
+whole Index restarts on the first edit, with no choice offered. It must be named in native results
+and the UI hooks as "a new owner started this document again; earlier history is in recovery", or
+users will read it as data loss.
+(1) is the path if continuity across a founder's departure is a product requirement. Until this is
+decided, the acceptance item "first-receipt inheritance" is proved for a continuously present
+successor (B inherits A's checkpoint), not for a join-born one.
 
 ## 10. References, admission and budgets
 
@@ -1790,7 +1815,9 @@ Truthfulness rules asserted by tests:
   (an owner change, or the committer's membership restarting).
 - `manualReason:"preparedStuck"` means a staged handoff's source no longer answers it cleanly
   (it holds part of the branch, a conflicting copy, or is another generation), so no automatic
-  path resolves it and disposal is refused; export, archive and copy remain.
+  path resolves it and disposal is refused; export and archive remain. Copy remains only into a
+  *different* document: the stuck branch's own document is under the transfer hold, so a copy
+  into it is refused (C1') until the hold resolves.
 
 Events reuse the existing bounded `SettlementNotices` rail and the `settlement-changed` channel:
 `LocalDraftManual` and `LocalDraftDisposed`. Neither is a delivery, settlement or finality claim.

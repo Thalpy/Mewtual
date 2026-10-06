@@ -22,13 +22,15 @@ whole-scope review of `510d0b54` (verdict: CHANGES REQUIRED, Agent 2 not complet
 <br>- `new_admitted` refuses a provenance that disagrees with its basis.
 <br>- `clippy.toml` and a source-scan test pin both hidden constructors.
 <br>Missing, all app-side: "no installed source" under custody, the S3 re-entry, the 8.3 rails, the 8.7 save path, and the receiver handoff selector's skip of non-Closing branches (review M1, required before any app mint). The structural inventory now exposes live provenance and exact charged bytes; these consumers still wait on Agent 1's provenance-parameterized Flow S. Also missing: 8.6 reconciliation, restart reconstruction through the store, and native results. Its absence is a Gate 4 gap, not a deferral. | Agent 2; Agent 1 for Flow S |
-| 5. Repeated owner tenure, rejoin, newcomers, legitimate progress | Implemented at the sync and receipt layer; not yet through the app actor | Leaf-aware tenure, v1 import, app seam, CORE-005 archived witness (`066a6533`), M-1 on the receive path with its own error (`0335262e`). **The product never rejoins with the same identity**: join and found both mint a fresh `MlsDevice`, so a returning owner is a new `DeviceId`. `returning::a_removed_owner_returns_as_a_new_device_with_a_new_tenure_everywhere` drives that form with real MLS and real receipts: A' lands in the vacated leaf, A' and every witness agree on the new start across restart, A' can author, its receipt verifies on witnesses and a newcomer, and A's first-tenure receipt and A's old key claiming the new tenure are refused everywhere. **Through the actor (2026-10-06):** `succession::repeated` covers A -> B -> A on a legacy group, through the actor with a restart at each transition.
-<br>- B issues its first receipt under its observed tenure through ordinary idle passes, inheriting A's checkpoint.
+| 5. Repeated owner tenure, rejoin, newcomers, legitimate progress | Implemented at the sync and receipt layer; A -> B -> A through the app actor; newcomer and hidden higher history not yet through the actor | Leaf-aware tenure, v1 import, app seam, CORE-005 archived witness (`066a6533`), M-1 on the receive path with its own error (`0335262e`). **The product never rejoins with the same identity**: join and found both mint a fresh `MlsDevice`, so a returning owner is a new `DeviceId`. `returning::a_removed_owner_returns_as_a_new_device_with_a_new_tenure_everywhere` drives that form with real MLS and real receipts: A' lands in the vacated leaf, A' and every witness agree on the new start across restart, A' can author, its receipt verifies on witnesses and a newcomer, and A's first-tenure receipt and A's old key claiming the new tenure are refused everywhere. **Through the actor (2026-10-06):** `succession::repeated` covers A -> B -> A on a legacy group, through the actor with a restart at each transition.
+<br>- B issues its first receipt under its observed tenure through ordinary idle passes, inheriting A's checkpoint, and that receipt verifies as current while B owns.
 <br>- A's same key is admitted again and owns again.
 <br>- A's old receipt verifies under its own claimed tenure, yet is refused under the observed one at the witness, also after a restart.
+<br>- The same through a real consumer: `adopt_studio_checkpoint` on an empty vault installs A's old checkpoint when handed the tenure the receipt claims, and refuses it, installing nothing, under the observed one.
+<br>- Mutation entry `repeated-tenure-comparison` removes the tenure comparison in `Receipt::verify_current_owner`; the test fails at the observed-tenure refusal.
 <br>**Two gaps, recorded for review in design 9.6:**
-<br>- A same-key device cannot process the Welcome, because of its stale MLS group (pinned; not a product path).
-<br>- A join-born owner cannot continue the former owner's documents (a missing authority path, needs a decision).
+<br>- A provider that already holds the GroupId cannot process the Welcome (pinned; not a product path).
+<br>- A join-born owner cannot continue the former owner's documents. Its first edit supersedes them instead, and for a singleton (the channel's Index) that is the only outcome. Needs a product decision.
 <br>**Still missing:** a newcomer (N-T2) and hidden higher old-tenure history (N-T5) through the actor. | Agent 2 |
 | 6. Truthful native results and events | Partial | Results and settlement notices exist; no command beyond `studio_overlay_read` is registered; UI-hooks rows not applied. | Agent 2 contract; Agent 4 registration and rows |
 
@@ -882,6 +884,32 @@ which closes every item the acceptance matrix's G4-A2-P1 row names):
 >   no longer restores a whole Flipnote on the actor to ask.
 >
 > Every new guard was broken once to confirm its test fails.
+>
+> **The commit's own short review** (of `8b970c71`) found no blocker or high. Its fixes, in the
+> next commit:
+>
+> - **LOW-1:** C4 captured the destination before checking the hold. It now refuses a held
+>   destination first, inside the capture closure, so a held destination costs no capture. The
+>   check also precedes the exact-retry shortcut, so an exact retry into a held destination is
+>   refused, not acknowledged.
+> - **LOW-2:** `PreparedStuck`'s doc, here and in the design's section 11, said copy remains. It
+>   remains only into another document. The stuck branch's own document is under the hold, so a
+>   copy into it is refused.
+> - **MEDIUM-2:** design 9.6's "accept the stranding" was wrong. A join-born owner's first edit
+>   mints a fresh epoch-zero history under the same logical key. That supersedes the former owner's
+>   history, and members holding it receive a rewind into recovery. For the singleton Index it is
+>   the only outcome. 9.6 now says so, and the recommendation asks for an explicit product decision
+>   between adoption and supersession.
+> - **The repeated-tenure test's oracle:** the bare-check refusal is now repeated through
+>   `adopt_studio_checkpoint`, a real consumer: installed under R0's claimed tenure, refused under
+>   the observed one. B's R1 is checked current while B owns, and `rotate_to` installs private
+>   preparation pools like the other actor tests.
+> - **Wording:** 9.6 cites `policy_admission_ready` for the P2P admission refusal. It states Gap 1
+>   as the general rule (a provider already holding the GroupId), with the removed-device case as
+>   its consequence.
+> - **New mutation entries:** `repeated-tenure-comparison` (above) and `handoff-write-barrier`. The
+>   latter disables the Prepared handoff's ordinary-Apply barrier, which the C1' entries cannot see
+>   because C1' refuses first.
 
 | Finding | What |
 |---|---|

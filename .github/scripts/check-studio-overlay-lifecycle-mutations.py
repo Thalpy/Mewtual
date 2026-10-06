@@ -224,6 +224,31 @@ MUTATIONS = [
         "an_object_stored_under_another_channel_label_is_missing_here_not_an_error",
         "a wrong-channel object is a missing target, not a failed preview",
     ),
+    # The Prepared handoff's write barrier. C1' (the copy-hold entries above) refuses a copy into a
+    # held destination before any work is done; beneath it this barrier fences every ordinary Apply
+    # to the held document, a copy's or a Save's. The C1' tests cannot see it, since C1' refuses
+    # first, so this pins the barrier on its own.
+    (
+        "handoff-write-barrier", "catcoms-app", APP_TESTS,
+        "crates/catcoms-app/src/store/epoch_intents.rs",
+        "        if state.handoff_prepared() {\n",
+        "        if state.handoff_prepared() && false {\n",
+        "handoff::fences::studio_overlay_handoff_publication_and_shared_replacement_fences_survive_restart",
+        "handoff must resolve before ordinary Apply",
+    ),
+    # --- repeated tenure: A -> B -> A through the actor ---
+    #
+    # The same key owning twice is what makes the tenure comparison load-bearing: A's earlier
+    # receipt carries A's key and A is the committer again, so without the comparison it verifies
+    # as current. `&& false` keeps both operands used under -D warnings.
+    (
+        "repeated-tenure-comparison", "catcoms-app", "studio_exchange::tests::succession::repeated::",
+        "crates/catcoms-replication/src/epoch.rs",
+        "            || self.tenure_start_group_epoch != expected_tenure_start_group_epoch\n",
+        "            || (self.tenure_start_group_epoch != expected_tenure_start_group_epoch && false)\n",
+        "studio_actor_a_to_b_to_a_progresses_under_new_tenure_and_refuses_the_returning_keys_old_one",
+        "A's earlier-tenure receipt is refused under the tenure the witness observed",
+    ),
     # --- the branch-generation namespace ---
     (
         "admission-not-trusted", "catcoms-replication", REPL_TESTS,
