@@ -16,6 +16,8 @@ use catcoms_rt::{Clock, MemNetwork};
 
 const SERVER: u64 = 83;
 
+mod registry;
+
 /// Alice founds a server that Bob joins and serves seeds for. Her own Index source adopts two
 /// receipts for a later epoch without either seed, so it faults on them. With `decide`, she has
 /// also persisted a decision for `chosen` at B1 and applied it at B2, so the source owes a

@@ -32,6 +32,14 @@ impl CatchupRuntime {
             return Ok(false);
         };
         let bucket = pointer(target, &server.group_id())?.bucket();
+        if self.repair_claimed(CheckpointTarget::Registry(bucket)) {
+            // A repair job owns this bucket between S1 and S4. A page persisted now would only
+            // make its rebuild stale, and the job's outcome may supersede the page's epoch anyway:
+            // discard it like any other superseded page and let the next tail pass refetch.
+            self.registry_pass = None;
+            self.registry_next_at = server.runtime_clock().monotonic_ms().saturating_add(5_000);
+            return Ok(true);
+        }
         if !self.prepare_registry_inventory(server, store, id, bucket)? {
             return Ok(true);
         }
@@ -139,6 +147,14 @@ impl CatchupRuntime {
         self.registry_target = Some(target);
         let key = pointer(target, &server.group_id())?;
         let bucket = key.bucket();
+        if self.repair_claimed(CheckpointTarget::Registry(bucket)) {
+            // A repair job owns this bucket: no pointer refresh, owner maintenance or page pass
+            // may write it until S4, and this target's turn would only stale the job's rebuild.
+            // Move on to the next watched target; the job is what unblocks this one.
+            self.registry_target = None;
+            self.registry_selection = self.registry_selection.wrapping_add(1);
+            return Ok(false);
+        }
         if !self.prepare(server, store, id, target)?
             || !self.prepare_registry_inventory(server, store, id, bucket)?
         {

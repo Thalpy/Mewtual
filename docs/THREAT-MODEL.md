@@ -44,14 +44,30 @@ table with the commit that closed it.
   into an already warm source and Flow S/H writes are not claim-checked; a change from them makes
   the rebuild stale, and the job writes nothing (an automatic job reruns; an explicit decision is
   reported abandoned, to be made again).
-  Registry repair execution remains disabled. Registry checkpoint routing classifies a pending
-  replacement only from the exact-current verified source already retained by the bounded
-  preparation boundary. Missing, cold, stale, retargeted or unreadable preparation is unknown and
-  defers the pass; it is never treated as proof that ordinary installation is safe, and the router
-  does not synchronously reconstruct the full Registry graph merely to reach the disabled gate.
-  Classification preparation is scheduled even when the local file is small; a custody-checked
-  absent source is tracked separately and rechecked by path, so first installation can proceed
-  without turning cold or stale state into a false absence claim.
+  Registry bucket repair executes only as the same job, scoped to the bucket. This covers the
+  explicit decision, Flow D, the owner's resume and the owed replacement. The bucket is captured
+  as bounded authenticated bytes and rebuilt detached. At commit the issue/apply transaction
+  receives the rebuild and uses it only if all of the following still match: mount, server,
+  group, bucket, actor, designated owner, MLS epoch, plaintext digest and physical size, plus a
+  fresh read verified against the live budget. Its writer re-reads the bytes once more before
+  writing. The authority checks are the custody path's own: V5, channel, durable snapshot, owner
+  refusal for Flow A, and `verify_current_owner`. Offered bucket repairs pass the same owner and
+  authoring-tenure pre-check before capture as Studio's. A held outcome or a failed commit of an
+  offered repair, Studio or Registry, holds that repair rather than its target, so a replayed
+  older repair cannot keep a target's legitimate replacement from being fetched.
+  The router still classifies a pending replacement only from the exact-current verified source
+  already retained by the bounded preparation boundary; a held owner decision is read from the
+  bounded owner record. Missing, cold, stale, retargeted or unreadable preparation is unknown and
+  defers the pass; it is never treated as proof that ordinary installation is safe. The owner's
+  resume uses the same exact classification, falling back to the record's B3 flag only while the
+  provider is unknown, so an install that landed just before a crash (its recycle lost) is
+  resumed and recycled rather than waited on forever. Nothing on the repair path reconstructs
+  the full Registry graph under custody to decide. Classification preparation is scheduled even
+  when the local file is small. A custody-checked absent source is tracked separately and
+  rechecked by path, so first installation can proceed without turning cold or stale state into
+  a false absence claim. While a job owns a bucket, Registry maintenance, pointer refresh, page
+  persistence and installs into it are skipped or deferred. A Studio-side pointer write is not
+  claim-checked; like any other change, it makes the rebuild stale and the job writes nothing.
 
 - **Automatic recovery is conservative and author-local.** Studio replay checks the complete
   own envelope, every retained/staged historical selection and the fresh current projection.
@@ -561,11 +577,10 @@ table with the commit that closed it.
   full-identity rates, four driver-owned outbound slots and source service rails bound resources;
   rate debt is process-local and Sybils still reach aggregate caps. Authenticated current-tenure
   repair bytes may be carried only after the exact replacement source is synchronized and the
-  contextual owner record is re-saved durably. For Studio sources, receiving-side repair
-  application, owner continuation and repaired-seed installation run only as the detached job
-  described under the Studio fault repair entry above, which holds shared preparation admission
-  from capture through commit. The same paths for Registry buckets remain disabled until their job
-  exists. Registry seed fetching
+  contextual owner record is re-saved durably. For Studio sources and Registry buckets alike,
+  receiving-side repair application, owner continuation and repaired-seed installation run only
+  as the detached job described under the Studio fault repair entry above, which holds shared
+  preparation admission from capture through commit. Registry seed fetching
   and explicit recovery-first installation are implemented; head hints alone still authorize
   neither replacement nor an editing lease.
 - **Registry page cursors are continuation claims, not remote possession or currency proofs.**

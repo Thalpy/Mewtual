@@ -466,9 +466,6 @@ pub(super) struct CatchupRuntime {
     registry_repair_next_at: u64,
     // Rotates which peer a repaired seed is requested from.
     repair_seed_peer: usize,
-    // Terminal Registry repairs already applied here, so repeated answers carrying one cost no
-    // further Registry restores. Bounded; forgetting one only costs a reload.
-    registry_repairs_seen: std::collections::BTreeSet<(u8, [u8; 32])>,
     // Targets whose owed repair hit a persistent hold (recovery warning, storage refusal, held
     // decision, unobserved tenure): no repaired seed is fetched for them again until this time.
     repair_backoff: std::collections::BTreeMap<CheckpointTarget, u64>,
@@ -482,8 +479,9 @@ pub(super) struct CatchupRuntime {
     repair_capacity_at: u64,
     repair_reports: std::collections::BTreeMap<CheckpointTarget, crate::studio::StudioRepairReport>,
     repairs_seen: std::collections::BTreeSet<(CheckpointTarget, [u8; 32])>,
-    // Offered repairs this device could not assemble evidence for, held per repair (never per
-    // target) until the given time, so a bad or premature offer cannot stall other repair work.
+    // Offered repairs held per repair (never per target) until the given time: one this device
+    // could not assemble evidence for, one whose transaction held it (a replayed older sequence,
+    // say), or one whose S3 failed. A bad or premature offer cannot stall other repair work.
     repair_unverifiable: std::collections::BTreeMap<(CheckpointTarget, [u8; 32]), u64>,
 }
 impl CatchupRuntime {

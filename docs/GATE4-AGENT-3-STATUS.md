@@ -4,6 +4,104 @@ Owner: Agent 3 ([assignment](GATE4-AGENT-HANDOFFS.md#agent-3-runtime-signed-faul
 Proposal: [GATE4-AGENT-3-DESIGN](GATE4-AGENT-3-DESIGN.md), revision 16 follow-up.
 Review preamble: 3. Current entries override older ones.
 
+## Registry repair job: implemented, 2026-10-06
+
+**The Registry gate is gone.** `registry_repair_execution_ready()` is deleted: every Registry repair
+path now runs through the same detached job as a Studio source, scoped to the bucket
+(`CheckpointTarget::Registry`). Nothing Registry-side runs a repair transaction synchronously any
+more, and nothing restores a bucket under custody to decide whether to repair it.
+
+**Core and store.**
+- `RegistryEpoch::prepare_vault_source` is the detached restore. It takes the group's public facts
+  as values, mirroring `StudioEpoch::prepare_vault_source`.
+- `store/epoch_registry/repair_source.rs` holds S1 and S2:
+  - `capture_registry_repair_source` is a bounded authenticated read under custody (S1);
+  - `RegistryRepairCapture::rebuild` runs detached (S2);
+  - the result is a `PreparedRegistryRepair`, bound to mount, server, group, bucket, actor,
+    owner, MLS epoch, plaintext digest and physical size.
+- The issue and apply transactions gain `*_prepared` entry points. They share the existing inner
+  bodies, so every outcome, hold, CORE-007 refusal and recycle is unchanged.
+- `check_prepared_registry` rechecks the context, re-reads the record and verifies it against the
+  live budget before the rebuild is used.
+- The writer (`update_registry_prepared_with_io`) uses the prepared unit only if the re-read bytes
+  still match its digest and size; otherwise it refuses with "prepared Registry source changed".
+- The Server wrappers (`issue_registry_fault_repair_prepared`,
+  `resume_registry_bucket_repair_prepared`, `apply_registry_bucket_repair_prepared`) repeat their
+  custody siblings' V5, channel, snapshot and owner checks exactly.
+
+**Runtime.**
+- **Job types.** `RepairRebuild::Registry` and `RepairRebuilt::Registry`.
+- **S3.** `repair_execute` does a staleness pre-check (`registry_repair_source_is_current`): stale
+  is an ordinary 5 s rerun, while any other refusal is a 60 s hold. Then `execute_registry` runs
+  every input, and `finish_registry_repair` follows each outcome.
+- **Entry points now scheduling the job:**
+  - `repair_registry_fault`: V5 and the snapshot first, then the visit model, answering
+    `RepairStarted { scope: RegistryBucket }`;
+  - `offer_registry_repair`: Flow D from both discovery arms, with the same refusal memo,
+    per-repair unverifiable hold and owner/tenure pre-check as Studio;
+  - `resume_registry_repair`: B3 is read from the owner record, and a bucket that owes only its
+    seed fetches it instead of rerunning the job;
+  - the router's owed-bucket branch: one Replace path for both kinds.
+- **Owed-repair facts.** These come from the retained prepared provider
+  (`prepared_registry_owed_repair`; unknown defers, as Agent 4's gate did), never from a restore
+  under custody. `owed_registry_repair` and `registry_repair_evidence` are now test-only for that
+  reason.
+- **Claims.** Consulted by `work_registry` (skip and advance, before any pointer refresh, owner
+  maintenance or page pass) and `persist_registry_page` (drop the page), in addition to the
+  router and `advance_checkpoint`.
+- **Provider after a bucket write.** The provider is dropped only when no Registry preparation
+  is queued or running. Otherwise that preparation's attachment would find no provider and fail
+  the visit; the stamp check on every use refuses superseded bytes instead.
+- **Removed.** The synchronous `install_repaired_registry_seed`, and the separate Registry repair
+  memo (`registry_repairs_seen`, now in `repairs_seen` by target).
+
+**Tests** (`catchup/tests/repair/registry.rs`: 7 here, plus 2 from the review below). The
+full-load counter now also counts
+`checked_registry_unit`, the custody restore the transactions use. Each guard was broken to
+confirm its test fails:
+- **The decision as a job:** the custody counter stays unchanged through S1 and S3. Passing no
+  rebuild to the transaction fails it.
+- **A stale rebuild writes nothing** and is reported "decide again". Accepting any bytes as
+  matching fails it (the budget's inventory check still refused the write, as a second line).
+- **The owed replacement:** `AwaitingSeed`, then a minted repaired pass, then the Replace job,
+  then `Installed`, with the owner record recycled.
+- **An owner owing only its seed** fetches it with no job. Ignoring B3 fails it.
+- **An unverifiable offered repair** holds only itself, never the bucket. Holding the bucket
+  instead fails it.
+- **A claimed bucket gets no Registry turn.** Removing the consult fails it.
+- **A bucket commit does not strand a queued Registry preparation.** Dropping the provider
+  unconditionally fails it.
+- **Contract change.** Agent 4's `unopened` test of the owed-bucket router keeps its assertions:
+  defer, discard the pass, no custody load, no write. Its message no longer says repair is
+  disabled.
+
+**Residuals for review.**
+- Registry Flow D on a real peer is not exercised end to end: this fixture's only peer has no
+  store. The S3 owner refusal and the evidence branches are covered on the founder.
+- The router's Replace start from a network-fetched bucket seed is covered only through its
+  parts.
+- On a peer, a cold provider is the steady state rather than an edge case. Every bucket job
+  invalidates the provider, while Studio keeps its source warm. So repeated offers of a repair
+  already applied there, while its seed is pending, each run a full job: rebuild, inventory scan
+  and flush. The cost is bounded by this device's own discovery cadence, with no remote
+  amplification. Keeping the post-S3 bucket warm would remove it.
+
+### Adversarial review of the Registry job (uncommitted diff on `3b58be24`): no BLOCKER
+
+| Finding | Disposition |
+|---|---|
+| **HIGH-1:** a crash between the owner's replacement install and its record recycle wedged the bucket. B3 alone fetched a seed that the held decision then deferred forever. | **Fixed.** `resume_registry_repair` classifies from the warm provider: owed means fetch the seed, owes-nothing means schedule Resume (which recycles), and B3 is used only while the provider is unknown. Regression: roll the owner record back after an install, then resume answers `AlreadyRepaired` and the record is recycled. Forcing the B3 fallback fails it. |
+| **MEDIUM-1:** an offered repair's `Held` outcome or failed S3 held the whole target, so one replayed older repair a minute could block the owed seed. Studio had the same flaw. | **Fixed for both.** `hold_offer` holds that repair only, both from the finish functions and from the `repair_commit` error path. Regression for the error path: an owner's offered repair fails at S3, holds only itself, and the owed seed still mints. Restoring the target hold fails it. The held-outcome half needs a real peer and is still untested. |
+| **LOW-1:** `finish_registry_repair` lengthened the shared owner resume cadence. | **Fixed.** The bump is removed; a hold now waits on its bucket backoff. The test that pinned the bump now pins "resume runs no job while the seed is pending" instead. |
+| **LOW-2:** `RefreshRequired` was noted for outcomes that write nothing. | **Fixed.** It is noted just before each transaction call. |
+| **LOW-3:** a stale graph kept its pool slot while any preparation ran. | **Fixed.** A provider that holds a graph is always dropped (no preparation can be pending against one), and the provider is also invalidated on the S3 error path. |
+| **LOW-4:** the cold-provider cost was understated. | **Documented** above. |
+| **LOW-5:** the router's owner Replace skipped the snapshot pre-check. | **Fixed.** Restored before the pass is consumed, for both kinds. No dedicated test. |
+| **LOW-6:** the writer trusted its caller's context check. | **Fixed.** `context_matches` is checked inside `update_registry_prepared_with_io`. The earlier checks mask it, so no test is possible. |
+| **LOW-7:** unused synchronous custody entry points remained. | **Fixed.** The five Server functions and four store wrappers are now `#[cfg(test)]`. |
+| **LOW-8:** doc wording and a vacuous assertion. | **Fixed.** THREAT-MODEL and INTERFACES now say held decisions come from the owner record, and the claimed-bucket test asserts that no preparation started instead of an unchanged faulted file. |
+| **Q6:** the test-only copy of the owed mapping did not pin the production one. | **Fixed.** Both paths now use `registry_owed_replacement`. |
+
 ## Detached S1-S4 repair runtime: progress, 2026-10-06
 
 **Studio job implemented** (C below). `catchup/repair_job.rs` holds the job: claims, inputs,

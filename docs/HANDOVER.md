@@ -10,8 +10,36 @@ and ranks the live hazards in that path.
 
 ## Status (latest entry: 2026-10-06)
 
+- **Gate 4 detached Registry repair job (2026-10-06).** Agent 4's Registry fail-closed gate is
+  removed: every Registry repair path now runs through the same design 10.3 job as a Studio
+  source, scoped to the bucket. That covers:
+  - the explicit `RepairRegistryFault`;
+  - Flow D from Registry discovery answers;
+  - the owner's resume of a held bucket decision;
+  - the owed bucket replacement.
+
+  How the bucket job differs from the Studio job:
+  - **S1** reads bounded authenticated bytes and **S2** rebuilds the bucket detached
+    (`RegistryEpoch::prepare_vault_source`).
+  - **S3** hands the rebuild to the unchanged issue/apply transaction. That transaction
+    rechecks context, digest, physical size and the live budget, and its writer re-reads the
+    bytes before using the rebuild. A stale rebuild is an ordinary rerun.
+  - Owed-repair facts come from the retained prepared provider; an unknown fact defers. Nothing
+    restores a bucket under custody to decide.
+  - The bucket claim also stops Registry maintenance and page persistence for that bucket.
+
+  Still open:
+  - Registry Flow D on a real second peer;
+  - the two-peer scenario;
+  - the S3 cost measurement;
+  - claims on gossip ingest, replay and Flow S/H.
+
+  Native repair commands remain unregistered, P5 is false and Gate 4 remains open. Details are
+  in `GATE4-AGENT-3-STATUS.md`.
+
 - **Gate 4 detached Studio repair job (2026-10-06).** Studio fault repair runs again, but only as
-  Agent 3's design 10.3 job; Agent 4's fail-closed gate (`3fcde979`) now covers Registry alone.
+  Agent 3's design 10.3 job; Agent 4's fail-closed gate (`3fcde979`) then covered Registry alone,
+  until the Registry job above removed it.
   - **S1:** reserves a shared preparation-pool slot and a per-target live claim before any body
     read, then captures the bounded plaintext.
   - **S2:** rebuilds the source detached.
@@ -25,9 +53,10 @@ and ranks the live hazards in that path.
   replacement is installed through the same job. The core gained a sealed owner-authority view
   for a later detached adoption half.
 
-  Still open: the Registry job, the two-peer scenario, the S3 cost measurement, and claims on
-  gossip ingest, replay and Flow S/H. Native repair commands remain unregistered, P5 is false and
-  Gate 4 remains open. Details are in `GATE4-AGENT-3-STATUS.md`.
+  At the time the Registry job was still open (since built, above), with the two-peer scenario,
+  the S3 cost measurement, and claims on gossip ingest, replay and Flow S/H. Native repair
+  commands remain unregistered, P5 is false and Gate 4 remains open. Details are in
+  `GATE4-AGENT-3-STATUS.md`.
 
 - **Gate 4 archived-owner admission candidate (2026-10-05).** The app now consumes the single
   archived Observed-tenure witness only through the still-current durable owner snapshot used by

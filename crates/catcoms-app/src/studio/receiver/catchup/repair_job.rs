@@ -5,11 +5,13 @@
 //!   captured exactly as ordinary source preparation captures it.
 //! - **S2, detached.** The source is rebuilt from that capture, owning only the capture, the slot
 //!   and the claim: no store, Server, vault key or MLS secret.
-//! - **S3, custody.** The rebuild is installed, which rechecks actor, owner, MLS epoch, group,
-//!   plaintext digest and physical size against what is on disk now. The unchanged store
-//!   transaction then runs on that warm source: issuance, resume, Flow D application or the owed
-//!   replacement. Every outcome, hold, CORE-007 refusal and owner recycle is therefore the
-//!   store's, exactly as it was when the transaction ran directly.
+//! - **S3, custody.** The rebuild is rechecked: actor, owner, MLS epoch, group, plaintext digest
+//!   and physical size against what is on disk now. The unchanged store transaction then runs on
+//!   it: issuance, resume, Flow D application or the owed replacement. A Studio rebuild is
+//!   installed into the warm source cache that transaction reads; a Registry bucket has no such
+//!   cache, so its rebuild is handed to the transaction, which rechecks it again before use.
+//!   Every outcome, hold, CORE-007 refusal and owner recycle is therefore the store's, exactly as
+//!   it was when the transaction ran directly.
 //! - **S4.** The ownership drops after the commit attempt, wherever its last owner is. A cancelled
 //!   waiter never releases a slot or a claim that a running worker still owns.
 //!
@@ -77,8 +79,8 @@ pub(crate) enum RepairInput {
         repair: Box<ReceiptRepair>,
         offered: Option<Box<Receipt>>,
     },
-    /// The selected seed for the replacement this source owes, extracted at S1 from a pass whose
-    /// selection was made under this device's observed tenure.
+    /// The selected seed for the replacement this source owes, extracted from a pass whose
+    /// selection was made under this device's observed tenure before the job was asked for.
     Replace {
         repair: Box<ReceiptRepair>,
         pair: Box<[Receipt; 2]>,
@@ -108,11 +110,13 @@ impl RepairInput {
 /// S2's input: the bounded authenticated capture, nothing else.
 pub(crate) enum RepairRebuild {
     Studio(StudioSourceCapture),
+    Registry(crate::store::RegistryRepairCapture),
 }
 
-/// S2's output, parked until S3 installs it.
+/// S2's output, parked until S3 installs or rechecks it.
 pub(crate) enum RepairRebuilt {
     Studio(Box<PreparedStudioSource>),
+    Registry(Box<crate::store::PreparedRegistryRepair>),
 }
 
 enum RepairStage {
@@ -192,6 +196,9 @@ impl RepairRebuild {
             Self::Studio(capture) => capture
                 .rebuild()
                 .map(|prepared| RepairRebuilt::Studio(Box::new(prepared))),
+            Self::Registry(capture) => capture
+                .rebuild()
+                .map(|prepared| RepairRebuilt::Registry(Box::new(prepared))),
         };
         match rebuilt {
             Ok(rebuilt) => Ok((rebuilt, ownership)),
@@ -273,9 +280,12 @@ impl CatchupRuntime {
                 .sync
                 .with_registry_context(|g, d, _, _| store.capture_studio_source(id, g, studio, d))
                 .map(|capture| capture.map(RepairRebuild::Studio)),
-            CheckpointTarget::Registry(_) => {
-                Err(invalid("Registry repair awaits its detached rebuild"))
-            }
+            CheckpointTarget::Registry(bucket) => server
+                .sync
+                .with_registry_context(|g, d, _, _| {
+                    store.capture_registry_repair_source(id, g, bucket, d)
+                })
+                .map(|capture| capture.map(RepairRebuild::Registry)),
         };
         let rebuild = match captured {
             Ok(Some(rebuild)) => rebuild,
@@ -410,7 +420,8 @@ impl CatchupRuntime {
     }
 
     /// S3 and S4. Budget first, then install the rebuild, run the transaction, and drop the
-    /// ownership after the attempt. A failure holds this target only.
+    /// ownership after the attempt. A failure holds this target only, or for an offered repair
+    /// only that repair: an offer is untrusted input and must not hold the target it names.
     pub(super) fn repair_commit<T: MeshTransport, R: CryptoRngCore>(
         &mut self,
         server: &mut Server<T, R>,
@@ -441,6 +452,10 @@ impl CatchupRuntime {
         let RepairStage::Ready(rebuilt, ownership) = stage else {
             unreachable!("checked by repair_parked")
         };
+        let offered = match &input {
+            RepairInput::Offered { repair, .. } => Some(repair.hash()),
+            _ => None,
+        };
         let mut budget = match budget {
             Ok(budget) => budget,
             Err(error) => {
@@ -448,16 +463,35 @@ impl CatchupRuntime {
                 return Ok(None);
             }
         };
-        let result = self.repair_execute(server, store, id, target, input, rebuilt, &mut budget);
+        let result = self.repair_execute(
+            server,
+            store,
+            id,
+            target,
+            failure_target,
+            input,
+            rebuilt,
+            &mut budget,
+        );
         // S4: released only after the commit attempt returned, on success and error alike.
         drop(ownership);
-        match result {
-            Ok(updated) => Ok(updated),
-            Err(error) => {
-                self.end_repair_job(target, failure_target, &error, now);
-                Ok(None)
-            }
+        let Err(error) = result else {
+            return result;
+        };
+        if matches!(target, CheckpointTarget::Registry(_)) {
+            // A failed attempt may still have written part of the bucket. The stamp check on every
+            // use refuses the old graph anyway; dropping it now also frees its pool slot.
+            self.invalidate_registry_provider();
         }
+        match offered {
+            Some(repair) => {
+                self.note_repair_failure_for(failure_target, &error);
+                self.report_repair(target, Err(&error));
+                self.hold_offer(target, repair, now);
+            }
+            None => self.end_repair_job(target, failure_target, &error, now),
+        }
+        Ok(None)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -467,46 +501,77 @@ impl CatchupRuntime {
         store: &mut ServerStore,
         id: u64,
         target: CheckpointTarget,
+        failure_target: Option<StudioTarget>,
         input: RepairInput,
         rebuilt: RepairRebuilt,
         budget: &mut crate::store::EpochStudioBudget,
     ) -> Result<Option<StudioTarget>, AppError> {
+        match (target, rebuilt) {
+            (CheckpointTarget::Studio(studio), RepairRebuilt::Studio(prepared)) => {
+                let installed = server.sync.with_registry_context(|g, d, _, _| {
+                    store.install_prepared_studio_source(g, d, *prepared)
+                })?;
+                if !installed {
+                    return Ok(self.repair_stale(server, target, &input));
+                }
+                self.settlement
+                    .note(studio, StudioSettlementState::RefreshRequired);
+                match input {
+                    RepairInput::Decide(request) => {
+                        self.execute_decision(server, store, id, studio, request, budget)
+                    }
+                    RepairInput::Resume => self.execute_resume(server, store, id, studio, budget),
+                    RepairInput::Offered { repair, offered } => self.execute_offered(
+                        server,
+                        store,
+                        id,
+                        studio,
+                        &repair,
+                        offered.as_deref(),
+                        budget,
+                    ),
+                    RepairInput::Replace { repair, pair, seed } => self
+                        .execute_replace(server, store, id, studio, &repair, &pair, &seed, budget),
+                }
+            }
+            (CheckpointTarget::Registry(bucket), RepairRebuilt::Registry(prepared)) => {
+                // A bucket has no warm cache to install into: the rebuild itself goes to the
+                // transaction, which rechecks it again under this same custody. This read only
+                // tells a stale rebuild (ordinary, rerun soon) from a failure (held for 60 s).
+                let current = server.sync.with_registry_context(|g, d, _, _| {
+                    store.registry_repair_source_is_current(id, g, bucket, d, &prepared)
+                })?;
+                if !current {
+                    return Ok(self.repair_stale(server, target, &input));
+                }
+                self.execute_registry(
+                    server,
+                    store,
+                    id,
+                    bucket,
+                    failure_target,
+                    input,
+                    *prepared,
+                    budget,
+                )
+            }
+            _ => Err(invalid("a repair rebuild does not match its target")),
+        }
+    }
+
+    /// The source moved during S2. Nothing was written; automatic work captures afresh after a
+    /// short wait, and an explicit decision is reported for its person to repeat.
+    fn repair_stale<T: MeshTransport, R: CryptoRngCore>(
+        &mut self,
+        server: &mut Server<T, R>,
+        target: CheckpointTarget,
+        input: &RepairInput,
+    ) -> Option<StudioTarget> {
         let now = server.runtime_clock().monotonic_ms();
-        let (CheckpointTarget::Studio(studio), RepairRebuilt::Studio(prepared)) = (target, rebuilt)
-        else {
-            return Err(invalid("Registry repair awaits its detached rebuild"));
-        };
-        let installed = server.sync.with_registry_context(|g, d, _, _| {
-            store.install_prepared_studio_source(g, d, *prepared)
-        })?;
-        if !installed {
-            // The source moved during S2. Nothing was written; automatic work captures afresh
-            // after a short wait, and an explicit decision is reported for its person to repeat.
-            self.repair_backoff
-                .insert(target, now.saturating_add(REPAIR_STALE_RETRY_MS));
-            let stale = abandoned(input.explicit(), "the document changed during the repair");
-            self.report_repair(target, Err(&stale));
-            return Ok(None);
-        }
-        self.settlement
-            .note(studio, StudioSettlementState::RefreshRequired);
-        match input {
-            RepairInput::Decide(request) => {
-                self.execute_decision(server, store, id, studio, request, budget)
-            }
-            RepairInput::Resume => self.execute_resume(server, store, id, studio, budget),
-            RepairInput::Offered { repair, offered } => self.execute_offered(
-                server,
-                store,
-                id,
-                studio,
-                &repair,
-                offered.as_deref(),
-                budget,
-            ),
-            RepairInput::Replace { repair, pair, seed } => {
-                self.execute_replace(server, store, id, studio, &repair, &pair, &seed, budget)
-            }
-        }
+        self.repair_backoff
+            .insert(target, now.saturating_add(REPAIR_STALE_RETRY_MS));
+        let stale = abandoned(input.explicit(), "the document changed during the repair");
+        self.report_repair(target, Err(&stale));
+        None
     }
 }

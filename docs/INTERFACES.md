@@ -895,8 +895,15 @@ outcome reaches the renderer only through the fault view:
   clears the previous report, so it is never shown as the new one's outcome. The report is
   volatile, local and bounded.
 
-`RepairRegistryFault` and every Registry repair path stay fail-closed until the Registry job exists.
+`RepairRegistryFault` follows the same contract for the target's Registry bucket. It answers
+`RepairStarted` with `scope: RegistryBucket(bucket)`, and its outcome is read through that
+bucket's fault view. Registry Flow D, the owner's resume of a held bucket decision and the owed
+bucket replacement are the same job, scoped to the bucket. Whether a bucket owes a replacement
+is classified from the retained prepared page provider, never by restoring the bucket inside the
+request; a held owner decision is read from the bounded owner record. While the provider is
+cold or stale, a fetched bucket pass is deferred, not installed.
 While a job owns a target, foreground `Apply` and `ApplyOverlayCopy` into it are refused for retry.
+While a job owns a bucket, Registry maintenance, pointer refresh and page persistence skip it.
 
 `studio_recovery_list`, `studio_recovery_read`, `studio_recovery_export`, and
 `studio_recovery_acknowledge` use the same actor/native custody as Save. They authenticate all

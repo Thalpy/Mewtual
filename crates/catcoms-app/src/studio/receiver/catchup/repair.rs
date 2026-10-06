@@ -1,22 +1,23 @@
 //! The repair step (design 5.7, 10.3). Only this runtime holds the durable owner snapshot, so the
 //! explicit decision reaches issuance here, and the owner resumes a persisted decision after a
-//! crash in the same slot as rotation, after discovery, seed and page work. Studio repair work
-//! never runs in these entry points: each schedules the detached job in `repair_job`, and the
-//! `execute_*` handlers below are its S3. Round-robin over watched targets, with a 5 s cadence that
-//! backs off to 60 s on any hold; a persistent hold also stops that target's seed refetches and
-//! automatic jobs for 60 s. A hold is always a per-target wait: nothing here returns an error that
-//! would pause catch-up.
+//! crash in the same slot as rotation, after discovery, seed and page work. Repair work, for a
+//! Studio source or a Registry bucket alike, never runs in these entry points: each schedules the
+//! detached job in `repair_job`, and the `execute_*` handlers below are its S3. Round-robin over
+//! watched targets, with a 5 s cadence that backs off to 60 s on any hold; a persistent hold also
+//! stops that target's seed refetches and automatic jobs for 60 s. A hold is always a per-target
+//! wait: nothing here returns an error that would pause catch-up.
 use super::repair_job::{RepairInput, RepairSchedule};
 use super::*;
-use crate::store::{OfferedRepairEvidence, StudioRepairOutcome, StudioRepairRequest};
+use crate::store::{
+    OfferedRepairEvidence, PreparedRegistryRepair, StudioRepairOutcome, StudioRepairRequest,
+};
 use crate::studio::{StudioFaultScope, StudioRepairReport};
 use catcoms_replication::{Receipt, ReceiptRepair};
 use zeroize::Zeroizing;
 
-/// Remembered terminal Registry repairs, bounded; forgetting one only costs a reload.
-const MAX_REMEMBERED_REGISTRY_REPAIRS: usize = 64;
-/// Remembered terminal Studio repairs and last-attempt reports, each bounded the same way.
-/// Forgetting a terminal repair costs one more job; forgetting a report only hides it.
+/// Remembered terminal repairs (Studio sources and Registry buckets, keyed by target) and
+/// last-attempt reports, each bounded the same way. Forgetting a terminal repair costs one more
+/// job; forgetting a report only hides it.
 const MAX_REMEMBERED_REPAIRS: usize = 64;
 /// How long a persistent repair hold suppresses refetching that target's selected seed. The same
 /// 60 s the ordinary installer waits after a recovery warning.
@@ -61,18 +62,6 @@ impl CatchupRuntime {
             .route_checkpoint_install(server, store, id, None)?
             .is_none();
         Ok((ordinary, self.checkpoint.take()))
-    }
-
-    /// Fail-closed integration gate for the Registry repair transactions, which still run
-    /// synchronously while the receiver owns Server/store custody. Studio repair runs through the
-    /// detached job in `repair_job`; Registry live discovery, owner resume and repaired-seed
-    /// installation must not enter their transactions until the same job owns capture, detached
-    /// rebuild, result custody and the revalidation at commit for a bucket.
-    ///
-    /// Keep this as a function rather than a public/configurable flag: unfinished repair is not a
-    /// user option and must not be enabled accidentally by configuration or a renderer command.
-    pub(super) fn registry_repair_execution_ready() -> bool {
-        false
     }
 
     /// The bounded last-attempt report a fault view shows for `target`.
@@ -155,11 +144,102 @@ impl CatchupRuntime {
         }
     }
 
-    fn remember_registry_repair(&mut self, bucket: u8, repair: &ReceiptRepair) {
-        if self.registry_repairs_seen.len() >= MAX_REMEMBERED_REGISTRY_REPAIRS {
-            self.registry_repairs_seen.clear();
+    /// Hold one offered repair, never its target: another repair, or the owed seed of the one the
+    /// target already carries, must not wait behind it. An offer is untrusted input, so whatever
+    /// stopped it (unverifiable evidence, a held outcome such as a replayed older sequence, or a
+    /// failed S3) is charged to that repair alone; otherwise one replayed offer a minute could
+    /// keep a target's legitimate replacement from ever being fetched (review MEDIUM-1). The hold
+    /// expires rather than becoming terminal, since each of those may change.
+    pub(super) fn hold_offer(&mut self, scope: CheckpointTarget, repair: [u8; 32], now: u64) {
+        self.repair_unverifiable.retain(|_, until| now < *until);
+        if self.repair_unverifiable.len() >= MAX_REMEMBERED_REPAIRS {
+            self.repair_unverifiable.clear();
         }
-        self.registry_repairs_seen.insert((bucket, repair.hash()));
+        self.repair_unverifiable
+            .insert((scope, repair), now.saturating_add(REPAIR_HOLD_BACKOFF_MS));
+    }
+
+    fn hold_unverifiable(&mut self, scope: CheckpointTarget, repair: &ReceiptRepair, now: u64) {
+        self.hold_offer(scope, repair.hash(), now);
+        let unverifiable =
+            invalid("this device cannot verify that repair yet; it will be offered again");
+        self.report_repair(scope, Err(&unverifiable));
+    }
+
+    /// The repair Flow D must not take again on this device: the owner's own (it resumes, never
+    /// re-applies), one already terminal here, or one under its own per-offer hold.
+    fn offer_refused<T: MeshTransport, R: CryptoRngCore>(
+        &self,
+        server: &mut Server<T, R>,
+        scope: CheckpointTarget,
+        repair: &ReceiptRepair,
+    ) -> bool {
+        let owner = server
+            .sync
+            .with_registry_context(|g, d, _, _| g.designated_committer() == Some(d.device_id()));
+        let now = server.runtime_clock().monotonic_ms();
+        owner
+            || self.repairs_seen.contains(&(scope, repair.hash()))
+            || self
+                .repair_unverifiable
+                .get(&(scope, repair.hash()))
+                .is_some_and(|until| now < *until)
+    }
+
+    /// Before anything is reserved or read, the repair must verify against the live owner and
+    /// this device's own authoring tenure, the same first step the transaction takes. A newcomer
+    /// with `Unknown` or `Imported` tenure therefore schedules nothing (N16), and a repair signed
+    /// by anyone but the current owner costs no capture and holds nothing else.
+    fn offer_authorized<T: MeshTransport, R: CryptoRngCore>(
+        server: &mut Server<T, R>,
+        repair: &ReceiptRepair,
+    ) -> bool {
+        let Some(tenure) = server.sync.authoring_owner_tenure_start() else {
+            return false;
+        };
+        server
+            .sync
+            .with_registry_context(|g, _, _, _| repair.verify_current_owner(g, tenure).is_ok())
+    }
+
+    /// The replacement `bucket` owes, from the retained prepared provider only, exactly as the
+    /// router classifies it: `None` is unknown (no warm, current provider for this bucket),
+    /// `Some(None)` a checked "owes nothing". Never a custody restore. An unreadable provider is
+    /// unknown too; the caller's own fallback decides what unknown costs.
+    #[allow(clippy::type_complexity)]
+    fn registry_classification<T: MeshTransport, R: CryptoRngCore>(
+        &mut self,
+        server: &mut Server<T, R>,
+        store: &ServerStore,
+        id: u64,
+        bucket: u8,
+    ) -> Option<Option<(ReceiptRepair, [Receipt; 2])>> {
+        let provider = self.registry_provider.as_mut()?;
+        server
+            .prepared_registry_owed_repair(store, id, bucket, provider)
+            .ok()
+            .flatten()
+    }
+
+    /// A Registry write invalidates the read-only prepared wrapper. Drop it now unless a Registry
+    /// preparation is queued or may be running: its attachment would then find no provider and
+    /// fail the whole visit. That one is left to the stamp check every use of the provider makes
+    /// (`registry_page_preparation_is_warm`, `check_source`, the attach itself), which refuses
+    /// superseded bytes. `preparing` also covers Studio and preview preparation, so a provider
+    /// that still holds a graph is dropped regardless: beginning a preparation clears the graph,
+    /// so none can be pending against one that has it, and dropping it releases its pool slot now
+    /// rather than at its next use or expiry (review LOW-3).
+    pub(super) fn invalidate_registry_provider(&mut self) {
+        let holds_graph = self
+            .registry_provider
+            .as_ref()
+            .is_some_and(|p| p.has_prepared_source());
+        let none_pending = !self.preparing
+            && self.registry_preparation.is_none()
+            && self.registry_prepared.is_none();
+        if holds_graph || none_pending {
+            self.registry_provider = None;
+        }
     }
 
     /// A repair that owes its replacement needs the selected checkpoint's seed. No fresh owner
@@ -273,8 +353,9 @@ impl CatchupRuntime {
         })
     }
 
-    /// The owner's explicit decision for the target's Registry bucket. The bucket's prepared
-    /// provider is dropped afterwards: any write invalidates a read-only prepared wrapper.
+    /// The owner's explicit decision for the target's Registry bucket: the same refusals as a
+    /// Studio source decision, then the same job, scoped to the bucket. Its outcome is read back
+    /// through the bucket's fault view.
     pub(in crate::studio::receiver) fn repair_registry_fault<T: MeshTransport, R: CryptoRngCore>(
         &mut self,
         server: &mut Server<T, R>,
@@ -283,11 +364,7 @@ impl CatchupRuntime {
         target: StudioTarget,
         request: StudioRepairRequest,
     ) -> Result<StudioControlResponse, AppError> {
-        if !Self::registry_repair_execution_ready() {
-            return Err(invalid(
-                "Registry fault repair awaits detached admitted runtime execution",
-            ));
-        }
+        server.require_observed_owner_tenure()?;
         let snapshot = self.owner_snapshot.clone().ok_or_else(|| {
             invalid("only the current owner, with a durable snapshot, may decide")
         })?;
@@ -295,39 +372,28 @@ impl CatchupRuntime {
             return Err(invalid("the durable owner snapshot is stale; retry"));
         }
         let bucket = server.studio_registry_bucket(target)?;
-        let mut budget = Self::inventory_budget(server, store, id)?;
-        self.settlement
-            .note(target, StudioSettlementState::RefreshRequired);
-        self.registry_provider = None;
-        let (repair, outcome, _) = server.issue_registry_fault_repair(
+        let scope = CheckpointTarget::Registry(bucket);
+        let start = match self.start_repair(
+            server,
             store,
             id,
-            target,
-            &snapshot,
-            request,
-            None,
-            &mut budget,
-        )?;
-        if outcome == StudioRepairOutcome::AwaitingSeed {
-            let held = server
-                .sync
-                .with_registry_context(|g, d, _, _| store.held_registry_repair(id, g, bucket, d));
-            if let Ok(Some((_, pair))) = held {
-                self.await_repaired_seed(
-                    server,
-                    store,
-                    id,
-                    CheckpointTarget::Registry(bucket),
-                    Some(target),
-                    &repair,
-                    &pair,
-                );
+            scope,
+            Some(target),
+            RepairInput::Decide(request),
+        ) {
+            RepairSchedule::Held => {
+                let reason = match self.repair_report(scope) {
+                    Some(StudioRepairReport::Failed(reason)) => reason,
+                    _ => "the repair could not start".into(),
+                };
+                return Err(invalid(reason));
             }
-        }
-        Ok(StudioControlResponse::Repaired {
+            started => started.start(),
+        };
+        Ok(StudioControlResponse::RepairStarted {
             target,
             scope: StudioFaultScope::RegistryBucket(bucket),
-            outcome,
+            start,
         })
     }
 
@@ -343,10 +409,7 @@ impl CatchupRuntime {
     /// target backing off, or a replacement already owed for exactly this repair, whose selected
     /// seed the router (or, with no pass, this call) fetches without rerunning the job.
     ///
-    /// Before anything is reserved or read, the repair must verify against the live owner and
-    /// this device's own authoring tenure, the same first step the transaction takes. A newcomer
-    /// with `Unknown` or `Imported` tenure therefore schedules nothing (N16), and a repair signed
-    /// by anyone but the current owner costs no capture and holds nothing else.
+    /// Before anything is reserved or read, the repair must pass `offer_authorized`.
     #[allow(clippy::too_many_arguments)]
     pub(super) fn offer_repair<T: MeshTransport, R: CryptoRngCore>(
         &mut self,
@@ -358,27 +421,8 @@ impl CatchupRuntime {
         offered: Option<&Receipt>,
         with_pass: bool,
     ) -> bool {
-        let owner = server
-            .sync
-            .with_registry_context(|g, d, _, _| g.designated_committer() == Some(d.device_id()));
         let scope = CheckpointTarget::Studio(target);
-        let now = server.runtime_clock().monotonic_ms();
-        if owner
-            || self.repairs_seen.contains(&(scope, repair.hash()))
-            || self
-                .repair_unverifiable
-                .get(&(scope, repair.hash()))
-                .is_some_and(|until| now < *until)
-        {
-            return false;
-        }
-        let Some(tenure) = server.sync.authoring_owner_tenure_start() else {
-            return false;
-        };
-        let authorized = server
-            .sync
-            .with_registry_context(|g, _, _, _| repair.verify_current_owner(g, tenure).is_ok());
-        if !authorized {
+        if self.offer_refused(server, scope, repair) || !Self::offer_authorized(server, repair) {
             return false;
         }
         let owed = server
@@ -402,81 +446,67 @@ impl CatchupRuntime {
         }
     }
 
-    /// Flow D for a Registry bucket: the same rules as a Studio source. A faulted bucket blocks
-    /// discovery, so the repair an owner's answer carries is applied here before anything else.
-    /// The bucket's own detached preparation runs first when its source is large.
-    pub(super) fn apply_offered_registry_repair<T: MeshTransport, R: CryptoRngCore>(
+    /// Flow D for a Registry bucket: the same rules as a Studio source, and the same answer. A
+    /// faulted bucket blocks discovery, so the repair an owner's answer carries is the bucket's
+    /// way out; it is scheduled here and applied by the job's S3 to a bucket rebuilt detached,
+    /// with the pair assembled there. `failure_target` is the discovery's Studio target, if any.
+    ///
+    /// Whether the bucket already owes exactly this repair's replacement is read from the
+    /// retained prepared provider only, never from a restore under custody. When that provider is
+    /// cold the job runs, and its S3 classification (an `AwaitingSeed` without a second write)
+    /// fetches the seed instead.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn offer_registry_repair<T: MeshTransport, R: CryptoRngCore>(
         &mut self,
         server: &mut Server<T, R>,
         store: &mut ServerStore,
         id: u64,
         bucket: u8,
+        failure_target: Option<StudioTarget>,
         repair: &ReceiptRepair,
         offered: Option<&Receipt>,
-    ) -> Result<Option<(StudioRepairOutcome, [Receipt; 2])>, AppError> {
-        if !Self::registry_repair_execution_ready() {
-            return Ok(None);
+        with_pass: bool,
+    ) -> bool {
+        let scope = CheckpointTarget::Registry(bucket);
+        if self.offer_refused(server, scope, repair) || !Self::offer_authorized(server, repair) {
+            return false;
         }
-        let owner = server
-            .sync
-            .with_registry_context(|g, d, _, _| g.designated_committer() == Some(d.device_id()));
-        if owner
-            || self
-                .registry_repairs_seen
-                .contains(&(bucket, repair.hash()))
-            || (!store.registry_receive_source_fits(id, &server.group_id(), bucket)?
-                && !self.prepare_registry_inventory(server, store, id, bucket)?)
-        {
-            return Ok(None);
+        // Unknown (a cold provider) is treated as "not owed": the job then runs, and its S3
+        // classification is exact.
+        let owed = self
+            .registry_classification(server, store, id, bucket)
+            .flatten()
+            .filter(|(owed, _)| owed.hash() == repair.hash());
+        if let Some((owed, pair)) = owed {
+            if !with_pass {
+                self.await_repaired_seed(server, store, id, scope, failure_target, &owed, &pair);
+            }
+            return false;
         }
-        let pair = server.sync.with_registry_context(|g, d, _, _| {
-            store.registry_repair_evidence(id, g, bucket, d, repair, offered)
-        });
-        let pair = match pair {
-            Ok(OfferedRepairEvidence::Pair(pair)) => *pair,
-            // Terminal here: remember it so later answers carrying the same repair cost no
-            // further Registry restores on the actor. Unverifiable may change, so it is not.
-            Ok(OfferedRepairEvidence::Terminal) => {
-                self.remember_registry_repair(bucket, repair);
-                return Ok(None);
-            }
-            Ok(OfferedRepairEvidence::Unverifiable) => return Ok(None),
-            Err(error) => {
-                if let Some(target) = self.target {
-                    self.note_repair_failure(target, &error);
-                }
-                return Ok(None);
-            }
+        let input = RepairInput::Offered {
+            repair: Box::new(repair.clone()),
+            offered: offered.cloned().map(Box::new),
         };
-        let mut budget = Self::inventory_budget(server, store, id)?;
-        self.registry_provider = None;
-        match server.apply_registry_bucket_repair(
-            store,
-            id,
-            bucket,
-            repair,
-            &pair,
-            None,
-            &mut budget,
-        ) {
-            Ok((outcome, _)) => {
-                if outcome.is_terminal() {
-                    self.remember_registry_repair(bucket, repair);
-                }
-                Ok(Some((outcome, pair)))
-            }
-            Err(error) => {
-                if let Some(target) = self.target {
-                    self.note_repair_failure(target, &error);
-                }
-                Ok(None)
-            }
+        match self.start_repair(server, store, id, scope, failure_target, input) {
+            RepairSchedule::Scheduled | RepairSchedule::Busy | RepairSchedule::Full => true,
+            RepairSchedule::Held => false,
         }
     }
 
     /// The owner resumes a held Registry decision for the bucket behind `target`. The explicit
-    /// decision itself is never made here: only one already persisted at B1 is continued. Paced
-    /// like the Studio step: a hold or failure backs off to 60 s instead of every Registry turn.
+    /// decision itself is never made here: only one already persisted at B1 is continued, as a
+    /// job. Paced like the Studio step: a hold backs off to 60 s instead of every Registry turn.
+    ///
+    /// Returns whether a held decision owns the bucket; the caller then gives this turn to it.
+    ///
+    /// Whether only the seed is missing is read from the prepared provider, which `work_registry`
+    /// has just made warm and current for this bucket: exact, and no bucket restore. The owner
+    /// record's B3 flag is only the fallback for an unknown provider, because it cannot tell an
+    /// owed replacement from one that was installed just before a crash, while the recycle that
+    /// follows the install in its own write was lost. That record still holds the decision with
+    /// B3 set although the bucket owes nothing. A seed fetch there would be deferred by the held
+    /// decision forever, and nothing else recycles an owner's record (review HIGH-1); the resume
+    /// does, answering `AlreadyRepaired`.
     pub(super) fn resume_registry_repair<T: MeshTransport, R: CryptoRngCore>(
         &mut self,
         server: &mut Server<T, R>,
@@ -485,9 +515,6 @@ impl CatchupRuntime {
         target: StudioTarget,
         bucket: u8,
     ) -> Result<bool, AppError> {
-        if !Self::registry_repair_execution_ready() {
-            return Ok(false);
-        }
         let now = server.runtime_clock().monotonic_ms();
         if now < self.registry_repair_next_at {
             return Ok(false);
@@ -504,36 +531,32 @@ impl CatchupRuntime {
         let Ok(Some((repair, pair))) = held else {
             return Ok(false);
         };
-        let mut budget = Self::inventory_budget(server, store, id)?;
-        self.registry_provider = None;
-        match server.resume_registry_fault_repair(
-            store,
-            id,
-            target,
-            &snapshot,
-            &repair,
-            &pair,
-            None,
-            &mut budget,
-        ) {
-            Ok((outcome, _)) if outcome.is_terminal() => {}
-            Ok((outcome, _)) => {
-                self.registry_repair_next_at = now.saturating_add(60_000);
-                if outcome == StudioRepairOutcome::AwaitingSeed {
-                    self.await_repaired_seed(
-                        server,
-                        store,
-                        id,
-                        CheckpointTarget::Registry(bucket),
-                        Some(target),
-                        &repair,
-                        &pair,
-                    );
+        let scope = CheckpointTarget::Registry(bucket);
+        let owes_only_seed = match self.registry_classification(server, store, id, bucket) {
+            Some(owed) => Ok(owed.is_some_and(|(owed, _)| owed.hash() == repair.hash())),
+            None => server.sync.with_registry_context(|g, d, _, _| {
+                store.held_registry_repair_applied(id, g, bucket, d)
+            }),
+        };
+        match owes_only_seed {
+            Ok(true) => {
+                // B2 already crossed: a resume would only flush the same bucket again. Fetch the
+                // seed instead; only a fetch that actually started earns the long cadence.
+                self.await_repaired_seed(server, store, id, scope, Some(target), &repair, &pair);
+                if self.checkpoint.is_some() || self.repair_backoff.contains_key(&scope) {
+                    self.registry_repair_next_at = now.saturating_add(60_000);
+                }
+            }
+            Ok(false) => {
+                if self.start_repair(server, store, id, scope, Some(target), RepairInput::Resume)
+                    == RepairSchedule::Held
+                {
+                    self.registry_repair_next_at = now.saturating_add(60_000);
                 }
             }
             Err(error) => {
-                self.registry_repair_next_at = now.saturating_add(60_000);
                 self.note_repair_failure(target, &error);
+                self.registry_repair_next_at = now.saturating_add(60_000);
             }
         }
         Ok(true)
@@ -633,7 +656,7 @@ impl CatchupRuntime {
         let snapshot = self.current_owner_snapshot(server, store, id)?;
         let (repair, outcome, state) = server
             .issue_studio_fault_repair(store, id, target, &snapshot, request, None, budget)?;
-        self.finish_studio_repair(server, store, id, target, &repair, outcome, state);
+        self.finish_studio_repair(server, store, id, target, &repair, outcome, state, false);
         Ok(Some(target))
     }
 
@@ -659,7 +682,7 @@ impl CatchupRuntime {
         let (outcome, state) = server.resume_studio_fault_repair(
             store, id, target, &snapshot, &repair, &pair, None, budget,
         )?;
-        self.finish_studio_repair(server, store, id, target, &repair, outcome, state);
+        self.finish_studio_repair(server, store, id, target, &repair, outcome, state, false);
         Ok(Some(target))
     }
 
@@ -689,24 +712,12 @@ impl CatchupRuntime {
         let Some(pair) = server.sync.with_registry_context(|g, d, _, _| {
             store.studio_repair_evidence(id, g, target, d, repair, offered)
         }) else {
-            // Unverifiable here today. Only this repair is held, never the target: another
-            // repair, or this one's owed seed, must not wait behind it.
-            self.repair_unverifiable.retain(|_, until| now < *until);
-            if self.repair_unverifiable.len() >= MAX_REMEMBERED_REPAIRS {
-                self.repair_unverifiable.clear();
-            }
-            self.repair_unverifiable.insert(
-                (scope, repair.hash()),
-                now.saturating_add(REPAIR_HOLD_BACKOFF_MS),
-            );
-            let unverifiable =
-                invalid("this device cannot verify that repair yet; it will be offered again");
-            self.report_repair(scope, Err(&unverifiable));
+            self.hold_unverifiable(scope, repair, now);
             return Ok(None);
         };
         let (outcome, state) =
             server.apply_studio_fault_repair(store, id, target, repair, &pair, None, budget)?;
-        self.finish_studio_repair(server, store, id, target, repair, outcome, state);
+        self.finish_studio_repair(server, store, id, target, repair, outcome, state, true);
         Ok(Some(target))
     }
 
@@ -754,7 +765,7 @@ impl CatchupRuntime {
             }
             self.next_at = now;
         }
-        self.finish_studio_repair(server, store, id, target, repair, outcome, state);
+        self.finish_studio_repair(server, store, id, target, repair, outcome, state, false);
         Ok(Some(target))
     }
 
@@ -773,7 +784,8 @@ impl CatchupRuntime {
 
     /// Everything a committed repair transaction is followed by, whichever input ran it: retain
     /// the saved source, label it, report it, remember it once terminal, back off from a
-    /// persistent hold, and fetch the selected seed when a replacement is owed.
+    /// persistent hold, and fetch the selected seed when a replacement is owed. A hold on an
+    /// `offered` repair holds that repair, never the target (see `hold_offer`).
     #[allow(clippy::too_many_arguments)]
     fn finish_studio_repair<T: MeshTransport, R: CryptoRngCore>(
         &mut self,
@@ -784,6 +796,7 @@ impl CatchupRuntime {
         repair: &ReceiptRepair,
         outcome: StudioRepairOutcome,
         state: crate::store::EpochStudioState,
+        offered: bool,
     ) {
         let scope = CheckpointTarget::Studio(target);
         let now = server.runtime_clock().monotonic_ms();
@@ -809,6 +822,7 @@ impl CatchupRuntime {
                     self.await_repaired_seed(server, store, id, scope, Some(target), &owed, &pair);
                 }
             }
+            StudioRepairOutcome::Held(_) if offered => self.hold_offer(scope, repair.hash(), now),
             // Recovery warning, storage refusal or a hold: they need the user or the owner.
             _ => self.hold_repair(scope, now),
         }
@@ -822,11 +836,211 @@ impl CatchupRuntime {
             .insert(target, now.saturating_add(REPAIR_HOLD_BACKOFF_MS));
     }
 
+    /// S3 of a Registry bucket job, for every input. `prepared` was found current a moment ago
+    /// under this same custody, and each `*_prepared` transaction rechecks it against the live
+    /// context and the bytes on disk before using it; otherwise these are the same transactions,
+    /// with the same authority checks, that the bucket's synchronous repair called directly.
+    ///
+    /// `failure_target` is the Studio target the job was asked for, if any: an explicit decision
+    /// always has one (its channel is checked at issuance); a bucket pass may have none.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn execute_registry<T: MeshTransport, R: CryptoRngCore>(
+        &mut self,
+        server: &mut Server<T, R>,
+        store: &mut ServerStore,
+        id: u64,
+        bucket: u8,
+        failure_target: Option<StudioTarget>,
+        input: RepairInput,
+        prepared: PreparedRegistryRepair,
+        budget: &mut crate::store::EpochStudioBudget,
+    ) -> Result<Option<StudioTarget>, AppError> {
+        let scope = CheckpointTarget::Registry(bucket);
+        let now = server.runtime_clock().monotonic_ms();
+        let offered = matches!(input, RepairInput::Offered { .. });
+        let (repair, pair, outcome) = match input {
+            RepairInput::Decide(request) => {
+                let target = failure_target
+                    .ok_or_else(|| invalid("a bucket decision is made for one document"))?;
+                let snapshot = self.current_owner_snapshot(server, store, id)?;
+                self.note_refresh(failure_target);
+                let (repair, outcome, _) = server.issue_registry_fault_repair_prepared(
+                    store, id, target, &snapshot, request, prepared, budget,
+                )?;
+                // The seed fetch needs the decision's pair, which the bounded owner record holds.
+                let pair = if outcome == StudioRepairOutcome::AwaitingSeed {
+                    server
+                        .sync
+                        .with_registry_context(|g, d, _, _| {
+                            store.held_registry_repair(id, g, bucket, d)
+                        })
+                        .ok()
+                        .flatten()
+                        .filter(|(held, _)| held.hash() == repair.hash())
+                        .map(|(_, pair)| pair)
+                } else {
+                    None
+                };
+                (repair, pair, outcome)
+            }
+            RepairInput::Resume => {
+                let snapshot = self.current_owner_snapshot(server, store, id)?;
+                let Some((repair, pair)) = server.sync.with_registry_context(|g, d, _, _| {
+                    store.held_registry_repair(id, g, bucket, d)
+                })?
+                else {
+                    // Completed or recycled since S1; nothing is owed.
+                    self.report_repair(scope, Ok(StudioRepairOutcome::AlreadyRepaired));
+                    return Ok(None);
+                };
+                self.note_refresh(failure_target);
+                let (outcome, _) = server.resume_registry_bucket_repair_prepared(
+                    store, id, bucket, &snapshot, &repair, &pair, None, prepared, budget,
+                )?;
+                (repair, Some(pair), outcome)
+            }
+            RepairInput::Offered { repair, offered } => {
+                match prepared.offered_evidence(&repair, offered.as_deref()) {
+                    OfferedRepairEvidence::Terminal => {
+                        // Terminal here: later answers carrying it cost no further job.
+                        self.remember_repair(scope, &repair);
+                        self.report_repair(scope, Ok(StudioRepairOutcome::AlreadyRepaired));
+                        return Ok(None);
+                    }
+                    OfferedRepairEvidence::Unverifiable => {
+                        self.hold_unverifiable(scope, &repair, now);
+                        return Ok(None);
+                    }
+                    OfferedRepairEvidence::Pair(pair) => {
+                        self.note_refresh(failure_target);
+                        let (outcome, _) = server.apply_registry_bucket_repair_prepared(
+                            store, id, bucket, &repair, &pair, None, prepared, budget,
+                        )?;
+                        (*repair, Some(*pair), outcome)
+                    }
+                }
+            }
+            RepairInput::Replace { repair, pair, seed } => {
+                // The owner installs only as a resume would, through a current durable snapshot;
+                // a peer through Flow A, which refuses the owner.
+                let owner = server.sync.with_registry_context(|g, d, _, _| {
+                    g.designated_committer() == Some(d.device_id())
+                });
+                let snapshot = if owner {
+                    Some(self.current_owner_snapshot(server, store, id)?)
+                } else {
+                    None
+                };
+                self.note_refresh(failure_target);
+                let (outcome, _) = if let Some(snapshot) = snapshot {
+                    server.resume_registry_bucket_repair_prepared(
+                        store,
+                        id,
+                        bucket,
+                        &snapshot,
+                        &repair,
+                        &pair,
+                        Some(seed.as_slice()),
+                        prepared,
+                        budget,
+                    )?
+                } else {
+                    server.apply_registry_bucket_repair_prepared(
+                        store,
+                        id,
+                        bucket,
+                        &repair,
+                        &pair,
+                        Some(seed.as_slice()),
+                        prepared,
+                        budget,
+                    )?
+                };
+                if outcome.is_terminal()
+                    && self
+                        .registry_watch
+                        .as_ref()
+                        .is_some_and(|watch| watch.bucket == bucket)
+                {
+                    // The replacement opened a new epoch for this bucket. Old concrete-epoch pages
+                    // must not enter it; another bucket's tail is left alone (S3 runs any time).
+                    self.reset_registry_tail(server, now);
+                }
+                (*repair, Some(*pair), outcome)
+            }
+        };
+        self.finish_registry_repair(
+            server,
+            store,
+            id,
+            bucket,
+            failure_target,
+            &repair,
+            pair,
+            outcome,
+            offered,
+        );
+        Ok(None)
+    }
+
+    /// Settlement hears of a bucket write only when one is about to run: an offer this bucket
+    /// already finished, one it cannot verify, or a resume with nothing held writes nothing and
+    /// must not ask the renderer to refresh (review LOW-2).
+    fn note_refresh(&mut self, failure_target: Option<StudioTarget>) {
+        if let Some(target) = failure_target {
+            self.settlement
+                .note(target, StudioSettlementState::RefreshRequired);
+        }
+    }
+
+    /// The Registry counterpart of `finish_studio_repair`. A bucket has no settlement phase of
+    /// its own and no warm cache to retain into; the prepared page provider is what goes stale.
+    ///
+    /// The owner's shared Registry resume cadence is not touched here. It is one value for every
+    /// bucket, so lengthening it for this bucket's outcome would also delay a held decision in
+    /// another (review LOW-1). This bucket waits on its own: a hold sets its backoff, which
+    /// `start_repair` honours, and an owed seed is classified by the resume and fetched, not rerun.
+    #[allow(clippy::too_many_arguments)]
+    fn finish_registry_repair<T: MeshTransport, R: CryptoRngCore>(
+        &mut self,
+        server: &mut Server<T, R>,
+        store: &mut ServerStore,
+        id: u64,
+        bucket: u8,
+        failure_target: Option<StudioTarget>,
+        repair: &ReceiptRepair,
+        pair: Option<[Receipt; 2]>,
+        outcome: StudioRepairOutcome,
+        offered: bool,
+    ) {
+        let scope = CheckpointTarget::Registry(bucket);
+        let now = server.runtime_clock().monotonic_ms();
+        self.invalidate_registry_provider();
+        self.report_repair(scope, Ok(outcome));
+        if outcome.is_terminal() {
+            self.repair_backoff.remove(&scope);
+            self.remember_repair(scope, repair);
+            return;
+        }
+        match (outcome, pair) {
+            (StudioRepairOutcome::AwaitingSeed, Some(pair)) => {
+                self.await_repaired_seed(server, store, id, scope, failure_target, repair, &pair);
+            }
+            (StudioRepairOutcome::AwaitingSeed, None) => {}
+            (StudioRepairOutcome::Held(_), _) if offered => {
+                self.hold_offer(scope, repair.hash(), now);
+            }
+            // Recovery warning, storage refusal or a hold: they need the user or the owner.
+            _ => self.hold_repair(scope, now),
+        }
+    }
+
     /// Route a checkpoint pass before the ordinary installer, so a repair is never an installer
     /// error that pauses all catch-up:
-    /// - the source owes a repair and this pass has fetched exactly its selected seed: install
-    ///   through the repair transaction itself, with typed RecoveryPending/StorageRefused and
-    ///   owner recycling (the owner only through a current durable snapshot);
+    /// - the source owes a repair and this pass has fetched exactly its selected seed: hand the
+    ///   seed to a repair job, whose S3 installs it through the repair transaction itself, with
+    ///   typed RecoveryPending/StorageRefused and owner recycling (the owner only through a
+    ///   current durable snapshot);
     /// - the source owes a repair and this pass names another receipt, or has no seed yet: drop
     ///   it and fetch the repair's own selected seed instead, from the source's committed
     ///   evidence (a peer self-heals here);
@@ -854,44 +1068,31 @@ impl CatchupRuntime {
             self.retry_discovery(now);
             return Ok(Some(None));
         }
-        let automatic_repair_ready = match target {
-            CheckpointTarget::Studio(_) => true,
-            CheckpointTarget::Registry(_) => Self::registry_repair_execution_ready(),
-        };
         let owed = match target {
             CheckpointTarget::Studio(studio) => server
                 .sync
                 .with_registry_context(|g, d, _, _| Ok(store.owed_studio_repair(id, g, studio, d))),
-            CheckpointTarget::Registry(bucket) if !automatic_repair_ready => {
-                // Registry reconstruction is detached and already retained by the page provider.
-                // Rebuilding it here, under actor/store custody, would defeat that boundary even
-                // though automatic repair execution is disabled. Unknown classification is not
-                // "no repair": a missing/cold/stale provider must defer rather than fall through
-                // to ordinary installation.
+            CheckpointTarget::Registry(bucket) => {
+                // Registry reconstruction is detached and already retained by the page provider,
+                // which the caller prepared for this bucket. Rebuilding it here, under actor/store
+                // custody, would defeat that boundary. Unknown classification is not "no repair":
+                // a missing/cold/stale provider must defer rather than fall through to ordinary
+                // installation.
                 let classification = match self.registry_provider.as_mut() {
                     Some(provider) => {
-                        server.prepared_registry_repair_install_pending(store, id, bucket, provider)
+                        server.prepared_registry_owed_repair(store, id, bucket, provider)
                     }
                     None => Ok(None),
                 };
                 match classification {
-                    Ok(Some(false)) => Ok(None),
-                    Ok(Some(true) | None) => {
-                        self.checkpoint = None;
+                    Ok(Some(owed)) => Ok(owed),
+                    Ok(None) => {
                         self.retry_discovery(now);
                         return Ok(Some(None));
                     }
-                    Err(error) => {
-                        self.note_repair_failure_for(failure_target, &error);
-                        self.checkpoint = None;
-                        self.retry_discovery(now);
-                        return Ok(Some(None));
-                    }
+                    Err(error) => Err(error),
                 }
             }
-            CheckpointTarget::Registry(bucket) => server
-                .sync
-                .with_registry_context(|g, d, _, _| store.owed_registry_repair(id, g, bucket, d)),
         };
         let owed = match owed {
             Ok(owed) => owed,
@@ -902,14 +1103,6 @@ impl CatchupRuntime {
             }
         };
         if let Some((repair, pair)) = owed {
-            if !automatic_repair_ready {
-                // Do not let the ordinary installer consume the decision's selected checkpoint.
-                // The fetched pass is network-derived and disposable; durable repair/source state
-                // remains untouched for the future detached job.
-                self.checkpoint = None;
-                self.retry_discovery(now);
-                return Ok(Some(None));
-            }
             let fetched = self
                 .checkpoint
                 .as_ref()
@@ -927,97 +1120,50 @@ impl CatchupRuntime {
                 }
                 return Ok(Some(None));
             }
-            if let CheckpointTarget::Studio(studio) = target {
-                // S1 of the replacement: the seed is taken from the pass only if its selection was
-                // made under this device's observed tenure. The install is the job's S3, on a
-                // source rebuilt detached.
-                let pass = self.checkpoint.take().expect("pass");
-                let seed = match server.repaired_seed_bytes(store, id, &pass, &repair) {
-                    Ok(seed) => seed,
-                    Err(error) => {
-                        self.note_repair_failure_for(failure_target, &error);
-                        self.hold_repair(target, now);
-                        self.retry_discovery(now);
-                        return Ok(Some(None));
-                    }
-                };
-                let input = RepairInput::Replace {
-                    repair: Box::new(repair),
-                    pair: Box::new(pair),
-                    seed: Zeroizing::new(seed),
-                };
-                if self.start_repair(server, store, id, target, Some(studio), input)
-                    == RepairSchedule::Busy
-                {
-                    // Another repair job: keep the fetched seed rather than fetch it again, and
-                    // look again shortly. A full pool is not this: it may be this actor's own
-                    // overlay or handoff waiting for a slot, which a parked pass would hold back
-                    // (it blocks `replay_ready`), so that case drops the pass below.
-                    self.checkpoint = Some(pass);
-                    self.checkpoint_retry = now.saturating_add(1_000);
-                    return Ok(Some(None));
-                }
-                self.retry_discovery(now);
-                return Ok(Some(None));
-            }
+            // The owner installs only as a resume would, through a current durable snapshot. S3
+            // checks it again, but a snapshot already stale here would cost a whole job, the
+            // fetched seed and a held target before saying so (review LOW-5).
             let owner = server.sync.with_registry_context(|g, d, _, _| {
                 g.designated_committer() == Some(d.device_id())
             });
-            // The owner installs only as a resume would: through a current durable snapshot.
-            let snapshot = match self.owner_snapshot.clone() {
-                Some(snapshot)
-                    if owner && server.owner_head_snapshot_is_current(store, id, &snapshot) =>
-                {
-                    Some(snapshot)
-                }
-                _ if owner => {
-                    let stale = invalid("the durable owner snapshot is stale; retry");
+            if owner {
+                if let Err(stale) = self.current_owner_snapshot(server, store, id) {
                     self.note_repair_failure_for(failure_target, &stale);
                     self.retry_discovery(now);
                     return Ok(Some(None));
                 }
-                _ => None,
-            };
-            let mut budget = Self::budget(server, store, id)?;
-            let pass = self.checkpoint.take().expect("pass");
-            if let Some(failure_target) = failure_target {
-                self.settlement
-                    .note(failure_target, StudioSettlementState::RefreshRequired);
             }
-            // Registry only: the Studio replacement returned above as a job.
-            self.registry_provider = None;
-            let installed = server
-                .install_repaired_registry_seed(
-                    store,
-                    id,
-                    &pass,
-                    &repair,
-                    &pair,
-                    snapshot.as_ref(),
-                    &mut budget,
-                )
-                .map(|(outcome, _)| outcome);
-            return Ok(Some(match installed {
-                Ok(outcome) if outcome.is_terminal() => {
-                    self.repair_backoff.remove(&target);
-                    self.reset_registry_tail(server, now);
-                    self.discovery_plan = self.after_registry.take();
-                    None
-                }
-                Ok(_) => {
-                    // Recovery warning, storage refusal or a hold: everything is retained. They
-                    // need the user or the owner, so the seed is not refetched for a while.
-                    self.hold_repair(target, now);
-                    self.retry_discovery(now);
-                    None
-                }
+            // The seed is taken from the pass only if its selection was made under this device's
+            // observed tenure. The install is the job's S3, on a source or bucket rebuilt
+            // detached; the owner goes through its current durable snapshot there.
+            let pass = self.checkpoint.take().expect("pass");
+            let seed = match server.repaired_seed_bytes(store, id, &pass, &repair) {
+                Ok(seed) => seed,
                 Err(error) => {
                     self.note_repair_failure_for(failure_target, &error);
                     self.hold_repair(target, now);
                     self.retry_discovery(now);
-                    None
+                    return Ok(Some(None));
                 }
-            }));
+            };
+            let input = RepairInput::Replace {
+                repair: Box::new(repair),
+                pair: Box::new(pair),
+                seed: Zeroizing::new(seed),
+            };
+            if self.start_repair(server, store, id, target, failure_target, input)
+                == RepairSchedule::Busy
+            {
+                // Another repair job: keep the fetched seed rather than fetch it again, and look
+                // again shortly. A full pool is not this: it may be this actor's own overlay or
+                // handoff waiting for a slot, which a parked pass would hold back (it blocks
+                // `replay_ready`), so that case drops the pass below.
+                self.checkpoint = Some(pass);
+                self.checkpoint_retry = now.saturating_add(1_000);
+                return Ok(Some(None));
+            }
+            self.retry_discovery(now);
+            return Ok(Some(None));
         }
         let deferred = server
             .sync
