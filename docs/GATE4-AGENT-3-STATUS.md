@@ -70,8 +70,29 @@ or a control request on spawned actors.
 **Test barrier.** `wait_studio_preparation` (test-only) now also waits for a detached repair S2, so
 actor fixtures await it without spending network deadlines.
 
-**S3 cost** (`profile_repair_job_stages`, release, 20,000 operations; the smoke variant runs in
-the suite). The profile is added, but its release numbers are not recorded yet.
+**S3 cost** (`profile_repair_job_stages`, release; the smoke variant runs in the suite). The
+fixture asked for 20,000 operations and the saved Studio source holds 6,939, at 4.9 MB physical:
+the byte cap stops it first. One release run, while other agents' builds shared the machine;
+read these as orders of magnitude:
+
+| Stage | Decision | Replacement |
+|---|---|---|
+| S1 capture (custody) | 9 ms | 11 ms |
+| S2 rebuild (detached) | 181 s | 153 s |
+| S3 install (custody) | 14 ms | 11 ms |
+| S3 transaction (custody) | 211 ms | 264 ms |
+| **Total custody** | **234 ms** | **286 ms** |
+
+For comparison, a cold restore of the same source takes 136 s, and the synchronous repair did
+that inside custody before the job existed. At this size the job moves about two and a half
+minutes of verification off the actor and keeps under a third of a second in custody.
+
+**Load isolation.** Parallel full-suite runs exposed a load-sensitive Registry runtime test,
+`studio_held_registry_page_is_discarded_after_fault_or_checkpoint_replacement`. Its receiver
+drew from the process-wide preparation pool, and parallel actor tests can hold all four slots.
+It now keeps a private pool, as the `unopened` fixtures already do; no assertion changed. The
+two-peer test's actors also get private pools, through a test-only hook
+(`actor::studio_pools_for_next_spawn`, consumed by the next `spawn` on that thread).
 
 **Still open:** Registry Flow D on a real peer; the CI run of the new harness workflow; a bounded
 repair verdict.

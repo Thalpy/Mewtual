@@ -139,7 +139,9 @@ async fn fault_view(
     }
 }
 
-/// Spawn an actor whose event stream must never report a paused receiver.
+/// Spawn an actor whose event stream must never report a paused receiver. Its preparation pools
+/// are private, as the process it models would have them: these actors retain Registry graphs
+/// (and their slots) for up to 30 s, which must not starve other tests sharing the process pool.
 fn spawn(
     node: Node,
 ) -> (
@@ -147,6 +149,10 @@ fn spawn(
     tokio::task::JoinHandle<()>,
     tokio::task::JoinHandle<()>,
 ) {
+    crate::actor::studio_pools_for_next_spawn(
+        Arc::new(tokio::sync::Semaphore::new(4)),
+        Arc::new(tokio::sync::Semaphore::new(3)),
+    );
     let (actor, mut events, task) = crate::spawn(node);
     let drain = tokio::spawn(async move {
         while let Some(event) = events.recv().await {
