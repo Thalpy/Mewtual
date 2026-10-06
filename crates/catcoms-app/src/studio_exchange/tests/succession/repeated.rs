@@ -18,13 +18,21 @@
 //! authenticated P2P policy refuses an admission that changes the owner (`joining.rs`'s negative
 //! case).
 //!
-//! **What this cannot show yet:** the returning device's *own* side. It cannot process the
-//! Welcome, because its MLS provider still holds its old membership of the same group. The test
-//! pins that failure so that the day it is lifted, the returning owner's first receipt of its
-//! second tenure is added here.
+//! **What the first test cannot show:** the returning device's *own* side. A cannot process the
+//! Welcome, because its MLS provider still holds the same group. The test pins that failure. The
+//! second test shows the returning side anyway, by turning the roles round: B -> A -> B, where B
+//! never leaves. B's first receipt of its second tenure is issued through the actor.
+//!
+//! **The newcomer (N-T2).** C joins during A's first tenure and reads `Unknown` there: neither its
+//! Welcome nor any receipt names a start. It learns each later start only by observing the
+//! transition, holds the same value as the owner, and refuses each earlier same-key receipt.
+//!
+//! **Why C joins that early.** A member can only join while the lowest leaf is occupied, or MLS
+//! puts it there and it owns by its own join (9.6). And it cannot join during A's second tenure,
+//! because only the owner admits, and A's device here cannot act.
 use super::joining::{drain_events, step};
 use super::*;
-use catcoms_replication::Receipt;
+use catcoms_replication::{CheckpointSeed, Receipt};
 
 /// Ordinary actor idle passes until `target`'s source is at `epoch`, Open, and the Registry
 /// pointer names it. Returns whether that state was reached in the bounded window.
@@ -81,14 +89,118 @@ fn published(store: &ServerStore, group_id: &[u8], target: StudioTarget) -> Rece
     journal.published().expect("a published receipt").clone()
 }
 
-#[tokio::test]
-async fn studio_actor_a_to_b_to_a_progresses_under_new_tenure_and_refuses_the_returning_keys_old_one(
-) {
+/// One ordinary tick to flush what the previous one queued. A tick drains its outbox (queued commit
+/// broadcasts) at the top, then blocks on the next transport event, so the wait is cut short here.
+/// A tick is cancel-safe by design: its network waits stay owned on the node.
+async fn flush(node: &mut Node) {
+    let _ = tokio::time::timeout(std::time::Duration::from_millis(500), node.sync_once()).await;
+}
+
+/// Ordinary sync ticks until `node` has processed every commit up to `epoch`. Bounded in ticks and
+/// in time, because a tick blocks on the next transport event: a commit that never arrives must
+/// fail the test by name instead of hanging it.
+///
+/// It ends with one more tick. A member at the contested setting applies a commit when its stage
+/// resolves, and that tick returns early, so a removal's routing-label rotation is only noted. The
+/// member subscribes to the new label's topics on its NEXT tick. Without that tick it would miss
+/// every later commit, which is published on the new label.
+async fn catch_up(node: &mut Node, epoch: u64, who: &str) {
+    for _ in 0..50 {
+        if node.epoch() == epoch {
+            break;
+        }
+        tokio::time::timeout(std::time::Duration::from_secs(10), node.sync_once())
+            .await
+            .unwrap_or_else(|_| panic!("{who} never received the commit for epoch {epoch}"))
+            .unwrap();
+    }
+    assert_eq!(node.epoch(), epoch, "{who} never processed the commit");
+    flush(node).await;
+}
+
+/// The contested-commit setting the transitions use: a member at committer rank 1 may commit, with
+/// no stage window. It is how B removes A here while A is still the designated committer. Every
+/// member that must accept such a commit carries it too.
+fn contested() -> catcoms_sync::SyncConfig {
+    catcoms_sync::SyncConfig {
+        max_committer_rank: 1,
+        stage_decision_window_ms: 0,
+        ..Default::default()
+    }
+}
+
+/// Where both tests stand once A's key has been admitted again: A owns its second tenure at the
+/// witness, and everything earlier is real receipts and real membership changes.
+struct Returned {
+    /// B, restarted from its saved snapshot, which admitted A's key and is not the owner.
+    witness: Node,
+    /// C, which joined during A's first tenure and has observed every transition since. Still at
+    /// the contested setting, so it can accept a later rank-1 commit.
+    newcomer: Node,
+    clock: ManualClock,
+    /// B's vault. Holds R1 published and the Studio source at epoch 2, Open.
+    b_root: tempfile::TempDir,
+    target: StudioTarget,
+    /// A's receipt, tenure 0, closing epoch 0.
+    r0: Receipt,
+    seed: CheckpointSeed,
+    /// B's first receipt, tenure `t1`, closing epoch 1 and inheriting R0's checkpoint.
+    r1: Receipt,
+    /// B's tenure start, at A's removal.
+    t1: u64,
+    /// A's second tenure start, at its admission, as the witness observed it.
+    t2: u64,
+    a_id: crate::DeviceId,
+}
+
+/// A owns, B succeeds it through the actor and a restart, then A's same key is admitted again.
+async fn a_returns_at_the_witness() -> Returned {
     // --- Tenure 0. A owns: it closes epoch 0 and installs epoch 1 under R0, signed by A's key. B,
     // a member while A is provably owner, adopts that checkpoint, and holds A's eligible history in
     // epoch 1, enough to reach the production rotation threshold.
     let mut p = Pair::new_legacy().await;
     let target = target();
+
+    // --- C joins while A owns its first tenure, so it never saw any tenure begin (N-T2). It stays
+    // for every later transition and observes each one.
+    // B listens on the control topic first (the Pair fixture never subscribed it), or the Add that
+    // admits C is published before anyone but A can hear it.
+    p.bob.subscribe_control().await.unwrap();
+    let invite = p.alice.mint_invite([44; 16], u64::MAX, vec![]).unwrap();
+    let (joined, tick) = tokio::join!(
+        Node::join(
+            Net::new(p.hub.join(PeerId::from_u64(4))),
+            MlsDevice::generate().unwrap(),
+            rng(),
+            Box::new(p.clock.clone()),
+            "C, a newcomer during A's first tenure",
+            p.alice.local_peer(),
+            &invite
+        ),
+        p.alice.sync_once()
+    );
+    tick.unwrap();
+    let mut newcomer = joined.unwrap();
+    newcomer.subscribe_control().await.unwrap();
+    newcomer.sync.set_config(contested());
+    // B must learn C's admission first, or A's removal would leave the two with different rosters.
+    catch_up(&mut p.bob, p.alice.epoch(), "B, for C's admission").await;
+    let welcome_epoch = newcomer.epoch();
+    assert!(welcome_epoch > 0);
+    assert!(!newcomer.is_owner());
+    // Nothing C holds names a start: not its Welcome's epoch, not any receipt's claim. It reads
+    // Unknown, has no verification value, and cannot author.
+    assert_eq!(
+        newcomer.observed_owner_tenure(),
+        crate::studio::StudioOwnerTenure::Unknown,
+        "a newcomer that is not the committer reads Unknown, not its Welcome's epoch"
+    );
+    assert_eq!(newcomer.sync.verification_owner_tenure_start(), None);
+    assert!(
+        newcomer.require_observed_owner_tenure().is_err(),
+        "a newcomer that saw no tenure begin cannot author"
+    );
+
     let (r0, seed, _) = super::super::discovery::prepared_checkpoint(&mut p, target);
     assert_eq!(r0.tenure_start_group_epoch, 0);
     let mut b = budget(&mut p.bob, &mut p.b_store);
@@ -122,17 +234,23 @@ async fn studio_actor_a_to_b_to_a_progresses_under_new_tenure_and_refuses_the_re
 
     // --- A -> B. The staged Remove supplies a real observed transition; strict policy is restored
     // before any Studio actor runs (the same fixture `succession.rs` and `joining.rs` use).
-    p.bob.sync.set_config(catcoms_sync::SyncConfig {
-        max_committer_rank: 1,
-        stage_decision_window_ms: 0,
-        ..Default::default()
-    });
+    p.bob.sync.set_config(contested());
     p.bob.sync.remove(&a_id).await.unwrap();
     p.bob.sync_once().await.unwrap();
     p.bob.sync.set_config(catcoms_sync::SyncConfig::default());
     assert!(p.bob.is_owner());
     let t1 = p.bob.sync.authoring_owner_tenure_start().unwrap();
     assert!(t1 > 0, "B's tenure starts at the removal, after A's");
+    // C observed the transition, so it now holds B's start, and the same value as B.
+    catch_up(&mut newcomer, p.bob.epoch(), "C, for A's removal").await;
+    assert_eq!(
+        newcomer.observed_owner_tenure(),
+        crate::studio::StudioOwnerTenure::Known(t1)
+    );
+    assert!(
+        t1 > welcome_epoch,
+        "learned by observation, not from the Welcome"
+    );
 
     // Restart B (T2), then let ordinary idle passes close epoch 1 under B's tenure.
     let snapshot = p.bob.snapshot().unwrap();
@@ -140,6 +258,7 @@ async fn studio_actor_a_to_b_to_a_progresses_under_new_tenure_and_refuses_the_re
         p.b_store.save_server(SERVER, &snapshot, rng).unwrap()
     });
     let Pair {
+        hub,
         b_root,
         b_store,
         clock,
@@ -207,8 +326,7 @@ async fn studio_actor_a_to_b_to_a_progresses_under_new_tenure_and_refuses_the_re
     });
 
     // --- B -> A. A returns with its own key and takes the founder's freed leaf, so it owns again,
-    // from its join epoch. B, restarted, is the witness that admits it.
-    let hub = Hub::new();
+    // from its join epoch. B, restarted, is the witness that admits it, on the hub C listens on.
     let mut witness = Node::restore(
         &open(b_root.path()).load_server(SERVER).unwrap(),
         Net::new(hub.join(PeerId::from_u64(22))),
@@ -217,6 +335,7 @@ async fn studio_actor_a_to_b_to_a_progresses_under_new_tenure_and_refuses_the_re
         "B, witness to A's return",
     )
     .unwrap();
+    witness.subscribe_control().await.unwrap();
     let invite = witness.mint_invite([45; 16], u64::MAX, vec![]).unwrap();
     let (joined, tick) = tokio::join!(
         Node::join(
@@ -259,6 +378,48 @@ async fn studio_actor_a_to_b_to_a_progresses_under_new_tenure_and_refuses_the_re
     let t2 = witness.sync.authoring_owner_tenure_start().unwrap();
     assert!(t2 > t1, "the witness observed a new tenure, after B's");
     assert_ne!(t2, r0.tenure_start_group_epoch, "A's two tenures differ");
+    // C observed A's admission too, and agrees with the witness. The tick that admitted A queued
+    // its commit broadcast; the next one sends it.
+    flush(&mut witness).await;
+    catch_up(&mut newcomer, witness.epoch(), "C, for A's admission").await;
+    newcomer
+        .sync
+        .with_registry_context(|g, _, _, _| assert_eq!(g.designated_committer(), Some(a_id)));
+    assert_eq!(
+        newcomer.observed_owner_tenure(),
+        crate::studio::StudioOwnerTenure::Known(t2)
+    );
+    Returned {
+        witness,
+        newcomer,
+        clock,
+        b_root,
+        target,
+        r0,
+        seed,
+        r1,
+        t1,
+        t2,
+        a_id,
+    }
+}
+
+#[tokio::test]
+async fn studio_actor_a_to_b_to_a_progresses_under_new_tenure_and_refuses_the_returning_keys_old_one(
+) {
+    let Returned {
+        mut witness,
+        mut newcomer,
+        clock,
+        b_root: _b_root,
+        target,
+        r0,
+        seed,
+        r1,
+        t1,
+        t2,
+        ..
+    } = a_returns_at_the_witness().await;
 
     // --- The earlier tenure's same-key receipt. Under its OWN claimed start R0 still verifies: the
     // key is A's, A is the designated committer again, and that start is not in the future. That
@@ -281,6 +442,9 @@ async fn studio_actor_a_to_b_to_a_progresses_under_new_tenure_and_refuses_the_re
         })
     };
     refusals(&mut witness);
+    // And at C, the newcomer that joined during A's first tenure and read Unknown there (N-T2): the
+    // replayed same-key receipt of that tenure is refused under the start C has since observed.
+    refusals(&mut newcomer);
 
     // --- The same refusal through a real consumer, not only the bare check (the review's M1).
     // Adoption is what turns a receipt into installed history, and it verifies with whatever tenure
@@ -321,8 +485,14 @@ async fn studio_actor_a_to_b_to_a_progresses_under_new_tenure_and_refuses_the_re
         "precondition: a consumer that took R0's word for its tenure would install it: {claimed:?}"
     );
     let (observed, installed) = adopt(&mut witness, t2);
+    // Named, not a broad `is_err()`: the refusal must be the receipt's authority check, the one
+    // the tenure feeds, and not some other failure that merely depends on the tenure argument.
     assert!(
-        observed.is_err() && !installed,
+        matches!(
+            &observed,
+            Err(crate::AppError::Invalid(reason))
+                if reason.contains("epoch-close signature or authority is invalid")
+        ) && !installed,
         "adoption under the observed start must refuse A's same-key receipt: {observed:?}"
     );
 
@@ -340,4 +510,164 @@ async fn studio_actor_a_to_b_to_a_progresses_under_new_tenure_and_refuses_the_re
     .unwrap();
     assert_eq!(witness.sync.authoring_owner_tenure_start(), Some(t2));
     refusals(&mut witness);
+}
+
+/// B -> A -> B: the same-key return made by a device that works, observed by the newcomer.
+///
+/// The first test cannot show the returning owner's own side, because A's device cannot process
+/// its Welcome. B never leaves, so B owning a second time is the same-key return made by a working
+/// device. That device's first receipt of its second tenure is issued here, by ordinary actor idle
+/// passes, and it inherits across A's tenure in between.
+///
+/// C, the newcomer from the shared prefix, read `Unknown` when it joined and has observed every
+/// transition since. It learns B's second start the same way, holds exactly B's value, keeps it
+/// across a restart, and refuses B's first-tenure receipt under it.
+///
+/// **A fixture lever, stated.** While A owns, A is the designated committer, and its device here
+/// cannot commit (it never joined). B therefore removes A at committer rank 1 with no stage window,
+/// the same contested-commit setting the first transition uses. It is restored before any Studio
+/// actor runs.
+#[tokio::test]
+async fn studio_actor_b_to_a_to_b_issues_the_returning_keys_receipt_under_its_new_tenure_and_the_newcomer_learns_it_by_observation(
+) {
+    let Returned {
+        mut witness,
+        mut newcomer,
+        clock,
+        b_root,
+        target,
+        r0,
+        r1,
+        t1,
+        t2,
+        a_id,
+        ..
+    } = a_returns_at_the_witness().await;
+
+    // --- A -> B again. B removes A, and is then the lowest occupied leaf, so it owns a second time.
+    witness.sync.set_config(contested());
+    witness.sync.remove(&a_id).await.unwrap();
+    witness.sync_once().await.unwrap();
+    witness.sync.set_config(catcoms_sync::SyncConfig::default());
+    catch_up(&mut newcomer, witness.epoch(), "C, for A's second removal").await;
+    newcomer
+        .sync
+        .set_config(catcoms_sync::SyncConfig::default());
+    assert!(witness.is_owner(), "B owns again");
+    let t3 = witness.sync.authoring_owner_tenure_start().unwrap();
+    assert!(
+        t3 > t2,
+        "B's second tenure starts at A's removal, after A's second one"
+    );
+    assert_ne!(t3, t1, "B's two tenures differ");
+    // C learned B's second start by observing the transition, and holds exactly B's value.
+    assert_eq!(
+        newcomer.observed_owner_tenure(),
+        crate::studio::StudioOwnerTenure::Known(t3)
+    );
+
+    // --- B's first-tenure receipt is otherwise valid again: B's key, B the committer, a start
+    // that is not in the future. Under the start each node observed it is refused, at B and at C.
+    let refusals = |node: &mut Node| {
+        node.sync.with_registry_context(|g, _, _, _| {
+            assert!(
+                r1.verify_current_owner(g, t1).is_ok(),
+                "precondition: B's first-tenure receipt is otherwise valid now that B owns again"
+            );
+            assert!(
+                r1.verify_current_owner(g, t3).is_err(),
+                "B's first-tenure receipt is refused under its second tenure"
+            );
+            assert!(r0.verify_current_owner(g, t3).is_err());
+        })
+    };
+    refusals(&mut witness);
+    refusals(&mut newcomer);
+
+    // --- Progress under the new authority, through the actor after a restart. B holds epoch 2
+    // (opened by its own R1) and enough eligible history in it to reach the production threshold.
+    let snapshot = witness.snapshot().unwrap();
+    let mut held = open(b_root.path());
+    witness.sync.with_registry_context(|g, d, _, rng| {
+        held.save_server(SERVER, &snapshot, rng).unwrap();
+        crate::store::fill_studio_epoch_fixture(&mut held, SERVER, g, d, target);
+    });
+    drop(witness);
+    let restored = Node::restore(
+        &held.load_server(SERVER).unwrap(),
+        Net::new(Hub::new().join(PeerId::from_u64(22))),
+        rng(),
+        Box::new(clock.clone()),
+        "B, owner again, restarted",
+    )
+    .unwrap();
+    assert_eq!(restored.sync.authoring_owner_tenure_start(), Some(t3));
+    let mut b_verifier = Node::restore(
+        &snapshot,
+        Net::new(Hub::new().join(PeerId::from_u64(98))),
+        rng(),
+        Box::new(clock.clone()),
+        "read-only B verifier, second tenure",
+    )
+    .unwrap();
+    let store = Arc::new(Mutex::new(Some(held)));
+    let (actor, events, task) = crate::spawn(restored);
+    let drained = drain_events(events);
+    assert!(
+        rotate_to(&actor, &store, &mut b_verifier, &clock, target, 3).await,
+        "B's idle passes in its second tenure must close epoch 2 and install its successor"
+    );
+    let b_snapshot = actor.snapshot().await.unwrap();
+    actor.shutdown().await;
+    task.await.unwrap();
+    drained.await.unwrap();
+    let r2 = {
+        let mut guard = store.lock().await;
+        let held = guard.as_mut().unwrap();
+        b_verifier.sync.with_registry_context(|_, _, _, rng| {
+            held.save_server(SERVER, &b_snapshot, rng).unwrap()
+        });
+        let r2 = published(held, &b_verifier.group_id(), target);
+        drop(guard.take());
+        r2
+    };
+    // The returning key's first receipt of its second tenure: the same key as R1, the new start,
+    // and inheriting the checkpoint R1 opened, across A's tenure in between.
+    assert_eq!(r2.owner_public_key, r1.owner_public_key, "the same key");
+    assert_eq!(r2.tenure_start_group_epoch, t3);
+    assert_eq!(r2.closed_epoch, 2);
+    assert_eq!(
+        r2.inherited,
+        InheritedCheckpoint::Checkpoint {
+            epoch: 2,
+            close_record_hash: r1.close_record_hash,
+            seed_change_hash: r1.seed_change_hash,
+        }
+    );
+    let current = |node: &mut Node| {
+        node.sync.with_registry_context(|g, _, _, _| {
+            r2.verify_current_owner(g, t3)
+                .expect("R2 is the current owner's receipt under the observed start");
+        })
+    };
+    current(&mut b_verifier);
+    current(&mut newcomer);
+
+    // And C across a restart: the observed start survives, and so does everything it decides.
+    let newcomer_snapshot = newcomer.snapshot().unwrap();
+    drop(newcomer);
+    let mut newcomer = Node::restore(
+        &newcomer_snapshot,
+        Net::new(Hub::new().join(PeerId::from_u64(24))),
+        rng(),
+        Box::new(clock.clone()),
+        "C, restarted",
+    )
+    .unwrap();
+    assert_eq!(
+        newcomer.observed_owner_tenure(),
+        crate::studio::StudioOwnerTenure::Known(t3)
+    );
+    refusals(&mut newcomer);
+    current(&mut newcomer);
 }

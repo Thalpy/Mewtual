@@ -168,6 +168,12 @@ impl ServerStore {
     /// Only a writer bug produces that shape: the record is AEAD-sealed and scope-checked. And the
     /// handoff's own check (`check_index_object_sources`) still full-loads at H1 and H5, so a
     /// publication that relies on the object meets the restore there.
+    ///
+    /// **Copy has no such later load.** A copy into an Open Index is an ordinary Apply, not a
+    /// handoff, so on that path this probe is the only object-existence guard. That is accepted on
+    /// the same ground: only a writer bug makes the header and body disagree. A copy that names such
+    /// an object would land an Index entry for an object whose body cannot be read, which the Index
+    /// already has to tolerate for an object deleted after the entry was written.
     pub(crate) fn studio_object_holds_work(
         &self,
         server: u64,

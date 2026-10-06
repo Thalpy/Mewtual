@@ -22,21 +22,23 @@ whole-scope review of `510d0b54` (verdict: CHANGES REQUIRED, Agent 2 not complet
 <br>- `new_admitted` refuses a provenance that disagrees with its basis.
 <br>- `clippy.toml` and a source-scan test pin both hidden constructors.
 <br>Missing, all app-side: "no installed source" under custody, the S3 re-entry, the 8.3 rails, the 8.7 save path, and the receiver handoff selector's skip of non-Closing branches (review M1, required before any app mint). The structural inventory now exposes live provenance and exact charged bytes; these consumers still wait on Agent 1's provenance-parameterized Flow S. Also missing: 8.6 reconciliation, restart reconstruction through the store, and native results. Its absence is a Gate 4 gap, not a deferral. | Agent 2; Agent 1 for Flow S |
-| 5. Repeated owner tenure, rejoin, newcomers, legitimate progress | Implemented at the sync and receipt layer; A -> B -> A through the app actor; newcomer and hidden higher history not yet through the actor | Leaf-aware tenure, v1 import, app seam, CORE-005 archived witness (`066a6533`), M-1 on the receive path with its own error (`0335262e`). **The product never rejoins with the same identity**: join and found both mint a fresh `MlsDevice`, so a returning owner is a new `DeviceId`. `returning::a_removed_owner_returns_as_a_new_device_with_a_new_tenure_everywhere` drives that form with real MLS and real receipts: A' lands in the vacated leaf, A' and every witness agree on the new start across restart, A' can author, its receipt verifies on witnesses and a newcomer, and A's first-tenure receipt and A's old key claiming the new tenure are refused everywhere. **Through the actor (2026-10-06):** `succession::repeated` covers A -> B -> A on a legacy group, through the actor with a restart at each transition.
-<br>- B issues its first receipt under its observed tenure through ordinary idle passes, inheriting A's checkpoint, and that receipt verifies as current while B owns.
-<br>- A's same key is admitted again and owns again.
-<br>- A's old receipt verifies under its own claimed tenure, yet is refused under the observed one at the witness, also after a restart.
-<br>- The same through a real consumer: `adopt_studio_checkpoint` on an empty vault installs A's old checkpoint when handed the tenure the receipt claims, and refuses it, installing nothing, under the observed one.
-<br>- Mutation entry `repeated-tenure-comparison` removes the tenure comparison in `Receipt::verify_current_owner`; the test fails at the observed-tenure refusal.
+| 5. Repeated owner tenure, rejoin, newcomers, legitimate progress | Sync and receipt layer implemented. **Through the actor:** succession and first receipts, in both of a same-key owner's tenures. **Not through the actor:** the same-key refusals, the newcomer, the product's fresh-key A', and hidden higher history. Review 2 (at `1d888fa8`): **PARTIAL** | Leaf-aware tenure, v1 import, app seam, CORE-005 archived witness (`066a6533`), M-1 on the receive path with its own error (`0335262e`). **The product never rejoins with the same identity**: join and found both mint a fresh `MlsDevice`, so a returning owner is a new `DeviceId`. `returning::a_removed_owner_returns_as_a_new_device_with_a_new_tenure_everywhere` drives that form with real MLS and real receipts: A' lands in the vacated leaf, A' and every witness agree on the new start across restart, A' can author, its receipt verifies on witnesses and a newcomer, and A's first-tenure receipt and A's old key claiming the new tenure are refused everywhere.
+<br>**`succession::repeated` (2026-10-06), on a legacy group.** What runs where (narrowed after Review 2's M-1):
+<br>- *Through the actor, with a restart at each transition:* B issues its first receipt R1 under its observed tenure t1, by ordinary idle passes, inheriting A's checkpoint. In the second test (B -> A -> B) B owns a second time and issues R2 under t3: the same key, the new start, inheriting R1's checkpoint across A's tenure in between.
+<br>- *On sync nodes:* the membership changes. A's key is admitted again and owns again at t2, then B removes it.
+<br>- *At the bare check and through `adopt_studio_checkpoint`:* each earlier same-key receipt (A's R0 under t2, B's R1 under t3) is otherwise valid under its own claim and refused under the observed start, at the witness, at B and at the newcomer, also after restarts. Adoption installs R0 when handed R0's claim and refuses, by name, installing nothing, when handed the observed start.
+<br>- *Newcomer (N-T2), on a sync node:* C joins during A's first tenure and reads `Unknown`, with no verification value, and cannot author. It learns t1, t2 and t3 only by observing each transition, holds the owner's value, and keeps it across a restart.
+<br>- *The production gate (Review 2, M-1):* adoption in production is handed a fresh owner proof's claim, and the member's proof gate in `complete_checkpoint_head_scoped` compares it with the observed start. `receipt_head::tests::tenure` pins that gate at the sync layer: B, owning again, proves its first-tenure receipt fresh, and C refuses it, while the same proof of R2 under t3 is accepted. Not driven end to end through the actor's discovery path.
+<br>- *Mutation entries:* `repeated-tenure-comparison` and `repeated-tenure-comparison-returning-owner` (the comparison in `Receipt::verify_current_owner`), `newcomer-joined-unknown` (design M22), `proof-claimed-tenure-gate` (the proof gate).
 <br>**Two gaps, recorded for review in design 9.6:**
 <br>- A provider that already holds the GroupId cannot process the Welcome (pinned; not a product path).
 <br>- A join-born owner cannot continue the former owner's documents. Its first edit supersedes them instead, and for a singleton (the channel's Index) that is the only outcome. Needs a product decision.
-<br>**Still missing:** a newcomer (N-T2) and hidden higher old-tenure history (N-T5) through the actor. | Agent 2 |
+<br>**Still missing:** the product's fresh-key A' through the actor, the same-key proof refusal through the actor's discovery path, and hidden higher old-tenure history (N-T5) through the actor. | Agent 2 |
 | 6. Truthful native results and events | Partial | Results and settlement notices exist; no command beyond `studio_overlay_read` is registered; UI-hooks rows not applied. | Agent 2 contract; Agent 4 registration and rows |
 
 | Prerequisite | State |
 |---|---|
-| P1 reviewed manual lifecycle | Implemented; review at `510d0b54` returned CHANGES REQUIRED. Every listed item is now closed or dispositioned (2026-10-06); a bounded whole-boundary lifecycle review is the next step, and P1 is not reviewed until it passes |
+| P1 reviewed manual lifecycle | **Review 2 (bounded implementation and finding re-review, base `510d0b54`, head `1d888fa8`): bounded PASS, no blocker or high.** Every G4-A2-P1 item is verified closed with pinned regressions and verified mutation evidence. Its LOW findings are dispositioned in "The copy review" below; two regressions stay open as follow-ups (L-1's stamp-based live-hold half, L-2's cross-document hold). A bounded PASS is one input to P5, not P5 |
 | P2 hold mapping | Implemented. Agent 1's two questions answered in `f158c17b` (`TenureImported`, `PreparedStuck`). Its re-review found no blocker and two mediums, both fixed in the next commit: a Prepared branch with Absent evidence now runs every active check H1 runs after returning it to active, and the tenure copy no longer claims waiting cures one reason but not the other (both end at the next observed owner transition). |
 | P3 native results and events | Partial (goal 6) |
 | P4 live-tenure contract | Implemented: `StudioOwnerTenure`, `require_owner_tenure`, CORE-005 witness |
@@ -144,6 +146,7 @@ over, not the contract. Reasoning from either row as FALSE remains correct today
 | 2026-09-16 | Design revision 5 (`f2257b0`) | **(b) PASS remains.** (a) and (c) CHANGES REQUIRED for one new Medium finding introduced by revision 5's own accessor-removal hardening. The revision-4 finding is closed. Reviewer ran no Cargo commands. |
 | 2026-09-16 | Design revision 6 (`a6d8170`) | **PASS for (a) and (c), no findings.** With (b)'s revision-4 PASS this accepts the whole design. Every finding from revisions 1 to 6 is closed at the design boundary. Two non-blocking refinements were offered and are adopted in revision 7. Reviewer ran no Cargo commands. |
 | 2026-09-16 | Design revision 7 | Accepted refinements only: A-1's scope sentence and N-T7b's diagnostics. No reviewed decision changes. |
+| 2026-10-06 | Review 2, bounded implementation (`510d0b54`..`1d888fa8`) | **(a) P1 manual lifecycle: bounded PASS** with seven LOWs. **(b) Repeated tenure through the actor: PARTIAL**, one MEDIUM (M-1: the same-key refusal was not through the actor, and production's proof gate was unpinned). Reviewer ran 8 focused tests and inspected the 16 mutation logs; no full suites. Native Save conditions: not yet satisfied. Dispositions in "The copy review". |
 
 ### Revision-5 re-review findings and their disposition
 
@@ -910,6 +913,41 @@ which closes every item the acceptance matrix's G4-A2-P1 row names):
 > - **New mutation entries:** `repeated-tenure-comparison` (above) and `handoff-write-barrier`. The
 >   latter disables the Prepared handoff's ordinary-Apply barrier, which the C1' entries cannot see
 >   because C1' refuses first.
+>
+> **Review 2** (bounded, `510d0b54`..`1d888fa8`, pushed): P1 bounded PASS; repeated tenure PARTIAL.
+> Dispositions, in the commit after `1d888fa8`:
+>
+> - **M-1 (MEDIUM), the same-key refusal not through the actor, production's gate unpinned.**
+>   - *Wording narrowed:* status row 5 and design 9.6 now say what runs where.
+>   - *Gate pinned:* `receipt_head::tests::tenure` pins the member's proof gate (B owning again
+>     proves its first-tenure receipt fresh; C refuses it; the same proof of the current tenure's
+>     receipt is accepted), with mutation entry `proof-claimed-tenure-gate`.
+>   - *Same-key return with a working device, through the actor:* B -> A -> B (B's R2 under t3) and
+>     the N-T2 newcomer, with entries `repeated-tenure-comparison-returning-owner` and
+>     `newcomer-joined-unknown`.
+>   - *Still open:* the refusal end to end through the actor's discovery path, and the product's A'
+>     through the actor.
+> - **L-1, C1' promises a live-hold refusal it does not implement.** Design C1' now says how each
+>   clause is met: only the transfer hold has its own check; a live job is caught by the source
+>   stamp or the destination's Open requirement. *Follow-up:* a regression for the stamp half
+>   (overlay Save lands on the source between preview and apply; C3 and C4 refuse it as changed).
+> - **L-2, the C1' regression is same-document only.** *Follow-up:* a cross-document Flipnote
+>   fixture, asserting (a) a hold on the destination refuses at C3 by message, and (b) a hold on the
+>   source still previews Ready, applies, and leaves `handoff_prepared()` true. The app-level copy
+>   fixture is Index-only. Building a second Flipnote with its own staged handoff is not in this
+>   round.
+> - **L-3, the adoption refusal was a broad `is_err()`.** It now asserts the authority refusal by
+>   name.
+> - **L-4, the refusal text promised a retry that cannot work.** It now says to preview the copy
+>   again once the handoff resolves, and the doc comment and design C1' explain why: an exact
+>   retry's acknowledgement is lost across a hold, though nothing is written twice.
+> - **L-5, the copy nonce domain is keyless.** Stated as a convention, not a hostile-renderer
+>   guarantee, in `copy_nonce`'s doc and design C4.
+> - **L-6, the header-only probe is copy's only object-existence guard.** Said so in
+>   `studio_object_holds_work`'s doc.
+> - **L-7, no `overlayCopyApplied` shape in INTERFACES or the hooks.** Left for Agent 4 with the
+>   command registration. The shape is in design C4. The note to Agent 4 carries it, with the
+>   nonce-domain compatibility note.
 
 | Finding | What |
 |---|---|

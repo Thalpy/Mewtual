@@ -764,7 +764,7 @@ over-cap check and drops only the logical-key equality.
 | C1 | Begin | yes | `capture_studio_overlay_copy` (5.2): the accepted source capture plus the destination's two authenticated records and their stamps, one permit, one visit. |
 | C2 | Plan | detached | Decode both destination records, build the destination and recovery projections, reconstruct the draft, run `restore::plan`. |
 | C3 | Preview | yes | The existing source-stamp recheck plus `studio_destination_is_current`, destination channel known, destination still Open with the same `doc_id`, `expected_projection = recovery_fingerprint()`. Returns one bounded proposed body or an explicit hold. Saves nothing. |
-| C4 | Apply | yes | C1' again, then the exact-retry shortcut (`contains_exact_operation` on the destination), then re-plan from durable state and require `epoch_id`, `expected_projection`, `disposition == Ready` and a byte-identical `body`. Then the ordinary `StudioRequest::Apply` publication path. *As built (2026-10-06):* the operation is published under `copy_nonce(nonce)`, a nonce derived in a domain of its own, and the shortcut looks for that. So a copy's operation coincides only with an earlier copy under the same renderer nonce and body, never with an ordinary Save of the same bytes (review L4). The result is `OverlayCopyApplied` / `overlayCopyApplied` with `branchPreserved: false`, never `recoveryApplied`. |
+| C4 | Apply | yes | C1' again, then the exact-retry shortcut (`contains_exact_operation` on the destination), then re-plan from durable state and require `epoch_id`, `expected_projection`, `disposition == Ready` and a byte-identical `body`. Then the ordinary `StudioRequest::Apply` publication path. *As built (2026-10-06):* the operation is published under `copy_nonce(nonce)`, a nonce derived in a domain of its own, and the shortcut looks for that. So a copy's operation coincides only with an earlier copy under the same renderer nonce and body, never with an ordinary Save of the same bytes (review L4). That domain is a convention, not a guarantee against a hostile renderer: the derivation is public and unkeyed, so a renderer can compute it and collide an ordinary Save with a later copy's echo. That misreports a kind and never writes twice (Review 2, L-5). The result is `OverlayCopyApplied` / `overlayCopyApplied` with `branchPreserved: false`, never `recoveryApplied`. |
 
 There is **no C5**: copy writes nothing to the branch's record (findings 1, 2, 8).
 
@@ -772,6 +772,17 @@ There is **no C5**: copy writes nothing to the branch's record (findings 1, 2, 8
   hold exists on the destination. Permitted while a transfer hold exists on the source, and it does
   not clear `Prepared`, retire the original envelopes, or count as evidence that the original
   handoff completed.
+  - *As built (2026-10-06), and how each clause is met.* Only the transfer-hold clause has a check
+    of its own: `refuse_held_destination` at C1, C3 and C4. No copy stage consults the live-job
+    reservation. The live-hold clause is met by other guards. A live overlay job that lands on the
+    **source** changes its stamp, so C3 and C4 refuse the preview as stale. A live job on a
+    cross-document **destination** means the destination is Closing, which C3 and C4 refuse as not
+    Open. Review 2 (L-1) found no behavioural hole, but the stamp-based half has no regression of
+    its own yet (a recorded follow-up).
+  - The remedy for a refusal is a fresh preview once the handoff resolves, not a resend: a resolved
+    handoff rotates the destination, so the old preview cannot apply. An exact retry of a copy that
+    already landed therefore loses its acknowledgement across a hold, though nothing is written
+    twice (review L-4).
 - **C2'.** A bulk copy is the user issuing C3/C4 per item. There is no batch command and no batch
   atomicity. Each item consumes ordinary admission, typed policy, capacity preflight, reference
   protection and content budget.
@@ -1654,9 +1665,20 @@ Built: `studio_exchange::tests::succession::repeated`. A owns and issues R0. B r
 and issues its first receipt R1 under its observed tenure t1, inheriting A's checkpoint. A's key is
 then admitted again and owns again at t2. At the witness, R0 is otherwise valid (it verifies under
 its own claimed tenure), yet it is refused under the observed t2, also after a restart. That is the
-assignment's "reject an earlier tenure's otherwise valid same-key receipt", at actor level. Two
-things the scenario could not reach are recorded here rather than guessed at, as assignment item 5
-asks.
+assignment's "reject an earlier tenure's otherwise valid same-key receipt". Two things the scenario
+could not reach are recorded here rather than guessed at, as assignment item 5 asks.
+
+**What runs where (corrected after Review 2, M-1).**
+- **Through the actor:** B's succession and its first receipt R1, and, in the second test
+  (B -> A -> B), B's first receipt of its second tenure.
+- **On sync nodes, not the actor:** the membership changes and the newcomer.
+- **At the bare check and at adoption:** the same-key refusals. Adoption is handed the tenure
+  explicitly there.
+- **Production adoption** is never handed an observed value. It is handed the claim of a fresh
+  owner proof, and the member's proof gate (`complete_checkpoint_head_scoped`) is what compares
+  that claim with the observed start. That gate is pinned at the sync layer by
+  `receipt_head::tests::tenure`, with a mutation entry. A same-key owner proving its own
+  earlier-tenure receipt through the actor's discovery path is not driven end to end.
 
 **Gap 1, same-key re-entry (low; recommend no change).** An MLS provider that already holds a
 group cannot process a Welcome into the same GroupId: it fails with "already exists". Nothing in

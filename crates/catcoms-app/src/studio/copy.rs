@@ -175,6 +175,11 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
     /// this way, a copy's operation can coincide only with an earlier copy under the same
     /// renderer nonce and body, so "already saved" now means "this copy already landed". An exact
     /// retry still resends the same renderer nonce and so finds the same operation.
+    ///
+    /// **A convention, not a guarantee against a hostile renderer.** The derivation is public and
+    /// unkeyed, so a renderer that wants to can compute it and make an ordinary Save collide with a
+    /// later copy's echo. That misreports a kind, never writes twice. It closes the stale-renderer
+    /// case it was made for, and nothing here should be read as more.
     fn copy_nonce(nonce: [u8; 16]) -> [u8; 16] {
         let hash = blake3::derive_key("catcoms/studio-overlay-copy-nonce/v1", &nonce);
         let mut out = [0; 16];
@@ -184,6 +189,11 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
 
     /// C1' (design 6.3): refused, retryably, while the destination is under a transfer hold.
     /// Asked at C1, C3 and C4, since a hold can be staged between any two of them.
+    ///
+    /// The remedy is a fresh preview, not a resend. A handoff that resolves rotates the destination,
+    /// so a C4 retry of the old preview would then fail as no longer Open. That includes the exact
+    /// retry of a copy that already landed: its acknowledgement is lost across the hold, though
+    /// nothing is written twice, because the re-preview finds the copied content already there.
     fn refuse_held_destination(
         store: &ServerStore,
         server: u64,
@@ -192,7 +202,8 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
     ) -> Result<(), AppError> {
         if store.studio_copy_destination_held(server, group, destination)? {
             return Err(invalid(
-                "the copy destination is under a transfer hold; retry once its handoff resolves",
+                "the copy destination is under a transfer hold; preview the copy again once its \
+                 handoff resolves",
             ));
         }
         Ok(())

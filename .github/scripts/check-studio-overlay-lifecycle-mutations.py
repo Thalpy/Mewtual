@@ -249,6 +249,39 @@ MUTATIONS = [
         "studio_actor_a_to_b_to_a_progresses_under_new_tenure_and_refuses_the_returning_keys_old_one",
         "A's earlier-tenure receipt is refused under the tenure the witness observed",
     ),
+    # The same comparison, from the side of a device that owns twice and works: B -> A -> B, where
+    # B's first-tenure receipt is otherwise valid again once B owns a second time.
+    (
+        "repeated-tenure-comparison-returning-owner", "catcoms-app",
+        "studio_exchange::tests::succession::repeated::",
+        "crates/catcoms-replication/src/epoch.rs",
+        "            || self.tenure_start_group_epoch != expected_tenure_start_group_epoch\n",
+        "            || (self.tenure_start_group_epoch != expected_tenure_start_group_epoch && false)\n",
+        "studio_actor_b_to_a_to_b_issues_the_returning_keys_receipt_under_its_new_tenure_and_the_newcomer_learns_it_by_observation",
+        "B's first-tenure receipt is refused under its second tenure",
+    ),
+    # N-T2 (design M22): a joiner derives a start from its own join ONLY if it is the committer. The
+    # mutant lets every joiner do so, so the newcomer reads its Welcome's epoch instead of Unknown.
+    # `|| true` keeps `device` used under -D warnings.
+    (
+        "newcomer-joined-unknown", "catcoms-app", "studio_exchange::tests::succession::repeated::",
+        "crates/catcoms-sync/src/owner_tenure.rs",
+        "        if group.designated_committer() == Some(device.device_id()) {\n            state.start = Some(state.position.epoch);\n",
+        "        if group.designated_committer() == Some(device.device_id()) || true {\n            state.start = Some(state.position.epoch);\n",
+        "studio_actor_a_to_b_to_a_progresses_under_new_tenure_and_refuses_the_returning_keys_old_one",
+        "a newcomer that is not the committer reads Unknown, not its Welcome's epoch",
+    ),
+    # Review 2's M-1: the member-side gate on a fresh owner proof. Production adoption is handed the
+    # proof's claimed tenure, so this comparison, not `verify_current_owner`'s, is the first one a
+    # same-key owner proving an earlier tenure's receipt meets. `&& false` keeps `t` used.
+    (
+        "proof-claimed-tenure-gate", "catcoms-sync", "receipt_head::tests::tenure::",
+        "crates/catcoms-sync/src/receipt_head/detached.rs",
+        "                    .is_some_and(|t| t != proof.tenure_start_group_epoch)\n",
+        "                    .is_some_and(|t| t != proof.tenure_start_group_epoch && false)\n",
+        "a_member_refuses_a_fresh_proof_of_the_same_owners_earlier_tenure_receipt",
+        "a proof claiming the owner's earlier tenure is refused by a member that observed the later",
+    ),
     # --- the branch-generation namespace ---
     (
         "admission-not-trusted", "catcoms-replication", REPL_TESTS,
