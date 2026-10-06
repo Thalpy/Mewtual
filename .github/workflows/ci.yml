@@ -33,6 +33,10 @@ jobs:
         if: runner.os == 'Linux'
         shell: bash
         run: bash scripts/check-no-ambient.sh
+      - name: Store raw-fs gate (I-4)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: bash scripts/check-store-raw-fs.sh
 
   deny:
     name: cargo-deny (supply chain)

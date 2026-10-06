@@ -346,3 +346,173 @@ alone: step 3 needs N-H2, N-M2 and N-M3 built; step 2 needs N-M1, the profile de
 stated Apply-path limitation. The I-4 writer audit runs before whichever of them ships first,
 because that is the first production code that parks a cursor. Step 4 waits for N-H4's evidence,
 N-H3's admission rule, N-M4's helper split and Agent 3. Step 5 is unchanged.
+
+## 12. Step 1 as built, and the plan for step 2
+
+**Step 1 is implemented** (`2df3564f`): S-1 to S-4 as in section 3, with one correction its
+review forced. The first cut of `drive_epoch_inventory_job` passed its absolute deadline to the
+cursor's relative step, which adds it to the current time, so each step's own expiry was disabled;
+the cursor now has `step_until`, which takes an absolute deadline as given, and a regression pins
+the exact entry count. An issued inventory starts with a token matching nothing, so only the
+finish stamp makes it mintable.
+
+**Step 2, the replay manual move: staged, not yet shipped.** The site is the end of
+`StudioReceiver::replay_step` (`receiver/replay.rs`), reached when a pass's order is empty and
+`pass.manual` still holds evidence to move into recovery. Until step 2 it scanned synchronously
+and minted. The staged build (private worktree; its design review, I-4 writer audit and
+adversarial review are recorded below; it waits only on Agent 2's go-ahead for the two shared
+files) is:
+
+1. **`receiver/inventory.rs` (new), `InventoryRuntime`**, a field of `StudioReceiver`: the
+   section 4 state machine over one boxed `EpochInventoryJob` with
+   `EpochInventoryProfile::receive()`, in states `Idle | Stepping | Parked | Validating |
+   Installing | Backoff`. `Installing` holds a result that arrived outside custody until the next
+   owner turn installs it, which is also where a validation error surfaces (M7). The entry is
+   `budget_turn(store, id, group, clock, deadline_ms, pool) -> InventoryTurn` with
+   `InventoryTurn = Ready(Box<EpochStudioBudget>) | NotYet | Unstable`; `Ready` is minted in the
+   call that finished the job.
+2. **The replay site** keeps `pass` (its `manual` set and empty `order`) on `NotYet` and returns
+   `Ok(None)`; every replay turn re-derives the evidence and re-screens `pass.manual` before
+   reaching the site, which is N-L5's rule. It does **not** depend on the job finishing. On
+   `Unstable` (including any turn inside the runtime's backoff), or once the pass has waited
+   `MANUAL_MOVE_PATIENCE_MS` (60 s) since it first asked, it mints its budget the way it did before
+   step 2, from one synchronous `receive()`-profile scan in that visit, and moves the evidence. On
+   the patience path it first releases whatever the job holds; on `Unstable` the runtime keeps its
+   backoff for its other owners. This is the answer to the review's HIGH-1, below. It is outside
+   9.2's no-fallback rule, which governs overlay commits (section 6), and it adds no custody class:
+   it is the scan this site always ran, under the limits every receive packet already pays.
+3. **The visit deadline** is `background_step`'s one clock sample plus `INVENTORY_SLICE_MS`
+   (250 ms, an experiment value until 13.7, like H3's slice), passed down to replay (S-3), so
+   time the H-stages spent comes out of replay's share.
+4. **Detached validation**: `StudioBackgroundJob::InventoryValidate(InventoryDetach { body,
+   permit, token })`, `StudioBackgroundResult::InventoryValidated(token, Box<Result>)` and
+   `InventoryCancelled(token)` in `receiver/catchup.rs`, placed in `detach()` after
+   Prepare/PrepareRegistry and before the `in_flight` check. The permit is reserved from the
+   shared preparation pool before any step; a full pool means no step. Item 4's earlier wording
+   also had the inventory refuse the last free permit; that contradicted N-H3, which puts the
+   last-permit rule on **overlay admission** so that non-overlay inventory always has one. N-H3 is
+   step 3's to build; step 2 takes any free permit and holds nothing while it waits.
+5. **Own writes (N-M1)** by token identity, not counting. `ServerStore` gains a crate-private,
+   opaque `EpochInventoryQuiet` mark (comparable, never installable) and
+   `restart_epoch_inventory_job_uncharged`, which gives an overtaken job a fresh cursor without
+   charging `MAX_INVENTORY_RESTARTS`. `StudioReceiver::run` now wraps the visit: `begin_visit`
+   compares the mark before anything in the visit can write and, if the token moved since the last
+   visit ended, taints the current cursor as overtaken by someone else until a fresh cursor
+   replaces it; `end_visit` marks the token on every exit, early returns included. Only an
+   untainted job is refreshed uncharged, at most three times per job, and a cursor that never
+   stepped (its turn found the pool full) is refreshed free without counting. A restart found on
+   resuming keeps stepping in the same turn, since nothing can overtake the fresh cursor inside an
+   exclusive visit. Control requests that do not run through `run` look foreign and are charged:
+   the safe direction (`Apply` and `ApplyOverlayCopy` controls call `run` after their own
+   preparation writes, which is the same direction). N-M1 softens own-write restarts; it does not
+   make the job immune to writes between turns, which is why item 2 does not depend on the job.
+6. **Lifecycle**: `pause()` and `clear_previews()` (which the UI-lock reset calls) release the
+   job; a mount or numeric-server change drops it. A `Validating` job's late result carries a
+   token nothing waits on and is dropped on arrival.
+7. **Stated limitation**: replay's ordinary Apply path still scans synchronously (section 11).
+
+Three places where the build departs from sections 4 and 11, each forced by a defect the plan had:
+
+- **`studio_pending` gains one term, not two: a `Parked` body awaiting detach.** An expired
+  `Backoff` (and an `Installing` result) is consumed only by an owner's turn, and owners are paced
+  by their own schedules. Reporting either as driver work would hold the driver at its active
+  cadence until the owner's next turn, and for an expired backoff no owner wants any more, forever.
+  An expired backoff is instead cleared by the next visit's lifecycle. **There is no wake term.**
+  The price, which the review asked to be written down: in a quiet actor a result waits for the
+  native five-second idle wake plus replay's alternation, so the job advances about one uncached
+  record per six seconds.
+- **The idle drop is 30 s since an owner last asked, not 32 visits** (N-L6). Every inbound packet
+  is a visit, so under sustained gossip 32 visits can pass between two of replay's paced turns,
+  and dropping a job its owner still wants restarts it every time: a livelock for the owner.
+  `Installing` is covered by the same drop.
+- **Pending was planned as "true when a result arrives"** (section 10). That is the spin above;
+  the regression now pins the opposite.
+
+**What step 2 actually buys, stated honestly.** Until 13.7 calibrates the classifier every
+uncached record parks, so the turn-based path finishes in bounded custody per visit only for a
+vault with few Recovery, OwnerReceipts, Intents and DraftArchive records and no write between its
+turns. Otherwise the move ends in the synchronous fallback, which costs what it always did. Step 2
+is therefore the runtime, its lifecycle and its tests, ready for the classifier, rather than a
+custody improvement for busy vaults today.
+
+### Review of the staged step 2 (2026-10-06, Opus, static, worktree at `2df3564f`)
+
+No blocker. Dispositions:
+
+| finding | disposition |
+|---|---|
+| **HIGH-1** the move can stall indefinitely under ordinary writes between turns (uncached families are re-validated on every fresh cursor), and while it waits its pass holds replay for every target; the N-M1 doc claim was false | **fixed**: item 2's synchronous fallback on `Unstable` and after 60 s of patience, so the pass's hold on replay is bounded; the module doc corrected. Regressions: a write between every visit still completes; a backoff turn scans synchronously with nothing detached and keeps the backoff; a job that can never step falls back no earlier and no later than its patience |
+| MEDIUM-1 the H3/H4/M6 wiring untested at the receiver | **fixed**: one receiver-level test, against the state the production `run` leaves: a parked body is pending; it detaches with catch-up's `in_flight` set; a pre-cancelled validation routes to the runtime (`idle`, permit back); `pause` and `clear_previews` release a parked body and its permit. Each of the five mutations named was executed and killed |
+| MEDIUM-2 replay tests on the global four-slot pool | **fixed**: `watch()` injects a private pool. A full-suite failure of `registry_runtime::studio_held_registry_page_is_discarded_after_fault_or_checkpoint_replacement` (passes alone) is consistent with this contention |
+| LOW-1 quiet check after the early return | **fixed**: `begin_visit` at the top of `run`; regression with an early-return visit |
+| LOW-2 validation errors pause the receiver; the documents disagreed | **decided and stated**: a validation error, or a worker `JoinError`, surfaces as the error the synchronous scan it replaces would have raised, and so pauses the receiver as before. Section 10's "no pause" wording is superseded. The `JoinError` mapping has no test (a panicking validator cannot be injected without a new seam); recorded gap |
+| LOW-3 a resume-time restart wasted the turn; a never-stepped cursor spent the own-restart cap | **fixed**: the drive loop keeps stepping after such a restart; a cursor with no progress is refreshed free and uncounted; regression for the second |
+| LOW-4 comment and document drift; HANDOVER and THREAT-MODEL; no diagnostic for a waiting move | comments and this section **fixed**; HANDOVER and THREAT-MODEL are updated in the commit that ships step 2; a diagnostic for a waiting or backing-off move is a **follow-up** |
+| LOW-5 the uncharged-restart waiver was `pub` | **fixed**: `pub(crate)`, with the mark and its comparison |
+
+**Re-review of the fixes (2026-10-06, the same reviewer, static):** no blocker or high; HIGH-1,
+MEDIUM-1 and MEDIUM-2 closed; `confirm_listing` judged correct and fail-closed (same classifier as
+the traversal, exact-key and count checks, entry limit consistent, reference path checked before
+protection is installed). Its findings:
+
+| finding | disposition |
+|---|---|
+| MEDIUM (design question) with 60 s of patience, a vault holding more than about ten uncached records cannot finish the turn-based path in a quiet actor, so the common case pays the delay and the detached validations and then runs the old scan; ship before 13.7 or not | **decided: ship.** Nothing unsafe follows, maximum custody is unchanged, the move is not time-critical, and the runtime, its lifecycle and its tests are what steps 3 to 5 and the classifier need. Stated in "What step 2 actually buys" above and in HANDOVER when it lands. Revisit the patience figure when 13.7 lands |
+| LOW-1 the patience path's `release()` lifted a store-wide backoff | **fixed**: `abandon_job()` drops the job and keeps a backoff |
+| LOW-2 the patience clock lives on the pass, so a rebuilt pass restarts it | **accepted**: the writes that rebuild a pass also restart the job, so `Unstable` still bounds the wait |
+| LOW-3 a stale module-doc sentence (`Unstable` carrying a time); the `end_visit` doc's control-request claim | **fixed** |
+| LOW-4 the cancellation test asserted only the inventory side | **fixed**: catch-up's `in_flight` is held through the cancelled completion and asserted still set. A waiter cancelled while its blocking closure already runs is still untested |
+| LOW-5 holes in the raw-fs gate: a `#[cfg(test)]` on a non-item could swallow production lines; `File::options()` and explicit syncs unmatched; AGENTS.md does not list the gate | **fixed** in the script: only items are skipped, an unclosed skip fails the gate, `};` closes, and the pattern covers `File::options` and `sync_all`/`sync_data`. The hardened scanner immediately found a site the first version had swallowed through a `#[cfg(test)]` struct-field initializer: `remove_server`'s unlink of the non-family `.bin`, `.net` and `.cache` files, benign and already audited, now allow-listed with its reason. The scanner relies on rustfmt layout, which CI enforces. AGENTS.md is a local, git-ignored file, so the line adding the gate to its handoff checks is proposed to the user rather than made |
+
+The re-review also asks THREAT-MODEL to record a behaviour change: on a filesystem whose directory
+streams are unstable (SMB, FUSE), synchronous receive and reference scans now refuse, and so
+pause, instead of issuing an undercounted inventory. That goes in with the commit that ships step
+2, beside the bounded member-driven delay of a manual move.
+
+Residual risks the review listed, accepted for step 2: a `Stepping` job holds a `ReadDir` on
+`servers/` for up to 30 s between visits; overlay and handoff work can exhaust the pool and starve
+the job until N-H3 (step 3), which now only delays the move until its patience runs out; a parked
+body survives a visit whose lease is cancelled or that errors without pausing, until the lock
+reset or the next good visit; each waiting turn re-derives the replay evidence; the mount-change
+drop is pinned only by the store's own mount check.
+
+### I-4 writer audit for step 2 (2026-10-06, Opus, static, at `2df3564f`)
+
+Required by section 8 before the first production code that parks a cursor. No blocker or high:
+no writer was found that mutates a five-family file without rotating `inventory_generation` first,
+and every cross-visit consumer rechecks the token. The audited writer list is recorded in the
+status ledger. Dispositions:
+
+| finding | disposition |
+|---|---|
+| M-1 raw `std::fs` mutation compiles in every store module; only the guarded primitives are type-level | **fixed**: `scripts/check-store-raw-fs.sh`, in CI beside the ambient gate, refuses raw mutation in non-test store code outside `mod persistence`, the store's directory creation at open, and the three per-family sync helpers that take `&EpochMutation` (each allowed exactly once, and a stale allowance fails). Verified by planting a raw `fs::write`. The overclaiming comments in `store.rs` and design 9.2 corrected |
+| M-2 a `ReadDir` held across visits beside non-family churn (`save_server` on most packets) can skip an entry on a filesystem without stable directory streams; the inventory would undercount | **fixed**: every finish, budget and reference scan, confirms the traversal against one fresh names-only listing; a mismatch is an invalidation (the job restarts), refused at the public finish. Regressions for a missed record, an extra record, the job's restart and the reference scan; the check's removal was executed and killed |
+| M-3 read-only and duplicate paths rotate (completed-handoff page serve, duplicate page ingest, Registry receive sync, maintenance flush), so a polling peer restarts jobs | design 9.2's "not on reads" **corrected**; liveness is no longer at stake for replay (item 2). Memoising already-durable sync-repairs per mount is a **follow-up**, needed before catch-up converts (step 4) |
+| L-1 the token was captured after `read_dir`, which on Windows reads the first entry | **fixed**: all three tokens are cloned before the directory is touched |
+| L-2 `EpochIntentBudget::from_inventory`, `records_for_server` and `EpochStorageBudget::from_inventory` skip the S-2 token check | **follow-up**: no production minting path uses them today; narrow or check them before one does |
+| L-3 no per-site rotation tests for the Registry family, the Studio unchanged and discovery syncs, the handoff syncs, retirement and `flush_checked_epoch_intents` | **follow-up**: structurally guaranteed by the guard parameter, and M-1's gate now covers the bypass that would make the gap matter |
+
+Tests (focused, all passing): thirteen runtime unit tests in `receiver/inventory/tests.rs` against
+a real store, real records, a manual clock and a private pool (park and detach with the permit,
+full pool, token routing and abandoned results, cancellation, a validation error surfaced once,
+the charged restart storm and its backoff, own writes uncharged up to the cap, a foreign write in
+an earlier gap still charged, an early-return visit not laundering one, a never-stepped cursor
+refreshed free, a packet burst not dropping a wanted job, numeric-server change); in
+`studio_exchange/tests/replay.rs` the existing restart test now drives the actor's
+detach/complete loop (a recorded contract change: the manual move no longer completes in one
+`run`) and asserts the budget came through a detached validation, that a result's arrival does
+not make the receiver pending, and that every visit leaves its mark, plus the four HIGH-1 and
+MEDIUM-1 regressions above; and the M-2 regressions in the store. Mutations executed and killed:
+no permit, any-token install, no backoff, error not surfaced, no idle drop, server change ignored,
+`Installing` never installed, `Installing` reported pending, no `Installing` idle drop, a
+synchronous scan at the replay site, no end-of-visit mark, taint never set, no own-restart cap,
+taint not cleared by a restart, no fallback on `Unstable`, no patience, no cancellation arm, no
+release in `pause`, no release in `clear_previews`, detach behind `in_flight`, no pending term, no
+listing check.
+
+Files touched outside Agent 1's own: `studio/receiver.rs` (the field, `run` wrapping `run_visit`
+for the mark, the lifecycle call, the deadline in `background_step`, the pending term, the pause
+and clear hooks) and `studio/receiver/catchup.rs` (the variants, their `run`/`detach`/`complete`
+arms and the test label; `preparation_pool` made `pub(super)`). Both are areas where Agent 2 works,
+so the edits are kept to those lines and are ported only once Agent 2 confirms neither file is
+mid-edit.

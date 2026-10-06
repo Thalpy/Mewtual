@@ -480,7 +480,13 @@ fn decode_server_net(bytes: &[u8]) -> Result<ServerNet, AppError> {
 /// What escapes is therefore deliberate and small: the [`EpochMutation`] capability, which only
 /// rotation hands out, and a fixed set of **path-specific** savers for the records that are not
 /// inventoried. There is no path-generic writer anywhere outside this module, so an inventoried
-/// bare write is not merely forbidden by audit, it cannot be spelled.
+/// write through *these* primitives cannot be spelled without rotating.
+///
+/// That is not the same as "cannot be spelled at all": `std::fs` is reachable from every module,
+/// and nothing in the type system stops a raw `fs::write` or `remove_file` on an epoch path
+/// beside them (I-4 audit M-1). That gap is closed mechanically instead, by
+/// `scripts/check-store-raw-fs.sh` in CI, which refuses raw filesystem mutation in non-test store
+/// code outside this module and three reviewed per-family sync helpers that take `&EpochMutation`.
 mod persistence {
     use super::*;
 

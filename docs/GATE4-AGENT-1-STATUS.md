@@ -1542,6 +1542,66 @@ yet installed, `drive` reports `Stepped` when out of time and an error when time
 planned runtime cannot reach that state, because a job whose body is out for validation is not
 stepped (design section 4).
 
+### Step 2 (replay's manual move): staged in a private worktree, reviewed, not yet shipped
+
+Built and reviewed as `GATE4-AGENT-1-C3-RUNTIME.md` section 12 records: the shared,
+turn-based `InventoryRuntime`, its detached validation through the receiver's background-job
+machinery, N-M1's own-write accounting, and replay's manual move taking its budget from it with
+a synchronous fallback (on `Unstable`, or after 60 s of patience). Its adversarial review found no
+blocker and one high, a liveness stall under ordinary writes, which the fallback answers. It ships
+once Agent 2 confirms the two shared receiver files are free; until then no production path parks
+a cursor across visits. Step 2 is the runtime and its tests, ready for 13.7's classifier, more than
+a custody improvement for busy vaults today: with every uncached record parking, a busy or large
+vault ends in the same synchronous scan as before.
+
+### I-4 writer audit at C-3 step 2 (2026-10-06, Opus, static, at `2df3564f`)
+
+Section 8 of the runtime design requires the audit to be re-run before the first production code
+that parks a cursor, because only then does an under-rotating writer become unsafe. No blocker or
+high. Findings and their dispositions are in the runtime design's section 12 (M-1 raw `std::fs`
+now refused by `scripts/check-store-raw-fs.sh` in CI; M-2 a finish-time names-only listing check;
+M-3 read-path rotations recorded, memo a follow-up; L-1 fixed; L-2 and L-3 follow-ups). The
+audited writer list, which is what proves coverage beside the type-level guard:
+
+| writer | kinds touched | rotates before first mutating I/O | evidence |
+|---|---|---|---|
+| Recovery accounted, incl. eviction settle | Recovery + temp | yes | `epoch_recovery.rs:374→376`; `:411` delegates |
+| Recovery unaccounted / tooling | Recovery + temp | yes | `epoch_recovery.rs:485→487` |
+| Owner journal (all owner writers, fault/repair resave, publication) | OwnerReceipts + temp | yes | `epoch_owner.rs:642→644`, the only write in the family |
+| Intents replace (ordinary, overlay accept, handoff stages) | Intents + temp | yes | `epoch_intents.rs:752→754` |
+| Intents exact-retry sync | Intents | yes | `epoch_intents.rs:712→714` |
+| `flush_checked_epoch_intents` | Intents | yes | `epoch_intents.rs:568` |
+| Retirement replace / zero-removal sync | Intents | yes | `retirement.rs:352→354`, `312→314` |
+| Handoff completed sync (source precheck) | Intents | yes | `epoch_studio/handoff.rs:702` |
+| Handoff publication sync (read-only serve) | Intents | yes, over-rotates (M-3) | `handoff.rs:749` via `source.rs:158` |
+| Draft archive write | DraftArchive + temp | yes | `epoch_draft_archive.rs:255→257` |
+| Draft archive exact-retry sync | DraftArchive | yes | `epoch_draft_archive.rs:209→211` |
+| Draft archive release (unlink + parent sync) | DraftArchive | yes | `epoch_draft_archive.rs:370→372,379` |
+| Registry epoch replace / unchanged sync | Registry + temp | yes | `epoch_registry.rs:492→494`, `457→459` |
+| Registry head proof sync / repair barrier | Registry | yes | `epoch_registry/head.rs:343→345`, `383→385` |
+| Registry maintenance hint | Registry, Intents | yes | `epoch_registry/page_source.rs:60,71` |
+| Registry page receive sync | Registry | yes | `epoch_registry/receive.rs:201→203` |
+| Studio source (seal, rotate, adopt, overlay commit, ingest, handoff) replace / unchanged sync | Studio + temp | yes | `epoch_studio.rs:688→690`, `643→645`, the only write in the family |
+| Studio discovery proof sync / repair barrier | Studio | yes | `epoch_studio/discovery.rs:400→402`, `439→441` |
+| Cleanup unlink batch + directory sync (test-only callers) | all temps | yes, per step before the loop | `epoch_recovery/cleanup.rs:164→197,215` |
+| Failed-write staging unlink (`StagingPath::drop`) | any, inside a guarded write | yes (the caller's guard) | `store.rs:567-587,1256-1263` |
+| Non-family savers (`.bin`, `.net`, `.cache`, ui-state, pairing, `registry.bin`) | none; same directory, hence M-2 | no, correctly | `store.rs:1203-1228` |
+| `remove_server` | none (`servers/` non-family files) | no, correctly | `store.rs:1608-1619` |
+| `ServerStore::open` (creates `servers/`, root sync) | directory, before mount | n/a (fresh token) | `store.rs:1383,1390,1401` |
+| Vault session lock, passphrase rewrap | vault root only | n/a | `catcoms-storage/src/vault.rs:118-122`; `store.rs:1448` |
+| Blob stores | `blobs/` only | n/a | `store.rs:1635-1659` |
+| `WriteHooks` seams | decide only, no I/O; `None` is the only production value | n/a | `store.rs:869-894` |
+| Test-only raw writers | any | no (`cfg(test)`) | `store.rs:681-684,1162-1179`; `epoch_draft_archive.rs:533,562` |
+| catcomsctl, Tauri bridge | nothing in `servers/` outside tests | n/a | `bins/catcomsctl/src/main.rs`; `admission_storage.rs` tests from `:382` |
+| Budget mint / scope entry | none | correctly does not rotate | `epoch_studio.rs:187,222` |
+
+Line numbers are as audited at `2df3564f`. The readers' side was confirmed sound: step, install,
+finish, mint and reference finish all recheck the token, and `Arc::ptr_eq` against live clones
+cannot suffer ABA. Residual risks the audit named, not defects: the token is per `ServerStore`
+instance and exclusivity rests on the vault's file lock (weak on Linux NFS); the `servers/` parent
+is checked as a non-link directory only at begin; crash-orphaned `.bin` staging files could
+exhaust the 1024-entry receive limit, which fails closed.
+
 ### What remains, and why it is a separate checkpoint
 
 The runtime still drives scans the old way at six sites: `studio/control.rs` (x2),

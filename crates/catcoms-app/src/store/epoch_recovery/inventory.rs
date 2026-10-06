@@ -673,6 +673,13 @@ impl ServerStore {
         profile: EpochInventoryProfile,
     ) -> Result<EpochStorageScan<'_>, AppError> {
         let coverage = profile.coverage;
+        // Every token is captured before the directory is touched. On Windows `read_dir` already
+        // reads the first entry (`FindFirstFileExW`), so a capture after it would not cover that
+        // read (I-4 audit L-1). Custody excludes writers here today; the order is what keeps the
+        // comment below true without that.
+        let generation = self.inventory_generation.clone();
+        let intent_generation = self.intent_generation.clone();
+        let studio_generation = self.studio_generation.clone();
         let path = self.dir.join("servers");
         let metadata = fs::symlink_metadata(&path).map_err(|e| AppError::Io(e.to_string()))?;
         if !metadata.is_dir() || is_link(&metadata) {
@@ -683,12 +690,9 @@ impl ServerStore {
         let directory = fs::read_dir(path).map_err(|e| AppError::Io(e.to_string()))?;
         // A fresh token that matches nothing: only `finish_with` stamps the real one, so an
         // inventory issued by any other path, present or future, cannot mint a budget.
-        let mut inventory = EpochStorageInventory::empty(
-            coverage,
-            self.intent_generation.clone(),
-            std::sync::Arc::new(()),
-        );
-        inventory.studio_generation = self.studio_generation.clone();
+        let mut inventory =
+            EpochStorageInventory::empty(coverage, intent_generation, std::sync::Arc::new(()));
+        inventory.studio_generation = studio_generation;
         Ok(EpochStorageScan {
             cursor: EpochStorageCursor {
                 directory,
@@ -700,9 +704,9 @@ impl ServerStore {
                 byte_limit: profile.byte_limit,
                 cold_byte_limit: profile.cold_byte_limit,
                 references: None,
-                // Captured before the first entry is read, so any mutation concurrent with even
+                // Captured before the directory was opened, so any mutation concurrent with even
                 // the earliest part of this scan invalidates it.
-                generation: self.inventory_generation.clone(),
+                generation,
                 identity: std::sync::Arc::new(()),
                 mount: self.registry_mount(),
                 parked: None,
@@ -1032,6 +1036,10 @@ impl EpochStorageCursor {
                 "reference scan incomplete or unpublished metadata remains",
             ));
         }
+        // A skipped record here would leave its references unprotected, which is worse than an
+        // undercounted budget; the same listing check, collapsed to the public error.
+        self.confirm_listing(store)
+            .map_err(CursorFailure::into_error)?;
         let collected = self
             .references
             .ok_or_else(|| invalid("not a reference scan"))?;
@@ -1438,6 +1446,71 @@ impl EpochStorageCursor {
         Ok(self.progress)
     }
 
+    /// Confirm the finished traversal saw exactly the family files one fresh listing of the
+    /// directory names, with no body read, finds now (I-4 audit M-2).
+    ///
+    /// A cursor that spans visits holds its directory stream across them, and between them other
+    /// files in the same directory (`{id}.bin`, `.net`, `.cache` and their staging siblings) are
+    /// created and renamed without rotating anything, which is correct under I-4 because they are
+    /// not inventoried. POSIX and NTFS keep an open stream stable for the entries that did not
+    /// change, but not every filesystem a vault can sit on promises that (some FUSE and SMB
+    /// backends), and an entry skipped there would make this inventory silently undercount, and
+    /// a budget minted from it too generous. The token rules out any inventoried file having
+    /// changed since the cursor began, so a mismatch can only be the traversal's own instability;
+    /// it is reported as an invalidation, which restarts the scan rather than issuing it.
+    ///
+    /// Bounded by the profile's entry limit, as the traversal is, and it costs one listing per
+    /// finished inventory.
+    fn confirm_listing(&self, store: &ServerStore) -> Result<(), CursorFailure> {
+        let fault = |e: std::io::Error| CursorFailure::Fault(AppError::Io(e.to_string()));
+        let changed = || {
+            CursorFailure::Invalidated(invalid(
+                "epoch storage directory listing changed during the inventory",
+            ))
+        };
+        let mut family_entries = 0usize;
+        for (visited, entry) in fs::read_dir(store.dir.join("servers"))
+            .map_err(fault)?
+            .enumerate()
+        {
+            if visited >= self.entry_limit {
+                return Err(CursorFailure::Fault(invalid(
+                    "epoch storage inventory directory limit reached",
+                )));
+            }
+            let name = entry.map_err(fault)?.file_name();
+            let Some((family, kind)) =
+                storage_name(&name, self.coverage()).map_err(CursorFailure::Fault)?
+            else {
+                continue;
+            };
+            let seen = match kind {
+                RecoveryName::Final(hash) => self.inventory.records.contains_key(&(family, hash)),
+                RecoveryName::Temporary(_) => name
+                    .to_str()
+                    .is_some_and(|name| self.inventory.orphans.contains_key(name)),
+            };
+            if !seen {
+                return Err(changed());
+            }
+            family_entries += 1;
+        }
+        if family_entries != self.inventory.records.len() + self.inventory.orphans.len() {
+            return Err(changed());
+        }
+        Ok(())
+    }
+
+    /// Forget one record the traversal saw, as a directory stream that skipped its entry would
+    /// have, so a test outside this module can drive [`Self::confirm_listing`]'s refusal.
+    #[cfg(test)]
+    pub(in crate::store) fn forget_a_record_for_test(&mut self) {
+        self.inventory
+            .records
+            .pop_first()
+            .expect("a traversal with a record to forget");
+    }
+
     fn check_cold_bytes(&self, size: u64) -> Result<(), AppError> {
         if self.cold_byte_limit.is_some_and(|limit| {
             self.progress
@@ -1461,6 +1534,7 @@ impl EpochStorageCursor {
                 "epoch storage inventory is incomplete",
             )));
         }
+        self.confirm_listing(store)?;
         // Stamp the budget-ownership token at issue, not at begin.
         //
         // `studio_generation` rotates on a budget mint and on budget *entry* - bookkeeping that
@@ -4072,6 +4146,85 @@ mod tests {
             direct.1,
             "a non-family file changed the record set"
         );
+    }
+
+    /// Drive a cursor over the whole directory with no time budget.
+    fn traverse(store: &mut ServerStore, cursor: &mut EpochStorageCursor) {
+        while !store
+            .step_epoch_storage_scan(cursor, ENTRIES_PER_STEP, None)
+            .unwrap()
+            .complete
+        {}
+    }
+
+    /// I-4 audit M-2. A traversal that never saw a record on disk, which is what a directory
+    /// stream unstable under unrelated churn would produce, must not be issued as an inventory:
+    /// it would undercount, and a budget minted from it would be too generous. The job path turns
+    /// the refusal into a restart, because nothing inventoried changed and a fresh scan is the cure.
+    #[test]
+    fn a_traversal_that_missed_a_record_is_refused_at_finish() {
+        let root = tempfile::tempdir().unwrap();
+        let mut store = open(root.path());
+        for n in 0..3u8 {
+            stage(&mut store, 7, &document(b"group", &[b'm', n]), 1);
+        }
+        let coverage = EpochInventoryCoverage::RecoveryOnly;
+
+        // The precondition: the same traversal, untouched, issues.
+        let mut cursor = store.begin_epoch_storage_scan(coverage).unwrap();
+        traverse(&mut store, &mut cursor);
+        assert_eq!(
+            store
+                .finish_epoch_storage_scan(cursor)
+                .unwrap()
+                .records()
+                .count(),
+            3
+        );
+
+        // A stream that skipped one entry: the record is on disk, the inventory lacks it.
+        let mut cursor = store.begin_epoch_storage_scan(coverage).unwrap();
+        traverse(&mut store, &mut cursor);
+        cursor.inventory.records.pop_first().unwrap();
+        let error = store.finish_epoch_storage_scan(cursor).unwrap_err();
+        assert!(
+            error.to_string().contains("listing changed"),
+            "an undercounting inventory was issued or refused for the wrong reason: {error}"
+        );
+
+        // A stream that returned an entry the directory no longer has, here because a record was
+        // unlinked behind the guard's back: the inventory holds more than the disk.
+        let mut cursor = store.begin_epoch_storage_scan(coverage).unwrap();
+        traverse(&mut store, &mut cursor);
+        let parent = root.path().join("servers");
+        let record = fs::read_dir(&parent)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .find(|path| {
+                matches!(
+                    storage_name(path.file_name().unwrap(), coverage).unwrap(),
+                    Some((_, RecoveryName::Final(_)))
+                )
+            })
+            .unwrap();
+        fs::remove_file(record).unwrap();
+        assert!(store
+            .finish_epoch_storage_scan(cursor)
+            .unwrap_err()
+            .to_string()
+            .contains("listing changed"));
+
+        // The job path restarts rather than failing: the cure is a fresh traversal.
+        let mut job = store.begin_epoch_inventory_job(coverage).unwrap();
+        while !matches!(
+            store.step_epoch_inventory_job(&mut job, ENTRIES_PER_STEP, None).unwrap(),
+            EpochInventoryStep::Stepped(progress) if progress.complete
+        ) {}
+        job.cursor.inventory.records.pop_first().unwrap();
+        assert!(matches!(
+            store.finish_epoch_inventory_job(job).unwrap(),
+            EpochInventoryOutcome::Restarted(_)
+        ));
     }
 
     /// A restart absorbs an invalidation and nothing else.
