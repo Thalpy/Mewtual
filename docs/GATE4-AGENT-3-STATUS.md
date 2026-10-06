@@ -4,6 +4,71 @@ Owner: Agent 3 ([assignment](GATE4-AGENT-HANDOFFS.md#agent-3-runtime-signed-faul
 Proposal: [GATE4-AGENT-3-DESIGN](GATE4-AGENT-3-DESIGN.md), revision 16 follow-up.
 Review preamble: 3. Current entries override older ones.
 
+## Detached S1-S4 repair runtime: implementation plan, 2026-10-06
+
+Answers G4-A3-BOUND in [GATE4-ACCEPTANCE](GATE4-ACCEPTANCE.md). Today every repair runtime entry is
+switched off by `automatic_repair_execution_ready() == false` (`3fcde979`): explicit decisions,
+offered-repair application, owner and Registry resume, and repaired-seed installation. This plan
+builds design 10.3's job and only then turns that gate on. Base `c6f7fea0`.
+
+**A. Captured authority (core).** Every group use on the repair and adoption paths reads four public
+facts: group id, epoch, designated committer, and that committer's signing key (`verify_current_owner`
+for receipts and repairs, `from_checkpoint`, the book and journal resolvers). A trait `OwnerAuthority`
+is implemented by `ServerGroup` and by `CapturedOwnerAuthority`, a value snapshot of those facts
+taken from the live group under custody. The repair and adoption core functions become generic over
+it, so existing callers compile unchanged and S2 can run the existing logic with no MLS state. The
+captured view answers `member_signature_key` only for the committer, so any other query fails
+closed. Equivalence tests compare verdicts against the live group for each accept and refuse case.
+`ReceiptRepairPlan` gains `Clone`, so S3 can write B1 from an inert copy of the plan S2 applied.
+
+**B. Store split.** Each transaction (`issue_*`, `apply_*`, Studio and Registry) becomes three steps:
+- `capture_*` (S1, custody): the current live checks, owner/peer rules, CORE-007 refusal, held
+  decision and admission. Handoff resolution and signing (issuance) stay here, because both need
+  custody. It records a stamp (mount, server, group id, actor and key, owner, MLS epoch, observed
+  tenure, the source wrapper digest and size, and the owner-record digest), the authenticated
+  plaintext, the captured authority, and the inputs: repair, pair, raw seed.
+- `plan_*` (S2, pure): restore the unit; plan and apply the transition (owner: against the expected
+  B1 journal, which `commit_joint` requires; peer: `apply_receipt_repair`); snapshot the result for
+  B2; when a seed is present, `prepare_repair_adoption` (seed verification and the whole-version
+  `Repair` snapshot), `adopted_successor`, and its snapshot.
+- `commit_*` (S3, custody): re-derive the stamp from live state and require equality, including the
+  live captured authority and the wrapper digest re-read immediately before the first write. Then
+  B1 (from the plan copy), B2 and B6 from the precomputed snapshots, B3, B4/B5 and recycle, all
+  through the existing writers, the `CheckedRepairRecovery` capability, and `epoch_mutation_guard`.
+  The existing synchronous entry points become capture, plan, commit in one call, so every
+  existing repair store test exercises the split pipeline.
+
+**C. Runtime job.** Modelled on Flow H (`HandoffJob`):
+- Token-routed stages `Captured`, `Detached`, `Ready`, with the RT-001 drop-in-worker and
+  cancelled-carries-nothing arms, and `StudioBackgroundJob::RepairPlan` detached behind
+  `replay_ready()`.
+- Admission is `reserve_overlay()` before any body read, so repair shares the one heavy slot with
+  Save and handoff. The bundle also carries a per-target live claim (`Weak` reap, the
+  `OverlayAdmission` pattern), which is released where the last `Arc` drops.
+- S3 runs in the actor turn: budget first, commit, then drop ownership. Authority is checked every
+  turn (an owner or epoch change abandons the job), with per-target holds, wakes, and
+  `release_if_stalled`.
+- Entry points that enqueue jobs instead of executing: explicit `RepairFault` and
+  `RepairRegistryFault` (visit model: `Scheduled`, or `Busy` when admission is full), offered
+  repairs from the discovery arms, `repair_owner`, `resume_registry_repair`, and the owed-repair
+  install in `route_checkpoint_install`.
+- `target_is_claimed = durable claim || live job claim` is consulted by `route_checkpoint_install`
+  and ordinary install, page receive, owner rotation, and Registry maintenance.
+
+**D. Evidence and gate.** The gate is removed only after:
+- warm and cold full-pool deferral with no mutation;
+- cancellation and result holding (the slot is kept while a worker or result owns it);
+- an unrelated actor progressing while a large S2 is paused;
+- fairness across held targets;
+- S3 refusals for each stamp field and for a source change mid-S2, with no write;
+- interrupted B2/B3 Studio and Registry;
+- a two-peer Fault, decision, replacement, restart and newcomer run through the actor.
+
+Mutants: claim removal (M18), the live authority recheck, the digest recheck, and admission-before-read.
+
+Not in scope: native registration (Agent 4, after P5), the C-3 cursor consumers (Agent 1), CORE-007
+cancellation, and the S2 cost measurements, which are reported, not tuned.
+
 ## Archived Observed-tenure integration candidate, 2026-10-05
 
 On `gate4-finalization`, the shared Studio/Registry report admission consumes CORE-005's private
