@@ -1360,8 +1360,14 @@ attribution, tenure or signing authority.
   computed in the same custody visit as P2's eligibility, on the inspection and on the lifecycle
   row. It is `None` for a Closing branch or no branch, and `AwaitingSource` with no source record.
   It is `SourceUnreadable` when a source exists but cannot be read: a fourth value beyond section
-  11's three, for the reason P2 added `sourceUnreadable`. An actor test takes a real Unconfirmed
-  branch from `awaitingSource` to `baseConfirmed` when its confirmed checkpoint is installed.
+  11's three, for the reason P2 added `sourceUnreadable`.
+- **Tests:** two cover the app arms, on a real Unconfirmed branch saved through the actor.
+  - The branch goes from `awaitingSource` to `baseConfirmed` when its confirmed checkpoint is
+    installed.
+  - It reads `baseSuperseded` when another checkpoint is installed instead, then
+    `sourceUnreadable` once that record is corrupted.
+  - The installs use `adopt_studio_checkpoint` directly, with the owner proof's tenure handed in.
+    The proof exchange is discovery's.
 - **Native `unconfirmedState`, built:** `awaitingSource`, `baseConfirmed`, `baseSuperseded`,
   `sourceUnreadable` or null, the same on the inspection and the lifecycle row.
 - **Decisions the app must make** (review of `f3ce1758`):
@@ -1403,10 +1409,20 @@ Agent 1's Flow S is not implemented, this path is not implemented either; it is 
     renderer sent. The Closing `save_overlay` clears it when it takes a plan.
 - **A Closing draft refuses this Save.** The store's exact-retry acknowledgement is kind-blind, so a
   Closing branch's accepted operation resent through this action would otherwise be reported as
-  Unconfirmed work. The receiver refuses first, by what the document's live draft is.
-- **The inventory scan runs only when a store stage will spend the budget.** A `busy` visit
-  costs none. Each other visit still pays one complete scan, as every lifecycle control does,
-  until C-3's cursor makes the per-visit inventory cheaper; native must pace its retries.
+  Unconfirmed work. The receiver refuses first, by what the document's live draft is, at the
+  ticket and at every Save.
+- **The inventory scan runs only when a store stage will spend the budget.** A visit that finds
+  the slot busy costs none; one that finishes another request's plan pays that commit's. Each
+  other visit still pays one complete scan, as every lifecycle control does, until C-3's cursor
+  makes the per-visit inventory cheaper; native must pace its retries. The scan runs before a
+  parked plan is taken, so a failed scan leaves the plan parked.
+- **Open, required before native registration (re-review of `5ccc4647`, MEDIUM):** a parked plan
+  whose caller never returns still pins one of the four process-wide preparation permits. Only a
+  later Save on this actor frees it, and nothing bounds how long it waits. The fix is a park
+  deadline in the catch-up runtime (stamp on park, an expiry term in the actor's wake schedule,
+  drop on expiry; RT-001 makes the drop safe). The slot is shared with Agent 1's Closing
+  `save_overlay`, which has the same shape, so it is being settled with Agent 1. Unreachable while
+  the Save actions are unregistered.
 - **The ticket refuses a device that is no longer a member.** The mint checks the provider's
   membership, not this device's.
 - **The two Saves stay apart.** Neither action is reachable through the control transaction: both
@@ -1861,7 +1877,10 @@ type OverlayInspection =
       provenance: "closing" | "unconfirmed";
       eligibility: "transferable" | "manual";
       manualReason: OverlayManualReason | null;
-      unconfirmedState: "awaitingSource" | "baseConfirmed" | "baseSuperseded" | null;
+      // `sourceUnreadable` added as built (2026-10-06): an installed source exists but cannot be
+      // read. Also on the lifecycle row. Null exactly for a Closing branch or no branch.
+      unconfirmedState: "awaitingSource" | "baseConfirmed" | "baseSuperseded"
+        | "sourceUnreadable" | null;
       replayable: boolean; archived: boolean;
       readOnly: true; content_: StudioContent | null }
   | { v: 1; kind: "disposed"; channel: Decimal; object: Hex32 | null;

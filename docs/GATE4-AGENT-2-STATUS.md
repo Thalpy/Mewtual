@@ -35,7 +35,8 @@ whole-scope review of `510d0b54` (verdict: CHANGES REQUIRED, Agent 2 not complet
 <br>&nbsp;&nbsp;- The one-per-actor overlay slot (review of `b35e23d2`): a visit finishes any parked plan, for any target, and reports only its own request's outcome; a retry of its own in-flight plan is pending. Tested with interleaved requests and across two targets.
 <br>&nbsp;&nbsp;- A Closing draft refuses this Save, with an oracle showing the store alone would acknowledge it.
 <br>&nbsp;&nbsp;- Not natively registered: Agent 4 does that, and P5 stays false.
-<br>- **8.6's app call and native `unconfirmedState`**, on the inspection and the lifecycle row, with a fourth value, `sourceUnreadable`. An actor test goes from `awaitingSource` to `baseConfirmed`.
+<br>- **8.6's app call and native `unconfirmedState`**, on the inspection and the lifecycle row, with a fourth value, `sourceUnreadable`. Tests on a branch saved through the actor reach every state: `awaitingSource`, then `baseConfirmed` or `baseSuperseded`, then `sourceUnreadable`. The installs use `adopt_studio_checkpoint` directly, with the proof's tenure handed in.
+<br>- **Open, required before native registration:** a parked plan whose caller never returns still pins one process-wide preparation permit, with no time bound (re-review of `5ccc4647`, MEDIUM). Settled with Agent 1, whose Closing `save_overlay` shares the slot. Unreachable while unregistered.
 <br>**Still missing:**
 <br>- The per-server count and the vault-wide byte rails.
 <br>- The receiver handoff selector's skip of non-Closing branches (review M1), taken by Agent 1 and not in `c9566b82`. Until it lands, an Unconfirmed branch is refused at `start_studio_handoff` and backed off, not skipped.
@@ -165,6 +166,7 @@ over, not the contract. Reasoning from either row as FALSE remains correct today
 | 2026-09-16 | Design revision 6 (`a6d8170`) | **PASS for (a) and (c), no findings.** With (b)'s revision-4 PASS this accepts the whole design. Every finding from revisions 1 to 6 is closed at the design boundary. Two non-blocking refinements were offered and are adopted in revision 7. Reviewer ran no Cargo commands. |
 | 2026-09-16 | Design revision 7 | Accepted refinements only: A-1's scope sentence and N-T7b's diagnostics. No reviewed decision changes. |
 | 2026-10-06 | Review 2, bounded implementation (`510d0b54`..`1d888fa8`) | **(a) P1 manual lifecycle: bounded PASS** with seven LOWs. **(b) Repeated tenure through the actor: PARTIAL**, one MEDIUM (M-1: the same-key refusal was not through the actor, and production's proof gate was unpinned). Reviewer ran 8 focused tests and inspected the 16 mutation logs; no full suites. Native Save conditions: not yet satisfied. Dispositions in "The copy review". |
+| 2026-10-06 | Re-review of the slice 2 fixes (`b35e23d2`..`5ccc4647`) | **No blocker or high.** HIGH-1 is closed for the actor slot, and MEDIUM-1 to MEDIUM-3 are closed. One MEDIUM remains: an abandoned parked plan still pins a process-wide permit with no time bound. It is recorded as required before native registration and taken to Agent 1. Five LOWs, fixed next. Reviewer ran 7 focused tests and checked both workspaces. |
 | 2026-10-06 | Preview-local slice 2 (`b35e23d2`: the Unconfirmed Save through the actor) | **No blocker. One HIGH:** an abandoned plan on one target blocked Saves on every other target and pinned a process-wide permit. Also three MEDIUMs: a Closing draft reported as Unconfirmed, no refresh notice for another request's commit, and a full scan on every visit. Five LOWs. All fixed in the next commit, with regressions and mutation entries; `b35e23d2` was not pushed before them. Reviewer: static inspection only. |
 | 2026-10-06 | Preview-local slice 1 (`f3ce1758`: the rail, the basis accessors, 8.6's core) | **No blocker or high.** Two MEDIUM test gaps, each with an overstating doc line: the reader's wiring of each 8.6 half, and the read-side rail. Three LOWs: a compile-time bound, `BaseSuperseded` also naming a source behind the base, and phase and adopting left to the app. All fixed or recorded in the next commit, which also makes `f3ce1758`'s two unformatted replication files fmt-clean. Reviewer ran the 13 Unconfirmed tests. |
 | 2026-10-06 | Review 2 finding re-review (`1d888fa8`..`bea7e701`) | **No blocker, high or medium.** (a) P1 bounded PASS stands. (b) Repeated tenure through the actor: **bounded PASS on the narrowed claim** (M-1 closed). Three doc and evidence LOWs, fixed next. Reviewer ran the three new tests (all pass) and inspected the mutation logs. |
@@ -1048,6 +1050,25 @@ No blocker. `b35e23d2` was held back from origin until these were fixed, in the 
 - **LOW-5, test gaps.** Added: the oversized-body refusal, a Flipnote target, the own-plan retry
   and the two-target case. Not added: a receiver restart. A fresh receiver has no parked plan and
   no remembered request, so its first visit is the fresh-visit path the other tests cover.
+
+**Re-review of the fixes (`b35e23d2`..`5ccc4647`): no blocker or high.**
+
+HIGH-1 is closed for the actor slot, every park path traced, and MEDIUM-1 to MEDIUM-3 are closed.
+In the commit after `5ccc4647`:
+- **MEDIUM, open and recorded:** an abandoned parked plan still pins one of the four process-wide
+  preparation permits with no time bound. Only a later Save on the same actor frees it.
+  - The fix is a park deadline in the catch-up runtime, which the Closing `save_overlay` shares.
+  - It is recorded as required before native registration, in design 8.7 and status row 4, and
+    taken to Agent 1.
+- **LOW-1:** a failed or cancelled plan now clears the remembered request.
+- **LOW-2:** the budget is built before a parked plan is taken, so a failed scan leaves the plan
+  parked.
+- **LOW-3:** the ticket also refuses a Closing draft.
+- **LOW-4:** the scan wording is corrected, and section 11's type union gains `sourceUnreadable`.
+- **LOW-5:** a test reaches `baseSuperseded` and `sourceUnreadable`.
+- **Not done:** a receiver-level test of an Unconfirmed visit taking a parked Closing plan. That
+  needs a Closing plan parked through the receiver, and the Closing Save has no caller yet. The
+  store-level refusal (`closing_plan_refuses_an_unconfirmed_commit_mint_by_name`) is Agent 1's.
 
 | Finding | What |
 |---|---|

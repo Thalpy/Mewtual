@@ -832,6 +832,11 @@ impl CatchupRuntime {
     /// would wait for as long as the plan's caller stayed away, which can be for ever. The
     /// Unconfirmed Save takes it with this instead, finishes it, and reports nothing of it as its
     /// own (design 8.7; review of `b35e23d2`, HIGH-1).
+    /// Whether a plan is parked, for a caller that must prepare before it takes one.
+    pub(super) fn has_planned_overlay(&self) -> bool {
+        self.overlay_planned.is_some()
+    }
+
     pub(super) fn take_any_planned_overlay(
         &mut self,
     ) -> Option<(StudioTarget, Box<StudioOverlayPlan>, OverlayOwnership)> {
@@ -1381,12 +1386,19 @@ impl StudioReceiver {
                 // request stays retryable and the next Save reclassifies from durable state.
                 if let Ok((plan, ownership)) = result {
                     self.catchup.overlay_planned = Some((context, plan, ownership));
+                } else {
+                    // Nothing was parked, so no Unconfirmed request has scheduled work any more.
+                    // A stale fingerprint would answer that request's retry "pending" while
+                    // nothing of it is in flight (design 8.7; re-review of `5ccc4647`, LOW-1).
+                    self.unconfirmed_scheduled = None;
                 }
             }
             StudioBackgroundResult::CancelledOverlay => {
                 // Clears the waiter only. The worker still owns the bundle and is still running,
-                // so admission and the shared slot remain occupied until it ends by itself.
+                // so admission and the shared slot remain occupied until it ends by itself. What
+                // it produces is never parked, so the remembered request is cleared as above.
                 self.catchup.overlay_detached = false;
+                self.unconfirmed_scheduled = None;
             }
             StudioBackgroundResult::Handoff(completion) => {
                 let now = server.runtime_clock().monotonic_ms();

@@ -412,6 +412,39 @@ async fn studio_actor_unconfirmed_save_retry_of_its_own_scheduled_plan_is_pendin
 /// discovery's, tested there.
 fn install_confirmed_checkpoint(p: &mut Pair, target: StudioTarget) {
     let (receipt, seed) = candidate(p, target);
+    install_checkpoint(p, target, &receipt, &seed);
+}
+
+/// Another owner checkpoint of the same document: the same empty projection, under another close.
+/// Installed instead of the preview's, it is a confirmed source that is not the branch's base.
+fn other_checkpoint(p: &mut Pair, target: StudioTarget) -> (Receipt, CheckpointSeed) {
+    p.alice.sync.with_registry_context(|g, d, _, _| {
+        let seed = StudioEpoch::new(g, target, d.device_id())
+            .unwrap()
+            .projection()
+            .unwrap()
+            .checkpoint([8; 32])
+            .unwrap();
+        let receipt = Receipt::sign(
+            target.document(&g.group_id()).unwrap(),
+            0,
+            [8; 32],
+            seed.change_hash(),
+            0,
+            InheritedCheckpoint::EpochZero,
+            d,
+        )
+        .unwrap();
+        (receipt, seed)
+    })
+}
+
+fn install_checkpoint(
+    p: &mut Pair,
+    target: StudioTarget,
+    receipt: &Receipt,
+    seed: &CheckpointSeed,
+) {
     let mut b = budget(&mut p.bob, &mut p.b_store);
     let clock = p.clock.clone();
     let store = &mut p.b_store;
@@ -424,7 +457,7 @@ fn install_confirmed_checkpoint(p: &mut Pair, target: StudioTarget) {
                 g,
                 target,
                 d,
-                &receipt,
+                receipt,
                 Some(seed.bytes()),
                 0,
                 &clock,
@@ -490,6 +523,47 @@ async fn studio_actor_unconfirmed_branch_reconciles_from_awaiting_to_confirmed_o
         "a confirmed base promotes nothing: the branch is still Unconfirmed"
     );
     assert_eq!(pending(&mut p, target), 1);
+}
+
+/// The other two app-level arms of design 8.6 (re-review of `5ccc4647`, LOW-5). A confirmed source
+/// that is not the branch's base, here another owner checkpoint under another close, reads
+/// `BaseSuperseded`. The same source made unreadable on disk reads `SourceUnreadable`, never
+/// `AwaitingSource`: a record is there, and it cannot be vouched for as absent.
+#[tokio::test]
+async fn studio_actor_unconfirmed_branch_reconciles_superseded_then_unreadable() {
+    use catcoms_replication::studio::StudioOverlayUnconfirmedState as U;
+    let (mut p, mut receiver, target, basis, branch) = ready_receiver().await;
+    let request = new_entry(&mut p, (basis, branch), 91, [8; 16]);
+    assert!(matches!(
+        save(&mut receiver, &mut p, target, &request).unwrap(),
+        StudioUnconfirmedSaveOutcome::Scheduled
+    ));
+    settle(&mut receiver, &mut p).await;
+    assert!(matches!(
+        save(&mut receiver, &mut p, target, &request).unwrap(),
+        StudioUnconfirmedSaveOutcome::Saved { accepted: 1, .. }
+    ));
+
+    let (receipt, seed) = other_checkpoint(&mut p, target);
+    install_checkpoint(&mut p, target, &receipt, &seed);
+    assert_eq!(
+        reconciliation(&mut receiver, &mut p, target),
+        Some(U::BaseSuperseded),
+        "a confirmed source from another checkpoint supersedes the branch's base"
+    );
+
+    let store = &p.b_store;
+    let path = p
+        .bob
+        .sync
+        .with_registry_context(|g, _, _, _| store.studio_source_path_for_test(SERVER, g, target))
+        .unwrap();
+    std::fs::write(&path, b"not a sealed studio record").unwrap();
+    assert_eq!(
+        reconciliation(&mut receiver, &mut p, target),
+        Some(U::SourceUnreadable),
+        "a source that is there but unreadable is neither awaited nor compared"
+    );
 }
 
 /// Both actions go through the receiver and its scope checks; neither can be reached through the

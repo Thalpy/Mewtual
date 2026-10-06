@@ -30,7 +30,8 @@ impl StudioReceiver {
     ///
     /// The same scope checks the transaction makes first: the request's own bounds, then a channel
     /// this server knows. The budget (a completed five-family inventory, as for every other
-    /// lifecycle control) is taken only by a stage that will use it. A `Busy` visit costs no scan.
+    /// lifecycle control) is taken only by a stage that will use it. A visit that finds the slot
+    /// busy costs no scan; one that finishes another request's parked plan pays that commit's.
     pub(super) fn unconfirmed_save_control<T: MeshTransport + 'static, R: CryptoRngCore>(
         &mut self,
         server: &mut Server<T, R>,
@@ -49,6 +50,9 @@ impl StudioReceiver {
         }
         match request.action {
             StudioControlAction::BeginUnconfirmedOverlaySave => {
+                // Every Save under a ticket for a Closing draft would be refused anyway; naming
+                // the reason here, before a ticket exists, is the truthful place for it.
+                refuse_closing_draft(server, store, id, target)?;
                 let (basis, branch) =
                     self.begin_unconfirmed_overlay_save(server, store, id, target)?;
                 Ok(StudioControlResponse::UnconfirmedOverlaySaveTicket {
@@ -149,25 +153,30 @@ impl StudioReceiver {
         // never one parked with the plan. A Closing plan is refused by the store, by name, before
         // it reads anything; RT-001 holds for that as for any refusal: nothing is parked, and its
         // request reclassifies from durable state on its own retry.
-        if let Some((planned, plan, ownership)) = self.catchup.take_any_planned_overlay() {
+        if self.catchup.has_planned_overlay() {
+            // The budget before the take: a failed scan then leaves the plan parked for the next
+            // visit, instead of destroying a committable plan (re-review of `5ccc4647`, LOW-2).
+            let mut budget = save_budget(server, store, id)?;
+            let (planned, plan, ownership) = self
+                .catchup
+                .take_any_planned_overlay()
+                .expect("checked just above, in the same custody visit");
             // Whose plan this is. The slot holds one plan whichever request made it, and the plan
             // does not say, so the receiver remembers which request scheduled it.
             let ours = planned == target && self.unconfirmed_scheduled == Some(request);
             self.unconfirmed_scheduled = None;
             let attempt = self.catchup.preview.mint(server, store, id, planned);
-            let committed = save_budget(server, store, id).and_then(|mut budget| {
-                server.sync.with_registry_context(|group, device, _, rng| {
-                    store.commit_studio_overlay_with(
-                        id,
-                        group,
-                        planned,
-                        device,
-                        StudioOverlayMint::unconfirmed(attempt),
-                        *plan,
-                        rng,
-                        &mut budget,
-                    )
-                })
+            let committed = server.sync.with_registry_context(|group, device, _, rng| {
+                store.commit_studio_overlay_with(
+                    id,
+                    group,
+                    planned,
+                    device,
+                    StudioOverlayMint::unconfirmed(attempt),
+                    *plan,
+                    rng,
+                    &mut budget,
+                )
             });
             // Released only after the commit attempt returns, on success and on error alike.
             drop(ownership);
@@ -237,7 +246,7 @@ impl StudioReceiver {
 }
 
 /// A budget from a completed five-family inventory, as every lifecycle control takes one. Called
-/// only by a stage that will spend it, so a `Busy` visit costs no scan.
+/// only by a stage that will spend it, so a visit that finds the slot busy costs no scan.
 fn save_budget<T: MeshTransport + 'static, R: CryptoRngCore>(
     server: &mut Server<T, R>,
     store: &mut ServerStore,
