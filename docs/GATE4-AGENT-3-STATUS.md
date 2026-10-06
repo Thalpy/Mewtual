@@ -19,55 +19,82 @@ taken from the live group under custody. The repair and adoption core functions 
 it, so existing callers compile unchanged and S2 can run the existing logic with no MLS state. The
 captured view answers `member_signature_key` only for the committer, so any other query fails
 closed. Equivalence tests compare verdicts against the live group for each accept and refuse case.
-`ReceiptRepairPlan` gains `Clone`, so S3 can write B1 from an inert copy of the plan S2 applied.
+Implemented in `81a771bd`. After the design review (below) S2 does not use it yet: it is the seam for
+moving the adoption half (seed verification, `Repair` snapshot, successor build) into S2 if the
+in-custody measurements require that.
 
-**B. Store split.** Each transaction (`issue_*`, `apply_*`, Studio and Registry) becomes three steps:
-- `capture_*` (S1, custody): the current live checks, owner/peer rules, CORE-007 refusal, held
-  decision and admission. Handoff resolution and signing (issuance) stay here, because both need
-  custody. It records a stamp (mount, server, group id, actor and key, owner, MLS epoch, observed
-  tenure, the source wrapper digest and size, and the owner-record digest), the authenticated
-  plaintext, the captured authority, and the inputs: repair, pair, raw seed.
-- `plan_*` (S2, pure): restore the unit; plan and apply the transition (owner: against the expected
-  B1 journal, which `commit_joint` requires; peer: `apply_receipt_repair`); snapshot the result for
-  B2; when a seed is present, `prepare_repair_adoption` (seed verification and the whole-version
-  `Repair` snapshot), `adopted_successor`, and its snapshot.
-- `commit_*` (S3, custody): re-derive the stamp from live state and require equality, including the
-  live captured authority and the wrapper digest re-read immediately before the first write. Then
-  B1 (from the plan copy), B2 and B6 from the precomputed snapshots, B3, B4/B5 and recycle, all
-  through the existing writers, the `CheckedRepairRecovery` capability, and `epoch_mutation_guard`.
-  The existing synchronous entry points become capture, plan, commit in one call, so every
-  existing repair store test exercises the split pipeline.
+**B. Store (revised after review).** The transactions stay as they are; S3 runs them unchanged on a
+source S2 rebuilt. Studio needs no store change: `install_prepared_studio_source` installs the
+rebuild after rechecking actor, owner, MLS epoch, group, plaintext digest and physical size, and
+the transaction takes that warm unit through its existing digest-checked warm path. Registry
+transactions restore the bucket under custody today, so they gain a variant that takes the
+detached rebuild and rechecks its stamp against disk in the same way. Every outcome, hold,
+CORE-007 refusal and recycle stays exactly as today, and so does the cold-source refusal.
 
 **C. Runtime job.** Modelled on Flow H (`HandoffJob`):
-- Token-routed stages `Captured`, `Detached`, `Ready`, with the RT-001 drop-in-worker and
-  cancelled-carries-nothing arms, and `StudioBackgroundJob::RepairPlan` detached behind
-  `replay_ready()`.
-- Admission is `reserve_overlay()` before any body read, so repair shares the one heavy slot with
-  Save and handoff. The bundle also carries a per-target live claim (`Weak` reap, the
-  `OverlayAdmission` pattern), which is released where the last `Arc` drops.
-- S3 runs in the actor turn: budget first, commit, then drop ownership. Authority is checked every
-  turn (an owner or epoch change abandons the job), with per-target holds, wakes, and
-  `release_if_stalled`.
-- Entry points that enqueue jobs instead of executing: explicit `RepairFault` and
-  `RepairRegistryFault` (visit model: `Scheduled`, or `Busy` when admission is full), offered
-  repairs from the discovery arms, `repair_owner`, `resume_registry_repair`, and the owed-repair
-  install in `route_checkpoint_install`.
-- `target_is_claimed = durable claim || live job claim` is consulted by `route_checkpoint_install`
-  and ordinary install, page receive, owner rotation, and Registry maintenance.
+- **S1:** one per-actor repair slot. One pool permit is taken before any body read; a refusal sets
+  only a flat capacity retry and charges no target. A per-target live claim is taken (Studio target,
+  or the Registry bucket) using the `OverlayAdmission` `Weak` reap. Then the bounded plaintext
+  capture of the existing preparation, plus the job inputs: an explicit decision, a resume, an
+  offered repair and its receipt, or seed bytes extracted under the authoring-tenure check.
+- **S2:** the existing detached rebuild, holding the job's own permit. It never takes a second one.
+- **S3:** in the actor turn, not gated on `replay_ready()`. Budget first, then install the rebuild,
+  run the transaction, and drop the ownership. A stale rebuild holds the target and retries.
+- Token-routed completion, with RT-001 drop-in-worker and cancelled-carries-nothing. Detached at
+  the top of the `detach` chain beside `Prepare`, so pending discovery never parks it. Authority
+  (tenure, MLS epoch) is checked every turn and abandons the job; per-target holds and wakes; the
+  parked result counts in `result_parked()`.
+- **Entry points that enqueue instead of executing:**
+  - explicit `RepairFault`/`RepairRegistryFault`: `Scheduled`, `Busy`, or `Scheduled` again for
+    the same decision while it is live;
+  - offered repairs from the discovery arms, which drop the pass when a job is scheduled or busy;
+  - `repair_owner` and `resume_registry_repair`;
+  - the owed-replacement install.
+- **Live claim consulted by:** ordinary install and `route_checkpoint_install`, page receive, owner
+  rotation (the sticky target advances), Registry maintenance, and foreground `Apply` and
+  `ApplyOverlayCopy`. Each drops the pass, or refuses, without rescheduling discovery for that
+  target.
+- **Outcome reporting:** a bounded per-target last-decision outcome and a scheduled blocker in the
+  fault view, replacing the single overwritten failure slot as the only channel.
 
 **D. Evidence and gate.** The gate is removed only after:
-- warm and cold full-pool deferral with no mutation;
-- cancellation and result holding (the slot is kept while a worker or result owns it);
+- full-pool deferral with no mutation;
+- cancellation and result holding;
 - an unrelated actor progressing while a large S2 is paused;
+- S3 completing within bounded turns for a Selected pass carrying a repair, a `PageReady` pass on
+  the claimed target, and a faulted target under reporting discovery;
+- a stale rebuild refused with no write;
 - fairness across held targets;
-- S3 refusals for each stamp field and for a source change mid-S2, with no write;
 - interrupted B2/B3 Studio and Registry;
 - a two-peer Fault, decision, replacement, restart and newcomer run through the actor.
 
-Mutants: claim removal (M18), the live authority recheck, the digest recheck, and admission-before-read.
+In-custody S3 cost is measured at a maximal source.
+
+Mutants: claim removal (M18), restoring the `replay_ready` gate, admission before read, and the
+stale-rebuild check.
 
 Not in scope: native registration (Agent 4, after P5), the C-3 cursor consumers (Agent 1), CORE-007
-cancellation, and the S2 cost measurements, which are reported, not tuned.
+cancellation, and claims on gossip ingest and own-operation replay. A source changed by those
+during S2 makes the rebuild stale and the job retries; this is a documented residual.
+
+### Design review of `d23452c9`: no BLOCKER, plan revised
+
+| Finding | Disposition |
+|---|---|
+| HIGH-1 job starves behind its own claim (`replay_ready`, discovery gate) | S2 detaches at the top of the chain and S3 is ungated; claimed-target deferral drops the pass without rescheduling discovery; three liveness regressions plus a gate mutant. |
+| HIGH-2 S1 cannot sign or assemble evidence without the restored graph; preparing inside a reserved job is hold-and-wait | Signing and evidence happen at S3 inside the unchanged transaction on the rebuild; the job's S2 uses its own permit. |
+| MEDIUM-3 partial S2 results change outcomes | Moot: S3 runs the unchanged transaction. A `StorageRefused` test is added. |
+| MEDIUM-4 precomputed-snapshot writers | Moot: existing writers. If the adoption half moves to S2 later, pairing is by type and the capability is consumed inside the writer. |
+| MEDIUM-5 missing consult points; Busy offered repair falls through | Busy, scheduled and live cases drop the pass. Consult points are listed in C; gossip ingest and replay are a residual. Owner-record re-saves no longer matter, because S3 reads the record fresh. |
+| MEDIUM-6 stamp contents | The stamp is the existing prepared-source check (plaintext digest and physical size, actor, owner, MLS, group, mount). Authority, durable snapshot, channel and CORE-007 checks are re-run by the transaction at S3. |
+| MEDIUM-7 trait boundary | Sealed, private constructor from a live group only, no codec (`81a771bd`). The `same_tenure` equivalence test is added when S2 first uses the view. |
+| MEDIUM-8 visit-model reporting | Scheduled/Busy plus a per-target last outcome and blocker; native converter variant and INTERFACES update. Design 10.3 amendment: no native session is captured. |
+| MEDIUM-9 overlay admission | Dropped: a pool permit plus a per-actor repair slot, as design 10.3 specifies. Save and handoff are unaffected. |
+| LOW-10 B1 copy | Moot; `ReceiptRepairPlan` is no longer `Clone`. |
+| LOW-11 admission across detach | Moot: minted at S3 by the transaction. |
+| LOW-12 synchronous composites | The cold-source refusal is unchanged. |
+| LOW-13 mutants and tests | Listed in D. |
+| LOW-14 budget per path | Kept per job kind: the install uses `budget()`, the rest `inventory_budget()`. |
 
 ## Archived Observed-tenure integration candidate, 2026-10-05
 

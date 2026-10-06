@@ -225,7 +225,6 @@ impl ReceiptBook {
 
 /// Exact private plan stamp, including accepted/quarantined work and accounting. The exclusive
 /// typed source borrow protects its document; this stamp additionally fences gate-only races.
-#[derive(Clone)]
 struct RepairStateStamp {
     gate: EpochGateInner,
     book: Vec<u8>,
@@ -234,7 +233,6 @@ struct RepairStateStamp {
     opening: Option<Receipt>,
 }
 
-#[derive(Clone)]
 struct RepairCandidate {
     expected: RepairStateStamp,
     book: ReceiptBook,
@@ -243,7 +241,6 @@ struct RepairCandidate {
     binding: RepairBinding,
 }
 
-#[derive(Clone)]
 enum RepairPlan {
     Candidate(Box<RepairCandidate>),
     Unchanged(SourceRepairOutcome),

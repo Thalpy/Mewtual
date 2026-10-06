@@ -10,12 +10,6 @@ use super::*;
 /// only then apply the source candidate and persist the complete source at B2. Neither this
 /// value nor its commit method attests that either write happened. Restart must reconstruct
 /// a plan under the still-held transaction, repeating historical admission and live checks.
-///
-/// `Clone` lets a detached stage apply one copy to its private source while the other is
-/// written at B1 under custody. A copy is no more authority than the original: `commit_joint`
-/// rechecks live authority, the exact journal and every stamped source version, so a copy
-/// applied to anything but the source it was planned on refuses.
-#[derive(Clone)]
 pub struct ReceiptRepairPlan {
     resolved: ResolvedRepair,
     source_version: Hash32,
