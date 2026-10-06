@@ -4,6 +4,77 @@ Owner: Agent 3 ([assignment](GATE4-AGENT-HANDOFFS.md#agent-3-runtime-signed-faul
 Proposal: [GATE4-AGENT-3-DESIGN](GATE4-AGENT-3-DESIGN.md), revision 16 follow-up.
 Review preamble: 3. Current entries override older ones.
 
+## Runtime evidence: harness, two-peer run, S3 cost, 2026-10-06
+
+This answers the remaining items of plan D below, except Registry Flow D on a real peer.
+
+**Scripted mutants.** `scripts/check-agent3-runtime-mutations.py` reuses the core harness, and a
+new workflow `agent3-repair-runtime.yml` runs it on Linux and Windows. It has 12 mutants:
+- **The plan's four:**
+  - live claim consult (M18);
+  - restoring the `replay_ready` gate on S2;
+  - restoring it on S3;
+  - admission before read.
+- **Stale-rebuild checks:** the Studio stale-rebuild check, the Registry stale-rebuild check, and
+  the Registry record digest.
+- **Guards from this session:**
+  - the S3 custody restore;
+  - the owner crash-between-install-and-recycle resume;
+  - the per-offer hold;
+  - the claimed bucket's skipped turn;
+  - queued-preparation stranding.
+
+Every replacement compiles under CI's `-D warnings`. A local run detected the first four and
+restored each byte for byte. The Studio stale mutant then failed, but at a message-less assertion
+rather than the expected one; that assertion now carries the message the harness matches.
+
+**Two-peer run through the actors**
+(`catchup/tests/repair/two_peer.rs`, `a_fault_is_decided_replaced_and_survives_restart_and_a_newcomer_through_the_actors`).
+Nothing in it calls a repair transaction or runtime method: every step is a receive turn, a Read
+or a control request on spawned actors.
+- **Ownership change:** Alice founds, Bob, Carol and Dave join, and Bob removes Alice, so Carol
+  observed Bob's tenure begin.
+- **Fault:** Bob installed and published R1, then met a rival R2 from his own tenure. Carol holds
+  both receipts and no seed.
+- **Decision:** Bob's explicit decision is a job; `Busy` is retried as the visit model says.
+- **Peer replacement:** Carol takes the repair from Bob's answer through her actor, owes R1's
+  seed, fetches it from Bob and installs the replacement in a Replace job. Both sit on the same
+  epoch and projection.
+- **Restart:** actors and mounts come back from disk and snapshot. Bob's source has left Fault
+  and his owner record is ordinary; no job reruns on anyone.
+- **Newcomer:** Dave, a member whose vault never held the document, installs the repaired version
+  through an ordinary owner proof.
+
+**What the run found** (fixed here):
+- **HIGH: re-staged reports blocked newcomers after any repair.** A faulted peer reports its
+  frozen pair on every discovery until it applies the repair. Reports reaching the owner after
+  its own decision finished were staged again: proof of the selected receipt stayed suppressed
+  (no newcomer could install the repaired document), and the fault view offered the decided pair
+  for a second decision with `may_decide: true`.
+  - *Fix:* `admit_fault_report` now takes the repair the caller's exact source carries, and
+    declines a report of exactly that pair while no decision is held and the repair verifies
+    under the current tenure. Those are the conditions under which the head service carries it in
+    the same answer. Any other case stages as before. The Studio head adapter now reads its source
+    before B0, as the Registry adapters already did.
+  - *Regressions:* the store test
+    `a_report_of_a_pair_the_owner_already_repaired_is_answered_not_restaged` (an exact pair is
+    answered, a different pair still stages), plus the two-peer run. Removing the decline fails
+    both.
+- **Protocol limit, not changed:** after A to B, leaf 0 is vacant, so no fresh MLS member can
+  join under B's tenure. A pinned group refuses (`AdmissionAuthorityUnavailable`) until a
+  succession proof exists, and a policy-less group would make the joiner the owner. The run
+  therefore uses a document newcomer. An MLS newcomer's refusal of an offered repair (N16) stays
+  pinned by the runtime test.
+
+**Test barrier.** `wait_studio_preparation` (test-only) now also waits for a detached repair S2, so
+actor fixtures await it without spending network deadlines.
+
+**S3 cost** (`profile_repair_job_stages`, release, 20,000 operations; the smoke variant runs in
+the suite). The profile is added, but its release numbers are not recorded yet.
+
+**Still open:** Registry Flow D on a real peer; the CI run of the new harness workflow; a bounded
+repair verdict.
+
 ## Registry repair job: implemented, 2026-10-06
 
 **The Registry gate is gone.** `registry_repair_execution_ready()` is deleted: every Registry repair

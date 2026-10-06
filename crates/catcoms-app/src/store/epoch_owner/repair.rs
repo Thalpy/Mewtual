@@ -384,8 +384,12 @@ impl ServerStore {
     /// receipts match either the current Observed owner or the one archived Observed witness from
     /// the same durable snapshot is admissible. An exact retained attestation is checked first, so
     /// an unresolved pair survives archive turnover. `Ok(None)` writes nothing (not the owner,
-    /// unprovable, foreign, malformed, or unavailable historical capacity); `Err` is a failed or
-    /// uncertain B0 write, which the caller must turn into a fail-closed answer.
+    /// unprovable, foreign, malformed, or unavailable historical capacity, or already answered by
+    /// `carried`); `Err` is a failed or uncertain B0 write, which the caller must turn into a
+    /// fail-closed answer.
+    ///
+    /// `carried` is the repair the caller's exact source carries right now (its committed
+    /// repair state), if any. See `admit_fault_report_with_writer` for why it matters.
     #[allow(clippy::too_many_arguments)]
     pub(in crate::store) fn admit_fault_report(
         &mut self,
@@ -396,6 +400,7 @@ impl ServerStore {
         tenure: u64,
         archived_owner: Option<&ArchivedOwnerTenure>,
         report: &[Receipt; 2],
+        carried: Option<&ReceiptRepair>,
         rng: &mut impl CryptoRngCore,
         budget: &mut EpochStorageBudget,
     ) -> Result<Option<ReportAdmission>, AppError> {
@@ -407,6 +412,7 @@ impl ServerStore {
             tenure,
             archived_owner,
             report,
+            carried,
             rng,
             budget,
             &mut WriteHooks::None,
@@ -416,6 +422,20 @@ impl ServerStore {
     /// The production admission path with the owner-record writer exposed only for deterministic
     /// crash-boundary tests. Callers must propagate every writer error: a visible or uncertain B0
     /// replacement is not permission to answer the request that carried the report.
+    ///
+    /// A report of exactly the pair the caller's source already carries a finished repair for is
+    /// answered, not admitted. A faulted peer keeps reporting its frozen pair on every discovery
+    /// until it applies the repair, and some of those reports reach the owner after its own
+    /// decision has finished and recycled the record. Staging one again would reopen a decided
+    /// pair: it suppresses proof of the very receipt the repair selected, so no newcomer could
+    /// install the repaired document, and it offers the pair for a second decision. Design
+    /// 10.3's two-peer actor run found exactly this.
+    ///
+    /// The report is declined only under the conditions on which the head service carries that
+    /// repair in the same answer: no decision is held, the source carries the repair, and it
+    /// verifies under this current tenure. Any other case stages as before, so a pair the owner
+    /// can no longer answer stays decidable. `carried` is local authenticated state the caller
+    /// read from its exact source; it chooses nothing and widens no authority.
     #[allow(clippy::too_many_arguments)]
     pub(in crate::store) fn admit_fault_report_with_writer(
         &mut self,
@@ -426,6 +446,7 @@ impl ServerStore {
         tenure: u64,
         archived_owner: Option<&ArchivedOwnerTenure>,
         report: &[Receipt; 2],
+        carried: Option<&ReceiptRepair>,
         rng: &mut impl CryptoRngCore,
         budget: &mut EpochStorageBudget,
         hooks: &mut WriteHooks<'_>,
@@ -446,6 +467,14 @@ impl ServerStore {
         // retained exact attestation remains sufficient after the single archive has turned over.
         let state =
             self.checked_owner_repair_state(server, document, &observer, group.epoch(), budget)?;
+        let answered = state.held_repair().is_none()
+            && carried.is_some_and(|repair| {
+                repair.receipt_hashes == hashes
+                    && repair.verify_current_owner(group, tenure).is_ok()
+            });
+        if answered {
+            return Ok(None);
+        }
         let admission = match state.retained_admission(hashes, &observer, group.epoch())? {
             Some(admission) => admission,
             None => match ValidatedFaultAdmission::current(

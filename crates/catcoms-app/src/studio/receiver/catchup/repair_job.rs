@@ -228,6 +228,14 @@ impl CatchupRuntime {
             .is_some_and(|job| !matches!(job.stage, RepairStage::Detached))
     }
 
+    /// The job's S2 is running on a worker.
+    #[cfg(test)]
+    pub(super) fn repair_detached_for_test(&self) -> bool {
+        self.repair_job
+            .as_ref()
+            .is_some_and(|job| matches!(job.stage, RepairStage::Detached))
+    }
+
     /// A rebuilt source is parked holding a pool slot until S3 consumes it.
     pub(super) fn repair_parked(&self) -> bool {
         self.repair_job

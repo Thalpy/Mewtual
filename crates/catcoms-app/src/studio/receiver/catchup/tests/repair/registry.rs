@@ -455,9 +455,12 @@ async fn an_offered_bucket_repair_this_device_cannot_verify_holds_only_that_repa
         .unwrap();
     assert_eq!(updated, None);
     assert_eq!(bucket_file(owed.root.path()), before, "nothing was applied");
-    assert!(runtime
-        .repair_unverifiable
-        .contains_key(&(scope, repair.hash())));
+    assert!(
+        runtime
+            .repair_unverifiable
+            .contains_key(&(scope, repair.hash())),
+        "an unverifiable offer holds that repair"
+    );
     assert!(
         !runtime.repair_backoff.contains_key(&scope),
         "only that repair is held, never the bucket"
@@ -665,9 +668,12 @@ async fn a_failed_offer_holds_only_that_repair_and_the_owed_seed_is_still_fetche
         "{:?}",
         runtime.repair_report(scope)
     );
-    assert!(runtime
-        .repair_unverifiable
-        .contains_key(&(scope, repair.hash())));
+    assert!(
+        runtime
+            .repair_unverifiable
+            .contains_key(&(scope, repair.hash())),
+        "a failed offer holds that repair"
+    );
     assert!(
         !runtime.repair_backoff.contains_key(&scope),
         "an offer never holds the bucket it names"

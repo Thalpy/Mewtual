@@ -10,6 +10,27 @@ and ranks the live hazards in that path.
 
 ## Status (latest entry: 2026-10-06)
 
+- **Gate 4 repair runtime evidence (2026-10-06).** A two-peer run through spawned actors now
+  covers:
+  - a real Fault;
+  - the owner's decision as a job;
+  - a peer applying the owner's repair and installing its replacement with a seed fetched over the
+    network;
+  - a restart;
+  - a document newcomer installing the repaired version.
+
+  The run found that a faulted peer's late reports were staged again after the owner's repair
+  finished. That suppressed proof of the selected receipt, so no newcomer could install the
+  repaired document. Such a report is now answered by the repair the source carries (see
+  THREAT-MODEL).
+
+  The run also confirmed a protocol limit: after an owner succession, no fresh MLS member can
+  join until a succession proof exists.
+
+  New: a 12-mutant runtime harness with its own workflow (`agent3-repair-runtime.yml`) and an
+  opt-in S3 cost profile. Still open: Registry Flow D on a real peer and a bounded repair
+  verdict. Details are in `GATE4-AGENT-3-STATUS.md`.
+
 - **Gate 4 detached Registry repair job (2026-10-06).** Agent 4's Registry fail-closed gate is
   removed: every Registry repair path now runs through the same design 10.3 job as a Studio
   source, scoped to the bucket. That covers:

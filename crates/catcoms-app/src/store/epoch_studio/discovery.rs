@@ -257,24 +257,8 @@ impl ServerStore {
         ),
         AppError,
     > {
-        // S-3 before the response is decided (U-7). A failed or uncertain stage refuses the
-        // whole answer rather than proving either side of a conflict it could not record.
-        if let (Some(report), Some(tenure)) = (fault_report, durable_tenure) {
-            let document = target.document(&group.group_id()).map_err(invalid)?;
-            self.with_studio_protocol_budget(server, group, budget, |store, storage| {
-                store.admit_fault_report(
-                    server,
-                    &document,
-                    group,
-                    device,
-                    tenure,
-                    archived_owner,
-                    report,
-                    rng,
-                    storage,
-                )
-            })?;
-        }
+        // The exact source first, as the Registry adapters read theirs: the repair it carries
+        // decides whether a report is already answered (see `admit_fault_report_with_writer`).
         let source =
             self.with_studio_checkpoint_source(server, group, target, device, budget, |state| {
                 Ok((
@@ -287,6 +271,26 @@ impl ServerStore {
                     state.unit.repair_state().map(|s| s.repair),
                 ))
             })?;
+        // S-3 before the response is decided (U-7). A failed or uncertain stage refuses the
+        // whole answer rather than proving either side of a conflict it could not record.
+        if let (Some(report), Some(tenure)) = (fault_report, durable_tenure) {
+            let document = target.document(&group.group_id()).map_err(invalid)?;
+            let carried = source.as_ref().and_then(|(_, _, repair)| repair.as_ref());
+            self.with_studio_protocol_budget(server, group, budget, |store, storage| {
+                store.admit_fault_report(
+                    server,
+                    &document,
+                    group,
+                    device,
+                    tenure,
+                    archived_owner,
+                    report,
+                    carried,
+                    rng,
+                    storage,
+                )
+            })?;
+        }
         let document = target.document(&group.group_id()).map_err(invalid)?;
         let storage_scope = StorageScope::new(server, &document.server_id).map_err(invalid)?;
         let journal = (|| {

@@ -1199,9 +1199,12 @@ impl CatchupRuntime {
 #[cfg(test)]
 mod tests;
 impl StudioReceiver {
+    /// Detached CPU work a deterministic fixture waits out without advancing its clock: source
+    /// and Registry preparation, and a repair job's S2 rebuild (which keeps its own stage rather
+    /// than the `preparing` flag). Network jobs are excluded so both actors keep serving.
     #[cfg(test)]
     pub(crate) fn preparing_for_test(&self) -> bool {
-        self.catchup.preparing
+        self.catchup.preparing || self.catchup.repair_detached_for_test()
     }
 
     /// Called under the successful native custody window, then run after releasing that lease.

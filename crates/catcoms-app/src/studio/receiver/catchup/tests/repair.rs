@@ -17,6 +17,7 @@ use catcoms_rt::{Clock, MemNetwork};
 const SERVER: u64 = 83;
 
 mod registry;
+mod two_peer;
 
 /// Alice founds a server that Bob joins and serves seeds for. Her own Index source adopts two
 /// receipts for a later epoch without either seed, so it faults on them. With `decide`, she has
@@ -473,7 +474,7 @@ async fn a_rebuild_that_went_stale_during_s2_writes_nothing_and_backs_off() {
     let updated = runtime
         .repair_commit(&mut owed.alice, &mut owed.store, SERVER)
         .unwrap();
-    assert_eq!(updated, None);
+    assert_eq!(updated, None, "a stale rebuild commits nothing");
     assert_eq!(owed.source(), owed.faulted_source, "the job wrote nothing");
     assert!(
         runtime.repair_backoff.contains_key(&scope),

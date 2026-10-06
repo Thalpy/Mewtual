@@ -29,8 +29,15 @@ table with the commit that closed it.
   attestation before storage. Unknown, Imported, wrong and evicted unadmitted history remain
   unavailable by design. Registry head service authenticates and accounts its source before this
   B0 write, propagates every failed or uncertain write before classifying the source, and preserves
-  Fault as a hard refusal afterward; prepared service does not cold-reconstruct that source. Native
-  repair remains unavailable.
+  Fault as a hard refusal afterward; prepared service does not cold-reconstruct that source. Studio
+  head service now reads its exact source before B0 too. A report naming exactly the pair the
+  owner's source already carries a finished repair for is answered by that repair in the same
+  response rather than staged again. This is declined only while no decision is held, the source
+  carries the repair and it verifies under the current tenure; otherwise the report stages as
+  before, so a pair the owner can no longer answer stays decidable. Without this, a faulted peer's
+  late reports reopened the decided pair: proof of the selected receipt stayed suppressed, so no
+  newcomer could install the repaired document, and the view offered the pair for a second
+  decision. Native repair remains unavailable.
   Studio fault repair executes only as Agent 3's detached job (design 10.3). Each actor runs one
   job at a time. A shared preparation-pool slot and a per-target live claim are reserved before
   any body read. The source is rebuilt detached, holding no store, vault key or MLS state. At
