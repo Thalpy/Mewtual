@@ -52,10 +52,11 @@ or a control request on spawned actors.
   (no newcomer could install the repaired document), and the fault view offered the decided pair
   for a second decision with `may_decide: true`.
   - *Fix:* `admit_fault_report` now takes the repair the caller's exact source carries, and
-    declines a report of exactly that pair while no decision is held and the repair verifies
-    under the current tenure. Those are the conditions under which the head service carries it in
-    the same answer. Any other case stages as before. The Studio head adapter now reads its source
-    before B0, as the Registry adapters already did.
+    declines a report of exactly that pair while no decision is held, the source is servable and
+    the repair verifies under the current tenure. Those are the conditions under which the head
+    service carries it in the same answer. Any other case stages as before. Studio reads the
+    carried repair through a warm, byte-verified probe that cannot fail or delay B0, and keeps B0
+    ahead of its authoritative source read (see review AG3-IMP-003 below).
   - *Regressions:* the store test
     `a_report_of_a_pair_the_owner_already_repaired_is_answered_not_restaged` (an exact pair is
     answered, a different pair still stages), plus the two-peer run. Removing the decline fails
@@ -74,6 +75,13 @@ the suite). The profile is added, but its release numbers are not recorded yet.
 
 **Still open:** Registry Flow D on a real peer; the CI run of the new harness workflow; a bounded
 repair verdict.
+
+### Review of `02280999`: REQUEST CHANGES, both findings fixed
+
+| Finding | Disposition |
+|---|---|
+| **AG3-IMP-003 (P1):** to find the carried repair, the Studio head adapter moved its whole source read before B0. That read propagates `receipt_head()`'s `ReceiptConflict` for a Faulted source, so a valid report of another pair was dropped with the refused answer, against design 6.5/U-7. The same read also refuses a cold source and invalidates the budget. | **Fixed.** B0 is back ahead of the authoritative source read, exactly as before `02280999`; against that commit the adapter is now purely additive. The carried repair comes from a probe of the warm source after its byte-for-byte check against disk. The probe cannot fail, delay B0 or touch the budget; a cold, changed or Faulted source gives `None`, and the report stages as it always did. A carried repair is also passed only from a servable source, Studio and both Registry adapters, so the decline stays exact: a Faulted source answers nothing. |
+| **AG3-TEST-016 (P2):** no regression exercised admission while the owner's own source is Faulted. | **Added** `a_faulted_owner_source_retains_another_reported_pair_before_refusing_service`: warm and cold, with B independent of A or sharing one receipt. It asserts that service is refused, B is retained in the reserved slot, the source is byte-identical (no winner chosen), B survives a restart, A keeps priority with B waiting, and B is decidable once A is resolved. The store harness gains `REPAIR-b0-before-source-refusal`, which reinstates a refusing source read before B0. |
 
 ## Registry repair job: implemented, 2026-10-06
 

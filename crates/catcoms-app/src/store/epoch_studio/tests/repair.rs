@@ -911,6 +911,106 @@ fn sorted_pair(a: &Receipt, b: &Receipt) -> [Receipt; 2] {
     pair
 }
 
+/// Review AG3-IMP-003 on `02280999`: report admission is evidence persistence and precedes the
+/// head's Fault refusal (design 6.5, U-7). While the owner's own source is Faulted on A, an
+/// independently authorized report of another pair B must cross B0 and stay retained although
+/// the same request is then refused service. The answered-report check must not move B0 behind
+/// a source read. Warm and cold sources, and B independent of A or sharing one of its receipts
+/// (the three-receipt shape).
+#[test]
+fn a_faulted_owner_source_retains_another_reported_pair_before_refusing_service() {
+    for (warm, shared) in [(true, false), (true, true), (false, false), (false, true)] {
+        let root = tempfile::tempdir().unwrap();
+        let mut store = open(root.path());
+        let f = Fixture::new(false);
+        let mut b = budget(&mut store, &f);
+        f.edit(&mut store, &mut b, f.insert());
+        let (a1, a1_seed) = checkpoint(&f, &store, 10, 10);
+        let (a2, _) = checkpoint(&f, &store, 10, 11);
+        let (b1, _) = checkpoint(&f, &store, 10, 12);
+        let (b2, _) = checkpoint(&f, &store, 10, 13);
+        adopt(&f, &mut store, &a1, None);
+        adopt(&f, &mut store, &a2, None);
+        let faulted = f.load(&store).unwrap();
+        assert_eq!(faulted.phase(), EpochPhase::Fault);
+        if warm {
+            store.retain_studio_source(&f.group, &f.device, faulted);
+        }
+        let source = fs::read(f.path(&store)).unwrap();
+        let a = sorted_pair(&a1, &a2);
+        let reported = if shared {
+            sorted_pair(&a1, &b1)
+        } else {
+            sorted_pair(&b1, &b2)
+        };
+        let hashes = [reported[0].hash(), reported[1].hash()];
+
+        let mut b = budget(&mut store, &f);
+        let answer = store.prepare_studio_head_with_fault_repair(
+            SERVER,
+            &f.group,
+            f.target,
+            &f.device,
+            Some(0),
+            None,
+            Some(&reported),
+            &mut rng(),
+            &mut b,
+        );
+        assert!(
+            answer.is_err(),
+            "a Faulted or unprepared source still refuses service (warm {warm})"
+        );
+        assert_eq!(
+            fs::read(f.path(&store)).unwrap(),
+            source,
+            "no winner was chosen"
+        );
+        let reserved = |store: &ServerStore| {
+            store
+                .load_epoch_owner_repair_state(SERVER, &f.logical, &f.device.device_id(), 0)
+                .unwrap()
+                .0
+                .retained_pairs()
+                .1
+                .map(|pair| pair.hashes())
+        };
+        assert_eq!(
+            reserved(&store),
+            Some(hashes),
+            "the report crossed B0 before the refusal (warm {warm}, shared {shared})"
+        );
+        drop(store);
+        let mut store = open(root.path());
+        assert_eq!(reserved(&store), Some(hashes), "and it survives a restart");
+
+        // Priority: the source's own fault is decided first; the retained pair waits behind it.
+        let decidable = |store: &mut ServerStore| {
+            let evidence = store
+                .studio_fault_evidence(SERVER, &f.group, f.target, &f.device, Some(0))
+                .unwrap()
+                .unwrap();
+            (
+                evidence.decidable.map(|d| [d[0].hash(), d[1].hash()]),
+                evidence.waiting,
+            )
+        };
+        assert_eq!(
+            decidable(&mut store),
+            (Some([a[0].hash(), a[1].hash()]), 1),
+            "A, the source's own fault, is decided first and B waits"
+        );
+        let (repair, _, _) = issue(&f, &mut store, request([&a1, &a2], &a1), None).unwrap();
+        let (outcome, _) = apply(&f, &mut store, &repair, &a, Some(a1_seed.bytes())).unwrap();
+        assert_eq!(outcome, StudioRepairOutcome::Installed);
+        assert_eq!(
+            decidable(&mut store).0,
+            Some(hashes),
+            "once A is resolved, B is the next decidable pair (shared {shared})"
+        );
+    }
+}
+
 /// Found by design 10.3's two-peer actor run. A faulted peer reports its frozen pair on every
 /// discovery until it has applied the repair, so some reports reach the owner after its own
 /// decision has finished and recycled the record. Staging one again reopened a decided pair: it
@@ -1883,7 +1983,12 @@ fn repair_job_stages(count: usize, clock: &dyn catcoms_rt::Clock) {
     );
     let (chosen, seed) = checkpoint(&f, &store, 10, 10);
     let (rival, _) = checkpoint(&f, &store, 10, 11);
-    adopt(&f, &mut store, &chosen, None);
+    // A source this large exceeds the cold byte limit for automatic adoption: the runtime adopts
+    // into it only once it is warm (prepared detached), so the fixture keeps it warm the same way.
+    let warm = f.load(&store).unwrap();
+    store.retain_studio_source(&f.group, &f.device, warm);
+    let (_, state) = adopt(&f, &mut store, &chosen, None);
+    store.retain_studio_source(&f.group, &f.device, state);
     adopt(&f, &mut store, &rival, None);
     let pair = sorted_pair(&chosen, &rival);
     let bytes = fs::metadata(f.path(&store)).unwrap().len();

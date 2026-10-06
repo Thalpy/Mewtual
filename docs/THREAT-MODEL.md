@@ -30,11 +30,14 @@ table with the commit that closed it.
   unavailable by design. Registry head service authenticates and accounts its source before this
   B0 write, propagates every failed or uncertain write before classifying the source, and preserves
   Fault as a hard refusal afterward; prepared service does not cold-reconstruct that source. Studio
-  head service now reads its exact source before B0 too. A report naming exactly the pair the
-  owner's source already carries a finished repair for is answered by that repair in the same
-  response rather than staged again. This is declined only while no decision is held, the source
-  carries the repair and it verifies under the current tenure; otherwise the report stages as
-  before, so a pair the owner can no longer answer stays decidable. Without this, a faulted peer's
+  head service keeps B0 ahead of its authoritative source read, so a Faulted or unprepared source
+  still refuses service only after an independently authorized report is retained. A report
+  naming exactly the pair the owner's source already carries a finished repair for is answered by
+  that repair in the same response rather than staged again. This is declined only while no
+  decision is held, the source is servable and carries the repair, and the repair verifies under
+  the current tenure. Studio reads that repair from its warm, byte-verified source through a
+  probe that cannot fail or delay B0. Otherwise the report stages as before, so a pair the owner
+  can no longer answer stays decidable. Without this, a faulted peer's
   late reports reopened the decided pair: proof of the selected receipt stayed suppressed, so no
   newcomer could install the repaired document, and the view offered the pair for a second
   decision. Native repair remains unavailable.

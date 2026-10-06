@@ -433,9 +433,11 @@ impl ServerStore {
     ///
     /// The report is declined only under the conditions on which the head service carries that
     /// repair in the same answer: no decision is held, the source carries the repair, and it
-    /// verifies under this current tenure. Any other case stages as before, so a pair the owner
-    /// can no longer answer stays decidable. `carried` is local authenticated state the caller
-    /// read from its exact source; it chooses nothing and widens no authority.
+    /// verifies under this current tenure. Callers pass `carried` only from a source that answer
+    /// can serve (not Faulted, and for Studio warm and byte-identical to disk), and obtaining it
+    /// must never fail or delay B0. Any other case stages as before, so a pair the owner can no
+    /// longer answer stays decidable. `carried` is local authenticated state the caller read
+    /// from its exact source; it chooses nothing and widens no authority.
     #[allow(clippy::too_many_arguments)]
     pub(in crate::store) fn admit_fault_report_with_writer(
         &mut self,

@@ -194,6 +194,19 @@ core.MUTATIONS = [
         REPAIR_TESTS + "a_report_of_a_pair_the_owner_already_repaired_is_answered_not_restaged",
         "a pair the owner already repaired is not staged again",
     ),
+    (
+        # Review AG3-IMP-003: a source read that can refuse (Fault, cold) must never precede B0,
+        # or an independently authorized report is dropped with the refused answer.
+        "REPAIR-b0-before-source-refusal", STUDIO_HEAD,
+        "        // S-3 before the response is decided (U-7). A failed or uncertain stage refuses the\n",
+        "        let _premature =\n"
+        "            self.with_studio_checkpoint_source(server, group, target, device, budget, |state| {\n"
+        "                Ok(state.unit.receipt_head().map_err(invalid)?.cloned())\n"
+        "            })?;\n"
+        "        // S-3 before the response is decided (U-7). A failed or uncertain stage refuses the\n",
+        REPAIR_TESTS + "a_faulted_owner_source_retains_another_reported_pair_before_refusing_service",
+        "the report crossed B0 before the refusal",
+    ),
 ]
 
 
