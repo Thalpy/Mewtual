@@ -368,6 +368,18 @@ MUTATIONS = [
         "studio_actor_unconfirmed_save_a_parked_plan_never_blocks_another_target",
         "finishing A's plan changed A's document, so its row is refreshed",
     ),
+    # Re-review of `5ccc4647`, MEDIUM: a parked plan is dropped at its deadline. The mutant never
+    # drops it, so after the deadline the slot is still held and another target's Save is `busy`.
+    # `&& false` keeps the retention call used.
+    (
+        "unconfirmed-save-park-deadline", "catcoms-app",
+        "studio_exchange::tests::provisional::seed::tail::unconfirmed_actor::",
+        "crates/catcoms-app/src/studio/receiver/catchup.rs",
+        "        if self.overlay_park_retention(now) == Some(0) {\n",
+        "        if self.overlay_park_retention(now) == Some(0) && false {\n",
+        "studio_actor_unconfirmed_save_an_abandoned_plan_is_dropped_at_its_deadline",
+        "the dropped plan no longer holds the slot",
+    ),
     # Review of `b35e23d2`, LOW-1: a retry of this request's own in-flight plan is `Scheduled`.
     (
         "unconfirmed-save-own-plan-pending", "catcoms-app",

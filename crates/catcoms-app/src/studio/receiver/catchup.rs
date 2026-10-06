@@ -57,6 +57,13 @@ type PreparedRegistryResult = Result<Box<ServerPreparedRegistryPageSource>, AppE
 /// happened to collect them, or forever if none ever came.
 type OverlayPlanResult = Result<(Box<StudioOverlayPlan>, OverlayOwnership), AppError>;
 
+/// How long a committable Save plan may stay parked waiting for the Save visit that commits it.
+///
+/// The same bound as a retained Registry source, for the same reason: both hold a process-wide
+/// preparation permit that only a custody visit releases. A caller retrying promptly, as the Save
+/// contract asks, commits well inside it. One that comes back later re-captures and re-plans.
+pub(super) const OVERLAY_PARK_MS: u64 = 30_000;
+
 /// Which overlay job a detached plan belongs to. Carries no plaintext, no key and no permit; it is
 /// only enough to route a completion back to the target that asked for it.
 pub(crate) struct OverlayContext {
@@ -395,6 +402,11 @@ pub(super) struct CatchupRuntime {
     /// Only a committable plan is parked. A refusal parks nothing, because it owns nothing and the
     /// next Save reclassifies from durable state anyway (RT-001).
     overlay_planned: Option<(OverlayContext, Box<StudioOverlayPlan>, OverlayOwnership)>,
+    /// When a parked plan is dropped if no Save has come back for it ([`OVERLAY_PARK_MS`]). The
+    /// plan holds this actor's admission and one of four process-wide preparation permits, and
+    /// only a Save visit consumes it, so without a bound a caller who never returns would hold
+    /// both for as long as no other Save runs here.
+    overlay_planned_until: u64,
     /// True from the moment the job is handed to the runtime until its result or cancellation
     /// comes back. It is waiter bookkeeping, never the admission record: admission lives in
     /// `overlay_admission` and is proved by a live `Arc`, so a cancelled waiter clearing this
@@ -835,6 +847,42 @@ impl CatchupRuntime {
     /// Whether a plan is parked, for a caller that must prepare before it takes one.
     pub(super) fn has_planned_overlay(&self) -> bool {
         self.overlay_planned.is_some()
+    }
+
+    /// How long a parked plan still has, or `Some(0)` once it is due; `None` with nothing parked.
+    ///
+    /// One definition for three consumers, exactly as `registry_retention`: the expiry that drops
+    /// the plan, `pending` reporting the visit that does it, and `wake_in` publishing the deadline
+    /// so a quiet actor schedules that visit at all. An expiry without the wake is no bound.
+    pub(super) fn overlay_park_retention(&self, now: u64) -> Option<u64> {
+        self.overlay_planned
+            .is_some()
+            .then(|| self.overlay_planned_until.saturating_sub(now))
+    }
+
+    /// A visit is owed: a parked plan is past its deadline and only a pass can drop it.
+    pub(in crate::studio::receiver) fn overlay_park_expiry_due(&self, now: u64) -> bool {
+        self.overlay_park_retention(now) == Some(0)
+    }
+
+    /// Milliseconds until that visit is owed, for the actor's injected-clock wake.
+    pub(in crate::studio::receiver) fn overlay_park_wake_in(&self, now: u64) -> Option<u64> {
+        self.overlay_park_retention(now)
+            .filter(|remaining| *remaining > 0)
+    }
+
+    /// Drop a parked plan past its deadline, releasing admission and the permit with it. Returns
+    /// whether one was dropped, so the receiver can forget the request that scheduled it.
+    ///
+    /// Safe for the reason RT-001 gives for a refused plan: nothing durable was written, the media
+    /// hold dies with the plan, and the request reclassifies from durable state on its next visit.
+    /// The cost of a caller who comes back late is one more capture and plan.
+    pub(in crate::studio::receiver) fn expire_parked_overlay(&mut self, now: u64) -> bool {
+        if self.overlay_park_retention(now) == Some(0) {
+            self.overlay_planned = None;
+            return true;
+        }
+        false
     }
 
     pub(super) fn take_any_planned_overlay(
@@ -1386,6 +1434,10 @@ impl StudioReceiver {
                 // request stays retryable and the next Save reclassifies from durable state.
                 if let Ok((plan, ownership)) = result {
                     self.catchup.overlay_planned = Some((context, plan, ownership));
+                    self.catchup.overlay_planned_until = server
+                        .runtime_clock()
+                        .monotonic_ms()
+                        .saturating_add(OVERLAY_PARK_MS);
                 } else {
                     // Nothing was parked, so no Unconfirmed request has scheduled work any more.
                     // A stale fingerprint would answer that request's retry "pending" while

@@ -36,7 +36,7 @@ whole-scope review of `510d0b54` (verdict: CHANGES REQUIRED, Agent 2 not complet
 <br>&nbsp;&nbsp;- A Closing draft refuses this Save, with an oracle showing the store alone would acknowledge it.
 <br>&nbsp;&nbsp;- Not natively registered: Agent 4 does that, and P5 stays false.
 <br>- **8.6's app call and native `unconfirmedState`**, on the inspection and the lifecycle row, with a fourth value, `sourceUnreadable`. Tests on a branch saved through the actor reach every state: `awaitingSource`, then `baseConfirmed` or `baseSuperseded`, then `sourceUnreadable`. The installs use `adopt_studio_checkpoint` directly, with the proof's tenure handed in.
-<br>- **Open, required before native registration:** a parked plan whose caller never returns still pins one process-wide preparation permit, with no time bound (re-review of `5ccc4647`, MEDIUM). Settled with Agent 1, whose Closing `save_overlay` shares the slot. Unreachable while unregistered.
+<br>- **A parked plan has a deadline** (re-review of `5ccc4647`, MEDIUM): 30 s, as for a retained Registry source. It sits in the actor's wake schedule, and the expiry drops the plan, releasing admission and the process-wide permit. It covers the Closing `save_overlay`'s plans too. Tested and mutation-pinned (`unconfirmed-save-park-deadline`).
 <br>**Still missing:**
 <br>- The per-server count and the vault-wide byte rails.
 <br>- The receiver handoff selector's skip of non-Closing branches (review M1), taken by Agent 1 and not in `c9566b82`. Until it lands, an Unconfirmed branch is refused at `start_studio_handoff` and backed off, not skipped.
@@ -1055,11 +1055,14 @@ No blocker. `b35e23d2` was held back from origin until these were fixed, in the 
 
 HIGH-1 is closed for the actor slot, every park path traced, and MEDIUM-1 to MEDIUM-3 are closed.
 In the commit after `5ccc4647`:
-- **MEDIUM, open and recorded:** an abandoned parked plan still pins one of the four process-wide
-  preparation permits with no time bound. Only a later Save on the same actor frees it.
-  - The fix is a park deadline in the catch-up runtime, which the Closing `save_overlay` shares.
-  - It is recorded as required before native registration, in design 8.7 and status row 4, and
-    taken to Agent 1.
+- **MEDIUM, an abandoned parked plan pinned a process-wide permit with no time bound.** Recorded
+  in `7f73b8eb`, then fixed in the commit after it:
+  - `OVERLAY_PARK_MS` is stamped when a plan parks.
+  - One retention function feeds the expiry in the receiver's pass, `pending` and `wake_in`.
+  - The expiry drops the plan and forgets its request.
+  - Test: `studio_actor_unconfirmed_save_an_abandoned_plan_is_dropped_at_its_deadline`. Its slot
+    check does not depend on whether any preview is still live. Mutation entry
+    `unconfirmed-save-park-deadline`.
 - **LOW-1:** a failed or cancelled plan now clears the remembered request.
 - **LOW-2:** the budget is built before a parked plan is taken, so a failed scan leaves the plan
   parked.

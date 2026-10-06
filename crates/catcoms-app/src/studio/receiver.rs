@@ -480,6 +480,8 @@ impl StudioReceiver {
                 // never schedules that visit, so the thirty-second bound the code claims is not
                 // a bound at all: four such actors strand the whole pool indefinitely.
                 || self.catchup.registry_expiry_due(now)
+                // The same for a parked Save plan past its deadline (design 8.7).
+                || self.catchup.overlay_park_expiry_due(now)
                 || self.catchup.pending(server, &self.watches))
     }
     /// Milliseconds until this receiver has time-gated work to do, if any.
@@ -501,16 +503,17 @@ impl StudioReceiver {
         if self.paused {
             return None;
         }
-        // Both deadlines, from the one sample the caller took. They are independent resources,
+        // Every deadline, from the one sample the caller took. They are independent resources,
         // so the earliest wins; nothing here dominates anything else the way the capacity gate
         // dominates per-target pacing.
-        match (
+        [
             self.handoff.wake_in(now, &self.rail()),
             self.catchup.registry_wake_in(now),
-        ) {
-            (Some(a), Some(b)) => Some(a.min(b)),
-            (only, None) | (None, only) => only,
-        }
+            self.catchup.overlay_park_wake_in(now),
+        ]
+        .into_iter()
+        .flatten()
+        .min()
     }
 
     /// The watched targets, which is the only set a handoff deadline may speak for. A deadline
@@ -622,6 +625,15 @@ impl StudioReceiver {
             return Err(invalid("Studio receive mount or numeric server changed"));
         }
         self.catchup.lifecycle(server, store, id);
+        // A parked Save plan whose caller never came back holds this actor's admission and a
+        // process-wide preparation permit; only a Save visit consumes it. Bounded like the
+        // retained Registry source, and its request forgotten with it (design 8.7).
+        if self
+            .catchup
+            .expire_parked_overlay(server.runtime_clock().monotonic_ms())
+        {
+            self.unconfirmed_scheduled = None;
+        }
         self.catchup.preview.maintain(server, store, id);
         let mls = server.sync.with_registry_context(|g, _, _, _| g.epoch());
         self.replay.lifecycle(store, id, mls);

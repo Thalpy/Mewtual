@@ -1416,13 +1416,14 @@ Agent 1's Flow S is not implemented, this path is not implemented either; it is 
   other visit still pays one complete scan, as every lifecycle control does, until C-3's cursor
   makes the per-visit inventory cheaper; native must pace its retries. The scan runs before a
   parked plan is taken, so a failed scan leaves the plan parked.
-- **Open, required before native registration (re-review of `5ccc4647`, MEDIUM):** a parked plan
-  whose caller never returns still pins one of the four process-wide preparation permits. Only a
-  later Save on this actor frees it, and nothing bounds how long it waits. The fix is a park
-  deadline in the catch-up runtime (stamp on park, an expiry term in the actor's wake schedule,
-  drop on expiry; RT-001 makes the drop safe). The slot is shared with Agent 1's Closing
-  `save_overlay`, which has the same shape, so it is being settled with Agent 1. Unreachable while
-  the Save actions are unregistered.
+- **A parked plan has a deadline** (re-review of `5ccc4647`, MEDIUM). A plan whose caller never
+  returns would otherwise pin one of the four process-wide preparation permits until some later
+  Save on this actor. `OVERLAY_PARK_MS` (30 s, the retained Registry source's bound, for the same
+  reason) is stamped when a plan parks. One retention function feeds the expiry in the receiver's
+  maintenance pass, the actor's `pending` and its `wake_in`, so a quiet actor still comes back for
+  it. The expiry drops the plan and the remembered request. RT-001 makes the drop safe, and a late
+  caller re-captures. The deadline covers Agent 1's Closing `save_overlay` too, since it parks in
+  the same slot.
 - **The ticket refuses a device that is no longer a member.** The mint checks the provider's
   membership, not this device's.
 - **The two Saves stay apart.** Neither action is reachable through the control transaction: both

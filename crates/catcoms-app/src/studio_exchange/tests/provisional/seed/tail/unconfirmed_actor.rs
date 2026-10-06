@@ -383,6 +383,63 @@ async fn studio_actor_unconfirmed_save_a_parked_plan_never_blocks_another_target
     ));
 }
 
+/// Re-review of `5ccc4647`, MEDIUM: a parked plan whose caller never returns is bounded.
+///
+/// While it waits, the actor's wake schedule holds a deadline no later than the park bound, so a
+/// quiet actor still schedules the visit. Past the deadline an ordinary pass drops the plan,
+/// releasing admission and the process-wide permit. Nothing was committed, and the caller's late
+/// retry cannot commit the dropped plan: it is either captured afresh or refused for want of a
+/// preview, never saved from the old plan.
+#[tokio::test]
+async fn studio_actor_unconfirmed_save_an_abandoned_plan_is_dropped_at_its_deadline() {
+    let (mut p, mut receiver, target, basis, branch) = ready_receiver().await;
+    let a = new_entry(&mut p, (basis, branch), 95, [8; 16]);
+    assert!(matches!(
+        save(&mut receiver, &mut p, target, &a).unwrap(),
+        StudioUnconfirmedSaveOutcome::Scheduled
+    ));
+    settle(&mut receiver, &mut p).await;
+    let wake = receiver.wake_in(&p.bob);
+    assert!(
+        wake.is_some_and(|ms| ms <= 30_000),
+        "a parked plan keeps a deadline in the wake schedule: {wake:?}"
+    );
+
+    p.clock.advance_ms(30_001);
+    receiver
+        .run(&mut p.bob, &mut p.b_store, SERVER, None)
+        .unwrap();
+    assert_eq!(
+        pending(&mut p, target),
+        0,
+        "the dropped plan committed nothing"
+    );
+    // The slot is free. A Save on another target is not told `busy`, whether or not any preview
+    // is still live: with the plan still parked it would finish it and say `busy`.
+    let flipnote = StudioTarget::Flipnote {
+        channel: channel(),
+        object: [0x78; 16],
+    };
+    let b = StudioUnconfirmedOverlaySaveRequest {
+        basis: [1; 32],
+        branch: [2; 32],
+        nonce: [96; 16],
+        body: FlipnoteOp::SetHeader(FlipnoteHeader::Title("b".into()))
+            .encode()
+            .unwrap(),
+    };
+    let other = save(&mut receiver, &mut p, flipnote, &b);
+    assert!(
+        !matches!(other, Ok(StudioUnconfirmedSaveOutcome::Busy)),
+        "the dropped plan no longer holds the slot: {other:?}"
+    );
+    let retry = save(&mut receiver, &mut p, target, &a);
+    assert!(
+        !matches!(retry, Ok(StudioUnconfirmedSaveOutcome::Saved { .. })),
+        "the expired plan was dropped, so a late retry cannot commit it: {retry:?}"
+    );
+}
+
 /// Review of `b35e23d2`, LOW-1: a retry while this request's own plan is in flight is `Scheduled`,
 /// not `Busy`. "Nothing of this request was saved" would be untrue of a plan already running.
 #[tokio::test]
