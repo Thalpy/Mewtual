@@ -5,8 +5,10 @@
 passes". It does not establish isolation - no sibling test is selected, so a mutant that also breaks
 one would go unnoticed here. Isolation rests on the hand-runs behind each entry.
 
-Covers Agent 2's scope: the draft archive and its release, the disposal transaction, the
-branch-generation namespace, and the owner-tenure observation rule.
+Covers Agent 2's scope: the draft archive and its release, the disposal transaction, copy into
+current, the branch-generation namespace, and the owner-tenure observation rule.
+
+Optional entry names on the command line run a subset; with none, every entry runs (the CI default).
 
 Every mutation here was first proved by hand: each fails its own named test, at its own intended
 assertion, and the restored source passes. The script exists so that stays true - a guard that stops
@@ -22,6 +24,7 @@ set here so a CI run and a local run agree rather than one of them mysteriously 
 from pathlib import Path
 import os
 import subprocess
+import sys
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -154,6 +157,73 @@ MUTATIONS = [
         "the_copy_probe_refuses_an_object_that_is_missing_or_disappears_before_apply",
         "C4 must refuse to publish an entry",
     ),
+    # --- copy into current: the 2026-10-06 P1 closures, each guard on its own ---
+    #
+    # The review of that slice found these were hand-run once and anchored nowhere, so a later
+    # change could stop testing them silently. Each mutant removes exactly one guard and keeps every
+    # binding live under -D warnings.
+    #
+    # L4: a copy publishes under its own nonce domain. Without it an ordinary Save of the copy's
+    # exact bytes is acknowledged as the copy having landed.
+    (
+        "copy-nonce-domain", "catcoms-app", "studio::copy::tests::",
+        "crates/catcoms-app/src/studio/copy.rs",
+        "        let hash = blake3::derive_key(\"catcoms/studio-overlay-copy-nonce/v1\", &nonce);\n"
+        "        let mut out = [0; 16];\n"
+        "        out.copy_from_slice(&hash[..16]);\n"
+        "        out\n",
+        "        let _ = blake3::derive_key(\"catcoms/studio-overlay-copy-nonce/v1\", &nonce);\n"
+        "        nonce\n",
+        "an_ordinary_save_of_the_same_bytes_is_never_reported_as_this_copy",
+        "an ordinary Save must not be acknowledged as this copy having landed",
+    ),
+    # C1' at each of its three stages, separately. C3's mutant still refuses, because the staged
+    # hold rewrote the branch's record and the source stamp catches that. So its expected text is
+    # the message assertion ("C3 refusal"), which only the hold check satisfies.
+    (
+        "copy-hold-c1", "catcoms-app", "studio::copy::tests::",
+        "crates/catcoms-app/src/studio/copy.rs",
+        "            Self::refuse_held_destination(store, server, group, choice.destination)?;\n",
+        "",
+        "a_transfer_hold_on_the_destination_refuses_the_copy_at_c1_c3_and_c4",
+        "C1 must refuse while the destination is held",
+    ),
+    (
+        "copy-hold-c3", "catcoms-app", "studio::copy::tests::",
+        "crates/catcoms-app/src/studio/copy.rs",
+        "            Self::refuse_held_destination(store, server, group, plan.destination_target())?;\n",
+        "",
+        "a_transfer_hold_on_the_destination_refuses_the_copy_at_c1_c3_and_c4",
+        "C3 refusal",
+    ),
+    (
+        "copy-hold-c4", "catcoms-app", "studio::copy::tests::",
+        "crates/catcoms-app/src/studio/copy.rs",
+        "            Self::refuse_held_destination(store, server, group, apply.destination)?;\n",
+        "",
+        "a_transfer_hold_on_the_destination_refuses_the_copy_at_c1_c3_and_c4",
+        "C4 must refuse while the destination is held",
+    ),
+    # M3: the exact-retry shortcut. Without it a landed copy's identical echo re-plans against a
+    # destination that already holds it and is refused as stale.
+    (
+        "copy-exact-retry", "catcoms-app", "studio::copy::tests::",
+        "crates/catcoms-app/src/studio/copy.rs",
+        "            if exact {\n                return Ok(true);\n            }\n",
+        "            let _ = exact;\n",
+        "a_copy_lands_once_and_its_exact_retry_is_acknowledged_without_a_second_operation",
+        "an exact retry is acknowledged, not refused as stale",
+    ),
+    # The wrong-object-channel Low: an object stored under another channel's label is missing in
+    # this channel. As an error it fails the whole preview instead.
+    (
+        "copy-wrong-channel", "catcoms-app", "studio::copy::tests::",
+        f"{APP}/epoch_studio/eligibility.rs",
+        "        if stored != object {\n            return Ok(false);\n        }\n",
+        "        if stored != object {\n            return Err(invalid(\"wrong object channel\"));\n        }\n",
+        "an_object_stored_under_another_channel_label_is_missing_here_not_an_error",
+        "a wrong-channel object is a missing target, not a failed preview",
+    ),
     # --- the branch-generation namespace ---
     (
         "admission-not-trusted", "catcoms-replication", REPL_TESTS,
@@ -225,9 +295,17 @@ def run(package, prefix, test):
 
 
 def main():
+    # Optional entry names select a subset for diagnosis or for proving new entries, as the handoff
+    # harness allows. With none, every entry runs: the CI invocation passes no arguments and is
+    # unchanged. An unknown name refuses rather than silently running nothing.
+    selected = set(sys.argv[1:])
+    unknown = selected - {m[0] for m in MUTATIONS}
+    if unknown:
+        raise ValueError(f"unknown mutation selector: {sorted(unknown)}")
+    mutations = [m for m in MUTATIONS if not selected or m[0] in selected]
     log_dir = ROOT / "logs"
     log_dir.mkdir(exist_ok=True)
-    for name, package, prefix, path, before, after, test, assertion in MUTATIONS:
+    for name, package, prefix, path, before, after, test, assertion in mutations:
         source = ROOT / path
         original = source.read_bytes()
         before, after = before.encode(), after.encode()
@@ -268,7 +346,7 @@ def main():
     # Recompile the restored sources once, then require each exercised regression to pass. Green here
     # is not the evidence - the failing mutants above are - but a restored suite that does not pass
     # would mean the restoration itself was wrong.
-    for name, package, prefix, _, _, _, test, _ in MUTATIONS:
+    for name, package, prefix, _, _, _, test, _ in mutations:
         result = run(package, prefix, test)
         (log_dir / f"gate4-overlay-lifecycle-restored-{name}.log").write_text(
             result.stdout, encoding="utf-8"

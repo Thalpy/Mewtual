@@ -2,9 +2,11 @@
 //!
 //! Two phases, mirroring the accepted recovery `Preview` -> `Apply` shape, because copy is the same
 //! kind of act: a proposal built off custody, shown to a user, then re-derived under custody before
-//! anything is written. Nothing here writes to the branch's own record. Copy is never a precondition
-//! for destroying anything, and no count of copied items ever establishes that a branch was
-//! preserved; only an archive does that.
+//! anything is written. Nothing here writes to the branch: its overlay metadata, entries and
+//! identity are untouched (N6). For a same-document copy the ordinary intent does land in the same
+//! intents file as the branch, which is why a landed copy makes the next preview stale. Copy is
+//! never a precondition for destroying anything, and no count of copied items ever establishes
+//! that a branch was preserved; only an archive does that.
 //!
 //! **Copy is projection-level and lossy on purpose (C-P).** It recovers the selected value of an
 //! element as a new operation authored by the copier. A branch entry superseded within the branch, a
@@ -181,6 +183,7 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
     }
 
     /// C1' (design 6.3): refused, retryably, while the destination is under a transfer hold.
+    /// Asked at C1, C3 and C4, since a hold can be staged between any two of them.
     fn refuse_held_destination(
         store: &ServerStore,
         server: u64,
@@ -369,6 +372,12 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
             store.capture_studio_overlay_copy(server, group, source, apply.destination, device)
         })?;
         let already_saved = self.sync.with_registry_context(|group, device, _, _| {
+            // C1' once more, first. A hold staged after the preview would otherwise surface only
+            // as the publication path's generic "overlay handoff must resolve" refusal, after a
+            // full re-plan, and an exact retry under a hold would be an error rather than this
+            // copy's own retryable reason. Checked before the exact shortcut on purpose: the
+            // publication that shortcut leads to refuses under a hold anyway.
+            Self::refuse_held_destination(store, server, group, apply.destination)?;
             let op = super::domain(apply.destination, nonce, apply.body.clone());
             let exact = store
                 .with_studio_source(server, group, apply.destination, device, |state| {

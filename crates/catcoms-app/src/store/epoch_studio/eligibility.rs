@@ -162,6 +162,12 @@ impl ServerStore {
     /// nothing here. Copy's probe reports that as a missing target rather than failing the whole
     /// preview (the review's wrong-object-channel Low), and P2 calls it `ObjectMissing`. An
     /// unreadable record is an error, for the caller to classify.
+    ///
+    /// **Header-only, so it does not prove the body restorable.** An authenticated record whose
+    /// header counts operations its body cannot yield passes here, where a full load would refuse.
+    /// Only a writer bug produces that shape: the record is AEAD-sealed and scope-checked. And the
+    /// handoff's own check (`check_index_object_sources`) still full-loads at H1 and H5, so a
+    /// publication that relies on the object meets the restore there.
     pub(crate) fn studio_object_holds_work(
         &self,
         server: u64,

@@ -764,7 +764,7 @@ over-cap check and drops only the logical-key equality.
 | C1 | Begin | yes | `capture_studio_overlay_copy` (5.2): the accepted source capture plus the destination's two authenticated records and their stamps, one permit, one visit. |
 | C2 | Plan | detached | Decode both destination records, build the destination and recovery projections, reconstruct the draft, run `restore::plan`. |
 | C3 | Preview | yes | The existing source-stamp recheck plus `studio_destination_is_current`, destination channel known, destination still Open with the same `doc_id`, `expected_projection = recovery_fingerprint()`. Returns one bounded proposed body or an explicit hold. Saves nothing. |
-| C4 | Apply | yes | Exact-retry shortcut first (`contains_exact_operation` on the destination), then re-plan from durable state and require `epoch_id`, `expected_projection`, `disposition == Ready` and a byte-identical `body`. Then the ordinary `StudioRequest::Apply` publication path. |
+| C4 | Apply | yes | C1' again, then the exact-retry shortcut (`contains_exact_operation` on the destination), then re-plan from durable state and require `epoch_id`, `expected_projection`, `disposition == Ready` and a byte-identical `body`. Then the ordinary `StudioRequest::Apply` publication path. *As built (2026-10-06):* the operation is published under `copy_nonce(nonce)`, a nonce derived in a domain of its own, and the shortcut looks for that. So a copy's operation coincides only with an earlier copy under the same renderer nonce and body, never with an ordinary Save of the same bytes (review L4). The result is `OverlayCopyApplied` / `overlayCopyApplied` with `branchPreserved: false`, never `recoveryApplied`. |
 
 There is **no C5**: copy writes nothing to the branch's record (findings 1, 2, 8).
 
@@ -1648,6 +1648,60 @@ alternative for legacy-snapshot and unobserved-gap owners. It is a new authority
 guarantee is a quorum-of-witnesses property rather than a cryptographic proof, and the reviewer's
 16.3 agrees it is not a substitute for the 9.3 integration.
 
+### 9.6 Two gaps found driving A -> B -> A through the actor (2026-10-06, proposed for review)
+
+Built: `studio_exchange::tests::succession::repeated`. A owns and issues R0. B removes A, restarts,
+and issues its first receipt R1 under its observed tenure t1, inheriting A's checkpoint. A's key is
+then admitted again and owns again at t2. At the witness, R0 is otherwise valid (it verifies under
+its own claimed tenure), yet it is refused under the observed t2, also after a restart. That is the
+assignment's "reject an earlier tenure's otherwise valid same-key receipt", at actor level. Two
+things the scenario could not reach are recorded here rather than guessed at, as assignment item 5
+asks.
+
+**Gap 1, same-key re-entry (low; recommend no change).** A device removed from a group keeps that
+group in its MLS provider storage. Processing a Welcome into the same GroupId then fails with
+"already exists", so a device that keeps its key cannot get back in. The test pins this failure.
+Product joins and founds always mint a fresh device, so a returning user is a new key, and every
+receipt of its earlier tenure fails on the key alone, before the tenure rule is needed. The rule
+still matters, and is proved at the witness, for any path that ever re-admits a key. Options:
+(a) leave it, since same-key return is not a product path; (b) a reviewed `ServerGroup::join`
+change that discards a stale group with the Welcome's GroupId first, only if a product path comes
+to need same-key return. Recommendation: (a).
+
+**Gap 2, a join-born owner cannot continue the former owner's documents (needs a decision).**
+- **Why every later joiner owns.** MLS fills the leftmost blank leaf, and the lowest leaf is the
+  committer. So once the founder has left, every later joiner takes the founder's leaf and owns
+  from its own join. Authenticated P2P policy refuses that admission outright
+  (`joining.rs`, negative case). Legacy groups admit it.
+- **Why that owner is stuck.** It holds no Studio history. The former owner's checkpoints carry
+  receipts whose key is no longer the owner's, so they carry no current-owner proof, and the new
+  owner sees them only as unconfirmed previews (`joining.rs`, positive case). It cannot install
+  them, so it can neither close them nor issue a receipt that inherits them.
+- **The effect.** Every Studio document the former owner held is readable as a preview but can
+  never be continued under the new tenure.
+
+This is a missing authority path, not a bug in an existing one. Three directions, for the
+reviewer and the receipt-protocol owners (Agents 1 and 3):
+
+1. **Adoption by first receipt.** The new owner's first receipt names the former owner's
+   checkpoint as its `InheritedCheckpoint`, making the inheritance the new owner's own signed
+   claim rather than a proof of the former owner's authority. It is cheap, but it launders
+   unverified content into current history under a valid signature: a hostile former owner, or
+   any provider of the preview, chooses what the joiner adopts. It would need an explicit user
+   decision and a durable record of what was adopted.
+2. **Witnessed continuity.** A continuously present member that verified the former owner's
+   receipts while that owner was current attests the checkpoint to the new owner. This is the
+   witnessed-transition protocol 9.5 rejected for a different case, with the same
+   quorum-of-witnesses limits.
+3. **Accept the stranding.** A join-born owner starts fresh documents. Former history stays
+   readable as a preview, and goal 4's preview-local work keeps members' drafts. This is the
+   status quo, made explicit in native results.
+
+Recommendation: (3) for Gate 4, stated honestly in native results and the UI hooks, with (1)
+raised as a later reviewed protocol if continuity across a founder's departure is a product
+requirement. Until this is decided, the acceptance item "first-receipt inheritance" is proved for
+a continuously present successor (B inherits A's checkpoint) and not for a join-born one.
+
 ## 10. References, admission and budgets
 
 - **R1.** Retained branches keep their conservative protection unchanged: the inventory's reference
@@ -1933,7 +1987,7 @@ not see. Added, changed or corrected:
 
 | # | Level | Case | Independent observation |
 |---|---|---|---|
-| N6 | actor | Same-document copy after rotation, per item | Each item routes through the ordinary Save path, is authored by the copier with a fresh nonce, and appears in the destination projection; **no byte of the branch's record changes at any point** (findings 1, 2, 8). |
+| N6 | actor | Same-document copy after rotation, per item | Each item routes through the ordinary Save path, is authored by the copier with a fresh nonce, and appears in the destination projection; **nothing that records the branch changes at any point**: its id, content hash, accepted count and overlay metadata bytes (findings 1, 2, 8). *Corrected 2026-10-06:* this used to say "no byte of the branch's record". For a same-document copy the ordinary intent lands in the same intents file as the branch, so the file's bytes do change; the branch does not. |
 | N7 | actor | Copy exact retry after a lost response | `already_saved` true, no second destination operation; still no branch-record write. |
 | N8 | actor | Stale `expected_projection` or `epoch_id` | Refused; nothing saved; re-preview succeeds. |
 | N8b | store | **Finding 4 destination currency.** Change the destination's source record, then its recovery record, between C1 and C3, and again between C3 and C4, each with an authenticated same-size replacement | Each refuses at `studio_destination_is_current` with its own digest or size comparison; each fixture passes the source stamp check first. |

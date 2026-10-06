@@ -22,7 +22,14 @@ whole-scope review of `510d0b54` (verdict: CHANGES REQUIRED, Agent 2 not complet
 <br>- `new_admitted` refuses a provenance that disagrees with its basis.
 <br>- `clippy.toml` and a source-scan test pin both hidden constructors.
 <br>Missing, all app-side: "no installed source" under custody, the S3 re-entry, the 8.3 rails, the 8.7 save path, and the receiver handoff selector's skip of non-Closing branches (review M1, required before any app mint). The structural inventory now exposes live provenance and exact charged bytes; these consumers still wait on Agent 1's provenance-parameterized Flow S. Also missing: 8.6 reconciliation, restart reconstruction through the store, and native results. Its absence is a Gate 4 gap, not a deferral. | Agent 2; Agent 1 for Flow S |
-| 5. Repeated owner tenure, rejoin, newcomers, legitimate progress | Implemented at the sync and receipt layer; not yet through the app actor | Leaf-aware tenure, v1 import, app seam, CORE-005 archived witness (`066a6533`), M-1 on the receive path with its own error (`0335262e`). **The product never rejoins with the same identity**: join and found both mint a fresh `MlsDevice`, so a returning owner is a new `DeviceId`. `returning::a_removed_owner_returns_as_a_new_device_with_a_new_tenure_everywhere` drives that form with real MLS and real receipts: A' lands in the vacated leaf, A' and every witness agree on the new start across restart, A' can author, its receipt verifies on witnesses and a newcomer, and A's first-tenure receipt and A's old key claiming the new tenure are refused everywhere. **Missing:** the same flow through the actor and a real Studio rotation. | Agent 2 |
+| 5. Repeated owner tenure, rejoin, newcomers, legitimate progress | Implemented at the sync and receipt layer; not yet through the app actor | Leaf-aware tenure, v1 import, app seam, CORE-005 archived witness (`066a6533`), M-1 on the receive path with its own error (`0335262e`). **The product never rejoins with the same identity**: join and found both mint a fresh `MlsDevice`, so a returning owner is a new `DeviceId`. `returning::a_removed_owner_returns_as_a_new_device_with_a_new_tenure_everywhere` drives that form with real MLS and real receipts: A' lands in the vacated leaf, A' and every witness agree on the new start across restart, A' can author, its receipt verifies on witnesses and a newcomer, and A's first-tenure receipt and A's old key claiming the new tenure are refused everywhere. **Through the actor (2026-10-06):** `succession::repeated` covers A -> B -> A on a legacy group, through the actor with a restart at each transition.
+<br>- B issues its first receipt under its observed tenure through ordinary idle passes, inheriting A's checkpoint.
+<br>- A's same key is admitted again and owns again.
+<br>- A's old receipt verifies under its own claimed tenure, yet is refused under the observed one at the witness, also after a restart.
+<br>**Two gaps, recorded for review in design 9.6:**
+<br>- A same-key device cannot process the Welcome, because of its stale MLS group (pinned; not a product path).
+<br>- A join-born owner cannot continue the former owner's documents (a missing authority path, needs a decision).
+<br>**Still missing:** a newcomer (N-T2) and hidden higher old-tenure history (N-T5) through the actor. | Agent 2 |
 | 6. Truthful native results and events | Partial | Results and settlement notices exist; no command beyond `studio_overlay_read` is registered; UI-hooks rows not applied. | Agent 2 contract; Agent 4 registration and rows |
 
 | Prerequisite | State |
@@ -840,18 +847,22 @@ which closes every item the acceptance matrix's G4-A2-P1 row names):
 >
 > - **M2:** closed earlier by `ed8ab0a8`.
 > - **M3:** the exact-retry half is closed by
->   `studio::copy::tests::a_copy_lands_once_and_its_exact_retry_is_acknowledged_without_a_second_write`.
+>   `studio::copy::tests::a_copy_lands_once_and_its_exact_retry_is_acknowledged_without_a_second_operation`.
 >   The copy is published through the real Apply, lands as exactly one operation, and its
 >   identical echo is acknowledged `already_saved` and adds no operation, also after a store
 >   restart (the P1 copy-across-restart evidence). At the actor and native level,
 >   `an_applied_copy_crosses_as_a_copy_and_its_exact_retry_as_already_saved` shows the same:
 >   no new record and an unchanged destination. An exact retry re-seals and re-persists the
 >   held operation by design, so it is not byte-silent.
-> - **M4 (C1'):** a transfer hold on the destination now refuses at C1, and a hold staged since C1
->   refuses C3, before any preview says Ready
->   (`a_transfer_hold_on_the_destination_refuses_the_copy_at_c1_and_again_at_c3`). Copying out
->   of a *source* under a hold stays permitted, as designed. That case is cross-document only and
->   not separately tested.
+> - **M4 (C1'):** a transfer hold on the destination now refuses at C1; a hold staged since C1
+>   refuses C3, before any preview says Ready; and, after the commit's own review, a hold staged
+>   since the preview refuses C4 with the same retryable reason, not the publication path's
+>   generic one (`a_transfer_hold_on_the_destination_refuses_the_copy_at_c1_c3_and_c4`). Copying
+>   out of a *source* under a hold stays permitted, as designed. That case is cross-document only
+>   and not separately tested; the review confirmed it statically.
+> - **Compatibility note:** a copy applied before the nonce-domain change (raw renderer nonce)
+>   is not recognised by the new exact-retry shortcut. Its retry re-plans and is refused as
+>   stale, never written twice. The commands are unregistered, so no renderer has such a copy.
 > - **L2:** the vacuous restore test now pins each refusal to its own reason ("recovery value is
 >   not in this version", "recovery document scope differs").
 > - **L4:** copies publish under their own nonce domain, `copy_nonce`. An ordinary Save of the same

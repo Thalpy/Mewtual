@@ -579,7 +579,7 @@ async fn export_archive_and_copy_preview_keep_their_slot_and_fence_through_deliv
 /// everything that records it (N6): its id, its content, its accepted count and its metadata
 /// bytes.
 #[tokio::test]
-async fn a_copy_lands_once_and_its_exact_retry_is_acknowledged_without_a_second_write() {
+async fn a_copy_lands_once_and_its_exact_retry_is_acknowledged_without_a_second_operation() {
     let mut f = Fixture::new().await;
     f.create_object();
     let branch = f.branch_identity();
@@ -664,16 +664,19 @@ async fn an_ordinary_save_of_the_same_bytes_is_never_reported_as_this_copy() {
     );
 }
 
-/// M4 / design 6.3 C1': a transfer hold on the destination refuses the copy at C1, and a hold
-/// staged between C1 and C3 refuses the preview, before it can tell the user the copy is Ready.
-/// Both refusals are by message, so neither the C4 publication guard nor the source-stamp
-/// currency check can stand in for the hold check.
+/// M4 / design 6.3 C1': a transfer hold on the destination refuses the copy at C1, at C3 when it
+/// was staged after C1, and at C4 when it was staged after the preview. Every refusal is by
+/// message, so neither the publication path's own guard nor the source-stamp currency check can
+/// stand in for the hold check. At C4 that publication guard would otherwise answer after a full
+/// re-plan, with a generic reason instead of this copy's retryable one (the review's M1).
 #[tokio::test]
-async fn a_transfer_hold_on_the_destination_refuses_the_copy_at_c1_and_again_at_c3() {
+async fn a_transfer_hold_on_the_destination_refuses_the_copy_at_c1_c3_and_c4() {
     let mut f = Fixture::new().await;
     f.create_object();
 
     let prepared = f.plan().await;
+    let echo = f.echo(&prepared.plan);
+    let before = f.destination_ops();
     f.stage_transfer_hold();
     let refused = f
         .server
@@ -689,6 +692,13 @@ async fn a_transfer_hold_on_the_destination_refuses_the_copy_at_c1_and_again_at_
         .expect_err("C1 must refuse while the destination is held")
         .to_string();
     assert!(refused.contains("transfer hold"), "C1 refusal: {refused}");
+
+    let refused = f
+        .apply(echo)
+        .expect_err("C4 must refuse while the destination is held")
+        .to_string();
+    assert!(refused.contains("transfer hold"), "C4 refusal: {refused}");
+    assert_eq!(f.destination_ops(), before, "a refused apply wrote nothing");
     assert_eq!(
         pool.available_permits(),
         4,

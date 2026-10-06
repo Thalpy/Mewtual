@@ -11,6 +11,7 @@ use tokio::sync::Mutex;
 
 mod interrupted;
 mod joining;
+mod repeated;
 
 #[tokio::test]
 async fn studio_actor_new_owner_keeps_open_edits_and_rotates_after_restart() {
