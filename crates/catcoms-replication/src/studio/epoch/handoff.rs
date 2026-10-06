@@ -226,6 +226,43 @@ impl StudioEpoch {
         Ok(None)
     }
 
+    /// Design 8.6, from authenticated vault bytes and the header only: whether this installed
+    /// source is the checkpoint an Unconfirmed `overlay` was based on. Never `AwaitingSource`:
+    /// absence is the caller's to report, since there are no bytes to pass.
+    ///
+    /// Refuses a Closing branch (`EpochScope`). Reconciliation is a statement about preview-based
+    /// work, and a Closing branch's relation to its source is P2's successor classification.
+    pub fn unconfirmed_base_state_in_vault(
+        bytes: &[u8],
+        overlay: &StudioOverlay,
+    ) -> Result<StudioOverlayUnconfirmedState, ReplError> {
+        if overlay.basis_kind() != super::super::overlay::BasisKind::Unconfirmed {
+            return Err(ReplError::EpochScope);
+        }
+        let shape = VaultShape::read(bytes, overlay.target())?;
+        let opening = (!shape.opening.is_empty())
+            .then(|| Receipt::decode(shape.opening))
+            .transpose()?;
+        let base = overlay.receipt();
+        let base_doc_id = crate::epoch_id(
+            base.document.doc_type,
+            &base.document.logical_key,
+            base.closed_epoch
+                .checked_add(1)
+                .ok_or(ReplError::EpochBound)?,
+            &base.close_record_hash,
+        );
+        Ok(if unconfirmed_base_confirmed(
+            shape.is_document(&base.document, base_doc_id),
+            opening.as_ref().map(|r| r.seed_change_hash),
+            base.seed_change_hash,
+        ) {
+            StudioOverlayUnconfirmedState::BaseConfirmed
+        } else {
+            StudioOverlayUnconfirmedState::BaseSuperseded
+        })
+    }
+
     /// Whether authenticated vault bytes hold any work: a later epoch or at least one operation.
     ///
     /// The structural form of the H1 and H5 Index check, `check_index_object_sources`, which treats
@@ -351,6 +388,22 @@ pub(in crate::studio) fn overlay_signed_hash_in(
 ) -> Result<Option<[u8; 32]>, ReplError> {
     Ok(held_in(operations, intent.author, &intent.operation)?
         .map(|op| blake3::derive_key("catcoms/studio-overlay-signed-operation/v1", &op.encode())))
+}
+
+/// Design 8.6's predicate, alone, so each half can be tested apart from the other (design M21:
+/// document identity and seed identity must differ independently in the fixtures).
+///
+/// `same_document`: the installed source's gate names the branch's base document id, the
+/// successor id its receipt's close selected. `opening_seed`: the installed source's opening
+/// checkpoint's seed change hash, `None` when the source opened from no checkpoint. BOTH must
+/// agree. A source at the base id but with another seed opened from a different checkpoint under
+/// the same close, and the branch's seed-only base would misdescribe it.
+pub(in crate::studio) fn unconfirmed_base_confirmed(
+    same_document: bool,
+    opening_seed: Option<[u8; 32]>,
+    branch_seed: [u8; 32],
+) -> bool {
+    same_document && opening_seed == Some(branch_seed)
 }
 
 /// The signed operation `author` saved for `domain`'s id, if any; an id held with a DIFFERENT body

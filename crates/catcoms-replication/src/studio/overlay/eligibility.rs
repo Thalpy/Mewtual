@@ -5,6 +5,25 @@
 //! basis, signs, or changes a record, and a `Transferable` answer is a description of the present,
 //! not a promise: the handoff re-derives everything under custody when it actually runs.
 
+/// Design 8.6: how an Unconfirmed branch's base relates to what is installed here now.
+///
+/// Derived on read from durable state, and never written, so reconciliation has no crash window.
+/// A description, not a promotion: `BaseConfirmed` says two hashes agree. It says nothing about
+/// the preview's provider ever having been owner, and confers no tenure and no signing authority.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StudioOverlayUnconfirmedState {
+    /// No installed source for the document yet.
+    AwaitingSource,
+    /// The installed source is the checkpoint this branch was based on. Its document id equals the
+    /// branch's base document id, AND its opening checkpoint's seed change hash equals the branch's.
+    /// Copy into that source becomes available once it is Open.
+    BaseConfirmed,
+    /// An installed source exists and is not that checkpoint: another checkpoint, a later epoch,
+    /// or one whose seed differs. Copy is still offered, against the actual current projection,
+    /// under an honest label.
+    BaseSuperseded,
+}
+
 /// What a user can do about a retained draft right now.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum StudioOverlayEligibility {

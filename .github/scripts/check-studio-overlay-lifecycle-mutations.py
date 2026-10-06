@@ -282,6 +282,39 @@ MUTATIONS = [
         "a_member_refuses_a_fresh_proof_of_the_same_owners_earlier_tenure_receipt",
         "a proof claiming the owner's earlier tenure is refused by a member that observed the later",
     ),
+    # --- design 8.3's per-branch rail for an Unconfirmed branch ---
+    #
+    # The mutant gives an Unconfirmed branch the Closing cap. The decode-side half (`checked_entries`
+    # applying the same cap once the kind is known) has no entry: this build cannot write an
+    # Unconfirmed record past the rail, so there is no input that reaches it alone.
+    (
+        "unconfirmed-op-rail", "catcoms-replication", REPL_TESTS,
+        f"{REPL}/overlay.rs",
+        "            BasisKind::Unconfirmed => MAX_STUDIO_UNCONFIRMED_OVERLAY_OPS,\n",
+        "            BasisKind::Unconfirmed => MAX_STUDIO_OVERLAY_OPS,\n",
+        "unconfirmed::an_unconfirmed_branch_accepts_sixty_four_operations_and_refuses_the_sixty_fifth",
+        "the Unconfirmed rail refuses operation",
+    ),
+    # --- design 8.6 reconciliation (design M21): each half of the predicate on its own ---
+    #
+    # The fixture's mixed cases differ in exactly one half, so dropping either half fails on that
+    # half's own assertion. `|| true` keeps the dropped operand used under -D warnings.
+    (
+        "reconcile-document-half", "catcoms-replication", REPL_TESTS,
+        f"{REPL}/epoch/handoff.rs",
+        "    same_document && opening_seed == Some(branch_seed)\n",
+        "    (same_document || true) && opening_seed == Some(branch_seed)\n",
+        "unconfirmed::reconciliation_confirms_the_base_only_when_both_the_document_and_the_seed_agree",
+        "the same seed under another document id is superseded",
+    ),
+    (
+        "reconcile-seed-half", "catcoms-replication", REPL_TESTS,
+        f"{REPL}/epoch/handoff.rs",
+        "    same_document && opening_seed == Some(branch_seed)\n",
+        "    same_document && (opening_seed == Some(branch_seed) || true)\n",
+        "unconfirmed::reconciliation_confirms_the_base_only_when_both_the_document_and_the_seed_agree",
+        "the base document id with another seed is superseded",
+    ),
     # --- the branch-generation namespace ---
     (
         "admission-not-trusted", "catcoms-replication", REPL_TESTS,

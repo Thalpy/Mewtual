@@ -1250,9 +1250,14 @@ over the same receipt and seed cannot be interchanged.
 >   `new_admitted` refuses a `provenance` argument that disagrees with the basis variant and
 >   stores the variant's own. Removing the redundant argument is left for coordination with
 >   Agent 1.
-> - **Not yet built:** the app side. That is "no installed source" under custody, the S3 re-entry
->   through the current preview, the 8.3 rails, the 8.7 save path, 8.6 reconciliation and native
->   results. Each waits on Agent 1's provenance-parameterized Flow S and its structural decode.
+> - **App side, as of 2026-10-06.**
+>   - *Built by Agent 1's Flow S (`c9566b82`):* "no installed source" under custody (a metadata
+>     probe), the S3 re-entry through a fresh mint attempt, the exact-target check and the
+>     current-MLS-epoch check. The store path accepts the same seed and receipt from a replacement
+>     preview; another candidate does not match.
+>   - *Built by Agent 2:* the per-branch rail (8.3) and 8.6's replication core.
+>   - *Not yet built:* the Server/actor Save of 8.7, with the mint made in the same custody visit
+>     that consumes it; the per-server and vault-wide rails; 8.6's app call; native results.
 > - **Required with the app slice, not optional:** the receiver's automatic handoff selector
 >   (`studio/receiver/handoff.rs`, the probe that picks a live overlay authored by this device)
 >   must skip non-Closing provenance and memoise it as quiet. Today it would select an
@@ -1305,6 +1310,15 @@ Agent 1's structural decode to expose the provenance discriminant and the charge
 14). Finding 6's retained seed bytes are counted in the **memory** accounting as well as the
 persisted-byte accounting. Refusals are `StorageRefused { reason }` and retain all existing work.
 
+*As built (2026-10-06):*
+- **Per-branch rail: built.** `MAX_STUDIO_UNCONFIRMED_OVERLAY_OPS = 64`, applied by kind in
+  `StudioOverlay::append` (before staging, so a refused Save changes nothing) and in
+  `checked_entries` (every read, once the decoder has set the kind). It is pinned by mutation entry
+  `unconfirmed-op-rail`.
+- **Per-document rail: holds structurally.** Admission never opens a branch beside a live one.
+- **Not built yet:** the per-server count and the vault-wide byte total. They are charged at
+  Flow S's admission, in Agent 1's store stages, and wait on the Save path (8.7).
+
 ### 8.4 Expiry versus retained work
 
 Unchanged from revision 1. Preview expiry, capacity eviction, replacement, unwatch and rewatch,
@@ -1330,6 +1344,19 @@ the branch's, in which case copy into that source becomes available when it is O
 `BaseSuperseded` otherwise, with copy still offered against the actual current projection under an
 honest label. `BaseConfirmed` is a statement that two hashes agree, never a promotion of preview
 attribution, tenure or signing authority.
+
+*As built (2026-10-06), replication core:*
+- **The state:** `StudioOverlayUnconfirmedState`.
+- **The predicate:** `unconfirmed_base_confirmed`, on its own, so each half can be mutated apart
+  from the other (M21: entries `reconcile-document-half` and `reconcile-seed-half`).
+- **The header-only reader:** `StudioEpoch::unconfirmed_base_state_in_vault`.
+  - The base document id is `epoch_id(doc_type, logical_key, closed_epoch + 1, close_record_hash)`.
+  - It refuses a Closing branch.
+  - Absence of a source is the caller's `AwaitingSource`.
+- **Not built yet:** the app's per-read call and the native `unconfirmedState` field. Both wait on
+  the Save path, since until then no Unconfirmed branch can exist in a production vault.
+- **One decision the app must make:** what to report when the installed source exists but cannot
+  be read. It is neither awaiting nor confirmable.
 
 ### 8.7 Acceptance path
 
@@ -1671,7 +1698,9 @@ could not reach are recorded here rather than guessed at, as assignment item 5 a
 **What runs where (corrected after Review 2, M-1).**
 - **Through the actor:** B's succession and its first receipt R1, and, in the second test
   (B -> A -> B), B's first receipt of its second tenure.
-- **On sync nodes, not the actor:** the membership changes and the newcomer.
+- **On hand-ticked app `Server`s, not through the actor:** the membership changes and the
+  newcomer. The newcomer's tenure is read through the app seam (`observed_owner_tenure`,
+  `require_observed_owner_tenure`), so the conversion to `StudioOwnerTenure` is covered there.
 - **At the bare check and at adoption:** the same-key refusals. Adoption is handed the tenure
   explicitly there.
 - **Production adoption** is never handed an observed value. It is handed the claim of a fresh
