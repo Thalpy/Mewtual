@@ -166,7 +166,8 @@ over, not the contract. Reasoning from either row as FALSE remains correct today
 | 2026-09-16 | Design revision 6 (`a6d8170`) | **PASS for (a) and (c), no findings.** With (b)'s revision-4 PASS this accepts the whole design. Every finding from revisions 1 to 6 is closed at the design boundary. Two non-blocking refinements were offered and are adopted in revision 7. Reviewer ran no Cargo commands. |
 | 2026-09-16 | Design revision 7 | Accepted refinements only: A-1's scope sentence and N-T7b's diagnostics. No reviewed decision changes. |
 | 2026-10-06 | Review 2, bounded implementation (`510d0b54`..`1d888fa8`) | **(a) P1 manual lifecycle: bounded PASS** with seven LOWs. **(b) Repeated tenure through the actor: PARTIAL**, one MEDIUM (M-1: the same-key refusal was not through the actor, and production's proof gate was unpinned). Reviewer ran 8 focused tests and inspected the 16 mutation logs; no full suites. Native Save conditions: not yet satisfied. Dispositions in "The copy review". |
-| 2026-10-06 | Re-review of the slice 2 fixes (`b35e23d2`..`5ccc4647`) | **No blocker or high.** HIGH-1 is closed for the actor slot, and MEDIUM-1 to MEDIUM-3 are closed. One MEDIUM remains: an abandoned parked plan still pins a process-wide permit with no time bound. It is recorded as required before native registration and taken to Agent 1. Five LOWs, fixed next. Reviewer ran 7 focused tests and checked both workspaces. |
+| 2026-10-06 | Review of the deadline (`5ccc4647`..`265b0756`) | **No blocker or high; the MEDIUM is closed.** Six LOWs, fixed next: the bound held only while unpaused; the `pending` term at the deadline was unpinned; the ticket's Closing refusal was untested; a misplaced doc block; the PIX republish cost unstated; one stale status line. Reviewer ran the 8 actor tests. |
+| 2026-10-06 | Re-review of the slice 2 fixes (`b35e23d2`..`5ccc4647`) | **No blocker or high.** HIGH-1 is closed for the actor slot, and MEDIUM-1 to MEDIUM-3 are closed. One MEDIUM remained: an abandoned parked plan still pinned a process-wide permit with no time bound. It was fixed by Agent 2 in `265b0756` with a park deadline, and Agent 1 was told, since the slot is shared. Five LOWs, fixed in `7f73b8eb`. Reviewer ran 7 focused tests and checked both workspaces. |
 | 2026-10-06 | Preview-local slice 2 (`b35e23d2`: the Unconfirmed Save through the actor) | **No blocker. One HIGH:** an abandoned plan on one target blocked Saves on every other target and pinned a process-wide permit. Also three MEDIUMs: a Closing draft reported as Unconfirmed, no refresh notice for another request's commit, and a full scan on every visit. Five LOWs. All fixed in the next commit, with regressions and mutation entries; `b35e23d2` was not pushed before them. Reviewer: static inspection only. |
 | 2026-10-06 | Preview-local slice 1 (`f3ce1758`: the rail, the basis accessors, 8.6's core) | **No blocker or high.** Two MEDIUM test gaps, each with an overstating doc line: the reader's wiring of each 8.6 half, and the read-side rail. Three LOWs: a compile-time bound, `BaseSuperseded` also naming a source behind the base, and phase and adopting left to the app. All fixed or recorded in the next commit, which also makes `f3ce1758`'s two unformatted replication files fmt-clean. Reviewer ran the 13 Unconfirmed tests. |
 | 2026-10-06 | Review 2 finding re-review (`1d888fa8`..`bea7e701`) | **No blocker, high or medium.** (a) P1 bounded PASS stands. (b) Repeated tenure through the actor: **bounded PASS on the narrowed claim** (M-1 closed). Three doc and evidence LOWs, fixed next. Reviewer ran the three new tests (all pass) and inspected the mutation logs. |
@@ -1072,6 +1073,27 @@ In the commit after `5ccc4647`:
 - **Not done:** a receiver-level test of an Unconfirmed visit taking a parked Closing plan. That
   needs a Closing plan parked through the receiver, and the Closing Save has no caller yet. The
   store-level refusal (`closing_plan_refuses_an_unconfirmed_commit_mint_by_name`) is Agent 1's.
+
+**Review of the deadline (`5ccc4647`..`265b0756`): no blocker or high; the MEDIUM is closed.**
+
+Every park path is stamped (one assignment, in `complete()`). No same-turn race: Save visits are
+`control()` turns and the expiry lives only in `run()`, on one lease. The Closing plan's drop is
+safe. Its six LOWs, fixed in the next commit:
+- **LOW-1, the bound held only while unpaused:** the park's `pending` and `wake_in` terms now sit
+  outside the pause gate. `run` already drops the plan before it honours the pause. The Registry
+  source has the same shape; that is left to its owners.
+- **LOW-2, the `pending` term at the deadline was unpinned:** a paused test isolates the park
+  terms and pins both sides of the deadline. Mutation entries `unconfirmed-save-park-pending-term`
+  and `unconfirmed-save-park-wake-term`.
+- **LOW-3, the ticket's Closing refusal was untested:** the copy fixture now sends the ticket too.
+  The fixture has no preview, so the check's order is observable. Mutation entry
+  `unconfirmed-ticket-refuses-closing-draft`.
+- **LOW-4 to LOW-6:** a doc block moved back to its function; the late caller's PIX republish cost
+  stated in the code and in design 8.7; one stale status line.
+- **Found while fixing:** the actor tests drew on the one process-wide preparation pool. Each
+  parks a plan, so with ten of them in parallel some saw others' plans as `busy`. `ready_receiver`
+  now gives each test a private pool (`inject_overlay_pool_for_test`, as the catch-up tests do).
+  The full-suite run at `265b0756` predates this and may show that contention.
 
 | Finding | What |
 |---|---|

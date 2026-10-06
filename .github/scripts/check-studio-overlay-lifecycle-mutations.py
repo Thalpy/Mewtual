@@ -380,6 +380,36 @@ MUTATIONS = [
         "studio_actor_unconfirmed_save_an_abandoned_plan_is_dropped_at_its_deadline",
         "the dropped plan no longer holds the slot",
     ),
+    # Review of `265b0756`, LOW-1 and LOW-2: the park deadline's two scheduling terms, outside the
+    # pause gate. Paused, they are the only terms left, so each mutant is seen alone.
+    (
+        "unconfirmed-save-park-pending-term", "catcoms-app",
+        "studio_exchange::tests::provisional::seed::tail::unconfirmed_actor::",
+        "crates/catcoms-app/src/studio/receiver.rs",
+        "            || self.catchup.overlay_park_expiry_due(now)\n",
+        "            || (self.catchup.overlay_park_expiry_due(now) && false)\n",
+        "studio_actor_unconfirmed_save_park_deadline_holds_while_paused",
+        "at its deadline a parked plan is pending even while paused",
+    ),
+    (
+        "unconfirmed-save-park-wake-term", "catcoms-app",
+        "studio_exchange::tests::provisional::seed::tail::unconfirmed_actor::",
+        "crates/catcoms-app/src/studio/receiver.rs",
+        "            return self.catchup.overlay_park_wake_in(now);\n",
+        "            return None;\n",
+        "studio_actor_unconfirmed_save_park_deadline_holds_while_paused",
+        "a paused receiver still publishes a parked plan's deadline",
+    ),
+    # Review of `265b0756`, LOW-3: the ticket refuses a Closing draft before it mints. The fixture
+    # has no preview, so the mutant's ticket is refused for that instead, under another reason.
+    (
+        "unconfirmed-ticket-refuses-closing-draft", "catcoms-app", "studio::copy::tests::",
+        "crates/catcoms-app/src/studio/receiver/unconfirmed.rs",
+        "                // the reason here, before a ticket exists, is the truthful place for it.\n                refuse_closing_draft(server, store, id, target)?;\n",
+        "                // the reason here, before a ticket exists, is the truthful place for it.\n                let _ = refuse_closing_draft(server, store, id, target);\n",
+        "a_closing_drafts_operation_resent_as_an_unconfirmed_save_is_refused",
+        "the ticket names the Closing draft before it mints",
+    ),
     # Review of `b35e23d2`, LOW-1: a retry of this request's own in-flight plan is `Scheduled`.
     (
         "unconfirmed-save-own-plan-pending", "catcoms-app",

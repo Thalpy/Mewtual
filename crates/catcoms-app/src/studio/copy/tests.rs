@@ -829,4 +829,27 @@ async fn a_closing_drafts_operation_resent_as_an_unconfirmed_save_is_refused() {
         refused.contains("was not made on a preview"),
         "a Closing draft is refused by the receiver, not reported as Unconfirmed work: {refused}"
     );
+
+    // The ticket names the same reason, and names it first. This receiver has no preview, so a
+    // ticket that minted before checking would be refused for that instead (review of
+    // `265b0756`, LOW-3).
+    let ticket = receiver
+        .control(
+            &mut f.server,
+            &mut f.store,
+            SERVER,
+            crate::studio::StudioControlRequest {
+                target: f.index,
+                action: crate::studio::StudioControlAction::BeginUnconfirmedOverlaySave,
+            },
+        )
+        .map(|(_, _, response)| response);
+    let refused = match ticket {
+        Err(error) => error.to_string(),
+        Ok(response) => panic!("a ticket for a Closing draft must be refused, got {response:?}"),
+    };
+    assert!(
+        refused.contains("was not made on a preview"),
+        "the ticket names the Closing draft before it mints: {refused}"
+    );
 }

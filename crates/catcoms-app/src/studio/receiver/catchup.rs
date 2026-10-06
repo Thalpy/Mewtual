@@ -837,13 +837,6 @@ impl CatchupRuntime {
             .map(|(_, plan, ownership)| (plan, ownership))
     }
 
-    /// Take whatever plan is parked, for any target, with the target it was planned for.
-    ///
-    /// The slot holds one plan for the whole actor, and `reserve_overlay` refuses every target
-    /// while it is parked. So a Save on another target that could only take its own target's plan
-    /// would wait for as long as the plan's caller stayed away, which can be for ever. The
-    /// Unconfirmed Save takes it with this instead, finishes it, and reports nothing of it as its
-    /// own (design 8.7; review of `b35e23d2`, HIGH-1).
     /// Whether a plan is parked, for a caller that must prepare before it takes one.
     pub(super) fn has_planned_overlay(&self) -> bool {
         self.overlay_planned.is_some()
@@ -876,7 +869,10 @@ impl CatchupRuntime {
     ///
     /// Safe for the reason RT-001 gives for a refused plan: nothing durable was written, the media
     /// hold dies with the plan, and the request reclassifies from durable state on its next visit.
-    /// The cost of a caller who comes back late is one more capture and plan.
+    /// A caller who comes back late re-captures and re-plans. For a Flipnote frame operation it may
+    /// also have to republish the frame's PIX: the plan's media hold was the only thing keeping a
+    /// promoted PIX from reclamation, and it is not durable protection. That is the cost RT-001
+    /// already accepts for a refused plan.
     pub(in crate::studio::receiver) fn expire_parked_overlay(&mut self, now: u64) -> bool {
         if self.overlay_park_retention(now) == Some(0) {
             self.overlay_planned = None;
@@ -885,6 +881,13 @@ impl CatchupRuntime {
         false
     }
 
+    /// Take whatever plan is parked, for any target, with the target it was planned for.
+    ///
+    /// The slot holds one plan for the whole actor, and `reserve_overlay` refuses every target
+    /// while it is parked. So a Save on another target that could only take its own target's plan
+    /// would wait for as long as the plan's caller stayed away, which can be for ever. The
+    /// Unconfirmed Save takes it with this instead, finishes it, and reports nothing of it as its
+    /// own (design 8.7; review of `b35e23d2`, HIGH-1).
     pub(super) fn take_any_planned_overlay(
         &mut self,
     ) -> Option<(StudioTarget, Box<StudioOverlayPlan>, OverlayOwnership)> {

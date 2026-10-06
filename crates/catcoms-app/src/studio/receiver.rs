@@ -451,7 +451,7 @@ impl StudioReceiver {
         server: &Server<T, R>,
         now: u64,
     ) -> bool {
-        !self.paused
+        (!self.paused
             && ((self.catchup.replay_ready()
                 && self
                     .replay
@@ -480,9 +480,11 @@ impl StudioReceiver {
                 // never schedules that visit, so the thirty-second bound the code claims is not
                 // a bound at all: four such actors strand the whole pool indefinitely.
                 || self.catchup.registry_expiry_due(now)
-                // The same for a parked Save plan past its deadline (design 8.7).
-                || self.catchup.overlay_park_expiry_due(now)
-                || self.catchup.pending(server, &self.watches))
+                || self.catchup.pending(server, &self.watches)))
+            // A parked Save plan past its deadline (design 8.7), outside the pause gate: a paused
+            // receiver must still release the admission and process-wide permit a plan holds,
+            // and `run` drops it before it honours the pause (review of `265b0756`, LOW-1).
+            || self.catchup.overlay_park_expiry_due(now)
     }
     /// Milliseconds until this receiver has time-gated work to do, if any.
     ///
@@ -500,8 +502,10 @@ impl StudioReceiver {
     }
 
     fn wake_in_at(&self, now: u64) -> Option<u64> {
+        // A parked plan's deadline is published even while paused, for the reason its pending
+        // term sits outside the pause gate.
         if self.paused {
-            return None;
+            return self.catchup.overlay_park_wake_in(now);
         }
         // Every deadline, from the one sample the caller took. They are independent resources,
         // so the earliest wins; nothing here dominates anything else the way the capacity gate
@@ -521,6 +525,16 @@ impl StudioReceiver {
     fn rail(&self) -> Vec<StudioTarget> {
         self.watches.iter().map(|(w, _)| w.target).collect()
     }
+    /// A private preparation pool for this receiver, so a test that parks plans does not contend
+    /// with every other test in the process on the one global four-slot semaphore.
+    #[cfg(test)]
+    pub(crate) fn inject_overlay_pool_for_test(
+        &mut self,
+        permits: usize,
+    ) -> Arc<tokio::sync::Semaphore> {
+        self.catchup.inject_overlay_pool_for_test(permits)
+    }
+
     /// Put the receiver in the state a storage fault leaves it in.
     ///
     /// Only the precondition is simulated. What a completion arriving in that state does, and

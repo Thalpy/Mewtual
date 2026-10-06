@@ -93,6 +93,9 @@ async fn ready_receiver() -> (Pair, StudioReceiver, StudioTarget, [u8; 32], [u8;
     let logical = target.document(&p.bob.group_id()).unwrap();
     let epoch_id = epoch_zero_id(logical.doc_type, &logical.logical_key);
     let mut receiver = runtime.into_receiver(vec![(watch, epoch_id)]);
+    // These tests park plans, and each holds a preparation permit while it waits. On the one
+    // process-wide pool, parallel tests would see each other's plans as `busy`.
+    receiver.inject_overlay_pool_for_test(4);
     assert_eq!(
         p.bob.observed_owner_tenure(),
         crate::studio::StudioOwnerTenure::Unknown
@@ -438,6 +441,54 @@ async fn studio_actor_unconfirmed_save_an_abandoned_plan_is_dropped_at_its_deadl
         !matches!(retry, Ok(StudioUnconfirmedSaveOutcome::Saved { .. })),
         "the expired plan was dropped, so a late retry cannot commit it: {retry:?}"
     );
+}
+
+/// Review of `265b0756`, LOW-1 and LOW-2: the park deadline holds while the receiver is paused,
+/// and both of its scheduling terms are pinned.
+///
+/// Paused, every other term of `pending` and `wake_in` is gated off, so what remains is exactly
+/// the park's. Before the deadline: no work, and the deadline published. At it: work, and no
+/// deadline (an expired one still published would be a spin, not a wake). Then the paused pass the
+/// scheduler asked for drops the plan.
+#[tokio::test]
+async fn studio_actor_unconfirmed_save_park_deadline_holds_while_paused() {
+    let (mut p, mut receiver, target, basis, branch) = ready_receiver().await;
+    let a = new_entry(&mut p, (basis, branch), 97, [8; 16]);
+    assert!(matches!(
+        save(&mut receiver, &mut p, target, &a).unwrap(),
+        StudioUnconfirmedSaveOutcome::Scheduled
+    ));
+    settle(&mut receiver, &mut p).await;
+    receiver.pause_for_test();
+
+    let wake = receiver
+        .wake_in(&p.bob)
+        .expect("a paused receiver still publishes a parked plan's deadline");
+    assert!(
+        !receiver.pending(&p.bob),
+        "nothing is owed before the deadline"
+    );
+    p.clock.advance_ms(wake - 1);
+    assert_eq!(receiver.wake_in(&p.bob), Some(1));
+    assert!(!receiver.pending(&p.bob));
+
+    p.clock.advance_ms(1);
+    assert!(
+        receiver.pending(&p.bob),
+        "at its deadline a parked plan is pending even while paused"
+    );
+    assert!(
+        receiver.wake_in(&p.bob).is_none(),
+        "an expired deadline is no longer published"
+    );
+    receiver
+        .run(&mut p.bob, &mut p.b_store, SERVER, None)
+        .unwrap();
+    assert!(
+        !receiver.pending(&p.bob) && receiver.wake_in(&p.bob).is_none(),
+        "the paused pass dropped the plan"
+    );
+    assert_eq!(pending(&mut p, target), 0);
 }
 
 /// Review of `b35e23d2`, LOW-1: a retry while this request's own plan is in flight is `Scheduled`,

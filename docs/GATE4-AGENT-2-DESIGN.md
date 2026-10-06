@@ -1421,9 +1421,11 @@ Agent 1's Flow S is not implemented, this path is not implemented either; it is 
   Save on this actor. `OVERLAY_PARK_MS` (30 s, the retained Registry source's bound, for the same
   reason) is stamped when a plan parks. One retention function feeds the expiry in the receiver's
   maintenance pass, the actor's `pending` and its `wake_in`, so a quiet actor still comes back for
-  it. The expiry drops the plan and the remembered request. RT-001 makes the drop safe, and a late
-  caller re-captures. The deadline covers Agent 1's Closing `save_overlay` too, since it parks in
-  the same slot.
+  it, even while its receiver is paused: those two terms sit outside the pause gate, and `run`
+  drops the plan before it honours the pause. The expiry drops the plan and the remembered request.
+  RT-001 makes the drop safe. A late caller re-captures, and for a Flipnote frame it may have to
+  republish the frame's PIX, since the plan's media hold was not durable protection. The deadline
+  covers Agent 1's Closing `save_overlay` too, since it parks in the same slot.
 - **The ticket refuses a device that is no longer a member.** The mint checks the provider's
   membership, not this device's.
 - **The two Saves stay apart.** Neither action is reachable through the control transaction: both
