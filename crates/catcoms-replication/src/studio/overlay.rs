@@ -220,7 +220,11 @@ impl StudioOverlayBasis<'_> {
             Self::Unconfirmed(basis) => basis.provenance(),
         }
     }
-    pub(in crate::studio) fn target(&self) -> StudioTarget {
+    /// The exact target this basis was minted for. Public so a Save stage can refuse a basis minted
+    /// for another channel BEFORE admission: a Flipnote's logical key omits its channel, so the
+    /// identity comparison admission makes cannot see the difference, and a branch opened from the
+    /// wrong basis would be recorded under the basis's channel while the request named another.
+    pub fn target(&self) -> StudioTarget {
         self.data().target
     }
     pub(in crate::studio) fn closed_epoch(&self) -> u64 {

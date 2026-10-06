@@ -99,6 +99,10 @@ pub(crate) use epoch_studio::{
     StudioHandoffPlan, StudioHandoffStart, StudioOverlayCapture, StudioOverlayPlan,
     StudioOverlayStart, StudioSourceCapture, MAX_SIGNING_TURNS_PER_VISIT, SIGNING_SLICE_BUDGET_MS,
 };
+// The provenance-general Flow S mint (G4-A1-S). Its first production consumer is the preview Save
+// (G4-A2-PREVIEW); until that lands only tests name it, hence the non-test allowance.
+#[cfg_attr(not(test), allow(unused_imports))]
+pub(crate) use epoch_studio::StudioOverlayMint;
 pub use epoch_studio::{StudioFaultEvidence, StudioRepairOutcome, StudioRepairRequest};
 pub mod epoch_budget;
 

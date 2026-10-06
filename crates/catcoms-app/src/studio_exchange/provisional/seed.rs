@@ -124,6 +124,32 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
             .sync
             .with_provisional_studio_seed(&prepared.inner, inspect)?)
     }
+    /// The app's one route to an Unconfirmed overlay basis (design 8.1, G4-A1-S).
+    ///
+    /// Rechecks this seed's mount, server and channel, then mints inside sync's scoped hint
+    /// callback, which rechecks every present-time condition the hint carries and requires a
+    /// complete tail. The store adds what sync cannot see or does not bind: that no source is
+    /// stored for the document, that the basis is for exactly the requested target, and that it
+    /// was minted under the current MLS epoch by a provider who is still a member
+    /// (`mint_studio_overlay_basis`).
+    ///
+    /// Flow S takes the **result**, failed or not (`StudioOverlayMint::unconfirmed`): a retry of
+    /// durably accepted work must be answered with no live preview at all, so a failed mint is
+    /// only surfaced if the request turns out to be new authoring. Attempt it in the same custody
+    /// visit as the store stage that consumes it, once for S1b and again for S3, and never carry a
+    /// minted basis across the detached plan: the S3 attempt is what re-runs the live check.
+    ///
+    /// Called only by tests until the preview Save (G4-A2-PREVIEW) wires it in production.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn mint_unconfirmed_overlay_basis(
+        &self,
+        store: &ServerStore,
+        server: u64,
+        prepared: &ServerPreparedProvisionalStudioSeed,
+    ) -> Result<catcoms_replication::studio::StudioUnconfirmedOverlayBasis, AppError> {
+        self.check_provisional_seed_scope(store, server, &prepared.scope)?;
+        Ok(self.sync.mint_unconfirmed_overlay_basis(&prepared.inner)?)
+    }
 }
 impl ServerPreparedProvisionalStudioSeed {
     pub(crate) fn unconfirmed_projection(&self) -> &catcoms_replication::studio::StudioProjection {

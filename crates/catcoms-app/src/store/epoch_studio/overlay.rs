@@ -1,13 +1,26 @@
 //! No source writes accompany local acceptance. Eligibility is checked under the same
 //! exclusive store/group borrow as the shared intent transaction, with no detached gap.
-use super::overlay_capture::OverlayBranch;
+use super::overlay_capture::{basis_changed, OverlayBranch, OwnedOverlayBasis, StudioOverlayMint};
 use super::*;
-use crate::studio::{require_owner_tenure, StudioOwnerTenure};
+use crate::studio::StudioOwnerTenure;
 use catcoms_replication::studio::{
-    StudioClosingOverlayBasis, StudioOverlayAdmission, StudioOverlayRequestClass,
-    StudioOverlaySave, StudioOverlayState,
+    StudioClosingOverlayBasis, StudioOverlayAdmission, StudioOverlayBasis,
+    StudioOverlayRequestClass, StudioOverlaySave, StudioOverlayState,
 };
 use catcoms_replication::{CloseRecord, LocalIntent};
+
+/// The stale-branch refusal, worded for the fresh basis's kind. The Closing wording is exactly what
+/// it was before Flow S was parameterized.
+fn stale_branch(fresh: &OwnedOverlayBasis) -> AppError {
+    match fresh {
+        OwnedOverlayBasis::Closing(_) => {
+            invalid("Closing overlay request names a stale branch; prepare it again")
+        }
+        OwnedOverlayBasis::Unconfirmed(_) => {
+            invalid("unconfirmed overlay request names a stale branch; prepare it again")
+        }
+    }
+}
 
 impl ServerStore {
     #[allow(clippy::too_many_arguments)]
@@ -60,13 +73,12 @@ impl ServerStore {
         rng: &mut impl CryptoRngCore,
         budget: &mut EpochStudioBudget,
     ) -> Result<StudioOverlayStart, AppError> {
-        self.start_studio_closing_overlay_with_io(
+        self.start_studio_overlay_with_io(
             server,
             group,
             target,
             device,
-            close,
-            tenure,
+            StudioOverlayMint::Closing { close, tenure },
             basis,
             branch,
             operation,
@@ -99,6 +111,117 @@ impl ServerStore {
             close,
             tenure,
             plan,
+            rng,
+            budget,
+            &mut WriteHooks::None,
+        )
+    }
+
+    /// The scheduled runtime's first custody visit, for either provenance (G4-A1-S).
+    ///
+    /// The `*_closing_*` entry points above are thin `StudioOverlayMint::Closing` wrappers over the
+    /// same three stages; this is the general form. For an Unconfirmed request the caller passes
+    /// its mint ATTEMPT from the target's current ready preview in this custody visit - even a
+    /// failed one, because classification must still answer a retry with no live preview.
+    ///
+    /// This and the two general entry points below have no production caller until the preview
+    /// Save (G4-A2-PREVIEW) lands; the Closing runtime keeps using its wrappers.
+    #[allow(clippy::too_many_arguments)]
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn start_studio_overlay(
+        &mut self,
+        server: u64,
+        group: &ServerGroup,
+        target: StudioTarget,
+        device: &MlsDevice,
+        mint: StudioOverlayMint<'_>,
+        basis: [u8; 32],
+        branch: [u8; 32],
+        operation: DomainOp,
+        ts: u64,
+        rng: &mut impl CryptoRngCore,
+        budget: &mut EpochStudioBudget,
+    ) -> Result<StudioOverlayStart, AppError> {
+        self.start_studio_overlay_with_io(
+            server,
+            group,
+            target,
+            device,
+            mint,
+            basis,
+            branch,
+            operation,
+            ts,
+            rng,
+            budget,
+            &mut WriteHooks::None,
+        )
+    }
+
+    /// The scheduled runtime's commit visit, for either provenance. An Unconfirmed commit takes a
+    /// mint attempt made in THIS visit, never one parked with the plan (design 8.7, "re-enters").
+    #[allow(clippy::too_many_arguments)]
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn commit_studio_overlay_with(
+        &mut self,
+        server: u64,
+        group: &ServerGroup,
+        target: StudioTarget,
+        device: &MlsDevice,
+        mint: StudioOverlayMint<'_>,
+        plan: StudioOverlayPlan,
+        rng: &mut impl CryptoRngCore,
+        budget: &mut EpochStudioBudget,
+    ) -> Result<catcoms_replication::studio::StudioLocalDraft, AppError> {
+        self.commit_studio_overlay_with_io(
+            server,
+            group,
+            target,
+            device,
+            mint,
+            plan,
+            rng,
+            budget,
+            &mut WriteHooks::None,
+        )
+    }
+
+    /// The synchronous adapter, for either provenance: the same three stages with no detach.
+    ///
+    /// It takes the S1b mint and the S3 mint separately. In one synchronous call nothing can
+    /// change between them, so a caller that attempts both before calling is equivalent to
+    /// re-entering the live check at S3, and there is still one adapter and one algorithm rather
+    /// than a second orchestrator. Like the Closing adapter, this is for tests and callers that
+    /// cannot release custody; the scheduled runtime uses the split form so the first append of a
+    /// branch runs detached, off the actor (design 8.1).
+    #[allow(clippy::too_many_arguments)]
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn save_studio_overlay(
+        &mut self,
+        server: u64,
+        group: &ServerGroup,
+        target: StudioTarget,
+        device: &MlsDevice,
+        start_mint: StudioOverlayMint<'_>,
+        commit_mint: StudioOverlayMint<'_>,
+        basis: [u8; 32],
+        branch: [u8; 32],
+        operation: DomainOp,
+        ts: u64,
+        rng: &mut impl CryptoRngCore,
+        budget: &mut EpochStudioBudget,
+    ) -> Result<StudioOverlaySave, AppError> {
+        self.save_studio_overlay_with_io(
+            server,
+            group,
+            target,
+            device,
+            start_mint,
+            commit_mint,
+            basis,
+            branch,
+            operation,
+            ts,
             rng,
             budget,
             &mut WriteHooks::None,
@@ -139,12 +262,15 @@ impl ServerStore {
     /// **Not for retries.** A retry must resend the branch its original request named. After a
     /// transfer or a disposal this returns the *next* branch, because that is what a fresh Save
     /// would open, and a retry that re-asked here would name a branch it never wrote to.
-    pub(crate) fn studio_overlay_request_branch(
+    ///
+    /// Either provenance: a ticket for an Unconfirmed Save is derived the same way, from the same
+    /// definition, so neither kind can compute a branch identity of its own.
+    pub(crate) fn studio_overlay_request_branch<'b>(
         &mut self,
         server: u64,
         group: &ServerGroup,
         target: StudioTarget,
-        fresh: &StudioClosingOverlayBasis,
+        fresh: impl Into<StudioOverlayBasis<'b>>,
         budget: &mut EpochStudioBudget,
     ) -> Result<[u8; 32], AppError> {
         let logical = target.document(&group.group_id()).map_err(invalid)?;
@@ -175,16 +301,17 @@ impl ServerStore {
     /// **The order is load bearing.** Every terminal acknowledgement - a transferred branch, a
     /// disposed branch, an exact retry of an accepted operation - is reached before anything
     /// requires tenure, mints a basis, reads a source or touches media (V8, AG1-001). Only work
-    /// that is genuinely new authoring reaches S1b.
+    /// that is genuinely new authoring reaches S1b. That holds for both provenances: the `mint`
+    /// is not looked at until S1b, so a lost preview blocks new Unconfirmed authoring and nothing
+    /// else, exactly as a missing tenure blocks new Closing authoring and nothing else.
     #[allow(clippy::too_many_arguments)]
-    pub(in crate::store) fn start_studio_closing_overlay_with_io(
+    pub(in crate::store) fn start_studio_overlay_with_io(
         &mut self,
         server: u64,
         group: &ServerGroup,
         target: StudioTarget,
         device: &MlsDevice,
-        close: &CloseRecord,
-        tenure: StudioOwnerTenure,
+        mint: StudioOverlayMint<'_>,
         basis: [u8; 32],
         branch: [u8; 32],
         operation: DomainOp,
@@ -315,21 +442,25 @@ impl ServerStore {
         // rails. Otherwise a stale request reports a media error, or promotes a blob into the
         // durable namespace, on its way to being refused for an unrelated reason.
         //
-        // S1b is a V1 site, so this is where the tenure is required, and not before: everything
-        // above must stay reachable under Imported and Unknown.
-        let tenure_value = require_owner_tenure(tenure)?;
-        let (mut source, observed, _) =
-            self.checked_studio_source(server, group, target, device, false, &mut budget.storage)?;
-        if observed.is_none() {
-            return Err(invalid("Closing overlay source is missing"));
+        // S1b is where the mint is consumed, and not before: everything above must stay reachable
+        // under Imported and Unknown tenure (V8) and with no live preview at all. For Closing this
+        // is the V1 site where the tenure is required; for Unconfirmed it is where an installed
+        // source refuses and where a failed mint attempt is finally surfaced.
+        let fresh = self.mint_studio_overlay_basis(
+            server,
+            group,
+            target,
+            device,
+            mint,
+            &mut budget.storage,
+        )?;
+        // A request for the other KIND of draft than the live branch needs no check of its own:
+        // fingerprint domains differ per provenance, so it can never equal the live basis and
+        // the joins below refuse it (`EpochScope` when it names the live branch, `Stale` when it
+        // does not, since no branch is admitted beside a live one).
+        if fresh.as_basis().fingerprint() != basis {
+            return Err(basis_changed(&fresh));
         }
-        let fresh = source
-            .prepare_closing_overlay(close, group, tenure_value)
-            .map_err(invalid)?;
-        if fresh.fingerprint() != basis {
-            return Err(invalid("Closing overlay basis changed"));
-        }
-        drop(source);
         // S1b, the branch half: resolve `Unmatched` against the basis just minted. A new branch is
         // admitted only when the request names exactly the identity the next admission would mint;
         // anything else - an older generation, a skipped one, a disposed or transferred branch the
@@ -349,24 +480,20 @@ impl ServerStore {
             if metadata.is_prepared() {
                 return Err(invalid(catcoms_replication::ReplError::EpochClosed));
             }
-            if state.overlay().map(|live| live.basis()) != Some(fresh.fingerprint()) {
+            if state.overlay().map(|live| live.basis()) != Some(fresh.as_basis().fingerprint()) {
                 return Err(invalid(catcoms_replication::ReplError::EpochScope));
             }
             OverlayBranch::Live
         } else {
             let admission = match state.handoff_metadata() {
                 Some(metadata) => metadata
-                    .admit_new_branch(target, branch, &fresh)
+                    .admit_new_branch(target, branch, fresh.as_basis())
                     .map_err(invalid)?,
-                None => StudioOverlayState::admit_first_branch(branch, &fresh),
+                None => StudioOverlayState::admit_first_branch(branch, fresh.as_basis()),
             };
             match admission {
                 StudioOverlayAdmission::New { .. } => OverlayBranch::Admitted(admission),
-                StudioOverlayAdmission::Stale => {
-                    return Err(invalid(
-                        "Closing overlay request names a stale branch; prepare it again",
-                    ))
-                }
+                StudioOverlayAdmission::Stale => return Err(stale_branch(&fresh)),
             }
         };
         drop(state);
@@ -417,8 +544,9 @@ impl ServerStore {
         Ok(())
     }
 
-    /// The synchronous adapter: the same three stages with no detach between them. Every caller
-    /// that cannot release custody, and every existing test, takes this path.
+    /// The synchronous Closing adapter. A thin wrapper so every existing caller and test keeps its
+    /// exact signature: the same recipe serves S1b and S3, because a Closing mint is re-derived
+    /// from durable state each time it is used.
     #[allow(clippy::too_many_arguments)]
     pub(in crate::store) fn save_studio_closing_overlay_with_io(
         &mut self,
@@ -434,21 +562,65 @@ impl ServerStore {
         ts: u64,
         rng: &mut impl CryptoRngCore,
         budget: &mut EpochStudioBudget,
+        hooks: &mut WriteHooks<'_>,
+    ) -> Result<StudioOverlaySave, AppError> {
+        self.save_studio_overlay_with_io(
+            server,
+            group,
+            target,
+            device,
+            StudioOverlayMint::Closing { close, tenure },
+            StudioOverlayMint::Closing { close, tenure },
+            basis,
+            branch,
+            operation,
+            ts,
+            rng,
+            budget,
+            hooks,
+        )
+    }
+
+    /// The synchronous adapter: the same three stages with no detach between them. Every caller
+    /// that cannot release custody, and every existing test, takes this path.
+    #[allow(clippy::too_many_arguments)]
+    pub(in crate::store) fn save_studio_overlay_with_io(
+        &mut self,
+        server: u64,
+        group: &ServerGroup,
+        target: StudioTarget,
+        device: &MlsDevice,
+        start_mint: StudioOverlayMint<'_>,
+        commit_mint: StudioOverlayMint<'_>,
+        basis: [u8; 32],
+        branch: [u8; 32],
+        operation: DomainOp,
+        ts: u64,
+        rng: &mut impl CryptoRngCore,
+        budget: &mut EpochStudioBudget,
         // `FnMut` so this can lend the same writer to the start visit and then to the commit.
         // A reborrow `&mut F` is itself `FnOnce`, so neither callee's bound changes and no caller
         // has to pass anything twice.
         hooks: &mut WriteHooks<'_>,
     ) -> Result<StudioOverlaySave, AppError> {
-        let capture = match self.start_studio_closing_overlay_with_io(
-            server, group, target, device, close, tenure, basis, branch, operation, ts, rng,
-            budget, hooks,
+        let capture = match self.start_studio_overlay_with_io(
+            server, group, target, device, start_mint, basis, branch, operation, ts, rng, budget,
+            hooks,
         )? {
             StudioOverlayStart::Settled(saved) => return Ok(*saved),
             StudioOverlayStart::Captured(capture) => *capture,
         };
         let plan = capture.plan()?;
-        self.commit_studio_overlay_save(
-            server, group, target, device, close, tenure, plan, rng, budget, hooks,
+        self.commit_studio_overlay_with_io(
+            server,
+            group,
+            target,
+            device,
+            commit_mint,
+            plan,
+            rng,
+            budget,
+            hooks,
         )
         .map(StudioOverlaySave::Local)
     }

@@ -106,3 +106,43 @@ Return PASS for this bounded core implementation or numbered findings with concr
 paths. Native activation, runtime permit/stamp/commit scheduling and full Gate 4 acceptance
 remain separate; no native overlay Save is enabled by this checkpoint.
 ```
+
+## Review verdict (2026-10-06): bounded PASS, two medium test-coverage findings open
+
+Independent adversarial review of exactly `8190dc46b885f6b61efe9d84c8a1675fb041f823` to
+`e65bfd89acecd4e660edb0560410e1d02cec5e21`, run with the preamble in
+`GATE4-REVIEW-PREAMBLES.md` and the common reviewer contract. Reviewer: an Opus agent, read-only,
+in its own detached worktree at the head SHA.
+
+**Verdict: PASS for the bounded core handoff preparation and signing split (production code).**
+No blocker or high finding, and no production correction required for the PASS. Not Gate 4
+acceptance.
+
+**What the reviewer executed**: the five core `studio_handoff_preparation` tests (5 passed); the
+committed signing mutation harness, with both mutants (`mls`, `owner`) failing at their named
+assertions with exactly one test executed each, byte-exact restoration and restored passes; and two
+probe mutants of its own (below). **Not executed by the reviewer**: the app crate's 25 handoff
+tests, both 256-operation fixtures, the ten store mutants, app Clippy, fmt, the ambient gate and
+cargo deny. Those were assessed from CI run 34981381873 (`prepared-signing` and `handoff` jobs),
+after the reviewer verified that the run's merge checkout is tree-equivalent to `e65bfd8` under
+`crates/` and `.github/`, apart from an unrelated jukebox fixture.
+
+**Verified sound**: opaque authority (private, not `Clone`, redacted `Debug`; `check_live` at capture
+and before every signature: device id and key, roster key, MLS epoch, tenure, `verify_current_owner`);
+actual source binding (`check_overlay_successor`); envelope, order and timestamp preservation against
+the ordinary-edit oracle for both kinds; exactly one `sign_domain` per call; no signed-prefix
+escape; complete final assembly; the store's Prepared -> whole Source -> Completed, source-required
+metadata and reference fences unchanged.
+
+| id | severity | finding | status |
+|---|---|---|---|
+| SIGN-TEST-001 | MEDIUM, test coverage | Pre-sign typed and aggregate admission is unreached by any test: `local_policy` (`epoch/handoff/preparation.rs:39`), per-operation `recovery::preflight` (`:69`), the probe gate's `admit_local` (`:83-91`) and the manifest framing probe (`overlay/handoff/preparation.rs:115-121`). One reviewer mutant disabled all four and every core test passed. Line 39 is the handoff path's only editor-cap check, and it is reachable through a vault-decoded branch, which is how the 256-operation fixture builds one. No handoff test has a non-owner author | **open**: regression driving a vault-decoded over-cap branch to its exact `EpochBound`, a positive non-owner-author handoff, and isolated mutants for `:39` and `:83`; then re-review |
+| SIGN-TEST-002 | MEDIUM, test coverage | Nothing pins the binding between the captured authority and the metadata's receipt (`overlay/handoff/preparation.rs:106`). Replacing the comparison with `false` passed every core test. Without it, authority captured for receipt RA could sign a branch prepared against RB from an earlier tenure of the same owner key (A -> B -> A) | **open**: regression capturing authority from one state and preparing a second with a different receipt (`rejoining_owner`), asserting `EpochScope` from `prepare_handoff_detached` specifically, plus an isolated mutant; then re-review |
+| SIGN-PERF-001 | LOW, production | The compatibility adapter restores the private copy before the cheap pristine check, so a refused `handoff_studio_overlay` against a successor with progress pays one extra full restore under custody, and it clones the ledger and metadata twice | follow-up: run `check_overlay_successor`, or a cheap op-count/phase/opening check, before `copy_handoff_source`. Not reachable from native today |
+| SIGN-DESIGN-001 | LOW, design | Authority binds at receipt level (target, author, receipt), not the branch fingerprint; the tenure equality in `check_live` is implied by the receipt check | note; binding `active.basis()` at capture would make provenance exact rather than relying on runtime stamps |
+
+Residual risks recorded by the reviewer: `finish` does not re-check live authority, so the runtime
+must re-check before commit; strict MLS-epoch equality means membership churn can keep a large batch
+from completing; batch plaintext is not zeroized on drop (consistent with `StudioEpoch`); the
+per-call work count is the only measurement. The reviewer also observed that both medium gaps
+appear to persist at the current branch head.
