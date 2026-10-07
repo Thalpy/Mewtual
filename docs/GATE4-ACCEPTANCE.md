@@ -9,8 +9,8 @@ status documents and in Git history; they do not override this matrix.
 
 | Item | Exact state |
 |---|---|
-| Shared baseline | `gate4-agent1-runtime` at `f9b2aec52482b393863279fb584567fc509c9eb6` |
-| Runtime-accounting candidate | PR #35 / `gate4-runtime-completion`, reconciled against exact base `f9b2aec5...`; preserves original reviewed history through `3ab445e7...` and adds the missing Unconfirmed quota/accounting and request-correlation corrections to the newer baseline implementations |
+| Shared baseline | `gate4-agent1-runtime` at `9c63bd6eaa4bbf4f22b1f3bcd6b0fdee20ae45aa` |
+| Runtime-accounting candidate | PR #35 / `gate4-runtime-completion`, reconciled against exact base `9c63bd6e...`; preserves original reviewed history through `3ab445e7...` and adds the missing Unconfirmed quota/accounting and request-correlation corrections to the newer baseline implementations |
 | Archived-tenure integration | PR #34 is merged; its archived Observed-tenure consumer and reviewed Registry B0-before-Fault ordering are in the shared baseline |
 | Verified repair history | Historical PR #32 checkpoint `87629d6b72992254911a8e44f698d535bb5d7904`; incorporated through merged PR #33 |
 | Documentation history | Historical PR #31 checkpoint `f0af61c9b1247fa955300ac50545074e18e9b302`; incorporated through merged PR #33 |

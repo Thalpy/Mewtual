@@ -2,7 +2,7 @@
 
 Current checkpoint: 2026-10-07. PR #35 is being reconciled on
 `gate4-runtime-completion` against `gate4-agent1-runtime` at
-`f9b2aec52482b393863279fb584567fc509c9eb6`. Gate 4 remains incomplete and Gate 5 remains closed.
+`9c63bd6eaa4bbf4f22b1f3bcd6b0fdee20ae45aa`. Gate 4 remains incomplete and Gate 5 remains closed.
 
 The detailed live ledger is [GATE4-ACCEPTANCE](GATE4-ACCEPTANCE.md). This document records the
 integration history, current ownership boundaries and the single remaining execution sequence.
@@ -67,11 +67,11 @@ The reconciled exact head still requires CI and a bounded integration review bef
 
 | Item | State |
 |---|---|
-| Shared integration baseline | `gate4-agent1-runtime` at `f9b2aec52482b393863279fb584567fc509c9eb6` |
+| Shared integration baseline | `gate4-agent1-runtime` at `9c63bd6eaa4bbf4f22b1f3bcd6b0fdee20ae45aa` |
 | Repair candidate | Historical PR #32 checkpoint `87629d6b72992254911a8e44f698d535bb5d7904`; its reviewed ancestry is in merged PR #33 |
 | Documentation checkpoint | Historical PR #31 checkpoint `f0af61c9b1247fa955300ac50545074e18e9b302`; its documentation ancestry is in merged PR #33 |
 | Archived-tenure branch | PR #34 merged; `gate4-finalization` is historical at `7f80815e...` |
-| Runtime completion branch | PR #35, `gate4-runtime-completion`; original implementation `eef69729...` plus separately identifiable review response `6aee00046...`, now reconciled with exact base `f9b2aec5...` |
+| Runtime completion branch | PR #35, `gate4-runtime-completion`; original implementation `eef69729...` plus separately identifiable review response `6aee00046...`, now reconciled with exact base `9c63bd6e...` |
 | Agent 3 source | `gate4-agent3-repair` at `15b715a10704a8dafc2cccef65854d4d45ad55ca`; preserved, not rewritten |
 
 PR #28 remains the Agent 3 source record. PR #32 was its first integrated successor; merged PR #33
@@ -82,7 +82,7 @@ historical source checkpoints, not additional merge instructions.
 ## Historical ownership checkpoint
 
 The agent-by-agent lists below record PR #35's original 2026-10-06 checkpoint. Later Agent 1 and
-Agent 2 commits already on `f9b2aec5...` supersede several “still required” entries; their own
+Agent 1/2 commits already on `9c63bd6e...` supersede several “still required” entries; their own
 status documents and `GATE4-ACCEPTANCE.md` are authoritative for current ownership. They are kept
 here as integration history, not as a live gap list.
 

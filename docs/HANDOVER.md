@@ -11,7 +11,7 @@ and ranks the live hazards in that path.
 ## Status (latest entry: 2026-10-07)
 
 - **Gate 4 PR #35 reconciliation (2026-10-07).** The candidate is resolved against
-  `gate4-agent1-runtime` at `f9b2aec52482b393863279fb584567fc509c9eb6`, retaining the newer
+  `gate4-agent1-runtime` at `9c63bd6eaa4bbf4f22b1f3bcd6b0fdee20ae45aa`, retaining the newer
   generalized Flow S, actor Save, 8.6 reconciliation, restart coverage and non-Closing handoff
   exclusion. It adds the remaining 3-live-Unconfirmed-branches/server-group and 8 MiB physical
   Intents/vault rails, reconstructs them from authenticated inventory, updates them only after a
