@@ -80,6 +80,22 @@ impl EpochStudioBudget {
     pub fn usage(&self) -> Footprint {
         self.storage.usage()
     }
+    /// Test-only: occupy design 8.3's Unconfirmed rails; see the intent budget's own hook.
+    #[cfg(test)]
+    pub(crate) fn occupy_unconfirmed_rails_for_test(
+        &mut self,
+        server: u64,
+        branches: u8,
+        room: u64,
+    ) {
+        self.intents
+            .occupy_unconfirmed_for_test(server, branches, room);
+    }
+    /// Test-only: the Unconfirmed tally this budget holds, as (server, bytes) per record.
+    #[cfg(test)]
+    pub(crate) fn unconfirmed_tally_for_test(&self) -> Vec<(u64, u64)> {
+        self.intents.unconfirmed_for_test()
+    }
     /// Reports uncertain accounting, not whether a newer mint superseded this wrapper. Every
     /// mutation independently checks the store's live generation before spending any bytes.
     pub fn requires_reconciliation(&self) -> bool {

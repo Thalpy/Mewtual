@@ -497,6 +497,20 @@ impl ServerStore {
             }
         };
         drop(state);
+        // S1b, design 8.3's per-server and vault-wide rails for a draft made on a preview, from
+        // the budget entered in this call. Before the media half, by the rule for anything that
+        // cannot succeed: a refused rail has promoted and held no pixels. The bytes are the
+        // record's as it stands. A Save only grows it, so this is an early subset of S3's check,
+        // which runs again at the exact size the commit would write.
+        if matches!(
+            fresh.as_basis(),
+            catcoms_replication::studio::StudioOverlayBasis::Unconfirmed(_)
+        ) {
+            let scope = super::super::epoch_intents::scope_bytes(server, &logical)?;
+            let id = *blake3::hash(&scope).as_bytes();
+            let current = budget.intents.record_bytes(id).unwrap_or(0);
+            budget.intents.admit_unconfirmed(server, id, current)?;
+        }
         // S1b, the media half, now that this request is unaccepted, authorized and admitted to a
         // branch: validate and promote the referenced pixels into the durable namespace, then take
         // the job-owned hold. The intent, the frame facts and the hold are minted as one value

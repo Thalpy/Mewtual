@@ -283,11 +283,13 @@ fn an_unconfirmed_branch_keeps_its_identity_across_a_reload() {
     }
 }
 
-/// Review (ii) change 4: admission takes its provenance from the basis, and a label that disagrees
-/// is refused in BOTH directions. The dangerous one is an Unconfirmed base labelled Closing, which
-/// the handoff guard (keyed on the label) would otherwise let through to signing.
+/// Review (ii) change 4: admission takes its provenance from the basis, and from nothing else. The
+/// dangerous mislabel is an Unconfirmed base recorded as Closing, which the handoff guard (keyed on
+/// the label) would let through to signing. Admission used to take a label as well, and refused one
+/// that disagreed with the basis in either direction. That argument is gone, so the disagreement can
+/// no longer be expressed. What is left to pin is that each basis yields its own provenance.
 #[test]
-fn admission_refuses_a_basis_under_the_other_provenance() {
+fn admission_takes_its_provenance_from_the_basis() {
     let mut f = Fixture::new(true);
     let b = bases(&mut f);
     let owner = f.owner.device_id();
@@ -310,28 +312,19 @@ fn admission_refuses_a_basis_under_the_other_provenance() {
         .unwrap();
     let next = StudioOverlayAdmission::New { generation: 2 };
 
-    assert!(matches!(
-        vacant.new_admitted(&unconfirmed, next, StudioOverlayProvenance::Closing),
-        Err(ReplError::IntentConflict)
-    ));
-    assert!(matches!(
-        vacant.new_admitted(&b.closing, next, unconfirmed.provenance()),
-        Err(ReplError::IntentConflict)
-    ));
-    // Each under its own label is admitted, so the refusals are the label check and nothing else.
-    assert_eq!(
-        vacant
-            .new_admitted(&unconfirmed, next, unconfirmed.provenance())
-            .unwrap()
-            .provenance(),
-        unconfirmed.provenance()
+    let admitted = vacant.new_admitted(&unconfirmed, next).unwrap();
+    assert!(
+        matches!(
+            admitted.provenance(),
+            StudioOverlayProvenance::Unconfirmed { .. }
+        ),
+        "a branch opened on a preview's basis is recorded as Unconfirmed"
     );
+    assert_eq!(admitted.provenance(), unconfirmed.provenance());
     assert_eq!(
-        vacant
-            .new_admitted(&b.closing, next, StudioOverlayProvenance::Closing)
-            .unwrap()
-            .provenance(),
-        StudioOverlayProvenance::Closing
+        vacant.new_admitted(&b.closing, next).unwrap().provenance(),
+        StudioOverlayProvenance::Closing,
+        "a branch opened on a Closing basis is recorded as Closing"
     );
 }
 
@@ -392,11 +385,7 @@ fn a_generation_two_preview_record_relabelled_closing_is_refused() {
     let op = f.domain(body);
     let id = revived.prepare(owner, op).unwrap();
     let mut g2 = transferred
-        .new_admitted(
-            &preview,
-            StudioOverlayAdmission::New { generation: 2 },
-            preview.provenance(),
-        )
+        .new_admitted(&preview, StudioOverlayAdmission::New { generation: 2 })
         .unwrap();
     g2.append(&preview, &revived, id, 900)
         .expect("precondition: the generation-2 preview branch accepts its first Save");
@@ -494,11 +483,7 @@ fn an_unconfirmed_branch_archives_and_disposes_under_its_own_basis() {
     ));
     assert_eq!(
         after
-            .new_admitted(
-                &b.closing,
-                StudioOverlayAdmission::New { generation: 2 },
-                StudioOverlayProvenance::Closing
-            )
+            .new_admitted(&b.closing, StudioOverlayAdmission::New { generation: 2 })
             .unwrap()
             .provenance(),
         StudioOverlayProvenance::Closing

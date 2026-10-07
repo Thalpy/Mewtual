@@ -327,9 +327,7 @@ impl StudioOverlayCapture {
                 }
                 // The provenance argument is the basis's own, so it agrees by construction; it
                 // used to be a hard-coded `Closing` that nothing tied to the basis.
-                state
-                    .new_admitted(basis, *admission, basis.provenance())
-                    .map_err(invalid)
+                state.new_admitted(basis, *admission).map_err(invalid)
             }
             (OverlayBranch::Admitted(admission), None) => {
                 let basis = self.basis.as_basis();
@@ -770,6 +768,19 @@ impl ServerStore {
             return Err(basis_changed(&fresh));
         }
         drop(fresh);
+        // S3, design 8.3's per-server and vault-wide rails, checked again at the exact size the
+        // write below would give the record, from the budget entered in this call. Before the pixel
+        // check, the holds and the write, so a refusal writes nothing and holds nothing.
+        if matches!(
+            state.live_overlay_provenance(),
+            Some(StudioOverlayProvenance::Unconfirmed { .. })
+        ) {
+            let scope = super::super::epoch_intents::scope_bytes(server, &document)?;
+            let next = super::super::epoch_intents::prepared_intent_bytes(&state, &scope)?;
+            budget
+                .intents
+                .admit_unconfirmed(server, *blake3::hash(&scope).as_bytes(), next)?;
+        }
         // S3: the referenced pixels must still be physically present. The transient hold is a
         // liveness claim over an address, not proof the bytes survived the detached stage, so
         // this runs before the ordinary holds and before the intent barrier. A missing blob must

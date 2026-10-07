@@ -8,7 +8,32 @@ the protocol- vs honest-client-enforced boundary and the hardening backlog.
 [`MESSAGE-FLOW.md`](MESSAGE-FLOW.md) traces one message end to end (send, gossip, catch-up)
 and ranks the live hazards in that path.
 
-## Status (latest entry: 2026-10-06)
+## Status (latest entry: 2026-10-07)
+
+- **Gate 4 Agent 2: the Unconfirmed aggregate rails, and the parked-plan mutation fix
+  (2026-10-07).**
+  - **Rails:** design 8.3's per-server count (3) and vault-wide bytes (8 MiB, inside the intent
+    ceiling) now exist. The tally sits in `EpochIntentBudget`, built from the inventory's
+    authenticated facts and kept current by `write_prepared_intents`. Flow S checks it at S1b,
+    before media work, and again at S3, at the exact size of the write. Only growth is refused; an
+    exact retry is answered at capacity. There is no typed `StorageRefused`: the refusal is
+    `Invalid` with its own reason. The share is admission policy at Flow S, not a vault invariant.
+    Ordinary edits beside a live branch whose confirmed source is installed grow the counted
+    record unrefused, so the tally can pass 8 MiB. After that, every Unconfirmed Save is refused
+    until headroom returns.
+  - **`new_admitted`:** its redundant `provenance` argument is gone, by agreement with Agent 1.
+  - **Harness:** CI's `lifecycle-mutations` job failed at `abbb6076` on
+    `unconfirmed-save-any-parked-plan`. Its mutant broke a check-then-take pair and panicked at an
+    `expect` before its assertion. It now skips the branch at the caller. Seven `unconfirmed-rail-*`
+    entries were added.
+  - **Still open** (the 2026-10-06 entry's list, less the rails and the selector skip, which
+    Agent 1 landed in `9c63bd6e`):
+    - native registration (Agent 4);
+    - the same-key refusal through a fresh discovery proof;
+    - N-T5 through the receiver loop and with a full recovery journal;
+    - the A' product decision (design 9.6).
+
+    P5 remains false.
 
 - **Gate 4 Agent 2: the Unconfirmed Save through the actor, 8.6 reconciliation, N-T5 and the
   cross-document copy regressions (2026-10-06).** This updates the 2026-10-05 entry's "Unconfirmed Flow S and its app-side

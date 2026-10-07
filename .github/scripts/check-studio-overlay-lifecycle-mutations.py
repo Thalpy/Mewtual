@@ -356,6 +356,73 @@ MUTATIONS = [
         "unconfirmed::an_unconfirmed_branch_accepts_sixty_four_operations_and_refuses_the_sixty_fifth",
         "an Unconfirmed branch past the rail refuses to read",
     ),
+    # --- design 8.3's per-server and vault-wide rails, at Flow S's S1b and S3 ---
+    #
+    # Each rail's comparison, each admission point's call and both sources of the tally on their
+    # own. `&& false` keeps every operand compiled and used under -D warnings.
+    (
+        "unconfirmed-rail-per-server", "catcoms-app", "studio_exchange::tests::provisional::seed::tail::unconfirmed_rails::",
+        "crates/catcoms-app/src/store/epoch_intents.rs",
+        "        if !self.unconfirmed.contains_key(&id) && branches >= MAX_UNCONFIRMED_BRANCHES_PER_SERVER {\n",
+        "        if !self.unconfirmed.contains_key(&id) && branches >= MAX_UNCONFIRMED_BRANCHES_PER_SERVER && false {\n",
+        "studio_unconfirmed_rail_refuses_a_fourth_draft_on_a_server_at_s1b",
+        "expected a refusal at S1b (unconfirmed draft limit reached)",
+    ),
+    (
+        "unconfirmed-rail-vault-share", "catcoms-app", "studio_exchange::tests::provisional::seed::tail::unconfirmed_rails::",
+        "crates/catcoms-app/src/store/epoch_intents.rs",
+        "            .is_none_or(|total| total > MAX_VAULT_UNCONFIRMED_BYTES)\n",
+        "            .is_none_or(|total| total > MAX_VAULT_UNCONFIRMED_BYTES && false)\n",
+        "studio_unconfirmed_rail_lets_a_live_branch_append_and_refuses_growth_past_the_share",
+        "expected a refusal at S3 (unconfirmed draft storage limit reached)",
+    ),
+    # Without S1b's call the count is still caught, but at S3, after the media work S1b exists to
+    # spare. So the expected text is the stage assertion, not a missing refusal.
+    (
+        "unconfirmed-rail-s1b", "catcoms-app", "studio_exchange::tests::provisional::seed::tail::unconfirmed_rails::",
+        "crates/catcoms-app/src/store/epoch_studio/overlay.rs",
+        "            catcoms_replication::studio::StudioOverlayBasis::Unconfirmed(_)\n        ) {\n",
+        "            catcoms_replication::studio::StudioOverlayBasis::Unconfirmed(_)\n        ) && false {\n",
+        "studio_unconfirmed_rail_refuses_a_fourth_draft_on_a_server_at_s1b",
+        "refused at the wrong stage",
+    ),
+    # Without S3's call, a competing draft admitted while this one's plan was detached slips
+    # through: S1b saw room, and nothing checks again.
+    (
+        "unconfirmed-rail-s3", "catcoms-app", "studio_exchange::tests::provisional::seed::tail::unconfirmed_rails::",
+        "crates/catcoms-app/src/store/epoch_studio/overlay_capture.rs",
+        "            Some(StudioOverlayProvenance::Unconfirmed { .. })\n        ) {\n",
+        "            Some(StudioOverlayProvenance::Unconfirmed { .. })\n        ) && false {\n",
+        "studio_unconfirmed_rail_refuses_a_fourth_draft_on_a_server_at_s1b",
+        "expected a refusal at S3 (unconfirmed draft limit reached)",
+    ),
+    (
+        "unconfirmed-rail-tally-follows-write", "catcoms-app", "studio_exchange::tests::provisional::seed::tail::unconfirmed_rails::",
+        "crates/catcoms-app/src/store/epoch_intents.rs",
+        "            intents.unconfirmed.insert(id, (server, next));\n",
+        "            intents.unconfirmed.remove(&id);\n",
+        "studio_unconfirmed_rail_tally_comes_from_the_inventory_and_follows_the_commit",
+        "the commit's budget counts the draft it just wrote, at its written size",
+    ),
+    (
+        "unconfirmed-rail-tally-from-inventory", "catcoms-app", "studio_exchange::tests::provisional::seed::tail::unconfirmed_rails::",
+        "crates/catcoms-app/src/store/epoch_intents.rs",
+        "                    Some(catcoms_replication::studio::StudioOverlayProvenance::Unconfirmed { .. })\n                ) {\n                    unconfirmed.insert(entry.record.id",
+        "                    Some(catcoms_replication::studio::StudioOverlayProvenance::Unconfirmed { .. })\n                ) && false {\n                    unconfirmed.insert(entry.record.id",
+        "studio_unconfirmed_rail_tally_comes_from_the_inventory_and_follows_the_commit",
+        "a fresh budget counts it from the inventory",
+    ),
+    # The writer's other arm: a write that leaves no live Unconfirmed branch (here a disposal)
+    # drops the record. The mutant keeps it, so the disposal's own budget still counts it.
+    (
+        "unconfirmed-rail-tally-drops-ended-branch", "catcoms-app",
+        "studio_exchange::tests::provisional::seed::tail::unconfirmed_rails::",
+        "crates/catcoms-app/src/store/epoch_intents.rs",
+        "        } else {\n            intents.unconfirmed.remove(&id);\n        }\n",
+        "        } else {\n            let _ = intents.unconfirmed.get(&id);\n        }\n",
+        "studio_unconfirmed_rail_tally_follows_ordinary_growth_and_drops_a_disposed_branch",
+        "the disposal's own budget drops the record",
+    ),
     # --- design 8.6 reconciliation (design M21): each half of the predicate on its own ---
     #
     # The fixture's mixed cases differ in exactly one half, so dropping either half fails on that
@@ -408,15 +475,17 @@ MUTATIONS = [
         "studio_actor_unconfirmed_save_never_reports_another_requests_plan_as_its_own",
         "B must not be told A's work was its own",
     ),
-    # Review of `b35e23d2`, HIGH-1: a visit finishes a parked plan of ANY target. The mutant leaves
-    # every parked plan where it is, so a plan parked for another target blocks the visit with
-    # nothing finishing it. Mutated inside the method, so the method stays used under -D warnings.
+    # Review of `b35e23d2`, HIGH-1: a visit finishes a parked plan of ANY target. The mutant skips
+    # the parked-plan branch at the caller, so a plan parked for another target keeps the slot and
+    # nothing finishes it. Mutating the take itself (an earlier form of this entry) broke the
+    # check-then-take pair the branch relies on, and failed at its `expect` rather than at the
+    # assertion (follow-up review of `abbb6076`). `&& false` keeps both calls compiled and used.
     (
         "unconfirmed-save-any-parked-plan", "catcoms-app",
         "studio_exchange::tests::provisional::seed::tail::unconfirmed_actor::",
-        "crates/catcoms-app/src/studio/receiver/catchup.rs",
-        "            .take()\n            .map(|(context, plan, ownership)| (context.target, plan, ownership))\n",
-        "            .take_if(|_| false)\n            .map(|(context, plan, ownership)| (context.target, plan, ownership))\n",
+        "crates/catcoms-app/src/studio/receiver/unconfirmed.rs",
+        "        if self.catchup.has_planned_overlay() {\n",
+        "        if self.catchup.has_planned_overlay() && false {\n",
         "studio_actor_unconfirmed_save_a_parked_plan_never_blocks_another_target",
         "finishing A's plan changed A's document, so its row is refreshed",
     ),
