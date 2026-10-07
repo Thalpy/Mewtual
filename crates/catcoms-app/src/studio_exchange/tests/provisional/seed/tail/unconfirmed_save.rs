@@ -1217,3 +1217,88 @@ async fn unconfirmed_save_refuses_a_basis_for_another_device_or_group_at_s1b() {
     );
     assert_eq!(recorded(&mut p, target), None, "nothing was written");
 }
+
+/// Agent 2's review M1, Agent 1's half: the H1 handoff probe transfers only Closing branches.
+///
+/// An Unconfirmed branch is never transferable (8.5): refused at H1 while no source is installed,
+/// and at H2's provenance guard once one is. Selecting it therefore took a reservation and a
+/// doubling backoff each period, or a capture and a detached worker, for nothing. The probe must
+/// read it, memoise it as having nothing to transfer, start no job and hold nothing back, both
+/// before and after a confirmed source arrives.
+#[tokio::test]
+async fn the_handoff_probe_leaves_an_unconfirmed_branch_alone() {
+    let target = target();
+    let mut p = preview_pair(target).await;
+    // The provider's own edit, so it holds a source it can later serve to Bob (as in
+    // `unconfirmed_save_exact_retry_is_answered_beside_a_newly_received_source`).
+    p.save(&title(0x40, "confirmed elsewhere"));
+    let prepared = complete_preview(&mut p).await;
+    let basis = mint(&p, &prepared).unwrap();
+    let ticket = ticket(&mut p, target, &basis);
+    let operation = draft_op(&p, target, 0x41, "a draft on a preview");
+    local(save(&mut p, target, &prepared, ticket, operation).unwrap());
+    assert!(
+        matches!(
+            recorded(&mut p, target),
+            Some((Some(StudioOverlayProvenance::Unconfirmed { .. }), _))
+        ),
+        "precondition: this member's live branch is Unconfirmed"
+    );
+
+    // A receiver watching the document, as the saving actor's is, and one probe as a background
+    // turn runs it. Whole visits would also start catch-up fetches from Alice, which this pair
+    // does not serve, and which the probe does not need.
+    let mut receiver = crate::studio::StudioReceiver::default();
+    receiver.inject_overlay_pool_for_test(4);
+    receiver
+        .run(
+            &mut p.bob,
+            &mut p.b_store,
+            SERVER,
+            Some(StudioRequest::Read { target }),
+        )
+        .unwrap();
+    let probe = |p: &mut Pair, receiver: &mut crate::studio::StudioReceiver| {
+        receiver.handoff_probe_for_test(&mut p.bob, &mut p.b_store, SERVER);
+        let now = p.clock.monotonic_ms();
+        assert!(
+            !receiver.handoff_held_for_test(target, now),
+            "the probe selected an Unconfirmed branch and backed the document off"
+        );
+        assert!(
+            !receiver.handoff_has_job_for_test(),
+            "the probe started a handoff of an Unconfirmed branch"
+        );
+        assert!(
+            receiver.handoff_quiet_for_test(&p.b_store, target),
+            "the probe never recorded the Unconfirmed branch as having nothing to transfer"
+        );
+    };
+    probe(&mut p, &mut receiver);
+
+    // A confirmed source arrives (a Studio write, which does not rotate the intent generation).
+    // The branch is still Unconfirmed, and a fresh receiver, which has no memo to rely on, must
+    // read it again and leave it alone in this state too. The receiver's own watch replaced the
+    // pair's page watch, so that is re-established for the receive first.
+    drop(receiver);
+    p.watch = p
+        .bob
+        .watch_studio_epoch(&p.b_store, SERVER, target)
+        .unwrap();
+    receive_source(&mut p, target).await;
+    assert!(matches!(
+        recorded(&mut p, target),
+        Some((Some(StudioOverlayProvenance::Unconfirmed { .. }), _))
+    ));
+    let mut receiver = crate::studio::StudioReceiver::default();
+    receiver.inject_overlay_pool_for_test(4);
+    receiver
+        .run(
+            &mut p.bob,
+            &mut p.b_store,
+            SERVER,
+            Some(StudioRequest::Read { target }),
+        )
+        .unwrap();
+    probe(&mut p, &mut receiver);
+}

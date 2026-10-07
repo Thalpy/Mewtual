@@ -398,6 +398,36 @@ impl HandoffRuntime {
 }
 
 impl StudioReceiver {
+    /// Whether the H1 probe is holding `target` back with a per-target backoff.
+    #[cfg(test)]
+    pub(crate) fn handoff_held_for_test(&self, target: StudioTarget, now: u64) -> bool {
+        self.handoff.held(target, now)
+    }
+
+    /// Whether the H1 probe has read `target` and memoised it as having nothing to transfer.
+    #[cfg(test)]
+    pub(crate) fn handoff_quiet_for_test(&self, store: &ServerStore, target: StudioTarget) -> bool {
+        self.handoff.is_quiet(&store.intent_generation(), target)
+    }
+
+    /// Whether a handoff job exists at any stage.
+    #[cfg(test)]
+    pub(crate) fn handoff_has_job_for_test(&self) -> bool {
+        self.handoff.job.is_some()
+    }
+
+    /// One H1 probe, exactly as a background turn runs it, without the catch-up and network work
+    /// a whole visit of a multi-member test would also start.
+    #[cfg(test)]
+    pub(crate) fn handoff_probe_for_test<T: MeshTransport + 'static, R: CryptoRngCore>(
+        &mut self,
+        server: &mut Server<T, R>,
+        store: &mut ServerStore,
+        id: u64,
+    ) {
+        self.handoff_probe(server, store, id);
+    }
+
     /// Abandon a job whose authority has moved, at **any** stage.
     ///
     /// A job's `StudioHandoffAuthority` pins **both** the owner tenure and the MLS epoch it was
@@ -530,10 +560,25 @@ impl StudioReceiver {
             let Ok(logical) = target.document(&group) else {
                 continue;
             };
-            // Structural: the probe needs the branch's author and basis, never its projection.
+            // Structural: the probe needs the branch's author, kind and basis, never its projection.
+            //
+            // Only a Closing branch is transferable. An Unconfirmed one (a draft over a preview,
+            // design 8) never is (8.5): it is refused at H1 while no source is installed, and at
+            // H2's provenance guard once one is, after a capture and a detached worker. Selecting
+            // it therefore cost a reservation and a doubling backoff each period, or worse, for
+            // nothing (Agent 2's review M1). It is "nothing to transfer", memoised quiet like any
+            // other such target. A branch's provenance never changes during its life, and the
+            // only way to a transferable branch on that document is a disposal and then a Closing
+            // Save, both Intents writes that rotate the generation and so make the memo stale.
             match store.load_epoch_intents_structural(id, &logical) {
                 Ok(state) => match state.handoff_metadata().and_then(|m| m.overlay()) {
-                    Some(overlay) if overlay.author() == device => {
+                    Some(overlay)
+                        if overlay.author() == device
+                            && state.live_overlay_provenance()
+                                == Some(
+                                    catcoms_replication::studio::StudioOverlayProvenance::Closing,
+                                ) =>
+                    {
                         found = Some((target, overlay.basis()));
                         break;
                     }

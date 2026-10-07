@@ -631,7 +631,10 @@ consequences that matter:
 Admission and the shared permit are acquired before the first bounded read in both flows, and are
 released immediately when the probe or classification finds no work to schedule. A target with no
 overlay is memoised in `no_overlay` against the store's `intent_generation`, so a quiescent vault is
-not re-probed each turn.
+not re-probed each turn. So is a target whose live branch is another device's or is Unconfirmed:
+an Unconfirmed branch is never transferable (8.5 of Agent 2's design), its provenance never
+changes during its life, and a transferable branch on that document needs a disposal and a
+Closing Save, both Intents writes that rotate the token (Agent 2's review M1).
 
 ### 7.3 Scheduling
 
