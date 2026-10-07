@@ -4510,6 +4510,19 @@ mutation-harness anchor moved.
 the final run; the first cut's run at `c6f7fea0` passed 838 app and 344 replication library tests
 with every integration binary green, and frontend `npm test` passed 1282 of 1282.
 
+## Agent 2's asks after Flow S (2026-10-07)
+
+From Agent 2's reply to the Flow S note. Each row says where it stands.
+
+| ask | state |
+|---|---|
+| M1: the H1 handoff probe must skip non-Closing branches | **done**: the probe selects only a live branch this device authored whose `live_overlay_provenance()` is `Closing`; an Unconfirmed one is memoised quiet (design 7.2), so it takes no reservation, no backoff, no capture. Regression `the_handoff_probe_leaves_an_unconfirmed_branch_alone`, before and after a confirmed source arrives, with the mutation (any provenance) executed and failing. Reviewed (Opus, static): no blocker, high or medium; the review's LOWs (comment precision, the installed-source variant, `live_overlay_provenance`, 7.2) are taken. Still untested: an Unconfirmed target ahead of an own Closing one on the same rail, which needs a member with tenure on that fixture |
+| `new_admitted`'s redundant `provenance` parameter | **waiting**: about twenty call sites are in Agent 2's owner tests, one of which pins a contract the removal makes inexpressible; done together once those files are free |
+| where the 8.3 per-server and vault-wide rails are called | **answered**: Agent 2 adds the calls at S1b (after the branch half, before media admission) and S3 (after the fresh mint's fingerprint check, before pixels, holds and the write), from the budget entered in that call |
+| `save_overlay` reports another request's plan as `Saved`, and only takes its own target's plan | **agreed, waiting**: mirrors Agent 2's Unconfirmed fix (`Busy`, never `Saved`; take any parked plan); in `studio/receiver.rs`, so it lands with C-3 step 2 |
+| the `cfg_attr(not(test), allow(dead_code))` markers | to remove with the `new_admitted` change |
+| L4b lazy minting | deferred; the API is mine |
+
 ## G4-A1-CORE: the core signing review, and its two test findings
 
 The SHA-pinned review of `8190dc4..e65bfd8` returned a **bounded PASS for the production code**
