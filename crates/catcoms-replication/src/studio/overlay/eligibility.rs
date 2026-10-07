@@ -5,6 +5,34 @@
 //! basis, signs, or changes a record, and a `Transferable` answer is a description of the present,
 //! not a promise: the handoff re-derives everything under custody when it actually runs.
 
+/// Design 8.6: how an Unconfirmed branch's base relates to what is installed here now.
+///
+/// Derived on read from durable state, and never written, so reconciliation has no crash window.
+/// A description, not a promotion: `BaseConfirmed` says two hashes agree. It says nothing about
+/// the preview's provider ever having been owner, and confers no tenure and no signing authority.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StudioOverlayUnconfirmedState {
+    /// No installed source for the document yet.
+    AwaitingSource,
+    /// The installed source is the checkpoint this branch was based on. Its document id equals the
+    /// branch's base document id, AND its opening checkpoint's seed change hash equals the branch's.
+    /// Copy into that source becomes available once it is Open.
+    BaseConfirmed,
+    /// An installed source exists and is not that checkpoint: another checkpoint, a later epoch,
+    /// one whose seed differs, **or an earlier epoch**. The last is not supersession in the plain
+    /// sense: catch-up can install the epoch the preview's receipt closes before the owner's close
+    /// lands, and then this reads `BaseSuperseded` until the successor arrives and it reads
+    /// `BaseConfirmed`. Design 8.6 names three states, so the label stays. Whether to show that
+    /// interval differently is the app's decision (review of `f3ce1758`, LOW-2). Copy is still
+    /// offered, against the actual current projection, under an honest label.
+    BaseSuperseded,
+    /// An installed source exists but could not be read, so neither "awaiting" nor either
+    /// comparison is true. Never produced by the vault reader, which errors instead; the app
+    /// reports it rather than fail the read. The same choice as P2's `SourceUnreadable`: a branch
+    /// the user needs to export or archive must not hide behind an error about another record.
+    SourceUnreadable,
+}
+
 /// What a user can do about a retained draft right now.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum StudioOverlayEligibility {
@@ -80,6 +108,8 @@ pub enum StudioOverlayManualReason {
     /// it holds a partial or conflicting set of the branch's signed operations, or it is not the
     /// Prepared epoch's document at all. The resolution can neither complete it nor return it to
     /// active. Permanent: no automatic path resolves it. Disposal is refused too, since a
-    /// transfer hold may be an acceptance in flight; export, archive and copy remain.
+    /// transfer hold may be an acceptance in flight; export and archive remain. Copy remains only
+    /// into another document: the branch's own document is under the hold, and the app refuses a
+    /// copy into a held destination.
     PreparedStuck,
 }

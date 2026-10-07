@@ -343,6 +343,482 @@ fn studio_handoff_preparation_source_owner_must_match_verified_authority() {
     }
 }
 
+/// SIGN-TEST-002 (core signing review). The captured authority is bound to the branch's receipt.
+///
+/// Authority is captured from a branch opened on the first close's receipt R1. A second close
+/// cycle then produces R2, a branch on it, and R2's successor. That branch, its ledger and its
+/// successor are consistent with one another, so `check_overlay_successor` accepts them, and R1
+/// still verifies as the current owner's receipt, so every signing turn's `check_live` would pass
+/// as well. The receipt comparison in `prepare_handoff_detached` is the one thing that refuses.
+/// Without it, a branch prepared against R2 would be signed under authority captured for R1: in an
+/// A -> B -> A tenure, authority from one tenure signing a branch opened in another.
+#[test]
+fn studio_handoff_preparation_refuses_authority_captured_for_another_receipt() {
+    for art in [false, true] {
+        let mut f = Fixture::new(art);
+        let (first, _, _) = branch(&mut f, 1);
+        let r1 = first.overlay().unwrap().receipt().clone();
+        let authority = first.handoff_authority(&f.owner, &f.group, 0).unwrap();
+
+        // A second cycle, from the epoch-1 successor `branch` left installed.
+        f.fill();
+        let decision = f.decide(Some(&r1));
+        let plan = f.plan(&decision);
+        let basis = f
+            .source
+            .prepare_closing_overlay(decision.close(), &f.group, 0)
+            .unwrap();
+        let mut ledger = IntentLedger::new(f.source.document().clone());
+        let mut second = StudioOverlayState::new(&basis);
+        for n in 0..2u64 {
+            let op = f.domain(f.title_body(&format!("second-cycle title {n}")));
+            let id = ledger.prepare(f.owner.device_id(), op).unwrap();
+            second.append(&basis, &ledger, id, 300 + n).unwrap();
+        }
+        f.source = f.source.checkpoint_successor(&plan, &f.group, 0).unwrap();
+        assert_eq!((f.source.epoch(), f.source.op_count()), (2, 0));
+        assert_ne!(
+            second.overlay().unwrap().receipt(),
+            &r1,
+            "precondition: two distinct receipts"
+        );
+        r1.verify_current_owner(&f.group, 0)
+            .expect("precondition: the captured receipt still verifies, so only binding refuses");
+
+        let before = f.source.snapshot().unwrap();
+        let source = f.source.copy_handoff_source(&f.group).unwrap();
+        assert!(
+            matches!(
+                second
+                    .clone()
+                    .prepare_handoff_detached(source, ledger.clone(), authority),
+                Err(ReplError::EpochScope)
+            ),
+            "authority captured for one receipt prepared a branch opened on another"
+        );
+        assert_eq!(f.source.snapshot().unwrap(), before);
+
+        // Positive control: the second branch's own authority prepares and signs it.
+        let mut own = signing(&mut f, &second, &ledger);
+        assert_eq!(own.remaining(), 2);
+        assert!(own.sign_next(&f.owner, &f.group, 0).unwrap());
+    }
+}
+
+/// SIGN-TEST-001 (core signing review). Pre-sign typed admission refuses an over-cap branch.
+///
+/// `local_policy` in `PreparedOverlayChanges::prepare` is the handoff path's only editor-cap check
+/// before signing: `finish` validates typed changes as ingest does, which accepts over-cap content
+/// as deterministic overflow. An honestly appended branch never reaches it over the cap, because
+/// `append` replays under the same policy against the same base. A structurally decoded one can:
+/// the structural decoder checks bounds, scope, ledger membership, sequence, author, envelope and
+/// canonical encoding, and replays nothing. Production's only caller, H2, uses the replaying
+/// decoder, which also refuses this branch, so here the check is defence in depth for any caller
+/// that does not.
+///
+/// So the branch is built honestly to exactly the Index cap of `MAX_INDEX_OBJECTS` (the base holds
+/// one object, the branch adds 63), plus one title edit, and that last entry is then retargeted in
+/// the record's bytes at one more `PutObject`, exactly as the C-1 decoder test retargets one.
+/// Preparation must refuse with `EpochBound` before any signature. The unspliced record is the
+/// positive control.
+#[test]
+fn studio_handoff_preparation_refuses_a_vault_decoded_branch_over_the_local_cap() {
+    let mut f = Fixture::new(false);
+    f.fill();
+    let decision = f.decide(None);
+    let plan = f.plan(&decision);
+    let basis = f
+        .source
+        .prepare_closing_overlay(decision.close(), &f.group, 0)
+        .unwrap();
+    let mut ledger = IntentLedger::new(f.source.document().clone());
+    let mut state = StudioOverlayState::new(&basis);
+    let put = |f: &mut Fixture, n: u8| {
+        f.domain(
+            IndexOp::PutObject {
+                object: [n; 16],
+                kind: StudioKind::Flipnote,
+                title: format!("object {n}"),
+                created_by: f.owner.device_id(),
+                ts: 100,
+                expiry: StudioExpiry::Never,
+            }
+            .encode()
+            .unwrap(),
+        )
+    };
+    // Object ids 2..=64; the base's own object is [1; 16].
+    for n in 2..=64u8 {
+        let op = put(&mut f, n);
+        let id = ledger.prepare(f.owner.device_id(), op).unwrap();
+        state.append(&basis, &ledger, id, 200).unwrap();
+    }
+    let edit = f.domain(f.title_body("the last honest entry"));
+    let edit_id = ledger.prepare(f.owner.device_id(), edit.clone()).unwrap();
+    state.append(&basis, &ledger, edit_id, 201).unwrap();
+    let over = put(&mut f, 65);
+    let over_id = ledger.prepare(f.owner.device_id(), over.clone()).unwrap();
+    assert!(
+        matches!(
+            state.clone().append(&basis, &ledger, over_id, 202),
+            Err(ReplError::EpochBound)
+        ),
+        "precondition: the 65th object is over the cap on the ordinary path"
+    );
+    f.source = f.source.checkpoint_successor(&plan, &f.group, 0).unwrap();
+
+    // Retarget the last entry (the title edit) at the over-cap PutObject: id, then envelope.
+    let canonical = state.encode_vault(&ledger).unwrap();
+    let at = canonical
+        .windows(32)
+        .position(|w| w == edit_id)
+        .expect("the title edit's entry id is in the record");
+    assert_eq!(
+        canonical.windows(32).filter(|w| *w == edit_id).count(),
+        1,
+        "the entry id must be unambiguous in the record"
+    );
+    let envelope = |op: &DomainOp| {
+        let mut hash = blake3::Hasher::new_derive_key("catcoms/studio-overlay-envelope/v1");
+        hash.update(f.owner.device_id().as_bytes());
+        hash.update(&op.encode().unwrap());
+        *hash.finalize().as_bytes()
+    };
+    assert_eq!(
+        &canonical[at + 36..at + 68],
+        &envelope(&edit),
+        "entry layout: the envelope follows the id after its length prefix"
+    );
+    let mut spliced = canonical.clone();
+    spliced[at..at + 32].copy_from_slice(&over_id);
+    spliced[at + 36..at + 68].copy_from_slice(&envelope(&over));
+    let decoded = StudioOverlayState::decode_vault_structural(&spliced, &ledger)
+        .expect("a structurally consistent record decodes without replay");
+    assert!(
+        matches!(
+            StudioOverlayState::decode_vault(&spliced, &ledger),
+            Err(ReplError::EpochBound)
+        ),
+        "the replaying decoder refuses it; only the structural route reaches the signer"
+    );
+
+    let before = f.source.snapshot().unwrap();
+    let authority = decoded.handoff_authority(&f.owner, &f.group, 0).unwrap();
+    let source = f.source.copy_handoff_source(&f.group).unwrap();
+    assert!(
+        matches!(
+            decoded.prepare_handoff_detached(source, ledger.clone(), authority),
+            Err(ReplError::EpochBound)
+        ),
+        "an over-cap branch reached signing past the local editor cap"
+    );
+    assert_eq!(f.source.snapshot().unwrap(), before);
+
+    // Positive control: the honest record, decoded the same way, prepares in full.
+    let honest = StudioOverlayState::decode_vault_structural(&canonical, &ledger).unwrap();
+    assert_eq!(signing(&mut f, &honest, &ledger).remaining(), 64);
+}
+
+/// SIGN-TEST-001, the aggregate half. Pre-sign gate admission refuses an honest branch whose signed
+/// form would not fit the successor epoch, before any signature.
+///
+/// Reachable by valid input, which is why it needs a test of its own: a title may be up to
+/// `MAX_DOMAIN_OP_BYTES`, and the per-document intent budget is `MAX_INTENT_BYTES_PER_DOCUMENT`,
+/// so dozens of near-maximal title edits append honestly. Nothing on the append path consults
+/// the epoch gate, yet each signed form carries the title twice (domain op and Automerge change),
+/// so together they exceed `MAX_EPOCH_BYTES` in the pristine successor. The titles are
+/// incompressible so the Automerge delta cannot shrink below the gate.
+///
+/// The refusal must come from `prepare_handoff_detached` itself. Without the probe the batch would
+/// sign every operation and only then be refused by `finish`'s own gate, having spent every turn.
+///
+/// Assembled as the app's 256-operation fixture assembles its branch, because appending this many
+/// near-maximal operations one at a time replays the whole growing branch on every append, which
+/// takes many minutes in a debug build. Each entry comes from a one-operation typed append; the
+/// entries are concatenated with consecutive sequences; and the full replaying decoder, which
+/// applies the same per-operation policy `append` does, must accept the result. The last
+/// operation then goes through the real `StudioOverlayState::append`, so the record is the v2
+/// form production writes and the branch is checked by one more complete replay.
+#[test]
+fn studio_handoff_preparation_refuses_an_honest_branch_over_the_successor_gate() {
+    const OPS: usize = 48;
+    let mut f = Fixture::new(false);
+    f.fill();
+    let decision = f.decide(None);
+    let plan = f.plan(&decision);
+    let basis = f
+        .source
+        .prepare_closing_overlay(decision.close(), &f.group, 0)
+        .unwrap();
+    let mut ledger = IntentLedger::new(f.source.document().clone());
+    let author = f.owner.device_id();
+    let ids = big_titles(&mut f, &mut ledger, author, OPS, 1);
+    let state = assembled_branch(&basis, &ledger, &ids, 400);
+    f.source = f.source.checkpoint_successor(&plan, &f.group, 0).unwrap();
+    let before = f.source.snapshot().unwrap();
+    let authority = state.handoff_authority(&f.owner, &f.group, 0).unwrap();
+    let source = f.source.copy_handoff_source(&f.group).unwrap();
+    assert!(
+        matches!(
+            state
+                .clone()
+                .prepare_handoff_detached(source, ledger.clone(), authority),
+            Err(ReplError::EpochBound)
+        ),
+        "a branch over the successor's epoch budget reached signing"
+    );
+    assert_eq!(f.source.snapshot().unwrap(), before);
+}
+
+/// `count` near-maximal title edits by `author`, prepared in `ledger`, returned as intent ids.
+///
+/// Printable, deterministic and incompressible enough that DEFLATE gains little, so each signed
+/// form carries roughly twice the title (domain op and Automerge change). 60 KiB rather than the
+/// full 64: JSON escapes `"` and `\`, which the domain-op bound counts. Asserts the branch is valid
+/// local work, within `MAX_INTENT_BYTES_PER_DOCUMENT`. `tag` keeps different branches' titles
+/// apart deterministically; it is not the author, because device ids are random per run.
+fn big_titles(
+    f: &mut Fixture,
+    ledger: &mut IntentLedger,
+    author: DeviceId,
+    count: usize,
+    tag: u8,
+) -> Vec<[u8; 32]> {
+    let mut total = 0usize;
+    let mut ids = Vec::new();
+    for n in 0..count as u64 {
+        let mut stream = blake3::Hasher::new()
+            .update(&n.to_be_bytes())
+            .update(&[tag])
+            .finalize_xof();
+        let mut raw = vec![0u8; 60 * 1024];
+        stream.fill(&mut raw);
+        let title: String = raw.iter().map(|b| char::from(0x21 + b % 94)).collect();
+        let op = f.domain(f.title_body(&title));
+        assert!(op.encode().unwrap().len() <= crate::epoch::MAX_DOMAIN_OP_BYTES);
+        total += op.encode().unwrap().len();
+        ids.push(ledger.prepare(author, op).unwrap());
+    }
+    assert!(
+        total <= crate::epoch::MAX_INTENT_BYTES_PER_DOCUMENT,
+        "precondition: the branch fits the intent budget, so it is valid local work"
+    );
+    ids
+}
+
+/// An honest branch of `ids`, assembled as the app's 256-operation fixture assembles its branch.
+///
+/// Appending many large operations one at a time replays the whole growing branch on every
+/// append, which takes many minutes in a debug build. Each entry comes from a one-operation typed
+/// append instead; the entries are concatenated with consecutive sequences; the full replaying
+/// decoder, which applies the same per-operation policy `append` does, must accept the result;
+/// and the last operation goes through the real `StudioOverlayState::append`, so the record is the
+/// v2 form production writes and the branch is checked by one more complete replay.
+///
+/// Entry layout as the C-1 test and the app fixture use it: the last 88 bytes of a one-entry
+/// record, with the sequence at 72..80; the prefix ends with the next sequence and the count.
+fn assembled_branch(
+    basis: &crate::studio::StudioClosingOverlayBasis,
+    ledger: &IntentLedger,
+    ids: &[[u8; 32]],
+    ts: u64,
+) -> StudioOverlayState {
+    let ops = ids.len();
+    let mut prefix = Vec::new();
+    let mut entries = Vec::new();
+    for (n, id) in ids[..ops - 1].iter().enumerate() {
+        let mut single = StudioOverlay::new(basis);
+        single.append(basis, ledger, *id, ts + n as u64).unwrap();
+        let bytes = single.encode_vault(ledger).unwrap();
+        let split = bytes.len() - 88;
+        if prefix.is_empty() {
+            prefix.extend_from_slice(&bytes[..split]);
+        }
+        let mut entry = bytes[split..].to_vec();
+        entry[72..80].copy_from_slice(&(n as u64 + 1).to_be_bytes());
+        entries.extend_from_slice(&entry);
+    }
+    let end = prefix.len();
+    prefix[end - 12..end - 4].copy_from_slice(&(ops as u64).to_be_bytes());
+    prefix[end - 4..].copy_from_slice(&((ops - 1) as u32).to_be_bytes());
+    prefix.extend_from_slice(&entries);
+    let mut state = StudioOverlayState::decode_vault(&prefix, ledger)
+        .expect("the replaying decoder accepts every operation under the append policy");
+    state
+        .append(basis, ledger, ids[ops - 1], ts + ops as u64)
+        .unwrap();
+    assert_eq!(state.overlay().unwrap().accepted(), ops);
+    state
+}
+
+/// A second member joins the owner's group, and stays a non-owner.
+fn second_member(f: &mut Fixture) -> (MlsDevice, ServerGroup) {
+    let member = MlsDevice::generate().unwrap();
+    let welcome = f
+        .group
+        .add_member(&f.owner, member.key_package().unwrap())
+        .unwrap()
+        .welcome;
+    let group = ServerGroup::join(&member, &welcome).unwrap();
+    assert_eq!(
+        f.group.designated_committer(),
+        Some(f.owner.device_id()),
+        "precondition: the owner stays the designated committer"
+    );
+    assert_eq!(group.epoch(), f.group.epoch());
+    (member, group)
+}
+
+/// The member's own copy of the owner's current source, restored under the member's group with
+/// the member as the local actor. An approximation of a fully synced member: it skips the
+/// member's own inbound decrypt and admission of each sealed operation and its own seal of the
+/// receipt. The member's successor is NOT copied this way; each test settles and checkpoints the
+/// member's copy itself, so the successor compared against the basis is one the member built.
+fn member_copy(f: &mut Fixture, member: &MlsDevice, group: &ServerGroup) -> StudioEpoch {
+    StudioEpoch::restore(
+        &f.source.snapshot().unwrap(),
+        group,
+        f.source.target,
+        member.device_id(),
+    )
+    .unwrap()
+}
+
+/// SIGN-TEST-001b (core signing review). A positive handoff by a **non-owner** author.
+///
+/// Every other handoff test has author == designated committer, so nothing pinned the split
+/// `check_overlay_successor` makes between the two: the source's actor must be the branch's
+/// author, and the gate's owner must be the receipt's owner. A rule requiring the actor to be the
+/// gate owner would refuse every member's handoff and pass every other test. Here a member
+/// authors a branch on the owner's close and hands it off: preparation, every signing turn and
+/// final assembly succeed, and every signed operation is the member's.
+#[test]
+fn studio_handoff_preparation_signs_a_branch_authored_by_a_non_owner_member() {
+    for art in [false, true] {
+        let mut f = Fixture::new(art);
+        let (member, member_group) = second_member(&mut f);
+        f.fill();
+        let decision = f.decide(None);
+        // Seals the owner's receipt into the owner's source; the member copies that Closing
+        // source and then settles its own copy, as the member's device would.
+        let _owner_plan = f.plan(&decision);
+        let mut closing = member_copy(&mut f, &member, &member_group);
+        let basis = closing
+            .prepare_closing_overlay(decision.close(), &member_group, 0)
+            .unwrap();
+        let mut ledger = IntentLedger::new(f.source.document().clone());
+        let mut state = StudioOverlayState::new(&basis);
+        for n in 0..2u64 {
+            let op = f.domain(f.title_body(&format!("the member's title {n}")));
+            let id = ledger.prepare(member.device_id(), op).unwrap();
+            state.append(&basis, &ledger, id, 500 + n).unwrap();
+        }
+        let member_plan = closing
+            .prepare_settlement(decision.close(), &member_group, 0)
+            .unwrap();
+        let mut successor = closing
+            .checkpoint_successor(&member_plan, &member_group, 0)
+            .unwrap();
+
+        let authority = state.handoff_authority(&member, &member_group, 0).unwrap();
+        let source = successor.copy_handoff_source(&member_group).unwrap();
+        let mut batch = state
+            .clone()
+            .prepare_handoff_detached(source, ledger.clone(), authority)
+            .expect("a member's branch on the owner's close prepares");
+        assert_eq!(batch.remaining(), 2);
+        while batch.sign_next(&member, &member_group, 0).unwrap() {}
+        let (candidate, prepared) = batch.finish().unwrap().into_parts();
+        assert_eq!(candidate.op_count(), 2);
+        assert!(
+            candidate
+                .doc
+                .signed_log()
+                .iter()
+                .all(|op| op.author_device == member.device_id()),
+            "a signed operation is not the member's"
+        );
+        assert_eq!(
+            prepared.evidence(&candidate, &ledger).unwrap(),
+            StudioHandoffEvidence::Complete
+        );
+    }
+}
+
+/// SIGN-TEST-001b, the per-device half. The probe gate charges a non-owner's operations against
+/// the per-device cap (`MAX_DEVICE_BYTES`), which the owner is exempt from.
+///
+/// The same shape of branch, about 1.5 MiB once signed (over the per-device cap, under the epoch
+/// budget), is handed off twice: authored by the owner it signs and assembles; authored by a
+/// member it is refused with `EpochBound` before any signature. Charging the owner the cap would
+/// fail the first leg; exempting everyone would fail the second.
+#[test]
+fn studio_handoff_preparation_charges_only_a_non_owner_the_per_device_cap() {
+    const OPS: usize = 14;
+    // The owner's branch: valid, and it fits the successor.
+    let mut f = Fixture::new(false);
+    f.fill();
+    let decision = f.decide(None);
+    let plan = f.plan(&decision);
+    let basis = f
+        .source
+        .prepare_closing_overlay(decision.close(), &f.group, 0)
+        .unwrap();
+    let mut ledger = IntentLedger::new(f.source.document().clone());
+    let owner = f.owner.device_id();
+    let ids = big_titles(&mut f, &mut ledger, owner, OPS, 2);
+    let state = assembled_branch(&basis, &ledger, &ids, 600);
+    f.source = f.source.checkpoint_successor(&plan, &f.group, 0).unwrap();
+    let authority = state.handoff_authority(&f.owner, &f.group, 0).unwrap();
+    let source = f.source.copy_handoff_source(&f.group).unwrap();
+    let mut batch = state
+        .prepare_handoff_detached(source, ledger.clone(), authority)
+        .expect("the owner is exempt from the per-device cap");
+    while batch.sign_next(&f.owner, &f.group, 0).unwrap() {}
+    let (candidate, _) = batch.finish().unwrap().into_parts();
+    assert_eq!(candidate.op_count(), OPS);
+    let signed: usize = candidate
+        .doc
+        .signed_log()
+        .iter()
+        .map(|op| op.encode().len())
+        .sum();
+    assert!(
+        signed > crate::epoch::MAX_DEVICE_BYTES && signed < crate::epoch::MAX_EPOCH_BYTES,
+        "precondition: the branch sits between the per-device cap and the epoch budget ({signed})"
+    );
+
+    // The same shape, authored by a member: over its per-device cap.
+    let mut f = Fixture::new(false);
+    let (member, member_group) = second_member(&mut f);
+    f.fill();
+    let decision = f.decide(None);
+    let _owner_plan = f.plan(&decision);
+    let mut closing = member_copy(&mut f, &member, &member_group);
+    let basis = closing
+        .prepare_closing_overlay(decision.close(), &member_group, 0)
+        .unwrap();
+    let mut ledger = IntentLedger::new(f.source.document().clone());
+    // The same tag as the owner's leg, so the two branches have the same shape by construction.
+    let ids = big_titles(&mut f, &mut ledger, member.device_id(), OPS, 2);
+    let state = assembled_branch(&basis, &ledger, &ids, 600);
+    let member_plan = closing
+        .prepare_settlement(decision.close(), &member_group, 0)
+        .unwrap();
+    let mut successor = closing
+        .checkpoint_successor(&member_plan, &member_group, 0)
+        .unwrap();
+    let authority = state.handoff_authority(&member, &member_group, 0).unwrap();
+    let source = successor.copy_handoff_source(&member_group).unwrap();
+    assert!(
+        matches!(
+            state.prepare_handoff_detached(source, ledger.clone(), authority),
+            Err(ReplError::EpochBound)
+        ),
+        "a member's branch over its per-device cap reached signing"
+    );
+}
+
 /// C-1. The structural decoder must accept exactly the records the full decoder accepts, produce
 /// the identical state, and keep every check except the ordered typed reconstruction.
 #[test]

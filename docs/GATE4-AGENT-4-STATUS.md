@@ -1,8 +1,8 @@
 # Gate 4 Agent 4 status: integration and completion coordination
 
-Current checkpoint: 2026-10-06. PR #34 is merged into `gate4-agent1-runtime` at
-`c6f7fea0af1392da37e484067a3c8c9131c328a4`. Further work is isolated on
-`gate4-runtime-completion`; Gate 4 remains incomplete and Gate 5 remains closed.
+Current checkpoint: 2026-10-07. PR #35 is being reconciled on
+`gate4-runtime-completion` against `gate4-agent1-runtime` at
+`f9b2aec52482b393863279fb584567fc509c9eb6`. Gate 4 remains incomplete and Gate 5 remains closed.
 
 The detailed live ledger is [GATE4-ACCEPTANCE](GATE4-ACCEPTANCE.md). This document records the
 integration history, current ownership boundaries and the single remaining execution sequence.
@@ -41,10 +41,10 @@ currently isolated pending the detached runtime boundary:
   attempts B0 with full failed/uncertain writer propagation, and only then preserves Fault as a
   hard service refusal. Real explicit/prepared, empty-capacity authority, post-write/reopen and
   no-reconstruction regressions pass. Final re-review has no finding at any severity.
-- On top of merged PR #34, `eef69729ae4b4200a6060b9f91719d44538094e5` implements the next bounded runtime dependency: Flow S now
+- In PR #35's preserved ancestry, `eef69729ae4b4200a6060b9f91719d44538094e5` implemented the next bounded runtime dependency: Flow S now
   carries typed Closing or Unconfirmed bases, and the crate-private awaiting-tenure consumer proves
   source absence, re-enters the current complete preview at S1b/S3, plans detached, enforces the
-  3/server, 8 MiB/vault and 64-op rails, reconstructs those counters from fresh inventory, releases
+  3/server-group, 8 MiB/vault and 64-op rails, reconstructs those counters from fresh inventory, releases
   them after durable disposal, and excludes Unconfirmed history from automatic handoff. Real
   Flipnote preview, expiry/retry, operation-limit, inventory and disposal regressions pass.
 - Review-response commit `6aee00046e35410ba42c9290c0d1f52fd41dd86b` binds each parked
@@ -56,20 +56,22 @@ currently isolated pending the detached runtime boundary:
   separately exercised with a live Unconfirmed branch, although it uses the same guarded writer as
   the real manual-recovery regression.
 
-The new code is still intentionally unavailable to the renderer. P5 is false; native Save and
-repair commands remain unregistered. Merged PR #34 supplies the archived-tenure consumer. The new
-runtime candidate has its bounded implementation/integration review and still needs exact-head
-Linux CI; the detached automatic repair runtime remains absent.
+The newer shared baseline independently contains the generalized Flow S, actor Save, reconciliation,
+restart coverage and handoff exclusion. PR #35's merge resolution therefore keeps those newer
+implementations and adds only the missing 3/server-group and 8 MiB/vault accounting rails plus its
+reviewed request-correlation and off-path-writer corrections. The code is still intentionally
+unavailable to the renderer. P5 is false; native Save and repair commands remain unregistered.
+The reconciled exact head still requires CI and a bounded integration review before merge.
 
 ## Exact branch state
 
 | Item | State |
 |---|---|
-| Shared integration baseline | `gate4-agent1-runtime` at merged PR #34 commit `c6f7fea0af1392da37e484067a3c8c9131c328a4` |
+| Shared integration baseline | `gate4-agent1-runtime` at `f9b2aec52482b393863279fb584567fc509c9eb6` |
 | Repair candidate | Historical PR #32 checkpoint `87629d6b72992254911a8e44f698d535bb5d7904`; its reviewed ancestry is in merged PR #33 |
 | Documentation checkpoint | Historical PR #31 checkpoint `f0af61c9b1247fa955300ac50545074e18e9b302`; its documentation ancestry is in merged PR #33 |
 | Archived-tenure branch | PR #34 merged; `gate4-finalization` is historical at `7f80815e...` |
-| Runtime completion branch | `gate4-runtime-completion`, from exact base `c6f7fea0...`; implementation `eef69729...` plus separately identifiable review response `6aee00046...`, with this documentation checkpoint above them |
+| Runtime completion branch | PR #35, `gate4-runtime-completion`; original implementation `eef69729...` plus separately identifiable review response `6aee00046...`, now reconciled with exact base `f9b2aec5...` |
 | Agent 3 source | `gate4-agent3-repair` at `15b715a10704a8dafc2cccef65854d4d45ad55ca`; preserved, not rewritten |
 
 PR #28 remains the Agent 3 source record. PR #32 was its first integrated successor; merged PR #33
@@ -77,7 +79,12 @@ preserves the same ancestry and adds the structural seam plus the bounded review
 PR #34 adds the historical consumer without rewriting that history. PRs #28, #31 and #32 remain
 historical source checkpoints, not additional merge instructions.
 
-## What each agent actually leaves behind
+## Historical ownership checkpoint
+
+The agent-by-agent lists below record PR #35's original 2026-10-06 checkpoint. Later Agent 1 and
+Agent 2 commits already on `f9b2aec5...` supersede several “still required” entries; their own
+status documents and `GATE4-ACCEPTANCE.md` are authoritative for current ownership. They are kept
+here as integration history, not as a live gap list.
 
 ### Agent 1
 
@@ -148,7 +155,7 @@ Still required: integrate the specialist completions, maintain this ledger, regi
 commands after P5, implement/run the seven combined scenarios, update interface/UI truth and request
 Review 4. Agent 4 must not turn dependency ancestry into an implementation claim.
 
-## Unified completion sequence
+## Historical completion sequence at PR #35's original base
 
 The next execution order is:
 

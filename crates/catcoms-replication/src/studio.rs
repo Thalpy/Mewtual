@@ -37,7 +37,8 @@ pub use overlay::{
     StudioOverlay, StudioOverlayAdmission, StudioOverlayBasis, StudioOverlayDisposal,
     StudioOverlayEligibility, StudioOverlayManualReason, StudioOverlayProvenance,
     StudioOverlayRequestClass, StudioOverlaySave, StudioOverlayState,
-    StudioUnconfirmedOverlayBasis, MAX_STUDIO_DRAFT_ARCHIVE_BYTES, MAX_STUDIO_OVERLAY_OPS,
+    StudioOverlayUnconfirmedState, StudioUnconfirmedOverlayBasis, MAX_STUDIO_DRAFT_ARCHIVE_BYTES,
+    MAX_STUDIO_OVERLAY_OPS, MAX_STUDIO_UNCONFIRMED_OVERLAY_OPS,
 };
 mod epoch;
 pub use epoch::catchup;

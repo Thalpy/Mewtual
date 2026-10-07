@@ -800,7 +800,11 @@ impl EpochMutation<'_> {
 ```
 
 The bare `atomic_write`, `sync_*` and unlink helpers stop being reachable for five-family paths, so
-a bypass is a compile error rather than a missing convention. A failed or panicking write still
+a bypass **through them** is a compile error rather than a missing convention. A raw `std::fs` call
+is outside what the type system can see, so it is refused mechanically instead:
+`scripts/check-store-raw-fs.sh`, run in CI, rejects raw filesystem mutation in non-test store code
+outside `mod persistence` and three reviewed per-family sync helpers that take `&EpochMutation`
+(I-4 writer audit, 2026-10-06, finding M-1). A failed or panicking write still
 leaves the token rotated, because rotation happens in `epoch_mutation_guard` before the guard is
 handed out and is never restored.
 
@@ -886,9 +890,22 @@ maximal-record measurement in 13.7 remain required.
 `MAX_INVENTORY_RESTARTS = 3` times per commit attempt, then returns `InventoryUnstable` and applies
 backoff. It does **not** fall back to a single-visit unbounded scan. A commit completes when no
 `inventory_generation` rotation occurs for the duration of one scan. Because the token rotates only
-on durable five-family mutation, and specifically **not** on budget mint or entry, on reads, or on
-the runtime's own bookkeeping, a vault with no writes in progress satisfies that condition; the
+on durable five-family mutation, and specifically **not** on budget mint or entry or on the
+runtime's own bookkeeping, a vault with no writes in progress satisfies that condition; the
 design does not self-invalidate.
+
+**Correction (I-4 writer audit, 2026-10-06, finding M-3).** An earlier wording also excluded
+"reads". That is false: several read-only and duplicate paths rotate, because they sync-repair a
+file before relying on it. They are a page serve for a target whose handoff has completed
+(`check_studio_handoff_publication` via `with_prepared_studio_source`), duplicate or empty Studio
+page ingest, the Registry page receive sync, and the Registry maintenance flush. Over-rotation is
+the safe direction and stays allowed, but once a job spans visits it costs liveness, so a peer
+polling pages can keep restarting a job. No owner may therefore depend on quiescence alone; the
+runtime document's section 12 records how replay's manual move does not. Memoising the
+already-durable sync-repairs per mount is done for the completed-handoff publication check, the
+site a polling peer drives (`sync_intent_unless_durable`); the duplicate page ingest (which a peer
+drives by pushing pages), Registry
+receive sync and maintenance flush sites remain a recorded follow-up.
 
 Changing the scanner from an exclusive borrow to an owned cursor is a **semantic consistency
 change**, not a mechanical signature change: it is the introduction of I-4 that makes cross-visit
@@ -1243,7 +1260,9 @@ From revision 3, all three answers adopted with their attached consequences:
 
 5. **Choke point backed by an audited writer list, not one or the other.** 9.2 makes the guard a
    type-level prerequisite, so a five-family write, rename, sync-repair or unlink cannot be
-   expressed without it and a bypass is a compile error rather than a forgotten convention. The
+   expressed **through the store's primitives** without it, and that bypass is a compile error
+   rather than a forgotten convention (a raw `std::fs` call is caught by the CI gate instead; see
+   9.2 and I-4 audit M-1). The
    writer list still proves coverage, and N17 with M20 keeps per-family evidence. I-4 stays separate
    from budget ownership in both directions: a budget mint or entry alone must not invalidate, and
    an operation that may have changed files must invalidate even when it returns an error.

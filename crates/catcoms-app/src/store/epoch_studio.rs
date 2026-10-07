@@ -31,9 +31,9 @@ pub(crate) use handoff_capture::{
     MAX_SIGNING_TURNS_PER_VISIT, SIGNING_SLICE_BUDGET_MS,
 };
 mod overlay;
-pub(crate) use overlay::{StudioOverlayClassification, StudioOverlayStart};
+pub(crate) use overlay::StudioOverlayStart;
 mod overlay_capture;
-pub(crate) use overlay_capture::{StudioOverlayCapture, StudioOverlayPlan};
+pub(crate) use overlay_capture::{StudioOverlayCapture, StudioOverlayMint, StudioOverlayPlan};
 mod preparation;
 mod recovery_disposition;
 mod registry;
@@ -68,9 +68,9 @@ pub struct EpochStudioBudget {
     storage: EpochStorageBudget,
     intents: EpochIntentBudget,
     /// Live Unconfirmed branches for this numeric server/group in the inventory that minted this
-    /// budget. Updated after each successful write made through the same sole coordinator.
+    /// budget. Updated only after a successful Flow S write or terminal disposal.
     unconfirmed_server_branches: usize,
-    /// Exact physical Intents bytes for live Unconfirmed branches across this mounted vault.
+    /// Exact physical Intents bytes occupied by live Unconfirmed branches across this vault.
     unconfirmed_vault_bytes: u64,
 }
 
@@ -95,8 +95,7 @@ impl EpochStudioBudget {
     }
 
     /// Check the Unconfirmed rails against the exact replacement size before any durable write.
-    /// `old_charge` is present only when this write extends an already-live Unconfirmed branch;
-    /// a terminal or Closing record did not contribute to the inventory's Unconfirmed total.
+    /// `old_charge` is present only when extending an already-live Unconfirmed branch.
     fn preflight_unconfirmed(
         &self,
         opens_branch: bool,
@@ -132,7 +131,7 @@ impl EpochStudioBudget {
         Ok(())
     }
 
-    /// Apply the already-preflighted accounting only after the replacement is durable.
+    /// Apply already-preflighted accounting only after the replacement is durable.
     fn commit_unconfirmed(
         &mut self,
         opens_branch: bool,
@@ -149,9 +148,7 @@ impl EpochStudioBudget {
         }
     }
 
-    /// Release a live Unconfirmed branch's quota only after its terminal disposal record is
-    /// durable. Terminal metadata stays in the Intents file, but the inventory deliberately no
-    /// longer classifies that file as live Unconfirmed occupancy.
+    /// Release a live Unconfirmed branch's quota only after its terminal disposal is durable.
     fn commit_unconfirmed_disposal(&mut self, old_charge: u64) {
         self.unconfirmed_vault_bytes = self
             .unconfirmed_vault_bytes
@@ -170,14 +167,9 @@ impl EpochStudioBudget {
         )
     }
 
-    /// Expose the inventory-derived counters only to crate tests. Production callers must use
-    /// the admission methods above so a stale observation cannot become quota authority.
     #[cfg(test)]
     pub(crate) fn unconfirmed_usage_for_test(&self) -> (usize, u64) {
-        (
-            self.unconfirmed_server_branches,
-            self.unconfirmed_vault_bytes,
-        )
+        self.unconfirmed_quota_snapshot()
     }
 }
 /// Detached read-only persisted state. No mutable document/gate/book escapes the store.
@@ -307,6 +299,11 @@ impl ServerStore {
     }
     /// Mint once from a completed CURRENT five-family scan. Minting again requires a new scan
     /// and supersedes the previous wrapper; reopening the vault invalidates all old handles.
+    ///
+    /// "Current" includes the inventory generation (C-3 runtime design, S-2): an inventory
+    /// finished before any five-family write cannot mint after it. Within one visit the finish and
+    /// the mint are adjacent, so this changes nothing there; it is what keeps a finish in one
+    /// visit and a mint in a later one from minting a budget for a vault that has since changed.
     pub fn studio_storage_budget(
         &mut self,
         server: u64,
@@ -317,6 +314,7 @@ impl ServerStore {
             != EpochInventoryCoverage::RecoveryOwnerReceiptsIntentsRegistryAndStudio
             || !Arc::ptr_eq(&inventory.studio_generation, &self.studio_generation)
             || !Arc::ptr_eq(&inventory.intent_generation, &self.intent_generation)
+            || !Arc::ptr_eq(&inventory.inventory_generation, &self.inventory_generation)
         {
             return Err(invalid("fresh five-family inventory required"));
         }

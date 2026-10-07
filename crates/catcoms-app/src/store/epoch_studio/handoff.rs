@@ -743,10 +743,12 @@ impl ServerStore {
                 return Err(invalid("prepared overlay handoff is not publishable"));
             }
             if metadata.has_completed() {
-                // I-4: same exact-retry flush, on the publish check's path.
+                // I-4: same exact-retry flush, on the publish check's path. Every page serve of
+                // this target comes through here, so a flush this mount already made, of a file
+                // nothing has written since, is not repeated (I-4 audit M-3).
                 let path = self.epoch_intent_path(&scope);
                 let bytes = bytes.ok_or_else(|| invalid("completed handoff record missing"))?;
-                self.epoch_mutation_guard().sync_intent(&path, bytes)?;
+                self.sync_intent_unless_durable(&path, bytes)?;
             }
         }
         Ok(())

@@ -2146,9 +2146,9 @@ before re-minting the preview and writing.
 
 The actor's parked-request key is exact rather than advisory: it includes target, provenance,
 basis fingerprint, branch identity and a domain-separated BLAKE3 digest of the complete canonical
-`DomainOp::encode()` bytes (nonce, type, logical key and body). A request that differs in any of
-those fields returns busy without consuming the parked plan or its ownership; the exact request can
-still complete afterward.
+`DomainOp::encode()` bytes (nonce, type, logical key and body). A different request may finish the
+parked plan to prevent an abandoned caller holding the actor slot, but it returns busy and cannot
+claim that plan's outcome as its own. The exact request is then answered from durable state.
 
 Live Unconfirmed work is limited to three branches per numeric server/group, 8 MiB of exact
 physical Intents bytes per mounted vault and 64 accepted operations per branch. A fresh complete
@@ -2161,9 +2161,10 @@ writer. The separate retirement writer applies the same rule before reservation 
 retry and terminal disposal remain available. This is deliberately fail-closed until any future
 coexistence writer can carry the outer `EpochStudioBudget` accounting itself.
 Unconfirmed provenance grants no handoff, signing, receipt, installed-source or publication
-authority. The implementation has real complete-preview Flipnote coverage but not yet real Index,
-8.6 reconciliation, true reopen/restart, actor/native result or UI coverage. Its functions and
-ticket remain crate-private; P5 is false and no Save command is registered.
+authority. The shared baseline now has real Index and Flipnote preview coverage, 8.6 reconciliation,
+an actor/store restart regression, the actor Save and native result conversion types. Its functions
+and ticket remain crate-private; P5 is false, no Save command is registered, and there is no UI
+exposure.
 
 The [prepared-signing checkpoint](GATE4-HANDOFF-SIGNING-REVIEW.md), awaiting review, adds:
 

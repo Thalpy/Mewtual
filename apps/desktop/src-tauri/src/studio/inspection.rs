@@ -84,10 +84,10 @@ mod tests;
 /// is unavailable, and saying "the read failed" instead is both less true and less useful.
 ///
 /// `eligibility` and `manualReason` are P2's classification, shared with the lifecycle row through
-/// `lifecycle::eligibility_fields`. Not present, and not by oversight: `unconfirmedState`, because
-/// no unconfirmed branch can exist until preview-local work does, and an always-null field would
-/// read as an answer; and `archived`, which belongs to `studio_overlay_lifecycle`, since that reads
-/// the archive record this capture deliberately does not hold.
+/// `lifecycle::eligibility_fields`. `unconfirmedState` is design 8.6's reconciliation, shared
+/// through `lifecycle::unconfirmed_state_value`, and null for a Closing branch. Not present, and
+/// not by oversight: `archived`, which belongs to `studio_overlay_lifecycle`, since that reads the
+/// archive record this capture deliberately does not hold.
 fn view(read: StudioOverlayInspection) -> Result<Value, String> {
     read.inspect(|v| {
         let channel = u128::from_be_bytes(v.target.channel()).to_string();
@@ -105,6 +105,7 @@ fn view(read: StudioOverlayInspection) -> Result<Value, String> {
             (Some(branch), _) => json!({"v":1,"kind":"local-draft","channel":channel,
                 "eligibility":eligibility,
                 "manualReason":manual_reason,
+                "unconfirmedState":super::lifecycle::unconfirmed_state_value(v.unconfirmed),
                 "object":object,
                 "basis":v.draft.map(|d| hex::encode(d.basis())),
                 "branch":hex::encode(branch),

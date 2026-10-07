@@ -7,6 +7,14 @@ use catcoms_wire::{Decoder, Encoder};
 use std::collections::{BTreeMap, BTreeSet};
 
 pub const MAX_STUDIO_OVERLAY_OPS: usize = 256;
+/// The accepted-operation cap for an **Unconfirmed** branch (design 8.3's per-branch rail). Lower
+/// than the Closing cap because such a branch rests on unconfirmed history: it is local work on an
+/// awaiting-tenure preview that may never be confirmed. It must never exceed
+/// [`MAX_STUDIO_OVERLAY_OPS`], which every archive and disposal format is sized for.
+pub const MAX_STUDIO_UNCONFIRMED_OVERLAY_OPS: usize = 64;
+// A rail above the formats' bound would let `append` accept a branch that its own decoder then
+// refuses on reload: a durable record that cannot be read back.
+const _: () = assert!(MAX_STUDIO_UNCONFIRMED_OVERLAY_OPS <= MAX_STUDIO_OVERLAY_OPS);
 const MAX_METADATA: usize = 64 * 1024;
 const MAX_EXTENSION: usize = MAX_CHECKPOINT_BYTES + MAX_METADATA;
 
@@ -18,7 +26,9 @@ pub use archive::{StudioDraftArchive, StudioOverlayProvenance, MAX_STUDIO_DRAFT_
 pub use disposal::{
     StudioDiscardConfirmation, StudioDisposalDecision, StudioDisposalMode, StudioOverlayDisposal,
 };
-pub use eligibility::{StudioOverlayEligibility, StudioOverlayManualReason};
+pub use eligibility::{
+    StudioOverlayEligibility, StudioOverlayManualReason, StudioOverlayUnconfirmedState,
+};
 pub use handoff::{
     StudioHandoffAuthority, StudioHandoffCandidate, StudioHandoffEvidence, StudioHandoffOutcome,
     StudioHandoffSigning, StudioOverlayAdmission, StudioOverlayRequestClass, StudioOverlaySave,
@@ -220,8 +230,23 @@ impl StudioOverlayBasis<'_> {
             Self::Unconfirmed(basis) => basis.provenance(),
         }
     }
-    pub(in crate::studio) fn target(&self) -> StudioTarget {
+    /// The exact target this basis was minted for. Public so a Save stage can refuse a basis minted
+    /// for another channel BEFORE admission: a Flipnote's logical key omits its channel, so the
+    /// identity comparison admission makes cannot see the difference, and a branch opened from the
+    /// wrong basis would be recorded under the basis's channel while the request named another.
+    pub fn target(&self) -> StudioTarget {
         self.data().target
+    }
+    /// The author every operation on a branch from this basis must have. Public for the same
+    /// reason as [`Self::target`]: a Save stage can refuse a basis minted for another author before
+    /// any media work, instead of at the later append (Agent 1's Flow S review, L1).
+    pub fn author(&self) -> DeviceId {
+        self.data().author
+    }
+    /// The logical document the basis's receipt names, which carries the server (group) id. Public
+    /// so a Save stage can refuse a basis for another group or document early, as above.
+    pub fn document(&self) -> &crate::LogicalDocument {
+        &self.data().receipt.document
     }
     pub(in crate::studio) fn closed_epoch(&self) -> u64 {
         self.data().receipt.closed_epoch
@@ -370,6 +395,23 @@ impl StudioOverlay {
     pub(in crate::studio) fn basis_kind(&self) -> BasisKind {
         self.base.kind
     }
+    /// The accepted-operation cap for this branch's kind: [`MAX_STUDIO_UNCONFIRMED_OVERLAY_OPS`]
+    /// for Unconfirmed, [`MAX_STUDIO_OVERLAY_OPS`] for Closing.
+    ///
+    /// Keyed on the kind, which is not persisted: the state decoder sets it from the record's outer
+    /// provenance, and `validate` requires agreement. A standalone decode of the nested blob starts
+    /// as Closing, so the looser cap applies until then.
+    ///
+    /// What keeps an over-long Unconfirmed branch out of memory is `validate`, run on every state
+    /// decode and encode after the kind is set. It reads through `checked_entries`, which applies
+    /// this cap. Not every accessor does: `exact_retry`, `contains` and `accepted` read the
+    /// entries directly, which is safe only because no decoded state reaches them unvalidated.
+    fn max_ops(&self) -> usize {
+        match self.base.kind {
+            BasisKind::Closing => MAX_STUDIO_OVERLAY_OPS,
+            BasisKind::Unconfirmed => MAX_STUDIO_UNCONFIRMED_OVERLAY_OPS,
+        }
+    }
     /// For the state decoder only, once it has read the record's provenance. The nested blob
     /// cannot say, so a standalone decode always starts as Closing.
     pub(in crate::studio) fn set_basis_kind(&mut self, kind: BasisKind) {
@@ -437,7 +479,9 @@ impl StudioOverlay {
         if self.basis() != basis.into().fingerprint() {
             return Err(ReplError::EpochScope);
         }
-        if self.entries.len() >= MAX_STUDIO_OVERLAY_OPS {
+        // Design 8.3's per-branch rail for an Unconfirmed branch, the overall cap for a Closing
+        // one. Refused before staging, so a refused Save changes nothing durable.
+        if self.entries.len() >= self.max_ops() {
             return Err(ReplError::EpochBound);
         }
         if self.contains(&id) {
@@ -468,13 +512,36 @@ impl StudioOverlay {
         *self = staged;
         Ok(view)
     }
+    /// Append past every admission check, the rail included. Test-only: the one way to build an
+    /// over-long Unconfirmed branch in memory, so that the read-side cap in `checked_entries` can be
+    /// held to its own test. No production writer produces such a branch; a crafted record could.
+    #[cfg(test)]
+    pub(in crate::studio) fn append_unchecked_for_test(
+        &mut self,
+        ledger: &IntentLedger,
+        id: [u8; 32],
+        ts: u64,
+    ) {
+        let intent = ledger
+            .pending()
+            .find(|(key, _)| **key == id)
+            .map(|(_, i)| i)
+            .unwrap();
+        self.entries.push(Entry {
+            id,
+            envelope: envelope(intent).unwrap(),
+            sequence: self.next_sequence,
+            ts,
+        });
+        self.next_sequence += 1;
+    }
     fn checked_entries<'a>(
         &self,
         ledger: &'a IntentLedger,
     ) -> Result<Vec<(&Entry, &'a LocalIntent)>, ReplError> {
         if ledger.document() != &self.base.receipt.document
             || self.entries.is_empty()
-            || self.entries.len() > MAX_STUDIO_OVERLAY_OPS
+            || self.entries.len() > self.max_ops()
             || self.next_sequence != self.entries.len() as u64 + 1
         {
             return Err(ReplError::Malformed);

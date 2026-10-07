@@ -8,42 +8,55 @@ the protocol- vs honest-client-enforced boundary and the hardening backlog.
 [`MESSAGE-FLOW.md`](MESSAGE-FLOW.md) traces one message end to end (send, gossip, catch-up)
 and ranks the live hazards in that path.
 
-## Status (latest entry: 2026-10-06)
+## Status (latest entry: 2026-10-07)
 
-- **Gate 4 internal awaiting-tenure Save candidate (2026-10-06).** Branch
-  `gate4-runtime-completion` starts exactly at merged PR #34 / `gate4-agent1-runtime`
-  `c6f7fea0af1392da37e484067a3c8c9131c328a4`; implementation commit
-  `eef69729ae4b4200a6060b9f91719d44538094e5`, followed by review-response commit
-  `6aee00046e35410ba42c9290c0d1f52fd41dd86b`,
-  generalizes detached Flow S over typed Closing and Unconfirmed bases without changing the
-  Closing wire or persistence formats. For new Unconfirmed work the app proves the installed
-  source absent, re-enters the current complete preview at S1b and S3, reauthenticates the detached
-  plan, and applies three branches per server, 8 MiB per vault and 64 operations per branch rails.
-  Successful disposal releases the live-branch counters only after its terminal replacement is
-  durable. Fresh five-family inventory reconstructs the counters, and automatic handoff memoizes
-  Unconfirmed history as quiet. A real complete Flipnote preview regression covers first append,
-  wrong-target refusal, expiry, exact retry, detached scheduling, durable provenance, fresh-
-  inventory reconstruction and disposal; a second real-flow regression refuses operation 65
-  before scheduling. The response binds parked work to target, provenance, basis, branch and the
-  full canonical operation digest, and makes ordinary replacement plus retirement fail closed when
-  either would preserve live Unconfirmed work outside quota-accounted Flow S. Exact sync retry and
-  terminal disposal remain available. The candidate remains internal: no actor/native command or
-  renderer path was registered, P5 is false, unfinished repair commands remain unavailable, and the
-  UI is unchanged.
-  Index preview evidence, 8.6 reconciliation, actor/native result wiring, the remaining lifecycle,
-  tenure, C-3/Flow R and detached repair work, specialist reviews and combined Review 4 remain
-  open. The definitive local root rerun, all 1,282 frontend tests, root and desktop strict Clippy,
-  desktop check, Svelte check, production build, formatting and `cargo deny` pass. The first root
-  run's single unopened-new-member assertion passed alone and in the complete rerun. The complete
-  native run passes 324/325; its normal-order six-client partition convergence failure repeats in
-  focused runs on both candidate and exact `c6f7fea0...` base, so native is not claimed green and no
-  assertion was weakened; all five command-ACL tests pass separately. Independent review found two
-  request-correlation/accounting MEDIUMs, then
-  two residual full-operation/retirement MEDIUMs; `6aee00046...` closes all four and final re-review
-  reports no BLOCKER/HIGH/MEDIUM. A LOW receipt-covered-retirement test gap remains recorded. Local
-  WSL launch is denied, so Linux ambient and repair-store mutation evidence is intentionally left to
-  exact-head PR CI. Startup/flow are inapplicable because no setup, process, renderer behavior or
-  command registration changed.
+- **Gate 4 PR #35 reconciliation (2026-10-07).** The candidate is resolved against
+  `gate4-agent1-runtime` at `f9b2aec52482b393863279fb584567fc509c9eb6`, retaining the newer
+  generalized Flow S, actor Save, 8.6 reconciliation, restart coverage and non-Closing handoff
+  exclusion. It adds the remaining 3-live-Unconfirmed-branches/server-group and 8 MiB physical
+  Intents/vault rails, reconstructs them from authenticated inventory, updates them only after a
+  durable Flow S write and releases them only after terminal disposal. It also preserves PR #35's
+  full canonical parked-request correlation and makes ordinary/retirement Intents writers fail
+  closed while they would preserve live Unconfirmed work without the outer quota owner. Focused
+  quota, operation-65, same-nonce/different-body, inventory/disposal and off-path-writer regressions
+  pass. P5 remains false; Save/repair commands remain unregistered; exact-head CI and the bounded
+  merge-resolution review are required before merge. This is incremental integration, not Gate 4
+  acceptance, and Gate 5 remains closed.
+
+- **Gate 4 Agent 2: the Unconfirmed Save through the actor, 8.6 reconciliation, N-T5 and the
+  cross-document copy regressions (2026-10-06).** This updates the 2026-10-05 entry's "Unconfirmed Flow S and its app-side
+  consumers remain missing". Agent 1's Flow S (`c9566b82`) is now consumed through the actor
+  (`b35e23d2`..`3b795bf7`, pushed):
+  - Save, through the receiver: `BeginUnconfirmedOverlaySave` and `SaveUnconfirmedOverlay`. Each
+    stage mints from the actor's live preview in its own visit. The actor has one overlay slot: a
+    visit finishes any parked plan and reports only its own request's outcome. A parked plan has a
+    30 s deadline that holds while the receiver is paused. A Closing draft is refused.
+  - Rail: an Unconfirmed branch takes at most 64 operations.
+  - Design 8.6: the state is derived on every read from headers, with four values, `awaitingSource`,
+    `baseConfirmed`, `baseSuperseded` and `sourceUnreadable`. It is carried as `unconfirmedState`
+    on the native lifecycle row and inspection.
+  - Restart: through the actor, landed work is answered as an exact retry, and a parked plan dies
+    with the process and re-plans once.
+  - N-T5 (hidden higher old-tenure history). This runs over the real discovery wire, through the
+    Server discovery stages the receiver drives, but not the receiver's own scheduling loop. A
+    member two closes ahead on the former owner's history adopts the new owner's lower-epoch
+    receipt and converges on the new owner's history. It keeps the former owner's history only as
+    a `Rewound` recovery snapshot, also after its vault is reopened, and refuses the former owner's
+    receipt from then on.
+  - Copy, Review 2's L-1 and L-2: cross-document Flipnote regressions. A hold on the destination
+    refuses, and a hold on the source permits and stays `Prepared`. A Save landing on the source
+    mid-copy is refused at C3. C4 compares no source stamp. It refuses only if its re-plan no
+    longer resolves the selected value (replaced or removed) or rebuilds a different body;
+    otherwise it applies the source's current value.
+  - **Updated by the 2026-10-07 entry:** the handoff selector skip is in the shared baseline and
+    PR #35 supplies the per-server/vault rails. Native registration remains missing and P5 remains
+    false.
+  - **Known local flake class:** tests on `StudioReceiver::default()` share the process-wide
+    preparation pool and can fail under full-suite load
+    (`registry_runtime.rs:164`, `receiver.rs:68`).
+
+  Ledger: `docs/GATE4-AGENT-2-STATUS.md`. Design: `docs/GATE4-AGENT-2-DESIGN.md` 8.3, 8.6, 8.7,
+  12.
 
 - **Gate 4 archived-owner admission candidate (2026-10-05).** The app now consumes the single
   archived Observed-tenure witness only through the still-current durable owner snapshot used by

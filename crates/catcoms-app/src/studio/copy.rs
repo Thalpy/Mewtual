@@ -2,9 +2,11 @@
 //!
 //! Two phases, mirroring the accepted recovery `Preview` -> `Apply` shape, because copy is the same
 //! kind of act: a proposal built off custody, shown to a user, then re-derived under custody before
-//! anything is written. Nothing here writes to the branch's own record. Copy is never a precondition
-//! for destroying anything, and no count of copied items ever establishes that a branch was
-//! preserved; only an archive does that.
+//! anything is written. Nothing here writes to the branch: its overlay metadata, entries and
+//! identity are untouched (N6). For a same-document copy the ordinary intent does land in the same
+//! intents file as the branch, which is why a landed copy makes the next preview stale. Copy is
+//! never a precondition for destroying anything, and no count of copied items ever establishes
+//! that a branch was preserved; only an archive does that.
 //!
 //! **Copy is projection-level and lossy on purpose (C-P).** It recovers the selected value of an
 //! element as a new operation authored by the copier. A branch entry superseded within the branch, a
@@ -140,11 +142,15 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
     /// Run at C3 **and** C4 rather than once. At C3 it downgrades, so the user is told the target
     /// is missing instead of being offered a copy that will fail; at C4 it refuses, because the
     /// object can disappear between the two.
+    ///
+    /// Answered from the object record's header (`studio_object_holds_work`), with the same
+    /// predicate a full load would apply and no restore of a whole Flipnote on the actor. An
+    /// object stored under another channel's label is missing in this channel, not an error that
+    /// fails the preview (the review's wrong-object-channel Low).
     fn probe_copy_object(
-        store: &mut ServerStore,
+        store: &ServerStore,
         server: u64,
         group: &catcoms_mls::ServerGroup,
-        device: &catcoms_mls::MlsDevice,
         plan: &StudioOverlayCopyPlan,
     ) -> Result<bool, AppError> {
         let StudioRecoveryItem::Object { id } = plan.choice().item else {
@@ -157,11 +163,50 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
             channel: plan.destination_target().channel(),
             object: id,
         };
-        Ok(store
-            .with_studio_source(server, group, object, device, |s| {
-                Ok(s.op_count() > 0 || s.epoch() > 0)
-            })?
-            .unwrap_or(false))
+        store.studio_object_holds_work(server, group, object)
+    }
+
+    /// The operation nonce a copy publishes under, derived from the renderer's nonce in a domain
+    /// of its own (the review's L4).
+    ///
+    /// A copy is an ordinary Apply, so with the renderer's nonce it would be byte-identical to an
+    /// ordinary Save of the same body under the same nonce. C4's exact-retry shortcut then
+    /// reported that Save as this copy, `already_saved`, which misstates what happened. Derived
+    /// this way, a copy's operation can coincide only with an earlier copy under the same
+    /// renderer nonce and body, so "already saved" now means "this copy already landed". An exact
+    /// retry still resends the same renderer nonce and so finds the same operation.
+    ///
+    /// **A convention, not a guarantee against a hostile renderer.** The derivation is public and
+    /// unkeyed, so a renderer that wants to can compute it and make an ordinary Save collide with a
+    /// later copy's echo. That misreports a kind, never writes twice. It closes the stale-renderer
+    /// case it was made for, and nothing here should be read as more.
+    fn copy_nonce(nonce: [u8; 16]) -> [u8; 16] {
+        let hash = blake3::derive_key("catcoms/studio-overlay-copy-nonce/v1", &nonce);
+        let mut out = [0; 16];
+        out.copy_from_slice(&hash[..16]);
+        out
+    }
+
+    /// C1' (design 6.3): refused, retryably, while the destination is under a transfer hold.
+    /// Asked at C1, C3 and C4, since a hold can be staged between any two of them.
+    ///
+    /// The remedy is a fresh preview, not a resend. A handoff that resolves rotates the destination,
+    /// so a C4 retry of the old preview would then fail as no longer Open. That includes the exact
+    /// retry of a copy that already landed: its acknowledgement is lost across the hold, though
+    /// nothing is written twice, because the re-preview finds the copied content already there.
+    fn refuse_held_destination(
+        store: &ServerStore,
+        server: u64,
+        group: &catcoms_mls::ServerGroup,
+        destination: StudioTarget,
+    ) -> Result<(), AppError> {
+        if store.studio_copy_destination_held(server, group, destination)? {
+            return Err(invalid(
+                "the copy destination is under a transfer hold; preview the copy again once its \
+                 handoff resolves",
+            ));
+        }
+        Ok(())
     }
 
     /// The destination's scope, decided here rather than accepted from a caller.
@@ -220,6 +265,7 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
             .try_acquire_owned()
             .map_err(|_| invalid("overlay copy capacity exhausted; retry"))?;
         let capture = self.sync.with_registry_context(|group, device, _, _| {
+            Self::refuse_held_destination(store, server, group, choice.destination)?;
             store.capture_studio_overlay_copy(server, group, source, choice.destination, device)
         })?;
         Ok(StudioCopyPreparation {
@@ -260,6 +306,8 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
         }
         let mut plan = plan;
         let current = self.sync.with_registry_context(|group, device, _, _| {
+            // A hold staged since C1 is refused here too, before the preview says Ready.
+            Self::refuse_held_destination(store, server, group, plan.destination_target())?;
             store.studio_copy_is_current(server, group, device, &plan)
         })?;
         if !current {
@@ -270,8 +318,8 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
         if plan.phase() != EpochPhase::Open {
             return Err(invalid("Studio copy requires an Open destination epoch"));
         }
-        if !self.sync.with_registry_context(|group, device, _, _| {
-            Self::probe_copy_object(store, server, group, device, &plan)
+        if !self.sync.with_registry_context(|group, _, _, _| {
+            Self::probe_copy_object(store, server, group, &plan)
         })? {
             plan.hold(StudioRecoveryDisposition::MissingTarget);
         }
@@ -318,22 +366,31 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
             mode: apply.mode,
         };
         let scope = Self::copy_scope(source, apply.destination)?;
+        // Published, and looked for by the exact-retry shortcut, under the copy's own nonce domain.
+        let nonce = Self::copy_nonce(apply.nonce);
         // The publication targets the DESTINATION. The source is where the value came from and has
         // nothing written to it: copy writes nothing to the branch's record.
         let request = StudioRequest::Apply {
             target: apply.destination,
             epoch_id: apply.epoch_id,
-            nonce: apply.nonce,
+            nonce,
             body: apply.body.clone(),
         };
         request.validate()?;
         self.copy_context(source)?;
         self.copy_context(apply.destination)?;
         let capture = self.sync.with_registry_context(|group, device, _, _| {
+            // C1' once more, first, as at C1, and before the capture so a held destination costs
+            // nothing. A hold staged after the preview would otherwise surface only as the
+            // publication path's generic "overlay handoff must resolve" refusal, after a full
+            // re-plan, and an exact retry under a hold would be an error rather than this copy's
+            // own retryable reason. It precedes the exact shortcut too: the publication that
+            // shortcut leads to refuses under a hold anyway.
+            Self::refuse_held_destination(store, server, group, apply.destination)?;
             store.capture_studio_overlay_copy(server, group, source, apply.destination, device)
         })?;
         let already_saved = self.sync.with_registry_context(|group, device, _, _| {
-            let op = super::domain(apply.destination, apply.nonce, apply.body.clone());
+            let op = super::domain(apply.destination, nonce, apply.body.clone());
             let exact = store
                 .with_studio_source(server, group, apply.destination, device, |state| {
                     if state.doc_id() != apply.epoch_id || state.phase() != EpochPhase::Open {
@@ -358,9 +415,10 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
             // Refused rather than downgraded here: at C4 there is nothing left to offer the user,
             // and an object that vanished between the preview and the apply is exactly the race
             // this probe exists for.
-            if !Self::probe_copy_object(store, server, group, device, &plan)? {
+            if !Self::probe_copy_object(store, server, group, &plan)? {
                 return Err(invalid(
-                    "the object this copy would publish no longer exists; re-preview",
+                    "the object this copy would publish no longer exists in this channel; \
+                     re-preview",
                 ));
             }
             Ok(false)

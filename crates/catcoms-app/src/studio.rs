@@ -45,7 +45,7 @@ pub use control::{
     StudioControlResponse, StudioOverlayArchived, StudioOverlayExport, StudioOverlayLifecycle,
     StudioRecoveryApply, StudioRecoveryListing, StudioRecoveryPreview, StudioRecoverySummary,
     StudioRecoveryVersion, StudioReleaseConfirmation, StudioSettlementSource,
-    CONTROL_REPLY_DROPPED,
+    StudioUnconfirmedOverlaySaveRequest, StudioUnconfirmedSaveOutcome, CONTROL_REPLY_DROPPED,
 };
 pub use restore::{
     StudioRecoveryDisposition, StudioRecoveryItem, StudioRecoveryMode, StudioRecoveryPlan,
@@ -57,9 +57,8 @@ pub(crate) use dispatch::{StudioDispatch, StudioReply, StudioResponse};
 mod receiver;
 #[cfg(test)]
 pub(crate) use receiver::PreviewHarness;
-#[cfg(test)]
-pub(crate) use receiver::StudioOverlaySaveVisit;
-pub(crate) use receiver::{StudioBackgroundResult, StudioReceiver};
+pub(crate) use receiver::StudioBackgroundResult;
+pub(crate) use receiver::StudioReceiver;
 
 /// Bounded before entering the actor queue. Bodies are the existing canonical Studio JSON,
 /// not renderer-authored Automerge changes. Keep ids/nonces/bodies stable across retries.

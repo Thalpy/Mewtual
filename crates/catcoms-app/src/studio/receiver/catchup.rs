@@ -57,67 +57,20 @@ type PreparedRegistryResult = Result<Box<ServerPreparedRegistryPageSource>, AppE
 /// happened to collect them, or forever if none ever came.
 type OverlayPlanResult = Result<(Box<StudioOverlayPlan>, OverlayOwnership), AppError>;
 
-/// The exact local Save request that owns a detached Flow S plan.
+/// How long a committable Save plan may stay parked waiting for the Save visit that commits it.
 ///
-/// A target alone is not an ownership key: two operations, or a Closing and an Unconfirmed Save,
-/// can legitimately name the same target. Consuming a target-matched plan would let request B
-/// commit request A and report A's result as B's, or destroy A while trying the other provenance.
-/// These public request facts are already reauthenticated by S3; carrying them here only keeps the
-/// receiver's transient result correlated with the call that scheduled it.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) struct OverlayRequestKey {
-    target: StudioTarget,
-    provenance: OverlayRequestProvenance,
-    basis: [u8; 32],
-    branch: [u8; 32],
-    operation_digest: [u8; 32],
-}
+/// The same bound as a retained Registry source, for the same reason: both hold a process-wide
+/// preparation permit that only a custody visit releases. A caller retrying promptly, as the Save
+/// contract asks, commits well inside it. One that comes back later re-captures and re-plans.
+pub(super) const OVERLAY_PARK_MS: u64 = 30_000;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum OverlayRequestProvenance {
-    Closing,
-    Unconfirmed,
-}
-
-impl OverlayRequestKey {
-    pub(super) fn closing(
-        target: StudioTarget,
-        basis: [u8; 32],
-        branch: [u8; 32],
-        operation_digest: [u8; 32],
-    ) -> Self {
-        Self {
-            target,
-            provenance: OverlayRequestProvenance::Closing,
-            basis,
-            branch,
-            operation_digest,
-        }
-    }
-
-    pub(super) fn unconfirmed(
-        target: StudioTarget,
-        basis: [u8; 32],
-        branch: [u8; 32],
-        operation_digest: [u8; 32],
-    ) -> Self {
-        Self {
-            target,
-            provenance: OverlayRequestProvenance::Unconfirmed,
-            basis,
-            branch,
-            operation_digest,
-        }
-    }
-}
-
-/// Which overlay job a detached plan belongs to. Carries no plaintext, no key and no permit.
+/// Which overlay job a detached plan belongs to. Carries no plaintext, no key and no permit; it is
+/// only enough to route a completion back to the target that asked for it.
 pub(crate) struct OverlayContext {
-    /// Flow S only. Flow H uses its independently minted `token` below.
-    request: Option<OverlayRequestKey>,
+    target: StudioTarget,
     /// Flow H only: the `HandoffJob::token` this work was detached for, so a completion can be
     /// matched against the job that asked for it rather than against its target. Flow S leaves it
-    /// zero and uses the exact request key above.
+    /// zero: a parked Save capture is user-initiated and there is only ever one.
     token: u64,
     /// Test-only barrier, in the shape `PreviewJob::pause_for_test` established: the blocking
     /// worker signals once it has entered and then blocks until released. It is taken out of the
@@ -131,18 +84,18 @@ pub(crate) struct OverlayContext {
 }
 
 impl OverlayContext {
-    fn new(request: OverlayRequestKey) -> Self {
+    fn new(target: StudioTarget) -> Self {
         Self {
-            request: Some(request),
+            target,
             token: 0,
             #[cfg(test)]
             pause: None,
         }
     }
 
-    fn handoff(_target: StudioTarget, token: u64) -> Self {
+    fn handoff(target: StudioTarget, token: u64) -> Self {
         Self {
-            request: None,
+            target,
             token,
             #[cfg(test)]
             pause: None,
@@ -340,12 +293,13 @@ impl<T: MeshTransport + 'static> StudioBackgroundJob<T> {
                 // with the capture holding the job-owned reference hold alongside them. Those are
                 // two owners, not one, and they do not always end together: see the failure arm.
                 Self::OverlayPlan(capture, ownership, context) => {
-                    #[cfg(test)]
-                    let (context, pause) = {
-                        let mut context = context;
-                        let pause = context.pause.take();
-                        (context, pause)
-                    };
+                    let OverlayContext {
+                        target,
+                        // Flow S routes on target; the handoff token is not used here.
+                        token: _,
+                        #[cfg(test)]
+                        pause,
+                    } = context;
                     let result = tokio::task::spawn_blocking(move || {
                         // Ownership and the capture are already inside this closure.
                         #[cfg(test)]
@@ -367,7 +321,10 @@ impl<T: MeshTransport + 'static> StudioBackgroundJob<T> {
                     })
                     .await;
                     match result {
-                        Ok(result) => StudioBackgroundResult::OverlayPlanned(context, result),
+                        Ok(result) => StudioBackgroundResult::OverlayPlanned(
+                            OverlayContext::new(target),
+                            result,
+                        ),
                         // The worker itself died, taking both the bundle and the capture with it.
                         // Unwinding released them, so there is nothing to hand back.
                         Err(_) => StudioBackgroundResult::CancelledOverlay,
@@ -445,6 +402,11 @@ pub(super) struct CatchupRuntime {
     /// Only a committable plan is parked. A refusal parks nothing, because it owns nothing and the
     /// next Save reclassifies from durable state anyway (RT-001).
     overlay_planned: Option<(OverlayContext, Box<StudioOverlayPlan>, OverlayOwnership)>,
+    /// When a parked plan is dropped if no Save has come back for it ([`OVERLAY_PARK_MS`]). The
+    /// plan holds this actor's admission and one of four process-wide preparation permits, and
+    /// only a Save visit consumes it, so without a bound a caller who never returns would hold
+    /// both for as long as no other Save runs here.
+    overlay_planned_until: u64,
     /// True from the moment the job is handed to the runtime until its result or cancellation
     /// comes back. It is waiter bookkeeping, never the admission record: admission lives in
     /// `overlay_admission` and is proved by a live `Arc`, so a cancelled waiter clearing this
@@ -855,27 +817,83 @@ impl CatchupRuntime {
         &mut self,
         capture: StudioOverlayCapture,
         ownership: OverlayOwnership,
-        request: OverlayRequestKey,
+        target: StudioTarget,
     ) {
-        self.overlay = Some((Box::new(capture), ownership, OverlayContext::new(request)));
+        self.overlay = Some((Box::new(capture), ownership, OverlayContext::new(target)));
     }
 
-    /// Take a completed plan only for the exact custody request that scheduled it.
-    ///
-    /// A mismatch deliberately leaves the plan and its ownership parked. The original request can
-    /// still collect it, while the different request observes Busy instead of stale success.
+    /// Take a completed plan for the custody visit that will commit it, if it belongs to `target`.
     /// The ownership comes back with it so the caller releases admission and the shared slot only
     /// after the commit attempt, not before.
     pub(super) fn take_planned_overlay(
         &mut self,
-        request: OverlayRequestKey,
+        target: StudioTarget,
     ) -> Option<(Box<StudioOverlayPlan>, OverlayOwnership)> {
-        if !matches!(&self.overlay_planned, Some((c, _, _)) if c.request == Some(request)) {
+        if !matches!(&self.overlay_planned, Some((c, _, _)) if c.target == target) {
             return None;
         }
         self.overlay_planned
             .take()
             .map(|(_, plan, ownership)| (plan, ownership))
+    }
+
+    /// Whether a plan is parked, for a caller that must prepare before it takes one.
+    pub(super) fn has_planned_overlay(&self) -> bool {
+        self.overlay_planned.is_some()
+    }
+
+    /// How long a parked plan still has, or `Some(0)` once it is due; `None` with nothing parked.
+    ///
+    /// One definition for three consumers, exactly as `registry_retention`: the expiry that drops
+    /// the plan, `pending` reporting the visit that does it, and `wake_in` publishing the deadline
+    /// so a quiet actor schedules that visit at all. An expiry without the wake is no bound.
+    pub(super) fn overlay_park_retention(&self, now: u64) -> Option<u64> {
+        self.overlay_planned
+            .is_some()
+            .then(|| self.overlay_planned_until.saturating_sub(now))
+    }
+
+    /// A visit is owed: a parked plan is past its deadline and only a pass can drop it.
+    pub(in crate::studio::receiver) fn overlay_park_expiry_due(&self, now: u64) -> bool {
+        self.overlay_park_retention(now) == Some(0)
+    }
+
+    /// Milliseconds until that visit is owed, for the actor's injected-clock wake.
+    pub(in crate::studio::receiver) fn overlay_park_wake_in(&self, now: u64) -> Option<u64> {
+        self.overlay_park_retention(now)
+            .filter(|remaining| *remaining > 0)
+    }
+
+    /// Drop a parked plan past its deadline, releasing admission and the permit with it. Returns
+    /// whether one was dropped, so the receiver can forget the request that scheduled it.
+    ///
+    /// Safe for the reason RT-001 gives for a refused plan: nothing durable was written, the media
+    /// hold dies with the plan, and the request reclassifies from durable state on its next visit.
+    /// A caller who comes back late re-captures and re-plans. For a Flipnote frame operation it may
+    /// also have to republish the frame's PIX: the plan's media hold was the only thing keeping a
+    /// promoted PIX from reclamation, and it is not durable protection. That is the cost RT-001
+    /// already accepts for a refused plan.
+    pub(in crate::studio::receiver) fn expire_parked_overlay(&mut self, now: u64) -> bool {
+        if self.overlay_park_retention(now) == Some(0) {
+            self.overlay_planned = None;
+            return true;
+        }
+        false
+    }
+
+    /// Take whatever plan is parked, for any target, with the target it was planned for.
+    ///
+    /// The slot holds one plan for the whole actor, and `reserve_overlay` refuses every target
+    /// while it is parked. So a Save on another target that could only take its own target's plan
+    /// would wait for as long as the plan's caller stayed away, which can be for ever. The
+    /// Unconfirmed Save takes it with this instead, finishes it, and reports nothing of it as its
+    /// own (design 8.7; review of `b35e23d2`, HIGH-1).
+    pub(super) fn take_any_planned_overlay(
+        &mut self,
+    ) -> Option<(StudioTarget, Box<StudioOverlayPlan>, OverlayOwnership)> {
+        self.overlay_planned
+            .take()
+            .map(|(context, plan, ownership)| (context.target, plan, ownership))
     }
 
     #[cfg(test)]
@@ -910,13 +928,7 @@ impl CatchupRuntime {
         ownership: OverlayOwnership,
         target: StudioTarget,
     ) {
-        self.overlay = Some((
-            Box::new(capture),
-            ownership,
-            OverlayContext::new(OverlayRequestKey::closing(
-                target, [0; 32], [0; 32], [0; 32],
-            )),
-        ));
+        self.overlay = Some((Box::new(capture), ownership, OverlayContext::new(target)));
     }
 
     fn prepare_for<T: MeshTransport, R: CryptoRngCore>(
@@ -1425,12 +1437,24 @@ impl StudioReceiver {
                 // request stays retryable and the next Save reclassifies from durable state.
                 if let Ok((plan, ownership)) = result {
                     self.catchup.overlay_planned = Some((context, plan, ownership));
+                    self.catchup.overlay_planned_until = server
+                        .runtime_clock()
+                        .monotonic_ms()
+                        .saturating_add(OVERLAY_PARK_MS);
+                } else {
+                    // Nothing was parked, so neither provenance has scheduled work any more. A
+                    // stale fingerprint would answer a retry "pending" while nothing is in flight.
+                    self.closing_scheduled = None;
+                    self.unconfirmed_scheduled = None;
                 }
             }
             StudioBackgroundResult::CancelledOverlay => {
                 // Clears the waiter only. The worker still owns the bundle and is still running,
-                // so admission and the shared slot remain occupied until it ends by itself.
+                // so admission and the shared slot remain occupied until it ends by itself. What
+                // it produces is never parked, so the remembered request is cleared as above.
                 self.catchup.overlay_detached = false;
+                self.closing_scheduled = None;
+                self.unconfirmed_scheduled = None;
             }
             StudioBackgroundResult::Handoff(completion) => {
                 let now = server.runtime_clock().monotonic_ms();

@@ -274,6 +274,19 @@ table with the commit that closed it.
   also covers owner journals. Each result reports its fixed coverage, and its metadata becomes stale
   if the future coordinator permits writes after the scan. A malicious local process concurrently
   replacing filesystem paths is outside the mounted-store exclusion guarantee.
+- **An inventory issued from a scan is checked against the vault as it is now, not only as the
+  scan saw it.** Every five-family write rotates `inventory_generation` before its first I/O
+  (I-4), and an owned scan cursor rechecks that token when it resumes, installs a detached
+  validation and finishes, and the Studio budget mint checks it again. The type-level write guard
+  does not cover a raw `std::fs` call, so `scripts/check-store-raw-fs.sh` in CI refuses raw
+  filesystem mutation in non-test store code. A cursor held across custody visits also holds its
+  directory stream while unrelated files in the same directory change, and some filesystems a
+  vault can sit on (certain SMB and FUSE backends) do not keep a stream stable under that churn.
+  Every finished inventory, budget or reference, is therefore confirmed against one fresh
+  names-only listing and refused on any mismatch: an inventory job restarts, and a synchronous
+  scan's caller gets an error, which pauses background receive. On such a filesystem Studio
+  storage work can be refused, never budgeted from an undercount. No production path keeps a
+  cursor across visits yet; replay's manual move (C-3 step 2) is the first.
 - **Recovery staging cleanup deletes unpublished attempts, never saved recovery versions.** Only
   strict canonical temporary sibling names under the mounted store's fixed parent are eligible,
   with regular/non-reparse checks and exclusive access for the whole bounded pass. No caller can
@@ -746,18 +759,19 @@ table with the commit that closed it.
   preview at both authorization and commit; detached plans bind mount, numeric server, complete
   target, member key, owner, MLS epoch and exact authenticated Intents bytes. A parked request also
   binds target, provenance, basis, branch and a domain-separated digest of the full canonical
-  operation, including its body; a mismatched request cannot consume the plan or its ownership.
-  Unconfirmed history
-  is excluded from automatic handoff and is capped at three live branches per server, 8 MiB of
-  authenticated physical Intents bytes per vault and 64 accepted operations per branch. Exact
+  operation, including its body. A mismatched request may finish the plan to release the bounded
+  actor slot, but it receives only `Busy` and cannot claim another request's outcome.
+  Unconfirmed history is excluded from automatic handoff and is capped at three live branches per
+  numeric server/group, 8 MiB of authenticated physical Intents bytes per vault and 64 accepted
+  operations per branch. Exact
   retry is classified before preview expiry, while any new operation after expiry refuses.
   Accounting changes only after a durable replacement and terminal disposal releases the live
   quota; fresh complete inventory reconstructs it. Non-sync ordinary intent replacement and
   retirement that would preserve a live Unconfirmed branch fail closed outside the sole private,
   quota-accounted Flow S writer; exact sync and terminal disposal remain possible. This prevents
-  untracked physical-byte changes until any future coexistence path owns the outer budget. This
-  slice has no actor/native/UI reachability,
-  no reconciliation claim and no permission to promote P5.
+  untracked physical-byte changes until any future coexistence path owns the outer budget. The
+  internal actor path and native result types exist, but no native command or UI exposes them;
+  this slice grants no permission to promote P5.
   The new explicit native Index/art transactions lend the sole mounted store only AFTER the
   actor's Ready rendezvous. Numeric-server persistence, UI commit and exact registry-incarnation
   locks are acquired without awaiting; a busy fence drops Ready and writes nothing. The blocking

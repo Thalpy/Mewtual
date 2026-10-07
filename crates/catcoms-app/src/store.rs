@@ -70,8 +70,8 @@ pub use epoch_recovery::inventory::{
     EpochStorageScanProgress, EpochStorageScanProgress as RecoveryScanProgress,
 };
 pub use epoch_recovery::inventory::{
-    EpochInventoryJob, EpochInventoryOutcome, EpochInventoryStep, ParkedEpochRecord,
-    ValidatedEpochRecord, MAX_INVENTORY_RESTARTS,
+    EpochInventoryJob, EpochInventoryOutcome, EpochInventoryProfile, EpochInventoryStep,
+    ParkedEpochRecord, ValidatedEpochRecord, MAX_INVENTORY_RESTARTS,
 };
 pub use epoch_recovery::{EpochRecoveryAction, EpochRecoveryState, EpochRecoveryUpdate};
 pub use epoch_registry::{
@@ -96,10 +96,13 @@ pub use epoch_studio::{
 };
 pub(crate) use epoch_studio::{
     PreparedStudioSource, SigningSlice, StudioHandoffCapture, StudioHandoffCommit,
-    StudioHandoffPlan, StudioHandoffStart, StudioOverlayCapture, StudioOverlayClassification,
-    StudioOverlayPlan, StudioOverlayStart, StudioSourceCapture, MAX_SIGNING_TURNS_PER_VISIT,
-    SIGNING_SLICE_BUDGET_MS,
+    StudioHandoffPlan, StudioHandoffStart, StudioOverlayCapture, StudioOverlayPlan,
+    StudioOverlayStart, StudioSourceCapture, MAX_SIGNING_TURNS_PER_VISIT, SIGNING_SLICE_BUDGET_MS,
 };
+// The provenance-general Flow S mint (G4-A1-S). Its first production consumer is the preview Save
+// (G4-A2-PREVIEW); until that lands only tests name it, hence the non-test allowance.
+#[cfg_attr(not(test), allow(unused_imports))]
+pub(crate) use epoch_studio::StudioOverlayMint;
 pub use epoch_studio::{StudioFaultEvidence, StudioRepairOutcome, StudioRepairRequest};
 pub mod epoch_budget;
 
@@ -477,7 +480,13 @@ fn decode_server_net(bytes: &[u8]) -> Result<ServerNet, AppError> {
 /// What escapes is therefore deliberate and small: the [`EpochMutation`] capability, which only
 /// rotation hands out, and a fixed set of **path-specific** savers for the records that are not
 /// inventoried. There is no path-generic writer anywhere outside this module, so an inventoried
-/// bare write is not merely forbidden by audit, it cannot be spelled.
+/// write through *these* primitives cannot be spelled without rotating.
+///
+/// That is not the same as "cannot be spelled at all": `std::fs` is reachable from every module,
+/// and nothing in the type system stops a raw `fs::write` or `remove_file` on an epoch path
+/// beside them (I-4 audit M-1). That gap is closed mechanically instead, by
+/// `scripts/check-store-raw-fs.sh` in CI, which refuses raw filesystem mutation in non-test store
+/// code outside this module and three reviewed per-family sync helpers that take `&EpochMutation`.
 mod persistence {
     use super::*;
 
@@ -1339,6 +1348,9 @@ pub struct ServerStore {
     // make it unsound. A budget mint or entry alone must not rotate this, which is what keeps
     // I-4 separate from budget ownership.
     inventory_generation: std::sync::Arc<()>,
+    // Sync-repairs this mount already made durable, so a read-only path need not repeat one
+    // (and rotate the token) for a file nothing has written since (I-4 audit M-3).
+    repeat_syncs: epoch_recovery::inventory::RepeatSyncMemo,
     // Pure validation metadata; every reuse requires freshly authenticated identical bytes.
     // Never substitutes for an inventory, generation check, source load or write budget.
     inventory_cache: epoch_recovery::inventory::cache::RecordCache,
@@ -1385,6 +1397,7 @@ impl ServerStore {
             intent_generation: std::sync::Arc::new(()),
             studio_generation: std::sync::Arc::new(()),
             inventory_generation: std::sync::Arc::new(()),
+            repeat_syncs: Default::default(),
             inventory_cache: Default::default(),
             studio_source: None,
             #[cfg(test)]

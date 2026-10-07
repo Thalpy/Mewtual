@@ -228,7 +228,9 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     /// epoch and **wall-clock** time are recorded as admission facts (`Clock::now_ms`, since they
     /// are persisted) and are not fingerprinted (design review (i)). Not checked here, because
     /// this crate cannot see the store: that the document has no installed source. The app
-    /// checks that under custody before asking, and again at S3.
+    /// checks that under custody, at S1b and again at S3. It does so after the mint *attempt* is
+    /// made and before the attempt's result is opened, so an installed source is the answer even
+    /// when the preview has also gone (Agent 1's Flow S, `mint_studio_overlay_basis`).
     pub fn mint_unconfirmed_overlay_basis(
         &self,
         prepared: &PreparedProvisionalStudioSeed,

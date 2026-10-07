@@ -9,8 +9,10 @@ use catcoms_replication::studio::StudioRecovery;
 use catcoms_replication::{EpochPhase, InheritedCheckpoint};
 use tokio::sync::Mutex;
 
+mod hidden;
 mod interrupted;
 mod joining;
+mod repeated;
 
 #[tokio::test]
 async fn studio_actor_new_owner_keeps_open_edits_and_rotates_after_restart() {

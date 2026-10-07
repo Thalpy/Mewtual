@@ -13,7 +13,7 @@ use catcoms_app::store::{StudioDisposalRequestMode, StudioOverlayDisposalRequest
 use catcoms_app::studio::{
     StudioArchiveReleaseRequest, StudioControlAction as Action, StudioControlRequest,
     StudioControlResponse as Response, StudioOverlayLifecycle, StudioPreparedInspection,
-    StudioReleaseConfirmation,
+    StudioReleaseConfirmation, StudioUnconfirmedSaveOutcome,
 };
 use recovery::{named_hash, target};
 
@@ -442,6 +442,7 @@ fn lifecycle_value(v: &StudioOverlayLifecycle) -> Result<Value, String> {
         "prepared":v.prepared,
         "eligibility":eligibility,
         "manualReason":manual_reason,
+        "unconfirmedState":unconfirmed_state_value(v.unconfirmed),
         "archive":v.archive.as_ref().map(|a| json!({"archive":hex::encode(a.id),
             "branch":hex::encode(a.branch),"generation":a.generation.to_string(),
             "replayable":a.replayable})),
@@ -452,6 +453,24 @@ fn lifecycle_value(v: &StudioOverlayLifecycle) -> Result<Value, String> {
             value
         }),
         "transferred":v.transferred}))
+}
+
+/// Design 8.6's `unconfirmedState`, one function for both reads like [`eligibility_fields`].
+///
+/// `null` for a Closing branch or no branch. `baseConfirmed` means two hashes agree, never that the
+/// preview's provider was ever owner. `sourceUnreadable` is not in design section 11's union; it is
+/// added for the same reason P2's `sourceUnreadable` reason is.
+pub(super) fn unconfirmed_state_value(
+    state: Option<catcoms_app::studio::types::StudioOverlayUnconfirmedState>,
+) -> Value {
+    use catcoms_app::studio::types::StudioOverlayUnconfirmedState as U;
+    match state {
+        None => Value::Null,
+        Some(U::AwaitingSource) => "awaitingSource".into(),
+        Some(U::BaseConfirmed) => "baseConfirmed".into(),
+        Some(U::BaseSuperseded) => "baseSuperseded".into(),
+        Some(U::SourceUnreadable) => "sourceUnreadable".into(),
+    }
 }
 
 /// P2's two fields, design section 11's `eligibility` and `manualReason`, from one classification.
@@ -504,6 +523,43 @@ fn disposal_value(v: &StudioOverlayDisposal) -> Result<Value, String> {
         "sequence":v.sequence.to_string(),"atMs":v.at.to_string(),"terminal":true}))
 }
 
+/// One visit of an Unconfirmed Save (design 8.7), as `{kind:"unconfirmedOverlaySave", state}`.
+///
+/// What every `saved` result states, so a renderer cannot present it otherwise:
+/// - `localOnly` and `provisional`: the work is on this device, on unconfirmed history.
+/// - `provenance: "unconfirmed"`: it was never an owner's checkpoint, published or signed (8.5).
+/// - No content: the draft is read through the inspection, which has a delivery fence.
+///
+/// `pending` and `busy` both mean "send the identical request again". They are told apart because
+/// `pending` means this request's work is scheduled, and `busy` means none of this request was
+/// saved: capacity was full, or the visit finished another request's work.
+fn unconfirmed_save_value(
+    target: StudioTarget,
+    outcome: StudioUnconfirmedSaveOutcome,
+) -> Result<Value, String> {
+    let mut value = json!({"v":1,"kind":"unconfirmedOverlaySave",
+        "channel":channel_of(target),"object":object_of(target)});
+    let fields = match outcome {
+        StudioUnconfirmedSaveOutcome::Saved { basis, accepted } => json!({"state":"saved",
+            "basis":hex::encode(basis),"accepted":accepted,"localOnly":true,"provisional":true,
+            "provenance":"unconfirmed"}),
+        StudioUnconfirmedSaveOutcome::Disposed(manifest) => {
+            json!({"state":"disposed","disposal":disposal_value(&manifest)?})
+        }
+        StudioUnconfirmedSaveOutcome::HandedOff(outcome) => json!({"state":"handedOff",
+            "basis":hex::encode(outcome.basis),"epoch":outcome.epoch.to_string(),
+            "docId":format!("{:032x}",outcome.doc_id),"accepted":outcome.accepted}),
+        StudioUnconfirmedSaveOutcome::Scheduled => {
+            json!({"state":"pending","retry":"sameRequest"})
+        }
+        StudioUnconfirmedSaveOutcome::Busy => json!({"state":"busy","retry":"sameRequest"}),
+    };
+    for (key, field) in fields.as_object().expect("an object literal") {
+        value[key] = field.clone();
+    }
+    Ok(value)
+}
+
 /// The lifecycle half of the one `StudioControlResponse` converter. Kept here rather than in
 /// `recovery` so that module stays about recovery; `response_value` delegates.
 pub(super) fn response_value(response: Response) -> Result<Value, String> {
@@ -548,6 +604,28 @@ pub(super) fn response_value(response: Response) -> Result<Value, String> {
             json!({"v":1,"kind":"overlayArchiveReleased","reconcileRequired":true})
         }
         Response::OverlayDisposed(v) => disposal_value(&v)?,
+        // Not `recoveryApplied`: a copy is an ordinary provisional Save of a value taken from a
+        // draft, and the renderer must not read it as a recovery. `branchPreserved` is stated
+        // rather than left for a renderer to infer: no copy, nor any count of them, preserves the
+        // branch it came from (design 6.3 C-P); only an archive does.
+        Response::OverlayCopyApplied {
+            destination,
+            already_saved,
+        } => json!({"v":1,"kind":"overlayCopyApplied",
+            "channel":channel_of(destination),"object":object_of(destination),
+            "contentSaved":true,"alreadySaved":already_saved,"provisional":true,
+            "branchPreserved":false}),
+        // Design 8.7. Never authority: the Save mints again from the live preview at each stage.
+        Response::UnconfirmedOverlaySaveTicket {
+            target,
+            basis,
+            branch,
+        } => json!({"v":1,"kind":"unconfirmedOverlaySaveTicket",
+            "channel":channel_of(target),"object":object_of(target),
+            "basis":hex::encode(basis),"branch":hex::encode(branch),"provenance":"unconfirmed"}),
+        Response::UnconfirmedOverlaySaved { target, outcome } => {
+            unconfirmed_save_value(target, outcome)?
+        }
         _ => return Err("mismatched overlay lifecycle response".into()),
     };
     bounded_view(value)

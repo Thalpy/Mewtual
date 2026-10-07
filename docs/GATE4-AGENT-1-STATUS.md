@@ -1502,6 +1502,108 @@ So a budgeted scan currently does one record per visit. That is the safe directi
 cheap record costs a visit, inlining an expensive one costs an unbounded custody hold - but it
 means **13.7 is now load-bearing for throughput, not just a reporting obligation**.
 
+### The runtime half: designed in `GATE4-AGENT-1-C3-RUNTIME.md`, step 1 in progress
+
+The runtime adoption has its own design document, `GATE4-AGENT-1-C3-RUNTIME.md`, reviewed twice
+before any runtime code. Revision 1 (the scratch draft) was **not ready**: two blockers (a queue
+head gated on `replay_ready()` could wait on catch-up forever; a second pool permit for overlay
+jobs could wedge the four-slot pool) and five highs, among them that the job API silently dropped
+the receive limits and that the throughput premise was false (every uncached record parks, one per
+visit). Revision 2 answered all 22 findings; its re-review closed both blockers in principle and
+found four new highs, all in the later conversion steps. Revision 3 records the decisions for those
+steps, and **step 1, the storage prerequisites, was accepted for implementation**.
+
+The list of sites below is the historical one. The current, complete table (about thirty sites,
+classified explicit or background, with profile and what each retains when not ready) is in the
+design document's section 5.
+
+**Step 1, the storage prerequisites, is implemented** (no runtime owner converted yet):
+
+| piece | what it does | test | mutation, killed |
+|---|---|---|---|
+| S-1 `EpochInventoryProfile` | coverage plus the four limits as one value; every scan is built through `scan_epoch_files_with(profile)`; `receive()` is exactly the old receive rail; a job keeps its profile on both restart paths | `an_inventory_job_keeps_its_profile_across_a_restart`: 65 records, restart from a step and from finish, both still refuse at the 65th | widening either restart path to `full()` |
+| S-2 generation stamp | the issued inventory carries the `inventory_generation` it was finished under; the Studio budget mint refuses a mismatch | `an_inventory_finished_before_a_five_family_write_cannot_mint_after_it` | dropping the new comparison: the stale inventory minted |
+| S-3 `drive_epoch_inventory_job` | one visit's drive against an absolute deadline, through a cursor step that takes the deadline as given (`step_until`); never begins a step with no time left; reports an already-parked body as `Parked` | `driving_a_job_respects_the_visit_deadline_and_stops_at_a_park`, `..._treats_its_deadline_as_absolute`, `..._loops_several_one_record_steps_in_one_visit` | dropping the pre-check (8 entries instead of 0); calling the relative step (traversal completed past the deadline); stepping once (stopped after one record); dropping the parked check |
+| S-4 held cursor beside non-family files | pins that creating, replacing and removing `.bin`/`.net` siblings, and a real `save_server`, between steps neither faults nor changes records or authenticated bytes | `a_held_cursor_tolerates_non_family_files_changing_beside_it` | (pins platform behaviour; no guard to break) |
+
+**Its review: one high, fixed.** An Opus adversarial review of the first cut found that
+`drive_epoch_inventory_job` passed its **absolute** deadline to the step's **relative** form,
+which adds it to the current time. A step's own expiry was therefore disabled, one step could run
+every non-family name to the next record, and the classifier was handed an enormous remaining
+budget, harmless only while `validation_fits` refuses everything. Nothing called it yet; step 2
+would have built on it. My test missed it because it used only a deadline already past and
+`u64::MAX`, where the two readings coincide. Fixed with a cursor step that takes an absolute
+deadline, plus the regression above. Also from that review: a test that `drive` really loops (M1),
+an inventory that starts with a token matching nothing so only the finish stamp makes it mintable
+(L2), the parked report (L3), a real server write in the S-4 test (L4), a doc warning on the
+vault-wide job constructor (L5), and the misplaced test doc comment (L1). The re-review closed
+H1 and found nothing new. One residual, recorded rather than changed: with a body taken but not
+yet installed, `drive` reports `Stepped` when out of time and an error when time remains. The
+planned runtime cannot reach that state, because a job whose body is out for validation is not
+stepped (design section 4).
+
+### Step 2 (replay's manual move): staged in a private worktree, reviewed, not yet shipped
+
+Built and reviewed as `GATE4-AGENT-1-C3-RUNTIME.md` section 12 records: the shared,
+turn-based `InventoryRuntime`, its detached validation through the receiver's background-job
+machinery, N-M1's own-write accounting, and replay's manual move taking its budget from it with
+a synchronous fallback (on `Unstable`, or after 60 s of patience). Its adversarial review found no
+blocker and one high, a liveness stall under ordinary writes, which the fallback answers. It ships
+once Agent 2 confirms the two shared receiver files are free; until then no production path parks
+a cursor across visits. Step 2 is the runtime and its tests, ready for 13.7's classifier, more than
+a custody improvement for busy vaults today: with every uncached record parking, a busy or large
+vault ends in the same synchronous scan as before.
+
+### I-4 writer audit at C-3 step 2 (2026-10-06, Opus, static, at `2df3564f`)
+
+Section 8 of the runtime design requires the audit to be re-run before the first production code
+that parks a cursor, because only then does an under-rotating writer become unsafe. No blocker or
+high. Findings and their dispositions are in the runtime design's section 12 (M-1 raw `std::fs`
+now refused by `scripts/check-store-raw-fs.sh` in CI; M-2 a finish-time names-only listing check;
+M-3 read-path rotations recorded, the completed-handoff serve memoised and its three sibling
+sites a follow-up; L-1 fixed; L-2 and L-3 follow-ups). The
+audited writer list, which is what proves coverage beside the type-level guard:
+
+| writer | kinds touched | rotates before first mutating I/O | evidence |
+|---|---|---|---|
+| Recovery accounted, incl. eviction settle | Recovery + temp | yes | `epoch_recovery.rs:374→376`; `:411` delegates |
+| Recovery unaccounted / tooling | Recovery + temp | yes | `epoch_recovery.rs:485→487` |
+| Owner journal (all owner writers, fault/repair resave, publication) | OwnerReceipts + temp | yes | `epoch_owner.rs:642→644`, the only write in the family |
+| Intents replace (ordinary, overlay accept, handoff stages) | Intents + temp | yes | `epoch_intents.rs:752→754` |
+| Intents exact-retry sync | Intents | yes | `epoch_intents.rs:712→714` |
+| `flush_checked_epoch_intents` | Intents | yes | `epoch_intents.rs:568` |
+| Retirement replace / zero-removal sync | Intents | yes | `retirement.rs:352→354`, `312→314` |
+| Handoff completed sync (source precheck) | Intents | yes | `epoch_studio/handoff.rs:702` |
+| Handoff publication sync (read-only serve) | Intents | yes; a repeat of a flush this mount already made, with no five-family write since, is now skipped with no I/O (M-3) | `handoff.rs:749` (now `:751`) via `source.rs:158`, through `sync_intent_unless_durable` |
+| `sync_intent_unless_durable` (added for M-3) | Intents | yes, through its own guard, when it flushes at all | store `epoch_recovery/inventory.rs`, `RepeatSyncMemo` beside it |
+| Draft archive write | DraftArchive + temp | yes | `epoch_draft_archive.rs:255→257` |
+| Draft archive exact-retry sync | DraftArchive | yes | `epoch_draft_archive.rs:209→211` |
+| Draft archive release (unlink + parent sync) | DraftArchive | yes | `epoch_draft_archive.rs:370→372,379` |
+| Registry epoch replace / unchanged sync | Registry + temp | yes | `epoch_registry.rs:492→494`, `457→459` |
+| Registry head proof sync / repair barrier | Registry | yes | `epoch_registry/head.rs:343→345`, `383→385` |
+| Registry maintenance hint | Registry, Intents | yes | `epoch_registry/page_source.rs:60,71` |
+| Registry page receive sync | Registry | yes | `epoch_registry/receive.rs:201→203` |
+| Studio source (seal, rotate, adopt, overlay commit, ingest, handoff) replace / unchanged sync | Studio + temp | yes | `epoch_studio.rs:688→690`, `643→645`, the only write in the family |
+| Studio discovery proof sync / repair barrier | Studio | yes | `epoch_studio/discovery.rs:400→402`, `439→441` |
+| Cleanup unlink batch + directory sync (test-only callers) | all temps | yes, per step before the loop | `epoch_recovery/cleanup.rs:164→197,215` |
+| Failed-write staging unlink (`StagingPath::drop`) | any, inside a guarded write | yes (the caller's guard) | `store.rs:567-587,1256-1263` |
+| Non-family savers (`.bin`, `.net`, `.cache`, ui-state, pairing, `registry.bin`) | none; same directory, hence M-2 | no, correctly | `store.rs:1203-1228` |
+| `remove_server` | none (`servers/` non-family files) | no, correctly | `store.rs:1608-1619` |
+| `ServerStore::open` (creates `servers/`, root sync) | directory, before mount | n/a (fresh token) | `store.rs:1383,1390,1401` |
+| Vault session lock, passphrase rewrap | vault root only | n/a | `catcoms-storage/src/vault.rs:118-122`; `store.rs:1448` |
+| Blob stores | `blobs/` only | n/a | `store.rs:1635-1659` |
+| `WriteHooks` seams | decide only, no I/O; `None` is the only production value | n/a | `store.rs:869-894` |
+| Test-only raw writers | any | no (`cfg(test)`) | `store.rs:681-684,1162-1179`; `epoch_draft_archive.rs:533,562` |
+| catcomsctl, Tauri bridge | nothing in `servers/` outside tests | n/a | `bins/catcomsctl/src/main.rs`; `admission_storage.rs` tests from `:382` |
+| Budget mint / scope entry | none | correctly does not rotate | `epoch_studio.rs:187,222` |
+
+Line numbers are as audited at `2df3564f`. The readers' side was confirmed sound: step, install,
+finish, mint and reference finish all recheck the token, and `Arc::ptr_eq` against live clones
+cannot suffer ABA. Residual risks the audit named, not defects: the token is per `ServerStore`
+instance and exclusivity rests on the vault's file lock (weak on Linux NFS); the `servers/` parent
+is checked as a non-link directory only at begin; crash-orphaned `.bin` staging files could
+exhaust the 1024-entry receive limit, which fails closed.
+
 ### What remains, and why it is a separate checkpoint
 
 The runtime still drives scans the old way at six sites: `studio/control.rs` (x2),
@@ -4265,6 +4367,170 @@ same degradation design 6.6 accepts for forgotten disposals ... refusal, never a
 a statement about *safety* it is right. What it is not is V8-neutral, and I took the classifier's
 safety argument as covering availability without checking. The old basis-keyed check already gave
 the acknowledgement, so restoring it costs nothing in the namespace and needs no layout change.
+
+## G4-A1-S: Flow S over either basis (store seam)
+
+Flow S is now one algorithm for both provenances, as design 8.7 of Agent 2's design asks ("Agent 1's
+Flow S unchanged", with the mint substituted). Only the mint differs, and it is consumed at exactly
+two points, S1b and S3, both reached only by new authoring.
+
+| piece | where | what it does |
+|---|---|---|
+| `StudioOverlayMint` | `store/epoch_studio/overlay_capture.rs` | `Closing { close, tenure }`, minted by the store from the installed source exactly as before; or `Unconfirmed(Result<StudioUnconfirmedOverlayBasis, AppError>)`, the caller's live-preview mint **attempt**, failed or not |
+| `mint_studio_overlay_basis` | same | the one place S1b and S3 obtain the fresh basis, so the two cannot drift |
+| `OwnedOverlayBasis` | same | what the capture and plan carry: an owned basis, never the preview's seed handle |
+| `start_studio_overlay`, `commit_studio_overlay_with`, `save_studio_overlay` | `store/epoch_studio/overlay.rs` | the general entry points; every `*_closing_*` entry point is now a thin `Closing` wrapper with its exact old signature |
+| `Server::mint_unconfirmed_overlay_basis` | `studio_exchange/provisional/seed.rs` (Agent 2's file) | seed-scope recheck, then sync's sanctioned mint; the app's only route to an Unconfirmed basis |
+| `StudioOverlayBasis::target()` | `catcoms-replication/src/studio/overlay.rs` (Agent 2's file) | widened to `pub` for the target check below |
+
+**What the store enforces for Unconfirmed, at S1b and again at S3:**
+
+1. **No stored source** for the document, probed under custody. Sync's mint cannot see the store.
+   It is a metadata probe, not a source read: any entry at the record's path refuses, including a
+   corrupt or non-regular one, and absence must also agree with the budget, so a record unlinked
+   while still accounted refuses. This comes before the mint result is opened, so "installed
+   source" is the answer even when the preview has also expired. (The first cut used
+   `checked_studio_source`, which restored the whole source on the actor just to refuse; review L4.)
+2. **The mint attempt**, surfaced verbatim.
+3. **The basis is for exactly this target**, else `EpochScope`. Not cosmetic, and found by
+   mutation: a Flipnote's logical key omits its channel, and with the check removed a basis
+   minted for one channel opened a branch for a request naming another.
+4. **The mint is of this MLS epoch**: it recorded the current MLS epoch, and its provider is still
+   a member. The sanctioned mint cannot fail this in the visit it was made. It refuses a basis
+   kept across an MLS-epoch change (review L2), and nothing more: a basis kept **within** one MLS
+   epoch, past its hint's expiry or its preview's eviction, still passes. Minting in the same
+   custody visit as the stage that consumes it is therefore a caller obligation, and
+   G4-A2-PREVIEW must enforce it. The membership half cannot fire alone, since any membership
+   change advances the epoch; it is defence in depth.
+5. Fingerprint equal to the request's basis, then branch admission, exactly as for Closing.
+
+A commit refuses a mint of the other kind than its plan, by name, before anything reads the store
+(review L3).
+
+No tenure is consulted anywhere on the Unconfirmed path (Agent 2 design 8.5).
+
+**The ordering property, both kinds.** Classification, `Transferred` and `Disposed`
+acknowledgements, `completed_retry`, exact retries and the ordinary-pending refusal all run before
+the mint is looked at. For Closing that is V8 unchanged. For Unconfirmed it is the analogue: a
+preview that expired, was evicted or vanished on restart blocks new authoring and nothing else.
+
+**S3 re-enters the live check.** The commit takes a mint attempt made in the commit visit, never
+one parked with the plan. The fingerprint is stable across a preview refresh (provider, MLS epoch
+and time are admission facts, not fingerprinted), so a refreshed mint still commits. The stamp
+covers only the Intents record, so **a confirmed source received over the network while the plan
+is detached is caught only by S3's installed-source check**, not by the stamp. That is the case the
+re-run exists for, and it is tested directly.
+
+**Closing is unchanged.** Error text is byte-identical. The provenance a new branch records now
+comes from `basis.provenance()` instead of a hard-coded `Closing`, which agrees by construction.
+
+**One check I added and then removed.** A "live draft of the other kind" refusal in S1b changed
+only the error text. Fingerprint domains differ per provenance, so a cross-kind request can never
+equal the live basis: it is refused as `EpochScope` when it names the live branch, and `Stale`
+otherwise, because `admit_new_branch` never admits beside a live branch. An untestable guard that
+only rewords an existing refusal belongs in G4-A1-MAP, not here.
+
+**Not wired in production.** The general entry points, the `Unconfirmed` variant and the Server
+mint carry `#[cfg_attr(not(test), allow(dead_code))]`, each commented as waiting for G4-A2-PREVIEW
+(Agent 2's preview Save: Server/actor Save, rails, reconciliation, native results). That work, and
+G4-A1-MAP's structured reasons, are not part of this change.
+
+### Tests, on a real fetched preview, each guard broken on purpose
+
+`studio_exchange/tests/provisional/seed/tail/unconfirmed_save.rs`. Every basis comes from the
+production mint over a preview fetched, parsed and tail-completed over the wire. The saving member
+is a plain joiner, asserted `Unknown` as a precondition.
+
+| test | proves |
+|---|---|
+| `..._first_append_joins_survives_refresh_and_retries_without_a_preview` | Index and Flipnote first append; the recorded provenance is the mint's own provider, MLS epoch and time; no source written; a mint one second later names the same basis and joins the live branch; after a restart the mint fails, yet the exact retry is answered from the reconstructed branch; new authoring surfaces the mint's own error and changes nothing |
+| `..._refuses_beside_an_installed_source` | refused at S1b with the preview still live; the ordinary Apply's own Intents row is left byte-identical |
+| `..._commit_reruns_the_live_check_after_the_detached_plan` | staged form: a source **received** during the detach (stamp unmoved, precondition asserted), a **local** Apply (the stamp answers first) and **expiry** all refuse at S3 and write nothing |
+| `..._refuses_stale_requests_and_a_basis_for_another_channel` | Unconfirmed wording for a changed basis and a stale branch; a basis for another channel of the same Flipnote object refuses `EpochScope` |
+| `..._exact_retry_is_answered_beside_a_newly_received_source` (review M1) | accept, receive the confirmed epoch over the network, retry exactly: acknowledged, nothing opened; new work beside the source refuses |
+| `..._refuses_a_corrupt_or_unlinked_source_rather_than_reading_it_as_absent` (M2) | a corrupt record refuses as an installed source; one unlinked while the budget accounts it refuses with `BudgetError::Inventory`; a sentinel mint failure is never what comes back |
+| `..._commits_from_a_replacement_preview_and_after_restart` (M3) | staged success: S1b from preview A, commit from a separately fetched preview B; the branch keeps A's admission facts; after a restart a third preview appends |
+| `..._refuses_a_basis_minted_under_an_earlier_mls_epoch` (L2) | a basis kept across a real membership commit refuses at S1b |
+| `unconfirmed_plan_refuses_a_closing_commit_mint_by_name` (L3) | an Unconfirmed plan given a Closing mint refuses with that reason, not an unrelated one |
+
+| mutation (applied in the isolated worktree, restored after) | killed by |
+|---|---|
+| drop the installed-source refusal | `refuses_beside_an_installed_source` and the S3 `received` case: both Saves succeeded |
+| drop the target check | the cross-channel Save succeeded |
+| refuse a failed mint before classification | the exact retry after restart |
+| skip the Unconfirmed re-mint at S3 | the S3 `received` and `expiry` cases |
+| ignore the budget's absence check (`verify_record(None)`) | the unlinked case heard the sentinel |
+| treat a present but unreadable record as absent | the corrupt case got `Inventory` instead of "installed source" (the budget still refused: two layers) |
+| drop the MLS-epoch/member guard | the kept basis was accepted |
+| drop the plan/mint kind check | the commit failed with an unrelated tenure refusal instead |
+
+### Review of the first cut: no blocker or high; three mediums and six lows, dispositioned
+
+An Opus adversarial review (Fable was rate-limited), read-only against the isolated worktree's diff
+at `e5a52386`, with the focused tests executed. It verified: the Closing wrappers are exact
+equivalents; the mint is consumed only after classification, exact retry and the pending check;
+cross-kind requests are refused without the removed check; provenance always comes from the basis;
+the cross-channel test pins the target check and nothing else; no new construction path; and every
+anchor in the six mutation harnesses still matches exactly once.
+
+| # | finding | disposition |
+|---|---|---|
+| M1 | no test of an exact retry after a confirmed source arrives; moving the presence check ahead of classification would pass every test | **fixed**: `unconfirmed_save_exact_retry_is_answered_beside_a_newly_received_source` |
+| M2 | "a corrupt or unreadable source refuses" was claimed, not tested | **fixed, and the check itself changed** (see L4): `..._refuses_a_corrupt_or_unlinked_source_rather_than_reading_it_as_absent`, with a sentinel mint failure that must not be what comes back |
+| M3 | replacement and restart-append untested; the commit doc overclaimed ("survives the ready entry being replaced"); the acceptance row and Agent 2's 8.1 "not yet built" note are stale | **fixed**: `..._commits_from_a_replacement_preview_and_after_restart`; the doc now says exactly what holds (same seed and receipt match; another candidate does not); acceptance row corrected; Agent 2 asked to update their own 8.1 note |
+| L1 | S1b binds the target only; a basis with another author or group passes S1b and is refused at S2 after media work | **fixed** once Agent 2 added `author()` and `document()` (`f3ce1758`): the Unconfirmed mint now refuses a basis naming another group's document, then one minted for another device, before media work. `unconfirmed_save_refuses_a_basis_for_another_device_or_group_at_s1b`: the provider offers the store the saver's basis, and a second independent group's basis is offered to the first. Dropping the document check lets the author check answer; dropping the author check moves the refusal to S2 as `EpochAuthority` |
+| L2 | the store has no evidence the mint attempt is fresh; a kept basis would skip every live recheck | **fixed**: the basis must record the current MLS epoch and a provider still in the group; `..._refuses_a_basis_minted_under_an_earlier_mls_epoch` hands the store a kept basis after a real membership commit |
+| L3 | the plan does not record its kind; a wrong-kind commit mint fails closed with misleading text | **fixed**: refused first, by name; `unconfirmed_plan_refuses_a_closing_commit_mint_by_name` |
+| L4 | the presence check ran a full `restore_unit` on the actor just to refuse | **fixed**: a metadata probe. Any entry at the record path refuses; absence must also agree with the budget, so a record unlinked while accounted refuses |
+| L4b | eager minting copies up to 2 MiB of seed bytes per attempt, even for retries that never use it | **follow-up for G4-A2-PREVIEW**: the mint needs `&sync` while the store runs inside `with_registry_context(&mut)`, so laziness needs the caller's design |
+| L5 | provenance-stays, a generation-2 Unconfirmed branch over an existing record, and the staged success path were untested | provenance-stays and staged success **fixed** (first and replacement tests). Generation 2 after a disposal is a **follow-up**: it needs the disposal flow, and a regression to hard-coded `Closing` there fails safe at `new_admitted`'s own agreement check |
+| L6 | `seed.rs` said the store adds "the one check"; `EpochScope` now covers three cases G4-A1-MAP must tell apart | doc **fixed**; the mapping note is carried into G4-A1-MAP |
+
+### Re-review of the fixes: M1-M3 closed; no blocker, high or medium; eight lows
+
+A second Opus pass, read-only and static, against the same worktree. It confirmed each new test
+reaches the guard it names, that the metadata probe cannot miss a real record (symlinks, case,
+temporaries and orphans all considered), that `verify_record(None)` cannot refuse a legitimate
+first append, that the MLS guard compares the fresh mint with the current group rather than with
+the branch's recorded epoch, so a live branch is not stranded by a membership change, and that no
+mutation-harness anchor moved.
+
+| # | finding | disposition |
+|---|---|---|
+| 1 | the freshness wording overclaimed: the guard catches a basis kept across an MLS-epoch change, not one kept within an epoch past expiry | wording **fixed** here; the same-visit mint is recorded as a G4-A2-PREVIEW obligation |
+| 2 | the membership half of the guard cannot fire alone | labelled defence in depth |
+| 3 | no test that a live Unconfirmed branch accepts a fresh mint's append after an MLS-epoch change; tightening the guard to the branch's recorded epoch would strand every branch unnoticed | **fixed** in the follow-up commit: `unconfirmed_branch_accepts_a_fresh_mint_after_an_mls_epoch_change` (third member joins, preview refetched, append accepted, provenance unchanged) |
+| 4 | a failed parent-directory probe does not invalidate the budget, though the comment implies parity with `checked_studio_source` | **fixed**: every probe failure invalidates the budget; a present record is not a failure. No test: it needs an IO fault on the vault directory |
+| 5 | the kind check's position before the store reads is not pinned, and the reverse pairing is untested | **fixed**: the Unconfirmed-plan test now hands the commit a stale budget, and `closing_plan_refuses_an_unconfirmed_commit_mint_by_name` is the reverse pairing on a real Closing capture. Moving the check after budget entry fails both with "Studio budget is stale" |
+| 6 | this section's tables and executed-checks line were stale | **fixed** here |
+| 7 | `catcoms-sync/.../provisional/seed.rs:229-230` (Agent 2's) says the app checks before minting; it checks after the attempt, before opening it | passed to Agent 2 |
+| 8 | no S3 test with a real preview of a different candidate | follow-up: the fixture's candidates are deterministic, so a different candidate needs a second fixture |
+
+**Executed** at `e5a52386` plus this change, in `M:/catcoms-a1-verify`: see the commit message for
+the final run; the first cut's run at `c6f7fea0` passed 838 app and 344 replication library tests
+with every integration binary green, and frontend `npm test` passed 1282 of 1282.
+
+## G4-A1-CORE: the core signing review, and its two test findings
+
+The SHA-pinned review of `8190dc4..e65bfd8` returned a **bounded PASS for the production code**
+with two medium test-coverage findings; the verdict, findings and what was executed are recorded in
+`GATE4-HANDOFF-SIGNING-REVIEW.md`. A finding re-review then closed SIGN-TEST-002 and narrowed
+SIGN-TEST-001.
+
+- **SIGN-TEST-002, closed**: the authority/receipt binding, pinned through a real second close
+  cycle, with the `receipt` mutant.
+- **SIGN-TEST-001, editor-cap and aggregate halves closed**: `local_policy` through a structurally
+  decoded over-cap branch (`local-policy` mutant), and the probe gate through an **honest**
+  branch (`probe-gate` mutant).
+- **SIGN-TEST-001b, submitted**: a positive handoff by a non-owner member, and the per-device cap
+  pinned in both directions (owner exempt, member charged), with three mutants
+  (`author-is-owner`, `owner-charged`, `device-exempt`); short re-review outstanding. Residual and
+  not part of the correction: no isolated mutant for the per-operation preflight or the framing
+  probe, neither of which is the first refusal for any cheap input.
+- **A product gap, for Agent 2**: the honest over-gate branch is valid local work that can never be
+  handed off automatically. For a non-owner author the binding limit is the 1 MiB per-device cap,
+  a quarter of the epoch budget; P2's classifier reports such a branch as Transferable; and no 8.3
+  rail bounds signed size. The handoff refuses it safely before signing.
 
 ## A verification-scope failure of mine, recorded because the fix alone would hide it
 

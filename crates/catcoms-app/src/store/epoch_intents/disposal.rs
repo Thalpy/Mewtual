@@ -48,9 +48,8 @@ pub enum StudioDisposalRequestMode {
 }
 
 impl ServerStore {
-    /// Test-only spelling of the transaction without the app's additional Unconfirmed rails.
-    /// Production callers use `ServerStore::dispose_studio_overlay`, which supplies those counters
-    /// and applies the successful release.
+    /// Test-only spelling without the app's additional Unconfirmed quota counters. Production
+    /// disposal supplies those counters and applies the release after this transaction lands.
     #[cfg(test)]
     #[allow(clippy::too_many_arguments)]
     pub(in crate::store) fn dispose_studio_overlay_with_io(
@@ -220,9 +219,8 @@ impl ServerStore {
             ));
         }
 
-        // The physical record was authenticated by `checked_epoch_replay_state`. Check the
-        // additional Unconfirmed inventory before Preserve can perform its archive durability
-        // barrier, so an accounting refusal leaves every record untouched.
+        // Validate the authenticated record against the inventory-derived quota before Preserve
+        // performs an archive durability barrier, so an accounting refusal changes no records.
         let old = self
             .read_scoped_intent_plain(&scope)?
             .map(|record| record.physical_bytes);

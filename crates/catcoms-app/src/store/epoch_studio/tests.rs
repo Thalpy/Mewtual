@@ -69,7 +69,7 @@ fn unconfirmed_quota_preflight_is_replacement_aware_and_updates_only_after_commi
     );
     budget
         .preflight_unconfirmed(true, None, 64)
-        .expect("the released bytes admit one new branch");
+        .expect("released bytes admit one new branch");
     budget.commit_unconfirmed(true, None, 64);
     assert_eq!(
         budget.unconfirmed_server_branches,
@@ -79,12 +79,11 @@ fn unconfirmed_quota_preflight_is_replacement_aware_and_updates_only_after_commi
 
     budget.commit_unconfirmed_disposal(64);
     assert_eq!(
-        budget.unconfirmed_server_branches,
-        MAX_UNCONFIRMED_BRANCHES_PER_SERVER - 1
-    );
-    assert_eq!(
-        budget.unconfirmed_vault_bytes,
-        MAX_UNCONFIRMED_VAULT_BYTES - 64
+        budget.unconfirmed_usage_for_test(),
+        (
+            MAX_UNCONFIRMED_BRANCHES_PER_SERVER - 1,
+            MAX_UNCONFIRMED_VAULT_BYTES - 64,
+        )
     );
 }
 struct Fixture {
@@ -1328,6 +1327,89 @@ fn a_budgeted_reference_scan_collects_the_same_cids_as_an_unbudgeted_one() {
     assert_eq!(
         got, want,
         "a budgeted reference scan collected a different CID set from an unbudgeted one"
+    );
+}
+
+/// I-4 audit M-2, on a reference scan. A traversal that missed a record on disk (what a directory
+/// stream unstable under unrelated churn would produce) must not install protection: the missed
+/// record's references would be left unprotected, which is worse than an undercounted budget.
+#[test]
+fn a_reference_scan_that_missed_a_record_installs_no_protection() {
+    let root = tempfile::tempdir().unwrap();
+    let f = Fixture::new(true);
+    let mut store = open(root.path());
+    let mut b = budget(&mut store, &f);
+    f.edit(&mut store, &mut b, f.insert());
+    let scan = |store: &mut ServerStore, forget: bool| {
+        store.creative_protection.lock().unwrap().unknown_for_test();
+        let mut cursor = store
+            .begin_epoch_storage_scan(
+                EpochInventoryCoverage::RecoveryOwnerReceiptsIntentsRegistryAndStudio,
+            )
+            .unwrap();
+        store
+            .collect_cursor_creative_references(&mut cursor)
+            .unwrap();
+        while !store
+            .step_epoch_storage_scan(&mut cursor, 64, None)
+            .unwrap()
+            .complete
+        {}
+        if forget {
+            cursor.forget_a_record_for_test();
+        }
+        store.finish_cursor_creative_references(cursor)
+    };
+    // The precondition: the same scan, untouched, installs.
+    scan(&mut store, false).unwrap();
+    let Err(error) = scan(&mut store, true) else {
+        panic!("protection was installed from a traversal that missed a record");
+    };
+    assert!(
+        error.to_string().contains("listing changed"),
+        "refused for the wrong reason: {error}"
+    );
+}
+
+/// C-3 runtime design S-2. An inventory finished before a five-family write cannot mint after it.
+///
+/// The write here is the mutation guard alone, which every five-family writer takes before its
+/// first possible I/O and which touches neither the Studio nor the Intents generation. Before the
+/// inventory carried the generation it was finished under, the two older checks both passed in
+/// this case, so the stale inventory minted a budget for a vault that had since changed. Within
+/// one visit finish and mint are adjacent; this is what makes splitting them across visits safe.
+#[test]
+fn an_inventory_finished_before_a_five_family_write_cannot_mint_after_it() {
+    let root = tempfile::tempdir().unwrap();
+    let f = Fixture::new(false);
+    let mut store = open(root.path());
+    let mut b = budget(&mut store, &f);
+    f.edit(&mut store, &mut b, f.insert());
+    drop(b);
+    let finished = |store: &mut ServerStore| {
+        let mut scan = store.scan_epoch_storage_with_studio().unwrap();
+        while !scan.step().unwrap().complete {}
+        scan.finish().unwrap()
+    };
+
+    let control = finished(&mut store);
+    assert!(
+        store
+            .studio_storage_budget(SERVER, &f.group, &control)
+            .is_ok(),
+        "control: a finish followed directly by a mint is fresh"
+    );
+
+    let stale = finished(&mut store);
+    store.epoch_mutation_guard();
+    let refused = store
+        .studio_storage_budget(SERVER, &f.group, &stale)
+        .unwrap_err();
+    assert!(
+        refused
+            .to_string()
+            .contains("fresh five-family inventory required"),
+        "an inventory finished before a write minted after it: {refused}"
     );
 }
 

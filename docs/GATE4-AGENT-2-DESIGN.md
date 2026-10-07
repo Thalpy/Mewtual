@@ -764,7 +764,7 @@ over-cap check and drops only the logical-key equality.
 | C1 | Begin | yes | `capture_studio_overlay_copy` (5.2): the accepted source capture plus the destination's two authenticated records and their stamps, one permit, one visit. |
 | C2 | Plan | detached | Decode both destination records, build the destination and recovery projections, reconstruct the draft, run `restore::plan`. |
 | C3 | Preview | yes | The existing source-stamp recheck plus `studio_destination_is_current`, destination channel known, destination still Open with the same `doc_id`, `expected_projection = recovery_fingerprint()`. Returns one bounded proposed body or an explicit hold. Saves nothing. |
-| C4 | Apply | yes | Exact-retry shortcut first (`contains_exact_operation` on the destination), then re-plan from durable state and require `epoch_id`, `expected_projection`, `disposition == Ready` and a byte-identical `body`. Then the ordinary `StudioRequest::Apply` publication path. |
+| C4 | Apply | yes | C1' again, then the exact-retry shortcut (`contains_exact_operation` on the destination), then re-plan from durable state and require `epoch_id`, `expected_projection`, `disposition == Ready` and a byte-identical `body`. Then the ordinary `StudioRequest::Apply` publication path. *As built (2026-10-06):* the operation is published under `copy_nonce(nonce)`, a nonce derived in a domain of its own, and the shortcut looks for that. So a copy's operation coincides only with an earlier copy under the same renderer nonce and body, never with an ordinary Save of the same bytes (review L4). That domain is a convention, not a guarantee against a hostile renderer: the derivation is public and unkeyed, so a renderer can compute it and collide an ordinary Save with a later copy's echo. That misreports a kind and never writes twice (Review 2, L-5). The result is `OverlayCopyApplied` / `overlayCopyApplied` with `branchPreserved: false`, never `recoveryApplied`. |
 
 There is **no C5**: copy writes nothing to the branch's record (findings 1, 2, 8).
 
@@ -772,6 +772,41 @@ There is **no C5**: copy writes nothing to the branch's record (findings 1, 2, 8
   hold exists on the destination. Permitted while a transfer hold exists on the source, and it does
   not clear `Prepared`, retire the original envelopes, or count as evidence that the original
   handoff completed.
+  - *As built (2026-10-06), and how each clause is met.* Only the transfer-hold clause has a check
+    of its own: `refuse_held_destination` at C1, C3 and C4. No copy stage consults the live-job
+    reservation. The live-hold clause is met by other guards, and at C4 only in part:
+    - A live overlay job that lands on the **source** changes the source stamp, so C3 refuses the
+      preview as changed (`studio_copy_is_current`).
+    - C4 compares no source stamp. It re-plans from the records it reads now and requires the same
+      epoch, destination projection, a `Ready` disposition and the same body. A landed job that
+      replaced or removed the selected value is refused by that re-plan:
+      - for a value-addressed item (`Title`, `Fps`, `Frame`, `ObjectTitle`, `ObjectExpiry`), the
+        planner no longer resolves the named value ("recovery value is not in this version"), or the
+        element is gone ("missing recovery ...");
+      - for an Index `Object`, the rebuilt body differs ("no longer Ready or body differs").
+
+      A job that touched only other elements lets the copy apply. What it applies is the value the
+      source holds now, so nothing untrue is written, but it is not a refusal. (Corrected
+      2026-10-06: this note used to say C4 refuses every such job as stale.)
+    - A live job on a cross-document **destination** means the destination is Closing, which C3
+      and C4 refuse as not Open.
+
+    Review 2 (L-1) found no behavioural hole. *Regressions (2026-10-06):* `copy::tests::cross`
+    copies between two Flipnotes, X a source whose branch can still take Saves and Y the
+    destination.
+    - The stamp half: a Save on X after C1 is refused at C3 as changed (mutation entry
+      `copy-c3-source-stamp`). After C3, a Save of another element lets C4 apply X's current
+      value, and a Save that replaced the selected value is refused at C4.
+    - L-2: a hold on Y refuses at C1, C3 and C4 by message. A hold on X permits the copy and leaves
+      X `Prepared` on the same branch, with its whole intent ledger unchanged
+      (`copy-hold-names-the-destination`).
+    - A hold on X staged mid-copy: staging it rewrites X's intent record. So before C3 it costs a
+      fresh preview (C3 refuses as changed), and after C3 the copy applies. "Permitted" for a hold
+      that lands before C3 therefore means "after a fresh preview".
+  - The remedy for a refusal is a fresh preview once the handoff resolves, not a resend: a resolved
+    handoff rotates the destination, so the old preview cannot apply. An exact retry of a copy that
+    already landed therefore loses its acknowledgement across a hold, though nothing is written
+    twice (review L-4).
 - **C2'.** A bulk copy is the user issuing C3/C4 per item. There is no batch command and no batch
   atomicity. Each item consumes ordinary admission, typed policy, capacity preflight, reference
   protection and content budget.
@@ -1239,9 +1274,14 @@ over the same receipt and seed cannot be interchanged.
 >   `new_admitted` refuses a `provenance` argument that disagrees with the basis variant and
 >   stores the variant's own. Removing the redundant argument is left for coordination with
 >   Agent 1.
-> - **Not yet built:** the app side. That is "no installed source" under custody, the S3 re-entry
->   through the current preview, the 8.3 rails, the 8.7 save path, 8.6 reconciliation and native
->   results. Each waits on Agent 1's provenance-parameterized Flow S and its structural decode.
+> - **App side, as of 2026-10-06.**
+>   - *Built by Agent 1's Flow S (`c9566b82`):* "no installed source" under custody (a metadata
+>     probe), the S3 re-entry through a fresh mint attempt, the exact-target check and the
+>     current-MLS-epoch check. The store path accepts the same seed and receipt from a replacement
+>     preview; another candidate does not match.
+>   - *Built by Agent 2:* the per-branch rail (8.3) and 8.6's replication core.
+>   - *Not yet built:* the Server/actor Save of 8.7, with the mint made in the same custody visit
+>     that consumes it; the per-server and vault-wide rails; 8.6's app call; native results.
 > - **Required with the app slice, not optional:** the receiver's automatic handoff selector
 >   (`studio/receiver/handoff.rs`, the probe that picks a live overlay authored by this device)
 >   must skip non-Closing provenance and memoise it as quiet. Today it would select an
@@ -1294,6 +1334,15 @@ Agent 1's structural decode to expose the provenance discriminant and the charge
 14). Finding 6's retained seed bytes are counted in the **memory** accounting as well as the
 persisted-byte accounting. Refusals are `StorageRefused { reason }` and retain all existing work.
 
+*As built (2026-10-06):*
+- **Per-branch rail: built.** `MAX_STUDIO_UNCONFIRMED_OVERLAY_OPS = 64`, applied by kind in
+  `StudioOverlay::append` (before staging, so a refused Save changes nothing) and in
+  `checked_entries` (every read, once the decoder has set the kind). It is pinned by mutation entry
+  `unconfirmed-op-rail`.
+- **Per-document rail: holds structurally.** Admission never opens a branch beside a live one.
+- **Not built yet:** the per-server count and the vault-wide byte total. They are charged at
+  Flow S's admission, in Agent 1's store stages, and wait on the Save path (8.7).
+
 ### 8.4 Expiry versus retained work
 
 Unchanged from revision 1. Preview expiry, capacity eviction, replacement, unwatch and rewatch,
@@ -1320,6 +1369,39 @@ the branch's, in which case copy into that source becomes available when it is O
 honest label. `BaseConfirmed` is a statement that two hashes agree, never a promotion of preview
 attribution, tenure or signing authority.
 
+*As built (2026-10-06), replication core:*
+- **The state:** `StudioOverlayUnconfirmedState`.
+- **The predicate:** `unconfirmed_base_confirmed`, on its own, so each half can be mutated apart
+  from the other (M21: entries `reconcile-document-half` and `reconcile-seed-half`).
+- **Each half at the reader production calls:** fixtures re-frame a real source with only the
+  opening or only the gate replaced, since no honest source differs in one half alone (entries
+  `reconcile-reader-document-half` and `reconcile-reader-seed-half`).
+- **The header-only reader:** `StudioEpoch::unconfirmed_base_state_in_vault`.
+  - The base document id is `epoch_id(doc_type, logical_key, closed_epoch + 1, close_record_hash)`.
+  - It refuses a Closing branch.
+  - Absence of a source is the caller's `AwaitingSource`.
+- **The app's per-read call, built:** `ServerStore::studio_overlay_unconfirmed_state`. It is
+  computed in the same custody visit as P2's eligibility, on the inspection and on the lifecycle
+  row. It is `None` for a Closing branch or no branch, and `AwaitingSource` with no source record.
+  It is `SourceUnreadable` when a source exists but cannot be read: a fourth value beyond section
+  11's three, for the reason P2 added `sourceUnreadable`.
+- **Tests:** two cover the app arms, on a real Unconfirmed branch saved through the actor.
+  - The branch goes from `awaitingSource` to `baseConfirmed` when its confirmed checkpoint is
+    installed.
+  - It reads `baseSuperseded` when another checkpoint is installed instead, then
+    `sourceUnreadable` once that record is corrupted.
+  - The installs use `adopt_studio_checkpoint` directly, with the owner proof's tenure handed in.
+    The proof exchange is discovery's.
+- **Native `unconfirmedState`, built:** `awaitingSource`, `baseConfirmed`, `baseSuperseded`,
+  `sourceUnreadable` or null, the same on the inspection and the lifecycle row.
+- **Decisions the app must make** (review of `f3ce1758`):
+  - What to report when the installed source exists but cannot be read. It is neither awaiting
+    nor confirmable.
+  - How to combine `BaseConfirmed` with the source's phase. A faulted or adopting source at the
+    base id with the base seed reads `BaseConfirmed`, and copy is available only once it is Open.
+  - Whether to show the interval when catch-up has installed the epoch the receipt closes, before
+    the successor arrives. It reads `BaseSuperseded`, which is not supersession in the plain sense.
+
 ### 8.7 Acceptance path
 
 Distinct control actions so neither path can be reached with the other's request:
@@ -1330,6 +1412,60 @@ substitutions: `studio_closing_basis` becomes the 8.1 mint; the S3 re-mint re-en
 `with_provisional_studio_seed` and requires the same fingerprint; and 8.3's rails are charged
 alongside the ordinary ones. The detached stage re-parses the captured seed bytes (8.1 part 3). If
 Agent 1's Flow S is not implemented, this path is not implemented either; it is not a second writer.
+
+*As built (2026-10-06), through the actor's receiver:* **two actions, not three.**
+- **`BeginUnconfirmedOverlaySave`** returns the ticket: the basis fingerprint and the branch, from
+  one fresh mint.
+- **`SaveUnconfirmedOverlay { basis, branch, nonce, body }`** is one custody visit, which the
+  caller repeats with the identical request until it is saved. That is the Closing runtime's
+  `save_overlay` contract. Prepare and Finish became one repeated visit because the actor
+  schedules the detached plan itself, on the production background path.
+- **The overlay slot is one per actor** (review of `b35e23d2`).
+  - It holds one parked plan for one target and refuses every reservation while it does. So a
+    visit first finishes whatever plan is parked, for any target and any request. A caller who
+    never returns therefore cannot hold the slot, on its own target or any other.
+  - A visit reports only its own request's outcome. Finishing another request's plan returns
+    `busy` (nothing of this request was saved), emits a refresh notice for that plan's document,
+    and logs, rather than returns, a commit error. That request's caller learns its outcome on its
+    own retry, as an exact retry.
+  - A retry while this request's own plan is in flight is `pending`, not `busy`.
+  - The receiver remembers which request scheduled the plan, by a fingerprint of everything the
+    renderer sent. The Closing `save_overlay` clears it when it takes a plan.
+- **A Closing draft refuses this Save.** The store's exact-retry acknowledgement is kind-blind, so a
+  Closing branch's accepted operation resent through this action would otherwise be reported as
+  Unconfirmed work. The receiver refuses first, by what the document's live draft is, at the
+  ticket and at every Save.
+- **The inventory scan runs only when a store stage will spend the budget.** A visit that finds
+  the slot busy costs none; one that finishes another request's plan pays that commit's. Each
+  other visit still pays one complete scan, as every lifecycle control does, until C-3's cursor
+  makes the per-visit inventory cheaper; native must pace its retries. The scan runs before a
+  parked plan is taken, so a failed scan leaves the plan parked.
+- **A parked plan has a deadline** (re-review of `5ccc4647`, MEDIUM). A plan whose caller never
+  returns would otherwise pin one of the four process-wide preparation permits until some later
+  Save on this actor. `OVERLAY_PARK_MS` (30 s, the retained Registry source's bound, for the same
+  reason) is stamped when a plan parks. One retention function feeds the expiry in the receiver's
+  maintenance pass, the actor's `pending` and its `wake_in`, so a quiet actor still comes back for
+  it, even while its receiver is paused: those two terms sit outside the pause gate, and `run`
+  drops the plan before it honours the pause. The expiry drops the plan and the remembered request.
+  RT-001 makes the drop safe. A late caller re-captures, and for a Flipnote frame it may have to
+  republish the frame's PIX, since the plan's media hold was not durable protection. The deadline
+  covers Agent 1's Closing `save_overlay` too, since it parks in the same slot.
+- **The ticket refuses a device that is no longer a member.** The mint checks the provider's
+  membership, not this device's.
+- **The two Saves stay apart.** Neither action is reachable through the control transaction: both
+  are refused there by name, and the receiver intercepts them. A Closing plan taken by an
+  Unconfirmed commit is refused by the store, by name.
+- **Each stage mints its own attempt** from the receiver's ready-preview cache, in its own visit:
+  the ticket, S1b and S3. Nothing carries a minted basis between visits. The attempt is made
+  eagerly before the store call, because the mint needs the sync borrow that the store stage holds
+  mutably. That costs one seed copy per visit (up to 2 MiB). Making it lazy needs an API change in
+  Agent 1's `StudioOverlayMint` (their review, L4b).
+- **Native results:**
+  - `unconfirmedOverlaySaveTicket`.
+  - `unconfirmedOverlaySave` with `state` saved, pending, busy, disposed or handedOff.
+  - A saved state says `localOnly`, `provisional` and `provenance:"unconfirmed"`, and carries no
+    content.
+  - Not natively registered (Agent 4; P5 false).
 
 ## 9. Repeated-owner tenure
 
@@ -1648,6 +1784,106 @@ alternative for legacy-snapshot and unobserved-gap owners. It is a new authority
 guarantee is a quorum-of-witnesses property rather than a cryptographic proof, and the reviewer's
 16.3 agrees it is not a substitute for the 9.3 integration.
 
+### 9.6 Two gaps found driving A -> B -> A through the actor (2026-10-06, proposed for review)
+
+Built: `studio_exchange::tests::succession::repeated`. A owns and issues R0. B removes A, restarts,
+and issues its first receipt R1 under its observed tenure t1, inheriting A's checkpoint. A's key is
+then admitted again and owns again at t2. At the witness, R0 is otherwise valid (it verifies under
+its own claimed tenure), yet it is refused under the observed t2, also after a restart. That is the
+assignment's "reject an earlier tenure's otherwise valid same-key receipt". Two things the scenario
+could not reach are recorded here rather than guessed at, as assignment item 5 asks.
+
+**What runs where (corrected after Review 2, M-1).**
+- **Through the actor:** B's succession and its first receipt R1, and, in the second test
+  (B -> A -> B), B's first receipt of its second tenure.
+- **On hand-ticked app `Server`s, not through the actor:** the membership changes and the
+  newcomer. The newcomer's tenure is read through the app seam (`observed_owner_tenure`,
+  `require_observed_owner_tenure`), so the conversion to `StudioOwnerTenure` is covered there.
+- **At the bare check and at adoption:** the same-key refusals. Adoption is handed the tenure
+  explicitly there.
+- **Production adoption** is never handed an observed value. It is handed the claim of a fresh
+  owner proof, and the member's proof gate (`complete_checkpoint_head_scoped`) is what compares
+  that claim with the observed start. That gate is pinned at the sync layer by
+  `receipt_head::tests::tenure`, with a mutation entry. A same-key owner proving its own
+  earlier-tenure receipt through the actor's discovery path is not driven end to end.
+
+**Gap 1, same-key re-entry (low; recommend no change).** An MLS provider that already holds a
+group cannot process a Welcome into the same GroupId: it fails with "already exists". Nothing in
+`catcoms-mls` deletes a group, so a device that keeps its key and its provider across a removal
+cannot get back in. (The test's device is a pre-removal `duplicate()` that never processed the
+Remove, so it shows the general rule, a provider already holding the GroupId; the removed-device
+case follows because nothing deletes the group.) The test pins this failure.
+Product joins and founds always mint a fresh device, so a returning user is a new key, and every
+receipt of its earlier tenure fails on the key alone, before the tenure rule is needed. The rule
+still matters, and is proved at the witness, for any path that ever re-admits a key. Options:
+(a) leave it, since same-key return is not a product path; (b) a reviewed `ServerGroup::join`
+change that discards a stale group with the Welcome's GroupId first, only if a product path comes
+to need same-key return. Recommendation: (a).
+
+**Gap 2, a join-born owner cannot continue the former owner's documents (needs a decision).**
+- **Why every later joiner owns.** MLS fills the leftmost blank leaf, and the lowest leaf is the
+  committer. So once the founder has left, every later joiner takes the founder's leaf and owns
+  from its own join. On authenticated P2P groups `policy_admission_ready` refuses every admission
+  while the committer is not leaf 0 (`group_policy.rs`; `joining.rs`, negative case). Legacy
+  groups admit it.
+- **Why that owner is stuck.** It holds no Studio history. The former owner's checkpoints carry
+  receipts whose key is no longer the owner's, so they carry no current-owner proof, and the new
+  owner sees them only as unconfirmed previews (`joining.rs`, positive case). It cannot install
+  them, so it can neither close them nor issue a receipt that inherits them.
+- **The effect.** Every Studio document the former owner held is readable as a preview but can
+  never be continued under the new tenure. It is not left alone either: the new owner's first
+  edit under the same logical key starts a new history that supersedes it (direction 3 below).
+- **Singleton documents have no way around it.** A channel's Index is one logical key per
+  channel, so "start a fresh document instead" is not available for it. The first Index edit a
+  join-born owner makes necessarily supersedes the former owner's Index. For an ordinary document
+  the owner could pick a new name; for a singleton, supersession is the only outcome under (3).
+
+This is a missing authority path, not a bug in an existing one. Three directions, for the
+reviewer and the receipt-protocol owners (Agents 1 and 3):
+
+1. **Adoption by first receipt.** The new owner's first receipt names the former owner's
+   checkpoint as its `InheritedCheckpoint`, making the inheritance the new owner's own signed
+   claim rather than a proof of the former owner's authority. It is cheap, but it launders
+   unverified content into current history under a valid signature: a hostile former owner, or
+   any provider of the preview, chooses what the joiner adopts. It would need an explicit user
+   decision and a durable record of what was adopted.
+2. **Witnessed continuity.** A continuously present member that verified the former owner's
+   receipts while that owner was current attests the checkpoint to the new owner. This is the
+   witnessed-transition protocol 9.5 rejected for a different case, with the same
+   quorum-of-witnesses limits.
+3. **Accept supersession, preserving what members held.** This is the status quo, and the
+   review of the first draft of this note showed it is *not* passive stranding.
+   - **What happens.** A join-born owner that holds nothing finds no source record, so
+     `checked_studio_source(.., allow_create = true, ..)` mints a fresh epoch-zero unit. The
+     inventory's "lost indexed file" guard does not apply: the absence is genuine, because the
+     record was never here. So the owner's first edit to an existing logical key is an epoch-zero
+     edit of a new history, and its first receipt (closing 0, `EpochZero`) is a valid
+     current-owner receipt under its tenure.
+   - **On members that held the former owner's history.** They receive that receipt as a rewind.
+     Under T4/N-T5, their higher history enters recovery: preserved, never silently adopted, but
+     superseded as current, with no user decision. Members that never held it simply follow the
+     new history.
+   - **Not yet driven through the actor** (N-T5 there is still missing). Until it is, "preserved
+     in recovery" is the design's stated rule, not demonstrated behaviour for this path.
+     *Update (2026-10-06):* N-T5 is now demonstrated for a continuously present successor that
+     missed the former owner's later closes (`succession::hidden`). It runs over the real
+     discovery wire, through the Server discovery stages the receiver drives, but not through the
+     receiver's own scheduling loop, which is still untested for a cross-tenure rewind. The member
+     two closes ahead adopts the new tenure's lower-epoch receipt, and keeps the former owner's
+     higher history only as a `Rewound` recovery snapshot. A join-born owner's
+     `EpochZero` receipt reaches members through the same tenure-first ingest
+     (`ReceiptBook::ingest_verified`), but that shape is not itself tested.
+
+Recommendation, revised: decide between (1) and (3) explicitly, with the product owner, before
+Gate 4 acceptance. (3) is the cheaper default, and is safe for content because recovery preserves
+the superseded history. Its cost falls hardest on singletons: after a founder leaves, the channel's
+whole Index restarts on the first edit, with no choice offered. It must be named in native results
+and the UI hooks as "a new owner started this document again; earlier history is in recovery", or
+users will read it as data loss.
+(1) is the path if continuity across a founder's departure is a product requirement. Until this is
+decided, the acceptance item "first-receipt inheritance" is proved for a continuously present
+successor (B inherits A's checkpoint), not for a join-born one.
+
 ## 10. References, admission and budgets
 
 - **R1.** Retained branches keep their conservative protection unchanged: the inventory's reference
@@ -1676,7 +1912,10 @@ type OverlayInspection =
       provenance: "closing" | "unconfirmed";
       eligibility: "transferable" | "manual";
       manualReason: OverlayManualReason | null;
-      unconfirmedState: "awaitingSource" | "baseConfirmed" | "baseSuperseded" | null;
+      // `sourceUnreadable` added as built (2026-10-06): an installed source exists but cannot be
+      // read. Also on the lifecycle row. Null exactly for a Closing branch or no branch.
+      unconfirmedState: "awaitingSource" | "baseConfirmed" | "baseSuperseded"
+        | "sourceUnreadable" | null;
       replayable: boolean; archived: boolean;
       readOnly: true; content_: StudioContent | null }
   | { v: 1; kind: "disposed"; channel: Decimal; object: Hex32 | null;
@@ -1736,7 +1975,9 @@ Truthfulness rules asserted by tests:
   (an owner change, or the committer's membership restarting).
 - `manualReason:"preparedStuck"` means a staged handoff's source no longer answers it cleanly
   (it holds part of the branch, a conflicting copy, or is another generation), so no automatic
-  path resolves it and disposal is refused; export, archive and copy remain.
+  path resolves it and disposal is refused; export and archive remain. Copy remains only into a
+  *different* document: the stuck branch's own document is under the transfer hold, so a copy
+  into it is refused (C1') until the hold resolves.
 
 Events reuse the existing bounded `SettlementNotices` rail and the `settlement-changed` channel:
 `LocalDraftManual` and `LocalDraftDisposed`. Neither is a delivery, settlement or finality claim.
@@ -1754,8 +1995,9 @@ Agent 1's `LocalDraftRetained` and `LocalDraftHandedOff` are separate.
 | After the disposal rename, before its flush | The exact retry reloads the record, sees `disposed`, and performs the sync-only flush `retire_included_with_io` already implements for `removed == 0`. |
 | Copy interrupted at any point | The ordinary Save retry contract applies unchanged; there is no bookkeeping write to be inconsistent with (findings 1, 8). |
 | Disposal requested while `Prepared` | Refused by D2. |
-| Restart with a retained unconfirmed branch and no preview | Reconstructs by re-parsing its own persisted seed bytes against its receipt (8.1 part 3); `AwaitingSource` until an installed source exists. |
-| Restart mid-copy with the destination rotated | The destination stamp, `epoch_id` and fingerprint refuse; re-preview against the new Open epoch. |
+| Restart with a retained unconfirmed branch and no preview | Reconstructs by re-parsing its own persisted seed bytes against its receipt (8.1 part 3); `AwaitingSource` until an installed source exists. An exact retry of accepted work is answered without a preview. New work is refused ("no live preview") until a fresh preview exists, and that preview's ticket names the same branch. *As built (2026-10-06), through the actor:* `unconfirmed_actor::studio_actor_unconfirmed_branch_resumes_after_a_restart_from_what_it_persisted`. It reopens the store and rebuilds the actor; the `Server` and its sync are kept, so it speaks for actor and store state. |
+| Restart with an Unconfirmed Save planned but not committed (8.7) | The parked plan lives only in the actor, so it dies with the process, and its media hold with it. Nothing durable was written (RT-001). The identical request is a fresh first visit: it plans again and lands once. Same test. |
+| Restart mid-copy with the destination rotated | There is no C3 after a restart, and C4 compares no stamp. C4 refuses on `epoch_id`: the exact-retry shortcut's epoch check, or the re-plan's `epoch_id` and projection fingerprint. Re-preview against the new Open epoch. (Corrected 2026-10-06: this row used to credit the destination stamp.) |
 | **Release: unlink succeeded, parent-directory sync failed** | `CommittedButNotDurable`. **Not exact-retryable; see 12.1.** Both budgets are already closed. The caller reconciles and re-reads the archive state; it does not resend the request. |
 
 ### 12.1 Release is exempt from the exact-retry contract
@@ -1933,10 +2175,10 @@ not see. Added, changed or corrected:
 
 | # | Level | Case | Independent observation |
 |---|---|---|---|
-| N6 | actor | Same-document copy after rotation, per item | Each item routes through the ordinary Save path, is authored by the copier with a fresh nonce, and appears in the destination projection; **no byte of the branch's record changes at any point** (findings 1, 2, 8). |
+| N6 | actor | Same-document copy after rotation, per item | Each item routes through the ordinary Save path, is authored by the copier with a fresh nonce, and appears in the destination projection; **nothing that records the branch changes at any point**: its id, content hash, accepted count and overlay metadata bytes (findings 1, 2, 8). *Corrected 2026-10-06:* this used to say "no byte of the branch's record". For a same-document copy the ordinary intent lands in the same intents file as the branch, so the file's bytes do change; the branch does not. |
 | N7 | actor | Copy exact retry after a lost response | `already_saved` true, no second destination operation; still no branch-record write. |
 | N8 | actor | Stale `expected_projection` or `epoch_id` | Refused; nothing saved; re-preview succeeds. |
-| N8b | store | **Finding 4 destination currency.** Change the destination's source record, then its recovery record, between C1 and C3, and again between C3 and C4, each with an authenticated same-size replacement | Each refuses at `studio_destination_is_current` with its own digest or size comparison; each fixture passes the source stamp check first. |
+| N8b | store | **Finding 4 destination currency.** Change the destination's source record, then its recovery record, between C1 and C3, and again between C3 and C4, each with an authenticated same-size replacement | Each refuses at `studio_destination_is_current` with its own digest or size comparison; each fixture passes the source stamp check first. *Corrected 2026-10-06:* that holds at C3 only. C4 does not call `studio_destination_is_current`: it re-captures and re-plans, and refuses a changed destination on its `epoch_id`, projection fingerprint, disposition or body. The N8b tests call the store function directly, so they pin C3's check, not a C4 one. |
 | N9 | store | Copy admission failures: `FLIPNOTE_MAX_FRAMES`, `FLIPNOTE_FRAME_BYTES`, `MAX_INDEX_OBJECTS`, over-cap, tombstoned target, missing PIX | Each yields its specific disposition or refusal; no partial destination write; branch and references intact. |
 | N9b | store | **Finding 2 derived source ids.** A branch with one accepted `InsertFrame` referencing CID X and a base title. Request a Title copy | `source_ops` names the title's source operation and **not** the insertion; no request field can name a different entry, because `source_entry` does not exist; the native result reports the derived ids. Then assert that no copy count or `source_ops` value permits a `Preserve` disposal. |
 | N10 | store | Cross-document copy while `Prepared` | Permitted into a genuinely distinct Flipnote in the same channel; refused when the destination is the branch's own document reached through another channel label; `prepared` never cleared. |
