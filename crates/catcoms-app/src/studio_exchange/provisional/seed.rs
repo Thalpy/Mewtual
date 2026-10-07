@@ -139,8 +139,8 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
     /// visit as the store stage that consumes it, once for S1b and again for S3, and never carry a
     /// minted basis across the detached plan: the S3 attempt is what re-runs the live check.
     ///
-    /// Called only by tests until the preview Save (G4-A2-PREVIEW) wires it in production.
-    #[cfg_attr(not(test), allow(dead_code))]
+    /// Reached in production from the preview Save through the preview's `mint`
+    /// (`studio/receiver/catchup/preview.rs`).
     pub(crate) fn mint_unconfirmed_overlay_basis(
         &self,
         store: &ServerStore,

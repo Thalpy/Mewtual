@@ -42,16 +42,12 @@ pub(crate) enum StudioOverlayMint<'a> {
     ///
     /// Boxed because the basis carries its receipt and seed metadata inline, which dwarfs the
     /// Closing variant. Build it with [`StudioOverlayMint::unconfirmed`].
-    ///
-    /// Constructed only by tests until the preview Save (G4-A2-PREVIEW) wires it in production.
-    #[cfg_attr(not(test), allow(dead_code))]
     Unconfirmed(Result<Box<StudioUnconfirmedOverlayBasis>, AppError>),
 }
 
 impl StudioOverlayMint<'_> {
     /// Wrap a live-preview mint attempt exactly as `Server::mint_unconfirmed_overlay_basis`
     /// returned it, failed or not.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn unconfirmed(attempt: Result<StudioUnconfirmedOverlayBasis, AppError>) -> Self {
         Self::Unconfirmed(attempt.map(Box::new))
     }

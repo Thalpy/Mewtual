@@ -124,10 +124,9 @@ impl ServerStore {
     /// its mint ATTEMPT from the target's current ready preview in this custody visit - even a
     /// failed one, because classification must still answer a retry with no live preview.
     ///
-    /// This and the two general entry points below have no production caller until the preview
-    /// Save (G4-A2-PREVIEW) lands; the Closing runtime keeps using its wrappers.
+    /// The preview Save (G4-A2-PREVIEW, `studio/receiver/unconfirmed.rs`) is its production
+    /// caller; the Closing runtime keeps using its wrappers.
     #[allow(clippy::too_many_arguments)]
-    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn start_studio_overlay(
         &mut self,
         server: u64,
@@ -161,7 +160,6 @@ impl ServerStore {
     /// The scheduled runtime's commit visit, for either provenance. An Unconfirmed commit takes a
     /// mint attempt made in THIS visit, never one parked with the plan (design 8.7, "re-enters").
     #[allow(clippy::too_many_arguments)]
-    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn commit_studio_overlay_with(
         &mut self,
         server: u64,
@@ -194,6 +192,9 @@ impl ServerStore {
     /// than a second orchestrator. Like the Closing adapter, this is for tests and callers that
     /// cannot release custody; the scheduled runtime uses the split form so the first append of a
     /// branch runs detached, off the actor (design 8.1).
+    ///
+    /// No production caller: the preview Save uses the split form above, and the Closing runtime
+    /// its own wrappers. Kept for the tests that drive all three stages in one call.
     #[allow(clippy::too_many_arguments)]
     #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn save_studio_overlay(
