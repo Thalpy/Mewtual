@@ -327,6 +327,85 @@ fn studio_overlay_handoff_refuses_a_persisted_source_that_is_not_the_candidate()
     }
 }
 
+/// The one byte, of the proof's checks, only the size-and-digest comparison sees (design 18.3
+/// review, F7).
+///
+/// H5 writes its destination linked to the handoff metadata: the plaintext ends in a link byte.
+/// This substitute is the candidate's own plaintext with that byte dropped, resealed. It decodes
+/// as an unlinked record with the candidate's channel and exactly the candidate's snapshot, so the
+/// snapshot-hash check passes and `check_studio_intent_link`, which accepts an unlinked record,
+/// passes too. Within the proof, only the comparison with what the writer encoded refuses it.
+///
+/// It is not the last line of defence. The encoding is canonical (the link, if present, is a
+/// trailing `1`), so dropping it always shrinks the record, and resolve's flush-only fence, which
+/// checks the file's length against the written version, refuses it too: later, and with
+/// "retry file changed". What this pins is the designed refusal point: the proof, which spends the
+/// budget and runs before resolve reads anything. CI's `proof-digest` entry removes the
+/// comparison and requires this test to fail at that assertion.
+#[test]
+fn studio_overlay_handoff_refuses_a_persisted_source_whose_link_was_dropped() {
+    let root = tempfile::tempdir().unwrap();
+    let f = Fixture::new(true);
+    let mut store = open(root.path());
+    let (_, basis, _) = prepare(&f, &mut store);
+    let commit = staged(&f, &mut store, basis);
+    let key = store.keys.db_key().unwrap();
+    let written = std::cell::RefCell::new(None);
+    let (outcome, restores) = commit_counting(
+        &f,
+        &mut store,
+        commit,
+        &mut WriteHooks::Hooked {
+            before: Some(&mut |at: WriteTag, _: &Path, bytes: &[u8]| {
+                if at != WriteTag::Source {
+                    return Intercept::Continue;
+                }
+                let plain = catcoms_crypto::unseal(&key, &unframe(bytes).unwrap()).unwrap();
+                let replaced = frame(&seal(&key, &plain[..plain.len() - 1], &mut rng()).unwrap());
+                *written.borrow_mut() = Some(plain);
+                Intercept::Replace(replaced)
+            }),
+            before_sync: None,
+            before_unlink: None,
+            after: None,
+        },
+    );
+    let plain = written
+        .into_inner()
+        .expect("the Source write was never reached");
+    // The preconditions: the candidate was linked, and dropping the link changes nothing else the
+    // proof's other checks read.
+    let scope = scope_bytes(SERVER, &f.logical).unwrap();
+    let (target, snapshot, linked) =
+        crate::store::epoch_studio::decode_record_link(&plain, &scope, &f.logical).unwrap();
+    let (dropped_target, dropped_snapshot, dropped_linked) =
+        crate::store::epoch_studio::decode_record_link(
+            &plain[..plain.len() - 1],
+            &scope,
+            &f.logical,
+        )
+        .unwrap();
+    assert!(linked, "precondition: H5 writes a linked destination");
+    assert!(!dropped_linked, "precondition: the substitute is unlinked");
+    assert_eq!((dropped_target, dropped_snapshot), (target, snapshot));
+
+    let error = outcome.expect_err("H5 completed from a persisted source whose link was dropped");
+    assert!(
+        error
+            .to_string()
+            .contains("persisted handoff source could not be proved to be the written candidate"),
+        "refused by something other than the post-write proof: {error}"
+    );
+    assert_eq!(restores, 0, "the refusal restored a source");
+    assert!(
+        store
+            .load_epoch_intents(SERVER, &f.logical)
+            .unwrap()
+            .handoff_prepared(),
+        "Prepared was not retained"
+    );
+}
+
 /// A Source write that lands bytes which do not authenticate at all is a proof failure too, not
 /// an error that escapes the proof: H5 refuses with Prepared retained, and the budget that
 /// reserved a footprint for the candidate is spent (9.1.1 step 4).

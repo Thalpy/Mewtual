@@ -91,10 +91,20 @@ MUTATIONS = [
      "if false && from_candidate && evidence != StudioHandoffEvidence::Complete {",
      "persisted::studio_overlay_handoff_verified_resolution_accepts_only_complete_evidence",
      "a proof with Absent evidence was resolved"),
+    # Design 18.3 review, F7: of the proof's checks, the size-and-digest comparison is the only one
+    # that sees the trailing link byte. A record with it dropped decodes unlinked with the
+    # candidate's own snapshot, so the snapshot hash and the link check both pass. The mutant
+    # removes the comparison. The record is then still refused, later, by resolve's flush-only
+    # length fence ("retry file changed"), so the assertion this entry names is the one that pins
+    # the refusal to the proof. The field checks themselves (channel, snapshot hash, link) have no
+    # entries: each is covered by the digest, so removing one alone is undetectable.
+    ("proof-digest", "crates/catcoms-app/src/store/epoch_studio/source/persisted.rs",
+     "if landed.physical_bytes != version.bytes || blake3::hash(&landed.plain) != version.digest {",
+     "if false && (landed.physical_bytes != version.bytes"
+     " || blake3::hash(&landed.plain) != version.digest) {",
+     "persisted::studio_overlay_handoff_refuses_a_persisted_source_whose_link_was_dropped",
+     "refused by something other than the post-write proof"),
     # 9.1.1 A3: a proof cannot be spent after a five-family write landed since verification.
-    # The proof's own post-write comparison has no entry here on purpose: its digest and field
-    # checks are each redundant with the others by construction, so removing any one of them is
-    # undetectable, and the type has no other constructor to bypass the whole comparison with.
     ("proof-generation", "crates/catcoms-app/src/store/epoch_studio/source/persisted.rs",
      "&& Arc::ptr_eq(&self.generation, &store.inventory_generation);",
      "&& { let _ = &self.generation; true };",

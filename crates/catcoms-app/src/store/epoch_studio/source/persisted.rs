@@ -63,6 +63,11 @@ impl ServerStore {
     ///   candidate's, so the unit carried here is the unit those bytes describe;
     /// - the source-to-intent link is valid, as `checked_studio_source` would require.
     ///
+    /// The digest overlaps the field checks, except at one byte: the link check accepts an
+    /// **unlinked** record, and dropping the link leaves the snapshot unchanged. So a destination
+    /// whose link was dropped is refused here only by the size-and-digest comparison (design 18.3
+    /// review, F7; `studio_overlay_handoff_refuses_a_persisted_source_whose_link_was_dropped`).
+    ///
     /// The re-read is bounded by the family's sealed cap, not the 8 MiB retained-source bound, so a
     /// successor that has grown past 8 MiB is still verified rather than refused.
     ///
