@@ -2381,6 +2381,60 @@ and are marked accordingly; 13.7 is re-run in the next checkpoint rather than be
 arithmetic here. `a_well_resolved_batch_is_not_reported_as_unresolved` pins all three rules this
 predicate has had wrong in sequence: the raw-sum rule, the zero-median rule and the per-unit rule.
 
+## Fix: the Studio header readers refused repaired records (2026-10-08)
+
+Found by the design review of 9.1.1 (H-1), in code that predates it. A Flipnote that has been
+through a bound repair keeps the repair-bound snapshot prefix (form 3) on every successor, and
+`StudioEpoch::restore` reads it through `RepairBinding::decode_prefix`. Two header-only readers in
+`crates/catcoms-replication/src/studio/epoch/handoff.rs` accepted only forms 1 and 2:
+`VaultShape::read` and `preserves_vault_source`. The effects, all while a full restore of the
+same bytes succeeded:
+
+- **A handoff into a repaired destination wedged.** Barrier 2 (`preserves_vault_source`) refused
+  as Malformed after Prepared was written. The Prepared resolution's flush, and every ordinary
+  write, cross that fence too. So nothing could write that document while Prepared stood, and
+  every retry redid all the signing.
+- P2's structural checks (`vault_holds_work`, `overlay_successor_hold_in_vault`, and
+  `evidence_in_vault`'s read) and copy's probe reported a repaired object as missing or
+  unreadable.
+
+**The fix.** Both readers now decode the prefix with `RepairBinding::decode_prefix` and discard
+the binding, which neither compares; `preserves_vault_source` already ignored the adopting flag.
+The review confirmed the fence need not compare the binding:
+- on the handoff path the bytes are already pinned exactly by the write capability;
+- on every other path no legitimate write changes the binding while Prepared stands;
+- comparing the binding alone would be half a check, since the fence also ignores the receipt
+  book and the phase.
+
+`reframe_vault_for_test`, a test-only helper that copies a one-byte prefix, now asserts it is not
+given a form-3 source.
+
+**Test.** `studio::epoch::owner::tests::studio_vault_header_readers_accept_a_repair_bound_source`
+fails before the fix, and fails with either half reverted. Its review (Opus, static) found no
+blocker or high.
+
+**Checks.**
+- fmt, clippy, the two gate scripts and `cargo deny` passed.
+- The root suite with `--no-fail-fast` passed: 43 binaries, 2 180 tests.
+- The tauri `cargo check` passed.
+- The frontend suite passed: 1 282 tests.
+- The tauri suite passed every binary except six-client at `six_client_recovery.rs:416`. That test
+  failed again run alone, twice. A control at `06526bd9`, which does not have this fix, failed
+  twice too. The assertion is a 90 s real-clock wait for chat history to converge after a
+  partition, which touches no Studio code. So it is the host's known flake, failing more often
+  tonight, not this change.
+
+**Open, from the review:**
+- **Follow-up tests:** form-3 cases in `owner/tests/eligibility.rs::classify`, holding the
+  structural hold, the full hold and `check_overlay_successor` together on a repaired source;
+  `evidence_in_vault` and `unconfirmed_base_state_in_vault` on form 3; and an app-level handoff
+  into a repaired Flipnote, asserting Completed and P2 eligibility.
+- **A design question for Agents 1 and 3:** `check_overlay_successor` and both holds never ask
+  whether the overlay's receipt is a repaired loser (`ReceiptBook::is_repaired_loser`).
+  Same-tenure repairs are covered, but a cross-tenure Transitioned repair whose source opening is
+  the losing receipt appears restorable, and would then accept a handoff of work based on the
+  loser. Not confirmed against the design.
+
 ## C-3 classifier and refused-result memo, built (2026-10-08)
 
 This builds parts A and B of `GATE4-AGENT-1-C3-RUNTIME.md` section 14. Revision 2 of that section

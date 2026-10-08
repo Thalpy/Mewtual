@@ -219,6 +219,70 @@ fn studio_repair_binding_survives_ordinary_checkpoint_successor() {
     }
 }
 
+/// The header readers accept every record prefix the restore path accepts.
+///
+/// A Flipnote that has been through a bound repair keeps the repair-bound prefix (form 3) on every
+/// successor, and `restore` reads it through `RepairBinding::decode_prefix`. The header-only
+/// readers used to accept only forms 1 and 2. So for a repaired destination, the handoff's
+/// barrier-2 fence (`preserves_vault_source`) refused as Malformed after Prepared was written,
+/// and the handoff looped. P2's structural Index check (`vault_holds_work`) and the lifecycle
+/// hold (`overlay_successor_hold_in_vault`) also reported the object as unreadable, though the
+/// full restore succeeds (review of design 9.1.1, H-1).
+#[test]
+fn studio_vault_header_readers_accept_a_repair_bound_source() {
+    for art in [false, true] {
+        let mut f = Fixture::new(art);
+        f.fill();
+        let decision = f.decide(None);
+        let selected = decision.receipt().clone();
+        f.source.seal(selected.clone(), &f.group, 0).unwrap();
+        let losing = Receipt::sign(
+            selected.document.clone(),
+            selected.closed_epoch,
+            [99; 32],
+            selected.seed_change_hash,
+            0,
+            selected.inherited.clone(),
+            &f.owner,
+        )
+        .unwrap();
+        f.source.seal(losing.clone(), &f.group, 0).unwrap();
+        let repair = crate::ReceiptRepair::sign_in_tenure(
+            selected.document.clone(),
+            selected.tenure_id,
+            [selected.hash(), losing.hash()],
+            selected.hash(),
+            1,
+            0,
+            &f.owner,
+        )
+        .unwrap();
+        f.source
+            .apply_receipt_repair(&repair, &selected, &losing, &f.group, 0)
+            .unwrap();
+        let plan = f.plan(&decision);
+        f.source = f.source.checkpoint_successor(&plan, &f.group, 0).unwrap();
+        f.restart();
+        let snapshot = f.source.snapshot().unwrap();
+        assert_eq!(
+            snapshot[0], 3,
+            "precondition: the source carries the repair-bound prefix"
+        );
+
+        assert!(
+            StudioEpoch::vault_holds_work(&snapshot, f.source.target).is_ok(),
+            "the structural work check refused a repaired source the restore accepts"
+        );
+        let preserved = f
+            .source
+            .preserves_vault_source(&snapshot, &std::collections::BTreeSet::new());
+        assert!(
+            matches!(preserved, Ok(true)),
+            "the barrier-2 fence refused a repaired source's own bytes: {preserved:?}"
+        );
+    }
+}
+
 #[test]
 fn studio_owner_settlement_resumes_exact_close_after_later_edit_and_restart() {
     for art in [false, true] {

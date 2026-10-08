@@ -55,11 +55,10 @@ impl<'a> VaultShape<'a> {
             return Err(ReplError::EpochBound);
         }
         let mut d = Decoder::new(bytes);
-        let adopting = match d.get_u8().map_err(|_| ReplError::Malformed)? {
-            1 => false,
-            2 => true,
-            _ => return Err(ReplError::Malformed),
-        };
+        // The same prefix decoder `restore` uses, so a repair-bound source (form 3), which a
+        // once-repaired Flipnote keeps on every successor, reads here as it restores. The binding
+        // itself is not part of any shape this reader reports.
+        let (adopting, _) = crate::epoch::repair_transition::RepairBinding::decode_prefix(&mut d)?;
         if d.get_bytes().map_err(|_| ReplError::Malformed)? != target.channel() {
             return Err(ReplError::EpochScope);
         }
@@ -95,6 +94,13 @@ pub(in crate::studio) fn reframe_vault_for_test(
 ) -> Vec<u8> {
     let mut d = Decoder::new(bytes);
     let prefix = d.get_u8().unwrap();
+    // Forms 1 and 2 only: the repair-bound form 3 carries binding bytes after the prefix byte,
+    // which this one-byte copy would misread as a field length. No fixture reframes a repaired
+    // source; one that needs to must copy the prefix through `RepairBinding::decode_prefix`.
+    assert!(
+        prefix <= 2,
+        "reframe_vault_for_test does not handle a repair-bound source"
+    );
     let mut fields: Vec<Vec<u8>> = (0..5).map(|_| d.get_bytes().unwrap().to_vec()).collect();
     // Field order as `StudioEpoch::snapshot` writes it: channel, opening, seed, book, gate.
     if let Some(opening) = opening {
@@ -132,9 +138,10 @@ impl StudioEpoch {
             return Err(ReplError::EpochBound);
         }
         let mut d = Decoder::new(bytes);
-        if !matches!(d.get_u8().map_err(|_| ReplError::Malformed)?, 1 | 2) {
-            return Err(ReplError::Malformed);
-        }
+        // `restore`'s own prefix decoder, so a repaired destination's form-3 prefix is read rather
+        // than refused as Malformed after Prepared was written (review of design 9.1.1, H-1).
+        // Like the adopting flag, the repair binding is not part of the history this compares.
+        crate::epoch::repair_transition::RepairBinding::decode_prefix(&mut d)?;
         if d.get_bytes().map_err(|_| ReplError::Malformed)? != self.target.channel() {
             return Ok(false);
         }
