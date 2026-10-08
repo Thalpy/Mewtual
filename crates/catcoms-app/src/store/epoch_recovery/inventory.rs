@@ -5032,8 +5032,36 @@ mod tests {
         );
     }
 
+    /// A full accounting scan with the memo emptied first, so every record is validated fresh.
+    ///
+    /// The oracle for a memoized result. `collect_with` alone consults the memo, so it would agree
+    /// with any wrong entry the scan under test had just used (design 18.3 review, F5).
+    fn fresh_inventory(store: &mut ServerStore) -> EpochStorageInventory {
+        store.inventory_cache.clear_for_test();
+        collect_with(
+            store,
+            EpochInventoryCoverage::RecoveryOwnerReceiptsIntentsRegistryAndStudio,
+        )
+    }
+
+    /// The restarted job's inventory, which must equal a fresh scan's. Counting parks and reuses
+    /// shows the memo was used; only this shows that what it returned was right.
+    fn assert_matches_fresh(store: &mut ServerStore, job: EpochInventoryJob) {
+        let EpochInventoryOutcome::Complete(budgeted) =
+            store.finish_epoch_inventory_job(job).unwrap()
+        else {
+            panic!("the restarted job did not complete on a quiet vault");
+        };
+        assert_eq!(
+            canonical(&budgeted),
+            canonical(&fresh_inventory(store)),
+            "the memoized result changed the inventory"
+        );
+    }
+
     /// Part B (design 14.3): a detached Studio result refused because a write overtook it is
-    /// memoized, so the restarted job reuses it instead of parking the record again.
+    /// memoized, so the restarted job reuses it instead of parking the record again, and the
+    /// inventory it completes is the one a fresh scan produces.
     #[test]
     fn a_refused_studio_result_warms_the_cache_for_the_restarted_job() {
         let root = tempfile::tempdir().unwrap();
@@ -5067,6 +5095,7 @@ mod tests {
             reused >= 1,
             "the restarted job reused nothing from the cache"
         );
+        assert_matches_fresh(&mut store, job);
     }
 
     /// Piece 1: a stale cached version of the record, here planted the way a writer that does not
@@ -5110,6 +5139,7 @@ mod tests {
             studio_parks, 0,
             "the stale entry survived the read and blocked the refused result's warm"
         );
+        assert_matches_fresh(&mut store, job);
     }
 
     /// Piece 3: an entry put after the scan read the record, as a write path warming a newer
