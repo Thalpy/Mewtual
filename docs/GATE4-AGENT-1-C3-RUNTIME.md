@@ -1,7 +1,9 @@
 # Gate 4 Agent 1: C-3 runtime adoption (design, revision 3)
 
 Status: **step 1 (section 3) accepted for implementation; steps 2 to 5 need the decisions in
-section 11 reviewed before each is built.** It extends
+section 11 reviewed before each is built. Section 14 proposes the classifier from measurement 13.7;
+it is at revision 2 after its design review and re-review, A and B are accepted for implementation,
+and step 3 stays gated (14.5).** It extends
 `GATE4-AGENT-1-DESIGN.md` section 9.2 (the cursor and I-4) and 5.5 (the overlay job). The storage
 half of C-3 is implemented and reviewed; this is the runtime half, ledger row G4-A1-C3.
 
@@ -535,10 +537,13 @@ as "ordinary gossip".
 
 So step 3 waits, with steps 4 and 5, for section 7's evidence: a reviewed conservative classifier
 from 13.7 (so small records of the uncached families validate inline and a job finishes in one or
-a few turns), or batched validation. The existing 13.7 data already narrows the classifier:
+a few turns), or batched validation. **Tightened by 14.5 (2026-10-08):** "one or a few turns" is
+not enough for H5. Under ordinary gossip it must finish in one visit with no park, and the
+classifier alone does not get it there. The existing 13.7 data already narrows the classifier:
 
 - **Recovery** validation is byte-linear (about 1.4 to 2.6 us per KiB accounting, 13 to 15 with
-  references), so a small-record byte threshold is safe for it.
+  references), so a small-record byte threshold is safe for it. **Qualified by 14.1:** the
+  accounting figures are from opaque projections, and structured shapes are unmeasured.
 - **Studio** validation is driven by structure, not bytes (a 130 KB record of 128 frames costs
   about 240 ms; a 3.7 MB title-only record about 24 ms), so no byte threshold is safe and Studio
   keeps detaching unless the validation cache already holds the record.
@@ -546,7 +551,381 @@ a few turns), or batched validation. The existing 13.7 data already narrows the 
 - **OwnerReceipts and Intents** are measured only at trivial sizes, and **DraftArchive** not at
   all. Those three, at their accepted ceilings, are the next measurements, and they decide whether
   the classifier makes the uncached families cheap enough for step 3 to finish in practice.
+  **Measured 2026-10-08; section 14 is what follows from them.**
 
 Flow R (G4-A1-R) follows step 3, because its commit needs the same embedded job; the sequencing
 note in the status ledger already forbids building it on the unbounded path and splitting it
 again.
+
+## 14. The conservative classifier (proposal, revision 2, 2026-10-08)
+
+Revision 1's design review (Opus, static, against `a62a7f80` plus this worktree's uncommitted
+changes) found no blocker, three highs, three mediums and six lows. All are accepted; 14.7 maps each
+to its answer. The most important is HIGH-1: **A and B do not unblock step 3**, and revision 1 was
+wrong to propose that they did. Step 3 stays gated, and 14.5 says what would unblock it.
+
+The measurements are in the status ledger under "The uncached families at their ceilings
+(2026-10-08)". **Nothing here is built yet.** Part A is the classifier. Part B stops a detached
+result from being wasted when its job restarts. Part C is an open question about the cache.
+
+### 14.1 What the measurements allow
+
+- **Accounting mode, four families can be bounded, each with a stated limit.**
+  - **Recovery** costs about 2.3 us per KiB to 4 MiB, and 2.7 in the earlier contended profile.
+    **That is on opaque projections only** (`stage_sized`: filler projection; empty tombstones,
+    elements, conflicts and applied operations). The accounting decode does work per item: it
+    decodes each item, `id()` re-encodes and hashes every snapshot, `slots.encode()` re-encodes
+    them, the `completed_eviction` check recomputes ids, and `footprint` re-encodes the staged
+    snapshot. A structured record is plausibly several times denser per byte, and **structured
+    shapes are unmeasured** (review HIGH-3).
+  - **Intents** costs at most 12.9 us per KiB at the upper median. Its densest measured shape is a
+    Closing branch at the operation ceiling. The single worst sample is 14.7 us per KiB, a 64-op
+    branch in run 4. The seed is copied as opaque bytes, so a larger seed only adds bytes.
+  - **OwnerReceipts** is not a byte rate. The two journals measured are version 1, which verify
+    nothing, which is why they fell below resolution. **Version-2 journals verify Ed25519
+    signatures during decode** (`validate_v2` and `validate_receipt` call `verify_signature_only`),
+    and so do fault-record pairs. Their cost is a fixed part plus one verification per signature,
+    and nothing measured says what it is (review M-1).
+  - **DraftArchive** accounting does no work that grows with size, by construction
+    (`validate_record_body` calls `storage_record` and never decodes the payload).
+- **Studio and Registry cannot be bounded by bytes in either mode.** A 130 KB Studio record of 128
+  frames costs about 240 ms; a 3.7 MB title-only one costs about 24 ms.
+- **Reference mode cannot be bounded by bytes for Intents.** `base_blob_cids` rebuilds the seed's
+  graph: a one-operation branch with a trivial seed already costs 175 us per KiB, and a dense seed
+  would cost what the same graph costs as a Studio record. Recovery's reference collection is
+  measured only to 142 KiB.
+- **No production path reaches the classifier in reference mode.** The one production reference
+  scan, `creative_pinned_cids`, steps with no deadline (`EpochStorageScan::step`), so it never
+  classifies. Every C-3 job, shared or embedded, is a budget inventory, which is accounting mode.
+
+### 14.2 Part A: the rule
+
+```rust
+const SAFETY: u64 = 4;         // margin for a slower machine and run-to-run variance
+const INLINE_CAP_MS: u64 = 25; // no inline validation is admitted against more than this
+const FIXED_US: u64 = 100;     // per-record constant; every small record measured is under 16 us
+
+/// (rate in us per KiB, envelope in physical bytes), accounting mode only.
+fn calibration(family: EpochRecordKind) -> Option<(u64, u64)> {
+    match family {
+        // Measured on opaque projections only (14.1). The envelope is held where FIXED_US
+        // dominates until structured shapes are measured, so a structured record several times
+        // denser per byte still sits far inside the cap.
+        Recovery => Some((3, 64 * 1024)),
+        Intents => Some((16, 4_197_020)),
+        // At most one version-2 signature fits in 747 bytes, and one verification (about 50 us)
+        // fits inside FIXED_US. The small envelope carries this bound, not the rate.
+        OwnerReceipts => Some((16, 747)),
+        // The one envelope beyond what was measured (6 334 584 bytes). Accounting never decodes
+        // the payload, so there is no size-dependent work to extrapolate.
+        DraftArchive => Some((0, MAX_DRAFT_ARCHIVE_SEALED_BYTES as u64)),
+        Registry | Studio => None, // driven by structure
+    }
+}
+
+fn validation_fits(family, size, references, remaining_ms) -> bool {
+    if references { return false; }                   // 14.1: no byte bound, no production caller
+    let Some((rate, envelope)) = calibration(family) else { return false };
+    if size > envelope { return false; }              // the envelope, see each family above
+    let predicted_us = FIXED_US.saturating_add(rate.saturating_mul(size.div_ceil(1024)));
+    // `remaining_ms` is floored to whole milliseconds, so up to 1 ms of it may already be gone.
+    let budget_ms = remaining_ms.saturating_sub(1).min(INLINE_CAP_MS);
+    predicted_us.saturating_mul(SAFETY) <= budget_ms.saturating_mul(1_000)
+}
+```
+
+The largest record admitted, at a full budget (26 ms or more remaining):
+
+| family | rate used | worst measured | largest admitted |
+|---|---|---|---|
+| Recovery | 3 us/KiB | 2.7 us/KiB, opaque projections only | 64 KiB (the envelope binds) |
+| Intents | 16 us/KiB | 14.7 us/KiB, worst single sample | 384 KiB |
+| OwnerReceipts | fixed part plus at most one signature | below resolution, version 1 only | 747 bytes (the envelope binds) |
+| DraftArchive | 0 | below resolution to the payload ceiling | the family's sealed cap, by construction |
+| Registry, Studio | - | structure-driven | never |
+| any family, reference mode | - | - | never |
+
+**What the bound means.** On the calibration host, in a release build, for a shape no denser than
+the densest measured, an admitted validation is predicted to take at most a quarter of the budget,
+so at most 6.25 ms. The factor of 4 is the margin for a slower machine and for variance: the three
+quiet runs agreed within 10%, and contended runs earlier moved by up to 86%. On a machine `k` times
+slower the hold is about `k x 6.25 ms`: it reaches the 25 ms cap at `k = 4`, and is about 63 ms at
+`k = 10`. **For Recovery and OwnerReceipts the envelope carries the bound, not the rate.** At
+64 KiB, even ten times the opaque Recovery rate is under 2 ms. For scale, reading and
+authenticating a 4 MiB record already takes 8 ms inline whatever the classifier says, and a step's
+one-entry minimum already lets one record's read overrun the slice.
+
+**Debug builds are not covered.** They run validation roughly an order of magnitude slower. That
+affects development and test builds only; production does not depend on it. The classifier's
+decisions are deterministic **under a deterministic clock**. A test driven by `SystemClock` can
+inline or park depending on real timing, so no such test may assert which happened.
+
+**The rule tightens as the slice runs down.** With 2 ms left the budget is 1 ms, so only predictions
+of 250 us or less inline: Recovery to about 50 KiB, Intents to about 9 KiB. **With 1 ms or less
+left, nothing inlines.**
+
+### 14.3 Part B: a detached result whose job restarted still warms the cache
+
+A detached Studio or Registry validation is thrown away when its job restarts, on two paths:
+
+- **In the store.** When the result comes back after a write has moved `inventory_generation`,
+  `install_validated` returns `Invalidated` and `install_validated_job_record` restarts the job.
+- **In the step-2 runtime, before the store sees it** (review HIGH-2b). An overtaken `Installing`
+  job is refreshed through `restart_epoch_inventory_job_uncharged`, and its result is "discarded
+  with that cursor" (`budget_turn`, `ccd00dbc` `receiver/inventory.rs`). Receive's writes are this
+  actor's own, so for the first `OWN_RESTARTS` restarts of every job this is the path taken. That
+  is the gossip case.
+
+Either way, the restarted cursor reaches the same record cold and parks it again. Under writes
+that arrive every turn, that can repeat indefinitely.
+
+**Proposal, in three pieces.**
+
+1. **Evict on mismatch** (review HIGH-2a). In `step_inner`, on any authenticated read of a
+   Registry or Studio record, if the cache holds an entry for the same key with a different size
+   or digest, remove it. That includes reference scans, which never consult the cache but whose
+   `install_body` put replaces by key anyway. The cache keeps one version per record, and the file
+   no longer has those bytes, so the entry can never hit again. The invariant this rests on, to be
+   written beside the cache: **every put describes bytes already on disk.** All three warm sites
+   keep it, and breaking it would only lose a warm entry, never return a wrong one. Without this, a stale entry left by a writer that does not warm (the core
+   Studio writer, or a warm that `cache_studio_source_footprint` or `remember_installed_registry`
+   declined) makes every later refused result look "not vacant", and nothing is ever warmed.
+2. **One store entry point for a refused result.** A store method (name to be settled) takes the
+   job and the validated result. It checks the result against the job's current cursor: same scan
+   identity, same mount as the cursor **and as the store's current `registry_mount()`** (a cursor
+   from another `ServerStore` must not warm this one; review LOW), and the record the cursor is
+   awaiting. Then it warms under piece 3. `install_validated`'s two `Invalidated` exits call the
+   same code. **Step 2's uncharged refresh calls it before discarding an `Installing` result**, and
+   so will step 3's embedded job when it exists. The warm and `install_body`'s existing put go
+   through **one memoize helper** that takes the validated body, so the value type is decided in
+   one place (re-review MEDIUM-2: see 14.5's memo).
+3. **Put only if vacant.** After piece 1, "vacant" means nothing has been put for this record since
+   the scan read it. If a write path put a newer version in between, that entry stays. If a writer
+   that does not warm rewrote the record, the warmed entry is a harmless miss, and piece 1 evicts it
+   on the next read.
+
+- **Why this is sound.** A cache entry is keyed by family and filename hash, and `get` also
+  requires the physical size and the blake3 digest of the authenticated plaintext to match the
+  bytes a later scan actually read. `validate_record_body` is a pure function of those bytes and
+  that size. So a result validated before a write is still the right answer for the bytes it was
+  computed from. If the write changed this record, the digest no longer matches and the entry is
+  simply a miss.
+- **What it relaxes, to be recorded in design 9.2 and the threat model when built** (review LOW).
+  Consequence 2 of 9.2 rechecks a returned validation's generation before it is consumed. A
+  refused result is still never installed into an inventory. Its pure accounting record is
+  memoized, which is a use of a result whose generation check failed.
+- **What it buys.** A cold record that is not rewritten, and stays in the cache, is validated once
+  rather than on every pass. This is not "at most once" in general: eviction (part C) and
+  rewrites both bring the cost back.
+- **What it does not cover.** Each of these costs one revalidation:
+  - a result dropped by token, for a job released while its body was out;
+  - the step-2 runtime's other discards of an `Installing` result: `lifecycle`'s idle drop, which
+    has only `&ServerStore`; `release()`, which has no store; and `abandon_job()` (re-review
+    LOW-1).
+
+  A warm into a full cache also evicts its least recently used entry, which may have been useful.
+
+### 14.4 Part C, an open question: the cache is 64 records and LRU
+
+`RecordCache` holds 64 entries and evicts the least recently used (`MAX_RECORDS`). A full scan
+reads every record in directory order. So in a vault with **more than 64** Studio and Registry
+records, LRU evicts each entry before the next scan reaches it again, and **every one of them
+misses on every scan**. Then each one parks, which costs a turn, and any write between turns can
+restart the job. Parts A and B cannot help there. The inventory's own record bound is 65 536
+(`MAX_ACCOUNTED_RECORDS`), so this is not a corner case.
+
+**Scope** (review M-3). The `receive()` profile caps a job at 64 records and 256 KiB of uncached
+bytes, so the shared job refuses before it can thrash. Part C matters only for full-profile jobs:
+H5, H1 and rotation.
+
+Two options:
+
+1. **A larger, indexed cache.** An entry is about 170 bytes, so 4 096 entries is about 0.7 MiB per
+   mount. The current `VecDeque` does a linear `position` and `retain` on every call, which would
+   not scale to that size, so this means a keyed map with an access order. Vaults beyond the new
+   capacity still thrash.
+2. **Scan-resistant admission at the current size.** A put from a scan never evicts; only write
+   paths do. A full scan then keeps its first 64 hits instead of none, but a large vault still
+   parks everything past 64. As worded, it would also pin entries for deleted or rewritten records
+   forever, so it needs part B's eviction on mismatch as well.
+
+**Recommendation: option 1**, with part B's eviction on mismatch, sized to the full-profile vaults
+step 3 is meant to support, and with limitation L5 amended. **It is necessary but not sufficient.**
+A hit still reads, authenticates and hashes the whole record, so the total bytes traversed still
+bound what one visit can finish (14.5). It is decided with step 3, since nothing before step 3
+needs it.
+
+### 14.5 What changes, what does not, and what this unblocks
+
+**What A and B do.** They remove the parks of small uncached records, and they stop a detached
+Studio or Registry validation from being lost when its job restarts. That shortens the step-2
+shared job and the first pass of any job. **They help each route to step 3 named below**, which is
+why they are worth building now. The memo does not replace A: first passes and changed records,
+H5's own Intents record among them, still need the classifier.
+
+**Step 3 stays gated** (review HIGH-1; revision 1 said otherwise). Design 9.2 says a commit
+completes only when no `inventory_generation` rotation occurs for the duration of one scan. Under
+ordinary gossip the receive path writes between nearly every pair of turns, so H5 must complete
+**within one visit, with no park, inside the overlay's share of that visit**. That share is half
+the deadline (N-H2), which is 125 ms; revision 1 used the 250 ms shared slice. A and B leave these
+in the way:
+
+- **an uncached record above its limit.** That means Recovery above 64 KiB, Intents above 384 KiB
+  or OwnerReceipts above 747 bytes. These families have no cache (L5), so they park on every pass;
+- **H5's own target Intents record**, whenever its Closing seed is above roughly 300 KiB. The
+  classifier sees only the size, so it charges the opaque seed bytes at the per-entry rate;
+- **any record reached when little of the slice is left;**
+- **cold Studio and Registry records beyond the cache** (part C);
+- **traversal itself.** Reading and authenticating costs about 2 us per KiB. Past roughly 60 MiB
+  of five-family bytes on the calibration host, even a fully warm vault cannot finish in 125 ms.
+
+So before step 3 is built it needs all three of:
+
+1. **A route to completion in one visit with no park**, for the vaults it is meant to support.
+   The candidate is a digest-keyed memo covering every accounting family, not only Registry and
+   Studio, sized per part C option 1. That is an amendment to L5. After one complete validation,
+   only records that changed would then cost a validation. **Its value must carry Intents' facts**
+   (re-review MEDIUM-2). Today a hit returns `ValidatedRecordBody::accounting_only`, with
+   `intent: None`, and `EpochIntentBudget::from_inventory` builds its Unconfirmed tally from
+   `intent_facts()`. A memo on today's value type would drop live Unconfirmed branches from that
+   tally, and the budget would be too generous. The alternative is some other progress mechanism
+   that survives restarts.
+2. **Measured full-profile traversal times for realistic vaults**, against the 125 ms share.
+3. **A deterministic H5 test with a five-family write between every pair of turns**, showing that
+   the handoff completes.
+
+Until then H5 keeps today's behaviour: it completes in one visit, at the cost of an unbounded scan
+in that visit.
+
+**L6 must name each condition above, and the backoff arithmetic.** Each job warms about three
+records before `Unstable`, then backs off for 30 s, doubling to 300 s. So a vault with about 20
+cold Studio records could wait tens of minutes before a handoff could complete.
+
+**Steps 4 and 5 are unchanged.** They still need section 7's measurements, including the restart
+rate with a second actor writing.
+
+### 14.6 Tests and mutations for A and B
+
+**Existing tests whose subject is the detached stage** (review M-2). With A, any test that plants a
+small Recovery, Intents, OwnerReceipts or DraftArchive record under a deadline and expects it to
+park would see it validate inline instead. Seven are known so far:
+
+- the five in `epoch_recovery/inventory.rs` that plant small Recovery records under a 250 ms
+  deadline at a frozen clock:
+  - `a_budgeted_cursor_parks_each_record_and_completes_through_the_detached_stage`;
+  - `a_budgeted_scan_produces_the_same_inventory_as_an_unbudgeted_one`;
+  - the two rail tests "after a record has been parked and installed";
+  - `a_detached_validation_is_refused_by_the_wrong_scan_record_or_generation`;
+- `driving_a_job_respects_the_visit_deadline_and_stops_at_a_park`;
+- `c3_multi_family_scan_parks_records_from_several_families` (`performance.rs`, not ignored).
+
+The opt-in profile harness needs the same, because it times `validate()` on every parked record.
+**The list is complete** (re-review LOW-4).
+`driving_a_job_treats_its_deadline_as_absolute` plants only non-family files.
+`driving_a_job_loops_several_one_record_steps_in_one_visit` relies on Studio cache hits. Every
+other job test passes no deadline. Running the suite and switching whatever fails would not be
+enough anyway: it misses a test that keeps passing after it stops exercising the detached path, as
+the inventory-equality test would. So **each switched test also asserts that something parked**.
+
+Revision 1 proposed forcing the park with a deadline equal to the current time. That works for the
+step API, but `drive_epoch_inventory_job` never begins a step with no time left, so drive tests
+would not step at all.
+
+Instead, a `#[cfg(test)]` switch makes `validation_fits` return false. Its name is still to be
+settled. It lives **on `ServerStore`** and `step_inner` reads it. Revision 2 put it on the cursor,
+but a cursor-level switch is lost whenever a job restarts, because `restart_job`,
+`finish_epoch_inventory_job` and the uncharged refresh all open fresh cursors (re-review
+MEDIUM-1). `studio_rotation_interruption` is the precedent for a test field on the store.
+Unbudgeted scans never classify, so they are unaffected.
+
+The tests and harness above use the switch, which also keeps them independent of the calibration
+constants. That is a recorded change to what they test: "a record the classifier detaches parks",
+with the classifier's own tests saying what it detaches.
+
+Two neighbours need no switch:
+
+- `a_supplied_deadline_stops_traversal_even_with_no_validation_to_classify` has nothing to classify.
+- `a_budgeted_reference_scan_collects_the_same_cids_as_an_unbudgeted_one` is a reference scan,
+  which never inlines.
+
+`ccd00dbc`'s runtime tests park cold Studio sources, which detach by rule, so they need no switch
+either.
+
+**New tests:**
+
+- **The rule as a table:**
+  - each family in each mode, at 0 bytes, at the envelope, and one byte past it;
+  - `remaining` at 0, at 1, exactly at the threshold, and one below it;
+  - the 25 ms cap binding when more time remains;
+  - `u64::MAX` size, with no overflow.
+- **A real cursor at a frozen clock** under a 250 ms deadline: a small Recovery record is
+  installed inline, nothing of it parks, a cold Studio record parks, and the inventory equals the
+  unbudgeted one. This is the test that pins inlining.
+- **A clock that advances on every read:** one small record inlines early in the slice, and a
+  later one parks once the remaining time falls below its threshold.
+- **The switch survives a restart:** a switched job that restarts still parks.
+- **Part B:**
+  - a Studio result refused as `Invalidated` warms the cache, and the restarted job reuses it
+    (`reused_records` rises, nothing parks);
+  - a stale entry for an older version is evicted on the read, so the refused result for the new
+    version does warm;
+  - a refused result does not displace an entry a write path put since the read;
+  - a result from another scan, another mount, another store or another record warms nothing;
+  - a record rewritten after its validation is a miss;
+  - when step 2 lands, an own-write storm in which `reused_records` rises after an uncharged
+    refresh.
+
+**Mutations, each run to its failing test and restored:**
+
+- `SAFETY` set to 1;
+- the cap removed;
+- the envelope check removed;
+- Studio admitted;
+- `references` ignored;
+- the 1 ms floor removed;
+- eviction on mismatch removed;
+- the vacancy check removed;
+- the store-mount check removed;
+- the warm on a fault exit.
+
+### 14.7 Revision 1's design review, answered
+
+| finding | answer |
+|---|---|
+| HIGH-1, A and B do not meet step 3's gate; the slice is 125 ms | 14.5: step 3 stays gated, on three named conditions |
+| HIGH-2a, a stale entry defeats the vacancy rule | 14.3 piece 1, eviction on mismatch |
+| HIGH-2b, step 2's uncharged refresh drops the result first | 14.3 piece 2, one store entry point called before any discard |
+| HIGH-3, Recovery's rate is from opaque projections | 14.1 and 14.2: envelope held at 64 KiB until structured shapes are measured |
+| M-1, version-2 owner journals verify signatures | 14.1 and 14.2: rationale corrected; the 747-byte envelope admits at most one |
+| M-2, two more affected tests; an expired deadline cannot drive | 14.6: the `#[cfg(test)]` switch, and the run-and-confirm procedure |
+| M-3, part C's scope and options | 14.4 |
+| LOW, `remaining_ms` is floored | 14.2: one millisecond subtracted |
+| LOW, part B relaxes 9.2 consequence 2 | 14.3, recorded in 9.2 and the threat model when built |
+| LOW, no check against the store's own mount | 14.3 piece 2 |
+| LOW, the DraftArchive envelope and constant | 14.2 |
+| LOW, determinism holds only under a deterministic clock | 14.2 |
+| LOW, the status ledger said "three families" | fixed: four, Recovery included |
+
+**Revision 2's re-review** (same reviewer, static) found no blocker or high, and said A and B are
+ready to build once its two mediums are answered.
+
+| finding | answer |
+|---|---|
+| MEDIUM-1, a cursor-level test switch is lost on restart | 14.6: the switch is on `ServerStore` |
+| MEDIUM-2, an all-family memo must carry Intents' facts | 14.3 piece 2's memoize helper; 14.5's memo |
+| LOW-1, other discard paths for an `Installing` result | 14.3, "what it does not cover" |
+| LOW-2, section 13's Recovery bullet | qualified |
+| LOW-3, "every route needs both" overclaimed | 14.5 reworded |
+| LOW-4, the affected-test list is complete | 14.6: the list, plus a "something parked" assertion per switched test |
+
+**Follow-up measurements this leaves.** Each one would let an envelope widen:
+
+- **Structured Recovery shapes:**
+  - an empty projection with the most applied operations, tombstones and elements;
+  - the most one-byte-value conflicts;
+  - a staged snapshot with a `completed_eviction`.
+- **A version-2 owner journal and a fault record**, at the 27 KiB cap.
+
+**Residual risks the review listed.** `SAFETY = 4` absorbs contention, shape uncertainty and slower
+hardware at once, so re-derive it per component once those measurements exist. Debug builds can
+hold an inline validation for about 63 ms.

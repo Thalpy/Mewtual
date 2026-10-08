@@ -2078,7 +2078,7 @@ four this ledger should have been distinguishing all along:
 | 13.4 | **complete as the arithmetic 13.4 asks for; not a measurement** | scope declared (one permit, sum of accounted bounds), stage/lifetime table with moves distinguished from clones, **64.18 MiB** over 13.4's eight items plus 18.09 MiB retained beyond its list. The largest simultaneous accounted set is H5's source write at 59.52 MiB under a declared document proxy; H4 is the smallest of the three priced stages. Five earlier attempts at this section were each refuted by review |
 | 13.5 | **source-correct fixture on the operation-count axis; one clause uncovered** | the three real production seams are timed at every depth 1 to 255, with custody separated from the detached plan, depth read back through `local_draft()` and the 255/256 premise asserted. "Against a maximal Closing source and seed" is **not** covered - the source is at rotation eligibility, not the byte ceiling - and S3's I-3 hold is bracketed rather than measured |
 | 13.6 | **executed measurement; obligation partly unaddressed** | `checked_epoch_replay_state` and the five-family inventory over several large retained branches, both named by 13.6. What exists measures the decoder pair and the two load entry points |
-| 13.7 | **source-correct fixtures, executed measurements, narrower conclusions** | accepted-ceiling runs for each family; DraftArchive entirely; a largest-single-step figure at a ceiling rather than at fixture sizes; restart behaviour under a real workload rather than a deterministic guard rotation. OwnerReceipts and Intents are measured only at trivial sizes |
+| 13.7 | **source-correct fixtures, executed measurements, narrower conclusions** | accepted-ceiling runs for each family; DraftArchive entirely; a largest-single-step figure at a ceiling rather than at fixture sizes; restart behaviour under a real workload rather than a deterministic guard rotation. **2026-10-08:** Intents now at its ceilings in both modes and DraftArchive at its ceiling in accounting mode; still missing are OwnerReceipts at its cap, DraftArchive in reference mode, and Recovery above 4 MiB |
 | 13.8 | **synchronous component evidence** | scheduled end-to-end wall clock and the visit count. `256 x max_turn_ms` is not the sum of the signature durations, and the direct loop excludes receive cadence and queued visits |
 
 **13.2 and 13.5 have nothing at all**, and are the same kind of work: custody per stage at shapes
@@ -2386,6 +2386,112 @@ predicate has had wrong in sequence: the raw-sum rule, the zero-median rule and 
 Until now every measurement obligation in design 13 was outstanding and the ledger said so. This
 is the first one with numbers behind it. It is **partial**, and the boundaries are stated below
 rather than left to be discovered.
+
+### The uncached families at their ceilings (2026-10-08)
+
+This closes the gap section 13 of `GATE4-AGENT-1-C3-RUNTIME.md` names: OwnerReceipts and Intents
+had been measured only at trivial sizes, and DraftArchive not at all. With Recovery, these are the
+four families `validation_fits` could ever admit inline. Studio and Registry are driven by
+structure, not bytes, so no byte threshold is safe for them (see "Registry and Studio measured"
+below).
+
+**Conditions.** The user cleared the machine for this window: no other agent was building.
+Isolated worktree at `a62a7f80` plus the harness added for this (`profile_c3_uncached_families` in
+`inventory/tests/performance.rs`, committed with this entry). Release build,
+`RUST_MIN_STACK=33554432`, `SystemClock`, 8 interleaved trials, 64 validation repetitions per
+record per trial, validation cache cleared before every trial, page cache warm. Runs 2 and 3 are
+the same case set (138.98 s and 141.05 s). Run 4 adds the retained-branch rows in reference mode
+(247.03 s), with the rest of the set interleaved alongside them as before.
+Run 1 is not a measurement: it panicked in reference mode on a fixture defect. The generic
+`document` helper's keys are not a Studio document's, and a reference scan decodes each intent as
+a Studio operation. `flipnote_document` is the fix.
+
+**Units.** Validation is the upper median of the 8 per-trial means. Each mean is over a 64-repetition
+batch timed on a 1 ms clock, so the resolution is about 15.6 us and "0" means a batch shorter than
+one tick. Read-and-park is one sample per trial, so it resolves only to 1 ms; the column shows run 3,
+or run 4 for the rows only run 4 has.
+"Per KiB" is the run 3 validation figure over physical bytes.
+
+| family, shape | physical bytes | mode | read-and-park | validation, runs 2 / 3 / 4 | per KiB |
+|---|---|---|---|---|---|
+| Recovery | 1 195 | accounting | 0 us | 0 / 0 / 0 us | - |
+| Recovery | 262 315 | accounting | 1 000 us | 171 / 171 / 171 us | 0.7 us |
+| Recovery | 1 048 747 | accounting | 2 000 us | 2 359 / 2 406 / 2 468 us | 2.3 us |
+| Recovery | 4 194 475 | accounting | 8 000 us | 9 031 / 9 171 / 9 156 us | 2.2 us |
+| Intents, 100 intents | 13 556 | accounting | 0 us | 93 / 93 / 93 us | 7.0 us |
+| Intents, 1 000 intents | 134 156 | accounting | 0 us | 1 015 / 1 015 / 1 000 us | 7.7 us |
+| Intents, 10 000 intents (count ceiling) | 1 340 156 | accounting | 3 000 us | 11 390 / 11 406 / 11 296 us | 8.7 us |
+| Intents, 100 intents | 13 556 | references | 0 us | 218 / 218 / 218 us | 16.5 us |
+| Intents, 1 000 intents | 134 156 | references | 1 000 us | 2 250 / 2 250 / 2 234 us | 17.2 us |
+| Intents, 10 000 intents (count ceiling) | 1 340 156 | references | 3 000 us | 23 781 / 23 937 / 24 093 us | 18.3 us |
+| Intents, 64 KiB bodies | 1 049 372 | accounting | 2 000 us | 484 / 500 / 500 us | 0.5 us |
+| Intents, 64 KiB bodies (byte ceiling) | 4 197 020 | accounting | 8 000 us | 2 796 / 3 062 / 2 906 us | 0.7 us |
+| Intents, Closing branch of 64 ops | 16 330 | accounting | 0 us | 187 / 187 / 187 us | 11.7 us |
+| Intents, Closing branch of 256 ops (op ceiling) | 62 218 | accounting | 0 us | 765 / 781 / 781 us | 12.9 us |
+| Intents, Closing branch of 1 op | 1 273 | references | 0 us | - / - / 218 us | **175 us** |
+| Intents, Closing branch of 64 ops | 16 330 | references | 0 us | - / - / 500 us | 31 us |
+| Intents, Closing branch of 256 ops (op ceiling) | 62 218 | references | 0 us | - / - / 1 375 us | 23 us |
+| OwnerReceipts, one receipt | 513 | accounting | 0 us | 0 / 0 / 0 us | - |
+| OwnerReceipts, receipt and decision close | 747 | accounting | 0 us | 0 / 0 / 0 us | - |
+| DraftArchive | 1 048 696 | accounting | 2 000 us | 0 / 0 / 0 us | 0 |
+| DraftArchive (payload ceiling, less 1 KiB) | 6 334 584 | accounting | 10 000 us | 0 / 0 / 0 us | 0 |
+| Studio, title history, in the branch vaults | 1 359 | accounting | 0 us | 500 / 500 / 468 us | not a byte rate |
+| Studio, title history, in the branch vaults | 1 359 | references | 0 us | - / - / 500 us | not a byte rate |
+
+The branch rows in reference mode use run 4's figure for "per KiB". Every reference-mode branch case
+was checked against its oracle on every trial: the fixture's operations are title edits, so the
+collected set must be empty, and it was.
+
+**What this establishes.**
+
+1. **Intents cost tracks entries, not bytes.** At the byte ceiling, the 64 KiB opaque bodies cost
+   0.7 us per KiB. At the count ceiling, minimal title intents cost 8.7 us. A retained Closing
+   branch costs 12.9 us at the operation ceiling, which makes it the densest shape per byte. So a
+   byte threshold for Intents in accounting mode is safe only at the branch's rate. The
+   accounting decode copies a branch's seed as opaque bytes and reads its entries as fixed-size
+   fields (`decode_vault_structural`), so a larger seed adds bytes at the opaque rate, not
+   structure.
+2. **In reference mode, Intents is driven by structure, like Studio.** A one-operation branch
+   costs 218 us with references against under 15 us without, which is 175 us per KiB. The cause is
+   `base_blob_cids`, which rebuilds the seed's graph (`self.base.graph()`) to enumerate its CIDs.
+   This fixture's seed is a title-only history, so its graph is trivial. A dense flipnote seed would
+   cost what the same graph costs as a Studio record, and that has been measured at about 240 ms for
+   128 frames. So no byte threshold is safe for Intents in reference mode. Without a branch,
+   reference collection roughly doubles the count shape's rate (8.7 to 18.3 us per KiB), because it
+   decodes every pending intent as a Studio operation.
+3. **The most expensive Intents record measured costs 11.4 ms to validate for accounting and
+   23.9 ms with references.** That is 10 000 intents with no branch. It is the most expensive
+   record of any uncached family measured so far, and it is still an order of magnitude below a
+   dense Studio record. Point 2 says why a branch with a dense seed could cost more in reference
+   mode.
+4. **Recovery repeats the earlier profile.** 9.0 to 9.2 ms at 4 MiB, against 11.0 ms in the first
+   profile on a contended machine. Recovery's own ceiling is 18 MiB plus 2 088 bytes, and **it is
+   not measured above 4 MiB**. **These Recovery records are opaque projections** (`stage_sized`:
+   filler projection; empty tombstones, elements, conflicts and applied operations). The
+   accounting decode does work per item, so a structured record can cost more per byte, and that
+   is unmeasured. So 2.3 us per KiB is the cost of Recovery's bytes, not a bound on its structure
+   (design review of C-3 section 14, HIGH-3).
+5. **DraftArchive accounting does no work that grows with size.** The accounting arm calls
+   `storage_record` and never decodes the payload (`validate_record_body`). It stays below
+   resolution all the way to the payload ceiling. Reading and authenticating the record, which
+   takes 10 ms at the ceiling, is the record's whole cost, and no classifier moves it.
+   **DraftArchive reference mode is not measured.** The test writer seals opaque bodies, and
+   reference mode needs a canonical archive whose payload decodes.
+6. **OwnerReceipts is measured only on small journals.** The two journals measured (513 and 747
+   bytes) are below resolution. The family's sealed cap is about 27 KiB (journal, close, nine
+   receipts, attestations). No fixture builds a journal at that cap, so the cap itself is
+   unmeasured. Only accounting mode was run. The decode does not branch on `references`
+   (`validate_record_body`), so reference mode does the same work; that is read from the code,
+   not measured.
+7. **Read-and-park is about 2 us per KiB for every family.** That is 8 ms at 4 MiB and 10 ms at
+   6.3 MB. It is paid inline whatever the classifier decides.
+8. **The three runs agree within 10% on every resolved validation row.** The largest gap is the
+   Intents byte ceiling, 2.80 against 3.06 ms. Contended runs earlier in this ledger moved by up to
+   86% on identical fixtures. So treat this as the quiet-machine figure, from one host, in a
+   release build only.
+
+These are the **worst rates over the shapes measured**, not a proven worst case for each family.
+The classifier proposal in section 14 of `GATE4-AGENT-1-C3-RUNTIME.md` uses them on those terms.
 
 ### The result established so far, stated at its actual width
 
@@ -2775,7 +2881,7 @@ measured, and an earlier version of this sentence claimed the latter.** Withdraw
 | 13.7 item | what exists |
 |---|---|
 | maximum continuous custody per scan slice | measured, at fixture sizes |
-| largest single-record step per family, with and without reference collection | measured for Recovery, Registry and Studio **at fixture sizes, not at accepted ceilings**; OwnerReceipts and Intents only at trivial sizes; **DraftArchive not at all** |
+| largest single-record step per family, with and without reference collection | Registry and Studio **at fixture sizes, not at accepted ceilings**. Recovery to 4 MiB, against an 18 MiB ceiling. **Updated 2026-10-08** (see "The uncached families at their ceilings"): Intents at its count, byte and branch-operation ceilings, in both modes; DraftArchive at its payload ceiling, accounting mode only; OwnerReceipts on small journals only, not at its 27 KiB cap |
 | how often detached validation is needed | trivially always, since `validation_fits` returns false. Not a measurement of anything |
 | visits per full scan | measured, and on one multi-family vault rather than a realistic one |
 | restart rate under concurrent writes | a **deterministic liveness test**, not a rate - see below |
@@ -4809,13 +4915,17 @@ makes that more important, not less.
 2. Then **Flow R**, which needs no media and is independent. It was deliberately sequenced after
    this boundary so it is not built on the unbounded inventory path and then split again.
 3. Produce design 13's eight measurements as each item lands; C-1's before-and-after is cheap,
-   since the opt-in profile already exists. **13.7 is partially done** - Recovery, accounting
-   and reference-collecting - and found that for these fixtures the read-and-park and validation
-   phases are of comparable magnitude at megabyte scale, with `validation_fits` able to move
-   only the latter. **Next, in this order: Registry and Studio** (the families whose expensive
-   typed reconstruction motivated the design, both scan modes, real histories at their largest
-   accepted shapes), then OwnerReceipts, Intents and DraftArchive, varying structure and not
-   only encoded size; then realistic full scans and the restart rate under concurrent writes.
+   since the opt-in profile already exists. **13.7 (updated 2026-10-08):** Recovery, Registry
+   and Studio were measured earlier. Intents, OwnerReceipts and DraftArchive were measured on
+   2026-10-08 (see "The uncached families at their ceilings"), and the classifier proposal that
+   follows from them is section 14 of `GATE4-AGENT-1-C3-RUNTIME.md`, awaiting design review.
+   Still outstanding:
+   - OwnerReceipts at its 27 KiB cap;
+   - DraftArchive in reference mode;
+   - Recovery above 4 MiB;
+   - realistic full scans;
+   - the restart rate under concurrent writes.
+
    The remaining seven measurements have no numbers.
 4. R4-TEST-001 stays open until the reviewer can inspect `079e59a` on GitHub. C-1's call-site table
    in design 5.1 still has no test asserting that no moved call site needs a projection.

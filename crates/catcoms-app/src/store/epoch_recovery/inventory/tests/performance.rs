@@ -2003,6 +2003,367 @@ fn protocol_comparison(clock: &dyn catcoms_rt::Clock, profile: &str) {
     }
 }
 
+// Design 13.7, part two (2026-10-08): the uncached families at their accepted ceilings.
+//
+// `validation_fits` must decide before it validates, from what it knows then: the family (from
+// the filename) and the authenticated size. So for each family the question is the worst
+// validation cost at a given size, across the shapes that make one size expensive, up to that
+// family's accepted ceiling. Three families were measured only at trivial sizes or not at all:
+// Intents (by count, by bytes, and with a retained branch), OwnerReceipts and DraftArchive.
+
+/// Write one document's ordinary intent ledger directly.
+///
+/// Built in memory through `IntentLedger::prepare`, which applies the same per-document caps as
+/// the production writer, then sealed and framed at the record's path exactly as the production
+/// writer frames it (the technique of `per_document_count_and_byte_caps_survive_vault_decode_and_
+/// prepare`). Writing 10,000 intents one `prepare_epoch_intent` at a time would rewrite the
+/// growing record ten thousand times. Returns the number of intents written.
+fn write_intent_ledger(
+    store: &ServerStore,
+    server: u64,
+    document: &LogicalDocument,
+    author: &catcoms_mls::MlsDevice,
+    ops: Vec<DomainOp>,
+    seed: u64,
+) -> usize {
+    let written = ops.len();
+    let mut ledger = catcoms_replication::IntentLedger::new(document.clone());
+    for op in ops {
+        ledger
+            .prepare(author.device_id(), op)
+            .expect("the fixture stays within the per-document caps");
+    }
+    let scope = crate::store::epoch_intents::scope_bytes(server, document).unwrap();
+    let state = crate::store::epoch_intents::EpochIntentState {
+        ledger,
+        overlay: None,
+    };
+    let sealed = catcoms_crypto::seal(
+        &store.keys.db_key().unwrap(),
+        &state.encode(&scope).unwrap(),
+        &mut ChaCha20Rng::seed_from_u64(seed),
+    )
+    .unwrap();
+    fs::write(
+        store.epoch_intent_path(&scope),
+        crate::store::frame(&sealed),
+    )
+    .unwrap();
+    written
+}
+
+/// A real Flipnote document in the profile's group. A reference-mode scan decodes each intent as a
+/// Studio operation for its document, which needs the document's real logical-key shape; the
+/// generic `document` helper's arbitrary keys satisfy the structural decode but not that.
+fn flipnote_document(object: u8) -> LogicalDocument {
+    StudioTarget::Flipnote {
+        channel: [7; 16],
+        object: [object; 16],
+    }
+    .document(b"group")
+    .unwrap()
+}
+
+/// A valid Flipnote title intent, so a reference-mode scan decodes it as it would a real one.
+fn title_intent(document: &LogicalDocument, n: u128, text: &str) -> DomainOp {
+    DomainOp {
+        nonce: n.to_be_bytes(),
+        doc_type: document.doc_type,
+        logical_key: document.logical_key.clone(),
+        body: FlipnoteOp::SetHeader(catcoms_replication::studio::FlipnoteHeader::Title(
+            text.into(),
+        ))
+        .encode()
+        .unwrap(),
+    }
+}
+
+/// Intents on the **count** axis: many small, valid intents, the densest shape per byte, up to
+/// `MAX_INTENTS_PER_DOCUMENT`. One document per count, so each is its own row. Title intents name
+/// no blob, so a reference-mode case collects nothing, and says so.
+fn intents_count_case(counts: &[usize], references: bool) -> Case {
+    let root = tempfile::tempdir().unwrap();
+    let store = open(root.path());
+    let author = catcoms_mls::MlsDevice::generate().unwrap();
+    for (n, &count) in counts.iter().enumerate() {
+        let doc = flipnote_document(n as u8);
+        let ops = (0..count)
+            .map(|n| title_intent(&doc, n as u128, "t"))
+            .collect();
+        assert_eq!(
+            write_intent_ledger(&store, 7, &doc, &author, ops, count as u64),
+            count
+        );
+    }
+    case(
+        format!(
+            "intents_count_{}",
+            if references {
+                "references"
+            } else {
+                "accounting"
+            }
+        ),
+        root,
+        store,
+        if references {
+            REFERENCE_COVERAGE
+        } else {
+            EpochInventoryCoverage::RecoveryOwnerReceiptsAndIntents
+        },
+        references,
+        CachePolicy::Fresh,
+        FixtureShape {
+            cids: references.then_some(0),
+            ..FixtureShape::default()
+        },
+        references.then(ExpectedRefs::none),
+    )
+}
+
+/// Intents on the **byte** axis: maximal 64 KiB envelopes filling the given operation bytes, up to
+/// `MAX_INTENT_BYTES_PER_DOCUMENT`. Accounting only: the bodies are opaque filler, which the
+/// structural decode does not interpret and a reference scan would refuse.
+fn intents_bytes_case(op_bytes: &[usize]) -> Case {
+    let root = tempfile::tempdir().unwrap();
+    let store = open(root.path());
+    let author = catcoms_mls::MlsDevice::generate().unwrap();
+    for (n, &total) in op_bytes.iter().enumerate() {
+        let doc = flipnote_document(0x80 + n as u8);
+        let overhead = {
+            let blank = title_intent(&doc, 0, "");
+            blank.encode().unwrap().len() - blank.body.len()
+        };
+        let mut ops = Vec::new();
+        let mut left = total;
+        let mut n = 0u128;
+        while left > 0 {
+            let len = left.min(catcoms_replication::epoch::MAX_DOMAIN_OP_BYTES);
+            let mut next = title_intent(&doc, n, "");
+            next.body = vec![b'x'; len - overhead];
+            ops.push(next);
+            left -= len;
+            n += 1;
+        }
+        write_intent_ledger(&store, 7, &doc, &author, ops, total as u64);
+    }
+    case(
+        "intents_bytes_accounting",
+        root,
+        store,
+        EpochInventoryCoverage::RecoveryOwnerReceiptsAndIntents,
+        false,
+        CachePolicy::Fresh,
+        FixtureShape::default(),
+        None,
+    )
+}
+
+/// Intents with a **retained Closing branch** of `ops` accepted operations, through the production
+/// Save path (`studio_handoff_ready_fixture`), up to `MAX_STUDIO_OVERLAY_OPS`. The structural
+/// decode skips the branch's replay, which is C-1's point; this measures what it still costs.
+/// The vault also holds the document's Studio and Registry records, reported as their own rows.
+///
+/// In reference mode the branch's base CIDs and every pending operation's blob CID are collected.
+/// The fixture's operations are all title edits, which name no blob, so the oracle is the empty
+/// set: what this times is the decode reference collection forces, not a large merge.
+fn intents_branch_cases(op_counts: &[usize], references: bool) -> Vec<Case> {
+    op_counts
+        .iter()
+        .map(|&ops| {
+            let root = tempfile::tempdir().unwrap();
+            let mut store = open(root.path());
+            let device = catcoms_mls::MlsDevice::generate().unwrap();
+            let group = catcoms_mls::ServerGroup::create(&device).unwrap();
+            let target = StudioTarget::Flipnote {
+                channel: [7; 16],
+                object: [ops as u8; 16],
+            };
+            crate::store::epoch_studio::tests::performance::studio_handoff_ready_fixture(
+                &mut store, 7, &group, &device, target, ops,
+            );
+            case(
+                format!(
+                    "intents_branch_{ops}_{}",
+                    if references {
+                        "references"
+                    } else {
+                        "accounting"
+                    }
+                ),
+                root,
+                store,
+                REFERENCE_COVERAGE,
+                references,
+                CachePolicy::Fresh,
+                FixtureShape {
+                    requested_ops: Some(ops),
+                    cids: references.then_some(0),
+                    ..FixtureShape::default()
+                },
+                references.then(ExpectedRefs::none),
+            )
+        })
+        .collect()
+}
+
+/// OwnerReceipts, through the production writer. The journal is bounded by construction
+/// (`MAX_OWNER_RECEIPT_JOURNAL_BYTES`: three receipt roles, a repair pair, one retired receipt and
+/// close, about 12 KiB), so its ceiling is small; this measures the ordinary one-receipt journal.
+fn owner_receipts_case() -> Case {
+    let root = tempfile::tempdir().unwrap();
+    let mut store = open(root.path());
+    let device = catcoms_mls::MlsDevice::generate().unwrap();
+    let group = catcoms_mls::ServerGroup::create(&device).unwrap();
+    let doc = StudioTarget::Flipnote {
+        channel: [7; 16],
+        object: [3; 16],
+    }
+    .document(&group.group_id())
+    .unwrap();
+    let receipt = catcoms_replication::Receipt::sign(
+        doc.clone(),
+        0,
+        [11; 32],
+        [12; 32],
+        group.epoch(),
+        catcoms_replication::InheritedCheckpoint::EpochZero,
+        &device,
+    )
+    .unwrap();
+    let mut budget = family_budget(&mut store, 7, &doc);
+    store
+        .prepare_epoch_owner_receipt(
+            7,
+            receipt,
+            &group,
+            group.epoch(),
+            &mut ChaCha20Rng::seed_from_u64(5),
+            &mut budget,
+        )
+        .expect("owner receipt");
+    case(
+        "owner_receipts_accounting",
+        root,
+        store,
+        EpochInventoryCoverage::RecoveryAndOwnerReceipts,
+        false,
+        CachePolicy::Fresh,
+        FixtureShape::default(),
+        None,
+    )
+}
+
+/// DraftArchive in accounting mode, up to the payload ceiling. Accounting does not decode the
+/// payload at all, only authenticates and names the record, so the body here is opaque filler
+/// (`write_draft_archive_for_test`, whose framing, binding and authentication are the real ones).
+fn draft_archive_case(body_bytes: &[usize]) -> Case {
+    let root = tempfile::tempdir().unwrap();
+    let store = open(root.path());
+    for (n, &bytes) in body_bytes.iter().enumerate() {
+        let doc = document(b"group", format!("archive-{n}").as_bytes());
+        crate::store::epoch_draft_archive::write_draft_archive_for_test(
+            &store,
+            7,
+            &doc,
+            &vec![9u8; bytes],
+            &mut ChaCha20Rng::seed_from_u64(n as u64),
+        )
+        .unwrap();
+    }
+    case(
+        "draft_archive_accounting",
+        root,
+        store,
+        REFERENCE_COVERAGE,
+        false,
+        CachePolicy::Fresh,
+        FixtureShape::default(),
+        None,
+    )
+}
+
+/// Not ignored: small versions of every fixture the uncached-families profile builds must scan
+/// cleanly in the mode they are profiled in, so a fixture that stops being valid fails here rather
+/// than halfway through an opt-in profile run, or worse, is measured while refused.
+#[test]
+fn uncached_family_fixtures_scan_cleanly() {
+    let mut cases = vec![
+        intents_count_case(&[1, 10], false),
+        intents_count_case(&[1, 10], true),
+        intents_bytes_case(&[64 * 1024]),
+        owner_receipts_case(),
+        draft_archive_case(&[1024]),
+    ];
+    cases.extend(intents_branch_cases(&[1], false));
+    cases.extend(intents_branch_cases(&[1], true));
+    for case in &mut cases {
+        let mut scan = case.store.scan_epoch_files(case.coverage).unwrap();
+        if case.references {
+            scan.collect_creative_references().unwrap();
+        }
+        while !scan
+            .step()
+            .unwrap_or_else(|e| panic!("{}: {e}", case.label))
+            .complete
+        {}
+        if case.references {
+            scan.finish_creative_references()
+                .unwrap_or_else(|e| panic!("{}: {e}", case.label));
+        } else {
+            scan.finish()
+                .unwrap_or_else(|e| panic!("{}: {e}", case.label));
+        }
+    }
+}
+
+/// Opt-in, real clock: the uncached families at their accepted ceilings, interleaved with the
+/// Recovery size sweep for comparison with the earlier profile. Prints; asserts correctness,
+/// never machine speed. Run on a quiet machine:
+/// `RUST_MIN_STACK=33554432 cargo test --release -p catcoms-app --lib -- --ignored
+/// profile_c3_uncached_families --nocapture`.
+#[test]
+#[ignore = "opt-in design 13.7 profiling of the uncached families; no machine-speed assertion"]
+fn profile_c3_uncached_families() {
+    let profile = if cfg!(debug_assertions) {
+        "debug"
+    } else {
+        "release"
+    };
+    let clock = &SystemClock;
+    let mut all = vec![
+        recovery_accounting_case(&[1024, 16 * 1024, 256 * 1024, 1024 * 1024, 4 * 1024 * 1024]),
+        intents_count_case(&[1, 100, 1_000, 10_000], false),
+        intents_count_case(&[1, 100, 1_000, 10_000], true),
+        intents_bytes_case(&[
+            256 * 1024,
+            1024 * 1024,
+            catcoms_replication::epoch::MAX_INTENT_BYTES_PER_DOCUMENT,
+        ]),
+        owner_receipts_case(),
+        draft_archive_case(&[
+            1024,
+            1024 * 1024,
+            catcoms_replication::studio::MAX_STUDIO_DRAFT_ARCHIVE_BYTES - 1024,
+        ]),
+    ];
+    for references in [false, true] {
+        all.extend(intents_branch_cases(
+            &[1, 64, catcoms_replication::studio::MAX_STUDIO_OVERLAY_OPS],
+            references,
+        ));
+    }
+    println!(
+        "C3_PROFILE group=uncached_families cases={} trials={TRIALS} order=interleaved",
+        all.len()
+    );
+    run_interleaved(&mut all, clock);
+    for case in &all {
+        check_case_structure(case);
+        report(case, Protocol::Interleaved.label(), profile);
+    }
+}
+
 /// Opt-in, real clock, real sizes. Prints; asserts correctness, never machine speed.
 ///
 /// **Every case is built first, then all of them are run round-robin.** Earlier versions ran
