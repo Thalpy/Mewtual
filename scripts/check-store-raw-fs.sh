@@ -17,20 +17,34 @@ cd "$(dirname "$0")/.."
 # inventory), so explicit syncs are matched too, wherever the handle came from.
 pattern='fs::(write|rename|remove_file|remove_dir|remove_dir_all|copy|hard_link|create_dir|create_dir_all|set_permissions)\(|File::(create|options)\(|OpenOptions::new\(\)|\.set_len\(|\.sync_(all|data)\('
 
-# Reviewed sites: file, then how many matching lines it may contain. Each of these is a per-family
-# sync helper that opens an existing epoch file only to `sync_all` it, and takes `&EpochMutation`
-# as a parameter, so the rotation is already a type-level prerequisite of calling it. Extend
-# deliberately, with review, and say why next to the entry.
+# Reviewed sites, each `file|enclosing fn|the matching line's own text, trimmed`, and each allowed
+# exactly once. Extend deliberately, with review, and say why next to the entry.
+#
+# Anchored the way the mutation harnesses anchor their bytes (design 18.3 review, F6). A per-file
+# count, which this used to be, passes when a reviewed site is replaced by a different raw
+# mutation in the same file, since the count is unchanged. With function and text in the key, a
+# reviewed line moved within its function still passes; a changed line, a copy of it, or the same
+# line in another function does not. "Enclosing fn" is the nearest `fn` declared above the hit, so
+# a hit in an initializer after a function's body is charged to that function: never to an
+# allowance, unless its text is also exactly a reviewed line of that function.
 declare -A allowed=(
-  # ServerStore::open creates servers/ before any token or cursor exists; remove_server unlinks
-  # only the non-family {id}.bin, .net and .cache files (I-4 audit: correctly not rotating).
-  ['crates/catcoms-app/src/store.rs']=2
-  ['crates/catcoms-app/src/store/epoch_intents.rs']=2   # sync_intent_file: OpenOptions, sync_all
-  ['crates/catcoms-app/src/store/epoch_registry.rs']=2  # sync_registry_file: OpenOptions, sync_all
-  ['crates/catcoms-app/src/store/epoch_studio.rs']=2    # sync_studio_file: OpenOptions, sync_all
+  # ServerStore::open creates servers/ before any token or cursor exists.
+  ['crates/catcoms-app/src/store.rs|open|fs::create_dir_all(dir.join("servers")).map_err(|e| AppError::Io(e.to_string()))?;']=1
+  # remove_server unlinks only the non-family {id}.bin, .net and .cache files (I-4 audit:
+  # correctly not rotating).
+  ['crates/catcoms-app/src/store.rs|remove_server|fs::remove_file(p).map_err(|e| AppError::Io(e.to_string()))?;']=1
+  # The per-family sync helpers. Each opens an existing epoch file only to `sync_all` it, and
+  # takes `&EpochMutation`, so the rotation is a type-level prerequisite of calling it.
+  ['crates/catcoms-app/src/store/epoch_intents.rs|sync_intent|let file = OpenOptions::new()']=1
+  ['crates/catcoms-app/src/store/epoch_intents.rs|sync_intent|file.sync_all().map_err(|e| AppError::Io(e.to_string()))?;']=1
+  ['crates/catcoms-app/src/store/epoch_registry.rs|sync_registry|let file = OpenOptions::new()']=1
+  ['crates/catcoms-app/src/store/epoch_registry.rs|sync_registry|file.sync_all().map_err(|e| AppError::Io(e.to_string()))?;']=1
+  ['crates/catcoms-app/src/store/epoch_studio.rs|sync_studio|let file = OpenOptions::new()']=1
+  ['crates/catcoms-app/src/store/epoch_studio.rs|sync_studio|file.sync_all().map_err(|e| AppError::Io(e.to_string()))?;']=1
 )
 
-# Print `file:line: text` for every match in non-test code. Skipped: whole test files, the body of
+# Print `file<TAB>line<TAB>enclosing fn<TAB>trimmed text` for every match in non-test code. The
+# enclosing fn is the nearest `fn` item declared above the match, or `-` before any. Skipped: whole test files, the body of
 # a `#[cfg(test)]` item (a module, function, impl or other item, which rustfmt closes with `}` or
 # `};` at the attribute's own indentation; a one-line item or declaration ends at its `;`), and
 # `mod persistence { .. }` in store.rs.
@@ -47,8 +61,9 @@ declare -A allowed=(
 scan() {
   # The pattern travels through the environment: `awk -v` would process its backslashes.
   PATTERN="$pattern" awk -v file="$1" '
-    BEGIN { pattern = ENVIRON["PATTERN"] }
+    BEGIN { pattern = ENVIRON["PATTERN"]; current = "-" }
     function indent(s) { match(s, /^[ \t]*/); return substr(s, 1, RLENGTH) }
+    function trim(s) { sub(/^[ \t]+/, "", s); sub(/[ \t\r]+$/, "", s); return s }
     function skip(from) { skipping = 1; skip_indent = from; skip_start = NR }
     # A flag, not an empty indent: a top-level item has no indentation at all.
     skipping {
@@ -67,7 +82,14 @@ scan() {
     }
     /^[ \t]*#\[cfg\(test\)\][ \t]*$/ { pending = 1; attr_indent = indent($0); next }
     /^(pub(\([^)]*\))? )?mod persistence \{/ { skip(indent($0)); next }
-    $0 ~ pattern { print file ":" NR ": " $0 }
+    # The enclosing function: the same item shape the skip rule recognises, restricted to `fn`.
+    /^[ \t]*(pub(\([^)]*\))? )?((async|unsafe|const|extern) )*fn [A-Za-z_]/ {
+      name = $0
+      sub(/^.*fn /, "", name)
+      match(name, /^[A-Za-z_][A-Za-z_0-9]*/)
+      current = substr(name, 1, RLENGTH)
+    }
+    $0 ~ pattern { printf "%s\t%d\t%s\t%s\n", file, NR, current, trim($0) }
     END {
       if (skipping) {
         printf "%s:%d: skip never closed; the scanner cannot tell test code from production here\n", file, skip_start > "/dev/stderr"
@@ -85,22 +107,24 @@ while IFS= read -r file; do
   esac
   # Captured, not streamed, so a scanner failure stops the gate instead of reading as "no hits".
   hits=$(scan "$file")
-  while IFS= read -r hit; do
-    [ -z "$hit" ] && continue
-    counts["$file"]=$(( ${counts["$file"]:-0} + 1 ))
-    if [ "${counts["$file"]}" -le "${allowed["$file"]:-0}" ]; then
+  while IFS=$'\t' read -r hit_file line fn text; do
+    [ -z "$hit_file" ] && continue
+    key="$hit_file|$fn|$text"
+    counts["$key"]=$(( ${counts["$key"]:-0} + 1 ))
+    if [ "${counts["$key"]}" -le "${allowed["$key"]:-0}" ]; then
       continue
     fi
     echo "FORBIDDEN raw filesystem mutation in the store:"
-    echo "    $hit"
+    echo "    $hit_file:$line: in fn $fn: $text"
     fail=1
   done <<< "$hits"
 done < <( { echo crates/catcoms-app/src/store.rs; find crates/catcoms-app/src/store -name '*.rs'; } | sort)
 
-# A reviewed site that disappeared must leave the allowlist too, or the allowance outlives it.
-for file in "${!allowed[@]}"; do
-  if [ "${counts["$file"]:-0}" -lt "${allowed["$file"]}" ]; then
-    echo "STALE allowance: $file has fewer reviewed sites than allowed; shrink the allowlist."
+# A reviewed site that disappeared, moved to another function or changed its text must leave the
+# allowlist too, or the allowance outlives it.
+for key in "${!allowed[@]}"; do
+  if [ "${counts["$key"]:-0}" -lt "${allowed["$key"]}" ]; then
+    echo "STALE allowance, no longer matched exactly once: $key"
     fail=1
   fi
 done
