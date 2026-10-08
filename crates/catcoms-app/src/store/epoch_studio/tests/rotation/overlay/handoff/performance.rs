@@ -295,12 +295,18 @@ const STAGE_TRIALS: usize = 5;
 
 /// One handoff, H1 to H5, each stage's milliseconds pushed into its slot of `samples`: H1, H2,
 /// H3, H4, H5's budget inventory, H5. Requires the commit to accept `expected` operations.
+///
+/// Slots 6 to 8 price one each of the structure-driven terms H5 repeats under custody (design 18.3
+/// review, F3), timed on the commit before H5 consumes it: a full candidate `snapshot()` encode
+/// (H5 does three), a candidate `blob_cids()` projection (at least three), and one seed graph
+/// load through `base_blob_cids()` (two). They are not subtracted from slot 5; they say how much
+/// of it reusing H4's bytes or caching the projections could remove.
 fn time_stages(
     f: &Fixture,
     store: &mut ServerStore,
     basis: [u8; 32],
     expected: usize,
-    samples: &mut [Vec<u64>; 6],
+    samples: &mut [Vec<u64>; 9],
 ) {
     let clock = SystemClock;
     let mut timed = |slot: usize, start: u64| {
@@ -335,8 +341,25 @@ fn time_stages(
         .complete());
     timed(2, start);
     let start = clock.monotonic_ms();
-    let commit = plan.assemble().unwrap();
+    let mut commit = plan.assemble().unwrap();
     timed(3, start);
+    let start = clock.monotonic_ms();
+    // `snapshot` takes `&mut` (an Automerge save). H5 calls it on this same unit three times.
+    let encoded = commit.candidate.snapshot().unwrap();
+    timed(6, start);
+    assert_eq!(
+        encoded.as_slice(),
+        commit.snapshot.as_slice(),
+        "H4's bytes are not the candidate's encoding"
+    );
+    let start = clock.monotonic_ms();
+    commit.candidate.blob_cids().unwrap();
+    timed(7, start);
+    let start = clock.monotonic_ms();
+    if let Some(overlay) = commit.prepared.overlay() {
+        overlay.base_blob_cids().unwrap();
+    }
+    timed(8, start);
     let start = clock.monotonic_ms();
     let mut b = budget(store, f);
     timed(4, start);
@@ -359,22 +382,22 @@ fn time_stages(
 }
 
 /// Print one shape's spreads.
-fn report_stages(shape: &str, count: usize, source_bytes: u64, samples: [Vec<u64>; 6]) {
+fn report_stages(shape: &str, count: usize, source_bytes: u64, samples: [Vec<u64>; 9]) {
     let build = if cfg!(debug_assertions) {
         "debug"
     } else {
         "release"
     };
-    let [h1, h2, h3, h4, inventory, h5] = samples.map(|s| Spread::of(&s, 1));
+    let [h1, h2, h3, h4, inventory, h5, encode, cids, seed] = samples.map(|s| Spread::of(&s, 1));
     println!(
-        "HANDOFF_STAGES build={build} shape={shape} count={count} source_bytes={source_bytes} trials={STAGE_TRIALS} units=min/upper_median/max_us(zero_samples raw_upper_median_ms) h1={h1} h2_detached={h2} h3_signing={h3} h4_detached={h4} h5_inventory={inventory} h5_commit={h5}"
+        "HANDOFF_STAGES build={build} shape={shape} count={count} source_bytes={source_bytes} trials={STAGE_TRIALS} units=min/upper_median/max_us(zero_samples raw_upper_median_ms) h1={h1} h2_detached={h2} h3_signing={h3} h4_detached={h4} h5_inventory={inventory} h5_commit={h5} one_snapshot_encode={encode} one_blob_cids={cids} one_seed_graph={seed}"
     );
 }
 
 /// Title-only branches of `count` operations, on the fixture's small source.
 fn stages(art: bool) {
     for count in [1, 32, 256] {
-        let mut samples: [Vec<u64>; 6] = Default::default();
+        let mut samples: [Vec<u64>; 9] = Default::default();
         let mut source_bytes = 0;
         for _ in 0..STAGE_TRIALS {
             let root = tempfile::tempdir().unwrap();
@@ -493,7 +516,7 @@ fn index_branch(f: &Fixture, store: &mut ServerStore, objects: usize) -> [u8; 32
 /// insertions up to a full branch, and an Index branch at its object ceiling.
 fn heavy_stages() {
     for frames in [32, 128, catcoms_replication::studio::MAX_STUDIO_OVERLAY_OPS] {
-        let mut samples: [Vec<u64>; 6] = Default::default();
+        let mut samples: [Vec<u64>; 9] = Default::default();
         let mut source_bytes = 0;
         for _ in 0..STAGE_TRIALS {
             let root = tempfile::tempdir().unwrap();
@@ -506,7 +529,7 @@ fn heavy_stages() {
         report_stages("flipnote_frames", frames, source_bytes, samples);
     }
     for objects in [16, catcoms_replication::studio::MAX_INDEX_OBJECTS - 1] {
-        let mut samples: [Vec<u64>; 6] = Default::default();
+        let mut samples: [Vec<u64>; 9] = Default::default();
         let mut source_bytes = 0;
         for _ in 0..STAGE_TRIALS {
             let root = tempfile::tempdir().unwrap();
@@ -532,7 +555,7 @@ fn profile_studio_overlay_handoff_stages() {
 /// small size, so a fixture that stops being valid fails here rather than in an opt-in run.
 #[test]
 fn studio_overlay_handoff_stage_profile_fixtures_hand_off() {
-    let mut samples: [Vec<u64>; 6] = Default::default();
+    let mut samples: [Vec<u64>; 9] = Default::default();
     let root = tempfile::tempdir().unwrap();
     let f = Fixture::new(true);
     let mut store = open(root.path());
