@@ -291,81 +291,219 @@ fn profile(art: bool) {
 /// in the scheduled runtime each visit mints a fresh one, and that inventory is C-3's cost, not
 /// the commit's. Each count is repeated `TRIALS` times on a fresh vault, and the spread is
 /// reported, because a single millisecond sample says little.
-fn stages(art: bool) {
-    const TRIALS: usize = 5;
+const STAGE_TRIALS: usize = 5;
+
+/// One handoff, H1 to H5, each stage's milliseconds pushed into its slot of `samples`: H1, H2,
+/// H3, H4, H5's budget inventory, H5. Requires the commit to accept `expected` operations.
+fn time_stages(
+    f: &Fixture,
+    store: &mut ServerStore,
+    basis: [u8; 32],
+    expected: usize,
+    samples: &mut [Vec<u64>; 6],
+) {
     let clock = SystemClock;
+    let mut timed = |slot: usize, start: u64| {
+        samples[slot].push(clock.monotonic_ms().saturating_sub(start));
+    };
+    let mut b = budget(store, f);
+    let start = clock.monotonic_ms();
+    let started = store
+        .start_studio_handoff_with_io(
+            SERVER,
+            &f.group,
+            f.target,
+            &f.device,
+            basis,
+            Some(0),
+            &mut rng(),
+            &mut b,
+            &mut WriteHooks::None,
+        )
+        .unwrap();
+    timed(0, start);
+    let crate::store::StudioHandoffStart::Captured(capture) = started else {
+        panic!("the fixture branch settled instead of capturing");
+    };
+    let start = clock.monotonic_ms();
+    let mut plan = capture.prepare().unwrap();
+    timed(1, start);
+    let start = clock.monotonic_ms();
+    assert!(plan
+        .sign_slice(&f.device, &f.group, 0, false, usize::MAX, None)
+        .unwrap()
+        .complete());
+    timed(2, start);
+    let start = clock.monotonic_ms();
+    let commit = plan.assemble().unwrap();
+    timed(3, start);
+    let start = clock.monotonic_ms();
+    let mut b = budget(store, f);
+    timed(4, start);
+    let start = clock.monotonic_ms();
+    let outcome = store
+        .commit_studio_handoff_with_io(
+            SERVER,
+            &f.group,
+            f.target,
+            &f.device,
+            commit,
+            Some(0),
+            &mut rng(),
+            &mut b,
+            &mut WriteHooks::None,
+        )
+        .unwrap();
+    timed(5, start);
+    assert_eq!(outcome.accepted, expected);
+}
+
+/// Print one shape's spreads.
+fn report_stages(shape: &str, count: usize, source_bytes: u64, samples: [Vec<u64>; 6]) {
     let build = if cfg!(debug_assertions) {
         "debug"
     } else {
         "release"
     };
+    let [h1, h2, h3, h4, inventory, h5] = samples.map(|s| Spread::of(&s, 1));
+    println!(
+        "HANDOFF_STAGES build={build} shape={shape} count={count} source_bytes={source_bytes} trials={STAGE_TRIALS} units=min/upper_median/max_us(zero_samples raw_upper_median_ms) h1={h1} h2_detached={h2} h3_signing={h3} h4_detached={h4} h5_inventory={inventory} h5_commit={h5}"
+    );
+}
+
+/// Title-only branches of `count` operations, on the fixture's small source.
+fn stages(art: bool) {
     for count in [1, 32, 256] {
         let mut samples: [Vec<u64>; 6] = Default::default();
         let mut source_bytes = 0;
-        for _ in 0..TRIALS {
+        for _ in 0..STAGE_TRIALS {
             let root = tempfile::tempdir().unwrap();
             let f = Fixture::new(art);
             let mut store = open(root.path());
             let (basis, _) = fixture(&f, &mut store, count);
-            let mut b = budget(&mut store, &f);
-            let mut timed = |slot: usize, start: u64| {
-                samples[slot].push(clock.monotonic_ms().saturating_sub(start));
-            };
-            let start = clock.monotonic_ms();
-            let started = store
-                .start_studio_handoff_with_io(
-                    SERVER,
-                    &f.group,
-                    f.target,
-                    &f.device,
-                    basis,
-                    Some(0),
-                    &mut rng(),
-                    &mut b,
-                    &mut WriteHooks::None,
-                )
-                .unwrap();
-            timed(0, start);
-            let crate::store::StudioHandoffStart::Captured(capture) = started else {
-                panic!("the fixture branch settled instead of capturing");
-            };
-            let start = clock.monotonic_ms();
-            let mut plan = capture.prepare().unwrap();
-            timed(1, start);
-            let start = clock.monotonic_ms();
-            assert!(plan
-                .sign_slice(&f.device, &f.group, 0, false, usize::MAX, None)
-                .unwrap()
-                .complete());
-            timed(2, start);
-            let start = clock.monotonic_ms();
-            let commit = plan.assemble().unwrap();
-            timed(3, start);
-            let start = clock.monotonic_ms();
-            let mut b = budget(&mut store, &f);
-            timed(4, start);
-            let start = clock.monotonic_ms();
-            let outcome = store
-                .commit_studio_handoff_with_io(
-                    SERVER,
-                    &f.group,
-                    f.target,
-                    &f.device,
-                    commit,
-                    Some(0),
-                    &mut rng(),
-                    &mut b,
-                    &mut WriteHooks::None,
-                )
-                .unwrap();
-            timed(5, start);
-            assert_eq!(outcome.accepted, count);
+            time_stages(&f, &mut store, basis, count, &mut samples);
             source_bytes = fs::metadata(f.path(&store)).unwrap().len();
         }
-        let [h1, h2, h3, h4, inventory, h5] = samples.map(|s| Spread::of(&s, 1));
-        println!(
-            "HANDOFF_STAGES build={build} art={art} count={count} source_bytes={source_bytes} trials={TRIALS} units=min/upper_median/max_us(zero_samples raw_upper_median_ms) h1={h1} h2_detached={h2} h3_signing={h3} h4_detached={h4} h5_inventory={inventory} h5_commit={h5}"
+        let shape = if art {
+            "flipnote_titles"
+        } else {
+            "index_titles"
+        };
+        report_stages(shape, count, source_bytes, samples);
+    }
+}
+
+/// A Flipnote branch of `frames` frame insertions, each naming a distinct stored blob, chained one
+/// after another. What H5 still walks after 9.1 (the candidate's projection and blob references)
+/// grows with frames, not with titles, so this is the shape the commit phase must be priced at.
+fn frame_branch(f: &Fixture, store: &mut ServerStore, frames: usize) -> [u8; 32] {
+    let (close, basis) = closing(f, store);
+    let mut after = [1u8; 16];
+    for n in 0..frames {
+        let (cid, bytes) = published_pix(store, f, n as u8);
+        let frame = [n as u8 + 10; 16];
+        let mut op = f.domain(
+            FlipnoteOp::InsertFrame {
+                frame,
+                after: Some(after),
+                cid,
+                bytes,
+            }
+            .encode()
+            .unwrap(),
+            0,
         );
+        op.nonce = (n as u128 + 5_000).to_be_bytes();
+        save(f, store, &close, basis.fingerprint(), op, 123);
+        after = frame;
+    }
+    let next = install(f, store, &close);
+    store.retain_studio_source(&f.group, &f.device, next);
+    basis.fingerprint()
+}
+
+/// An Index branch whose PutObjects name `objects` distinct existing Flipnotes, each given one
+/// title edit so it holds work. H5 reads each referenced object's record once (9.1.1, A1).
+fn index_branch(f: &Fixture, store: &mut ServerStore, objects: usize) -> [u8; 32] {
+    let (close, basis) = closing(f, store);
+    for n in 0..objects {
+        let object = [n as u8 + 20; 16];
+        let mut op = f.domain(
+            IndexOp::PutObject {
+                object,
+                kind: StudioKind::Flipnote,
+                title: format!("object {n}"),
+                created_by: f.device.device_id(),
+                ts: 123,
+                expiry: StudioExpiry::Never,
+            }
+            .encode()
+            .unwrap(),
+            0,
+        );
+        op.nonce = (n as u128 + 6_000).to_be_bytes();
+        save(f, store, &close, basis.fingerprint(), op, 123);
+    }
+    install(f, store, &close);
+    for n in 0..objects {
+        let referenced = StudioTarget::Flipnote {
+            channel: f.target.channel(),
+            object: [n as u8 + 20; 16],
+        };
+        let logical = referenced.document(&f.group.group_id()).unwrap();
+        let body = DomainOp {
+            doc_type: logical.doc_type,
+            logical_key: logical.logical_key.clone(),
+            nonce: (n as u128 + 7_000).to_be_bytes(),
+            body: FlipnoteOp::SetHeader(FlipnoteHeader::Title(format!("object {n}")))
+                .encode()
+                .unwrap(),
+        };
+        let mut b = budget(store, f);
+        store
+            .edit_studio_epoch(
+                SERVER,
+                &f.group,
+                referenced,
+                epoch_zero_id(logical.doc_type, &logical.logical_key),
+                &f.device,
+                body,
+                123,
+                &mut rng(),
+                &mut b,
+            )
+            .unwrap();
+    }
+    basis.fingerprint()
+}
+
+/// The shapes C-3 runtime design 15.7's step 2 asks for beyond title-only branches.
+fn heavy_stages() {
+    for frames in [32, 128] {
+        let mut samples: [Vec<u64>; 6] = Default::default();
+        let mut source_bytes = 0;
+        for _ in 0..STAGE_TRIALS {
+            let root = tempfile::tempdir().unwrap();
+            let f = Fixture::new(true);
+            let mut store = open(root.path());
+            let basis = frame_branch(&f, &mut store, frames);
+            time_stages(&f, &mut store, basis, frames, &mut samples);
+            source_bytes = fs::metadata(f.path(&store)).unwrap().len();
+        }
+        report_stages("flipnote_frames", frames, source_bytes, samples);
+    }
+    for objects in [16, 64] {
+        let mut samples: [Vec<u64>; 6] = Default::default();
+        let mut source_bytes = 0;
+        for _ in 0..STAGE_TRIALS {
+            let root = tempfile::tempdir().unwrap();
+            let f = Fixture::new(false);
+            let mut store = open(root.path());
+            let basis = index_branch(&f, &mut store, objects);
+            time_stages(&f, &mut store, basis, objects, &mut samples);
+            source_bytes = fs::metadata(f.path(&store)).unwrap().len();
+        }
+        report_stages("index_put_objects", objects, source_bytes, samples);
     }
 }
 
@@ -374,6 +512,25 @@ fn stages(art: bool) {
 fn profile_studio_overlay_handoff_stages() {
     stages(false);
     stages(true);
+    heavy_stages();
+}
+
+/// Not ignored: the heavy shapes the stage profile measures must build and hand off cleanly at a
+/// small size, so a fixture that stops being valid fails here rather than in an opt-in run.
+#[test]
+fn studio_overlay_handoff_stage_profile_fixtures_hand_off() {
+    let mut samples: [Vec<u64>; 6] = Default::default();
+    let root = tempfile::tempdir().unwrap();
+    let f = Fixture::new(true);
+    let mut store = open(root.path());
+    let basis = frame_branch(&f, &mut store, 2);
+    time_stages(&f, &mut store, basis, 2, &mut samples);
+    let root = tempfile::tempdir().unwrap();
+    let f = Fixture::new(false);
+    let mut store = open(root.path());
+    let basis = index_branch(&f, &mut store, 2);
+    time_stages(&f, &mut store, basis, 2, &mut samples);
+    assert!(samples.iter().all(|s| s.len() == 2));
 }
 
 #[test]
