@@ -396,12 +396,20 @@ fn stages(art: bool) {
 /// A Flipnote branch of `frames` frame insertions, each naming a distinct stored blob, chained one
 /// after another. What H5 still walks after 9.1 (the candidate's projection and blob references)
 /// grows with frames, not with titles, so this is the shape the commit phase must be priced at.
+///
+/// Frame ids come from a wide counter, never from `n as u8`: the base frame is `[1; 16]`
+/// (`Fixture::insert`), and a byte counter wraps onto it within a full-length branch. The blob
+/// tint is a byte, so at most 256 frames get distinct blobs.
 fn frame_branch(f: &Fixture, store: &mut ServerStore, frames: usize) -> [u8; 32] {
+    assert!(
+        frames <= 256,
+        "blob tints are a byte; frames would share a blob"
+    );
     let (close, basis) = closing(f, store);
     let mut after = [1u8; 16];
     for n in 0..frames {
         let (cid, bytes) = published_pix(store, f, n as u8);
-        let frame = [n as u8 + 10; 16];
+        let frame = (n as u128 + 10_000).to_be_bytes();
         let mut op = f.domain(
             FlipnoteOp::InsertFrame {
                 frame,
@@ -424,7 +432,11 @@ fn frame_branch(f: &Fixture, store: &mut ServerStore, frames: usize) -> [u8; 32]
 
 /// An Index branch whose PutObjects name `objects` distinct existing Flipnotes, each given one
 /// title edit so it holds work. H5 reads each referenced object's record once (9.1.1, A1).
+///
+/// The base Index already lists one object (`Fixture::insert` puts `[1; 16]`), and admission caps
+/// an Index at `MAX_INDEX_OBJECTS` across base and branch, so a branch holds at most one fewer.
 fn index_branch(f: &Fixture, store: &mut ServerStore, objects: usize) -> [u8; 32] {
+    assert!(objects < catcoms_replication::studio::MAX_INDEX_OBJECTS);
     let (close, basis) = closing(f, store);
     for n in 0..objects {
         let object = [n as u8 + 20; 16];
@@ -477,9 +489,10 @@ fn index_branch(f: &Fixture, store: &mut ServerStore, objects: usize) -> [u8; 32
     basis.fingerprint()
 }
 
-/// The shapes C-3 runtime design 15.7's step 2 asks for beyond title-only branches.
+/// The shapes C-3 runtime design 15.7's step 2 asks for beyond title-only branches: frame
+/// insertions up to a full branch, and an Index branch at its object ceiling.
 fn heavy_stages() {
-    for frames in [32, 128] {
+    for frames in [32, 128, catcoms_replication::studio::MAX_STUDIO_OVERLAY_OPS] {
         let mut samples: [Vec<u64>; 6] = Default::default();
         let mut source_bytes = 0;
         for _ in 0..STAGE_TRIALS {
@@ -492,7 +505,7 @@ fn heavy_stages() {
         }
         report_stages("flipnote_frames", frames, source_bytes, samples);
     }
-    for objects in [16, 64] {
+    for objects in [16, catcoms_replication::studio::MAX_INDEX_OBJECTS - 1] {
         let mut samples: [Vec<u64>; 6] = Default::default();
         let mut source_bytes = 0;
         for _ in 0..STAGE_TRIALS {
