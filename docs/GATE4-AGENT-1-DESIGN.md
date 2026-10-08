@@ -770,6 +770,165 @@ checkpoint.
   candidate. The decision table, barriers, accounting generations, write fences and publication hold
   are identical in both.
 
+#### 9.1.1 Implementation plan, and four amendments (proposal, revision 2, 2026-10-08)
+
+**Not built.** This maps 9.1 onto the code as it stands at `83328240`, and records where the code
+makes the text above ambiguous or incomplete. C-3 runtime design 15.7 makes 9.1 the first
+prerequisite of C-3 step 3, because the H5 visit restores the source graph twice today.
+
+**Today's H5 restores** (`commit_studio_handoff_with_io`, `store/epoch_studio/handoff.rs`):
+- `checked_studio_source` before the write, whose unit is then thrown away;
+- a second full read of the source, only to hash it;
+- `check_index_object_sources`, which restores once per Index PutObject;
+- `checked_studio_source` again inside `resolve_studio_handoff_with_io`, after the write.
+
+**What the code already gives.** The H1 stamp (`handoff_capture.rs`) binds mount, server,
+document, target, actor and key, owner, MLS epoch, tenure, and the source's (plaintext blake3,
+physical size). H2's detached restore (`prepare_vault_source`) calls the same `restore_scoped`
+with the same inputs that `checked_studio_source` uses. So everything the pre-write half of H5
+needs is a deterministic function of facts H2 already has, behind a stamp H5 already checks.
+
+**Steps:**
+
+1. **H2 facts.** `HandoffFacts { source: (blake3::Hash, u64), storage_protocol_bytes,
+   before_snapshot }` is computed in `StudioHandoffCapture::prepare` from the restored source
+   before `prepare_handoff_detached` consumes it. It is carried through `StudioHandoffPlan` and
+   `StudioHandoffCommit`; the runtime is unchanged. A store method `stamped_studio_source`
+   requires `facts.source == stamp.source`, builds `observed` from the stamped size and the
+   protocol bytes, and runs the fresh budget's `verify_record`.
+2. **The pre-write half of H5** replaces the first restore and the extra read with
+   `stamped_studio_source`. A stamp mismatch still refuses, with no fallback.
+3. **`VerifiedPersistedSource`** lives in a new child module `epoch_studio/source/persisted.rs`.
+   Its private fields mean only that module's one comparison can construct it. That comparison
+   re-reads the written record and requires the `SourceVersion` that `save_studio_source_checked`
+   returned to match: mount, server, target, physical size, plaintext digest, and the intent link.
+   It carries the candidate unit and its snapshot. `into_checked` rechecks the bindings and the
+   budget record before resolve uses it.
+4. **The post-write half of H5** keeps the writer's return value and verifies it.
+   - If verification fails, the Prepared record is kept and the storage budget is invalidated.
+     The commit is refused rather than resolved in the same call; the next H1, or a fence,
+     resolves from the actual bytes with `None`.
+   - If it succeeds, resolve runs with `Some`.
+5. **Resolve** takes `Option<VerifiedPersistedSource>`, and its one restore becomes a match on
+   it. The decision table, the flush-only save, the barriers and the generations are unchanged.
+   Every other caller passes `None`: H1's Prepared resolution, adoption, rotation, repair and the
+   tests.
+6. **The Index check at H5** becomes header-only. See amendment A1.
+7. **Tests**, named `studio_overlay_handoff_*` so the CI filter runs them:
+   - **zero restores** over H5, for a Flipnote and for an Index with duplicate PutObjects;
+   - **a facts oracle:** the facts equal what `checked_studio_source` produces, and the
+     candidate's evidence and blob CIDs equal the restored persisted bytes';
+   - **a same-size digest mismatch after the write:** refused, Prepared retained, no Completed,
+     zero restores; then resolve with `None` classifies from the actual bytes;
+   - **a same-size stamp mismatch between H4 and H5:** refused, zero restores, records unchanged;
+   - **Index objects** that went pristine, moved channel, or were edited between H1 and H5;
+   - **the restart path** still restores exactly once.
+
+   Three mutations go into `check-studio-handoff-mutations.py`: the persisted digest comparison
+   removed, the `Some` arm forced to restore, and the H5 object check dropped.
+
+**Amendments to 9.1's text:**
+
+- **A1, the Index object check (new).** 9.1 is silent on it, but it restores once per PutObject.
+  At H5 it becomes the header-only check `studio_object_holds_work` already performs, plus the
+  intent link, over the deduplicated set of referenced objects. That check covers existence,
+  channel, link and holding work. The residual is a record whose header and body disagree, which
+  only a writer bug produces; copy already accepts it. The alternative is stamping the referenced
+  object records at H1, which is stronger but kills the job on any write to a referenced Flipnote
+  between H1 and H5, the livelock C-3 15.7 HIGH-1 describes. H1 keeps its full check for now.
+- **A2, what the facts name.** "source_snapshot_digest" and "source_physical_bytes" mean the
+  stamp's (plaintext digest, physical size), not a hash of the snapshot alone. H2 cannot know the
+  physical size by itself.
+- **A3, what the struct binds.** It carries the candidate unit, so a verified version cannot be
+  paired with a different unit, and the inventory generation it was verified under. 5.4 lists
+  neither.
+- **A4, "resolve through Flow R" on mismatch.** Flow R is unbuilt, so today this means the next
+  H1's restore, or a fence, both of which take the `None` path.
+
+**What it leaves expensive** (to be measured with the commit phase, C-3 15.7 step 2):
+- two seed `graph()` loads;
+- several candidate `blob_cids` projections;
+- up to 256 header unseals for an Index;
+- two snapshots held per job.
+
+H1 still restores for each PutObject and for an interrupted Prepared record.
+
+**Hazards for the implementation.** The re-read must use the family's `MAX_SEALED_BYTES` bound,
+not the 8 MiB retained-source bound, or every successor over 8 MiB would be refused. Four CI
+mutation anchors in `handoff.rs` must stay unique, and new code must not add another `if linked {`
+there.
+
+**Design review of revision 1 (2026-10-08, Opus, static): no blocker; one high, which is a
+defect already in the code.** The review confirmed that using H2's facts is sound. The stamp
+binds every input of the restore: the plaintext, and through it the snapshot, channel and link;
+the server; the target; and the owner, the only non-byte input that changes normalized output.
+No check `checked_studio_source` makes is lost, because barrier 2 rechecks the link and the
+channel and `verify_record` stays. Revision 2 changes the plan as follows.
+
+- **H-1, the header readers refused repaired records (fixed separately, first).**
+  `VaultShape::read` and `preserves_vault_source` accepted only snapshot prefixes 1 and 2.
+  `restore` also accepts 3, the repair-bound form a once-repaired Flipnote keeps on every
+  successor. So A1's check would have refused such an object and looped. Barrier 2 already did:
+  a handoff into a repaired destination wrote Prepared, then failed and looped. P2 and copy
+  reported repaired objects as missing. Both readers now use `RepairBinding::decode_prefix`.
+- **Step 1.** `facts.source`'s digest is computed by the worker from the bytes it decoded, never
+  copied from the stamp; copying would make the check prove nothing. **`before_snapshot` is
+  dropped.** It only steers the writer's flush branch, and at H5 the candidate always differs. So
+  H5 always replaces, and a writer that returns no `SourceVersion` is a refusal.
+- **Steps 3 and 4.**
+  - The re-read is also checked against the candidate: its snapshot hash must equal the
+    capability's `source`, which barrier 2 already proved equal to the hash of
+    `candidate.snapshot()`. Channel and link byte are checked too. A3 is then enforced by a
+    check, not by convention.
+  - A failed re-read (I/O, authentication, missing file) counts as a verification failure. The
+    budget is invalidated before any error returns.
+- **Step 5.** The `Some` arm accepts only Complete evidence. Anything else refuses without writing.
+  Absent must never be classified, and written as Active, from the candidate.
+- **Step 4b, added: liveness after a refusal (M-2).** After any H5 error the runtime backs off,
+  30 s doubling to 300 s, and the probe requires a live tenure before it runs H1. So a Prepared
+  record left by a refusal holds that target's page and tail service for at least the backoff.
+  With tenure Unknown or Imported, the hold lasts until a fence runs. The probe will therefore run
+  a resolution-only H1 for a Prepared branch without a tenure. Resolution needs only current
+  membership (`resolve_studio_handoff_with_io` checks `current_member`), not tenure. Tests cover
+  a refusal followed by the next probe's resolution, and the same with tenure Unknown.
+- **Step 6 (A1).** The cost is a full authenticated read per referenced object, up to
+  `MAX_SEALED_BYTES` (about 9 MiB) each, plus a structural read of each object's intent record
+  for the link. That is 256 times 9 MiB in the worst case, and the commit-phase measurement must
+  use large referenced Flipnotes. The residual is wider than writer bugs: it also covers records
+  written by an older build that a newer restore would refuse. H1's full check catches those, so
+  H1 keeps it. The link check sits at the H5 call site, not inside `studio_object_holds_work`,
+  whose other callers (copy, P2) must not change.
+- **Step 7, tests.**
+  - **The zero-restore claim is narrowed (M-4).** `FULL_RESTORES` counts `restore_unit` only, and
+    a test-only counter in the replication crate is not compiled into app tests. The test claims
+    no `restore_unit` and no `load_studio_epoch` during H5, using a ready budget so
+    `enter_studio_budget` does not reconcile.
+  - **M17's substitute must pass the fence (M-1).** It is built from the candidate's plaintext
+    with a same-length change in bytes `preserves_vault_source` does not compare (the receipt
+    book), resealed. The test asserts that precondition. Otherwise the later fence would refuse
+    by itself, and a mutant that skipped the digest check would survive.
+  - **Added regressions:**
+    - a repaired destination and a repaired referenced object;
+    - a re-read that fails authentication;
+    - an Index object removed, or linked to missing or other-target intent metadata;
+    - the facts oracle extended to `complete()`'s output, the protocol bytes and the snapshot
+      round trip;
+    - a successor between 8 MiB and `MAX_SEALED_BYTES`.
+  - **Placement.** Tests live under `tests/rotation/overlay/handoff/`, inside the harness's
+    prefix, not in `persisted.rs`.
+- **Text to amend when built:**
+  - 9.3 step 8: the capability's `before` now comes from the stamp's digest. That is equivalent,
+    since barrier 2 still compares the actual bytes.
+  - 9.3: where the Index object check sits.
+  - Section 10: the step-9 mismatch row.
+  - 14.2: M-numbers for the new mutations; the digest one is M17.
+  - 14.3: names a harness that does not exist; the plan uses `check-studio-handoff-mutations.py`.
+  - 5.3 and 5.5: superseded by `StudioHandoffPlan` and `StudioHandoffCommit`.
+  - The comments at `eligibility.rs` 212-216 and `handoff.rs` 49-55.
+- **CI anchors.** The H1 and H5 calls to `check_index_object_sources` are textually identical, so
+  the H5 check gets its own function name. The lifecycle harness's `copy-wrong-channel` anchor in
+  `eligibility.rs` must stay byte-identical.
+
 ### 9.2 C-3: a vault inventory generation and a resumable cursor
 
 R10 shows that neither existing token can serve. C-3 therefore introduces one.
