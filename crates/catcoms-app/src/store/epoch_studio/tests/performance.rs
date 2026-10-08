@@ -982,7 +982,7 @@ fn flow_s_repeatable(depth: usize, repeats: usize, clock: &dyn Clock) -> (Spread
             .unwrap();
         retry.push(clock.monotonic_ms().saturating_sub(t));
         assert!(
-            matches!(settled, StudioOverlaySave::Local(_)),
+            matches!(settled, StudioOverlaySave::Acknowledged { .. }),
             "the resubmitted operation was not classified as an accepted retry"
         );
         assert_eq!(

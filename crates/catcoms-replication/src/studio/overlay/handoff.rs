@@ -10,7 +10,19 @@ use super::disposal::{get_provenance, put_provenance};
 
 #[derive(Debug)]
 pub enum StudioOverlaySave {
+    /// New work accepted into the live branch, with the draft it produced.
     Local(StudioLocalDraft),
+    /// An exact retry of an operation the live branch had already accepted: design 6.2's S1a,
+    /// terminal and flush-only. Nothing is accepted, and the branch is **not reconstructed**, so no
+    /// projection comes back; a caller that wants the draft reads it through the overlay read path.
+    ///
+    /// Both fields are structural facts of the stored branch, the same values a reconstruction's
+    /// [`StudioLocalDraft::basis`] and [`StudioLocalDraft::accepted`] would report. Replaying the
+    /// branch to learn them cost the retry its whole depth under custody (design 18.3 review, F1).
+    Acknowledged {
+        basis: [u8; 32],
+        accepted: usize,
+    },
     HandedOff(StudioHandoffOutcome),
     /// A delayed retry of an operation in the most recently **disposed** branch: the terminal
     /// acknowledgement design N17 requires. Nothing was accepted and no branch was opened; the

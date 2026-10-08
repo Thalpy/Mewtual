@@ -121,6 +121,15 @@ fn local(saved: StudioOverlaySave) -> StudioLocalDraft {
     }
 }
 
+/// An exact retry's answer: the stored branch's basis and accepted count. S1a rebuilds no draft
+/// (design 6.2; design 18.3 review, F1), so there is no projection to compare.
+fn acknowledged(saved: StudioOverlaySave) -> ([u8; 32], usize) {
+    match saved {
+        StudioOverlaySave::Acknowledged { basis, accepted } => (basis, accepted),
+        other => panic!("expected an exact-retry acknowledgement, got {other:?}"),
+    }
+}
+
 /// A new-authoring operation the empty seed accepts: a fresh Index entry, or a Flipnote title.
 fn draft_op(p: &Pair, target: StudioTarget, nonce: u8, text: &str) -> DomainOp {
     let body = match target {
@@ -271,7 +280,7 @@ const INSTALLED: &str = "epoch studio: this document has an installed source; an
 ///   the fresh basis still joins the live branch: a preview refreshed after the first Save must
 ///   not strand it.
 /// - After a restart the prepared preview belongs to a replaced mount and cannot mint, yet the
-///   exact retry is answered from the reconstructed branch. A failed mint is a value consumed only
+///   exact retry is answered from the stored branch. A failed mint is a value consumed only
 ///   by new authoring, never a precondition of classification (V8's Unconfirmed analogue); and new
 ///   authoring is refused with exactly that mint's error, leaving the branch as it was.
 #[tokio::test]
@@ -341,7 +350,7 @@ async fn unconfirmed_save_first_append_joins_survives_refresh_and_retries_withou
         drop(p.b_store);
         p.b_store = open(p.b_root.path());
         let lost = mint(&p, &prepared).unwrap_err().to_string();
-        let retried = local(
+        let retried = acknowledged(
             save_with(
                 &mut p,
                 target,
@@ -351,11 +360,10 @@ async fn unconfirmed_save_first_append_joins_survives_refresh_and_retries_withou
             )
             .unwrap(),
         );
-        assert_eq!(retried.basis(), first_ticket.0);
         assert_eq!(
-            retried.accepted(),
-            2,
-            "the exact retry is answered from the reconstructed branch"
+            retried,
+            (first_ticket.0, 2),
+            "the exact retry is answered from the stored branch"
         );
 
         let before = recorded(&mut p, target);
@@ -371,9 +379,10 @@ async fn unconfirmed_save_first_append_joins_survives_refresh_and_retries_withou
             before,
             "the refusal changed nothing"
         );
-        let unchanged =
-            local(save_with(&mut p, target, no_preview("gone"), first_ticket, first).unwrap());
-        assert_eq!(unchanged.accepted(), 2);
+        let unchanged = acknowledged(
+            save_with(&mut p, target, no_preview("gone"), first_ticket, first).unwrap(),
+        );
+        assert_eq!(unchanged, (first_ticket.0, 2));
         assert!(!installed(&mut p, target));
     }
 }
@@ -605,9 +614,8 @@ async fn unconfirmed_save_exact_retry_is_answered_beside_a_newly_received_source
 
     receive_source(&mut p, target).await;
     let before = recorded(&mut p, target);
-    let retried = local(save(&mut p, target, &prepared, ticket, first).unwrap());
-    assert_eq!(retried.basis(), ticket.0);
-    assert_eq!(retried.accepted(), 1, "acknowledged, not appended again");
+    let retried = acknowledged(save(&mut p, target, &prepared, ticket, first).unwrap());
+    assert_eq!(retried, (ticket.0, 1), "acknowledged, not appended again");
     assert_eq!(recorded(&mut p, target), before, "the retry opened nothing");
 
     let new_work = draft_op(&p, target, 0x73, "new beside the source");

@@ -21,6 +21,28 @@ fn local(saved: catcoms_replication::studio::StudioOverlaySave) -> StudioLocalDr
     }
 }
 
+/// What an exact retry of accepted work is answered with (design 6.2, S1a): the stored branch's
+/// basis and accepted count. No draft comes back, because S1a rebuilds none (design 18.3 review,
+/// F1); a test that needs the projection reads it with [`stored_draft`].
+fn acknowledged(saved: catcoms_replication::studio::StudioOverlaySave) -> ([u8; 32], usize) {
+    match saved {
+        catcoms_replication::studio::StudioOverlaySave::Acknowledged { basis, accepted } => {
+            (basis, accepted)
+        }
+        other => panic!("expected an exact-retry acknowledgement, got {other:?}"),
+    }
+}
+
+/// The live branch's draft as stored, rebuilt by the explicit read path.
+fn stored_draft(f: &Fixture, store: &ServerStore) -> StudioLocalDraft {
+    store
+        .load_epoch_intents(SERVER, &f.logical)
+        .unwrap()
+        .local_draft()
+        .unwrap()
+        .expect("no live branch")
+}
+
 #[test]
 fn studio_overlay_store_changed_closing_source_refuses_first_acceptance() {
     source_version::check(false);
@@ -83,26 +105,47 @@ fn save(
     op: DomainOp,
     ts: u64,
 ) -> StudioLocalDraft {
+    local(submit(f, store, close, basis, op, ts))
+}
+
+/// [`save`]'s twin for resending an operation the live branch already accepted.
+fn retry(
+    f: &Fixture,
+    store: &mut ServerStore,
+    close: &CloseRecord,
+    basis: [u8; 32],
+    op: DomainOp,
+    ts: u64,
+) -> ([u8; 32], usize) {
+    acknowledged(submit(f, store, close, basis, op, ts))
+}
+
+fn submit(
+    f: &Fixture,
+    store: &mut ServerStore,
+    close: &CloseRecord,
+    basis: [u8; 32],
+    op: DomainOp,
+    ts: u64,
+) -> catcoms_replication::studio::StudioOverlaySave {
     let branch = request_branch(f, store, close);
     let mut b = budget(store, f);
-    local(
-        store
-            .save_studio_closing_overlay(
-                SERVER,
-                &f.group,
-                f.target,
-                &f.device,
-                close,
-                StudioOwnerTenure::Known(0),
-                basis,
-                branch,
-                op,
-                ts,
-                &mut rng(),
-                &mut b,
-            )
-            .unwrap(),
-    )
+    store
+        .save_studio_closing_overlay(
+            SERVER,
+            &f.group,
+            f.target,
+            &f.device,
+            close,
+            StudioOwnerTenure::Known(0),
+            basis,
+            branch,
+            op,
+            ts,
+            &mut rng(),
+            &mut b,
+        )
+        .unwrap()
 }
 
 /// Agent 1 -> Agent 2 inventory seam. The lifecycle rails must count only authenticated
@@ -280,14 +323,74 @@ fn studio_overlay_store_restart_exact_retry_and_source_separation() {
             &expected
         );
         assert_eq!(fs::read(f.path(&store)).unwrap(), bytes);
-        let retry = save(&f, &mut store, &close, basis.fingerprint(), f.title(), 999);
+        let acknowledged = retry(&f, &mut store, &close, basis.fingerprint(), f.title(), 999);
+        assert_eq!(acknowledged, (basis.fingerprint(), 1));
         assert_eq!(
-            retry.projection(),
+            stored_draft(&f, &store).projection(),
             &expected,
             "retry changed the original authored timestamp"
         );
-        assert_eq!(retry.accepted(), 1);
         assert_eq!(canonical(&store), before);
+    }
+}
+
+/// Design 6.2's S1a, as the design 18.3 review (F1) found it was not built: an exact retry of
+/// accepted work is acknowledged flush-only. It rebuilds no draft, reports the stored branch's own
+/// basis and count, and leaves the intent record's bytes as they were.
+///
+/// Before the fix the retry replayed the whole branch under custody to return a projection that no
+/// caller used. That replay is the cost 13.5 measured, 426 ms at depth 255, without attributing it.
+/// The control reads the draft explicitly afterwards, which must still work and must move the
+/// counter, so a counter that never moves cannot make this pass. CI's overlay mutation harness
+/// (`retry-rebuild`) puts the rebuild back and requires this to fail at the counter.
+#[test]
+fn studio_overlay_store_exact_retry_rebuilds_no_draft() {
+    use crate::store::epoch_intents::overlay_draft_rebuilds_for_test as rebuilds;
+    let op = |f: &Fixture, nonce: u8| {
+        let mut op = f.title();
+        op.nonce = [nonce; 16];
+        op
+    };
+    for art in [false, true] {
+        let root = tempfile::tempdir().unwrap();
+        let f = Fixture::new(art);
+        let mut store = open(root.path());
+        let (close, basis) = closing(&f, &mut store);
+        let basis = basis.fingerprint();
+        for nonce in [11, 12, 13] {
+            save(&f, &mut store, &close, basis, op(&f, nonce), 300);
+        }
+        let scope = crate::store::epoch_intents::scope_bytes(SERVER, &f.logical).unwrap();
+        let record = fs::read(store.epoch_intent_path(&scope)).unwrap();
+        let before = rebuilds();
+
+        // The middle operation, resent exactly: an accepted retry, not new work.
+        let retried = submit(&f, &mut store, &close, basis, op(&f, 12), 301);
+        match retried {
+            catcoms_replication::studio::StudioOverlaySave::Acknowledged {
+                basis: acknowledged,
+                accepted,
+            } => {
+                assert_eq!(acknowledged, basis, "art {art}");
+                assert_eq!(accepted, 3, "the acknowledgement miscounted (art {art})");
+            }
+            other => panic!("an exact retry was not acknowledged (art {art}): {other:?}"),
+        }
+        assert_eq!(
+            rebuilds(),
+            before,
+            "an exact retry rebuilt the draft (art {art})"
+        );
+        assert_eq!(
+            fs::read(store.epoch_intent_path(&scope)).unwrap(),
+            record,
+            "an exact retry changed the intent record's bytes (art {art})"
+        );
+
+        // The control: the draft is still readable on request, and reading it is counted.
+        let draft = stored_draft(&f, &store);
+        assert_eq!((draft.basis(), draft.accepted()), (basis, 3));
+        assert_eq!(rebuilds(), before + 1, "the counter did not see a rebuild");
     }
 }
 
@@ -503,7 +606,8 @@ fn studio_overlay_store_uncertain_writes_and_changed_source_retry_at_physical_ca
                 &mut WriteHooks::MustNotWrite("exact retry allocated replacement"),
             )
             .unwrap();
-        assert_eq!(local(retry).projection(), expected.projection());
+        assert_eq!(acknowledged(retry), (basis.fingerprint(), 1));
+        assert_eq!(stored_draft(&f, &store).projection(), expected.projection());
         let mut changed = f.title();
         changed.nonce = [99; 16];
         let error = store
@@ -1340,14 +1444,14 @@ fn studio_overlay_exact_retry_is_acknowledged_without_media_admission() {
         &mut b,
     );
     let retried = match retried {
-        Ok(saved) => local(saved),
+        Ok(saved) => acknowledged(saved),
         Err(error) => panic!("an accepted retry was refused by media admission: {error}"),
     };
-    assert_eq!(retried.accepted(), 1);
+    assert_eq!(retried, (first.basis(), 1));
     assert_eq!(
-        retried.projection(),
+        stored_draft(&f, &store).projection(),
         first.projection(),
-        "an exact retry must return the same accepted draft"
+        "an exact retry must leave the same accepted draft"
     );
     assert_eq!(
         store.live_transient_holds_for_test(),

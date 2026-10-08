@@ -422,9 +422,7 @@ impl ServerStore {
                         &mut budget.intents,
                         hooks,
                     )
-                    .map(|draft| {
-                        StudioOverlayStart::Settled(Box::new(StudioOverlaySave::Local(draft)))
-                    });
+                    .map(|acknowledged| StudioOverlayStart::Settled(Box::new(acknowledged)));
             }
         }
         // Equal nonce and body from an ordinary failed Save is not accepted local draft evidence.

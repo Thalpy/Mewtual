@@ -120,10 +120,20 @@ fn save_between(
         .map_err(|error| ("S1b", error))?;
     let capture = match started {
         StudioOverlayStart::Captured(capture) => capture,
-        // Answered at S1, before any rail: an exact retry of accepted work.
+        // Answered at S1, before any rail: an exact retry of accepted work. S1a rebuilds no draft
+        // (design 6.2), so the one the caller compares is read back through the explicit path.
         StudioOverlayStart::Settled(saved) => match *saved {
-            catcoms_replication::studio::StudioOverlaySave::Local(draft) => return Ok(draft),
-            other => panic!("expected a local answer, got {other:?}"),
+            catcoms_replication::studio::StudioOverlaySave::Acknowledged { .. } => {
+                let logical = target.document(&p.bob.group_id()).unwrap();
+                return Ok(p
+                    .b_store
+                    .load_epoch_intents(SERVER, &logical)
+                    .unwrap()
+                    .local_draft()
+                    .unwrap()
+                    .expect("an acknowledged branch is live"));
+            }
+            other => panic!("expected an exact-retry acknowledgement, got {other:?}"),
         },
     };
     let plan = capture.plan().unwrap();

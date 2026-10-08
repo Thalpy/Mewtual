@@ -46,6 +46,16 @@ MUTATIONS = [
         "|| entry.sequence != index as u64 + 1", "|| (index == usize::MAX)",
         "codec_binds_annotations_envelopes_and_sequence", "overlay accepted reordered sequence",
     ),
+    # Design 6.2's S1a (design 18.3 review, F1): an exact retry is acknowledged flush-only. The
+    # mutant rebuilds the draft before acknowledging, which is what S1a did before the fix. It keeps
+    # the acknowledgement, so only the rebuild counter can catch it, not the outcome type.
+    (
+        "retry-rebuild", "crates/catcoms-app/src/store/epoch_intents/overlay.rs",
+        "        let acknowledged = StudioOverlaySave::Acknowledged {",
+        "        let _ = state.local_draft()?;\n"
+        "        let acknowledged = StudioOverlaySave::Acknowledged {",
+        "exact_retry_rebuilds_no_draft", "an exact retry rebuilt the draft",
+    ),
     (
         "seed-refs", "crates/catcoms-app/src/store/epoch_recovery/inventory.rs",
         "overlay.base_blob_cids().map_err(invalid)?", "{ let _ = overlay; Vec::<[u8; 32]>::new() }",
