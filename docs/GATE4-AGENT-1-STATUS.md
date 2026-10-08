@@ -2522,6 +2522,34 @@ Its findings and what happened to them:
   per PutObject and for an interrupted Prepared record.
 - **Not measured:** the commit phase on its own (C-3 15.7, step 2).
 
+### The commit phase, a first look (debug build, 2026-10-08)
+
+`profile_studio_overlay_handoff_stages` (`tests/rotation/overlay/handoff/performance.rs`, opt-in)
+times each stage separately, on a fresh vault per trial: H1, H2, H3, H4, the H5 budget's
+inventory, and H5 itself. Its smoke run was a **debug** build on a machine that was not quiet. So
+these numbers show shape only; the gate needs a release run in a quiet window. Upper medians of 5
+trials, in milliseconds:
+
+| target | branch ops | H1 | H3 signing | H5 inventory | H5 commit | H2, H4 (detached) |
+|---|---|---|---|---|---|---|
+| Index | 1 | 7 | 11 | 1 | 53 | 44, 20 |
+| Index | 32 | 12 | 184 | 3 | 100 | 390, 280 |
+| Index | 256 | 47 | 1 455 | 15 | 888 | 9 188, 4 410 |
+| Flipnote | 1 | 7 | 11 | 1 | 54 | 52, 22 |
+| Flipnote | 32 | 11 | 183 | 3 | 97 | 534, 317 |
+| Flipnote | 256 | 41 | 1 437 | 15 | 851 | 12 004, 5 639 |
+
+What it already says:
+
+- **H5's commit still scales with branch length** after 9.1: about 0.9 s for 256 operations, in
+  debug. Its remaining costs are listed above: the seed graph loads, the candidate's `blob_cids`,
+  and three durable writes with flushes.
+- **H3's signing is paged across visits by design**, so its total is not one custody hold.
+- **These sources are small.** At most 0.2 MB of title-only history, and no frames.
+
+So the release run must add a frame-heavy source, and an Index with many PutObjects, before C-3
+15.7 can price what remains of the 125 ms share.
+
 ## Fix: the Studio header readers refused repaired records (2026-10-08)
 
 Found by the design review of 9.1.1 (H-1), in code that predates it. A Flipnote that has been

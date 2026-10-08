@@ -283,6 +283,99 @@ fn profile(art: bool) {
     }
 }
 
+/// The handoff, stage by stage, for C-3 runtime design 15.7's step 2: what H5's commit costs on
+/// its own, after design 9.1 removed its restores.
+///
+/// H1 and H5 run under custody and H2 and H4 are detached, so only H1, the H3 slices and H5 count
+/// against a visit. H5 is timed alone, with its budget minted beforehand and reported separately:
+/// in the scheduled runtime each visit mints a fresh one, and that inventory is C-3's cost, not
+/// the commit's. Each count is repeated `TRIALS` times on a fresh vault, and the spread is
+/// reported, because a single millisecond sample says little.
+fn stages(art: bool) {
+    const TRIALS: usize = 5;
+    let clock = SystemClock;
+    let build = if cfg!(debug_assertions) {
+        "debug"
+    } else {
+        "release"
+    };
+    for count in [1, 32, 256] {
+        let mut samples: [Vec<u64>; 6] = Default::default();
+        let mut source_bytes = 0;
+        for _ in 0..TRIALS {
+            let root = tempfile::tempdir().unwrap();
+            let f = Fixture::new(art);
+            let mut store = open(root.path());
+            let (basis, _) = fixture(&f, &mut store, count);
+            let mut b = budget(&mut store, &f);
+            let mut timed = |slot: usize, start: u64| {
+                samples[slot].push(clock.monotonic_ms().saturating_sub(start));
+            };
+            let start = clock.monotonic_ms();
+            let started = store
+                .start_studio_handoff_with_io(
+                    SERVER,
+                    &f.group,
+                    f.target,
+                    &f.device,
+                    basis,
+                    Some(0),
+                    &mut rng(),
+                    &mut b,
+                    &mut WriteHooks::None,
+                )
+                .unwrap();
+            timed(0, start);
+            let crate::store::StudioHandoffStart::Captured(capture) = started else {
+                panic!("the fixture branch settled instead of capturing");
+            };
+            let start = clock.monotonic_ms();
+            let mut plan = capture.prepare().unwrap();
+            timed(1, start);
+            let start = clock.monotonic_ms();
+            assert!(plan
+                .sign_slice(&f.device, &f.group, 0, false, usize::MAX, None)
+                .unwrap()
+                .complete());
+            timed(2, start);
+            let start = clock.monotonic_ms();
+            let commit = plan.assemble().unwrap();
+            timed(3, start);
+            let start = clock.monotonic_ms();
+            let mut b = budget(&mut store, &f);
+            timed(4, start);
+            let start = clock.monotonic_ms();
+            let outcome = store
+                .commit_studio_handoff_with_io(
+                    SERVER,
+                    &f.group,
+                    f.target,
+                    &f.device,
+                    commit,
+                    Some(0),
+                    &mut rng(),
+                    &mut b,
+                    &mut WriteHooks::None,
+                )
+                .unwrap();
+            timed(5, start);
+            assert_eq!(outcome.accepted, count);
+            source_bytes = fs::metadata(f.path(&store)).unwrap().len();
+        }
+        let [h1, h2, h3, h4, inventory, h5] = samples.map(|s| Spread::of(&s, 1));
+        println!(
+            "HANDOFF_STAGES build={build} art={art} count={count} source_bytes={source_bytes} trials={TRIALS} units=min/upper_median/max_us(zero_samples raw_upper_median_ms) h1={h1} h2_detached={h2} h3_signing={h3} h4_detached={h4} h5_inventory={inventory} h5_commit={h5}"
+        );
+    }
+}
+
+#[test]
+#[ignore = "opt-in custody measurement, not a latency acceptance test"]
+fn profile_studio_overlay_handoff_stages() {
+    stages(false);
+    stages(true);
+}
+
 #[test]
 #[ignore = "opt-in custody measurement, not a latency acceptance test"]
 fn profile_studio_overlay_handoff_index() {
