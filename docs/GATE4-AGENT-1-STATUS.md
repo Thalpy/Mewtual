@@ -5062,6 +5062,21 @@ makes that more important, not less.
    signature change. Get that before converting call sites, not after.
    **Status: the storage half is done.** See the C-3 section above. What remains is the runtime
    adoption of the cursor at six call sites, which is its own checkpoint.
+
+   **Status, 2026-10-08:**
+   - **Step 2** (replay's manual move) is built and tested locally as `06526bd9`, rebased onto
+     `6a79e6f8`, with both of the implementation review's M-1 gates. It lands once Agent 2 confirms
+     `studio/receiver.rs` and `receiver/catchup.rs` are free.
+   - **The classifier and refused-result memo** (C-3 runtime 14, parts A and B) are built at
+     `6a79e6f8`.
+   - **Step 3, and Flow R after it, need more than the classifier** (C-3 runtime 15.7). In order:
+     - design 9.1 built, so H5 commits without a graph restore;
+     - the commit phase measured on its own;
+     - an all-family memo with writer warms;
+     - an indexed, pruned memo;
+     - traversal measurements, or a touched-path cursor;
+     - the H5 write-every-turn test.
+   - **Steps 4 and 5** still need section 7's measurements.
 2. Then **Flow R**, which needs no media and is independent. It was deliberately sequenced after
    this boundary so it is not built on the unbounded inventory path and then split again.
 3. Produce design 13's eight measurements as each item lands; C-1's before-and-after is cheap,

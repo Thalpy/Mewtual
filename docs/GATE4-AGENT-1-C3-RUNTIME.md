@@ -2,8 +2,9 @@
 
 Status: **step 1 (section 3) accepted for implementation; steps 2 to 5 need the decisions in
 section 11 reviewed before each is built. Section 14 proposes the classifier from measurement 13.7;
-it is at revision 2 after its design review and re-review, A and B are accepted for implementation,
-and step 3 stays gated (14.5).** It extends
+it is at revision 2 after its design review and re-review, A and B are built, and step 3 stays
+gated (14.5). Section 15 proposes a route to step 3; its design review found it not yet ready,
+and 15.7 lists what step 3 needs, starting with design 9.1.** It extends
 `GATE4-AGENT-1-DESIGN.md` section 9.2 (the cursor and I-4) and 5.5 (the overlay job). The storage
 half of C-3 is implemented and reviewed; this is the runtime half, ledger row G4-A1-C3.
 
@@ -949,3 +950,189 @@ ready to build once its two mediums are answered.
 **Residual risks the review listed.** `SAFETY = 4` absorbs contention, shape uncertainty and slower
 hardware at once, so re-derive it per component once those measurements exist. Debug builds can
 hold an inline validation for about 63 ms.
+
+## 15. A route to step 3 (proposal, revision 1, 2026-10-08: reviewed, not ready)
+
+**Nothing here is built.** Section 14.5 said what step 3 needs. This section proposes how to get
+it, says what no proposal of this kind can get, and lists the measurements that decide whether
+it is enough. **Its design review (15.7) found no blocker, but two highs mean it does not yet
+support the decision it asks for.** Read 15.7 before the rest.
+
+### 15.1 The target, restated
+
+Design 9.2 says a commit completes only if no `inventory_generation` rotation lands during its
+scan. Under ordinary gossip the receive path writes between nearly every pair of turns. So H5
+must complete its full-profile scan **within one visit, with no park, inside the overlay's
+125 ms share** (N-H2). `studio_storage_budget` then demands that the inventory's three
+generation tokens all match the store's, so nothing short of a complete scan in that visit can
+mint the budget.
+
+In one visit, each record costs three things:
+1. **Reading and authenticating it.** That is about 2 us per KiB on the calibration host, plus a
+   per-file cost that has not been measured.
+2. **Validating it.** A cache hit costs nothing. An inline validation is bounded by section 14.2.
+   Anything else parks, which fails the visit.
+3. **Installing it,** which is below resolution at the sizes measured.
+
+### 15.2 Proposal M1: memoize every accounting family
+
+Extend the validation memo from Registry and Studio to all six families, in accounting mode
+only. A record validated once is then a hit on every later scan until its bytes change, whatever
+its family or size. That removes the parks section 14.5 lists for large Recovery, Intents and
+OwnerReceipts records, including H5's own target Intents record, after their first validation.
+
+- **The value grows to carry Intents' facts:** `(StorageRecord, Option<EpochIntentInventoryFacts>)`.
+  A hit restores them. Today a hit returns `intent: None`, which is safe only because Intents is
+  never cached, and `memoize`'s comment already says this signature must grow first (re-review
+  MEDIUM-2). `EpochIntentBudget::from_inventory` builds its Unconfirmed tally from those facts, so
+  a test must pin that a hit carries them.
+- **Why it is sound for every family.** The argument is part B's. An entry is bound to the
+  filename hash, the physical size and the blake3 digest of the authenticated plaintext, and
+  `validate_record_body` is a pure function of those bytes. That includes OwnerReceipts, whose
+  version-2 decode verifies Ed25519 signatures over keys carried in the bytes themselves: that is
+  deterministic over the bytes, so its result can be memoized like any other. Reference scans
+  still never consult the memo.
+- **What changes in `step_inner`.** `cacheable` loses its family restriction, and `memoize` loses
+  its family gate. The cold-byte rail then counts only misses for every family, as it already does
+  for Registry and Studio. That is the rail's stated meaning: work for fresh validation.
+- **This amends L5**, which says an `inventory_cache` extension is not proposed.
+
+### 15.3 Proposal M2: an indexed memo sized to the inventory's own bound
+
+Section 14.4's analysis applies with more force once every family is memoized. Under LRU, a full
+scan of more records than the memo holds misses on every record.
+
+- **Capacity: `MAX_ACCOUNTED_RECORDS` (65 536).** A full scan then never thrashes. The memory
+  bound is about one more inventory's worth: an entry is about 170 bytes plus index overhead,
+  while a full-profile `EpochStorageInventory` already holds an entry per record during every
+  scan.
+- **Pruned to the vault on every completed full-coverage scan.** Such a scan has seen every key,
+  so it drops entries for files no longer present. In steady state the memo then tracks the vault
+  rather than its history.
+- **Indexed:** a keyed map plus an access order (for example `HashMap` and a `BTreeMap` of ticks),
+  so get, put and eviction are logarithmic. The current linear `VecDeque` would make a
+  65 536-entry scan quadratic. No new dependency.
+- **Eviction on mismatch and put-if-vacant are unchanged** (part B).
+
+### 15.4 What no scan-based route removes: traversal
+
+Every scan still reads and authenticates every record; a memo saves validation, never the read.
+On the calibration host the read alone is about 2 us per KiB, so **about 60 MiB of five-family
+bytes uses the whole 125 ms share** before any per-file cost. Beyond that, H5 cannot complete a
+visit under sustained gossip with any scan-based inventory, memo or not.
+
+The routes past that bound are not proposed:
+
+- **Skipping authentication for files whose size and timestamp look unchanged.** This weakens a
+  security check.
+- **A write-through inventory**, where each five-family writer updates a held inventory under
+  custody. This changes I-4's safety argument, from "every writer rotates" to "every writer
+  updates correctly", and under-update would be the unsafe direction.
+
+So with M1 and M2, **L6 becomes a stated vault-size bound.** For vaults whose traversal fits the
+share, a handoff completes under gossip once its records are warm. For larger vaults, a handoff
+is held until a quiet gap, which is L6's existing "held and retried under sustained writes",
+priced. Today the same handoff completes in one expensive visit, so building step 3 trades that
+visit's custody hold for this bound. That trade is the decision this proposal asks for.
+
+### 15.5 Measurements and tests this needs before step 3 is built
+
+- **Per-file traversal cost.** A vault of many small records, on NTFS, release build; the
+  bytes-only figure exists.
+- **Full-profile scan time with a warm memo**, for synthetic vaults of about 100, 1 000 and
+  4 000 records of mixed families. This says where the bound of 15.4 actually sits.
+- **The H5 write-every-turn test** (14.5, condition 3). With a warm vault and a receive-path
+  write between every pair of turns, the handoff completes. Above the traversal bound it stays
+  held, and is never committed from a partial scan.
+- **For M1:**
+  - an Intents hit restores the facts, and the Unconfirmed tally equals a cold scan's;
+  - an OwnerReceipts hit equals a fresh validation;
+  - mutations: drop the facts from the value; re-admit the family gate.
+- **For M2:**
+  - a full scan of more records than the old 64 reuses every warm entry;
+  - pruning drops a deleted record's entry;
+  - the bound is held at capacity;
+  - a mutation that skips pruning is caught.
+
+### 15.6 Questions for the review
+
+1. Is memoizing every accounting family sound? In particular: OwnerReceipts, given decode-time
+   signature verification; Intents' facts; and Recovery, given its per-snapshot work.
+2. Is capacity at `MAX_ACCOUNTED_RECORDS` with pruning the right bound, or should it be smaller,
+   with the traversal bound of 15.4 stated at that smaller size?
+3. Is a vault-size bound on handoff completion under gossip acceptable as L6, or does it rule step
+   3 out as designed? If the latter, which alternative should be designed instead?
+4. Is anything in 15.4 wrong? Is there a sound route past the traversal bound that this misses?
+
+### 15.7 Design review of revision 1 (2026-10-08, Opus, static): no blocker; two highs
+
+**M1 is sound for all six families.** Every validation input is the family, the plaintext, and
+the scope inside it, and server and document are decoded from that scope on every read. Size is
+in the key. No validator reads the clock, membership, MLS state or the registry. OwnerReceipts
+verifies signatures over keys carried in its own bytes. Consumers read only fields a hit already
+restores, plus the Intents facts, which M1 adds. **M2's capacity is right.**
+
+**What the review found:**
+
+- **HIGH-1: the record written between visits stays cold.**
+  - Receive writes after it scans. Its result reaches the memo only through
+    `retain_received_studio_source`, which does nothing while another document holds the source
+    slot. `cache_studio_source_footprint` also refuses sources over 8 MiB, and no Recovery,
+    OwnerReceipts, Intents or DraftArchive writer warms at all.
+  - The failure: Flipnote A is open, and a peer draws on Flipnote B. Each receive turn writes a new
+    B cold. H5 reads it, Studio never inlines, it parks, and the next write restarts the job,
+    forever.
+  - **Fix:** warm the memo from every writer's own result (`SourceVersion` already carries
+    digest, bytes and record), with a per-writer test that the warmed record equals a fresh
+    validation.
+- **HIGH-2: H5's own commit work is outside the cost model, and it is structure-driven.**
+  - `commit_studio_handoff_with_io` calls `checked_studio_source`, which runs a full
+    `restore_unit`, in the 240 ms class for 128 frames. An Index target adds one more restore per
+    PutObject (`check_index_object_sources`), then reference walks, encoding and three durable
+    writes.
+  - **Design 9.1, "no graph restore on the commit path" (`VerifiedPersistedSource`), is unbuilt.**
+  - So 15.4's "trades that visit's custody hold" overclaims: the H5 visit stays unbounded until
+    9.1 exists, and the scan's share is 125 ms *minus* the commit's cost.
+- **MEDIUM-1: the gossip premise and the vault-size bound do not occur together today.** The
+  receive profile pauses on any vault over 64 records, 8 MiB read or 256 KiB cold. So writes
+  between nearly every turn happen only in vaults of 64 records or fewer, whose traversal is at
+  most 8 MiB, about 16 ms. In larger vaults, rotations come from rarer writers and from
+  sync-repairs, which leave the bytes, and so the memo, valid. **15.4's bound only becomes real
+  once step 5 lifts the receive limits.** L6 should be stated per regime.
+- **MEDIUM-2:** `evict_mismatch`'s Registry-and-Studio gate must widen with M1, or stale entries
+  of the other families block warming again (part B, piece 1). `accounting_only` and
+  `memoize_refused` must carry the facts. The test pinning "Registry and Studio only" changes
+  deliberately, and that is a recorded contract change.
+- **MEDIUM-3: the memo starts empty at every launch.** Background jobs warm about three records
+  per `Unstable` cycle, then back off from 30 s, doubling to 300 s. **Missed route:** a restart
+  that added a memo entry is progress, so it should not be charged against
+  `MAX_INVENTORY_RESTARTS` or backoff. Measure time to first handoff from an empty memo.
+- **MEDIUM-4: M1 changes what automatic receive admits.** Warm bytes stop counting against the
+  256 KiB cold rail for every family, so whether receive pauses becomes history-dependent. That is
+  the rail's intent, but it is user-visible: update HANDOVER's limitation and test both
+  directions.
+- **LOW:**
+  - Memory is about 20 to 23 MiB at 65 536 entries, resident for the mount's life, not one
+    inventory's worth.
+  - Prune only after `finish_with` succeeds, and only within that scan's coverage.
+  - The 60 MiB figure has no margin; with the classifier's factor of 4 it is about 15 MiB.
+- **A route the doc missed, offered as a design question:** record touched paths inside the
+  `EpochMutation` primitives, which already take the path. A cursor could then span visits and
+  re-read only those paths at completion, plus `confirm_listing`. That removes the traversal bound
+  without a write-through inventory. It carries an audit obligation of I-4's class, and still
+  needs HIGH-1's writer warms.
+
+**What step 3 needs, as this review leaves it.** In dependency order:
+
+1. **Design 9.1, built:** H5 commits from a `VerifiedPersistedSource`, with no graph restore and
+   no per-PutObject restore for an Index. Without it no inventory route bounds the H5 visit.
+2. **The commit phase measured on its own:** 128 frames, and an Index with many PutObjects. This
+   sets what the scan has left of 125 ms.
+3. **M1, with writer warms (HIGH-1) and MEDIUM-2's three gates.**
+4. **M2, with pruning as LOW defines it.**
+5. **Either the traversal measurements of 15.5, or the touched-path route designed and reviewed.**
+6. **The H5 write-every-turn test, in HIGH-1's variants:** writes to a non-retained Studio
+   document, to a source over 8 MiB, and to a Recovery record over 64 KiB.
+
+**Revision 2 of this section waits on 1 and 2.** 9.1 is part of the accepted Flow H design and the
+largest of these items, so it comes first.
