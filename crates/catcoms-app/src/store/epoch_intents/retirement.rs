@@ -15,6 +15,7 @@ fn intent_retirement_shrink_still_needs_physical_replacement_headroom() {
         bytes: MAX_VAULT_INTENT_BYTES,
         // This case is about the class total at its cap; no archive is involved.
         archive_bytes: 0,
+        unconfirmed: BTreeMap::new(),
         ready: true,
     };
     assert!(budget
@@ -55,6 +56,7 @@ fn draft_archive_sub_cap_covers_the_physical_replacement_peak() {
         // below is attributable to the sub-cap.
         bytes: near,
         archive_bytes: near,
+        unconfirmed: BTreeMap::new(),
         ready: true,
     };
     assert!(
@@ -107,6 +109,7 @@ fn an_over_cap_archive_inventory_still_yields_a_usable_budget() {
         record_slots: 2,
         bytes: over + 2048,
         archive_bytes: over,
+        unconfirmed: BTreeMap::new(),
         ready: true,
     };
     // The premise: over the archive policy, comfortably under the class rail.
@@ -318,20 +321,6 @@ impl ServerStore {
                 intents.ready = true;
             }
             return Ok(());
-        }
-        if matches!(
-            state.live_overlay_provenance(),
-            Some(catcoms_replication::studio::StudioOverlayProvenance::Unconfirmed { .. })
-        ) {
-            // This is a second physical Intents writer, separate from
-            // `write_prepared_intents_inner`. Retirement can shrink ordinary entries while
-            // preserving a live Unconfirmed overlay, but it does not own the outer Studio budget
-            // that charges the whole file. Refuse before encode/reservation/I/O so its in-memory
-            // charge cannot diverge from the authenticated replacement. Zero-removal exact sync
-            // retries returned above and terminal disposal remains the supported release path.
-            return Err(invalid(
-                "resolve the awaiting-tenure draft before retiring its intent record",
-            ));
         }
         let plain = state.encode(&scope)?;
         let next = plain.len() as u64 + 40;

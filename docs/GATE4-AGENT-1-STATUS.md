@@ -4517,10 +4517,11 @@ From Agent 2's reply to the Flow S note. Each row says where it stands.
 | ask | state |
 |---|---|
 | M1: the H1 handoff probe must skip non-Closing branches | **done**: the probe selects only a live branch this device authored whose `live_overlay_provenance()` is `Closing`; an Unconfirmed one is memoised quiet (design 7.2), so it takes no reservation, no backoff, no capture. Regression `the_handoff_probe_leaves_an_unconfirmed_branch_alone`, before and after a confirmed source arrives, with the mutation (any provenance) executed and failing. Reviewed (Opus, static): no blocker, high or medium; the review's LOWs (comment precision, the installed-source variant, `live_overlay_provenance`, 7.2) are taken. Still untested: an Unconfirmed target ahead of an own Closing one on the same rail, which needs a member with tenure on that fixture |
-| `new_admitted`'s redundant `provenance` parameter | **waiting**: about twenty call sites are in Agent 2's owner tests, one of which pins a contract the removal makes inexpressible; done together once those files are free |
-| where the 8.3 per-server and vault-wide rails are called | **answered**: Agent 2 adds the calls at S1b (after the branch half, before media admission) and S3 (after the fresh mint's fingerprint check, before pixels, holds and the write), from the budget entered in that call |
+| `new_admitted`'s redundant `provenance` parameter | **done by Agent 2** in `30194a40`, by agreement: the provenance is the basis variant's own, and their test now pins that each basis yields its own |
+| where the 8.3 per-server and vault-wide rails are called | **done by Agent 2** in `30194a40`, at the points named: S1b (after the branch half, before media admission) and S3 (after the fresh mint's fingerprint check, before pixels, holds and the write), from the budget entered in that call |
 | `save_overlay` reports another request's plan as `Saved`, and only takes its own target's plan | **agreed, waiting**: mirrors Agent 2's Unconfirmed fix (`Busy`, never `Saved`; take any parked plan); in `studio/receiver.rs`, so it lands with C-3 step 2 |
-| the `cfg_attr(not(test), allow(dead_code))` markers | to remove with the `new_admitted` change |
+| the `cfg_attr(not(test), allow(dead_code))` markers | **removed** where the preview Save is now the production caller, with their "until G4-A2-PREVIEW" comments |
+| a refused S2 plan is dropped, so a deterministic refusal leaves the Save answering `Scheduled` indefinitely (found by the G4-A1-MAP inventory) | **sent to Agent 2** as a likely HIGH in their live Unconfirmed path, with a proposed fix and regression; mirrored in the Closing `save_overlay` with its other two fixes |
 | L4b lazy minting | deferred; the API is mine |
 
 ## G4-A1-CORE: the core signing review, and its two test findings

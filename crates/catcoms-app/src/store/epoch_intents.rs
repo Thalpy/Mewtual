@@ -21,6 +21,8 @@ use super::*;
 pub(super) const RECORD_DOMAIN: &[u8] = b"catcoms/epoch-intent-store/v1";
 const MAX_RECORD_BYTES: usize = MAX_INTENT_LEDGER_BYTES + 1024;
 pub(super) const MAX_SEALED_BYTES: usize = MAX_RECORD_BYTES + 40;
+/// What sealing and framing add to an encoded ledger on disk.
+const SEALED_FRAMING_BYTES: u64 = 40;
 /// Conservative vault-wide intent ceiling: sealed final files PLUS unpublished siblings and the
 /// full replacement copy at peak. Framing counts too; this is stricter than a payload-only cap.
 pub const MAX_VAULT_INTENT_BYTES: u64 = 64 * 1024 * 1024;
@@ -30,6 +32,21 @@ pub const MAX_VAULT_INTENT_BYTES: u64 = 64 * 1024 * 1024;
 /// retained, export stays available and no preservation claim is made. It is a storage policy to
 /// revisit after measurement, not a consequence of the format.
 pub(in crate::store) const MAX_VAULT_DRAFT_ARCHIVE_BYTES: u64 = 16 * 1024 * 1024;
+/// Design 8.3: live Unconfirmed branches one server may hold at once. Each is local work on a base
+/// nobody has confirmed yet, so their number is bounded per server as well as per document (one,
+/// structurally) and in bytes (below). A per-channel bound alone would grow with the channel count.
+pub(in crate::store) const MAX_UNCONFIRMED_BRANCHES_PER_SERVER: usize = 3;
+/// Design 8.3: physical bytes of the intent records holding a live Unconfirmed branch, across the
+/// vault. A share of [`MAX_VAULT_INTENT_BYTES`], never an addition to it. It counts each such
+/// record whole, ordinary intents included, because that is the footprint the branch keeps alive.
+///
+/// **Admission policy at Flow S, not an invariant of the vault.** Once a confirmed source is
+/// installed beside a live branch, ordinary edits land in the same record and grow it, and no rail
+/// refuses them: refusing ordinary editing for a draft's sake would self-lock, as the archive
+/// sub-cap's reasoning explains. So the tally can pass the share. Every Unconfirmed Save is then
+/// refused as growth until disposal, retirement or a transfer restores headroom. Orphaned
+/// temporaries are charged to the class ceiling but not to this share: they hold no live branch.
+pub(in crate::store) const MAX_VAULT_UNCONFIRMED_BYTES: u64 = 8 * 1024 * 1024;
 
 pub(super) mod disposal;
 pub(super) mod inspection;
@@ -211,6 +228,12 @@ pub struct EpochIntentBudget {
     // approach 6 MiB, so without one a few of them would occupy most of the vault-wide intent
     // ceiling and starve ordinary editing. This is a share of that ceiling, never an addition.
     archive_bytes: u64,
+    /// Design 8.3's Unconfirmed tally: every intent record whose live branch is Unconfirmed, with
+    /// the server it belongs to and its charged physical bytes. Built from the inventory's
+    /// authenticated facts and kept current by `write_prepared_intents`, the one writer that can
+    /// open or grow such a branch. Every other writer can only shrink or end one, so a record it
+    /// leaves stale here is over-counted, never under-counted: the safe direction.
+    unconfirmed: BTreeMap<[u8; 32], (u64, u64)>,
     ready: bool,
 }
 
@@ -251,6 +274,7 @@ impl EpochIntentBudget {
         let mut records = BTreeMap::new();
         let mut bytes = 0u64;
         let mut archive_bytes = 0u64;
+        let mut unconfirmed = BTreeMap::new();
         // The Intents accounting class, not the Intents physical family: preserved draft archives
         // are their own record kind but charge records, record slots and bytes here, against the
         // same vault-wide ceiling. Their ids derive from a different scope domain, so an archive
@@ -264,6 +288,16 @@ impl EpochIntentBudget {
                 archive_bytes = archive_bytes
                     .checked_add(size)
                     .ok_or_else(|| invalid("vault draft archive limit reached"))?;
+            }
+            // Only a LIVE branch counts: terminal metadata keeps its historic provenance, and
+            // `intent_facts` already reports it as no branch (`live_overlay_provenance`).
+            if let Some(facts) = entry.intent_facts() {
+                if matches!(
+                    facts.provenance(),
+                    Some(catcoms_replication::studio::StudioOverlayProvenance::Unconfirmed { .. })
+                ) {
+                    unconfirmed.insert(entry.record.id, (entry.server, facts.charged_bytes()));
+                }
             }
             records.insert(entry.record.id, size);
         }
@@ -305,6 +339,7 @@ impl EpochIntentBudget {
             records,
             bytes,
             archive_bytes,
+            unconfirmed,
             ready: true,
         })
     }
@@ -370,6 +405,82 @@ impl EpochIntentBudget {
     #[cfg(test)]
     pub(in crate::store) fn set_archive_bytes_for_test(&mut self, bytes: u64) {
         self.archive_bytes = bytes;
+    }
+
+    /// Design 8.3's per-server and vault-wide Unconfirmed rails, checked before any write.
+    ///
+    /// `id` is the intent record of `server`'s document the Save would leave holding a live
+    /// Unconfirmed branch `next` physical bytes long. Opening a branch is refused when `server`
+    /// already holds the maximum elsewhere; any Save is refused when the other records' bytes
+    /// plus `next` would pass the vault-wide share. Growth is refused, occupancy is not: like the
+    /// archive sub-cap this is admission policy, so nothing here makes an existing budget unusable
+    /// and an exact retry, which is answered before any rail, never reaches it.
+    ///
+    /// Refused as `Invalid` with a reason of its own, as the archive sub-cap and the class ceiling
+    /// are. A typed `StorageRefused` outcome is not built (design 8.3).
+    pub(in crate::store) fn admit_unconfirmed(
+        &self,
+        server: u64,
+        id: [u8; 32],
+        next: u64,
+    ) -> Result<(), AppError> {
+        let others = self.unconfirmed.iter().filter(|(record, _)| **record != id);
+        let (branches, bytes) = others.fold((0usize, 0u64), |(n, total), (_, (owner, size))| {
+            (
+                n + usize::from(*owner == server),
+                total.saturating_add(*size),
+            )
+        });
+        if !self.unconfirmed.contains_key(&id) && branches >= MAX_UNCONFIRMED_BRANCHES_PER_SERVER {
+            return Err(invalid(
+                "unconfirmed draft limit reached: this server already holds as many drafts made \
+                 on a preview as it may",
+            ));
+        }
+        if bytes
+            .checked_add(next)
+            .is_none_or(|total| total > MAX_VAULT_UNCONFIRMED_BYTES)
+        {
+            return Err(invalid(
+                "unconfirmed draft storage limit reached: drafts made on a preview already use \
+                 their share of this vault",
+            ));
+        }
+        Ok(())
+    }
+
+    /// The physical size this budget holds for record `id`, if it holds one.
+    pub(in crate::store) fn record_bytes(&self, id: [u8; 32]) -> Option<u64> {
+        self.records.get(&id).copied()
+    }
+
+    /// Test-only: occupy design 8.3's rails with stand-in records, so a regression can reach them
+    /// without building that many real preview drafts. `branches` empty live branches on `server`,
+    /// and one more record on another server holding the vault-wide share less `room` bytes. Only
+    /// the tally moves, so a refusal is attributable to a rail and not to the class ceiling.
+    #[cfg(test)]
+    pub(in crate::store) fn occupy_unconfirmed_for_test(
+        &mut self,
+        server: u64,
+        branches: u8,
+        room: u64,
+    ) {
+        for n in 0..branches {
+            let mut id = [0xee; 32];
+            id[0] = n;
+            self.unconfirmed.insert(id, (server, 0));
+        }
+        let elsewhere = server.wrapping_add(1);
+        self.unconfirmed.insert(
+            [0xef; 32],
+            (elsewhere, MAX_VAULT_UNCONFIRMED_BYTES.saturating_sub(room)),
+        );
+    }
+
+    /// Test-only: the Unconfirmed tally, as (server, bytes) per record.
+    #[cfg(test)]
+    pub(in crate::store) fn unconfirmed_for_test(&self) -> Vec<(u64, u64)> {
+        self.unconfirmed.values().copied().collect()
     }
 
     /// The class preflight plus the archive sub-cap. Both are checked before any reservation,
@@ -687,48 +798,6 @@ impl ServerStore {
         step: WriteStep,
         hooks: &mut WriteHooks<'_>,
     ) -> Result<EpochIntentState, AppError> {
-        self.write_prepared_intents_inner(
-            server, document, state, old, unchanged, rng, budget, intents, step, hooks, false,
-        )
-    }
-
-    /// Flow S's sole replacement seam. It has already authenticated the live overlay, preflighted
-    /// the complete old/new physical Unconfirmed charge, and commits that charge only after this
-    /// durable write returns successfully. No other writer may preserve a live Unconfirmed branch:
-    /// without the outer `EpochStudioBudget` it cannot keep the 8 MiB rail coherent.
-    #[allow(clippy::too_many_arguments)]
-    pub(in crate::store) fn write_prepared_flow_s_intents(
-        &mut self,
-        server: u64,
-        document: &LogicalDocument,
-        state: EpochIntentState,
-        old: Option<u64>,
-        rng: &mut impl CryptoRngCore,
-        budget: &mut EpochStorageBudget,
-        intents: &mut EpochIntentBudget,
-        step: WriteStep,
-        hooks: &mut WriteHooks<'_>,
-    ) -> Result<EpochIntentState, AppError> {
-        self.write_prepared_intents_inner(
-            server, document, state, old, false, rng, budget, intents, step, hooks, true,
-        )
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn write_prepared_intents_inner(
-        &mut self,
-        server: u64,
-        document: &LogicalDocument,
-        state: EpochIntentState,
-        old: Option<u64>,
-        unchanged: bool,
-        rng: &mut impl CryptoRngCore,
-        budget: &mut EpochStorageBudget,
-        intents: &mut EpochIntentBudget,
-        step: WriteStep,
-        hooks: &mut WriteHooks<'_>,
-        flow_s_accounted: bool,
-    ) -> Result<EpochIntentState, AppError> {
         let scope = scope_bytes(server, document)?;
         let storage_scope = StorageScope::new(server, &document.server_id).map_err(invalid)?;
         let id = *blake3::hash(&scope).as_bytes();
@@ -760,22 +829,9 @@ impl ServerStore {
             intents.ready = true;
             return Ok(state);
         }
-        if matches!(
-            state.live_overlay_provenance(),
-            Some(catcoms_replication::studio::StudioOverlayProvenance::Unconfirmed { .. })
-        ) && !flow_s_accounted
-        {
-            // The Unconfirmed rail charges the whole authenticated physical Intents record, not
-            // just its overlay extension. An ordinary edit/retirement that preserved the branch
-            // would therefore change its charge without access to the outer Studio budget. Fail
-            // before encoding, reservation or I/O; exact sync retries and terminal disposal remain
-            // available, and Flow S above is the one accounted replacement path.
-            return Err(invalid(
-                "resolve the awaiting-tenure draft before changing its intent record",
-            ));
-        }
         let plain = state.encode(&scope)?;
-        let next = plain.len() as u64 + 40;
+        // `prepared_intent_bytes` computes this same size ahead of the write; keep them one rule.
+        let next = plain.len() as u64 + SEALED_FRAMING_BYTES;
         // A step that was only ever allowed to flush must not reach a replacement. Refused
         // before the preflight, so it charges nothing and disturbs no held record.
         step.permit_replacement()?;
@@ -815,6 +871,16 @@ impl ServerStore {
         }
         intents.records.insert(id, next);
         intents.bytes = final_bytes;
+        // Design 8.3's tally follows the record just written: this is the writer that opens and
+        // grows an Unconfirmed branch, so a later rail check on the same budget sees it.
+        if matches!(
+            state.live_overlay_provenance(),
+            Some(catcoms_replication::studio::StudioOverlayProvenance::Unconfirmed { .. })
+        ) {
+            intents.unconfirmed.insert(id, (server, next));
+        } else {
+            intents.unconfirmed.remove(&id);
+        }
         intents.generation = self.intent_generation.clone();
         intents.ready = true;
         Ok(state)
@@ -911,6 +977,19 @@ impl ServerStore {
             physical_bytes: bytes.len() as u64,
         }))
     }
+}
+
+/// The physical size `write_prepared_intents` would give `state`'s record: its encoding plus the
+/// seal and frame. For a rail that must hold before that write, checked at the size it will write.
+///
+/// It encodes the record, and the write encodes it again: for an Unconfirmed branch that is up to
+/// the retained seed plus the ledger, a few MiB per commit. Accepted as a known cost; if it is ever
+/// measured as a problem, let the writer take the plaintext encoded here.
+pub(super) fn prepared_intent_bytes(
+    state: &EpochIntentState,
+    scope: &[u8],
+) -> Result<u64, AppError> {
+    Ok(state.encode(scope)?.len() as u64 + SEALED_FRAMING_BYTES)
 }
 
 pub(super) fn scope_bytes(server: u64, document: &LogicalDocument) -> Result<Vec<u8>, AppError> {

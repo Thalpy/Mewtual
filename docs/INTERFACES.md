@@ -2150,16 +2150,15 @@ basis fingerprint, branch identity and a domain-separated BLAKE3 digest of the c
 parked plan to prevent an abandoned caller holding the actor slot, but it returns busy and cannot
 claim that plan's outcome as its own. The exact request is then answered from durable state.
 
-Live Unconfirmed work is limited to three branches per numeric server/group, 8 MiB of exact
+Live Unconfirmed work is limited to three branches per numeric server, 8 MiB of exact
 physical Intents bytes per mounted vault and 64 accepted operations per branch. A fresh complete
 inventory derives the live counters from authenticated provenance and charged bytes. Replacement
 preflight subtracts the authenticated old charge; counters change only after a successful durable
 write, and disposal releases the live charge only after its terminal replacement succeeds.
-While a live Unconfirmed branch exists, the central ordinary intent writer refuses every non-sync
-replacement that would preserve it unless the caller uses the sole private, quota-accounted Flow S
-writer. The separate retirement writer applies the same rule before reservation or I/O. Exact sync
-retry and terminal disposal remain available. This is deliberately fail-closed until any future
-coexistence writer can carry the outer `EpochStudioBudget` accounting itself.
+The tally lives in `EpochIntentBudget`, so every successful ordinary or Flow S replacement updates
+the same record charge. The 8 MiB share is Flow S admission policy rather than a hard vault
+invariant: ordinary edits beside a live branch may take the tally over the share, after which new
+Unconfirmed growth refuses until headroom returns.
 Unconfirmed provenance grants no handoff, signing, receipt, installed-source or publication
 authority. The shared baseline now has real Index and Flipnote preview coverage, 8.6 reconciliation,
 an actor/store restart regression, the actor Save and native result conversion types. Its functions

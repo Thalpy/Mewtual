@@ -8,20 +8,43 @@ the protocol- vs honest-client-enforced boundary and the hardening backlog.
 [`MESSAGE-FLOW.md`](MESSAGE-FLOW.md) traces one message end to end (send, gossip, catch-up)
 and ranks the live hazards in that path.
 
-## Status (latest entry: 2026-10-07)
+## Status (latest entry: 2026-10-08)
 
-- **Gate 4 PR #35 reconciliation (2026-10-07).** The candidate is resolved against
-  `gate4-agent1-runtime` at `9c63bd6eaa4bbf4f22b1f3bcd6b0fdee20ae45aa`, retaining the newer
-  generalized Flow S, actor Save, 8.6 reconciliation, restart coverage and non-Closing handoff
-  exclusion. It adds the remaining 3-live-Unconfirmed-branches/server-group and 8 MiB physical
-  Intents/vault rails, reconstructs them from authenticated inventory, updates them only after a
-  durable Flow S write and releases them only after terminal disposal. It also preserves PR #35's
-  full canonical parked-request correlation and makes ordinary/retirement Intents writers fail
-  closed while they would preserve live Unconfirmed work without the outer quota owner. Focused
-  quota, operation-65, same-nonce/different-body, inventory/disposal and off-path-writer regressions
-  pass. P5 remains false; Save/repair commands remain unregistered; exact-head CI and the bounded
-  merge-resolution review are required before merge. This is incremental integration, not Gate 4
-  acceptance, and Gate 5 remains closed.
+- **Gate 4 PR #35 reconciliation (2026-10-08).** The candidate now preserves
+  `gate4-agent1-runtime` through `7310b22b76848c4b9f85fec816744cff00c1a64f`. Agent 2's newer
+  `EpochIntentBudget` implementation remains the sole owner of the 3-branch/8 MiB rails and their
+  mutation coverage. PR #35 contributes the still-missing full-envelope parked-request correlation
+  for both Closing and Unconfirmed Flow S: another caller may finish abandoned work to free the
+  bounded slot, but receives `Busy` and cannot claim that result. P5 remains false; Save and repair
+  commands remain unregistered. This is incremental integration, not Gate 4 acceptance, and Gate 5
+  remains closed. Residual LOW coverage gap: the common fingerprint path has the Unconfirmed
+  same-nonce/different-body regression, but Closing and cross-provenance parked-plan cases do not yet
+  have direct equivalents.
+
+- **Gate 4 Agent 2: the Unconfirmed aggregate rails, and the parked-plan mutation fix
+  (2026-10-07).**
+  - **Rails:** design 8.3's per-server count (3) and vault-wide bytes (8 MiB, inside the intent
+    ceiling) now exist. The tally sits in `EpochIntentBudget`, built from the inventory's
+    authenticated facts and kept current by `write_prepared_intents`. Flow S checks it at S1b,
+    before media work, and again at S3, at the exact size of the write. Only growth is refused; an
+    exact retry is answered at capacity. There is no typed `StorageRefused`: the refusal is
+    `Invalid` with its own reason. The share is admission policy at Flow S, not a vault invariant.
+    Ordinary edits beside a live branch whose confirmed source is installed grow the counted
+    record unrefused, so the tally can pass 8 MiB. After that, every Unconfirmed Save is refused
+    until headroom returns.
+  - **`new_admitted`:** its redundant `provenance` argument is gone, by agreement with Agent 1.
+  - **Harness:** CI's `lifecycle-mutations` job failed at `abbb6076` on
+    `unconfirmed-save-any-parked-plan`. Its mutant broke a check-then-take pair and panicked at an
+    `expect` before its assertion. It now skips the branch at the caller. Seven `unconfirmed-rail-*`
+    entries were added.
+  - **Still open** (the 2026-10-06 entry's list, less the rails and the selector skip, which
+    Agent 1 landed in `9c63bd6e`):
+    - native registration (Agent 4);
+    - the same-key refusal through a fresh discovery proof;
+    - N-T5 through the receiver loop and with a full recovery journal;
+    - the A' product decision (design 9.6).
+
+    P5 remains false.
 
 - **Gate 4 Agent 2: the Unconfirmed Save through the actor, 8.6 reconciliation, N-T5 and the
   cross-document copy regressions (2026-10-06).** This updates the 2026-10-05 entry's "Unconfirmed Flow S and its app-side
@@ -48,9 +71,9 @@ and ranks the live hazards in that path.
     mid-copy is refused at C3. C4 compares no source stamp. It refuses only if its re-plan no
     longer resolves the selected value (replaced or removed) or rebuilds a different body;
     otherwise it applies the source's current value.
-  - **Updated by the 2026-10-07 entry:** the handoff selector skip is in the shared baseline and
-    PR #35 supplies the per-server/vault rails. Native registration remains missing and P5 remains
-    false.
+  - **Updated by the 2026-10-08 entry:** the handoff selector skip and Agent 2's per-server/vault
+    rails are in the shared baseline. PR #35 adds full-envelope parked-request correlation. Native
+    registration remains missing and P5 remains false.
   - **Known local flake class:** tests on `StudioReceiver::default()` share the process-wide
     preparation pool and can fail under full-suite load
     (`registry_runtime.rs:164`, `receiver.rs:68`).

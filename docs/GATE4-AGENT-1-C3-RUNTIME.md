@@ -516,3 +516,37 @@ and clear hooks) and `studio/receiver/catchup.rs` (the variants, their `run`/`de
 arms and the test label; `preparation_pool` made `pub(super)`). Both are areas where Agent 2 works,
 so the edits are kept to those lines and are ported only once Agent 2 confirms neither file is
 mid-edit.
+
+## 13. Step 3 is gated on 13.7, like steps 4 and 5 (decision, 2026-10-07)
+
+Section 11 called steps 2 and 3 "independent and each shippable alone". Step 2's review (HIGH-1)
+showed why that is not true of step 3 as things stand. Until 13.7 calibrates `validation_fits`,
+every uncached record parks, so a job needs one owner turn per Recovery, OwnerReceipts, Intents
+or DraftArchive record, and any five-family write between two turns restarts it and throws that
+progress away. Ordinary receive writes a Studio source on most packets. So in any active channel
+a job may never finish.
+
+Replay's manual move survives this by falling back to the synchronous scan it always ran (section
+12, item 2). **H5 cannot**: it is an overlay commit, and design 9.2 forbids a fallback to an
+unbounded single-visit scan there. Built now, step 3 would leave an automatic handoff held
+indefinitely in any busy channel, where today it completes in one (expensive) visit. Limitation
+L6 accepts "a commit is held and retried under sustained writes"; it did not price "sustained"
+as "ordinary gossip".
+
+So step 3 waits, with steps 4 and 5, for section 7's evidence: a reviewed conservative classifier
+from 13.7 (so small records of the uncached families validate inline and a job finishes in one or
+a few turns), or batched validation. The existing 13.7 data already narrows the classifier:
+
+- **Recovery** validation is byte-linear (about 1.4 to 2.6 us per KiB accounting, 13 to 15 with
+  references), so a small-record byte threshold is safe for it.
+- **Studio** validation is driven by structure, not bytes (a 130 KB record of 128 frames costs
+  about 240 ms; a 3.7 MB title-only record about 24 ms), so no byte threshold is safe and Studio
+  keeps detaching unless the validation cache already holds the record.
+- **Registry** sits between (about 2 ms at 322 KB, 17 ms at 3.9 MB).
+- **OwnerReceipts and Intents** are measured only at trivial sizes, and **DraftArchive** not at
+  all. Those three, at their accepted ceilings, are the next measurements, and they decide whether
+  the classifier makes the uncached families cheap enough for step 3 to finish in practice.
+
+Flow R (G4-A1-R) follows step 3, because its commit needs the same embedded job; the sequencing
+note in the status ledger already forbids building it on the unbounded path and splitting it
+again.

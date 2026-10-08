@@ -1,8 +1,8 @@
 # Gate 4 Agent 4 status: integration and completion coordination
 
-Current checkpoint: 2026-10-07. PR #35 is being reconciled on
+Current checkpoint: 2026-10-08. PR #35 is being reconciled on
 `gate4-runtime-completion` against `gate4-agent1-runtime` at
-`9c63bd6eaa4bbf4f22b1f3bcd6b0fdee20ae45aa`. Gate 4 remains incomplete and Gate 5 remains closed.
+`7310b22b76848c4b9f85fec816744cff00c1a64f`. Gate 4 remains incomplete and Gate 5 remains closed.
 
 The detailed live ledger is [GATE4-ACCEPTANCE](GATE4-ACCEPTANCE.md). This document records the
 integration history, current ownership boundaries and the single remaining execution sequence.
@@ -41,25 +41,27 @@ currently isolated pending the detached runtime boundary:
   attempts B0 with full failed/uncertain writer propagation, and only then preserves Fault as a
   hard service refusal. Real explicit/prepared, empty-capacity authority, post-write/reopen and
   no-reconstruction regressions pass. Final re-review has no finding at any severity.
-- In PR #35's preserved ancestry, `eef69729ae4b4200a6060b9f91719d44538094e5` implemented the next bounded runtime dependency: Flow S now
+- In PR #35's preserved ancestry, `eef69729ae4b4200a6060b9f91719d44538094e5` originally implemented the next bounded runtime dependency: Flow S now
   carries typed Closing or Unconfirmed bases, and the crate-private awaiting-tenure consumer proves
   source absence, re-enters the current complete preview at S1b/S3, plans detached, enforces the
-  3/server-group, 8 MiB/vault and 64-op rails, reconstructs those counters from fresh inventory, releases
+  3/numeric-server, 8 MiB/vault and 64-op rails, reconstructs those counters from fresh inventory, releases
   them after durable disposal, and excludes Unconfirmed history from automatic handoff. Real
   Flipnote preview, expiry/retry, operation-limit, inventory and disposal regressions pass.
-- Review-response commit `6aee00046e35410ba42c9290c0d1f52fd41dd86b` binds each parked
+- Historical review-response commit `6aee00046e35410ba42c9290c0d1f52fd41dd86b` binds each parked
   plan to target, provenance, basis, branch and a domain-separated digest of the full canonical
   operation. It also makes the central ordinary intent writer and the independent retirement writer
   fail closed when a replacement would preserve live Unconfirmed work outside the sole accounted
   Flow S path. Exact sync retry and terminal disposal remain available. Independent re-review closes
   every BLOCKER/HIGH/MEDIUM finding; the only residual LOW is that receipt-covered retirement is not
   separately exercised with a live Unconfirmed branch, although it uses the same guarded writer as
-  the real manual-recovery regression.
+  the real manual-recovery regression. Agent 2's later implementation supersedes those duplicate
+  quota counters and adopts a different reviewed ordinary-growth policy, so the reconciliation does
+  not carry the historical off-path-writer rule forward.
 
 The newer shared baseline independently contains the generalized Flow S, actor Save, reconciliation,
-restart coverage and handoff exclusion. PR #35's merge resolution therefore keeps those newer
-implementations and adds only the missing 3/server-group and 8 MiB/vault accounting rails plus its
-reviewed request-correlation and off-path-writer corrections. The code is still intentionally
+restart coverage, handoff exclusion and Agent 2's reviewed 3/numeric-server and 8 MiB/vault rails.
+PR #35's merge resolution keeps those implementations and adds only its full-envelope parked-request
+correlation for Closing and Unconfirmed. The code is still intentionally
 unavailable to the renderer. P5 is false; native Save and repair commands remain unregistered.
 The reconciled exact head still requires CI and a bounded integration review before merge.
 
@@ -67,11 +69,11 @@ The reconciled exact head still requires CI and a bounded integration review bef
 
 | Item | State |
 |---|---|
-| Shared integration baseline | `gate4-agent1-runtime` at `9c63bd6eaa4bbf4f22b1f3bcd6b0fdee20ae45aa` |
+| Shared integration baseline | `gate4-agent1-runtime` at `7310b22b76848c4b9f85fec816744cff00c1a64f` |
 | Repair candidate | Historical PR #32 checkpoint `87629d6b72992254911a8e44f698d535bb5d7904`; its reviewed ancestry is in merged PR #33 |
 | Documentation checkpoint | Historical PR #31 checkpoint `f0af61c9b1247fa955300ac50545074e18e9b302`; its documentation ancestry is in merged PR #33 |
 | Archived-tenure branch | PR #34 merged; `gate4-finalization` is historical at `7f80815e...` |
-| Runtime completion branch | PR #35, `gate4-runtime-completion`; original implementation `eef69729...` plus separately identifiable review response `6aee00046...`, now reconciled with exact base `9c63bd6e...` |
+| Runtime completion branch | PR #35, `gate4-runtime-completion`; original implementation `eef69729...` plus separately identifiable review response `6aee00046...`, now reconciled with exact base `7310b22b...` |
 | Agent 3 source | `gate4-agent3-repair` at `15b715a10704a8dafc2cccef65854d4d45ad55ca`; preserved, not rewritten |
 
 PR #28 remains the Agent 3 source record. PR #32 was its first integrated successor; merged PR #33
@@ -82,7 +84,7 @@ historical source checkpoints, not additional merge instructions.
 ## Historical ownership checkpoint
 
 The agent-by-agent lists below record PR #35's original 2026-10-06 checkpoint. Later Agent 1 and
-Agent 1/2 commits already on `9c63bd6e...` supersede several “still required” entries; their own
+Agent 1/2 commits already on `7310b22b...` supersede several “still required” entries; their own
 status documents and `GATE4-ACCEPTANCE.md` are authoritative for current ownership. They are kept
 here as integration history, not as a live gap list.
 
@@ -187,14 +189,11 @@ because setup, process, renderer and command-registration
 paths are unchanged. Local `bash scripts/check-no-ambient.sh` could not start WSL (`E_ACCESSDENIED`),
 so Linux ambient and both repair-store mutation jobs remain exact-head PR checks.
 
-The independent bounded review initially found two MEDIUM defects: parked-plan correlation omitted
-provenance/operation identity, and ordinary replacements could change live-Unconfirmed physical
-bytes without updating the outer counters. Re-review found two residual MEDIUMs: `DomainOp::id`
-did not bind the body, and the separate retirement writer bypassed the central guard. Commit
-`6aee00046...` fixes all four with the full canonical-operation digest, sole accounted Flow S seam,
-and shared fail-closed retirement rule. Final re-review reports no remaining BLOCKER/HIGH/MEDIUM;
-the receipt-covered-retirement LOW test gap is recorded above. This verdict accepts only this
-bounded candidate, not the remaining Agent 1-3 work or full Gate 4.
+The original bounded review found request-correlation and quota-accounting defects and accepted
+`6aee00046...` after its response. The current merge resolution retains the accepted full canonical
+operation digest, while Agent 2's later reviewed `EpochIntentBudget` rails supersede the duplicate
+counter and off-path-writer solution. The resolved exact diff therefore requires a fresh bounded
+integration review and exact-head CI; the historical verdict does not by itself accept this merge.
 
 At `87629d6b72992254911a8e44f698d535bb5d7904`:
 

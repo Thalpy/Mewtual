@@ -124,10 +124,9 @@ impl ServerStore {
     /// its mint ATTEMPT from the target's current ready preview in this custody visit - even a
     /// failed one, because classification must still answer a retry with no live preview.
     ///
-    /// This and the two general entry points below have no production caller until the preview
-    /// Save (G4-A2-PREVIEW) lands; the Closing runtime keeps using its wrappers.
+    /// The preview Save (G4-A2-PREVIEW, `studio/receiver/unconfirmed.rs`) is its production
+    /// caller; the Closing runtime keeps using its wrappers.
     #[allow(clippy::too_many_arguments)]
-    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn start_studio_overlay(
         &mut self,
         server: u64,
@@ -161,7 +160,6 @@ impl ServerStore {
     /// The scheduled runtime's commit visit, for either provenance. An Unconfirmed commit takes a
     /// mint attempt made in THIS visit, never one parked with the plan (design 8.7, "re-enters").
     #[allow(clippy::too_many_arguments)]
-    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn commit_studio_overlay_with(
         &mut self,
         server: u64,
@@ -194,6 +192,9 @@ impl ServerStore {
     /// than a second orchestrator. Like the Closing adapter, this is for tests and callers that
     /// cannot release custody; the scheduled runtime uses the split form so the first append of a
     /// branch runs detached, off the actor (design 8.1).
+    ///
+    /// No production caller: the preview Save uses the split form above, and the Closing runtime
+    /// its own wrappers. Kept for the tests that drive all three stages in one call.
     #[allow(clippy::too_many_arguments)]
     #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn save_studio_overlay(
@@ -496,24 +497,21 @@ impl ServerStore {
                 StudioOverlayAdmission::Stale => return Err(stale_branch(&fresh)),
             }
         };
-        if matches!(&fresh, OwnedOverlayBasis::Unconfirmed(_)) {
-            match &joins {
-                OverlayBranch::Live
-                    if state
-                        .overlay()
-                        .map(|overlay| overlay.accepted())
-                        .unwrap_or(0)
-                        >= catcoms_replication::studio::MAX_STUDIO_UNCONFIRMED_OVERLAY_OPS =>
-                {
-                    return Err(invalid(
-                        "Unconfirmed draft operation limit reached (64 accepted operations)",
-                    ));
-                }
-                OverlayBranch::Admitted(_) => budget.preflight_unconfirmed_branch_count()?,
-                OverlayBranch::Live => {}
-            }
-        }
         drop(state);
+        // S1b, design 8.3's per-server and vault-wide rails for a draft made on a preview, from
+        // the budget entered in this call. Before the media half, by the rule for anything that
+        // cannot succeed: a refused rail has promoted and held no pixels. The bytes are the
+        // record's as it stands. A Save only grows it, so this is an early subset of S3's check,
+        // which runs again at the exact size the commit would write.
+        if matches!(
+            fresh.as_basis(),
+            catcoms_replication::studio::StudioOverlayBasis::Unconfirmed(_)
+        ) {
+            let scope = super::super::epoch_intents::scope_bytes(server, &logical)?;
+            let id = *blake3::hash(&scope).as_bytes();
+            let current = budget.intents.record_bytes(id).unwrap_or(0);
+            budget.intents.admit_unconfirmed(server, id, current)?;
+        }
         // S1b, the media half, now that this request is unaccepted, authorized and admitted to a
         // branch: validate and promote the referenced pixels into the durable namespace, then take
         // the job-owned hold. The intent, the frame facts and the hold are minted as one value

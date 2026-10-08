@@ -107,11 +107,7 @@ fn an_old_generation_request_is_stale_after_the_namespace_has_moved_on() {
         StudioOverlayAdmission::New { generation: 2 }
     );
     let g2 = after_g1
-        .new_admitted(
-            fresh,
-            StudioOverlayAdmission::New { generation: 2 },
-            StudioOverlayProvenance::Closing,
-        )
+        .new_admitted(fresh, StudioOverlayAdmission::New { generation: 2 })
         .unwrap();
     assert_eq!(g2.branch_generation(), 2);
     assert_eq!(g2.branch_id(), Some(g2_id));
@@ -197,11 +193,7 @@ fn a_fabricated_admission_cannot_mint_a_branch_at_a_chosen_generation() {
     // Reusing the disposed branch's own generation is the dangerous one, so it is checked first.
     assert!(
         after
-            .new_admitted(
-                &basis,
-                StudioOverlayAdmission::New { generation: 1 },
-                StudioOverlayProvenance::Closing,
-            )
+            .new_admitted(&basis, StudioOverlayAdmission::New { generation: 1 })
             .is_err(),
         "reusing the disposed branch's generation would give a new branch its identity"
     );
@@ -214,7 +206,6 @@ fn a_fabricated_admission_cannot_mint_a_branch_at_a_chosen_generation() {
                     StudioOverlayAdmission::New {
                         generation: fabricated
                     },
-                    StudioOverlayProvenance::Closing,
                 )
                 .is_err(),
             "generation {fabricated} is not the next one and must be refused"
@@ -223,11 +214,7 @@ fn a_fabricated_admission_cannot_mint_a_branch_at_a_chosen_generation() {
 
     // The real next generation works, and the branch it mints does NOT share the disposed identity.
     let g2 = after
-        .new_admitted(
-            &basis,
-            StudioOverlayAdmission::New { generation: 2 },
-            StudioOverlayProvenance::Closing,
-        )
+        .new_admitted(&basis, StudioOverlayAdmission::New { generation: 2 })
         .expect("the derived next generation must be admitted");
     assert_ne!(g2.branch_id(), Some(g1_id));
     // The disposed id must not resolve to the LIVE branch. It does still resolve to the retained
@@ -243,11 +230,7 @@ fn a_fabricated_admission_cannot_mint_a_branch_at_a_chosen_generation() {
     );
     // And `Stale` is never an admission.
     assert!(after
-        .new_admitted(
-            &basis,
-            StudioOverlayAdmission::Stale,
-            StudioOverlayProvenance::Closing,
-        )
+        .new_admitted(&basis, StudioOverlayAdmission::Stale)
         .is_err());
 }
 
@@ -299,9 +282,7 @@ fn appending_where_no_branch_exists_is_refused_and_admission_opens_the_next_one(
     let admission = after
         .admit_new_branch(f.source.target, requested, &basis)
         .unwrap();
-    let mut next = after
-        .new_admitted(&basis, admission, StudioOverlayProvenance::Closing)
-        .unwrap();
+    let mut next = after.new_admitted(&basis, admission).unwrap();
     next.append(&basis, &revived, id, 800)
         .expect("the first Save after a disposal is ordinary and must work");
 
@@ -470,11 +451,7 @@ fn the_requested_branch_id_is_the_one_admission_accepts_in_every_state() {
     // branch as Active - which is what preparing after the admission would have handed it anyway.
     let request = intent(&f, ordered[1].0.clone());
     let same = after
-        .new_admitted(
-            fresh,
-            StudioOverlayAdmission::New { generation: 2 },
-            StudioOverlayProvenance::Closing,
-        )
+        .new_admitted(fresh, StudioOverlayAdmission::New { generation: 2 })
         .unwrap();
     assert_eq!(
         same.classify_request(f.source.target, next, &request)
@@ -486,11 +463,7 @@ fn the_requested_branch_id_is_the_one_admission_accepts_in_every_state() {
     // names nothing and admission refuses it.
     let other = unrelated_basis();
     let different = after
-        .new_admitted(
-            &other,
-            StudioOverlayAdmission::New { generation: 2 },
-            StudioOverlayProvenance::Closing,
-        )
+        .new_admitted(&other, StudioOverlayAdmission::New { generation: 2 })
         .unwrap();
     assert_eq!(
         different
@@ -591,11 +564,7 @@ fn the_transferred_arm_is_exact_until_a_new_branch_is_admitted_and_then_refuses(
     // only has to be a valid one here; which basis it is does not affect the generation.
     let fresh = unrelated_basis();
     let next = transferred
-        .new_admitted(
-            &fresh,
-            StudioOverlayAdmission::New { generation: 2 },
-            StudioOverlayProvenance::Closing,
-        )
+        .new_admitted(&fresh, StudioOverlayAdmission::New { generation: 2 })
         .unwrap();
     assert_eq!(
         next.classify_request(f.source.target, id, &request)
@@ -635,11 +604,7 @@ fn a_new_branch_cannot_revive_the_ids_a_retained_disposal_recorded() {
     // shortcut: `minimum_new_basis_closed_epoch` is deliberately not advanced by a disposal.
     let fresh = &basis;
     let mut g2 = after
-        .new_admitted(
-            fresh,
-            StudioOverlayAdmission::New { generation: 2 },
-            StudioOverlayProvenance::Closing,
-        )
+        .new_admitted(fresh, StudioOverlayAdmission::New { generation: 2 })
         .unwrap();
     let first = ordered[0].0.id(&f.owner.device_id());
     let appended = g2.append(fresh, &revived, first, 500);
@@ -685,11 +650,7 @@ fn the_generation_and_provenance_survive_the_round_trip_and_gate_the_version() {
     let op = f.domain(f.title_body("generation two"));
     let id = revived.prepare(f.owner.device_id(), op).unwrap();
     let mut g2 = after
-        .new_admitted(
-            &basis,
-            StudioOverlayAdmission::New { generation: 2 },
-            StudioOverlayProvenance::Closing,
-        )
+        .new_admitted(&basis, StudioOverlayAdmission::New { generation: 2 })
         .unwrap();
     g2.append(&basis, &revived, id, 900).unwrap();
     assert_eq!(g2.branch_generation(), 2);
@@ -754,11 +715,7 @@ fn validate_refuses_a_zero_generation_in_a_crafted_record() {
         .prepare_closing_overlay(decision.close(), &f.group, 0)
         .unwrap();
     let mut g2 = transferred
-        .new_admitted(
-            &basis,
-            StudioOverlayAdmission::New { generation: 2 },
-            StudioOverlayProvenance::Closing,
-        )
+        .new_admitted(&basis, StudioOverlayAdmission::New { generation: 2 })
         .unwrap();
     // This used to return early when the append failed, and that early return was silently taken
     // once `append` stopped opening branches. An `expect` makes the setup a precondition instead.

@@ -10,7 +10,7 @@ use super::*;
 use catcoms_mls::{MlsDevice, ServerGroup};
 use catcoms_replication::epoch::{MAX_RECEIPT_BYTES, MAX_SIGNED_EPOCH_OP_BYTES};
 use catcoms_replication::studio::{
-    FlipnoteOp, IndexOp, StudioEpoch, StudioOverlayProvenance, StudioProjection, StudioTarget,
+    FlipnoteOp, IndexOp, StudioEpoch, StudioProjection, StudioTarget,
     MAX_STUDIO_EPOCH_SNAPSHOT_BYTES,
 };
 use catcoms_replication::{
@@ -67,15 +67,7 @@ pub struct EpochStudioBudget {
     generation: Arc<()>,
     storage: EpochStorageBudget,
     intents: EpochIntentBudget,
-    /// Live Unconfirmed branches for this numeric server/group in the inventory that minted this
-    /// budget. Updated only after a successful Flow S write or terminal disposal.
-    unconfirmed_server_branches: usize,
-    /// Exact physical Intents bytes occupied by live Unconfirmed branches across this vault.
-    unconfirmed_vault_bytes: u64,
 }
-
-const MAX_UNCONFIRMED_BRANCHES_PER_SERVER: usize = 3;
-const MAX_UNCONFIRMED_VAULT_BYTES: u64 = 8 * 1024 * 1024;
 impl std::fmt::Debug for EpochStudioBudget {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("EpochStudioBudget")
@@ -88,88 +80,26 @@ impl EpochStudioBudget {
     pub fn usage(&self) -> Footprint {
         self.storage.usage()
     }
+    /// Test-only: occupy design 8.3's Unconfirmed rails; see the intent budget's own hook.
+    #[cfg(test)]
+    pub(crate) fn occupy_unconfirmed_rails_for_test(
+        &mut self,
+        server: u64,
+        branches: u8,
+        room: u64,
+    ) {
+        self.intents
+            .occupy_unconfirmed_for_test(server, branches, room);
+    }
+    /// Test-only: the Unconfirmed tally this budget holds, as (server, bytes) per record.
+    #[cfg(test)]
+    pub(crate) fn unconfirmed_tally_for_test(&self) -> Vec<(u64, u64)> {
+        self.intents.unconfirmed_for_test()
+    }
     /// Reports uncertain accounting, not whether a newer mint superseded this wrapper. Every
     /// mutation independently checks the store's live generation before spending any bytes.
     pub fn requires_reconciliation(&self) -> bool {
         self.storage.requires_reconciliation()
-    }
-
-    /// Check the Unconfirmed rails against the exact replacement size before any durable write.
-    /// `old_charge` is present only when extending an already-live Unconfirmed branch.
-    fn preflight_unconfirmed(
-        &self,
-        opens_branch: bool,
-        old_charge: Option<u64>,
-        next_charge: u64,
-    ) -> Result<(), AppError> {
-        if opens_branch && self.unconfirmed_server_branches >= MAX_UNCONFIRMED_BRANCHES_PER_SERVER {
-            return Err(invalid(
-                "Unconfirmed draft limit reached for this server (3 branches)",
-            ));
-        }
-        let retained = self
-            .unconfirmed_vault_bytes
-            .checked_sub(old_charge.unwrap_or(0))
-            .ok_or_else(|| invalid("Unconfirmed draft inventory does not match the record"))?;
-        let next = retained
-            .checked_add(next_charge)
-            .ok_or_else(|| invalid("Unconfirmed draft accounting overflow"))?;
-        if next > MAX_UNCONFIRMED_VAULT_BYTES {
-            return Err(invalid(
-                "Unconfirmed draft storage limit reached for this vault (8 MiB)",
-            ));
-        }
-        Ok(())
-    }
-
-    fn preflight_unconfirmed_branch_count(&self) -> Result<(), AppError> {
-        if self.unconfirmed_server_branches >= MAX_UNCONFIRMED_BRANCHES_PER_SERVER {
-            return Err(invalid(
-                "Unconfirmed draft limit reached for this server (3 branches)",
-            ));
-        }
-        Ok(())
-    }
-
-    /// Apply already-preflighted accounting only after the replacement is durable.
-    fn commit_unconfirmed(
-        &mut self,
-        opens_branch: bool,
-        old_charge: Option<u64>,
-        next_charge: u64,
-    ) {
-        self.unconfirmed_vault_bytes = self
-            .unconfirmed_vault_bytes
-            .checked_sub(old_charge.unwrap_or(0))
-            .and_then(|bytes| bytes.checked_add(next_charge))
-            .expect("preflighted Unconfirmed byte accounting");
-        if opens_branch {
-            self.unconfirmed_server_branches += 1;
-        }
-    }
-
-    /// Release a live Unconfirmed branch's quota only after its terminal disposal is durable.
-    fn commit_unconfirmed_disposal(&mut self, old_charge: u64) {
-        self.unconfirmed_vault_bytes = self
-            .unconfirmed_vault_bytes
-            .checked_sub(old_charge)
-            .expect("authenticated live Unconfirmed record was charged by this budget");
-        self.unconfirmed_server_branches = self
-            .unconfirmed_server_branches
-            .checked_sub(1)
-            .expect("authenticated live Unconfirmed branch was charged by this budget");
-    }
-
-    fn unconfirmed_quota_snapshot(&self) -> (usize, u64) {
-        (
-            self.unconfirmed_server_branches,
-            self.unconfirmed_vault_bytes,
-        )
-    }
-
-    #[cfg(test)]
-    pub(crate) fn unconfirmed_usage_for_test(&self) -> (usize, u64) {
-        self.unconfirmed_quota_snapshot()
     }
 }
 /// Detached read-only persisted state. No mutable document/gate/book escapes the store.
@@ -218,61 +148,6 @@ impl EpochStudioState {
     }
 }
 impl ServerStore {
-    /// Test-only adapter for constructing the real mixed ordinary/Unconfirmed ledger sequence.
-    /// Production Studio edits keep using `edit_studio_epoch`; this deliberately stops after the
-    /// first intent barrier so the retirement regression can model an edit stranded before its
-    /// source barrier.
-    #[cfg(test)]
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) fn prepare_studio_intent_for_test(
-        &mut self,
-        server: u64,
-        group: &ServerGroup,
-        device: &MlsDevice,
-        document: &LogicalDocument,
-        operation: DomainOp,
-        rng: &mut impl CryptoRngCore,
-        budget: &mut EpochStudioBudget,
-    ) -> Result<EpochIntentState, AppError> {
-        self.enter_studio_budget(server, group, budget)?;
-        self.prepare_epoch_intent(
-            server,
-            document,
-            operation,
-            device,
-            group,
-            rng,
-            &mut budget.storage,
-            &mut budget.intents,
-        )
-    }
-
-    /// Test-only entry to the real manual-recovery retirement writer. The test supplies exact
-    /// loaded envelopes; this grants no production authority and exists only to prove that the
-    /// independent physical writer observes the live-Unconfirmed fail-closed rule.
-    #[cfg(test)]
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) fn retire_studio_intents_for_test(
-        &mut self,
-        server: u64,
-        group: &ServerGroup,
-        document: &LogicalDocument,
-        recovered: &std::collections::BTreeMap<[u8; 32], catcoms_replication::LocalIntent>,
-        rng: &mut impl CryptoRngCore,
-        budget: &mut EpochStudioBudget,
-    ) -> Result<(), AppError> {
-        self.enter_studio_budget(server, group, budget)?;
-        self.write_studio_manual_recovery_disposition_with_io(
-            server,
-            document,
-            recovered,
-            rng,
-            &mut budget.storage,
-            &mut budget.intents,
-            &mut WriteHooks::None,
-        )
-    }
-
     /// Use the SAME live five-family budget for a registry protocol transaction. No second
     /// mutable accounting owner escapes; the generation and full server scope are checked first.
     pub(crate) fn with_studio_protocol_budget<V>(
@@ -325,36 +200,12 @@ impl ServerStore {
         )
         .map_err(invalid)?;
         let intents = EpochIntentBudget::from_inventory(inventory)?;
-        let group_id = group.group_id();
-        let mut unconfirmed_server_branches = 0usize;
-        let mut unconfirmed_vault_bytes = 0u64;
-        for entry in inventory.records() {
-            let Some(facts) = entry.intent_facts() else {
-                continue;
-            };
-            if !matches!(
-                facts.provenance(),
-                Some(StudioOverlayProvenance::Unconfirmed { .. })
-            ) {
-                continue;
-            }
-            unconfirmed_vault_bytes = unconfirmed_vault_bytes
-                .checked_add(facts.charged_bytes())
-                .ok_or_else(|| invalid("Unconfirmed draft accounting overflow"))?;
-            if entry.server == server && entry.document.server_id == group_id {
-                unconfirmed_server_branches = unconfirmed_server_branches
-                    .checked_add(1)
-                    .ok_or_else(|| invalid("Unconfirmed draft accounting overflow"))?;
-            }
-        }
         self.studio_generation = Arc::new(());
         Ok(EpochStudioBudget {
             scope,
             generation: self.studio_generation.clone(),
             storage,
             intents,
-            unconfirmed_server_branches,
-            unconfirmed_vault_bytes,
         })
     }
     fn enter_studio_budget(
@@ -1158,8 +1009,7 @@ impl ServerStore {
         rng: &mut impl CryptoRngCore,
         budget: &mut EpochStudioBudget,
     ) -> Result<catcoms_replication::studio::StudioOverlayDisposal, AppError> {
-        let unconfirmed_quota = budget.unconfirmed_quota_snapshot();
-        let (disposed, unconfirmed_charge) = self.dispose_studio_overlay_accounted_with_io(
+        self.dispose_studio_overlay_with_io(
             server,
             document,
             target,
@@ -1170,13 +1020,8 @@ impl ServerStore {
             rng,
             &mut budget.storage,
             &mut budget.intents,
-            Some(unconfirmed_quota),
             &mut WriteHooks::None,
-        )?;
-        if let Some(old_charge) = unconfirmed_charge {
-            budget.commit_unconfirmed_disposal(old_charge);
-        }
-        Ok(disposed)
+        )
     }
 
     /// App-facing archive write. The control layer holds a `StudioDraftArchive` built on the

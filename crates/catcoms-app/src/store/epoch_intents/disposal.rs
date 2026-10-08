@@ -48,9 +48,10 @@ pub enum StudioDisposalRequestMode {
 }
 
 impl ServerStore {
-    /// Test-only spelling without the app's additional Unconfirmed quota counters. Production
-    /// disposal supplies those counters and applies the release after this transaction lands.
-    #[cfg(test)]
+    /// Dispose of an accepted local branch. D1 to D6, then one replacement.
+    ///
+    /// Every precondition is checked before any write, so a refusal costs nothing and leaves the
+    /// branch, its ledger entries and any existing archive exactly as they were.
     #[allow(clippy::too_many_arguments)]
     pub(in crate::store) fn dispose_studio_overlay_with_io(
         &mut self,
@@ -66,32 +67,6 @@ impl ServerStore {
         intents: &mut EpochIntentBudget,
         hooks: &mut WriteHooks<'_>,
     ) -> Result<StudioOverlayDisposal, AppError> {
-        self.dispose_studio_overlay_accounted_with_io(
-            server, document, target, group, device, request, ts, rng, budget, intents, None, hooks,
-        )
-        .map(|(manifest, _)| manifest)
-    }
-
-    /// Dispose of an accepted local branch. D1 to D6, then one replacement.
-    ///
-    /// Every precondition is checked before any write, so a refusal costs nothing and leaves the
-    /// branch, its ledger entries and any existing archive exactly as they were.
-    #[allow(clippy::too_many_arguments)]
-    pub(in crate::store) fn dispose_studio_overlay_accounted_with_io(
-        &mut self,
-        server: u64,
-        document: &LogicalDocument,
-        target: StudioTarget,
-        group: &ServerGroup,
-        device: &MlsDevice,
-        request: StudioOverlayDisposalRequest,
-        ts: u64,
-        rng: &mut impl CryptoRngCore,
-        budget: &mut EpochStorageBudget,
-        intents: &mut EpochIntentBudget,
-        unconfirmed_quota: Option<(usize, u64)>,
-        hooks: &mut WriteHooks<'_>,
-    ) -> Result<(StudioOverlayDisposal, Option<u64>), AppError> {
         // D1, part one: current local membership, and the same check every intent write makes. A
         // device that is not a current member of this document's group cannot dispose of work in it.
         if document.server_id != group.group_id()
@@ -171,15 +146,11 @@ impl ServerStore {
                 WriteStep::new(WriteTag::Intents),
                 hooks,
             )?;
-            return Ok((existing, None));
+            return Ok(existing);
         }
         let active = state
             .overlay()
             .ok_or_else(|| invalid("no local draft branch exists for this document"))?;
-        let unconfirmed = matches!(
-            metadata.provenance(),
-            catcoms_replication::studio::StudioOverlayProvenance::Unconfirmed { .. }
-        );
 
         // D1, part three: the requester must be the branch's own author. Membership alone is not
         // enough - another member of the same group has no standing over this device's local draft.
@@ -218,25 +189,6 @@ impl ServerStore {
                 "disposal disagrees with the branch's accepted count; re-inspect before disposing",
             ));
         }
-
-        // Validate the authenticated record against the inventory-derived quota before Preserve
-        // performs an archive durability barrier, so an accounting refusal changes no records.
-        let old = self
-            .read_scoped_intent_plain(&scope)?
-            .map(|record| record.physical_bytes);
-        let unconfirmed_charge = if unconfirmed {
-            let charge = old.ok_or_else(|| invalid("live Unconfirmed branch has no record"))?;
-            let (branches, bytes) = unconfirmed_quota
-                .ok_or_else(|| invalid("live Unconfirmed disposal requires its quota inventory"))?;
-            if branches == 0 || bytes < charge {
-                return Err(invalid(
-                    "Unconfirmed draft inventory does not match the disposed record",
-                ));
-            }
-            Some(charge)
-        } else {
-            None
-        };
 
         // D4 and D5: the evidence each mode requires.
         let decision = match request.mode {
@@ -430,6 +382,9 @@ impl ServerStore {
         // D6 and the write. The physical size only; the record was authenticated by the replay state
         // above. `write_prepared_intents` performs the preflight, the reservation, the I-4 rotation
         // and the atomic replacement, so the manifest and the removal land in one sealed plaintext.
+        let old = self
+            .read_scoped_intent_plain(&scope)?
+            .map(|record| record.physical_bytes);
         self.write_prepared_intents(
             server,
             document,
@@ -442,6 +397,6 @@ impl ServerStore {
             WriteStep::new(WriteTag::Intents),
             hooks,
         )?;
-        Ok((manifest, unconfirmed_charge))
+        Ok(manifest)
     }
 }

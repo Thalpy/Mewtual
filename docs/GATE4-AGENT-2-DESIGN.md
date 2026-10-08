@@ -1271,9 +1271,9 @@ over the same receipt and seed cannot be interchanged.
 >   defence, and a byte-surgery regression on a generation-2 preview record pins it.
 > - `new`, `new_admitted`, `admit_first_branch`, `admit_new_branch`, `request_branch_id` and
 >   `append` take `impl Into<StudioOverlayBasis>`, so Agent 1's call sites compile unchanged.
->   `new_admitted` refuses a `provenance` argument that disagrees with the basis variant and
->   stores the variant's own. Removing the redundant argument is left for coordination with
->   Agent 1.
+>   `new_admitted` stores the basis variant's own provenance. *Updated 2026-10-07:* its
+>   redundant `provenance` argument is removed (it was checked against the variant), with
+>   Agent 1's agreement. No caller can name a provenance at all now.
 > - **App side, as of 2026-10-06.**
 >   - *Built by Agent 1's Flow S (`c9566b82`):* "no installed source" under custody (a metadata
 >     probe), the S3 re-entry through a fresh mint attempt, the exact-target check and the
@@ -1340,8 +1340,44 @@ persisted-byte accounting. Refusals are `StorageRefused { reason }` and retain a
   `checked_entries` (every read, once the decoder has set the kind). It is pinned by mutation entry
   `unconfirmed-op-rail`.
 - **Per-document rail: holds structurally.** Admission never opens a branch beside a live one.
-- **Not built yet:** the per-server count and the vault-wide byte total. They are charged at
-  Flow S's admission, in Agent 1's store stages, and wait on the Save path (8.7).
+- **Per-server count and vault-wide bytes: built (2026-10-07).**
+  - *The tally.* `EpochIntentBudget` holds every intent record whose live branch is Unconfirmed,
+    with its server and charged bytes. It is built from the inventory's authenticated Intents
+    facts (`intent_facts()`), so terminal metadata never counts. `write_prepared_intents` keeps it
+    current for the record it writes. That is the only writer that opens or grows such a branch.
+    Every other writer only shrinks or ends one, so the tally can be stale only by over-counting.
+  - *The check.* `EpochIntentBudget::admit_unconfirmed`. A record that does not already hold a
+    live Unconfirmed branch is refused when its server holds 3 elsewhere. Any Save is refused when
+    the other records' bytes plus this record's size would pass 8 MiB.
+  - *Where it runs.* It runs at Flow S's two admission points, for an Unconfirmed basis only,
+    each time from the budget entered in that call:
+    - S1b, after the branch half and before media admission, at the record's current size, so a
+      refusal promotes and holds no pixels;
+    - S3, after the fresh mint's check and before the pixel check, the holds and the write, at
+      the exact size the write would produce (`prepared_intent_bytes`).
+
+    A draft admitted while another's plan is detached is therefore caught at the other's S3.
+  - *What it refuses.* Growth is refused; occupancy and acknowledgement are not. An exact retry
+    is answered at S1, before either rail, so accepted work is answered at full capacity. As with
+    the archive sub-cap, no existing occupancy makes a budget unusable.
+  - *Admission policy, not a vault invariant* (review of the rails, MEDIUM-1). The share bounds
+    what Flow S admits. Once a confirmed source is installed beside a live branch (8.6
+    `baseConfirmed`), ordinary edits land in the same record. The tally counts that record whole,
+    so it grows with them, and no rail refuses them: refusing ordinary editing for a draft's sake
+    would self-lock. So the tally can pass 8 MiB. Every Unconfirmed Save in the vault is then
+    refused as growth until disposal, retirement or a transfer restores headroom. Pinned by
+    `studio_unconfirmed_rail_tally_follows_ordinary_growth_and_drops_a_disposed_branch`. Orphaned
+    temporaries count toward the class ceiling but not toward this share.
+  - *Refusal type.* The refusal is `Invalid` with a reason of its own: "unconfirmed draft limit
+    reached" or "unconfirmed draft storage limit reached". That matches the class ceiling and the
+    archive sub-cap. The typed `StorageRefused` outcome named above is not built; native shows the
+    reason.
+  - *Tests.* In `tail::unconfirmed_rails`: the count at S1b, and a competing draft caught at S3;
+    a live branch appending on a full server; the share at S3 and at S1b; an exact retry at full
+    capacity; the tally from the inventory, after the commit and after a reopen; and the tally
+    under ordinary growth and after a disposal. Seven mutation entries, `unconfirmed-rail-*`.
+  - *What the tests do not build.* Three real preview drafts on one server. The other drafts are
+    stand-in tally entries, occupied through a test hook that moves only the tally.
 
 ### 8.4 Expiry versus retained work
 
@@ -1995,7 +2031,7 @@ Agent 1's `LocalDraftRetained` and `LocalDraftHandedOff` are separate.
 | After the disposal rename, before its flush | The exact retry reloads the record, sees `disposed`, and performs the sync-only flush `retire_included_with_io` already implements for `removed == 0`. |
 | Copy interrupted at any point | The ordinary Save retry contract applies unchanged; there is no bookkeeping write to be inconsistent with (findings 1, 8). |
 | Disposal requested while `Prepared` | Refused by D2. |
-| Restart with a retained unconfirmed branch and no preview | Reconstructs by re-parsing its own persisted seed bytes against its receipt (8.1 part 3); `AwaitingSource` until an installed source exists. An exact retry of accepted work is answered without a preview. New work is refused ("no live preview") until a fresh preview exists, and that preview's ticket names the same branch. *As built (2026-10-06), through the actor:* `unconfirmed_actor::studio_actor_unconfirmed_branch_resumes_after_a_restart_from_what_it_persisted`. It reopens the store and rebuilds the actor; the `Server` and its sync are kept, so it speaks for actor and store state. |
+| Restart with a retained unconfirmed branch and no preview | Reconstructs by re-parsing its own persisted seed bytes against its receipt (8.1 part 3); `AwaitingSource` until an installed source exists. An exact retry of accepted work is answered without a preview. New work is refused ("no live preview") until a fresh preview exists, and that preview's ticket names the same branch. *As built (2026-10-06), as receiver/store restart integration:* `unconfirmed_actor::studio_actor_unconfirmed_branch_resumes_after_a_restart_from_what_it_persisted`. It reopens the store and rebuilds the receiver; the `Server` and its sync are kept. So it speaks for receiver and store state, not a full process restart (MLS and provider state, tenure, transport identity and the actor mailbox are not reconstructed). It fetches a preview before its first post-restart retry and clears it later. The sequence "cold start, never fetch a preview, retry accepted work" is not separately run. |
 | Restart with an Unconfirmed Save planned but not committed (8.7) | The parked plan lives only in the actor, so it dies with the process, and its media hold with it. Nothing durable was written (RT-001). The identical request is a fresh first visit: it plans again and lands once. Same test. |
 | Restart mid-copy with the destination rotated | There is no C3 after a restart, and C4 compares no stamp. C4 refuses on `epoch_id`: the exact-retry shortcut's epoch check, or the re-plan's `epoch_id` and projection fingerprint. Re-preview against the new Open epoch. (Corrected 2026-10-06: this row used to credit the destination stamp.) |
 | **Release: unlink succeeded, parent-directory sync failed** | `CommittedButNotDurable`. **Not exact-retryable; see 12.1.** Both budgets are already closed. The caller reconciles and re-reads the archive state; it does not resend the request. |

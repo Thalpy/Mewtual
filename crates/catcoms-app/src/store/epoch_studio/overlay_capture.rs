@@ -42,16 +42,12 @@ pub(crate) enum StudioOverlayMint<'a> {
     ///
     /// Boxed because the basis carries its receipt and seed metadata inline, which dwarfs the
     /// Closing variant. Build it with [`StudioOverlayMint::unconfirmed`].
-    ///
-    /// Constructed only by tests until the preview Save (G4-A2-PREVIEW) wires it in production.
-    #[cfg_attr(not(test), allow(dead_code))]
     Unconfirmed(Result<Box<StudioUnconfirmedOverlayBasis>, AppError>),
 }
 
 impl StudioOverlayMint<'_> {
     /// Wrap a live-preview mint attempt exactly as `Server::mint_unconfirmed_overlay_basis`
     /// returned it, failed or not.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn unconfirmed(attempt: Result<StudioUnconfirmedOverlayBasis, AppError>) -> Self {
         Self::Unconfirmed(attempt.map(Box::new))
     }
@@ -221,8 +217,6 @@ pub(crate) struct StudioOverlayCapture {
     stamp: StudioOverlayStamp,
     intent_bytes: Option<Zeroizing<Vec<u8>>>,
     basis: OwnedOverlayBasis,
-    unconfirmed: bool,
-    opens_unconfirmed_branch: bool,
     /// The branch the request named, and what S1b decided it joins.
     branch: [u8; 32],
     joins: OverlayBranch,
@@ -246,8 +240,6 @@ pub(crate) struct StudioOverlayPlan {
     state: EpochIntentState,
     draft: StudioLocalDraft,
     media: AdmittedOverlayMedia,
-    unconfirmed: bool,
-    opens_unconfirmed_branch: bool,
 }
 
 impl std::fmt::Debug for StudioOverlayPlan {
@@ -285,14 +277,6 @@ impl StudioOverlayCapture {
             return Err(invalid("ordinary intent cannot become an accepted overlay"));
         }
         let mut overlay = self.joined_branch(state.overlay.as_ref())?;
-        if self.unconfirmed
-            && overlay.overlay().map(|held| held.accepted()).unwrap_or(0)
-                >= catcoms_replication::studio::MAX_STUDIO_UNCONFIRMED_OVERLAY_OPS
-        {
-            return Err(invalid(
-                "Unconfirmed draft operation limit reached (64 accepted operations)",
-            ));
-        }
         state
             .ledger
             .prepare(self.intent.author, self.intent.operation.clone())
@@ -306,8 +290,6 @@ impl StudioOverlayCapture {
             state,
             draft,
             media: self.media,
-            unconfirmed: self.unconfirmed,
-            opens_unconfirmed_branch: self.opens_unconfirmed_branch,
         })
     }
 
@@ -341,9 +323,7 @@ impl StudioOverlayCapture {
                 }
                 // The provenance argument is the basis's own, so it agrees by construction; it
                 // used to be a hard-coded `Closing` that nothing tied to the basis.
-                state
-                    .new_admitted(basis, *admission, basis.provenance())
-                    .map_err(invalid)
+                state.new_admitted(basis, *admission).map_err(invalid)
             }
             (OverlayBranch::Admitted(admission), None) => {
                 let basis = self.basis.as_basis();
@@ -471,8 +451,6 @@ impl ServerStore {
         ts: u64,
     ) -> Result<StudioOverlayCapture, AppError> {
         let basis = basis.into();
-        let unconfirmed = matches!(basis, OwnedOverlayBasis::Unconfirmed(_));
-        let opens_unconfirmed_branch = unconfirmed && matches!(&joins, OverlayBranch::Admitted(_));
         current_member(group, device)?;
         let document = target.document(&group.group_id()).map_err(invalid)?;
         let AdmittedOverlayAuthoring { intent, media } = authoring;
@@ -513,8 +491,6 @@ impl ServerStore {
             },
             intent_bytes: record.map(|r| r.plain),
             basis,
-            unconfirmed,
-            opens_unconfirmed_branch,
             branch,
             joins,
             intent,
@@ -750,8 +726,6 @@ impl ServerStore {
             state,
             draft,
             media,
-            unconfirmed,
-            opens_unconfirmed_branch,
         } = plan;
         let AdmittedOverlayMedia {
             origin,
@@ -790,24 +764,19 @@ impl ServerStore {
             return Err(basis_changed(&fresh));
         }
         drop(fresh);
-        let old_unconfirmed_charge = if unconfirmed && !opens_unconfirmed_branch {
-            stamp.intent.map(|(_, size)| size)
-        } else {
-            None
-        };
-        let next_unconfirmed_charge = if unconfirmed {
-            let scope = epoch_intents::scope_bytes(server, &document)?;
-            let next = state
-                .encode(&scope)?
-                .len()
-                .checked_add(40)
-                .ok_or_else(|| invalid("Unconfirmed draft accounting overflow"))?
-                as u64;
-            budget.preflight_unconfirmed(opens_unconfirmed_branch, old_unconfirmed_charge, next)?;
-            Some(next)
-        } else {
-            None
-        };
+        // S3, design 8.3's per-server and vault-wide rails, checked again at the exact size the
+        // write below would give the record, from the budget entered in this call. Before the pixel
+        // check, the holds and the write, so a refusal writes nothing and holds nothing.
+        if matches!(
+            state.live_overlay_provenance(),
+            Some(StudioOverlayProvenance::Unconfirmed { .. })
+        ) {
+            let scope = super::super::epoch_intents::scope_bytes(server, &document)?;
+            let next = super::super::epoch_intents::prepared_intent_bytes(&state, &scope)?;
+            budget
+                .intents
+                .admit_unconfirmed(server, *blake3::hash(&scope).as_bytes(), next)?;
+        }
         // S3: the referenced pixels must still be physically present. The transient hold is a
         // liveness claim over an address, not proof the bytes survived the detached stage, so
         // this runs before the ordinary holds and before the intent barrier. A missing blob must
@@ -833,14 +802,12 @@ impl ServerStore {
             }
         }
         let old = stamp.intent.map(|(_, physical)| physical);
-        // Flow S is the one writer that owns the outer Studio budget charging an Unconfirmed
-        // branch's complete physical intent record. Ordinary writers fail closed while such a
-        // branch is live; this accounted seam updates the charge only after the durable write.
-        let written = self.write_prepared_flow_s_intents(
+        let written = self.write_prepared_intents(
             server,
             &document,
             state,
             old,
+            false,
             rng,
             &mut budget.storage,
             &mut budget.intents,
@@ -850,9 +817,6 @@ impl ServerStore {
         // Explicit: the hold outlives the write attempt, including its error path.
         drop(hold);
         written?;
-        if let Some(next) = next_unconfirmed_charge {
-            budget.commit_unconfirmed(opens_unconfirmed_branch, old_unconfirmed_charge, next);
-        }
         Ok(draft)
     }
 }

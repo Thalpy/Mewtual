@@ -762,14 +762,14 @@ table with the commit that closed it.
   operation, including its body. A mismatched request may finish the plan to release the bounded
   actor slot, but it receives only `Busy` and cannot claim another request's outcome.
   Unconfirmed history is excluded from automatic handoff and is capped at three live branches per
-  numeric server/group, 8 MiB of authenticated physical Intents bytes per vault and 64 accepted
+  numeric server, 8 MiB of authenticated physical Intents bytes per vault and 64 accepted
   operations per branch. Exact
   retry is classified before preview expiry, while any new operation after expiry refuses.
   Accounting changes only after a durable replacement and terminal disposal releases the live
-  quota; fresh complete inventory reconstructs it. Non-sync ordinary intent replacement and
-  retirement that would preserve a live Unconfirmed branch fail closed outside the sole private,
-  quota-accounted Flow S writer; exact sync and terminal disposal remain possible. This prevents
-  untracked physical-byte changes until any future coexistence path owns the outer budget. The
+  quota; fresh complete inventory reconstructs it. The common `EpochIntentBudget` writer tracks
+  ordinary and Flow S replacements alike. The 8 MiB share is an admission limit on Unconfirmed
+  growth, not a hard vault invariant: an ordinary edit can take the tally over the share, after
+  which new Unconfirmed growth refuses until headroom returns. The
   internal actor path and native result types exist, but no native command or UI exposes them;
   this slice grants no permission to promote P5.
   The new explicit native Index/art transactions lend the sole mounted store only AFTER the
