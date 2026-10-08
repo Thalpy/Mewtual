@@ -519,17 +519,23 @@ fn run_interleaved(cases: &mut [Case], clock: &dyn catcoms_rt::Clock) {
 ///
 /// Every parameter is one axis of the fixture matrix these benchmarks sweep, so collapsing them
 /// into a struct would only move the same eight values one line up at each call site.
+///
+/// **Every case's store detaches every validation.** The harness times `validate()` on each
+/// parked record, and with the calibrated classifier a small uncached record would validate
+/// inline and contribute no sample. The switch keeps every record in the measurement, whatever
+/// the classifier's constants are (C-3 runtime design 14.6).
 #[allow(clippy::too_many_arguments)]
 fn case(
     label: impl Into<String>,
     root: tempfile::TempDir,
-    store: ServerStore,
+    mut store: ServerStore,
     coverage: EpochInventoryCoverage,
     references: bool,
     cache: CachePolicy,
     shape: FixtureShape,
     expected_refs: Option<ExpectedRefs>,
 ) -> Case {
+    store.detach_every_validation_for_test();
     Case {
         label: label.into(),
         _root: root,
@@ -1366,7 +1372,7 @@ fn c3_visit_profile_smoke() {
     assert_eq!(
         cost.records.len(),
         sizes.len(),
-        "a record did not park, so the classifier is no longer detaching everything and this \
+        "a record did not park, so the harness is no longer detaching everything and this \
          measurement no longer isolates the validation phase"
     );
     // Phase coverage: every parked result was installed, every trial finished, and each record
@@ -1615,8 +1621,8 @@ fn c3_multi_family_scan_parks_records_from_several_families() {
         .collect();
     // Named, not counted. A threshold like "at least three" is satisfied by Recovery, Registry
     // and Studio alone - the three families already measured - so it would pass with the two
-    // this fixture exists for entirely absent. The cache is cleared and `validation_fits`
-    // detaches everything, so every record present must park.
+    // this fixture exists for entirely absent. The cache is cleared and `case` switches the
+    // store to detach every validation, so every record present must park.
     for required in [
         EpochRecordKind::Recovery,
         EpochRecordKind::OwnerReceipts,

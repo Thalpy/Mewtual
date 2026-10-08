@@ -1358,6 +1358,10 @@ pub struct ServerStore {
     studio_source: Option<epoch_studio::source::RetainedSource>,
     #[cfg(test)]
     studio_rotation_interruption: Option<epoch_studio::StudioRotationInterruption>,
+    // Makes every budgeted fresh validation detach, for tests whose subject is the detached
+    // stage. On the store rather than the cursor, so a job's restarts keep it (C-3 runtime 14.6).
+    #[cfg(test)]
+    detach_every_validation: bool,
     creative_protection: creative_references::SharedProtection,
     // Stable only for this physical mount, unlike the rotating intent-inventory token. Replay
     // passes are local work cursors, not authority across reopen or the native UI-lock boundary.
@@ -1401,6 +1405,8 @@ impl ServerStore {
             studio_source: None,
             #[cfg(test)]
             studio_rotation_interruption: None,
+            #[cfg(test)]
+            detach_every_validation: false,
             replay_mount: std::sync::Arc::new(()),
             _session: session,
         };

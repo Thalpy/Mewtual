@@ -2381,6 +2381,156 @@ and are marked accordingly; 13.7 is re-run in the next checkpoint rather than be
 arithmetic here. `a_well_resolved_batch_is_not_reported_as_unresolved` pins all three rules this
 predicate has had wrong in sequence: the raw-sum rule, the zero-median rule and the per-unit rule.
 
+## C-3 classifier and refused-result memo, built (2026-10-08)
+
+This builds parts A and B of `GATE4-AGENT-1-C3-RUNTIME.md` section 14. Revision 2 of that section
+passed a design review and a re-review with no blocker or high. Store code only; no runtime site
+changes. **Step 3 stays gated** (14.5).
+
+### What is built
+
+- **`validation_fits` is calibrated** (`store/epoch_recovery/inventory.rs`).
+  - The rule: `(100 us + rate x KiB) x 4` must fit in `min(remaining - 1 ms, 25 ms)`.
+  - Families admitted, in accounting mode only: Recovery to 64 KiB at 3 us per KiB; Intents at
+    16 us per KiB; OwnerReceipts to 747 bytes; DraftArchive to its sealed cap at no
+    size-dependent rate.
+  - Never inline: Registry, Studio, and every family in reference mode.
+  - The constants and the reasoning behind each envelope are in `inline_calibration`.
+- **The validation memo** (`inventory/cache.rs`) gains two operations:
+  - `evict_mismatch`, run on every Registry or Studio read: an entry the bytes just read
+    contradict is removed;
+  - `put_if_vacant`.
+
+  Everything that enters the memo now goes through one helper, `memoize`. Its comment says why
+  extending the memo to Intents must carry the intent facts.
+- **A detached Registry or Studio result refused as `Invalidated` is memoized.** This happens in
+  `install_validated` before the job restarts, and never over an entry already present.
+  `ServerStore::memoize_overtaken_inventory_result` is the same entry point for a runtime that
+  discards a result itself. Each memoized result is checked against:
+  - the job's own cursor (scan identity, mount, awaited record);
+  - the store's current mount.
+- **A test-only switch, `detach_every_validation_for_test`, is on `ServerStore`**, so a job's
+  restarted cursors keep it.
+
+### Tests whose contract changed, recorded
+
+These plant small records that the calibrated classifier now inlines. They are switched to detach
+every validation, because their subject is the detached stage. They now assert "a record the
+classifier detaches parks"; what it detaches is the classifier's own tests' job. Each already
+asserted that something parked, which is what stops one from passing after it stops exercising
+the path.
+
+- `a_budgeted_cursor_parks_each_record_and_completes_through_the_detached_stage`
+- `a_budgeted_scan_produces_the_same_inventory_as_an_unbudgeted_one`
+- `a_rail_violation_still_refuses_after_a_record_has_been_parked_and_installed`
+- `the_aggregate_byte_rail_still_refuses_after_a_record_has_been_parked_and_installed`
+- `a_detached_validation_is_refused_by_the_wrong_scan_record_or_generation`
+- `driving_a_job_respects_the_visit_deadline_and_stops_at_a_park`
+- the 13.7 harness, through `case()`, which covers `c3_visit_profile_smoke` and
+  `c3_multi_family_scan_parks_records_from_several_families`
+
+Running the inventory tests with the classifier on and no switch failed exactly these eight, which
+matches the review's enumeration (seven tests plus the harness).
+
+### New tests, each broken on purpose
+
+Thirteen mutations were applied, and each was killed. The first twelve were killed by the new
+tests; the last by the switched tests and `the_detach_switch_survives_a_job_restart`:
+
+- `INLINE_SAFETY` set to 1;
+- the 25 ms cap removed;
+- the 1 ms floor removed;
+- the envelope check removed;
+- Studio admitted;
+- `references` ignored;
+- eviction on mismatch removed;
+- the vacancy check removed;
+- the store-mount check removed;
+- no memo on the `Invalidated` exits;
+- an unchecked memo on a fault exit;
+- the remaining time not sampled per record (run again after a formatting restructure of that
+  block);
+- the test switch ignored, which fails `the_detach_switch_survives_a_job_restart` and the switched
+  tests.
+
+After the implementation review, a fourteenth mutation removed `memoize`'s family gate. It was
+killed by `a_budgeted_scan_memoizes_only_registry_and_studio_records`. Both files were confirmed
+byte-identical to their pre-mutation hashes after each round.
+
+### Checks run
+
+The full run was on the reviewed tree:
+
+- fmt, clippy `-D warnings`, `check-no-ambient`, `check-store-raw-fs` and `cargo deny` passed;
+- the root suite with `--no-fail-fast` ran all 43 binaries: 2 178 passed, 0 failed;
+- the tauri workspace's `cargo check` passed;
+- the tauri suite with `--no-fail-fast` passed every binary except the known six-client flake at
+  `six_client_recovery.rs:416`. It failed at the same line in all three full runs today, including
+  the run on the test-only harness commit. On this branch no production inventory scan passes a
+  deadline, so part A has no production caller yet; part B's production effect is limited to the
+  eviction;
+- the frontend suite passed: 1 282 tests.
+
+The review's fixes are test code, comments and docs, all in catcoms-app or the docs. For those,
+fmt, clippy, the whole catcoms-app lib suite and the six-client test on its own were run again.
+
+| test | what it pins |
+|---|---|
+| `the_inline_classifier_admits_only_measured_families_inside_their_envelopes` | the rule as a table: each family and mode, envelope edges, the floor, the exact threshold, the cap, and `u64::MAX` |
+| `a_small_recovery_record_validates_inline_while_a_cold_studio_record_parks` | inlining through a real cursor; the budgeted inventory equals the unbudgeted one |
+| `the_slice_running_down_turns_an_inline_validation_into_a_park` | remaining time sampled per record against a visit's absolute deadline, with exact clock arithmetic |
+| `the_detach_switch_survives_a_job_restart` | the switch's placement (re-review MEDIUM-1) |
+| `a_refused_studio_result_warms_the_cache_for_the_restarted_job` | part B: the restarted job parks no Studio record and reuses one |
+| `a_stale_entry_is_evicted_so_a_refused_result_still_warms` | piece 1 (review HIGH-2a) |
+| `a_refused_result_never_displaces_an_entry_put_since_the_read` | piece 3 |
+| `an_overtaken_result_from_another_scan_mount_store_or_record_warms_nothing` | piece 2's bindings, fault exits, and vacancy on a second call |
+| `a_record_rewritten_after_its_validation_misses_the_warmed_entry` | a rewrite evicts the warmed entry and misses |
+| `a_budgeted_scan_memoizes_only_registry_and_studio_records` | `memoize`'s family gate: inlined Recovery and DraftArchive records leave no entry |
+| `a_vacant_only_put_never_displaces_an_existing_version`, `eviction_removes_only_a_contradicted_version_of_the_same_record` | the two cache operations directly |
+
+One branch is defensive and unreached by any test: the second `Invalidated` exit, where the
+cursor's generation differs from the result's. A result with a matching scan identity cannot reach
+it without forging. It memoizes the same way as the first exit.
+
+### What is not done
+
+- **Part B's runtime half lands with step 2** (`ccd00dbc`). Until then
+  `memoize_overtaken_inventory_result` has no production caller and carries a dead-code allowance
+  in non-test builds. Its implementation review (M-1) pointed out that nothing makes step 2 use
+  it: a port that keeps the uncharged restart as it is would drop every own-write result again,
+  which is exactly the gossip case. So **two conditions gate step 2's merge**:
+  - the store's uncharged restart takes the pending result and memoizes it before replacing the
+    cursor, for example `restart_epoch_inventory_job_uncharged(job, pending)`, so discarding
+    through that path cannot skip the memo;
+  - the own-write storm test asserts that `reused_records` rises after an uncharged refresh.
+- **Part C and step 3 are not built.** The follow-up measurements are in design 14.7: structured
+  Recovery shapes, and version-2 owner journals at their cap.
+
+### Implementation review (2026-10-08, Opus, static): no blocker or high
+
+The review confirmed the code matches design 14.2 and 14.3. It found:
+
+- **M-1, step 2's integration:** recorded above as a gate for step 2.
+- **L-1:** the docstring of `a_record_rewritten_after_its_validation_misses_the_warmed_entry` now
+  says it pins "a rewrite evicts and misses", not the digest check alone.
+- **L-2:** the slice test's docstring now says what it cannot catch: a sample taken at step entry
+  rather than at the record.
+- **L-3, doc wording:** fixed in the threat model, design 9.2, C-3 section 7 and this entry.
+- **L-4:** the cache comments now say what actually keeps a hit correct.
+- **L-5:** `memoize` takes the record rather than the whole body, as the design specified. Its
+  family gate is now pinned by `a_budgeted_scan_memoizes_only_registry_and_studio_records`. The
+  deviation from 14.3 is recorded there.
+
+Its residual gap was that `canonical()` ignored the Intents facts, so a budgeted-versus-unbudgeted
+comparison could not see lost Unconfirmed facts. It now compares them too.
+
+### Documentation updated
+
+- Design 9.2, consequence 2: the memo relaxation.
+- L6: what "sustained" means, priced.
+- The threat model: a new bullet after the I-4 one.
+- C-3 runtime: sections 1 and 14.
+
 ## Design 13.7, partially delivered: the first measurement in this design
 
 Until now every measurement obligation in design 13 was outstanding and the ledger said so. This

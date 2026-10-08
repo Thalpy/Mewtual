@@ -287,6 +287,26 @@ table with the commit that closed it.
   scan's caller gets an error, which pauses background receive. On such a filesystem Studio
   storage work can be refused, never budgeted from an undercount. No production path keeps a
   cursor across visits yet; replay's manual move (C-3 step 2) is the first.
+- **A budgeted scan holds custody for a bounded validation only, and a memoized validation is
+  reused only for identical bytes.** Under a deadline, `validation_fits` admits a fresh validation
+  inline only in accounting mode, and only for four families:
+  - Recovery, to 64 KiB;
+  - Intents, to 384 KiB, where the 25 ms cap binds;
+  - OwnerReceipts, to 747 bytes;
+  - DraftArchive, whose accounting does no size-dependent work.
+
+  It also requires a measured worst rate, times four, to fit in what remains of the slice and in
+  25 ms. Every other fresh validation detaches, including every fresh Registry and Studio
+  validation; a memo hit is reused instead. The rates are from one host, in a release build, on
+  the shapes measured. A peer able to make a much denser record than those shapes, or a much
+  slower machine, lengthens an inline hold in proportion. For Recovery and OwnerReceipts the size
+  envelopes keep it small; for Intents, the cap does. The validation memo holds only Registry and Studio accounting
+  records, keyed by filename hash, physical size and the blake3 digest of the authenticated
+  plaintext, and a hit needs all three to match bytes a scan has just read. **One deliberate
+  relaxation:** a detached result refused because a write overtook it is still memoized, unless
+  the memo already holds that record, so the restarted scan need not validate it again. The result
+  never reaches an inventory, and validation is a pure function of those bytes, so a memo entry
+  for bytes since rewritten is only a miss. A read evicts any entry its bytes contradict.
 - **Recovery staging cleanup deletes unpublished attempts, never saved recovery versions.** Only
   strict canonical temporary sibling names under the mounted store's fixed parent are eligible,
   with regular/non-reparse checks and exclusive access for the whole bounded pass. No caller can

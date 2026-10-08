@@ -881,6 +881,12 @@ Three consequences, from the revision-3 answer, that the implementation must hon
    hold the same `OverlayOwnership`: no second overlay pool, no capacity released when only the
    waiter is cancelled. The returned validation is bound to the original cursor identity, mount,
    record id and `inventory_generation`, and all four are rechecked before it is consumed.
+   **Relaxed for the validation memo only (2026-10-08, C-3 runtime design 14.3).** A Registry or
+   Studio result whose generation check fails is still never installed into an inventory. If it
+   passes the other three checks and the store's current mount, its accounting record is memoized
+   unless the memo already holds any version of that record. That is sound because the memo is keyed by the
+   bytes the result was computed from and validation is pure. It lets a restarted scan skip a
+   validation that a write overtook.
 3. **Parking bypasses no bound.** A genuine per-family or aggregate size-limit violation still
    refuses; scan poisoning, the cardinality and byte rails and the reference-cache exclusion are
    unchanged. At most one parked body exists at a time, which is the existing one-body-per-step
@@ -1049,6 +1055,18 @@ Limits:
   progress conditional on no five-family mutation for the duration of one scan. Under sustained
   writes a commit is held and retried. I-4's coverage is an audit obligation, and an under-rotating
   writer is the only unsafe direction.
+  **What "sustained" means, priced (2026-10-08, C-3 runtime design 14.5).** Ordinary gossip writes
+  between nearly every pair of turns, so an overlay commit completes only if its whole scan
+  finishes in one visit, within the overlay's 125 ms share, with no park. The calibrated classifier
+  and the refused-result memo still leave these to park on every pass:
+  - Recovery above 64 KiB, Intents above 384 KiB, or OwnerReceipts above 747 bytes;
+  - the commit's own Intents record when its seed is large;
+  - a record reached late in the slice;
+  - cold Studio and Registry records beyond the memo's 64 entries.
+
+  Traversal alone also exceeds 125 ms past roughly 60 MiB. A job warms about three records before
+  it backs off for 30 s, doubling to 300 s. So C-3 step 3 stays unbuilt, and until it is built the
+  handoff keeps completing in one expensive visit.
 - **L7.** Idle-only scheduling does not promise starvation-free overlay completion under sustained
   catch-up.
 

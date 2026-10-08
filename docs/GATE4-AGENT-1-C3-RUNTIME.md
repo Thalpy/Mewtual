@@ -24,6 +24,9 @@ answered below; the table in section 9 maps each one to the section that answers
   records are cacheable. Recovery, OwnerReceipts, Intents and DraftArchive are validated fresh on
   every scan, and `validation_fits` returns false for every fresh validation until measurement
   13.7 calibrates it. So under the current classifier **every uncached record parks**.
+  **Superseded 2026-10-08:** the classifier is calibrated (section 14.2), so small records of those
+  four families validate inline under a deadline. Registry and Studio still always detach when
+  cold.
 
 The second fact is what made revision 1's throughput premise false (review H2). It is why receive
 converts last, and only behind evidence (section 7).
@@ -221,6 +224,11 @@ Receive converts only after **one** of:
 
 And after measuring visits per inventory and the restart rate with a second actor writing. If
 receive stays synchronous, limitation L6 is stated to cover it.
+
+**Updated 2026-10-08.** "Every uncached record parks" is no longer true. The first condition above
+now holds (section 14.2): small records of the uncached families validate inline. Cold Registry
+and Studio records still park. The measurements in the last paragraph are still outstanding, so
+receive still does not convert.
 
 ## 8. Order of work
 
@@ -565,8 +573,13 @@ to its answer. The most important is HIGH-1: **A and B do not unblock step 3**, 
 wrong to propose that they did. Step 3 stays gated, and 14.5 says what would unblock it.
 
 The measurements are in the status ledger under "The uncached families at their ceilings
-(2026-10-08)". **Nothing here is built yet.** Part A is the classifier. Part B stops a detached
-result from being wasted when its job restarts. Part C is an open question about the cache.
+(2026-10-08)". Part A is the classifier. Part B stops a detached result from being wasted when its
+job restarts. Part C is an open question about the cache.
+
+**Parts A and B are built (2026-10-08), in the store only.** The status ledger entry "C-3
+classifier and refused-result memo, built" records the tests and mutations. Part B's runtime half,
+where step 2's uncharged refresh calls the store entry point before discarding a result, lands
+with step 2. Part C and step 3 are not built.
 
 ### 14.1 What the measurements allow
 
@@ -699,6 +712,13 @@ that arrive every turn, that can repeat indefinitely.
    so will step 3's embedded job when it exists. The warm and `install_body`'s existing put go
    through **one memoize helper** that takes the validated body, so the value type is decided in
    one place (re-review MEDIUM-2: see 14.5's memo).
+
+   **As built:** the helper takes the accounting record rather than the whole body. That is
+   because `install_body` has already moved the body's CIDs out by the time it memoizes. Its
+   comment says the signature must grow to take the Intents facts before the memo admits Intents.
+   A test pins that it admits only Registry and Studio today. Step 2's merge is gated on its
+   uncharged restart taking the pending result itself, so that no discard path can skip the memo
+   (implementation review M-1).
 3. **Put only if vacant.** After piece 1, "vacant" means nothing has been put for this record since
    the scan read it. If a write path put a newer version in between, that entry stays. If a writer
    that does not warm rewrote the record, the warmed entry is a harmless miss, and piece 1 evicts it

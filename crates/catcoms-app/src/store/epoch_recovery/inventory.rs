@@ -828,6 +828,48 @@ impl ServerStore {
         }
     }
 
+    /// Memoize a detached result that its job is about to throw away (C-3 runtime design 14.3).
+    ///
+    /// For a runtime that discards an `Installing` result itself rather than installing it, such
+    /// as step 2's uncharged refresh of an overtaken job. Call it **before** the job's cursor is
+    /// replaced: the result is checked against that cursor (its scan identity, its mount, and the
+    /// record it is awaiting) and against this store's current mount, and anything else warms
+    /// nothing. A result installed through [`Self::install_validated_job_record`] needs no call;
+    /// its own refusal warms the cache the same way.
+    ///
+    /// Only Registry and Studio results are memoized, and never over an entry already present for
+    /// that record. Returns whether the cache was warmed.
+    #[cfg_attr(not(test), allow(dead_code))] // Step 2's runtime calls it once that step lands.
+    pub(crate) fn memoize_overtaken_inventory_result(
+        &mut self,
+        job: &EpochInventoryJob,
+        validated: &ValidatedEpochRecord,
+    ) -> bool {
+        job.cursor.memoize_refused(self, validated)
+    }
+
+    /// Make every budgeted fresh validation detach, for a test whose subject is the detached
+    /// stage. It stays set for the store's life, so every cursor a job restarts into keeps it.
+    ///
+    /// Such a test should also assert that something parked, because a test that stops
+    /// exercising the detached path can keep passing for other reasons.
+    #[cfg(test)]
+    pub(in crate::store) fn detach_every_validation_for_test(&mut self) {
+        self.detach_every_validation = true;
+    }
+
+    /// Whether [`Self::detach_every_validation_for_test`] is in force. Always false outside tests.
+    fn detaches_every_validation(&self) -> bool {
+        #[cfg(test)]
+        {
+            self.detach_every_validation
+        }
+        #[cfg(not(test))]
+        {
+            false
+        }
+    }
+
     /// Finish, or restart once more, or report that the vault will not hold still.
     pub fn finish_epoch_inventory_job(
         &mut self,
@@ -1118,13 +1160,9 @@ impl EpochStorageCursor {
                     .insert((server, document.clone()), target);
             }
         }
-        if matches!(family, EpochRecordKind::Registry | EpochRecordKind::Studio) {
-            // Even an explicit reference scan may warm pure validation metadata, but a later
-            // reference scan must still enumerate the actual CIDs.
-            store
-                .inventory_cache
-                .put((family, hash), size, digest, body.record);
-        }
+        // Even an explicit reference scan may warm pure validation metadata, but a later
+        // reference scan must still enumerate the actual CIDs.
+        memoize(store, key, size, digest, body.record, Memoize::Replace);
         if self
             .inventory
             .records
@@ -1179,8 +1217,16 @@ impl EpochStorageCursor {
             Some(_) => return Err(fault("validated record is not the one this scan parked")),
             None => return Err(fault("this scan has no parked record to install")),
         }
-        self.check_not_invalidated(store)?;
+        // Refused for an invalidation, the result is still the right answer for the bytes it was
+        // computed from, so it is memoized before the caller restarts and drops it (C-3 runtime
+        // design 14.3). It never reaches an inventory. The fault exits above warm nothing: a
+        // result for another scan, mount or record is a caller error, not a lost validation.
+        if let Err(failure) = self.check_not_invalidated(store) {
+            self.memoize_refused(store, &validated);
+            return Err(failure);
+        }
         if !std::sync::Arc::ptr_eq(&self.generation, &validated.generation) {
+            self.memoize_refused(store, &validated);
             return Err(CursorFailure::Invalidated(invalid(
                 "validated record was produced before a concurrent record mutation",
             )));
@@ -1199,6 +1245,32 @@ impl EpochStorageCursor {
         self.awaiting = None;
         self.parked = None;
         Ok(())
+    }
+
+    /// Memoize a detached result this cursor parked but will not install (C-3 runtime 14.3).
+    ///
+    /// Every binding is checked here, including the ones `install_validated` has already
+    /// checked, because a runtime's own discard path reaches this without going through it:
+    /// the same scan, the same mount as this cursor **and as the store's current one**, and the
+    /// record this cursor is awaiting. Anything else warms nothing. The generation is
+    /// deliberately not checked: the result is memoized for the bytes it was computed from,
+    /// which a later read must match exactly, and it never reaches an inventory.
+    ///
+    /// Returns whether the cache was warmed.
+    fn memoize_refused(&self, store: &mut ServerStore, validated: &ValidatedEpochRecord) -> bool {
+        let bound = std::sync::Arc::ptr_eq(&self.identity, &validated.identity)
+            && std::sync::Arc::ptr_eq(&self.mount, &validated.mount)
+            && std::sync::Arc::ptr_eq(&validated.mount, &store.registry_mount())
+            && self.awaiting == Some(validated.key);
+        bound
+            && memoize(
+                store,
+                validated.key,
+                validated.size,
+                validated.digest,
+                validated.body.record,
+                Memoize::IfVacant,
+            )
     }
 
     fn step_with(
@@ -1388,6 +1460,15 @@ impl EpochStorageCursor {
                     // The digest includes scope/channel, receipt book, gate, quarantine and ALL
                     // signed history. Stat/filename/snapshot-head equality alone is insufficient.
                     let digest = blake3::hash(&plain);
+                    // A cached version these bytes contradict can never hit again, and left in
+                    // place it would block a later refused result from warming the record
+                    // (C-3 runtime design 14.3, piece 1). On every Registry or Studio read, so a
+                    // reference scan, which never consults the cache, clears it too.
+                    if matches!(family, EpochRecordKind::Registry | EpochRecordKind::Studio) {
+                        store
+                            .inventory_cache
+                            .evict_mismatch((family, hash), size, digest);
+                    }
                     let cached = cacheable
                         .then(|| store.inventory_cache.get((family, hash), size, digest))
                         .flatten();
@@ -1416,24 +1497,24 @@ impl EpochStorageCursor {
                         // validator on the strength of time that was spent getting to it.
                         let remaining_ms =
                             deadline.map(|(clock, at)| at.saturating_sub(clock.monotonic_ms()));
-                        if let Some(remaining) = remaining_ms {
-                            if !validation_fits(family, size, self.references.is_some(), remaining)
-                            {
-                                self.awaiting = Some((family, hash));
-                                self.parked = Some(ParkedEpochRecord {
-                                    identity: self.identity.clone(),
-                                    mount: self.mount.clone(),
-                                    generation: self.generation.clone(),
-                                    key: (family, hash),
-                                    plain,
-                                    server,
-                                    document,
-                                    size,
-                                    digest,
-                                    references: self.references.is_some(),
-                                });
-                                return Ok(self.progress);
-                            }
+                        let detach = remaining_ms.is_some_and(|remaining| {
+                            must_detach(store, family, size, self.references.is_some(), remaining)
+                        });
+                        if detach {
+                            self.awaiting = Some((family, hash));
+                            self.parked = Some(ParkedEpochRecord {
+                                identity: self.identity.clone(),
+                                mount: self.mount.clone(),
+                                generation: self.generation.clone(),
+                                key: (family, hash),
+                                plain,
+                                server,
+                                document,
+                                size,
+                                digest,
+                                references: self.references.is_some(),
+                            });
+                            return Ok(self.progress);
                         }
                         validate_record_body(
                             family,
@@ -2037,20 +2118,135 @@ impl ValidatedRecordBody {
 /// references are being collected - and **where cost cannot be conservatively classified, the
 /// default is to detach**.
 ///
-/// Measurement 13.7 is what will make classification possible: the largest single-record step for
-/// each family at its accepted ceiling, with and without reference collection. Until those
-/// figures exist, nothing can be conservatively classified and this returns false for every
-/// fresh validation. That is deliberately pessimistic - it detaches records that would have been
-/// cheap - and it is the direction the design names, because the failure mode of detaching a
-/// cheap record is an extra visit, while the failure mode of inlining an expensive one is an
-/// unbounded custody hold.
+/// The rule is C-3 runtime design 14.2, calibrated from measurement 13.7 ("The uncached families
+/// at their ceilings" in the status ledger): a measured worst rate per KiB, times the size, plus
+/// a fixed part, times [`INLINE_SAFETY`], must fit in what remains of the slice, and never more
+/// than [`INLINE_CAP_MS`]. A record is admitted only inside its family's envelope, which is the
+/// largest size measured unless the family does no size-dependent work at all.
+///
+/// The asymmetry it relies on: detaching a cheap record costs an extra visit, while inlining an
+/// expensive one is an unbounded custody hold. So it admits only what was measured.
+/// - **Reference mode never inlines.** Intents' reference collection rebuilds a retained
+///   branch's seed graph, so it is driven by structure like Studio, and no production reference
+///   scan has a deadline to classify against (`creative_pinned_cids` steps unbudgeted).
+/// - **Registry and Studio never inline.** Their cost is driven by structure: a 130 KB Studio
+///   record of 128 frames costs about 240 ms.
+///
+/// The figures are from one host, in a release build. A debug build validates roughly ten times
+/// slower, so its inline holds are not covered by this bound; nothing in production depends on
+/// them. The decision itself is deterministic under a deterministic clock, but a test driven by
+/// a real clock may see either outcome.
 fn validation_fits(
-    _family: EpochRecordKind,
-    _size: u64,
-    _references: bool,
-    _remaining_ms: u64,
+    family: EpochRecordKind,
+    size: u64,
+    references: bool,
+    remaining_ms: u64,
 ) -> bool {
-    false
+    if references {
+        return false;
+    }
+    let Some((rate_us_per_kib, envelope)) = inline_calibration(family) else {
+        return false;
+    };
+    if size > envelope {
+        return false;
+    }
+    let predicted_us =
+        INLINE_FIXED_US.saturating_add(rate_us_per_kib.saturating_mul(size.div_ceil(1024)));
+    // `remaining_ms` is a floored sample, so up to a millisecond of it may already be spent.
+    let budget_ms = remaining_ms.saturating_sub(1).min(INLINE_CAP_MS);
+    predicted_us.saturating_mul(INLINE_SAFETY) <= budget_ms.saturating_mul(1_000)
+}
+
+/// Whether a budgeted fresh validation must detach: the classifier says it does not fit, or the
+/// store is a test store switched to detach everything. Kept as its own function so the switch is
+/// an explicit alternative rather than a value smuggled through `remaining_ms`, which would stop
+/// working for any family the rule ever admitted at a zero budget.
+fn must_detach(
+    store: &ServerStore,
+    family: EpochRecordKind,
+    size: u64,
+    references: bool,
+    remaining_ms: u64,
+) -> bool {
+    store.detaches_every_validation() || !validation_fits(family, size, references, remaining_ms)
+}
+
+/// Margin between a measured worst case and what is admitted: a slower machine, run-to-run
+/// variance (quiet runs agreed within 10%; contended ones moved by up to 86%) and shape
+/// uncertainty all come out of this one factor, so it should be re-derived per component once
+/// the follow-up measurements in design 14.7 exist.
+const INLINE_SAFETY: u64 = 4;
+/// No inline validation is admitted against more than this, however much of the slice remains.
+/// With [`INLINE_SAFETY`], an admitted record is predicted to take at most a quarter of it.
+const INLINE_CAP_MS: u64 = 25;
+/// The per-record constant. Every small record measured validated in under 16 us.
+const INLINE_FIXED_US: u64 = 100;
+
+/// `(rate in us per KiB, envelope in physical bytes)` for a family that may validate inline in
+/// accounting mode, or `None` if it never does.
+fn inline_calibration(family: EpochRecordKind) -> Option<(u64, u64)> {
+    match family {
+        // Measured to 4 MiB at 2.3 us per KiB, but only on opaque projections. The accounting
+        // decode does work per item (each snapshot is re-encoded and hashed), so a structured
+        // record may be several times denser. The envelope is held where the fixed part
+        // dominates until structured shapes are measured: at 64 KiB even ten times the opaque
+        // rate is under 2 ms.
+        EpochRecordKind::Recovery => Some((3, 64 * 1024)),
+        // Worst single sample 14.7 us per KiB (a Closing branch of 64 operations). The densest
+        // shapes are entries, so a larger record, or a larger opaque seed, is cheaper per byte.
+        EpochRecordKind::Intents => Some((16, 4_197_020)),
+        // Not a byte rate: version-2 journals verify an Ed25519 signature per receipt during
+        // decode, and only version-1 journals were measured. At most one signature fits in the
+        // largest journal measured, and one verification fits inside the fixed part, so the
+        // small envelope carries this bound, not the rate.
+        EpochRecordKind::OwnerReceipts => Some((16, 747)),
+        // The one envelope beyond what was measured (6 334 584 bytes), because accounting never
+        // decodes the payload: `validate_record_body` only names and charges the record.
+        EpochRecordKind::DraftArchive => Some((0, family.sealed_cap() as u64)),
+        EpochRecordKind::Registry | EpochRecordKind::Studio => None,
+    }
+}
+
+/// How [`memoize`] treats an entry already cached for the record.
+#[derive(Clone, Copy)]
+enum Memoize {
+    /// An installed result for bytes this scan read and installed in one custody: replace.
+    Replace,
+    /// A result whose job was overtaken: never displace an entry put since the read.
+    IfVacant,
+}
+
+/// The one place a validation result enters `inventory_cache` (C-3 runtime design 14.3).
+///
+/// Only Registry and Studio are memoized, and only their accounting record, because a hit
+/// returns [`ValidatedRecordBody::accounting_only`]. That is sound for these two families, which
+/// carry no Intents inventory facts. **Extending the cache to Intents must store
+/// `EpochIntentInventoryFacts` as well, and this signature must grow to take them**, or
+/// `EpochIntentBudget::from_inventory`, which builds its Unconfirmed tally from them, would
+/// undercount live branches and mint too generous a budget.
+///
+/// Returns whether the cache was written.
+fn memoize(
+    store: &mut ServerStore,
+    key: (EpochRecordKind, [u8; 32]),
+    size: u64,
+    digest: blake3::Hash,
+    record: StorageRecord,
+    mode: Memoize,
+) -> bool {
+    if !matches!(key.0, EpochRecordKind::Registry | EpochRecordKind::Studio) {
+        return false;
+    }
+    match mode {
+        Memoize::Replace => {
+            store.inventory_cache.put(key, size, digest, record);
+            true
+        }
+        Memoize::IfVacant => store
+            .inventory_cache
+            .put_if_vacant(key, size, digest, record),
+    }
 }
 
 /// The typed validation of one authenticated record body, for every family.
@@ -3227,17 +3423,17 @@ mod tests {
         assert_eq!(inventory.coverage(), EpochInventoryCoverage::RecoveryOnly);
     }
 
-    /// C-3's custody bound: with a time budget, a record whose validation cannot be
-    /// conservatively bounded is parked rather than run, and the scan still completes through
-    /// the detached stage.
+    /// C-3's custody bound: with a time budget, a record the classifier detaches is parked rather
+    /// than run, and the scan still completes through the detached stage.
     ///
-    /// The classifier currently detaches every fresh validation, because measurement 13.7 does
-    /// not exist yet and 9.2's rule for that case is to default to detaching. So this also
-    /// documents the pessimistic default: one record per visit until those figures land.
+    /// The record is a small Recovery one, which the calibrated classifier would validate
+    /// inline, so the store is switched to detach every validation: this test's subject is the
+    /// detached stage, and the classifier's own tests say what it detaches (C-3 runtime 14.6).
     #[test]
     fn a_budgeted_cursor_parks_each_record_and_completes_through_the_detached_stage() {
         let root = tempfile::tempdir().unwrap();
         let mut store = open(root.path());
+        store.detach_every_validation_for_test();
         let doc = document(b"group", b"parked");
         stage(&mut store, 7, &doc, 1);
         let clock = ManualClock::new(0);
@@ -3310,6 +3506,11 @@ mod tests {
         u64,
         u64,
         u64,
+        // The Intents facts lifecycle accounting reads, as (provenance, charged bytes). Small
+        // Intents records now validate inline under a deadline, so the inline and detached paths
+        // must agree on these too. Provenance is compared through `Debug`, since the type is
+        // not `Ord` and the tuple must sort.
+        Option<(String, u64)>,
     );
 
     /// Every field a budgeted scan could have got wrong, canonicalised for comparison.
@@ -3335,6 +3536,9 @@ mod tests {
                     entry.record.footprint.content,
                     entry.record.footprint.protocol,
                     entry.record.footprint.settlement,
+                    entry
+                        .intent
+                        .map(|facts| (format!("{:?}", facts.provenance), facts.charged_bytes)),
                 )
             })
             .collect();
@@ -3370,10 +3574,15 @@ mod tests {
     /// staging accounting are all in the comparison. The rails are exercised across a park too:
     /// a record is parked, validated and installed before the limit is reached, so the refusal
     /// happens on a cursor that has already been through the detached path once.
+    ///
+    /// Switched to detach every validation: these small Recovery records would otherwise validate
+    /// inline, and the comparison would still pass while no longer exercising the detached path.
+    /// The count of parked bodies below is what pins that it does (C-3 runtime 14.6).
     #[test]
     fn a_budgeted_scan_produces_the_same_inventory_as_an_unbudgeted_one() {
         let root = tempfile::tempdir().unwrap();
         let mut store = open(root.path());
+        store.detach_every_validation_for_test();
         for (group, key) in [
             (&b"group-a"[..], &b"one"[..]),
             (&b"group-a"[..], &b"two"[..]),
@@ -3509,11 +3718,13 @@ mod tests {
     ///
     /// The existing cardinality and byte-rail tests run through the unbudgeted wrapper, so none
     /// of them reaches a limit on a cursor that has been through the detached path. Parking
-    /// bypasses no bound is a claim about exactly that case.
+    /// bypasses no bound is a claim about exactly that case. Switched to detach every validation,
+    /// since these small records would otherwise validate inline (C-3 runtime 14.6).
     #[test]
     fn a_rail_violation_still_refuses_after_a_record_has_been_parked_and_installed() {
         let root = tempfile::tempdir().unwrap();
         let mut store = open(root.path());
+        store.detach_every_validation_for_test();
         for key in [&b"one"[..], &b"two"[..], &b"three"[..]] {
             stage(&mut store, 7, &document(b"group", key), 1);
         }
@@ -3574,11 +3785,13 @@ mod tests {
     ///
     /// The record-count case above bounds cardinality; this bounds bytes, which is the counter a
     /// parked record's read has already spent by the time its validation is installed. The two
-    /// are separate rails and a cursor could honour one while losing the other.
+    /// are separate rails and a cursor could honour one while losing the other. Switched to
+    /// detach every validation, like the record-count case.
     #[test]
     fn the_aggregate_byte_rail_still_refuses_after_a_record_has_been_parked_and_installed() {
         let root = tempfile::tempdir().unwrap();
         let mut store = open(root.path());
+        store.detach_every_validation_for_test();
         for key in [&b"one"[..], &b"two"[..], &b"three"[..]] {
             stage(&mut store, 7, &document(b"group", key), 1);
         }
@@ -3724,11 +3937,15 @@ mod tests {
     /// mount, another record, or after a write the validation never saw. The last is the
     /// expected one - a validation runs outside custody precisely so that writes can happen
     /// while it does - which is why it refuses rather than poisons.
+    ///
+    /// Every store is switched to detach every validation inside `park`, which each one passes
+    /// through, because these small Recovery records would otherwise validate inline.
     #[test]
     fn a_detached_validation_is_refused_by_the_wrong_scan_record_or_generation() {
         let doc = document(b"group", b"binding");
         let clock = ManualClock::new(0);
         let park = |store: &mut ServerStore| {
+            store.detach_every_validation_for_test();
             let mut cursor = store
                 .begin_epoch_storage_scan(EpochInventoryCoverage::RecoveryOnly)
                 .unwrap();
@@ -4044,7 +4261,10 @@ mod tests {
         assert!(progress.complete, "the drive stopped before traversal end");
         assert_eq!(progress.visited_entries, 8);
 
-        // A record whose validation is never classified as fitting parks, and the drive stops.
+        // A record the classifier detaches parks, and the drive stops. This one is small enough
+        // to validate inline, so the store is switched to detach every validation; the switch
+        // lives on the store, so it holds for the job's cursor too.
+        store.detach_every_validation_for_test();
         let doc = document(b"group", b"park");
         stage(&mut store, 7, &doc, 1);
         let mut job = store
@@ -4523,5 +4743,589 @@ mod tests {
                 .unwrap(),
             EpochInventoryStep::Restarted
         ));
+    }
+
+    /// C-3 runtime design 14.2, as a table. The constants are `INLINE_FIXED_US = 100`,
+    /// `INLINE_SAFETY = 4` and `INLINE_CAP_MS = 25`, and each row's arithmetic is in its comment,
+    /// so a changed constant fails here with the reason visible rather than somewhere downstream.
+    #[test]
+    fn the_inline_classifier_admits_only_measured_families_inside_their_envelopes() {
+        use EpochRecordKind::*;
+        let fits = |family, size, remaining| validation_fits(family, size, false, remaining);
+
+        // Reference mode never inlines, for any family, however small or however much time.
+        for family in [
+            Recovery,
+            OwnerReceipts,
+            Intents,
+            DraftArchive,
+            Registry,
+            Studio,
+        ] {
+            assert!(
+                !validation_fits(family, 0, true, 1_000),
+                "{family:?} inlined with references"
+            );
+        }
+        // Registry and Studio never inline: their cost is driven by structure.
+        assert!(!fits(Registry, 0, 1_000));
+        assert!(!fits(Studio, 0, 1_000));
+
+        // The floor: a sample of 1 ms may already be spent, so it budgets nothing.
+        assert!(!fits(Recovery, 0, 0));
+        assert!(!fits(Recovery, 0, 1));
+        // 2 ms leaves a 1 ms budget, and an empty record predicts 100 us x 4 = 400 us.
+        assert!(fits(Recovery, 0, 2));
+        // Exactly at the threshold: 50 KiB predicts 100 + 3 x 50 = 250 us, x 4 = 1 000 us.
+        assert!(fits(Recovery, 50 * 1024, 2));
+        // One byte over rounds up a KiB: 253 us x 4 = 1 012 us, over the 1 ms budget.
+        assert!(!fits(Recovery, 50 * 1024 + 1, 2));
+
+        // The envelopes. Recovery is held at 64 KiB until structured shapes are measured.
+        assert!(fits(Recovery, 64 * 1024, 1_000));
+        assert!(!fits(Recovery, 64 * 1024 + 1, 1_000));
+        assert!(fits(OwnerReceipts, 747, 1_000));
+        assert!(!fits(OwnerReceipts, 748, 1_000));
+        // DraftArchive accounting does no size-dependent work, so its envelope is its cap.
+        let archive_cap = DraftArchive.sealed_cap() as u64;
+        assert!(fits(DraftArchive, archive_cap, 2));
+        assert!(!fits(DraftArchive, archive_cap + 1, 1_000));
+
+        // The cap binds however much time remains. 384 KiB of Intents predicts
+        // 100 + 16 x 384 = 6 244 us, x 4 = 24 976 us, inside 25 ms; one more KiB is 25 040 us.
+        assert!(fits(Intents, 384 * 1024, 1_000));
+        assert!(fits(Intents, 384 * 1024, 26));
+        assert!(
+            !fits(Intents, 384 * 1024, 25),
+            "25 ms remaining budgets only 24"
+        );
+        assert!(!fits(Intents, 384 * 1024 + 1, 1_000));
+        assert!(!fits(Intents, 384 * 1024 + 1, u64::MAX));
+
+        // No overflow anywhere: the largest inputs are refused, never wrapped into a yes.
+        for family in [
+            Recovery,
+            OwnerReceipts,
+            Intents,
+            DraftArchive,
+            Registry,
+            Studio,
+        ] {
+            assert!(
+                !fits(family, u64::MAX, u64::MAX),
+                "{family:?} admitted u64::MAX bytes"
+            );
+        }
+        assert!(fits(Recovery, 0, u64::MAX));
+    }
+
+    /// A small Studio source with a cold validation, in the vault's own group.
+    fn cold_studio_source(store: &mut ServerStore, object: u8) {
+        let device = catcoms_mls::MlsDevice::generate().unwrap();
+        let group = catcoms_mls::ServerGroup::create(&device).unwrap();
+        crate::store::epoch_studio::tests::performance::save_studio_source_fixture_ops(
+            store,
+            7,
+            &group,
+            &device,
+            catcoms_replication::studio::StudioTarget::Flipnote {
+                channel: [9; 16],
+                object: [object; 16],
+            },
+            3,
+            16,
+        );
+        store.inventory_cache.clear_for_test();
+    }
+
+    /// Step a job under a frozen 250 ms deadline until it parks a Studio record, installing any
+    /// other park on the way. Returns the parked Studio body.
+    fn park_studio(
+        store: &mut ServerStore,
+        job: &mut EpochInventoryJob,
+        clock: &ManualClock,
+    ) -> ParkedEpochRecord {
+        loop {
+            match store
+                .step_epoch_inventory_job(job, ENTRIES_PER_STEP, Some((clock, 250)))
+                .unwrap()
+            {
+                EpochInventoryStep::Parked => {
+                    let parked = store.take_parked_job_record(job).unwrap();
+                    if parked.classification().0 == EpochRecordKind::Studio {
+                        return parked;
+                    }
+                    let validated = parked.validate().unwrap();
+                    store.install_validated_job_record(job, validated).unwrap();
+                }
+                EpochInventoryStep::Stepped(progress) if progress.complete => {
+                    panic!("the traversal ended without parking a Studio record")
+                }
+                EpochInventoryStep::Unstable => panic!("a quiet vault reported unstable"),
+                _ => {}
+            }
+        }
+    }
+
+    /// Drive a job to its end under a frozen 250 ms deadline, installing every park, and report
+    /// how many Studio records parked and how many records were reused from the cache.
+    fn drive_to_end(
+        store: &mut ServerStore,
+        job: &mut EpochInventoryJob,
+        clock: &ManualClock,
+    ) -> (usize, usize) {
+        let mut studio_parks = 0;
+        loop {
+            match store
+                .step_epoch_inventory_job(job, ENTRIES_PER_STEP, Some((clock, 250)))
+                .unwrap()
+            {
+                EpochInventoryStep::Parked => {
+                    let parked = store.take_parked_job_record(job).unwrap();
+                    if parked.classification().0 == EpochRecordKind::Studio {
+                        studio_parks += 1;
+                    }
+                    let validated = parked.validate().unwrap();
+                    store.install_validated_job_record(job, validated).unwrap();
+                }
+                EpochInventoryStep::Stepped(progress) if progress.complete => {
+                    return (studio_parks, progress.reused_records);
+                }
+                EpochInventoryStep::Unstable => panic!("a quiet vault reported unstable"),
+                _ => {}
+            }
+        }
+    }
+
+    /// Part A through a real cursor at a frozen clock: under the same 250 ms deadline a small
+    /// Recovery record validates inline while a cold Studio record parks, and the budgeted
+    /// inventory is the unbudgeted one. This is the test that pins inlining.
+    #[test]
+    fn a_small_recovery_record_validates_inline_while_a_cold_studio_record_parks() {
+        let root = tempfile::tempdir().unwrap();
+        let mut store = open(root.path());
+        stage(&mut store, 7, &document(b"group", b"inline"), 1);
+        cold_studio_source(&mut store, 1);
+
+        let clock = ManualClock::new(0);
+        let mut cursor = store
+            .begin_epoch_storage_scan(
+                EpochInventoryCoverage::RecoveryOwnerReceiptsIntentsRegistryAndStudio,
+            )
+            .unwrap();
+        let mut parked_families = Vec::new();
+        loop {
+            let progress = store
+                .step_epoch_storage_scan(&mut cursor, ENTRIES_PER_STEP, Some((&clock, 250)))
+                .unwrap();
+            if let Some(parked) = store.take_parked_record(&mut cursor) {
+                parked_families.push(parked.classification().0);
+                let validated = parked.validate().unwrap();
+                store
+                    .install_validated_record(&mut cursor, validated)
+                    .unwrap();
+                continue;
+            }
+            if progress.complete {
+                assert_eq!(
+                    progress.recovery_records, 1,
+                    "the Recovery record was not counted"
+                );
+                break;
+            }
+        }
+        assert!(
+            !parked_families.contains(&EpochRecordKind::Recovery),
+            "a small Recovery record parked under a 250 ms budget: {parked_families:?}"
+        );
+        assert!(
+            parked_families.contains(&EpochRecordKind::Studio),
+            "the cold Studio record did not park: {parked_families:?}"
+        );
+
+        let budgeted = store.finish_epoch_storage_scan(cursor).unwrap();
+        let direct = collect_with(
+            &mut store,
+            EpochInventoryCoverage::RecoveryOwnerReceiptsIntentsRegistryAndStudio,
+        );
+        assert_eq!(canonical(&budgeted), canonical(&direct));
+    }
+
+    /// The remaining time is sampled at each record, against the visit's one absolute deadline,
+    /// because reaching a record spends some of it (design 9.2 consequence 1). A step handles at
+    /// most one record, so the slice runs down across the steps of one drive.
+    ///
+    /// The arithmetic, with a clock that advances 20 ms per read and a deadline at 70: the
+    /// drive's check reads 20, so a step begins. The first record's sample reads 40, leaving
+    /// 30 ms, a 25 ms budget, so it inlines and the step ends. The drive's next check reads 60,
+    /// still inside, so a second step begins. The second record's sample reads 80, leaving
+    /// nothing, so it parks. A classifier given the time remaining when the visit began would
+    /// inline both.
+    ///
+    /// What it does **not** catch: a sample taken when each step begins rather than at the record.
+    /// Each record here is the first entry of its step, and the clock moves only when read, so the
+    /// two give the same figures. Telling them apart needs non-family entries ahead of a record
+    /// within one step, and directory order cannot be controlled.
+    #[test]
+    fn the_slice_running_down_turns_an_inline_validation_into_a_park() {
+        let root = tempfile::tempdir().unwrap();
+        let mut store = open(root.path());
+        stage(&mut store, 7, &document(b"group", b"early"), 1);
+        stage(&mut store, 7, &document(b"group", b"late"), 1);
+        let listed = fs::read_dir(root.path().join("servers")).unwrap().count();
+        assert_eq!(
+            listed, 2,
+            "the arithmetic below assumes the two records are the only entries"
+        );
+
+        let clock = SteppingClock {
+            ms: std::sync::atomic::AtomicU64::new(0),
+            step: 20,
+        };
+        let mut job = store
+            .begin_epoch_inventory_job(EpochInventoryCoverage::RecoveryOnly)
+            .unwrap();
+        let step = store
+            .drive_epoch_inventory_job(&mut job, &clock, 70)
+            .unwrap();
+        assert_eq!(
+            job.cursor.progress.recovery_records, 1,
+            "the first record was not validated inline while time remained"
+        );
+        assert!(
+            matches!(step, EpochInventoryStep::Parked),
+            "the second record did not park once the slice had run down: {step:?}"
+        );
+        assert!(store.take_parked_job_record(&mut job).is_some());
+    }
+
+    /// The test switch is on the store, so a job's restarted cursor keeps it (re-review
+    /// MEDIUM-1). A switch held by the cursor would be lost here and the record would inline.
+    #[test]
+    fn the_detach_switch_survives_a_job_restart() {
+        let root = tempfile::tempdir().unwrap();
+        let mut store = open(root.path());
+        store.detach_every_validation_for_test();
+        stage(&mut store, 7, &document(b"group", b"switched"), 1);
+        let clock = ManualClock::new(0);
+        let mut job = store
+            .begin_epoch_inventory_job(EpochInventoryCoverage::RecoveryOnly)
+            .unwrap();
+        store.epoch_mutation_guard();
+        assert!(
+            matches!(
+                store
+                    .step_epoch_inventory_job(&mut job, ENTRIES_PER_STEP, Some((&clock, 250)))
+                    .unwrap(),
+                EpochInventoryStep::Restarted
+            ),
+            "precondition: the job was overtaken and restarted"
+        );
+        assert!(
+            matches!(
+                store
+                    .step_epoch_inventory_job(&mut job, ENTRIES_PER_STEP, Some((&clock, 250)))
+                    .unwrap(),
+                EpochInventoryStep::Parked
+            ),
+            "the restarted job inlined a record the switch should have detached"
+        );
+    }
+
+    /// Part B (design 14.3): a detached Studio result refused because a write overtook it is
+    /// memoized, so the restarted job reuses it instead of parking the record again.
+    #[test]
+    fn a_refused_studio_result_warms_the_cache_for_the_restarted_job() {
+        let root = tempfile::tempdir().unwrap();
+        let mut store = open(root.path());
+        cold_studio_source(&mut store, 1);
+        let clock = ManualClock::new(0);
+        let mut job = store
+            .begin_epoch_inventory_job(
+                EpochInventoryCoverage::RecoveryOwnerReceiptsIntentsRegistryAndStudio,
+            )
+            .unwrap();
+        let validated = park_studio(&mut store, &mut job, &clock)
+            .validate()
+            .unwrap();
+        store.epoch_mutation_guard();
+        assert!(
+            matches!(
+                store
+                    .install_validated_job_record(&mut job, validated)
+                    .unwrap(),
+                EpochInventoryStep::Restarted
+            ),
+            "precondition: the overtaken result was refused and the job restarted"
+        );
+        let (studio_parks, reused) = drive_to_end(&mut store, &mut job, &clock);
+        assert_eq!(
+            studio_parks, 0,
+            "the restarted job parked the Studio record again: its refused result was lost"
+        );
+        assert!(
+            reused >= 1,
+            "the restarted job reused nothing from the cache"
+        );
+    }
+
+    /// Piece 1: a stale cached version of the record, here planted the way a writer that does not
+    /// warm would leave one, is evicted when the scan reads the current bytes. Without that, the
+    /// vacancy rule would refuse the refused result's warm, and the restarted job would park the
+    /// record again.
+    #[test]
+    fn a_stale_entry_is_evicted_so_a_refused_result_still_warms() {
+        let root = tempfile::tempdir().unwrap();
+        let mut store = open(root.path());
+        cold_studio_source(&mut store, 1);
+        let clock = ManualClock::new(0);
+        let full = EpochInventoryCoverage::RecoveryOwnerReceiptsIntentsRegistryAndStudio;
+
+        // Learn the record's key and accounting from one park, then abandon that job.
+        let mut probe = store.begin_epoch_inventory_job(full).unwrap();
+        let probed = park_studio(&mut store, &mut probe, &clock)
+            .validate()
+            .unwrap();
+        drop(probe);
+        store.inventory_cache.put(
+            probed.key,
+            probed.size,
+            blake3::hash(b"an older version of this record"),
+            probed.body.record,
+        );
+
+        let mut job = store.begin_epoch_inventory_job(full).unwrap();
+        let validated = park_studio(&mut store, &mut job, &clock)
+            .validate()
+            .unwrap();
+        store.epoch_mutation_guard();
+        assert!(matches!(
+            store
+                .install_validated_job_record(&mut job, validated)
+                .unwrap(),
+            EpochInventoryStep::Restarted
+        ));
+        let (studio_parks, _) = drive_to_end(&mut store, &mut job, &clock);
+        assert_eq!(
+            studio_parks, 0,
+            "the stale entry survived the read and blocked the refused result's warm"
+        );
+    }
+
+    /// Piece 3: an entry put after the scan read the record, as a write path warming a newer
+    /// version would, is never displaced by the older refused result.
+    #[test]
+    fn a_refused_result_never_displaces_an_entry_put_since_the_read() {
+        let root = tempfile::tempdir().unwrap();
+        let mut store = open(root.path());
+        cold_studio_source(&mut store, 1);
+        let clock = ManualClock::new(0);
+        let mut job = store
+            .begin_epoch_inventory_job(
+                EpochInventoryCoverage::RecoveryOwnerReceiptsIntentsRegistryAndStudio,
+            )
+            .unwrap();
+        let validated = park_studio(&mut store, &mut job, &clock)
+            .validate()
+            .unwrap();
+        let (key, size, digest, record) = (
+            validated.key,
+            validated.size,
+            validated.digest,
+            validated.body.record,
+        );
+        let newer = blake3::hash(b"a newer version a write path warmed");
+        store.inventory_cache.put(key, size + 1, newer, record);
+        store.epoch_mutation_guard();
+        store
+            .install_validated_job_record(&mut job, validated)
+            .unwrap();
+        assert!(
+            store.inventory_cache.get(key, size + 1, newer).is_some(),
+            "the refused result displaced the newer entry"
+        );
+        assert!(
+            store.inventory_cache.get(key, size, digest).is_none(),
+            "the refused result was memoized over an entry put since the read"
+        );
+    }
+
+    /// Piece 2's bindings: only a result for this job's own cursor, its own mount, this store's
+    /// current mount and the record it awaits warms anything. A result refused as a fault, not
+    /// an invalidation, warms nothing either.
+    #[test]
+    fn an_overtaken_result_from_another_scan_mount_store_or_record_warms_nothing() {
+        let root = tempfile::tempdir().unwrap();
+        let mut store = open(root.path());
+        cold_studio_source(&mut store, 1);
+        let clock = ManualClock::new(0);
+        let full = EpochInventoryCoverage::RecoveryOwnerReceiptsIntentsRegistryAndStudio;
+        let mut job = store.begin_epoch_inventory_job(full).unwrap();
+        let validated = park_studio(&mut store, &mut job, &clock)
+            .validate()
+            .unwrap();
+        let cold = |store: &mut ServerStore| {
+            store
+                .inventory_cache
+                .get(validated.key, validated.size, validated.digest)
+                .is_none()
+        };
+
+        // Another scan: a second job's cursor, parked on the same record.
+        let mut other_job = store.begin_epoch_inventory_job(full).unwrap();
+        let _ = park_studio(&mut store, &mut other_job, &clock);
+        assert!(!store.memoize_overtaken_inventory_result(&other_job, &validated));
+        // Another record: this job's own result, renamed to a record the cursor is not awaiting.
+        let mut forged = validated_clone(&validated);
+        forged.key.1 = [0xAB; 32];
+        assert!(!store.memoize_overtaken_inventory_result(&job, &forged));
+        // Another mount, carried by the result.
+        let mut forged = validated_clone(&validated);
+        forged.mount = std::sync::Arc::new(());
+        assert!(!store.memoize_overtaken_inventory_result(&job, &forged));
+        // Another store: the cursor and result agree with each other, but not with this store.
+        let other_root = tempfile::tempdir().unwrap();
+        let mut other_store = open(other_root.path());
+        assert!(!other_store.memoize_overtaken_inventory_result(&job, &validated));
+        assert!(cold(&mut store), "a mismatched result warmed the cache");
+
+        // A fault exit: installing into a job that did not park it.
+        assert!(store
+            .install_validated_job_record(&mut other_job, validated_clone(&validated))
+            .is_err());
+        assert!(
+            cold(&mut store),
+            "a result refused as a fault warmed the cache"
+        );
+
+        // The control: the job's own result warms once, and the vacancy rule refuses a second.
+        assert!(store.memoize_overtaken_inventory_result(&job, &validated));
+        assert!(!store.memoize_overtaken_inventory_result(&job, &validated));
+        assert!(!cold(&mut store));
+    }
+
+    /// A record rewritten after its result was memoized misses: the warm entry describes the old
+    /// bytes, so the read evicts it and the record parks again.
+    ///
+    /// This pins "a rewrite evicts and misses", not `get`'s digest check on its own. The rewrite
+    /// here also changes the size, and eviction runs before the lookup, so either guard alone
+    /// would make it pass. `inventory_cache_is_bounded_lru_and_requires_family_size_and_full_digest`
+    /// in the cache's own tests is what pins the digest check.
+    #[test]
+    fn a_record_rewritten_after_its_validation_misses_the_warmed_entry() {
+        let root = tempfile::tempdir().unwrap();
+        let mut store = open(root.path());
+        let device = catcoms_mls::MlsDevice::generate().unwrap();
+        let group = catcoms_mls::ServerGroup::create(&device).unwrap();
+        let target = catcoms_replication::studio::StudioTarget::Flipnote {
+            channel: [9; 16],
+            object: [1; 16],
+        };
+        let save = |store: &mut ServerStore, message: usize| {
+            crate::store::epoch_studio::tests::performance::save_studio_source_fixture_ops(
+                store, 7, &group, &device, target, 3, message,
+            );
+            store.inventory_cache.clear_for_test();
+        };
+        save(&mut store, 16);
+        let clock = ManualClock::new(0);
+        let full = EpochInventoryCoverage::RecoveryOwnerReceiptsIntentsRegistryAndStudio;
+        let mut job = store.begin_epoch_inventory_job(full).unwrap();
+        let validated = park_studio(&mut store, &mut job, &clock)
+            .validate()
+            .unwrap();
+        assert!(store.memoize_overtaken_inventory_result(&job, &validated));
+        drop(job);
+
+        // Rewrite the record without warming the cache, keeping the warmed entry for the old
+        // bytes in place.
+        let (key, size, digest, record) = (
+            validated.key,
+            validated.size,
+            validated.digest,
+            validated.body.record,
+        );
+        save(&mut store, 32);
+        store.inventory_cache.put(key, size, digest, record);
+
+        let mut job = store.begin_epoch_inventory_job(full).unwrap();
+        let (studio_parks, _) = drive_to_end(&mut store, &mut job, &clock);
+        assert!(
+            studio_parks >= 1,
+            "a rewritten record hit an entry memoized for its old bytes"
+        );
+    }
+
+    /// `memoize` admits only Registry and Studio. A budgeted full scan inlines a small Recovery
+    /// record and a small DraftArchive, installs both through `memoize`, and must leave neither
+    /// in the memo: a hit returns accounting facts only, and for Intents that would drop the
+    /// facts lifecycle accounting reads (implementation review L-5).
+    #[test]
+    fn a_budgeted_scan_memoizes_only_registry_and_studio_records() {
+        let root = tempfile::tempdir().unwrap();
+        let mut store = open(root.path());
+        let doc = document(b"group", b"memo");
+        stage(&mut store, 7, &doc, 1);
+        crate::store::epoch_draft_archive::write_draft_archive_for_test(
+            &store,
+            7,
+            &doc,
+            &[9; 64],
+            &mut ChaCha20Rng::seed_from_u64(1),
+        )
+        .unwrap();
+        cold_studio_source(&mut store, 1);
+
+        let clock = ManualClock::new(0);
+        let mut job = store
+            .begin_epoch_inventory_job(
+                EpochInventoryCoverage::RecoveryOwnerReceiptsIntentsRegistryAndStudio,
+            )
+            .unwrap();
+        drive_to_end(&mut store, &mut job, &clock);
+        let EpochInventoryOutcome::Complete(inventory) =
+            store.finish_epoch_inventory_job(job).unwrap()
+        else {
+            panic!("a quiet vault did not complete");
+        };
+        for family in [EpochRecordKind::Recovery, EpochRecordKind::DraftArchive] {
+            assert!(
+                inventory.records().any(|entry| entry.kind == family),
+                "precondition: the scan installed no {family:?} record"
+            );
+            assert_eq!(
+                store.inventory_cache.entries_for_test(family),
+                0,
+                "a {family:?} record was memoized"
+            );
+        }
+        let studio = store
+            .inventory_cache
+            .entries_for_test(EpochRecordKind::Studio);
+        assert!(
+            studio >= 1,
+            "the control failed: the Studio record was not memoized"
+        );
+    }
+
+    /// A copy of a validated result, for tests that offer the same one more than once.
+    fn validated_clone(validated: &ValidatedEpochRecord) -> ValidatedEpochRecord {
+        ValidatedEpochRecord {
+            identity: validated.identity.clone(),
+            mount: validated.mount.clone(),
+            generation: validated.generation.clone(),
+            key: validated.key,
+            server: validated.server,
+            document: validated.document.clone(),
+            size: validated.size,
+            digest: validated.digest,
+            body: ValidatedRecordBody {
+                record: validated.body.record,
+                cids: validated.body.cids.clone(),
+                intent: None,
+                metadata: validated.body.metadata,
+                required: validated.body.required,
+            },
+        }
     }
 }
