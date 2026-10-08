@@ -73,6 +73,22 @@ impl std::fmt::Debug for StudioHandoffCapture {
     }
 }
 
+/// What H2 learned about the destination source while restoring it detached, so H5 does not
+/// restore it again (design 9.1 and 9.1.1, step 1).
+///
+/// **Valid only behind the stamp.** `restore` and H2's `prepare_vault_source` are the same
+/// restore over the same inputs, and the stamp binds every one of them: the plaintext, the
+/// server, the target and the owner. So these are exactly what H5's own restore would compute,
+/// for as long as H5's stamp check passes. H5 also requires `source` to equal the stamp's, which
+/// ties these facts to the bytes H5 re-reads.
+pub(super) struct HandoffFacts {
+    /// The blake3 of the source plaintext H2 actually decoded, computed by H2 rather than copied
+    /// from the stamp, and the physical size H1 observed, which H2 cannot know by itself.
+    source: (blake3::Hash, u64),
+    /// The restored source's protocol bytes, the one accounting fact the stamp does not carry.
+    storage_protocol_bytes: usize,
+}
+
 /// A proposal carrying the private signing batch. It becomes durable only after a custody visit
 /// reauthenticates the exact records it came from and signs every operation.
 pub(crate) struct StudioHandoffPlan {
@@ -83,6 +99,7 @@ pub(crate) struct StudioHandoffPlan {
     /// makes this sound: H5 requires the intent record to be byte-identical to the one H2 read,
     /// so this is still the current state or the plan is refused before anything durable happens.
     pub(super) state: EpochIntentState,
+    pub(super) facts: HandoffFacts,
 }
 
 impl std::fmt::Debug for StudioHandoffPlan {
@@ -105,6 +122,7 @@ pub(crate) struct StudioHandoffCommit {
     pub(super) prepared_bytes: u64,
     pub(super) completed_bytes: u64,
     pub(super) source_bytes: u64,
+    pub(super) facts: HandoffFacts,
 }
 
 impl std::fmt::Debug for StudioHandoffCommit {
@@ -235,6 +253,7 @@ impl StudioHandoffPlan {
             basis,
             signing,
             state,
+            facts,
         } = self;
         let (mut candidate, prepared) = signing.finish().map_err(invalid)?.into_parts();
         let completed = prepared
@@ -265,6 +284,7 @@ impl StudioHandoffPlan {
             prepared_bytes,
             completed_bytes,
             source_bytes,
+            facts,
         })
     }
 }
@@ -296,6 +316,12 @@ impl StudioHandoffCapture {
             self.stamp.owner,
         )
         .map_err(invalid)?;
+        // Taken before the restored source is consumed below, so H5 can account for the record
+        // it is about to replace without restoring it a second time (design 9.1.1, step 1).
+        let facts = HandoffFacts {
+            source: (blake3::hash(&self.source_bytes), self.stamp.source.1),
+            storage_protocol_bytes: source.storage_protocol_bytes().map_err(invalid)?,
+        };
         // The freshly decoded metadata must agree with the authority H1 minted. If the record
         // changed under the capture this refuses here, before any signature exists.
         let signing = metadata
@@ -306,6 +332,7 @@ impl StudioHandoffCapture {
             basis: self.basis,
             signing,
             state,
+            facts,
         })
     }
 }
@@ -368,6 +395,43 @@ impl ServerStore {
             return Ok(false);
         };
         Ok((blake3::hash(&source.plain), source.physical_bytes) == stamp.source)
+    }
+
+    /// The pre-write half of H5 without a restore (design 9.1.1, step 2): the accounting record
+    /// of the source H5 is about to replace, and the digest of its plaintext for the write's
+    /// capability.
+    ///
+    /// **Call only after `studio_handoff_is_current` has passed for `stamp`, under the same
+    /// borrow.** That check re-read the source and proved it byte-identical to the stamped one,
+    /// so the facts H2 computed from those bytes still describe it. `facts.source` must equal the
+    /// stamp's as well, which ties the facts to those bytes rather than trusting a worker. The
+    /// fresh budget's `verify_record` still runs, exactly as `checked_studio_source` runs it: a
+    /// wrong protocol figure from a worker can only fail it.
+    pub(super) fn stamped_studio_source(
+        &self,
+        stamp: &StudioHandoffStamp,
+        facts: &HandoffFacts,
+        budget: &mut EpochStorageBudget,
+    ) -> Result<(StorageRecord, blake3::Hash), AppError> {
+        if facts.source != stamp.source {
+            return Err(invalid("handoff facts do not describe the stamped source"));
+        }
+        let scope = scope_bytes(stamp.server, &stamp.document)?;
+        let observed = storage_record(
+            stamp.server,
+            &stamp.document,
+            &scope,
+            stamp.source.1,
+            facts.storage_protocol_bytes,
+        )?;
+        budget
+            .verify_record(
+                &StorageScope::new(stamp.server, &stamp.document.server_id).map_err(invalid)?,
+                *blake3::hash(&scope).as_bytes(),
+                Some(observed),
+            )
+            .map_err(invalid)?;
+        Ok((observed, stamp.source.0))
     }
 
     /// The H1 capture itself, after classification and authorization have both passed.

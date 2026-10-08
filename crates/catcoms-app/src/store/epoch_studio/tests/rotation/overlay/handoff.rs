@@ -9,6 +9,7 @@ mod fences;
 mod inspection;
 mod metadata;
 mod performance;
+mod persisted;
 mod references;
 
 fn transfer(f: &Fixture, store: &mut ServerStore, basis: [u8; 32]) -> StudioHandoffOutcome {

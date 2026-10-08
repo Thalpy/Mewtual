@@ -5,6 +5,9 @@ use super::super::epoch_owner::repair_defers_install;
 use super::*;
 use catcoms_crypto::DeviceId;
 
+mod persisted;
+pub(super) use persisted::VerifiedPersistedSource;
+
 /// Encoded input bound, NOT a resident-heap promise. Existing graph/operation/projection limits
 /// still bound the parsed unit, the transient preflight draft, and serialization allocations.
 pub(super) const MAX_RETAINED_BYTES: u64 = 8 * 1024 * 1024;

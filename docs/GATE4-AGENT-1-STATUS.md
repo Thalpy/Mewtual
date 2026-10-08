@@ -2381,6 +2381,147 @@ and are marked accordingly; 13.7 is re-run in the next checkpoint rather than be
 arithmetic here. `a_well_resolved_batch_is_not_reported_as_unresolved` pins all three rules this
 predicate has had wrong in sequence: the raw-sum rule, the zero-median rule and the per-unit rule.
 
+## Design 9.1, no graph restore on the commit path, built (2026-10-08)
+
+This builds 9.1 as its implementation plan, 9.1.1 revision 2, specifies. That plan's design review
+found no blocker; its one high was the repair-prefix defect, fixed first in `904e447f`. It is the
+first prerequisite C-3 runtime design 15.7 names for C-3 step 3.
+
+### What changed in H5 (`commit_studio_handoff_with_io`)
+
+- **Before the write: no restore.** H2 now carries `HandoffFacts`: the blake3 of the source
+  plaintext it decoded, the stamped physical size, and the restored source's protocol bytes. The
+  stamp check H5 already ran proves the source on disk is those bytes. `stamped_studio_source`
+  requires the facts to match the stamp, builds the accounting record and runs the fresh budget's
+  `verify_record`. The second full read only to hash the source is gone too. The writer always
+  replaces: the before-snapshot fact was dropped, because at H5 the candidate always differs.
+- **After the write: a proof, not a restore.** `VerifiedPersistedSource` (new
+  `epoch_studio/source/persisted.rs`) has private fields and one constructor. That constructor
+  re-reads what landed, bounded by the family's sealed cap rather than the 8 MiB retained bound,
+  and requires:
+  - the writer's version: mount, server, target, physical size and plaintext digest;
+  - the landed channel, and a snapshot hash equal to the candidate's;
+  - a valid intent link.
+
+  Any failure, including a re-read that does not authenticate, refuses the commit with Prepared
+  retained and the budget spent.
+- **Resolve takes `Option<VerifiedPersistedSource>`.** `Some` replaces resolve's one restore, and
+  `into_checked` rechecks mount, server, target, group and the inventory generation. A verified
+  source with anything but Complete evidence refuses without writing. Every other caller passes
+  `None` and is unchanged: H1, adoption, rotation, and repair's two calls (Agent 3's file, a
+  mechanical edit).
+- **The Index object check at H5 is header-only** (`check_index_objects_at_commit`, amendment A1).
+  Per distinct referenced Flipnote it checks that the object holds work, plus its intent link.
+  H1 keeps the full load.
+- **The probe resolves a Prepared branch without a tenure** (step 4b). H1 already resolved before
+  it asked for one. So a Prepared record left by a refused H5 no longer holds the target's service
+  until a fence runs, when tenure is Unknown or Imported.
+
+### Tests, each broken on purpose
+
+Ten new tests in `tests/rotation/overlay/handoff/persisted.rs`:
+
+- zero restores during H5, for a Flipnote and for an Index with two references;
+- a facts oracle against a real restore, extended past the write: the persisted bytes restore to
+  the candidate's blob CIDs and snapshot;
+- M17's post-write substitution, which flips a receipt-book byte. That substitute clears barrier
+  2's fence (asserted as a precondition), so without the proof Completed would be written;
+- a written source that does not authenticate is a proof failure, and the budget is spent;
+- a stamp refusal with zero restores;
+- an Index reference edited between H1 and H5 still committing;
+- an Index reference made pristine, relabelled under another channel, or linked to intent
+  metadata that does not exist, between H1 and H5, refused at H5 (added after the re-review,
+  which found the link check had no test);
+- the restart path still restoring exactly once;
+- the proof's bindings: target, candidate hash, and generation;
+- the verified arm accepting only Complete evidence.
+
+Plus `the_probe_enters_h1_without_a_tenure_only_to_resolve_a_prepared_branch`, a decision table
+for step 4b in `studio/receiver/handoff.rs`. All 126 existing overlay tests pass unchanged.
+
+Eight mutations were run by hand, each killed. The files were confirmed byte-exact after the
+first six, and restored by hand after the last two:
+
+- the verified arm forced to restore;
+- the pre-write restore put back;
+- the H5 Index check dropped (killed by the existing
+  `studio_overlay_handoff_rechecks_index_object_sources_at_commit_not_only_at_capture`);
+- the whole re-read removed;
+- the Complete-only rule dropped;
+- the generation binding dropped;
+- after the review, the H5 Index rule forced to accept, killed by the pristine-and-relabelled
+  test;
+- after the re-review, the H5 intent-link check deleted, killed by that test's unlinked case.
+
+Four of them are now CI entries in `check-studio-handoff-mutations.py`, each DETECTED locally.
+
+**Two things no mutation can show, and why:**
+
+- **The proof's digest and its field checks are each redundant with the others by construction.**
+  The plaintext is scope, channel, snapshot and link, each checked. So removing any one check is
+  undetectable, and M17 is the whole re-read removed.
+- **The facts-to-stamp equality cannot be reached from the tests.** `HandoffFacts`' fields are
+  private to the capture module, and in normal flows they always agree.
+
+### Implementation review (2026-10-08, Opus, static): no blocker or high
+
+The review confirmed each of these:
+
+- `stamped_studio_source` produces exactly `checked_studio_source`'s `observed`;
+- the empty `before` skips no check;
+- the writer's returned unit is the one whose snapshot landed;
+- the landed snapshot makes resolve's flush-only save equivalent, and an independent fence;
+- invalidating the budget is sufficient;
+- the probe cannot loop or spin.
+
+Its findings and what happened to them:
+
+- **M1, the post-write test was killed only by its message.** Its link-byte substitute failed an
+  earlier decode, so the test did not show the proof was load-bearing. It now flips a
+  receipt-book byte, which the fence skips, and asserts that precondition. The docstring and the
+  14.2 M17 row were corrected.
+- **M2, the "built as specified" claim overstated.** The cheap missing regressions were added:
+  - a write that does not authenticate, with the budget spent;
+  - pristine and relabelled references at H5;
+  - the facts oracle past the write.
+
+  The rest are listed below as not done, and the design header now says so.
+- **LOW-1:** the proof's doc claimed it "cannot be paired with another unit". It now says how the
+  unit is tied to the bytes, and by what.
+- **LOW-2:** the refusal message said "is not the written candidate" even for an I/O failure. It
+  now says "could not be proved to be".
+- **LOW-3:** H5 read each referenced object twice. It now reads it once.
+- **LOW-4:** step 4b's steady-state cost and pacing are recorded in design 9.1.1.
+- **LOW-5:** the facts-to-stamp check is half tautological. Recorded, not changed.
+
+**Re-review of those fixes:** no blocker or high. It confirmed that the inline Index rule matches
+`studio_object_holds_work` in every case: missing, wrong channel, unreadable and pristine.
+
+- **Its medium:** the H5 intent-link check still had no test. Now covered by the unlinked case,
+  and breaking the check fails it.
+- **Its lows, all fixed:**
+  - the test comment now says what the setup models;
+  - the proof's doc names its third builder and says "at construction";
+  - `eligibility.rs` says the rule is inlined and must be kept in step;
+  - the duplicate-PutObject claim cites the observed refusal.
+
+### What is not done, and what it leaves expensive
+
+- **Regressions the plan listed and this does not have:**
+  - **a successor between 8 MiB and `MAX_SEALED_BYTES`**, which needs an 8 MiB Studio fixture;
+  - **a repaired destination or repaired reference through H5**, which needs Agent 3's repair
+    fixtures;
+  - **the probe resolving after a refusal at receiver level, with tenure Unknown**: no receiver
+    fixture produces an actor without an observed tenure, and only the decision table covers it;
+  - **duplicate PutObjects:** the Save path refuses a second PutObject for an object already in
+    the branch as a malformed op. This was observed while writing these tests: a fixture that
+    saved two PutObjects for one object failed in the Save helper with "epoch studio: malformed
+    op". So the deduplication is defensive.
+- **Still expensive:** H5 still does two seed `graph()` loads and several candidate `blob_cids`
+  projections, and for an Index one authenticated read per referenced object. H1 still restores
+  per PutObject and for an interrupted Prepared record.
+- **Not measured:** the commit phase on its own (C-3 15.7, step 2).
+
 ## Fix: the Studio header readers refused repaired records (2026-10-08)
 
 Found by the design review of 9.1.1 (H-1), in code that predates it. A Flipnote that has been

@@ -70,6 +70,36 @@ MUTATIONS = [
      "collected.check_dependencies()?;", "let _ = collected.check_dependencies();",
      "references::studio_overlay_handoff_reference_scan_keeps_overlay_only_pixels_when_metadata_is_missing",
      "missing handoff metadata completed a reference scan"),
+    # Design 9.1: H5 resolves from the verified candidate, never by restoring the source it just
+    # wrote. Forcing the restore back must be seen as a restore.
+    ("verified-restore", STORE,
+     "verified.into_checked(self, server, group, target, &mut budget.storage)?",
+     "{ let _ = verified; self.checked_studio_source(server, group, target, device, false, &mut budget.storage)? }",
+     "persisted::studio_overlay_handoff_commit_restores_nothing",
+     "H5 restored a source"),
+    # 9.1.1 A1: H5's header-only Index object check is the only thing between a referenced
+    # Flipnote cleaned up after H1 and a durable Index entry naming nothing.
+    ("index-commit", STORE,
+     "self.check_index_objects_at_commit(server, group, target, &document, &state)?;",
+     "let _ = (&document, &state);",
+     "eligibility::studio_overlay_handoff_rechecks_index_object_sources_at_commit_not_only_at_capture",
+     "H5 committed an Index entry pointing at a source"),
+    # 9.1.1 step 5: a proof whose evidence is not Complete must never be resolved, in particular
+    # never returned to Active from a candidate.
+    ("verified-evidence", STORE,
+     "if from_candidate && evidence != StudioHandoffEvidence::Complete {",
+     "if false && from_candidate && evidence != StudioHandoffEvidence::Complete {",
+     "persisted::studio_overlay_handoff_verified_resolution_accepts_only_complete_evidence",
+     "a proof with Absent evidence was resolved"),
+    # 9.1.1 A3: a proof cannot be spent after a five-family write landed since verification.
+    # The proof's own post-write comparison has no entry here on purpose: its digest and field
+    # checks are each redundant with the others by construction, so removing any one of them is
+    # undetectable, and the type has no other constructor to bypass the whole comparison with.
+    ("proof-generation", "crates/catcoms-app/src/store/epoch_studio/source/persisted.rs",
+     "&& Arc::ptr_eq(&self.generation, &store.inventory_generation);",
+     "&& { let _ = &self.generation; true };",
+     "persisted::studio_overlay_handoff_verified_source_binds_target_candidate_and_generation",
+     "a proof was spent after a write landed"),
 ]
 
 

@@ -276,6 +276,12 @@ preparation.
 
 ### 5.3 Store: capture, stamp and plan
 
+**Superseded in shape (recorded 2026-10-08, 9.1.1).** The built types are `StudioHandoffStamp`,
+`StudioHandoffCapture`, `StudioHandoffPlan` and `StudioHandoffCommit`, in
+`store/epoch_studio/handoff_capture.rs`. H2's facts (`HandoffFacts`) travel in the plan and the
+commit, not in a `StudioOverlayPlanned::HandoffPrepared` variant. The sketch below is kept as the
+reviewed intent.
+
 ```rust
 pub(crate) struct StudioOverlayStamp {
     mount: Arc<()>, server: u64, document: LogicalDocument, target: StudioTarget,
@@ -770,9 +776,21 @@ checkpoint.
   candidate. The decision table, barriers, accounting generations, write fences and publication hold
   are identical in both.
 
-#### 9.1.1 Implementation plan, and four amendments (proposal, revision 2, 2026-10-08)
+#### 9.1.1 Implementation plan, and four amendments (revision 2, 2026-10-08; built)
 
-**Not built.** This maps 9.1 onto the code as it stands at `83328240`, and records where the code
+**Built (2026-10-08)** as revision 2 below specifies, except for four of step 7's regressions.
+Those are the 8 MiB successor, a repaired destination through H5, the receiver-level probe after
+a refusal, and duplicate PutObjects. The status ledger entry "Design 9.1, no graph restore on the
+commit path, built" lists them with the reasons, and records the tests and mutations.
+
+**Step 4b's cost, recorded from the implementation review.** For a Prepared branch stuck on Hold
+evidence on a device without a tenure, each backoff expiry now pays a five-family inventory and a
+full source restore under custody, where it used to be held for free. That is bounded by the
+backoff, and it is what a tenure-live device already paid. An Absent resolution is durable
+progress but is still paced as a failure, so the next probe holds the target without entering
+H1.
+
+This section maps 9.1 onto the code as it stood at `83328240`, and records where the code
 makes the text above ambiguous or incomplete. C-3 runtime design 15.7 makes 9.1 the first
 prerequisite of C-3 step 3, because the H5 visit restores the source graph twice today.
 
@@ -1087,12 +1105,15 @@ for a coordinated verdict on it.
 3. Complete-target comparison and `completed_branch` short-circuit, before source lookup,
    acknowledgement or sync reservation (HANDOFF-001).
 4. `check_handoff_references`: candidate plus pending coverage of the branch's base CIDs (R9).
+   Then, for an Index, the header-only object check at commit (9.1.1, A1).
 5. Preflight all three replacement peaks and the intent accounting.
 6. Re-read the actual intent record and compare its complete authenticated plaintext digest and
    physical size with the captured values (C-2).
 7. Barrier 1: write Prepared, retaining the complete branch and ledger.
 8. Barrier 2: `save_studio_source_checked` with the `CheckedHandoffWrite` capability minted from the
-   actual re-read bytes.
+   actual re-read bytes. **As built (9.1.1):** the capability's `before` is the stamp's source
+   digest, which step 2 proved equal to the bytes on disk under this borrow, and the writer still
+   compares it with the actual record. The writer always replaces.
 9. Verify the persisted source per 9.1 and construct `VerifiedPersistedSource`; barrier 3 through
    `resolve_studio_handoff_with_io`.
 10. Return the outcome. Publication becomes eligible only now.
@@ -1110,7 +1131,7 @@ the source-required metadata link, and HANDOFF-002's inventory dependency.
 | Before barrier 1 | No handoff happened. Active, original source. |
 | Between barriers 1 and 2 | Prepared with the exact recorded source-before and no branch ids: durably return to Active with the full draft. |
 | Between barriers 2 and 3 | Prepared with all exact envelopes and signed-operation digests: flush and complete without reapplying. |
-| Step 9 digest mismatch | Do not complete; retain Prepared and resolve from actual bytes. |
+| Step 9 proof failure | Do not complete; retain Prepared and resolve from actual bytes. **As built (9.1.1):** any failure of the post-write proof refuses the commit and spends the budget. That covers size, digest, snapshot hash, channel or link, and a re-read that is missing or does not authenticate. Nothing is resolved in that call. The next H1 resolves from the actual bytes, even without a live tenure (step 4b), or a fence does. |
 | Partial or conflicting evidence | Retain the full branch, report a hold, guess nothing. Export remains available (12.1). |
 | S3 interrupted after I-3's holds | One accounted atomic replacement with the existing exact-retry flush; the new references are protected by the ordinary mechanism regardless of the outcome; an exact retry is recognised at S1 with no fresh basis and no media work. |
 
@@ -1339,7 +1360,7 @@ expensive operations landing on opposite sides of a wall-clock threshold.
 | M14 | **I-3's ordinary holds in S3** (release the transient owner without transferring) | N12(b) | "newly accepted pixels were deleted after a successful Save and before the next scan". |
 | M15 | The S3 pixel possession revalidation | N12(d) | "a new acceptance named absent pixels". |
 | M16 | Media admission placed before classification (restore revision 2's S0) | N30 | "a completed retry was refused because its pixels were reclaimed". |
-| M17 | The step 9 persisted-source digest comparison | N7 | "completion proceeded without authenticating what landed". |
+| M17 | The step 9 persisted-source digest comparison | N7 | "completion proceeded without authenticating what landed". **As built (9.1.1):** the proof's digest and its field checks (scope, channel, snapshot hash, link) are each redundant with the others by construction, so M17 is the whole re-read removed. `persisted::studio_overlay_handoff_refuses_a_persisted_source_that_is_not_the_candidate` kills it. The CI harness carries the proof's generation binding, the verified arm's Complete-only rule, the restore-free resolution and the H5 Index check instead. |
 | M18 | The all-or-nothing requirement in the assemble stage | N7 | "a durable signed prefix escaped". |
 | M19 | The transfer-hold versus live-hold split | N20 | "export of an unresolved Prepared branch was refused with no live worker". |
 | M20 | `inventory_generation` rotation in **one** writer at a time: recovery, owner, Registry, Studio source, intent, cleanup unlink | N17, the matching family case | "a spanning scan finished across a real write to that family". |

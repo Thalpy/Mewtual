@@ -579,7 +579,7 @@ impl StudioReceiver {
                                     catcoms_replication::studio::StudioOverlayProvenance::Closing,
                                 ) =>
                     {
-                        found = Some((target, overlay.basis()));
+                        found = Some((target, overlay.basis(), state.handoff_prepared()));
                         break;
                     }
                     _ => quiet.push(target),
@@ -593,7 +593,7 @@ impl StudioReceiver {
         }
         // Nothing to schedule: 7.2's other half, releasing immediately, which dropping
         // `ownership` on return does.
-        let Some((target, basis)) = found else {
+        let Some((target, basis, prepared)) = found else {
             if let Some(bad) = unreadable {
                 self.handoff.hold_target(bad, now);
             }
@@ -602,7 +602,16 @@ impl StudioReceiver {
 
         // A transfer needs a live tenure to mint its authority. Without one there is nothing to
         // capture, and the reservation is released by dropping `ownership` on return.
-        let Some(tenure) = server.sync.authoring_owner_tenure_start() else {
+        //
+        // **Except a Prepared branch, which H1 still enters to resolve** (design 9.1.1, step 4b).
+        // A Prepared record holds the target's page and tail service, and one is left whenever an
+        // H5 refuses after its first write. Resolution needs only current membership, never a
+        // tenure, and H1 resolves before it asks for one. So with tenure Unknown or Imported, H1
+        // runs with none: it resolves from the actual bytes, settles a completed transfer, or
+        // returns the branch to Active and then refuses at the tenure check, which backs off as
+        // before. Without this the hold would last until a fence ran.
+        let Some(tenure) = probe_tenure(server.sync.authoring_owner_tenure_start(), prepared)
+        else {
             self.handoff.hold_target(target, now);
             return;
         };
@@ -611,10 +620,15 @@ impl StudioReceiver {
             return;
         };
         let started = server.sync.with_registry_context(|g, d, _, rng| {
-            store.start_studio_handoff(id, g, target, d, basis, Some(tenure), rng, &mut budget)
+            store.start_studio_handoff(id, g, target, d, basis, tenure, rng, &mut budget)
         });
         match started {
             Ok(crate::store::StudioHandoffStart::Captured(capture)) => {
+                // H1 refuses to capture without a tenure, so this holds; defensive all the same.
+                let Some(tenure) = tenure else {
+                    self.handoff.hold_target(target, now);
+                    return;
+                };
                 self.handoff.next_token = self.handoff.next_token.saturating_add(1);
                 self.handoff.job = Some(HandoffJob {
                     target,
@@ -893,5 +907,46 @@ impl StudioReceiver {
         server
             .sync
             .with_registry_context(|g, _, _, _| store.studio_storage_budget(id, g, &inventory))
+    }
+}
+
+/// Whether the probe may enter H1 for a selected branch, and with which tenure (design 9.1.1,
+/// step 4b). `None` holds the target. `Some(tenure)` enters H1 with that tenure.
+///
+/// A live tenure always enters. Without one, only a **Prepared** branch enters, with no tenure:
+/// H1 resolves a Prepared record from the actual bytes before it asks for a tenure, and resolving
+/// needs only current membership. That is what stops a Prepared record left by a refused H5 from
+/// holding the target's page and tail service until a fence runs. Any other branch without a
+/// tenure has nothing H1 can do, so it is held as before.
+fn probe_tenure(live: Option<u64>, prepared: bool) -> Option<Option<u64>> {
+    match (live, prepared) {
+        (Some(tenure), _) => Some(Some(tenure)),
+        (None, true) => Some(None),
+        (None, false) => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::probe_tenure;
+
+    /// The probe's tenure decision as a table. The receiver-level path to a branch that is
+    /// Prepared while this actor has no observed tenure needs an ownership change, which no
+    /// receiver fixture produces. The store half it relies on, H1 resolving a Prepared record
+    /// with no tenure, is pinned by `a_durable_prepared_handoff_is_resolved_with_no_observed_tenure`.
+    #[test]
+    fn the_probe_enters_h1_without_a_tenure_only_to_resolve_a_prepared_branch() {
+        assert_eq!(probe_tenure(Some(7), false), Some(Some(7)));
+        assert_eq!(probe_tenure(Some(7), true), Some(Some(7)));
+        assert_eq!(
+            probe_tenure(None, true),
+            Some(None),
+            "a Prepared branch without a tenure was held instead of resolved"
+        );
+        assert_eq!(
+            probe_tenure(None, false),
+            None,
+            "a branch with nothing to resolve entered H1 without a tenure"
+        );
     }
 }

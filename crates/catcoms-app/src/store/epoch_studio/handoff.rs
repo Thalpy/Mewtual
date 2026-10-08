@@ -48,11 +48,12 @@ impl ServerStore {
 
     /// Index creation still requires the actual independently saved object source.
     ///
-    /// This runs at **both** H1 and H5, not only at H1. The single custody visit got that for
-    /// free; a scheduled H1 to H5 spans many background turns, and the stamp covers only the Index
-    /// document's own intent and source records, so the referenced Flipnote's source can be
-    /// evicted, retired or cleaned up in between without invalidating anything. Committing then
-    /// would leave a durable Index entry pointing at a source that no longer exists.
+    /// H1's form, which full-loads each object. H5 runs the same property again, header-only, as
+    /// [`Self::check_index_objects_at_commit`]. Both are needed: a scheduled H1 to H5 spans many
+    /// background turns, and the stamp covers only the Index document's own intent and source
+    /// records, so the referenced Flipnote's source can be evicted, retired or cleaned up in
+    /// between without invalidating anything. Committing then would leave a durable Index entry
+    /// pointing at a source that no longer exists.
     fn check_index_object_sources(
         &mut self,
         server: u64,
@@ -80,6 +81,60 @@ impl ServerStore {
                     return Err(invalid("overlay references an unavailable Flipnote"));
                 }
             }
+        }
+        Ok(())
+    }
+
+    /// H5's form of the Index object check, without a restore (design 9.1.1, amendment A1).
+    ///
+    /// For each Flipnote the branch's PutObjects name, once each, it requires what H1's full load
+    /// established: a record in this channel that holds work (the header-only rule
+    /// `studio_object_holds_work` applies), and a valid intent link. Both are checked here on one
+    /// authenticated read, rather than by calling that helper and reading again for the link. The
+    /// helper's other callers (copy, P2) take no link check and must not change.
+    ///
+    /// **What it does not prove:** that the body still restores. An authenticated record whose
+    /// header and body disagree, or one an older build wrote that a newer restore refuses, passes
+    /// here. H1's full load catches both. Between H1 and H5 a record can only change through a
+    /// writer in this build, which writes bodies its own restore accepts.
+    ///
+    /// **Cost:** one authenticated read per distinct object, bounded by the family's sealed cap,
+    /// plus a structural read of its intent record when linked.
+    fn check_index_objects_at_commit(
+        &self,
+        server: u64,
+        group: &ServerGroup,
+        target: StudioTarget,
+        document: &LogicalDocument,
+        state: &EpochIntentState,
+    ) -> Result<(), AppError> {
+        let StudioTarget::Index { channel } = target else {
+            return Ok(());
+        };
+        let mut objects = std::collections::BTreeSet::new();
+        for (_, intent) in state.pending().filter(|(id, _)| state.is_overlay(id)) {
+            if let IndexOp::PutObject { object, .. } =
+                IndexOp::decode_domain(document, &intent.operation, &intent.author)
+                    .map_err(invalid)?
+            {
+                objects.insert(object);
+            }
+        }
+        let unavailable = || invalid("overlay references an unavailable Flipnote");
+        for object in objects {
+            let flipnote = StudioTarget::Flipnote { channel, object };
+            let logical = flipnote.document(&group.group_id()).map_err(invalid)?;
+            let scope = scope_bytes(server, &logical)?;
+            let record = self.read_studio_record(&scope)?.ok_or_else(unavailable)?;
+            // A record stored under another channel's label answers for this object id but
+            // names nothing in this channel, exactly as `studio_object_holds_work` treats it.
+            let (stored, snapshot) = decode_record(&record.plain, &scope, &logical)?;
+            let holds_work = stored == flipnote
+                && StudioEpoch::vault_holds_work(snapshot, flipnote).map_err(invalid)?;
+            if !holds_work {
+                return Err(unavailable());
+            }
+            self.check_studio_intent_link(server, &logical, &scope, &record.plain)?;
         }
         Ok(())
     }
@@ -241,7 +296,9 @@ impl ServerStore {
             return Err(invalid("overlay author or basis mismatch"));
         }
         if state.handoff_prepared() {
-            self.resolve_studio_handoff_with_io(server, group, target, device, rng, budget, hooks)?;
+            self.resolve_studio_handoff_with_io(
+                server, group, target, device, None, rng, budget, hooks,
+            )?;
             state = self.checked_epoch_replay_state(
                 server,
                 &document,
@@ -315,23 +372,18 @@ impl ServerStore {
             prepared_bytes,
             completed_bytes,
             source_bytes,
+            facts,
         } = commit;
         let document = stamp.document.clone();
-        let (source, observed, before) =
-            self.checked_studio_source(server, group, target, device, false, &mut budget.storage)?;
-        if observed.is_none() {
-            return Err(invalid("overlay destination source missing"));
-        }
-        drop(source);
-        let original_source = self
-            .read_studio_record(&scope_bytes(server, &document)?)?
-            .ok_or_else(|| invalid("overlay destination source missing"))?;
-        let original_source_hash = blake3::hash(&original_source.plain);
-        drop(original_source);
+        // No restore (design 9.1): the stamp check above re-read the source and proved it the
+        // bytes H2 restored, so H2's facts describe it. `observed` is the record this write
+        // replaces, and the digest is the capability's proof of the bytes it may replace.
+        let (observed, original_source_hash) =
+            self.stamped_studio_source(&stamp, &facts, &mut budget.storage)?;
         // Against the state as H2 read it, before the prepared overlay is installed, exactly as
         // when H4 and H5 were one function.
         self.check_handoff_references(&prepared, &candidate, &state)?;
-        self.check_index_object_sources(server, group, target, device, &document, &state)?;
+        self.check_index_objects_at_commit(server, group, target, &document, &state)?;
         let scope = epoch_intents::scope_bytes(server, &document)?;
         let source_scope = scope_bytes(server, &document)?;
         // Physical size and the authenticated plaintext digest are all the unchanged fence needs;
@@ -414,11 +466,15 @@ impl ServerStore {
             before: original_source_hash,
         };
         // Only this private capability can accompany the checked complete candidate.
-        self.save_studio_source_checked(
+        //
+        // `before` is empty, so the writer always replaces: the candidate carries the newly
+        // signed operations and is never the bytes it replaces, so its flush branch is never
+        // the right one here (review of 9.1.1, which dropped the before-snapshot fact).
+        let written = self.save_studio_source_checked(
             server,
             candidate,
-            observed,
-            &before,
+            Some(observed),
+            &[],
             WritePurpose::Ordinary,
             rng,
             &mut budget.storage,
@@ -427,7 +483,32 @@ impl ServerStore {
             None,
             Some(&capability),
         )?;
-        self.resolve_studio_handoff_with_io(server, group, target, device, rng, budget, hooks)?;
+        // After the write, prove that what landed is the candidate (design 9.1). On any failure,
+        // including a re-read that does not authenticate, the commit refuses here with Prepared
+        // retained. The next H1, or a fence, resolves from the actual bytes (A4). The budget
+        // reserved a footprint for bytes that may not be what landed, so it is spent.
+        let verified =
+            match self.verify_persisted_studio_source(server, target, written, capability.source) {
+                Ok(verified) => verified,
+                Err(error) => {
+                    budget.storage.invalidate();
+                    return Err(invalid(format!(
+                    "persisted handoff source could not be proved to be the written candidate; \
+                     Prepared retained: \
+                     {error}"
+                )));
+                }
+            };
+        self.resolve_studio_handoff_with_io(
+            server,
+            group,
+            target,
+            device,
+            Some(verified),
+            rng,
+            budget,
+            hooks,
+        )?;
         let final_state = self.checked_epoch_replay_state(
             server,
             &document,
@@ -489,11 +570,22 @@ impl ServerStore {
             group,
             target,
             device,
+            None,
             rng,
             budget,
             &mut WriteHooks::None,
         )
     }
+    /// One resolution algorithm for every Prepared record (design 9.1, "One algorithm").
+    ///
+    /// `verified` is `Some` only from the H5 commit that has just written and proved the
+    /// destination source. It supplies that candidate in place of a restore. Every other caller
+    /// passes `None` and restores from disk: H1's interrupted-Prepared resolution, the fences
+    /// (adoption, rotation, repair) and restart. The decision table, barriers, generations and
+    /// writes are the same either way, with one difference: a verified source that shows anything
+    /// but Complete evidence refuses without writing. The commit just wrote a candidate proved to
+    /// carry the whole branch, so anything else means the proof and the record disagree, and
+    /// `return_to_active` must never be computed from a candidate.
     #[allow(clippy::too_many_arguments)]
     pub(super) fn resolve_studio_handoff_with_io(
         &mut self,
@@ -501,6 +593,7 @@ impl ServerStore {
         group: &ServerGroup,
         target: StudioTarget,
         device: &MlsDevice,
+        verified: Option<source::VerifiedPersistedSource>,
         rng: &mut impl CryptoRngCore,
         budget: &mut EpochStudioBudget,
         hooks: &mut WriteHooks<'_>,
@@ -533,12 +626,30 @@ impl ServerStore {
             }
             return Ok(());
         }
-        let (source, observed, before) =
-            self.checked_studio_source(server, group, target, device, false, &mut budget.storage)?;
+        let from_candidate = verified.is_some();
+        let (source, observed, before) = match verified {
+            Some(verified) => {
+                verified.into_checked(self, server, group, target, &mut budget.storage)?
+            }
+            None => self.checked_studio_source(
+                server,
+                group,
+                target,
+                device,
+                false,
+                &mut budget.storage,
+            )?,
+        };
         if observed.is_none() {
             return Err(invalid("prepared handoff source missing"));
         }
-        match metadata.evidence(&source, &state.ledger).map_err(invalid)? {
+        let evidence = metadata.evidence(&source, &state.ledger).map_err(invalid)?;
+        if from_candidate && evidence != StudioHandoffEvidence::Complete {
+            return Err(invalid(
+                "verified handoff source does not carry the whole branch; Prepared retained",
+            ));
+        }
+        match evidence {
             StudioHandoffEvidence::Absent => {
                 state.overlay = Some(
                     metadata

@@ -1126,6 +1126,8 @@ restores, plus the Intents facts, which M1 adds. **M2's capacity is right.**
 
 1. **Design 9.1, built:** H5 commits from a `VerifiedPersistedSource`, with no graph restore and
    no per-PutObject restore for an Index. Without it no inventory route bounds the H5 visit.
+   **Done 2026-10-08.** H5 still does seed graph loads and `blob_cids` projections, which item 2
+   measures.
 2. **The commit phase measured on its own:** 128 frames, and an Index with many PutObjects. This
    sets what the scan has left of 125 ms.
 3. **M1, with writer warms (HIGH-1) and MEDIUM-2's three gates.**

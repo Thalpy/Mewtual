@@ -212,8 +212,11 @@ impl ServerStore {
     /// **Header-only, so it does not prove the body restorable.** An authenticated record whose
     /// header counts operations its body cannot yield passes here, where a full load would refuse.
     /// Only a writer bug produces that shape: the record is AEAD-sealed and scope-checked. And the
-    /// handoff's own check (`check_index_object_sources`) still full-loads at H1 and H5, so a
-    /// publication that relies on the object meets the restore there.
+    /// handoff's own check at H1 (`check_index_object_sources`) still full-loads, so a publication
+    /// that relies on the object meets the restore there. H5 rechecks the same rule, inlined in
+    /// `check_index_objects_at_commit` so one read serves it and the intent link (design 9.1.1
+    /// A1). **Keep the two in step.** By then the object passed H1's full load, and can only have
+    /// changed through a writer of this build.
     ///
     /// **Copy has no such later load.** A copy into an Open Index is an ordinary Apply, not a
     /// handoff, so on that path this probe is the only object-existence guard. That is accepted on
