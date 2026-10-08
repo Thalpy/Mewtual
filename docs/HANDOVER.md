@@ -8,7 +8,18 @@ the protocol- vs honest-client-enforced boundary and the hardening backlog.
 [`MESSAGE-FLOW.md`](MESSAGE-FLOW.md) traces one message end to end (send, gossip, catch-up)
 and ranks the live hazards in that path.
 
-## Status (latest entry: 2026-10-07)
+## Status (latest entry: 2026-10-08)
+
+- **Gate 4 PR #35 reconciliation (2026-10-08).** The candidate now preserves
+  `gate4-agent1-runtime` through `7310b22b76848c4b9f85fec816744cff00c1a64f`. Agent 2's newer
+  `EpochIntentBudget` implementation remains the sole owner of the 3-branch/8 MiB rails and their
+  mutation coverage. PR #35 contributes the still-missing full-envelope parked-request correlation
+  for both Closing and Unconfirmed Flow S: another caller may finish abandoned work to free the
+  bounded slot, but receives `Busy` and cannot claim that result. P5 remains false; Save and repair
+  commands remain unregistered. This is incremental integration, not Gate 4 acceptance, and Gate 5
+  remains closed. Residual LOW coverage gap: the common fingerprint path has the Unconfirmed
+  same-nonce/different-body regression, but Closing and cross-provenance parked-plan cases do not yet
+  have direct equivalents.
 
 - **Gate 4 Agent 2: the Unconfirmed aggregate rails, and the parked-plan mutation fix
   (2026-10-07).**
@@ -60,9 +71,9 @@ and ranks the live hazards in that path.
     mid-copy is refused at C3. C4 compares no source stamp. It refuses only if its re-plan no
     longer resolves the selected value (replaced or removed) or rebuilds a different body;
     otherwise it applies the source's current value.
-  - **Still missing:** the per-server and vault-wide Unconfirmed rails (placement with Agent 1),
-    the handoff selector's skip of non-Closing branches (Agent 1), and native registration
-    (Agent 4). P5 remains false.
+  - **Updated by the 2026-10-08 entry:** the handoff selector skip and Agent 2's per-server/vault
+    rails are in the shared baseline. PR #35 adds full-envelope parked-request correlation. Native
+    registration remains missing and P5 remains false.
   - **Known local flake class:** tests on `StudioReceiver::default()` share the process-wide
     preparation pool and can fail under full-suite load
     (`registry_runtime.rs:164`, `receiver.rs:68`).

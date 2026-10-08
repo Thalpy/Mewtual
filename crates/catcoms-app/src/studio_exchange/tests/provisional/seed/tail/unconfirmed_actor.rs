@@ -337,6 +337,37 @@ async fn studio_actor_unconfirmed_save_never_reports_another_requests_plan_as_it
     assert_eq!(pending(&mut p, target), 2);
 }
 
+/// `DomainOp::id` intentionally identifies a nonce slot and therefore aliases two envelopes with
+/// the same nonce but different bodies. Actor correlation must use the complete canonical request:
+/// B may finish A's parked plan, but it cannot report A's success as its own. Once A is durable,
+/// the store independently rejects B as a conflicting reuse of that nonce.
+#[tokio::test]
+async fn studio_actor_unconfirmed_save_correlates_same_nonce_requests_by_full_envelope() {
+    let (mut p, mut receiver, target, basis, branch) = ready_receiver().await;
+    let a = new_entry(&mut p, (basis, branch), 53, [8; 16]);
+    let b = new_entry(&mut p, (basis, branch), 53, [9; 16]);
+    assert!(matches!(
+        save(&mut receiver, &mut p, target, &a).unwrap(),
+        StudioUnconfirmedSaveOutcome::Scheduled
+    ));
+    settle(&mut receiver, &mut p).await;
+
+    let visit = save(&mut receiver, &mut p, target, &b).unwrap();
+    assert!(matches!(visit, StudioUnconfirmedSaveOutcome::Busy));
+    assert_eq!(pending(&mut p, target), 1, "only A was committed");
+    assert!(matches!(
+        save(&mut receiver, &mut p, target, &a).unwrap(),
+        StudioUnconfirmedSaveOutcome::Saved { accepted: 1, .. }
+    ));
+    let refused = save(&mut receiver, &mut p, target, &b)
+        .unwrap_err()
+        .to_string();
+    assert!(
+        refused.contains("nonce was reused with conflicting bytes"),
+        "the conflicting nonce must be rejected by the durable ledger: {refused}"
+    );
+}
+
 /// Review of `b35e23d2`, HIGH-1 and MEDIUM-2. The slot is one per actor, so a plan parked for one
 /// target whose caller never returns must not block a Save on another target.
 ///

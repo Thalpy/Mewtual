@@ -1,8 +1,8 @@
 # Gate 4 Agent 4 status: integration and completion coordination
 
-Current checkpoint: 2026-10-05. PR #33 is merged into `gate4-agent1-runtime` at
-`9d2f3e341d9fa503e2917de61fab348dc29850d0`. Further work is isolated on
-`gate4-finalization`; Gate 4 remains incomplete and Gate 5 remains closed.
+Current checkpoint: 2026-10-08. PR #35 is being reconciled on
+`gate4-runtime-completion` against `gate4-agent1-runtime` at
+`7310b22b76848c4b9f85fec816744cff00c1a64f`. Gate 4 remains incomplete and Gate 5 remains closed.
 
 The detailed live ledger is [GATE4-ACCEPTANCE](GATE4-ACCEPTANCE.md). This document records the
 integration history, current ownership boundaries and the single remaining execution sequence.
@@ -41,42 +41,68 @@ currently isolated pending the detached runtime boundary:
   attempts B0 with full failed/uncertain writer propagation, and only then preserves Fault as a
   hard service refusal. Real explicit/prepared, empty-capacity authority, post-write/reopen and
   no-reconstruction regressions pass. Final re-review has no finding at any severity.
+- In PR #35's preserved ancestry, `eef69729ae4b4200a6060b9f91719d44538094e5` originally implemented the next bounded runtime dependency: Flow S now
+  carries typed Closing or Unconfirmed bases, and the crate-private awaiting-tenure consumer proves
+  source absence, re-enters the current complete preview at S1b/S3, plans detached, enforces the
+  3/numeric-server, 8 MiB/vault and 64-op rails, reconstructs those counters from fresh inventory, releases
+  them after durable disposal, and excludes Unconfirmed history from automatic handoff. Real
+  Flipnote preview, expiry/retry, operation-limit, inventory and disposal regressions pass.
+- Historical review-response commit `6aee00046e35410ba42c9290c0d1f52fd41dd86b` binds each parked
+  plan to target, provenance, basis, branch and a domain-separated digest of the full canonical
+  operation. It also makes the central ordinary intent writer and the independent retirement writer
+  fail closed when a replacement would preserve live Unconfirmed work outside the sole accounted
+  Flow S path. Exact sync retry and terminal disposal remain available. Independent re-review closes
+  every BLOCKER/HIGH/MEDIUM finding; the only residual LOW is that receipt-covered retirement is not
+  separately exercised with a live Unconfirmed branch, although it uses the same guarded writer as
+  the real manual-recovery regression. Agent 2's later implementation supersedes those duplicate
+  quota counters and adopts a different reviewed ordinary-growth policy, so the reconciliation does
+  not carry the historical off-path-writer rule forward.
 
-The code is still intentionally unavailable to the renderer. P5 is false; native Save and repair
-commands remain unregistered. The finalization candidate supplies the archived-tenure consumer and
-has passed bounded re-review; exact-head Linux CI remains required and the detached automatic repair
-runtime remains absent.
+The newer shared baseline independently contains the generalized Flow S, actor Save, reconciliation,
+restart coverage, handoff exclusion and Agent 2's reviewed 3/numeric-server and 8 MiB/vault rails.
+PR #35's merge resolution keeps those implementations and adds only its full-envelope parked-request
+correlation for Closing and Unconfirmed. The code is still intentionally
+unavailable to the renderer. P5 is false; native Save and repair commands remain unregistered.
+The reconciled exact head still requires CI and a bounded integration review before merge.
 
 ## Exact branch state
 
 | Item | State |
 |---|---|
-| Shared integration baseline | `gate4-agent1-runtime` at merged PR #33 commit `9d2f3e341d9fa503e2917de61fab348dc29850d0` |
+| Shared integration baseline | `gate4-agent1-runtime` at `7310b22b76848c4b9f85fec816744cff00c1a64f` |
 | Repair candidate | Historical PR #32 checkpoint `87629d6b72992254911a8e44f698d535bb5d7904`; its reviewed ancestry is in merged PR #33 |
 | Documentation checkpoint | Historical PR #31 checkpoint `f0af61c9b1247fa955300ac50545074e18e9b302`; its documentation ancestry is in merged PR #33 |
-| Completion branch | PR #33 merged; new isolated continuation is `gate4-finalization` from exact base `9d2f3e34...` |
+| Archived-tenure branch | PR #34 merged; `gate4-finalization` is historical at `7f80815e...` |
+| Runtime completion branch | PR #35, `gate4-runtime-completion`; original implementation `eef69729...` plus separately identifiable review response `6aee00046...`, now reconciled with exact base `7310b22b...` |
 | Agent 3 source | `gate4-agent3-repair` at `15b715a10704a8dafc2cccef65854d4d45ad55ca`; preserved, not rewritten |
 
 PR #28 remains the Agent 3 source record. PR #32 was its first integrated successor; merged PR #33
-preserves the same ancestry and adds the structural seam plus the bounded review response. PRs #31
-and #32 remain historical source checkpoints, not additional merge instructions.
+preserves the same ancestry and adds the structural seam plus the bounded review response. Merged
+PR #34 adds the historical consumer without rewriting that history. PRs #28, #31 and #32 remain
+historical source checkpoints, not additional merge instructions.
 
-## What each agent actually leaves behind
+## Historical ownership checkpoint
+
+The agent-by-agent lists below record PR #35's original 2026-10-06 checkpoint. Later Agent 1 and
+Agent 1/2 commits already on `7310b22b...` supersede several “still required” entries; their own
+status documents and `GATE4-ACCEPTANCE.md` are authoritative for current ownership. They are kept
+here as integration history, not as a live gap list.
 
 ### Agent 1
 
 Completed: structural decode, transient reference protection, I-4 generation enforcement, the
-storage half of C-3, scheduled Closing Flow S and automatic Flow H.
+storage half of C-3, scheduled Closing Flow S, typed Closing/Unconfirmed capture-plan-commit, and
+automatic Closing Flow H with non-Closing exclusion.
 
 Still required:
 
-1. parameterize Flow S over the accepted `StudioOverlayBasis` variants, using the now-complete
-   structural provenance/charged-byte inventory result;
-2. map structured eligibility/manual reasons instead of returning only strings;
-3. adopt `EpochStorageCursor` at the six runtime scan owners;
-4. implement Flow R after cursor adoption;
-5. finish the required maximum-shape/custody measurements; and
-6. obtain the dedicated core-signing and coherent runtime reviews.
+1. map structured eligibility/manual reasons instead of returning only strings;
+2. adopt `EpochStorageCursor` at the six runtime scan owners;
+3. implement Flow R after cursor adoption;
+4. finish the required maximum-shape/custody measurements; and
+5. obtain the dedicated core-signing and final coherent runtime reviews. The bounded generalized
+   Flow S / awaiting-tenure review is complete through `6aee00046...`, but it does not substitute
+   for those wider verdicts.
 
 These are internal prerequisites and are not blocked by P5. P5 blocks exposure, not implementation.
 
@@ -94,12 +120,12 @@ Still required:
    diagnostic Low, and P1's copy-across-restart evidence; `ed8ab0a8` already closes M2, while
    `0335262e` closes the older D4/D1/object-probe/M-1 evidence items and supplies M3's
    successful-apply control, so none of those closures should be reopened or credited twice;
-2. consume Agent 1's completed inventory seam and the still-missing generalized Flow S seam in the app;
-3. implement preview custody admission, rails, S3 re-entry, Save, reconciliation and restart rebuild;
-4. exclude non-Closing branches from automatic handoff selection;
-5. drive the returning owner through the real app actor and Studio rotation;
-6. complete native result contracts without registering commands; and
-7. obtain a whole-boundary lifecycle/repeated-tenure review.
+2. add real Index evidence for the now-implemented internal preview custody, rails, S3, Save,
+   fresh-inventory reconstruction and handoff-exclusion slice;
+3. implement 8.6 reconciliation, actual reopen/restart reconstruction and actor scheduling;
+4. drive the returning owner through the real app actor and Studio rotation;
+5. complete native result contracts without registering commands; and
+6. obtain a whole-boundary lifecycle/repeated-tenure review.
 
 P5 remains **FALSE** until those P1-P4 requirements have implementation PASSes.
 
@@ -122,30 +148,52 @@ Still required:
 ### Agent 4
 
 Completed: preserved-history integration, response classification, Windows durability, repair
-sequence correction, two-platform mutation CI, desktop Clippy, final local exact-head suites, the
-Registry pre-gate reconstruction and fresh-receiver liveness corrections, and truthful unavailable
-registration state. The final bounded rereview is clear; pushed-head Linux ambient and mutation CI
-remain required before merge readiness is claimed.
+sequence correction, two-platform mutation CI, desktop Clippy, the Registry pre-gate reconstruction
+and fresh-receiver liveness corrections, truthful unavailable registration state, and the bounded
+internal generalized Flow S / awaiting-tenure candidate and its bounded review response. Pushed-head
+Linux ambient and mutation CI remain required before merge readiness is claimed.
 
 Still required: integrate the specialist completions, maintain this ledger, register only approved
 commands after P5, implement/run the seven combined scenarios, update interface/UI truth and request
 Review 4. Agent 4 must not turn dependency ancestry into an implementation claim.
 
-## Unified completion sequence
+## Historical completion sequence at PR #35's original base
 
 The next execution order is:
 
-1. Build the Agent 1 generalized Flow S seam on the completed structural
-   provenance/charged-byte inventory result.
+1. Obtain exact-head Linux CI for the independently reviewed generalized Flow S / internal preview
+   candidate.
 2. Adopt the C-3 cursor at runtime call sites, then implement Flow R.
-3. Close Agent 2's remaining lifecycle/copy findings and copy-restart evidence, then complete its
-   preview-local app path and real actor/Studio returning-owner path.
+3. Close Agent 2's remaining lifecycle/copy findings and copy-restart evidence, then complete Index
+   preview evidence, reconciliation, actor/native result wiring and the real actor/Studio
+   returning-owner path.
 4. Complete Agent 3's detached/runtime evidence, then obtain bounded reviews for Agents 1-3.
 5. If and only if Agent 2 records P5 true, add native registrations, ACLs, interface rows and UI
    hooks in one reviewable checkpoint.
 6. Run the combined Index/Flipnote/Registry scenarios and all required suites, then request Review 4.
 
 ## Verification for the current code candidate
+
+On `gate4-runtime-completion` through correction
+`6aee00046e35410ba42c9290c0d1f52fd41dd86b`, the definitive complete root suite passes, as do all
+1,282 frontend tests, root and desktop strict all-target/all-feature Clippy, desktop `cargo check`,
+root formatting, Svelte check, production build and `cargo deny`. The first root run had one
+order-sensitive `studio_actors_new_member_after_checkpoint_discovers_installs_and_receives_tail`
+failure; the exact test passed alone and the complete rerun passed. The desktop/Tauri run passes 324
+of 325 library tests and reproduces only
+`six_client_recovery::six_client_native_restart_and_partition_recovery`; a focused candidate rerun
+and a focused run on exact base `c6f7fea0...` fail with the same partition-boundary convergence
+shape, so this is recorded as an unresolved baseline defect, not a candidate pass. No assertion was
+weakened; the five command-ACL integration tests pass separately. Startup/flow remain inapplicable
+because setup, process, renderer and command-registration
+paths are unchanged. Local `bash scripts/check-no-ambient.sh` could not start WSL (`E_ACCESSDENIED`),
+so Linux ambient and both repair-store mutation jobs remain exact-head PR checks.
+
+The original bounded review found request-correlation and quota-accounting defects and accepted
+`6aee00046...` after its response. The current merge resolution retains the accepted full canonical
+operation digest, while Agent 2's later reviewed `EpochIntentBudget` rails supersede the duplicate
+counter and off-path-writer solution. The resolved exact diff therefore requires a fresh bounded
+integration review and exact-head CI; the historical verdict does not by itself accept this merge.
 
 At `87629d6b72992254911a8e44f698d535bb5d7904`:
 
@@ -211,5 +259,5 @@ passes. Native is therefore not claimed green locally; exact-head CI remains the
   not a substitute.
 - The shared preparation pool, source/reference fences, Prepared -> Source -> Completed order and
   exact retry identity remain intact.
-- The shared baseline remains unchanged while `gate4-finalization` is verified and reviewed.
+- The shared baseline remains unchanged while `gate4-runtime-completion` is verified and reviewed.
 - Gate 5 remains closed until full Gate 4 Review 4 passes and the user accepts it.

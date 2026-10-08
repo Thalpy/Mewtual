@@ -146,7 +146,7 @@ impl StudioReceiver {
         branch: [u8; 32],
         operation: DomainOp,
     ) -> Result<StudioOverlaySaveVisit, AppError> {
-        let request = request_fingerprint(target, &basis, &branch, &operation);
+        let request = overlay_request_fingerprint(1, target, &basis, &branch, &operation)?;
         // Any parked plan is finished first, whatever its target: its transient hold protects its
         // pixels, and while it is parked the slot refuses every reservation on this actor. S3
         // re-enters the live check with an attempt made in THIS visit, for the plan's own target,
@@ -164,6 +164,7 @@ impl StudioReceiver {
             // Whose plan this is. The slot holds one plan whichever request made it, and the plan
             // does not say, so the receiver remembers which request scheduled it.
             let ours = planned == target && self.unconfirmed_scheduled == Some(request);
+            self.closing_scheduled = None;
             self.unconfirmed_scheduled = None;
             let attempt = self.catchup.preview.mint(server, store, id, planned);
             let committed = server.sync.with_registry_context(|group, device, _, rng| {
@@ -282,27 +283,4 @@ fn refuse_closing_draft<T: MeshTransport + 'static, R: CryptoRngCore>(
         }
     }
     Ok(())
-}
-
-/// The identity of one Save request: everything the renderer sent, under a domain of its own. Two
-/// requests are the same exactly when an exact retry of one would be the other. Used only to tell
-/// whose parked plan a visit is finishing; never persisted and never authority.
-fn request_fingerprint(
-    target: StudioTarget,
-    basis: &[u8; 32],
-    branch: &[u8; 32],
-    operation: &DomainOp,
-) -> [u8; 32] {
-    let mut hash = blake3::Hasher::new_derive_key("catcoms/studio-unconfirmed-save-request/v1");
-    hash.update(&target.channel());
-    match target {
-        StudioTarget::Index { .. } => hash.update(&[0]),
-        StudioTarget::Flipnote { object, .. } => hash.update(&[1]).update(&object),
-    };
-    hash.update(basis)
-        .update(branch)
-        .update(&operation.nonce)
-        .update(&(operation.body.len() as u64).to_be_bytes())
-        .update(&operation.body);
-    *hash.finalize().as_bytes()
 }

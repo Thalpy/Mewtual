@@ -1442,9 +1442,9 @@ impl StudioReceiver {
                         .monotonic_ms()
                         .saturating_add(OVERLAY_PARK_MS);
                 } else {
-                    // Nothing was parked, so no Unconfirmed request has scheduled work any more.
-                    // A stale fingerprint would answer that request's retry "pending" while
-                    // nothing of it is in flight (design 8.7; re-review of `5ccc4647`, LOW-1).
+                    // Nothing was parked, so neither provenance has scheduled work any more. A
+                    // stale fingerprint would answer a retry "pending" while nothing is in flight.
+                    self.closing_scheduled = None;
                     self.unconfirmed_scheduled = None;
                 }
             }
@@ -1453,6 +1453,7 @@ impl StudioReceiver {
                 // so admission and the shared slot remain occupied until it ends by itself. What
                 // it produces is never parked, so the remembered request is cleared as above.
                 self.catchup.overlay_detached = false;
+                self.closing_scheduled = None;
                 self.unconfirmed_scheduled = None;
             }
             StudioBackgroundResult::Handoff(completion) => {

@@ -32,6 +32,10 @@ pub(crate) struct StudioReceiver {
     /// request made it. So a later visit must know whether that plan is its own before reporting
     /// it saved.
     unconfirmed_scheduled: Option<[u8; 32]>,
+    /// The exact Closing request that owns the one overlay job/plan slot. The target alone is not
+    /// enough: two operations can name the same document, and neither may report the other's
+    /// detached plan as its own successful Save.
+    closing_scheduled: Option<[u8; 32]>,
 }
 /// What one custody visit of the scheduled Flow S concluded.
 pub(crate) enum StudioOverlaySaveVisit {
@@ -44,6 +48,39 @@ pub(crate) enum StudioOverlaySaveVisit {
     /// Admission or the shared four-slot pool is full. Retryable, and nothing was read, promoted
     /// or held: 7.2 reserves before the first body read precisely so this costs nothing.
     Busy,
+}
+
+/// Correlate a detached Flow S result with the complete bounded request envelope.
+///
+/// `DomainOp::id` intentionally omits the body because it identifies an idempotency slot. That is
+/// too weak here: conflicting bodies with one nonce must not claim each other's parked work. The
+/// canonical operation encoding covers nonce, document type, logical key and body; the remaining
+/// fields distinguish the two basis kinds and the exact branch ticket presented by the caller.
+fn overlay_request_fingerprint(
+    provenance: u8,
+    target: StudioTarget,
+    basis: &[u8; 32],
+    branch: &[u8; 32],
+    operation: &catcoms_replication::DomainOp,
+) -> Result<[u8; 32], AppError> {
+    let encoded = operation.encode().map_err(invalid)?;
+    let mut hash = blake3::Hasher::new_derive_key("mewtual/studio-flow-s-request/v1");
+    hash.update(&[provenance]);
+    hash.update(&target.channel());
+    match target {
+        StudioTarget::Index { .. } => {
+            hash.update(&[0]);
+        }
+        StudioTarget::Flipnote { object, .. } => {
+            hash.update(&[1]);
+            hash.update(&object);
+        }
+    }
+    hash.update(basis);
+    hash.update(branch);
+    hash.update(&(encoded.len() as u64).to_be_bytes());
+    hash.update(&encoded);
+    Ok(*hash.finalize().as_bytes())
 }
 
 impl StudioReceiver {
@@ -80,14 +117,18 @@ impl StudioReceiver {
         operation: catcoms_replication::DomainOp,
         budget: &mut crate::store::EpochStudioBudget,
     ) -> Result<StudioOverlaySaveVisit, AppError> {
+        let request = overlay_request_fingerprint(0, target, &basis, &branch, &operation)?;
         // Read, never required here: S1b and S3 require it at their own points, and everything
         // before them - retries and acknowledgements - must keep working without it (V8).
         let tenure = server.observed_owner_tenure();
         // A plan this actor already produced is finished first. Its transient hold is the only
         // thing protecting its pixels, and it occupies admission until it is consumed.
         if let Some((plan, ownership)) = self.catchup.take_planned_overlay(target) {
-            // Whatever plan this takes, it is no longer an Unconfirmed request's to claim
-            // (design 8.7's `unconfirmed_scheduled`; review of `b35e23d2`, LOW-2).
+            // Whatever plan this takes is no longer another request's to claim. Commit it to
+            // release its transient media hold and shared slot, but only its exact scheduling
+            // request may receive the outcome as its own.
+            let ours = self.closing_scheduled == Some(request);
+            self.closing_scheduled = None;
             self.unconfirmed_scheduled = None;
             let committed = server.sync.with_registry_context(|group, device, _, rng| {
                 store.commit_studio_overlay(
@@ -97,6 +138,12 @@ impl StudioReceiver {
             // Explicit: admission and the shared slot are released only after the commit attempt
             // returns, on success and on error alike.
             drop(ownership);
+            if !ours {
+                if let Err(error) = committed {
+                    tracing::warn!(%error, "a parked overlay plan of another request did not commit");
+                }
+                return Ok(StudioOverlaySaveVisit::Busy);
+            }
             return committed.map(|draft| {
                 StudioOverlaySaveVisit::Saved(Box::new(
                     catcoms_replication::studio::StudioOverlaySave::Local(draft),
@@ -106,7 +153,11 @@ impl StudioReceiver {
         // 7.2. Reserve before the first bounded read, and release by dropping if there is nothing
         // to schedule. Nothing below this line reaches a blob until S1b.
         let Some(ownership) = self.catchup.reserve_overlay() else {
-            return Ok(StudioOverlaySaveVisit::Busy);
+            return Ok(if self.closing_scheduled == Some(request) {
+                StudioOverlaySaveVisit::Scheduled
+            } else {
+                StudioOverlaySaveVisit::Busy
+            });
         };
         let started = server
             .sync
@@ -133,6 +184,7 @@ impl StudioReceiver {
             }
             crate::store::StudioOverlayStart::Captured(capture) => {
                 self.catchup.schedule_overlay(*capture, ownership, target);
+                self.closing_scheduled = Some(request);
                 Ok(StudioOverlaySaveVisit::Scheduled)
             }
         }
@@ -646,6 +698,7 @@ impl StudioReceiver {
             .catchup
             .expire_parked_overlay(server.runtime_clock().monotonic_ms())
         {
+            self.closing_scheduled = None;
             self.unconfirmed_scheduled = None;
         }
         self.catchup.preview.maintain(server, store, id);

@@ -2128,8 +2128,42 @@ flushed before publication or normal source rewrites. Rotation/adoption resolve 
 journal/recovery/retirement work; the common source writer also fences evidence loss.
 
 The bounded store handoff is accepted; HANDOFF-002 is closed. Read-only `studio_overlay_read`
-is separately accepted, with INSPECTION-TEST-001 now closed. Native overlay writes, automatic
-handoff scheduling, manual disposition and preview-based overlays remain unavailable.
+is separately accepted, with INSPECTION-TEST-001 now closed. Native overlay writes and manual
+disposition remain unavailable. Automatic Closing handoff scheduling exists, but its selector now
+memoizes Unconfirmed history as quiet rather than attempting to transfer it.
+
+#### Awaiting-tenure overlay Save slice (Gate 4, internal only)
+
+The internal app/store path generalizes Flow S over an owned typed Closing or Unconfirmed basis.
+`prepare_studio_unconfirmed_overlay` proves the installed source absent against the current
+five-family inventory, mints a basis only through the current complete prepared preview, repeats
+absence before deriving the branch, and returns only the basis fingerprint plus branch identity.
+Classification remains provenance-independent, so terminal acknowledgements and exact accepted
+retries precede preview/source/media work. New authoring re-mints the preview at S1b, captures the
+exact authenticated Intents version and context, plans off custody, then at S3 rechecks mount,
+server, complete target, member/device key, owner, MLS epoch, exact record bytes and source absence
+before re-minting the preview and writing.
+
+The actor's parked-request key is exact rather than advisory: it includes target, provenance,
+basis fingerprint, branch identity and a domain-separated BLAKE3 digest of the complete canonical
+`DomainOp::encode()` bytes (nonce, type, logical key and body). A different request may finish the
+parked plan to prevent an abandoned caller holding the actor slot, but it returns busy and cannot
+claim that plan's outcome as its own. The exact request is then answered from durable state.
+
+Live Unconfirmed work is limited to three branches per numeric server, 8 MiB of exact
+physical Intents bytes per mounted vault and 64 accepted operations per branch. A fresh complete
+inventory derives the live counters from authenticated provenance and charged bytes. Replacement
+preflight subtracts the authenticated old charge; counters change only after a successful durable
+write, and disposal releases the live charge only after its terminal replacement succeeds.
+The tally lives in `EpochIntentBudget`, so every successful ordinary or Flow S replacement updates
+the same record charge. The 8 MiB share is Flow S admission policy rather than a hard vault
+invariant: ordinary edits beside a live branch may take the tally over the share, after which new
+Unconfirmed growth refuses until headroom returns.
+Unconfirmed provenance grants no handoff, signing, receipt, installed-source or publication
+authority. The shared baseline now has real Index and Flipnote preview coverage, 8.6 reconciliation,
+an actor/store restart regression, the actor Save and native result conversion types. Its functions
+and ticket remain crate-private; P5 is false, no Save command is registered, and there is no UI
+exposure.
 
 The [prepared-signing checkpoint](GATE4-HANDOFF-SIGNING-REVIEW.md), awaiting review, adds:
 
