@@ -15,7 +15,12 @@ cd "$(dirname "$0")/.."
 
 # A sync counts as a mutation under I-4 (an unchanged-file flush still invalidates a captured
 # inventory), so explicit syncs are matched too, wherever the handle came from.
-pattern='fs::(write|rename|remove_file|remove_dir|remove_dir_all|copy|hard_link|create_dir|create_dir_all|set_permissions)\(|File::(create|options)\(|OpenOptions::new\(\)|\.set_len\(|\.sync_(all|data)\('
+#
+# The open flags that can change a file are matched on their own lines too. An allowance keys only
+# the line that matched, and an `OpenOptions` chain spans several, so without these a reviewed
+# sync-only open could gain `.truncate(true)` or `.create(true)` unseen (implementation review of
+# the 18.3 fixes, LOW-5). `.write(true)` alone is not matched: a sync needs a writable handle.
+pattern='fs::(write|rename|remove_file|remove_dir|remove_dir_all|copy|hard_link|create_dir|create_dir_all|set_permissions)\(|File::(create|options)\(|OpenOptions::new\(\)|\.set_len\(|\.sync_(all|data)\(|\.(truncate|create|create_new|append)\(true\)'
 
 # Reviewed sites, each `file|enclosing fn|the matching line's own text, trimmed`, and each allowed
 # exactly once. Extend deliberately, with review, and say why next to the entry.

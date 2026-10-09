@@ -125,6 +125,65 @@ fn edit_referenced(f: &Fixture, store: &mut ServerStore, object: [u8; 16], nonce
         .unwrap();
 }
 
+/// H1's pristine-successor probe runs before the Index object check, whose restores of every object
+/// a PutObject names are the expensive part of H1 (implementation review of the 18.3 fixes, LOW-1).
+/// So a non-pristine Index successor is refused having restored nothing; with the probe after the
+/// check, as first built, this vault paid two restores every probe period before the refusal.
+#[test]
+fn studio_overlay_handoff_h1_refuses_a_non_pristine_index_successor_before_restoring_objects() {
+    let root = tempfile::tempdir().unwrap();
+    let f = Fixture::new(false);
+    let mut store = open(root.path());
+    let basis = index_with_two_references(&f, &mut store);
+    // The installed successor takes one ordinary operation, so it is no longer pristine.
+    let mut successor = f.load(&store).unwrap().unit;
+    let mut ordinary = f.title();
+    ordinary.nonce = [79; 16];
+    let packet = successor
+        .edit_or_reseal(&f.device, &f.group, &mut rng(), &ordinary, 557)
+        .unwrap();
+    let mut b = budget(&mut store, &f);
+    store
+        .ingest_studio_epoch(
+            SERVER,
+            &f.group,
+            f.target,
+            &f.device,
+            &packet,
+            &mut rng(),
+            &mut b,
+        )
+        .unwrap();
+
+    let mut b = budget(&mut store, &f);
+    let before = studio_full_restores_for_test();
+    let refused = store
+        .start_studio_handoff_with_io(
+            SERVER,
+            &f.group,
+            f.target,
+            &f.device,
+            basis,
+            Some(0),
+            &mut rng(),
+            &mut b,
+            &mut WriteHooks::None,
+        )
+        .map(|_| ())
+        .expect_err("H1 accepted a non-pristine Index successor");
+    assert!(
+        refused
+            .to_string()
+            .contains("successor is not transferable: SuccessorNotPristine"),
+        "refused for another reason: {refused}"
+    );
+    assert_eq!(
+        studio_full_restores_for_test() - before,
+        0,
+        "H1 restored the branch's objects before refusing a non-pristine successor"
+    );
+}
+
 /// 9.1.1 step 7, the zero-restore claim, narrowed as its review asked (M-4): H5 calls neither
 /// `restore_unit` nor `load_studio_epoch` (whose loads go through it), for a Flipnote and for an
 /// Index whose branch names two objects. Before 9.1 this H5 restored twice for a Flipnote, and

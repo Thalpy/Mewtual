@@ -316,8 +316,6 @@ impl ServerStore {
         }
         let tenure =
             tenure.ok_or_else(|| invalid("overlay handoff needs observed owner tenure"))?;
-        // Index creation still requires the actual independently saved object source.
-        self.check_index_object_sources(server, group, target, device, &document, &state)?;
         // The short live-authority mint. Structural metadata is enough: this reads the target,
         // the active branch's author and its receipt, and checks them against live membership,
         // MLS epoch and the observed tenure. It reconstructs nothing.
@@ -334,9 +332,11 @@ impl ServerStore {
         // classification the eligibility view reports, and the eligibility tests hold it to the
         // check on every state their fixtures reach. The design 18.3 review (F8) found it unbuilt.
         //
-        // Last, after the authority mint, on purpose: every refusal H1 made before the probe
-        // existed keeps its own check and message (the live owner's receipt check above is what
-        // its tests isolate), and the probe adds only the successor states nothing earlier sees.
+        // Placed after the authority mint, so the live owner's receipt check keeps its own refusal
+        // (its tests isolate it), and **before the Index check**, whose restores of every
+        // referenced object are the expensive part of H1; a non-pristine Index successor must not
+        // pay them every probe period (implementation review of the 18.3 fixes, LOW-1). On the
+        // eligible path the source is authenticated twice, here and by capture: a bounded read.
         let overlay = state
             .handoff_metadata()
             .and_then(|metadata| metadata.overlay())
@@ -353,6 +353,8 @@ impl ServerStore {
             }
             Some(None) => {}
         }
+        // Index creation still requires the actual independently saved object source.
+        self.check_index_object_sources(server, group, target, device, &document, &state)?;
         self.capture_studio_handoff(
             server, group, target, device, &document, basis, tenure, authority,
         )
@@ -418,6 +420,16 @@ impl ServerStore {
         let original = self.read_scoped_intent_plain(&scope)?;
         let old = original.as_ref().map(|record| record.physical_bytes);
         let original = original.map(|record| blake3::hash(&record.plain));
+        // Design 9.3 step 6 compares with the CAPTURED values (C-2), not only with this visit's
+        // own reads. The re-read before the first write, below, is under the same exclusive borrow
+        // as this one, so comparing those two with each other cannot fail. Without this, the
+        // digest comparison inside `studio_handoff_is_current` above was the only thing standing
+        // between a same-size change to the intent record and Prepared overwriting it with H2's
+        // ledger, losing whatever ordinary intent the change added (implementation review of the
+        // 18.3 fixes, M-1). With it, that comparison is redundant, as design mutation M1 says.
+        if !stamp.captured_intent(original, old) {
+            return Err(invalid("overlay intent source changed"));
+        }
         state.overlay = Some(prepared);
         let intent_id = *blake3::hash(&scope).as_bytes();
         budget.intents.preflight_handoff(

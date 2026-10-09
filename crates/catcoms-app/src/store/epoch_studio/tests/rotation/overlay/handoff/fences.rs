@@ -486,11 +486,15 @@ fn replace_at_the_same_size(store: &ServerStore, path: &Path) {
 /// A same-size authenticated replacement of either between H2 and a signing turn makes the plan
 /// stale, so no turn spends the device's signing authority on it.
 ///
-/// Both comparisons are redundant by design with H5, whose own currency check refuses the commit
-/// later, so nothing durable could go wrong without them. What they add is that nothing is signed
-/// first, and that is what this observes: `studio_handoff_plan_is_current` is the receiver's gate
-/// before every signing slice. CI's handoff harness (`plan-intent-digest`, `plan-source-digest`)
-/// keeps only the size in each comparison and requires this test to fail.
+/// Each comparison is redundant by design with a later H5 check against the **captured** stamp:
+/// the source's with barrier 2's capability, and the intent's with step 6. Step 6 used to compare
+/// its own two reads with each other, under one borrow, so for the intent this was in fact the only
+/// guard until the review of these fixes found it (M-1). What the comparisons add is that nothing
+/// is signed first, which the gate assertion observes: `studio_handoff_plan_is_current` is the
+/// receiver's gate before every signing slice. The second half drives the stale plan through H5
+/// anyway and requires the changed record to survive untouched. CI's handoff harness
+/// (`plan-intent-digest`, `plan-source-digest`) keeps only the size in each comparison and
+/// requires this test to fail at the gate.
 #[test]
 fn studio_overlay_handoff_plan_is_stale_after_a_same_size_wrapper_replacement() {
     for intent in [true, false] {
@@ -515,7 +519,7 @@ fn studio_overlay_handoff_plan_is_stale_after_a_same_size_wrapper_replacement() 
         else {
             panic!("H1 did not capture the fixture's branch");
         };
-        let plan = capture.prepare().unwrap();
+        let mut plan = capture.prepare().unwrap();
         assert!(
             store
                 .studio_handoff_plan_is_current(&f.group, &f.device, Some(0), &plan)
@@ -529,12 +533,53 @@ fn studio_overlay_handoff_plan_is_stale_after_a_same_size_wrapper_replacement() 
         } else {
             f.path(&store)
         };
+        // H5's budget is minted first: minting scans the vault, and the replacement below does not
+        // decode. A test write rotates no generation, so the budget stays spendable, and the test
+        // is about H5's checks rather than the inventory's.
+        let mut b = budget(&mut store, &f);
         replace_at_the_same_size(&store, &path);
         assert!(
             !store
                 .studio_handoff_plan_is_current(&f.group, &f.device, Some(0), &plan)
                 .unwrap(),
             "a stale plan reached a signing turn: the {which} wrapper changed at the same size"
+        );
+
+        // The durable half: the stale plan is signed and assembled anyway, as if the gate had let
+        // it through, and H5 must still refuse with nothing written. Under the `plan-intent-digest`
+        // mutant this is what H5's step 6 catches on its own, against the captured stamp.
+        let replaced = fs::read(&path).unwrap();
+        assert!(plan
+            .sign_slice(&f.device, &f.group, 0, false, usize::MAX, None)
+            .unwrap()
+            .complete());
+        let commit = plan.assemble().unwrap();
+        let committed = store.commit_studio_handoff_with_io(
+            SERVER,
+            &f.group,
+            f.target,
+            &f.device,
+            commit,
+            Some(0),
+            &mut rng(),
+            &mut b,
+            &mut WriteHooks::None,
+        );
+        assert!(
+            committed.is_err(),
+            "H5 committed a plan whose {which} record changed at the same size"
+        );
+        assert_eq!(
+            fs::read(&path).unwrap(),
+            replaced,
+            "H5 overwrote the changed {which} record"
+        );
+        assert!(
+            !store
+                .load_epoch_intents_structural(SERVER, &f.logical)
+                .map(|state| state.handoff_prepared())
+                .unwrap_or(false),
+            "H5 wrote Prepared over the changed {which} record"
         );
     }
 }
@@ -594,7 +639,9 @@ fn studio_overlay_handoff_h1_refuses_a_non_pristine_successor_before_capture() {
         );
         match started {
             Err(error) => assert!(
-                error.to_string().contains("successor is not transferable"),
+                error
+                    .to_string()
+                    .contains("successor is not transferable: SuccessorNotPristine"),
                 "refused for another reason (art {art}): {error}"
             ),
             Ok(crate::store::StudioHandoffStart::Captured(_)) => {

@@ -56,6 +56,14 @@ impl std::fmt::Debug for StudioHandoffStamp {
     }
 }
 
+impl StudioHandoffStamp {
+    /// Whether an intent record read now is, by plaintext digest and physical size, the one H1
+    /// captured and H2 decoded. H5's step 6 holds its own read to this (design 9.3).
+    pub(super) fn captured_intent(&self, digest: Option<blake3::Hash>, size: Option<u64>) -> bool {
+        digest.zip(size) == Some(self.intent)
+    }
+}
+
 /// Authenticated plaintext plus the public restore context H2 needs. H1 produces exactly one of
 /// these and nothing else durable.
 pub(crate) struct StudioHandoffCapture {
