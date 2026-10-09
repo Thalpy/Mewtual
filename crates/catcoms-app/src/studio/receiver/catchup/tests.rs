@@ -2097,3 +2097,333 @@ async fn a_queued_overlay_waits_behind_authoritative_catch_up() {
         "the overlay stayed deferred after catch-up cleared"
     );
 }
+
+/// The signing yield's parked-result term, on its own (design 18.3 review, F2).
+///
+/// In `a_signing_visit_yields_to_a_members_checkpoint_request_until_it_is_served` a parked
+/// preparation always belongs to the reserved request, so `service_owed` answers on the same turns
+/// and removing `result_parked` alone is masked there. Here a local owner capture parks a real
+/// source preparation with no request behind it, and the predicate must answer "yield" for it.
+#[tokio::test]
+async fn a_parked_catch_up_result_alone_makes_a_signing_slice_yield() {
+    let clock = ManualClock::new(1000);
+    let mut rng = ChaCha20Rng::seed_from_u64(1413);
+    let mut server = Server::found(
+        Hub::new().join(PeerId::from_u64(1)),
+        MlsDevice::generate().unwrap(),
+        rng.clone(),
+        Box::new(clock.clone()),
+        "owner",
+    )
+    .unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let mut store = ServerStore::open(root.path(), b"parked-priority", &mut rng).unwrap();
+    let target = StudioTarget::Flipnote {
+        channel: crate::channel_id("general").to_be_bytes(),
+        object: [9; 16],
+    };
+    server.sync.with_registry_context(|g, d, _, _| {
+        crate::store::save_studio_source_fixture(&mut store, 83, g, d, target)
+    });
+    let mut receiver = StudioReceiver::default();
+    receiver
+        .run(
+            &mut server,
+            &mut store,
+            83,
+            Some(StudioRequest::Read { target }),
+        )
+        .unwrap();
+    // A private pool, so the preparation's permit does not contend with other tests.
+    receiver.catchup.inject_overlay_pool_for_test(4);
+    // Displace the sole graph so the owner turn starts a real source preparation.
+    let other = StudioTarget::Flipnote {
+        channel: target.channel(),
+        object: [8; 16],
+    };
+    server.sync.with_registry_context(|g, d, _, _| {
+        crate::store::save_studio_source_fixture(&mut store, 83, g, d, other)
+    });
+    server
+        .studio_transaction(&mut store, 83, StudioRequest::Read { target: other })
+        .unwrap();
+    receiver.run(&mut server, &mut store, 83, None).unwrap();
+    assert!(
+        receiver.catchup.preparation.is_some(),
+        "the fixture did not start a real source preparation"
+    );
+    assert!(
+        !receiver.handoff_priority(&server),
+        "precondition: something else already asked a signing slice to yield"
+    );
+
+    let work = receiver
+        .detach(&mut server)
+        .expect("the preparation detaches");
+    receiver.complete(&mut server, work.run(None).await);
+    assert!(
+        receiver.catchup.result_parked(),
+        "the completed preparation was not parked"
+    );
+    assert!(
+        !server.sync.has_epoch_service_interest() && !receiver.catchup.service_owed(&server),
+        "precondition: a service request is behind this result, so it would mask the term"
+    );
+    assert!(
+        receiver.handoff_priority(&server),
+        "a parked result did not make a signing slice yield"
+    );
+}
+
+/// N31 at actor level (design 18.3 implementation review, F2): a signing slice reached through
+/// real background turns, with the authoritative work staged by a real second member.
+///
+/// `handoff_signing_pages_across_turns_and_a_priority_turn_signs_nothing` passes `handoff_sign`
+/// its priority answer directly, so nothing tested what `handoff_priority` computes, and the
+/// review's mutant forcing it to `false` survived. Here every turn is a production `run`. The
+/// priority work is Bob's checkpoint-head request, delivered over the transport and queued by the
+/// sync side after the observed slice ran (14.1, staging rule 2); nothing reaches into the store.
+///
+/// This is 14.1's count fixture: the branch is longer than `MAX_SIGNING_TURNS_PER_VISIT` and the
+/// injected clock never moves, so only the turn cap can bound the observed visit. The time
+/// fixture's bound is pinned at store level by
+/// `studio_overlay_handoff_signing_slice_reports_yield_bound_and_completion_apart`.
+///
+/// Its first run failed, and found a fourth term the answer needed (`service_owed`). Once
+/// catch-up had reserved the request and installed its source, none of 7.3's three terms held,
+/// so signing ran every turn to the end of the branch, H5's commit evicted the captured source,
+/// and Bob's request was dropped unanswered (`Transport(NoResponse)`).
+#[tokio::test]
+async fn a_signing_visit_yields_to_a_members_checkpoint_request_until_it_is_served() {
+    let clock = ManualClock::new(1000);
+    let mut rng = ChaCha20Rng::seed_from_u64(1409);
+    let hub = Hub::new();
+    let mut server = Server::found(
+        hub.join(PeerId::from_u64(1)),
+        MlsDevice::generate().unwrap(),
+        rng.clone(),
+        Box::new(clock.clone()),
+        "owner",
+    )
+    .unwrap();
+    server.subscribe_control().await.unwrap();
+    // Bob joins before the fixture is built. A join during H3 is an MLS change, which abandons
+    // the job, so the epoch the handoff pins must already include him.
+    let invite = server.mint_invite([1; 16], u64::MAX, vec![]).unwrap();
+    let (bob, tick) = tokio::join!(
+        Server::join(
+            hub.join(PeerId::from_u64(2)),
+            MlsDevice::generate().unwrap(),
+            ChaCha20Rng::seed_from_u64(1410),
+            Box::new(clock.clone()),
+            "member",
+            server.local_peer(),
+            &invite,
+        ),
+        server.sync_once()
+    );
+    tick.unwrap();
+    let mut bob = bob.unwrap();
+    // A checkpoint request goes only to a proven member endpoint, so Bob proves the owner's.
+    let (proof, tick) = tokio::join!(
+        bob.sync
+            .request_catchup(server.local_peer(), catcoms_wire::DocType::Wiki, 43),
+        server.sync_once()
+    );
+    proof.unwrap();
+    tick.unwrap();
+
+    let root = tempfile::tempdir().unwrap();
+    let mut store = ServerStore::open(root.path(), b"flow-h-priority", &mut rng).unwrap();
+    let target = StudioTarget::Flipnote {
+        channel: crate::channel_id("general").to_be_bytes(),
+        object: [19; 16],
+    };
+    let operations = crate::store::MAX_SIGNING_TURNS_PER_VISIT + 5;
+    server.sync.with_registry_context(|g, d, _, _| {
+        crate::store::studio_handoff_ready_fixture(&mut store, 83, g, d, target, operations)
+    });
+    let mut receiver = StudioReceiver::default();
+    receiver
+        .run(
+            &mut server,
+            &mut store,
+            83,
+            Some(StudioRequest::Read { target }),
+        )
+        .unwrap();
+    receiver.catchup.inject_overlay_pool_for_test(4);
+    for _ in 0..30 {
+        receiver.run(&mut server, &mut store, 83, None).unwrap();
+        if let Some(work) = receiver.detach(&mut server) {
+            receiver.complete(&mut server, work.run(None).await);
+        }
+        if receiver.handoff.stage_for_test() == Some("signing") {
+            break;
+        }
+    }
+    assert_eq!(
+        receiver.handoff.stage_for_test(),
+        Some("signing"),
+        "the fixture never reached H3, so this proves nothing"
+    );
+    assert_eq!(receiver.handoff.remaining_for_test(), Some(operations));
+
+    // 1. The observed visit. Nothing the priority gate answers is pending at its entry, so the
+    //    gate cannot be why it stops: it signs exactly a turn cap's worth and leaves work.
+    assert!(
+        !server.sync.has_epoch_service_interest(),
+        "precondition: service interest was already pending"
+    );
+    assert!(
+        !receiver.catchup.result_parked(),
+        "precondition: a background result was already parked"
+    );
+    assert!(
+        !receiver
+            .watches
+            .iter()
+            .any(|(w, _)| server.sync.studio_has_inbound(&w.inner)),
+        "precondition: a watch already had inbound"
+    );
+    receiver.run(&mut server, &mut store, 83, None).unwrap();
+    let after = receiver
+        .handoff
+        .remaining_for_test()
+        .expect("the job survived the observed visit");
+    assert_eq!(
+        operations - after,
+        crate::store::MAX_SIGNING_TURNS_PER_VISIT,
+        "the observed visit was not bounded by the turn cap"
+    );
+    assert!(after > 0, "the observed visit finished the branch");
+
+    // Displace the document's warm graph, so serving it needs a detached source preparation whose
+    // result then waits, parked, for a custody visit. The request then passes through three of the
+    // priority answer's four terms in turn: queued service interest, a parked result, and, once
+    // the source is installed, a reserved request still owed its answer. Catch-up alternates
+    // serving with its own client turns, so that last state lasts at least one turn.
+    let other = StudioTarget::Flipnote {
+        channel: target.channel(),
+        object: [18; 16],
+    };
+    server.sync.with_registry_context(|g, d, _, _| {
+        crate::store::save_studio_source_fixture(&mut store, 83, g, d, other)
+    });
+    server
+        .studio_transaction(&mut store, 83, StudioRequest::Read { target: other })
+        .unwrap();
+    assert!(
+        !server
+            .sync
+            .with_registry_context(|g, d, _, _| store.studio_source_is_warm(83, g, target, d)),
+        "precondition: the document's graph is still warm, so nothing would park"
+    );
+
+    // 2. Bob asks the owner for this document's checkpoint head. Until the answer goes back, a
+    //    turn that starts with the request queued, or with a result parked for custody, must sign
+    //    nothing: those are the turns that serve it.
+    let request = bob
+        .sync
+        .prepare_checkpoint_head(server.local_peer(), CheckpointTarget::Studio(target))
+        .unwrap();
+    let fetch = tokio::spawn(request.fetch());
+    tokio::task::yield_now().await;
+    for _ in 0..8 {
+        if server.sync.has_epoch_service_interest() {
+            break;
+        }
+        server.sync_once().await.unwrap();
+    }
+    assert!(
+        server.sync.has_epoch_service_interest(),
+        "Bob's request never reached the owner's service queue"
+    );
+    let (mut queued_yields, mut parked_yields, mut owed_yields) = (0, 0, 0);
+    for _ in 0..20 {
+        if fetch.is_finished() {
+            break;
+        }
+        // The priority answer's inputs at this turn's entry, read the way production reads them.
+        let queued = server.sync.has_epoch_service_interest();
+        let parked = receiver.catchup.result_parked();
+        let owed = receiver.catchup.service_owed(&server);
+        let before = receiver.handoff.remaining_for_test();
+        receiver.run(&mut server, &mut store, 83, None).unwrap();
+        if queued || parked || owed {
+            if queued {
+                queued_yields += 1;
+            } else if parked {
+                parked_yields += 1;
+            } else {
+                owed_yields += 1;
+            }
+            assert_eq!(
+                receiver.handoff.remaining_for_test(),
+                before,
+                "a signing slice ran while a member's checkpoint request waited"
+            );
+        }
+        if let Some(work) = receiver.detach(&mut server) {
+            receiver.complete(&mut server, work.run(None).await);
+        }
+        tokio::task::yield_now().await;
+    }
+    assert!(
+        fetch.is_finished(),
+        "the owner never answered Bob's request"
+    );
+    // Each term must really have been the reason for some turn, or a mutant removing it would
+    // pass here for want of a turn that needed it.
+    assert!(
+        queued_yields >= 1,
+        "no turn began with the request queued as service interest"
+    );
+    assert!(
+        parked_yields >= 1,
+        "no turn began with only the request's preparation result parked"
+    );
+    assert!(
+        owed_yields >= 1,
+        "no turn began with the request reserved, installed and still unanswered"
+    );
+    let answered = bob
+        .sync
+        .complete_checkpoint_head(fetch.await.expect("the fetch task"));
+    assert!(
+        answered.is_ok(),
+        "Bob's request was not served: {answered:?}"
+    );
+    // Authoritative progress came between two real signing slices: none signed in between.
+    assert_eq!(
+        receiver.handoff.remaining_for_test(),
+        Some(after),
+        "signing resumed before the authoritative work was served"
+    );
+
+    // 3. Signing then resumes, and the transfer completes with the whole branch.
+    let mut updated = None;
+    for _ in 0..30 {
+        let (_, changed) = receiver.run(&mut server, &mut store, 83, None).unwrap();
+        if let Some(work) = receiver.detach(&mut server) {
+            receiver.complete(&mut server, work.run(None).await);
+        }
+        if changed == Some(target) {
+            updated = changed;
+            break;
+        }
+    }
+    assert_eq!(
+        updated,
+        Some(target),
+        "the transfer never completed after the yield"
+    );
+    assert!(
+        store
+            .load_epoch_intents(83, &target.document(&server.group_id()).unwrap())
+            .unwrap()
+            .overlay()
+            .is_none(),
+        "the transferred branch was retained"
+    );
+}

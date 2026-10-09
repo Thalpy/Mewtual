@@ -46,6 +46,8 @@ jobs:
     # About 16 minutes of tests, then 18 mutants and their restored regressions, about 55 in all
     # on 2026-10-09. 45 was enough only while a broken entry stopped the harness early (from
     # 17dd54fc until 528f0d2e); with every entry running, that run was cancelled in its last phase.
+    # F2's four handoff-priority entries add about 15 more (locally, 2026-10-09): three of them
+    # run the actor-level test, about two minutes per run, once mutated and once restored.
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4

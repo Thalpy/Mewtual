@@ -30,8 +30,14 @@ and ranks the live hazards in that path.
     the budget scan. **Known gap:** a caller cannot tell it from the other `Busy`, because the
     paused event is one-shot and neither Save ends a pause. A distinct `Paused` outcome is
     proposed to Agent 2, and native Save must not register before it.
-  - Native Save and repair commands remain unregistered, and F2 (an actor-level priority test)
-    follows. This is not Gate 4 acceptance.
+  - **F2:** an actor-level test of Flow H's signing yield, with a second member's checkpoint
+    request arriving mid-signing. It found that a request catch-up had reserved, and whose source
+    it had installed, was invisible to the yield. Signing then ran to the end, and H5's commit
+    evicted the source and dropped the request unanswered. The yield now waits for it
+    (`CatchupRuntime::service_owed`).
+    - **Still open:** the heavy-stage gate `replay_ready()` has the same blind spot, once per
+      handoff, and the inbound term has no actor-level test.
+  - Native Save and repair commands remain unregistered. This is not Gate 4 acceptance.
 
 - **Gate 4 PR #35 reconciliation (2026-10-08).** The candidate now preserves
   `gate4-agent1-runtime` through `7310b22b76848c4b9f85fec816744cff00c1a64f`. Agent 2's newer

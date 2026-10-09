@@ -2488,7 +2488,7 @@ Everything else, including the classifier's 14 mutations, was checked by inspect
 | finding | what | disposition |
 |---|---|---|
 | F1 MEDIUM | S1a's exact-retry acknowledgement replayed the whole branch under custody (`overlay.read`) to return a projection no caller used | **fixed, landing with C-3 step 2** once Agent 2 freed their files (2026-10-09). They reviewed the diff against their files statically and found no change to their Save's outcome contract |
-| F2 MEDIUM | N31 is not the accepted actor-level test, and `handoff_priority` is unpinned | **open, its own push next.** Staging real priority work mid-signing needs a second member delivering inbound or a page request, a fixture of its own. Agent 2 has freed `catchup/tests.rs` for it |
+| F2 MEDIUM | N31 is not the accepted actor-level test, and `handoff_priority` is unpinned | **fixed** (2026-10-09): a real second member's checkpoint request mid-signing, four CI entries, and a missing fourth term the test found; see "F2" below. The inbound term and the heavy-stage gate stay open |
 | F3 MEDIUM | H5's custody terms are understated, and bounded custody is not established | **measured, deviation recorded**; see "H5's repeated terms, priced" below |
 | F4 LOW | a Save captured while the receiver is paused strands admission, a pool slot and a media hold | **fixed, `2b9ba0ae`**, in Agent 2's chosen shape, at both entry points (below) |
 | F5 LOW | the refused-result memo tests never checked what the memo returned | **fixed, `e01113a5`** |
@@ -2564,6 +2564,57 @@ before F4.
   the helper, not end to end.
 - The media-hold release is not observed: the catch-up fixture captures a title operation, which
   holds no media.
+
+### F2: the actor-level N31, and the fourth priority term it found (2026-10-09)
+
+**The test.** `a_signing_visit_yields_to_a_members_checkpoint_request_until_it_is_served`, in
+`catchup/tests.rs`, is design 14.1's count fixture driven entirely by production `run` turns:
+1. Bob joins for real and proves the owner's endpoint. The owner reaches H3 on a branch of
+   `MAX_SIGNING_TURNS_PER_VISIT + 5` operations, with the injected clock still.
+2. The observed visit starts with no service interest, no watch inbound and no parked result, and
+   signs exactly the turn cap, leaving five.
+3. Bob asks for the document's checkpoint head over the transport. The owner's warm graph was
+   displaced first, so serving it needs a detached source preparation.
+4. Every turn that starts with priority work signs nothing, and the test counts each kind. Bob's
+   request is then answered with no signature in between, and the transfer completes.
+
+**What its first run found.** Bob's request came back `Transport(NoResponse)`. Per turn:
+- **Turns 1 and 2:** it was queued interest, and both yielded. Turn 2 reserved it and detached the
+  preparation.
+- **Turn 3:** the parked result yielded; catch-up installed the source, but spent its turn on
+  client work, since it alternates that with serving.
+- **Turn 4:** none of 7.3's three terms held, so a slice signed the rest of the branch. A slice
+  that signs ends the turn before catch-up.
+- **Turns 5 and 6:** H5's commit evicted the warm source, and catch-up dropped the captured request
+  unanswered.
+
+**The fix.** A fourth term, `CatchupRuntime::service_owed`: a reserved request whose interest is
+still current. Catch-up's own `pending` already counted it; it is now one method that both
+`pending` and `handoff_priority` call. Design 7.3 is amended to match.
+
+**The parked term needed its own test.** In Bob's flow a parked preparation always belongs to the
+reserved request, so `service_owed` answers on the same turns and removing `result_parked` alone
+survives there. `a_parked_catch_up_result_alone_makes_a_signing_slice_yield` parks a real owner
+capture with no request behind it and asks the predicate directly. This is predicate level, not a
+signing turn, because with no priority work a signing slice takes every turn and catch-up never
+starts a capture mid-signing.
+
+**CI, four `handoff-priority*` entries in the handoff harness,** all DETECTED and PASS restored
+under `RUSTFLAGS='-D warnings'`:
+- `handoff-priority`, the reviewer's mutant: the whole predicate forced to `false`;
+- `-service`, `-owed` and `-parked`: one term removed each.
+
+The harness now accepts a crate-absolute test name beginning `studio::receiver::catchup::tests::`.
+
+**Not covered, recorded:**
+- **The inbound term.** A production turn reaches the yield with inbound still queued only through
+  the gossip fairness path (`gossip_runs >= 4` with background work), and no test stages that.
+- **The same gap at the heavy-stage gate, not fixed.** `replay_ready()` does not see a reserved
+  request either. If a request is captured while H4 runs off-actor, H5 can commit before it is
+  served, evicting the source and dropping the request, once per handoff; replay may do the same.
+  `replay_ready` is shared with replay, so the rule goes to Agent 2 before it changes.
+- **The time fixture** stays store-level, in
+  `studio_overlay_handoff_signing_slice_reports_yield_bound_and_completion_apart`.
 
 ### F3: H5's repeated terms, priced
 
@@ -5701,8 +5752,9 @@ makes that more important, not less.
    passes its own review and their status note says so. Agent 2's P5 is still false.
 8. **Design 18.3's implementation review is back** (2026-10-09): a bounded PASS WITH FINDINGS, no
    blocker or high. See its section above. F1 and F4 land in the batch with C-3 step 2.
-   **Still open: F2,** the actor-level N31 plus a mutation entry for `handoff_priority`, as its
-   own push. Native Save must not register until F2 is closed, besides Agent 2's P5.
+   **F2 is fixed** (2026-10-09), with the fourth priority term its test found. Still open from it,
+   for Agent 2's view: whether `replay_ready()`, the heavy-stage gate, should also wait for a
+   reserved service request. Native Save still waits for Agent 2's P5.
 
    **Also with Agent 2:** the shared overlay-lifecycle harness exceeds its 60-minute CI job on
    every push. Agent 2 will shard it by index (`--shard K/N`) after this batch lands.

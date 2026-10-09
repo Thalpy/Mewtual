@@ -500,7 +500,13 @@ impl StudioReceiver {
     }
 
     /// 7.3's placement answer for a signing slice: yield immediately to authoritative service
-    /// interest, to inbound on any watch, or to a background result already parked.
+    /// interest, to inbound on any watch, to a background result already parked, or to a reserved
+    /// service request still owed its answer.
+    ///
+    /// The last term is not in 7.3's list; the actor-level test for design 18.3 review F2 found it
+    /// missing. A request is queued interest only until catch-up reserves it, and a parked result
+    /// only until its source is installed. In the turns after that it is still unanswered, and
+    /// catch-up serves it only on a turn no slice has signed in.
     fn handoff_priority<T: MeshTransport, R: CryptoRngCore>(&self, server: &Server<T, R>) -> bool {
         server.sync.has_epoch_service_interest()
             || self
@@ -508,6 +514,7 @@ impl StudioReceiver {
                 .iter()
                 .any(|(w, _)| server.sync.studio_has_inbound(&w.inner))
             || self.catchup.result_parked()
+            || self.catchup.service_owed(server)
     }
     /// Notify before any bounded event-channel await: native work never waits on the event
     /// consumer, and event backpressure must not conceal an already-queued inbox packet.

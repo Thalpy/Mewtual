@@ -509,6 +509,22 @@ impl CatchupRuntime {
             || self.registry_prepared.is_some()
             || self.overlay_planned.is_some()
     }
+    /// A member's epoch-service request this runtime has reserved and not yet answered, while the
+    /// request is still current. Once reserved it is no longer queued interest, and once its
+    /// source preparation is installed no result is parked either, yet it is still owed an answer.
+    ///
+    /// `pending` counts it as work, and a signing slice must yield to it too (design 18.3 review,
+    /// F2, found by that test). A slice that signs ends its turn before catch-up, so without this
+    /// term signing ran every turn until the branch was done, and H5's commit then evicted the
+    /// source the request had captured, which drops a captured request unanswered.
+    pub(super) fn service_owed<T: MeshTransport, R: CryptoRngCore>(
+        &self,
+        server: &Server<T, R>,
+    ) -> bool {
+        self.service
+            .as_ref()
+            .is_some_and(|s| server.sync.epoch_service_interest_is_current(&s.interest))
+    }
     pub(super) fn replay_ready(&self) -> bool {
         !self.in_flight
             && !self.preparing
@@ -760,12 +776,7 @@ impl CatchupRuntime {
         if self.head_result.is_some() {
             return true;
         }
-        if server.sync.has_epoch_service_interest()
-            || self
-                .service
-                .as_ref()
-                .is_some_and(|s| server.sync.epoch_service_interest_is_current(&s.interest))
-        {
+        if server.sync.has_epoch_service_interest() || self.service_owed(server) {
             return true;
         }
         if !watches
