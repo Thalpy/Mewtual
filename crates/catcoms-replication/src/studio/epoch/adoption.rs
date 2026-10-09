@@ -2,7 +2,7 @@
 //! is not permission to replace local work: this plan retains the entire old domain version,
 //! and the store must persist it before installing the separately constructed successor.
 use super::*;
-use crate::{RecoveryReason, RecoverySnapshot, VerifiedCheckpoint};
+use crate::{OwnerAuthority, RecoveryReason, RecoverySnapshot, VerifiedCheckpoint};
 
 /// Immutable computation, bound to one exact sealed source and one current-owner receipt.
 /// It is not network provenance, a durable recovery acknowledgement, or an editing lease.
@@ -110,7 +110,7 @@ impl StudioEpoch {
         &mut self,
         receipt: &Receipt,
         raw_seed: &[u8],
-        group: &ServerGroup,
+        group: &(impl OwnerAuthority + ?Sized),
         tenure: u64,
     ) -> Result<StudioAdoptionPlan, ReplError> {
         let state = self.repair_state().ok_or(ReplError::ReceiptConflict)?;
@@ -125,7 +125,7 @@ impl StudioEpoch {
         &mut self,
         receipt: &Receipt,
         raw_seed: &[u8],
-        group: &ServerGroup,
+        group: &(impl OwnerAuthority + ?Sized),
         tenure: u64,
         reason: RecoveryReason,
     ) -> Result<StudioAdoptionPlan, ReplError> {
@@ -170,7 +170,7 @@ impl StudioEpoch {
     pub fn adopted_successor(
         &mut self,
         plan: &StudioAdoptionPlan,
-        group: &ServerGroup,
+        group: &(impl OwnerAuthority + ?Sized),
         tenure: u64,
     ) -> Result<Self, ReplError> {
         let expected_reason = if self.repair_install_pending() {

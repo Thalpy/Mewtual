@@ -19,6 +19,7 @@
 //! proposal/commit linearization of MLS membership changes and the anti-entropy
 //! sync protocol over the network.
 
+pub mod authority;
 mod bounded_change;
 mod catchup_index;
 pub mod checkpoint;
@@ -31,6 +32,7 @@ pub mod studio;
 
 use thiserror::Error;
 
+pub use authority::{CapturedOwnerAuthority, OwnerAuthority};
 pub use checkpoint::{CheckpointOrigin, CheckpointSeed, VerifiedCheckpoint, MAX_CHECKPOINT_BYTES};
 pub use doc::{AppliedOp, EncryptedDoc, MAX_DELIVERY_TARGETS};
 pub use epoch::{

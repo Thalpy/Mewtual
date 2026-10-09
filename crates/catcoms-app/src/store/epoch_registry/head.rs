@@ -156,6 +156,12 @@ impl ServerStore {
         budget
             .verify_record(&storage_scope, *blake3::hash(&scope).as_bytes(), record)
             .map_err(invalid)?;
+        let applied = unit
+            .as_ref()
+            .and_then(|u| u.repair_state().map(|state| state.repair));
+        // Only a source this answer can serve answers a report with its repair; a Faulted one
+        // refuses service below (see `admit_fault_report_with_writer`).
+        let servable = unit.as_ref().is_some_and(|u| u.receipt_head().is_ok());
         self.admit_registry_head_report(
             server,
             &document,
@@ -164,6 +170,7 @@ impl ServerStore {
             durable_tenure,
             archived_owner,
             fault_report,
+            applied.as_ref().filter(|_| servable),
             rng,
             budget,
             hooks,
@@ -178,9 +185,6 @@ impl ServerStore {
             .inspect_err(|_| budget.invalidate())?
             .flatten()
             .cloned();
-        let applied = unit
-            .as_ref()
-            .and_then(|u| u.repair_state().map(|state| state.repair));
         self.finish_registry_head_source(
             server,
             group,
@@ -209,6 +213,7 @@ impl ServerStore {
         durable_tenure: Option<u64>,
         archived_owner: Option<&ArchivedOwnerTenure>,
         fault_report: Option<&[Receipt; 2]>,
+        carried: Option<&ReceiptRepair>,
         rng: &mut impl CryptoRngCore,
         budget: &mut EpochStorageBudget,
         hooks: &mut WriteHooks<'_>,
@@ -222,6 +227,7 @@ impl ServerStore {
                 tenure,
                 archived_owner,
                 report,
+                carried,
                 rng,
                 budget,
                 hooks,
@@ -421,6 +427,8 @@ impl ServerStore {
         let record =
             self.checked_registry_prepared_record(server, group, bucket, device, prepared, budget)?;
         let document = registry_document(&group.group_id(), bucket).map_err(invalid)?;
+        let applied = prepared.and_then(|(_, source)| source.fault_repair());
+        let servable = prepared.is_some_and(|(_, source)| source.receipt_head().is_ok());
         self.admit_registry_head_report(
             server,
             &document,
@@ -429,6 +437,7 @@ impl ServerStore {
             tenure,
             archived_owner,
             fault_report,
+            applied.as_ref().filter(|_| servable),
             rng,
             budget,
             &mut WriteHooks::None,
@@ -440,7 +449,6 @@ impl ServerStore {
             .transpose()
             .inspect_err(|_| budget.invalidate())?
             .flatten();
-        let applied = prepared.and_then(|(_, source)| source.fault_repair());
         self.finish_registry_head_source(
             server,
             group,

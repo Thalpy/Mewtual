@@ -189,7 +189,7 @@ async fn studio_registry_preparation_outliving_head_needs_a_fresh_request() {
     assert_eq!(
         std::fs::read(path).unwrap(),
         before,
-        "disabled automatic repair performs no durable write"
+        "routing performs no durable write: only the repair job's S3 installs a replacement"
     );
     assert!(!client.take_pause_notice());
 }

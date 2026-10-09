@@ -48,6 +48,28 @@ pub enum StudioRepairBlocker {
     /// A decision is already persisted; it is resumed, never replaced.
     HeldRepair,
     NoFault,
+    /// This device's repair job for this fault is running. Its result appears as
+    /// `last_attempt` once it commits.
+    Scheduled,
+}
+
+/// What asking for a repair did. The repair itself runs as a detached job (design 10.3), so a
+/// request never waits for it; its outcome is read back through the fault view.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StudioRepairStart {
+    /// A job for exactly this work is running, newly or from an earlier identical request.
+    Scheduled,
+    /// Another repair job, or a full shared preparation pool. Nothing was reserved; ask again.
+    Busy,
+}
+
+/// The last repair attempt this device's runtime finished for a fault: volatile, local and
+/// bounded, never durable state. Lets a person see what happened to a decision they scheduled.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum StudioRepairReport {
+    Completed(StudioRepairOutcome),
+    /// Bounded error text. Nothing was claimed beyond what the store committed before it.
+    Failed(String),
 }
 
 /// Which document a fault view or repair is about: the target's own source, or the Registry
@@ -71,6 +93,20 @@ pub struct StudioFaultView {
     pub waiting: usize,
     /// Operations a replacement would move into recovery. Not a claim they are lost.
     pub preserved_operations: usize,
+    /// The last repair attempt this runtime finished for this scope, if it remembers one.
+    pub last_attempt: Option<StudioRepairReport>,
+}
+
+impl StudioFaultView {
+    /// Add what only the runtime knows: whether its job for this scope is running, and how its
+    /// last one ended. A running job blocks a second decision, as a held one does.
+    pub(crate) fn annotate_runtime(&mut self, running: bool, last: Option<StudioRepairReport>) {
+        if running {
+            self.blocked_by = Some(StudioRepairBlocker::Scheduled);
+            self.may_decide = false;
+        }
+        self.last_attempt = last;
+    }
 }
 
 fn candidate(receipt: &Receipt, opening: Option<[u8; 32]>) -> StudioFaultCandidate {
@@ -154,6 +190,7 @@ impl StudioFaultView {
             blocked_by,
             waiting: evidence.waiting,
             preserved_operations: evidence.operations,
+            last_attempt: None,
         }
     }
 }
@@ -318,8 +355,10 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
 
     /// The seed a fetched pass verified for exactly this repair's selected receipt. Applying is
     /// authoring (6.3), so the pass must have been selected under this device's observed owner
-    /// tenure: a proof pass carries the proof's own claim, which is never repair evidence.
-    fn repaired_seed_bytes(
+    /// tenure: a proof pass carries the proof's own claim, which is never repair evidence. The
+    /// router calls this before asking for a replacement job, which carries the bytes to its S3,
+    /// for a Studio source and a Registry bucket alike.
+    pub(crate) fn repaired_seed_bytes(
         &mut self,
         store: &ServerStore,
         server: u64,
@@ -349,95 +388,6 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
                     .map(|seed| seed.bytes().to_vec())
                     .ok_or_else(|| AppError::Invalid("no verified seed for this repair".into()))
             })?
-    }
-
-    /// Install a fetched selected seed for a repair this source owes, through the repair
-    /// transaction itself so the outcome is typed (Installed, RecoveryPending, StorageRefused)
-    /// and an owner's record is recycled in the same step. The owner goes through its durable
-    /// snapshot exactly as a resume does; a peer through Flow A, which refuses the owner.
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) fn install_repaired_studio_seed(
-        &mut self,
-        store: &mut ServerStore,
-        server: u64,
-        pass: &crate::studio_exchange::discovery::ServerCheckpointFetch,
-        repair: &ReceiptRepair,
-        pair: &[Receipt; 2],
-        owner_snapshot: Option<&ServerOwnerSnapshot>,
-        budget: &mut EpochStudioBudget,
-    ) -> Result<(StudioRepairOutcome, EpochStudioState), AppError> {
-        let catcoms_sync::checkpoint_exchange::CheckpointTarget::Studio(target) =
-            pass.inner.target()
-        else {
-            return Err(AppError::Invalid(
-                "a Studio repair needs a Studio seed".into(),
-            ));
-        };
-        let seed = self.repaired_seed_bytes(store, server, pass, repair)?;
-        match owner_snapshot {
-            Some(snapshot) => self.resume_studio_fault_repair(
-                store,
-                server,
-                target,
-                snapshot,
-                repair,
-                pair,
-                Some(&seed),
-                budget,
-            ),
-            None => self.apply_studio_fault_repair(
-                store,
-                server,
-                target,
-                repair,
-                pair,
-                Some(&seed),
-                budget,
-            ),
-        }
-    }
-
-    /// The Registry counterpart of [`Self::install_repaired_studio_seed`].
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) fn install_repaired_registry_seed(
-        &mut self,
-        store: &mut ServerStore,
-        server: u64,
-        pass: &crate::studio_exchange::discovery::ServerCheckpointFetch,
-        repair: &ReceiptRepair,
-        pair: &[Receipt; 2],
-        owner_snapshot: Option<&ServerOwnerSnapshot>,
-        budget: &mut EpochStudioBudget,
-    ) -> Result<(StudioRepairOutcome, EpochRegistryState), AppError> {
-        let catcoms_sync::checkpoint_exchange::CheckpointTarget::Registry(bucket) =
-            pass.inner.target()
-        else {
-            return Err(AppError::Invalid(
-                "a bucket repair needs a Registry seed".into(),
-            ));
-        };
-        let seed = self.repaired_seed_bytes(store, server, pass, repair)?;
-        match owner_snapshot {
-            Some(snapshot) => self.resume_registry_bucket_repair(
-                store,
-                server,
-                bucket,
-                snapshot,
-                repair,
-                pair,
-                Some(&seed),
-                budget,
-            ),
-            None => self.apply_registry_bucket_repair(
-                store,
-                server,
-                bucket,
-                repair,
-                pair,
-                Some(&seed),
-                budget,
-            ),
-        }
     }
 
     /// The Registry bucket a Studio target's pointer lives in, the scope of its discoverability.
@@ -487,6 +437,12 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
 
     /// Owner issuance and application for the target's Registry bucket, under the same V5 and
     /// durable-snapshot authority as a Studio source repair.
+    ///
+    /// This and the four synchronous Registry entry points below restore the bucket under
+    /// custody, so they are test-only: the runtime repairs a bucket only through the detached
+    /// job's `*_prepared` siblings, which repeat these exact checks. Keeping them out of
+    /// production builds means a synchronous Registry repair cannot quietly come back.
+    #[cfg(test)]
     #[allow(clippy::too_many_arguments)]
     pub fn issue_registry_fault_repair(
         &mut self,
@@ -528,6 +484,7 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
     }
 
     /// The owner resumes its own persisted Registry decision. It never signs anything new.
+    #[cfg(test)]
     #[allow(clippy::too_many_arguments)]
     pub fn resume_registry_fault_repair(
         &mut self,
@@ -550,6 +507,7 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
     }
 
     /// Bucket-keyed owner resume, for a fetched bucket seed that knows only its bucket.
+    #[cfg(test)]
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn resume_registry_bucket_repair(
         &mut self,
@@ -591,6 +549,7 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
     }
 
     /// Flow A for a peer applying a distributed Registry repair; authoring tenure required.
+    #[cfg(test)]
     #[allow(clippy::too_many_arguments)]
     pub fn apply_registry_fault_repair(
         &mut self,
@@ -608,6 +567,7 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
     }
 
     /// Bucket-keyed Flow A, for a Registry discovery completion that knows only its bucket.
+    #[cfg(test)]
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn apply_registry_bucket_repair(
         &mut self,
@@ -631,6 +591,123 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
                     store.apply_registry_repair(
                         server, group, bucket, device, repair, pair, tenure, raw_seed, clock, rng,
                         storage,
+                    )
+                })
+            })
+    }
+
+    /// The repair job's S3 for an explicit bucket decision: exactly the checks of
+    /// [`Self::issue_registry_fault_repair`], on the bucket the job rebuilt detached.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn issue_registry_fault_repair_prepared(
+        &mut self,
+        store: &mut ServerStore,
+        server: u64,
+        target: StudioTarget,
+        snapshot: &ServerOwnerSnapshot,
+        request: StudioRepairRequest,
+        prepared: crate::store::PreparedRegistryRepair,
+        budget: &mut EpochStudioBudget,
+    ) -> Result<(ReceiptRepair, StudioRepairOutcome, EpochRegistryState), AppError> {
+        let observed = self.require_observed_owner_tenure()?;
+        self.check_studio_fault_channel(target)?;
+        self.check_owner_snapshot(store, server, snapshot)?;
+        let bucket = self.studio_registry_bucket(target)?;
+        let clock = self.runtime_clock();
+        self.sync
+            .with_durable_owner_snapshot(&snapshot.inner, |group, device, rng, tenure| {
+                if tenure != observed {
+                    return Err(AppError::Invalid(
+                        "observed and durable owner tenure disagree".into(),
+                    ));
+                }
+                store.with_studio_protocol_budget(server, group, budget, |store, storage| {
+                    store.issue_registry_repair_prepared(
+                        server,
+                        group,
+                        bucket,
+                        device,
+                        tenure,
+                        request,
+                        prepared,
+                        clock.as_ref(),
+                        rng,
+                        storage,
+                    )
+                })
+            })?
+    }
+
+    /// The repair job's S3 for a bucket the owner resumes, or whose owed replacement it
+    /// installs (`raw_seed`): exactly the checks of [`Self::resume_registry_bucket_repair`].
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn resume_registry_bucket_repair_prepared(
+        &mut self,
+        store: &mut ServerStore,
+        server: u64,
+        bucket: u8,
+        snapshot: &ServerOwnerSnapshot,
+        repair: &ReceiptRepair,
+        pair: &[Receipt; 2],
+        raw_seed: Option<&[u8]>,
+        prepared: crate::store::PreparedRegistryRepair,
+        budget: &mut EpochStudioBudget,
+    ) -> Result<(StudioRepairOutcome, EpochRegistryState), AppError> {
+        let observed = self.require_observed_owner_tenure()?;
+        self.check_owner_snapshot(store, server, snapshot)?;
+        let clock = self.runtime_clock();
+        self.sync
+            .with_durable_owner_snapshot(&snapshot.inner, |group, device, rng, tenure| {
+                if tenure != observed {
+                    return Err(AppError::Invalid(
+                        "observed and durable owner tenure disagree".into(),
+                    ));
+                }
+                store.with_studio_protocol_budget(server, group, budget, |store, storage| {
+                    store.apply_registry_repair_prepared(
+                        server,
+                        group,
+                        bucket,
+                        device,
+                        repair,
+                        pair,
+                        tenure,
+                        raw_seed,
+                        prepared,
+                        clock.as_ref(),
+                        rng,
+                        storage,
+                    )
+                })
+            })?
+    }
+
+    /// The repair job's S3 for a peer: exactly the checks of
+    /// [`Self::apply_registry_bucket_repair`], which refuses the owner.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn apply_registry_bucket_repair_prepared(
+        &mut self,
+        store: &mut ServerStore,
+        server: u64,
+        bucket: u8,
+        repair: &ReceiptRepair,
+        pair: &[Receipt; 2],
+        raw_seed: Option<&[u8]>,
+        prepared: crate::store::PreparedRegistryRepair,
+        budget: &mut EpochStudioBudget,
+    ) -> Result<(StudioRepairOutcome, EpochRegistryState), AppError> {
+        let tenure = self.require_observed_owner_tenure()?;
+        self.sync
+            .with_registry_context(|group, device, clock, rng| {
+                if group.designated_committer() == Some(device.device_id()) {
+                    return Err(AppError::Invalid(
+                        "the owner resumes repairs through its durable snapshot".into(),
+                    ));
+                }
+                store.with_studio_protocol_budget(server, group, budget, |store, storage| {
+                    store.apply_registry_repair_prepared(
+                        server, group, bucket, device, repair, pair, tenure, raw_seed, prepared,
+                        clock, rng, storage,
                     )
                 })
             })

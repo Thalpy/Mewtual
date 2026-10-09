@@ -7,6 +7,7 @@ use crate::registry_ingress::ServerRegistryWatch;
 use catcoms_replication::registry_epoch::catchup::{
     RegistryPageOutcome, RegistryPageProvider, RegistryPageRequest, RegistryPageSource,
 };
+use catcoms_replication::{Receipt, ReceiptRepair};
 use catcoms_rt::{CryptoRngCore, MeshTransport, PeerId};
 use catcoms_sync::registry_catchup::RegistryPageQuery;
 use catcoms_sync::RegistrySyncInstance;
@@ -209,11 +210,8 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
         Ok(true)
     }
     /// Classify an owed Registry replacement from the already detached and verified source.
-    ///
-    /// `None` is deliberately "unknown", not "healthy": the provider may be absent, retargeted,
-    /// cold or stale. The automatic receiver must defer in that case. A returned fact is bound to
-    /// the current Server/mount/member context and to an exact reread of the saved wrapper, while
-    /// avoiding a second synchronous Registry reconstruction under actor/store custody.
+    /// The test-facing yes/no view of [`Self::prepared_registry_owed_repair`].
+    #[cfg(test)]
     pub(crate) fn prepared_registry_repair_install_pending(
         &mut self,
         store: &ServerStore,
@@ -221,12 +219,35 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
         bucket: u8,
         provider: &mut ServerRegistryPageProvider,
     ) -> Result<Option<bool>, AppError> {
+        Ok(self
+            .prepared_registry_owed_repair(store, server, bucket, provider)?
+            .map(|owed| owed.is_some()))
+    }
+
+    /// The replacement a Registry bucket owes, read from the already detached and verified
+    /// source: the committed repair and its full pair, sorted by hash as issuance sorts them.
+    ///
+    /// `None` is deliberately "unknown", not "healthy": the provider may be absent, retargeted,
+    /// cold or stale. The automatic receiver must defer in that case. `Some(None)` is a checked
+    /// "owes nothing", from checked absence or a current source with no pending install. A
+    /// returned fact is bound to the current Server/mount/member context and to an exact reread
+    /// of the saved wrapper, while avoiding a second synchronous Registry reconstruction under
+    /// actor/store custody. It schedules work only: the repair it names is verified again under
+    /// the current owner and this device's tenure before anything acts on it.
+    #[allow(clippy::type_complexity)]
+    pub(crate) fn prepared_registry_owed_repair(
+        &mut self,
+        store: &ServerStore,
+        server: u64,
+        bucket: u8,
+        provider: &mut ServerRegistryPageProvider,
+    ) -> Result<Option<Option<(ReceiptRepair, [Receipt; 2])>>, AppError> {
         if !self.registry_page_provider_matches(store, server, bucket, provider) {
             return Ok(None);
         }
         if provider.prepared_absent {
             if store.registry_page_source_is_absent(server, &self.group_id(), bucket)? {
-                return Ok(Some(false));
+                return Ok(Some(None));
             }
             provider.prepared_absent = false;
             return Ok(None);
@@ -234,10 +255,9 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
         if !self.registry_page_preparation_is_warm(store, provider)? {
             return Ok(None);
         }
-        Ok(provider
-            .prepared
-            .as_ref()
-            .map(|prepared| prepared.source.repair_install_pending()))
+        Ok(provider.prepared.as_ref().map(|prepared| {
+            crate::store::registry_owed_replacement(prepared.source.repair_state())
+        }))
     }
     /// Head/seed/page service from the existing one prepared Registry source. Its semaphore
     /// permit follows the graph's actual lifetime, including cancellation and queued results.

@@ -29,16 +29,81 @@ table with the commit that closed it.
   attestation before storage. Unknown, Imported, wrong and evicted unadmitted history remain
   unavailable by design. Registry head service authenticates and accounts its source before this
   B0 write, propagates every failed or uncertain write before classifying the source, and preserves
-  Fault as a hard refusal afterward; prepared service does not cold-reconstruct that source. Native
-  repair remains unavailable.
-  While automatic repair execution is disabled, Registry checkpoint routing classifies a pending
-  replacement only from the exact-current verified source already retained by the bounded
-  preparation boundary. Missing, cold, stale, retargeted or unreadable preparation is unknown and
-  defers the pass; it is never treated as proof that ordinary installation is safe, and the router
-  does not synchronously reconstruct the full Registry graph merely to reach the disabled gate.
-  Classification preparation is scheduled even when the local file is small; a custody-checked
-  absent source is tracked separately and rechecked by path, so first installation can proceed
-  without turning cold or stale state into a false absence claim.
+  Fault as a hard refusal afterward; prepared service does not cold-reconstruct that source. Studio
+  head service keeps B0 ahead of its authoritative source read, so a Faulted or unprepared source
+  still refuses service only after an independently authorized report is retained. A report
+  naming exactly the pair the owner's source already carries a finished repair for is answered by
+  that repair in the same response rather than staged again. This is declined only while no
+  decision is held, the source is servable and carries the repair, and the repair verifies under
+  the current tenure. Studio reads that repair from its warm, byte-verified source through a
+  probe that cannot fail or delay B0. Otherwise the report stages as before, so a pair the owner
+  can no longer answer stays decidable. Without this, a faulted peer's
+  late reports reopened the decided pair: proof of the selected receipt stayed suppressed, so no
+  newcomer could install the repaired document, and the view offered the pair for a second
+  decision. Native repair remains unavailable.
+  Studio fault repair executes only as Agent 3's detached job (design 10.3). Each actor runs one
+  job at a time. A shared preparation-pool slot and a per-target live claim are reserved before
+  any body read. The source is rebuilt detached, holding no store, vault key or MLS state. At
+  commit the rebuild's context and plaintext digest are rechecked against disk and the unchanged
+  authority-checked transaction runs. An offered repair is verified against the live owner and
+  this device's authoring tenure before anything is captured, so a newcomer with `Unknown` or
+  `Imported` tenure, or a repair signed by anyone but the current owner, costs no capture and
+  holds nothing else. While a job owns a target, ordinary installs, page receive, owner rotation,
+  preparation and foreground Apply into it defer or refuse. Own-operation replay and gossip
+  ingest that needs source preparation wait through the same preparation check. Gossip ingest
+  into an already warm source and Flow S/H writes are not claim-checked; a change from them makes
+  the rebuild stale, and the job writes nothing (an automatic job reruns; an explicit decision is
+  reported abandoned, to be made again).
+  Registry bucket repair executes only as the same job, scoped to the bucket. This covers the
+  explicit decision, Flow D, the owner's resume and the owed replacement. The bucket is captured
+  as bounded authenticated bytes and rebuilt detached. At commit the issue/apply transaction
+  receives the rebuild and uses it only if all of the following still match: mount, server,
+  group, bucket, actor, designated owner, MLS epoch, plaintext digest and physical size, plus a
+  fresh read verified against the live budget. Its writer re-reads the bytes once more before
+  writing. The authority checks are the custody path's own: V5, channel, durable snapshot, owner
+  refusal for Flow A, and `verify_current_owner`. Offered bucket repairs pass the same owner and
+  authoring-tenure pre-check before capture as Studio's. Every failure or held outcome of an
+  offered repair, Studio or Registry, at any stage (no local copy, a failed capture or rebuild, a
+  rebuild gone stale, a held outcome, a failed commit), holds that repair rather than its target,
+  so a replayed older repair cannot keep a target's legitimate replacement from being fetched. An
+  offered repair that was applied and now needs the user (a recovery warning, a storage refusal)
+  holds the document, since that hold is this device's own state. The same repair offered again
+  while its job runs may complete that job's evidence; it is never trusted beyond what S3
+  verifies.
+  The router still classifies a pending replacement only from the exact-current verified source
+  already retained by the bounded preparation boundary; a held owner decision is read from the
+  bounded owner record. Missing, cold, stale, retargeted or unreadable preparation is unknown and
+  defers the pass; it is never treated as proof that ordinary installation is safe. The owner's
+  resume uses the same exact classification, falling back to the record's B3 flag only while the
+  provider is unknown, so an install that landed just before a crash (its recycle lost) is
+  resumed and recycled rather than waited on forever. Nothing on the repair path reconstructs
+  the full Registry graph under custody to decide. Classification preparation is scheduled even
+  when the local file is small. A custody-checked absent source is tracked separately and
+  rechecked by path, so first installation can proceed without turning cold or stale state into
+  a false absence claim. While a job owns a bucket, Registry maintenance, pointer refresh, page
+  persistence and installs into it are skipped or deferred. A Studio-side pointer write is not
+  claim-checked; like any other change, it makes the rebuild stale and the job writes nothing.
+  The owner's automatic repair work is paced per target. A hold, a failure, a started
+  repaired-seed fetch or a started resume job defers only that Studio target's or bucket's next
+  owner-resume visit: by 60 s, doubling while it repeats, up to 15 min. Every persistent hold
+  also backs off that target's automatic jobs. A terminal outcome, a new explicit decision, or the person
+  acknowledging the document's recovery warning resets it. One held target therefore never
+  delays another's resume, and the owner's resume work for a target whose seed no peer serves,
+  or that needs the user, costs less and less. That pacing covers the owner's resume visits
+  only. A repaired-seed fetch started any other way (from an answer that carries a repair, from
+  the router, or after a job) is paced only by the single checkpoint slot and a hold, so a peer
+  owing a seed nobody serves refetches it on every reporting discovery of that target, as it
+  always has (an open follow-up). Nor is the pacing a global cap: K newly held targets can still
+  start K seed fetches in their first minute, each holding the single checkpoint slot, and the
+  deferral state lives in memory, so a restart starts every target afresh. A page fetched before
+  an S3 that rewrote its source is dropped, never saved against the repaired source. After a
+  crash between an owner's replacement install and its record's recycle, the router resumes the
+  decision as soon as it finds the source owing nothing behind it. If no fetch can start (an
+  owner alone has no peer at all), the owner resumes at once, and if a fetch comes to nothing,
+  its next visit resumes, so recovering an install already on the owner's disk never needs
+  another device. The cost of that: an owner alone whose seed really is still owed, with its
+  source evicted between visits, reruns a full detached rebuild once per deferral window (down to
+  one per 15 min) although nothing has changed. It is bounded by the deferral and the shared pool.
 
 - **Automatic recovery is conservative and author-local.** Studio replay checks the complete
   own envelope, every retained/staged historical selection and the fresh current projection.
@@ -603,9 +668,10 @@ table with the commit that closed it.
   full-identity rates, four driver-owned outbound slots and source service rails bound resources;
   rate debt is process-local and Sybils still reach aggregate caps. Authenticated current-tenure
   repair bytes may be carried only after the exact replacement source is synchronized and the
-  contextual owner record is re-saved durably. Automatic receiving-side repair application,
-  continuation and repaired-seed installation remain disabled until they can retain shared
-  preparation admission across detached capture, revalidation and commit. Registry seed fetching
+  contextual owner record is re-saved durably. For Studio sources and Registry buckets alike,
+  receiving-side repair application, owner continuation and repaired-seed installation run only
+  as the detached job described under the Studio fault repair entry above, which holds shared
+  preparation admission from capture through commit. Registry seed fetching
   and explicit recovery-first installation are implemented; head hints alone still authorize
   neither replacement nor an editing lease.
 - **Registry page cursors are continuation claims, not remote possession or currency proofs.**

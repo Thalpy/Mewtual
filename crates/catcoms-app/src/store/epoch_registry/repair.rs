@@ -35,6 +35,10 @@ impl ServerStore {
         device: &MlsDevice,
         budget: &mut EpochStorageBudget,
     ) -> Result<RegistryEpoch, AppError> {
+        // Counted with the other full loads, so a test can pin that the repair job's S3 used its
+        // detached rebuild instead of restoring the bucket again under custody.
+        #[cfg(test)]
+        super::FULL_LOADS.set(super::FULL_LOADS.get() + 1);
         let document = registry_document(&group.group_id(), bucket).map_err(invalid)?;
         let scope = scope_bytes(server, &document)?;
         let loaded = (|| {
@@ -69,6 +73,11 @@ impl ServerStore {
 
     /// S-1 for a Registry bucket, followed by Flow A. `tenure` is the authoring start from the
     /// durable owner snapshot in this custody visit; the caller refused Imported and Unknown.
+    ///
+    /// Test-only, with `apply_registry_repair` and both `_with_io` forms: without a rebuild these
+    /// restore the bucket under custody, which the runtime never does. Production reaches the
+    /// same inner transactions only through the `*_prepared` entry points.
+    #[cfg(test)]
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn issue_registry_repair(
         &mut self,
@@ -98,6 +107,7 @@ impl ServerStore {
         )
     }
 
+    #[cfg(test)]
     #[allow(clippy::too_many_arguments)]
     pub(super) fn issue_registry_repair_with_io(
         &mut self,
@@ -113,13 +123,120 @@ impl ServerStore {
         budget: &mut EpochStorageBudget,
         hooks: &mut WriteHooks<'_>,
     ) -> Result<(ReceiptRepair, RegistryRepairOutcome, EpochRegistryState), AppError> {
+        self.issue_registry_repair_inner(
+            server, group, bucket, device, tenure, request, raw_seed, None, clock, rng, budget,
+            hooks,
+        )
+    }
+
+    /// Issuance on a bucket a repair job rebuilt detached (design 10.3, S3). Identical to the
+    /// custody path once the rebuild's context and bytes are rechecked against the live group
+    /// and the disk; a stale rebuild refuses before anything is signed or written.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn issue_registry_repair_prepared(
+        &mut self,
+        server: u64,
+        group: &ServerGroup,
+        bucket: u8,
+        device: &MlsDevice,
+        tenure: u64,
+        request: StudioRepairRequest,
+        prepared: PreparedRegistryRepair,
+        clock: &dyn Clock,
+        rng: &mut impl CryptoRngCore,
+        budget: &mut EpochStorageBudget,
+    ) -> Result<(ReceiptRepair, RegistryRepairOutcome, EpochRegistryState), AppError> {
+        self.issue_registry_repair_inner(
+            server,
+            group,
+            bucket,
+            device,
+            tenure,
+            request,
+            None,
+            Some(prepared),
+            clock,
+            rng,
+            budget,
+            &mut WriteHooks::None,
+        )
+    }
+
+    /// A rebuild is used only once the live context and the bytes on disk are rechecked against
+    /// it, and its storage record is verified against the live budget as a restore's would be.
+    fn check_prepared_registry(
+        &self,
+        server: u64,
+        group: &ServerGroup,
+        bucket: u8,
+        device: &MlsDevice,
+        prepared: &PreparedRegistryRepair,
+        budget: &mut EpochStorageBudget,
+    ) -> Result<(), AppError> {
+        let stale = || invalid("prepared Registry source changed");
+        if !prepared.context_matches(self, server, group, bucket, device) {
+            return Err(stale());
+        }
+        let document = registry_document(&group.group_id(), bucket).map_err(invalid)?;
+        let scope = scope_bytes(server, &document)?;
+        let checked = (|| {
+            let record = self
+                .read_registry_record(&scope)?
+                .ok_or_else(|| invalid("a repair never creates a source"))?;
+            if !prepared.record_matches(&record) {
+                return Err(stale());
+            }
+            storage_record(
+                server,
+                &document,
+                &scope,
+                record.physical_bytes,
+                prepared.unit.storage_protocol_bytes().map_err(invalid)?,
+            )
+        })();
+        let observed = checked.inspect_err(|_| budget.invalidate())?;
+        budget
+            .verify_record(
+                &StorageScope::new(server, &document.server_id).map_err(invalid)?,
+                *blake3::hash(&scope).as_bytes(),
+                Some(observed),
+            )
+            .map_err(invalid)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn issue_registry_repair_inner(
+        &mut self,
+        server: u64,
+        group: &ServerGroup,
+        bucket: u8,
+        device: &MlsDevice,
+        tenure: u64,
+        request: StudioRepairRequest,
+        raw_seed: Option<&[u8]>,
+        mut prepared: Option<PreparedRegistryRepair>,
+        clock: &dyn Clock,
+        rng: &mut impl CryptoRngCore,
+        budget: &mut EpochStorageBudget,
+        hooks: &mut WriteHooks<'_>,
+    ) -> Result<(ReceiptRepair, RegistryRepairOutcome, EpochRegistryState), AppError> {
         current_registry_member(group, device)?;
         if group.designated_committer() != Some(device.device_id()) {
             return Err(invalid("only the current owner may decide a fault"));
         }
         let document = registry_document(&group.group_id(), bucket).map_err(invalid)?;
         let observer = device.device_id();
-        let mut unit = self.checked_registry_unit(server, group, bucket, device, budget)?;
+        let mut restored;
+        let unit: &mut RegistryEpoch = match prepared.as_mut() {
+            Some(prepared) => {
+                self.check_prepared_registry(server, group, bucket, device, prepared, budget)?;
+                &mut prepared.unit
+            }
+            None => {
+                restored = self.checked_registry_unit(server, group, bucket, device, budget)?;
+                &mut restored
+            }
+        };
         let owner =
             self.checked_owner_repair_state(server, &document, &observer, group.epoch(), budget)?;
         let (kind, pair, admission, repair) = if let Some((held, held_pair, kind)) =
@@ -197,15 +314,16 @@ impl ServerStore {
             hooks,
         )?;
         drop(plan);
-        let (outcome, state) = self.apply_registry_repair_with_io(
-            server, group, bucket, device, &repair, &pair, tenure, raw_seed, clock, rng, budget,
-            hooks,
+        let (outcome, state) = self.apply_registry_repair_inner(
+            server, group, bucket, device, &repair, &pair, tenure, raw_seed, prepared, clock, rng,
+            budget, hooks,
         )?;
         Ok((repair, outcome, state))
     }
 
     /// S-2, Flow A for a Registry bucket: the owner resuming its decision or a peer applying a
     /// distributed repair, with identical code and the same committed-state outcome rules.
+    #[cfg(test)]
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn apply_registry_repair(
         &mut self,
@@ -237,6 +355,7 @@ impl ServerStore {
         )
     }
 
+    #[cfg(test)]
     #[allow(clippy::too_many_arguments)]
     pub(super) fn apply_registry_repair_with_io(
         &mut self,
@@ -253,6 +372,65 @@ impl ServerStore {
         budget: &mut EpochStorageBudget,
         hooks: &mut WriteHooks<'_>,
     ) -> Result<(RegistryRepairOutcome, EpochRegistryState), AppError> {
+        self.apply_registry_repair_inner(
+            server, group, bucket, device, repair, pair, tenure, raw_seed, None, clock, rng,
+            budget, hooks,
+        )
+    }
+
+    /// Flow A (owner resume or peer application, and the owed replacement when `raw_seed` is
+    /// given) on a bucket a repair job rebuilt detached. Identical to the custody path once the
+    /// rebuild is rechecked; a stale rebuild refuses before any write.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn apply_registry_repair_prepared(
+        &mut self,
+        server: u64,
+        group: &ServerGroup,
+        bucket: u8,
+        device: &MlsDevice,
+        repair: &ReceiptRepair,
+        pair: &[Receipt; 2],
+        tenure: u64,
+        raw_seed: Option<&[u8]>,
+        prepared: PreparedRegistryRepair,
+        clock: &dyn Clock,
+        rng: &mut impl CryptoRngCore,
+        budget: &mut EpochStorageBudget,
+    ) -> Result<(RegistryRepairOutcome, EpochRegistryState), AppError> {
+        self.apply_registry_repair_inner(
+            server,
+            group,
+            bucket,
+            device,
+            repair,
+            pair,
+            tenure,
+            raw_seed,
+            Some(prepared),
+            clock,
+            rng,
+            budget,
+            &mut WriteHooks::None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn apply_registry_repair_inner(
+        &mut self,
+        server: u64,
+        group: &ServerGroup,
+        bucket: u8,
+        device: &MlsDevice,
+        repair: &ReceiptRepair,
+        pair: &[Receipt; 2],
+        tenure: u64,
+        raw_seed: Option<&[u8]>,
+        prepared: Option<PreparedRegistryRepair>,
+        clock: &dyn Clock,
+        rng: &mut impl CryptoRngCore,
+        budget: &mut EpochStorageBudget,
+        hooks: &mut WriteHooks<'_>,
+    ) -> Result<(RegistryRepairOutcome, EpochRegistryState), AppError> {
         current_registry_member(group, device)?;
         let document = registry_document(&group.group_id(), bucket).map_err(invalid)?;
         if repair.document != document {
@@ -264,10 +442,16 @@ impl ServerStore {
         repair.check_evidence(&pair[0], &pair[1]).map_err(invalid)?;
         let observer = device.device_id();
         let is_owner = group.designated_committer() == Some(observer);
-        let resolved = self
-            .checked_registry_unit(server, group, bucket, device, budget)?
-            .repair_state()
-            .filter(|s| s.repair == *repair);
+        let resolved = match &prepared {
+            Some(prepared) => {
+                self.check_prepared_registry(server, group, bucket, device, prepared, budget)?;
+                prepared.unit.repair_state()
+            }
+            None => self
+                .checked_registry_unit(server, group, bucket, device, budget)?
+                .repair_state(),
+        }
+        .filter(|s| s.repair == *repair);
         let owner = if is_owner {
             let owner = self.checked_owner_repair_state(
                 server,
@@ -302,7 +486,7 @@ impl ServerStore {
         let first = resolved.is_none();
         // B2 through the bucket's single checked writer, or for a retry the flush of unchanged
         // bytes. A hold changes nothing, and the unchanged source is flushed, never rewritten.
-        let (applied, mut state) = self.update_registry_with_io(
+        let (applied, mut state) = self.update_registry_prepared_with_io(
             server,
             group,
             bucket,
@@ -311,6 +495,7 @@ impl ServerStore {
             WritePurpose::Settlement,
             rng,
             budget,
+            prepared,
             |unit, _| {
                 if !first {
                     return Ok(None);
@@ -419,6 +604,11 @@ impl ServerStore {
     /// Flow D pair assembly for a bucket, from evidence this device already holds plus the
     /// receipt the same authenticated answer offered. Unverifiable is never a reason to invent
     /// the missing receipt; it may become verifiable later, unlike a terminal repair.
+    ///
+    /// Test-only since the repair job: this restores the bucket under custody, so the runtime
+    /// assembles the same evidence from its detached rebuild (`PreparedRegistryRepair::
+    /// offered_evidence`) through the shared `offered_evidence_in`, which these tests pin.
+    #[cfg(test)]
     pub(crate) fn registry_repair_evidence(
         &self,
         server: u64,
@@ -431,31 +621,7 @@ impl ServerStore {
         let Some(state) = self.load_registry_epoch(server, group, bucket, device)? else {
             return Ok(OfferedRepairEvidence::Unverifiable);
         };
-        let unit = &state.unit;
-        if unit
-            .repair_state()
-            .is_some_and(|s| s.repair == *repair && !s.install_pending)
-        {
-            return Ok(OfferedRepairEvidence::Terminal);
-        }
-        let mut held: Vec<Receipt> = Vec::new();
-        if let Some((a, b)) = unit.fault_evidence() {
-            held.extend([a.clone(), b.clone()]);
-        }
-        if let Ok(Some(head)) = unit.receipt_head() {
-            held.push(head.clone());
-        }
-        held.extend(unit.opening().cloned());
-        held.extend(offered.cloned());
-        // After B2 the fault is gone; the bucket's own resolved evidence still holds both.
-        if let Some(state) = unit.repair_state() {
-            held.extend([state.selected, state.losing]);
-        }
-        let find = |hash: &[u8; 32]| held.iter().find(|r| r.hash() == *hash).cloned();
-        Ok(match repair.receipt_hashes.each_ref().map(find) {
-            [Some(a), Some(b)] => OfferedRepairEvidence::Pair(Box::new([a, b])),
-            _ => OfferedRepairEvidence::Unverifiable,
-        })
+        Ok(offered_evidence_in(&state.unit, repair, offered))
     }
 
     /// S-4 for a bucket, read-only: the decidable pair exactly as issuance would derive it, and
@@ -527,6 +693,11 @@ impl ServerStore {
     }
 
     /// The committed repair this bucket still owes a replacement for, with its complete pair.
+    ///
+    /// Test-only since the repair job: this restores the bucket under custody, so the runtime
+    /// reads the same fact from the retained prepared provider
+    /// (`Server::prepared_registry_owed_repair`) or, for the owner, from its bounded record.
+    #[cfg(test)]
     pub(crate) fn owed_registry_repair(
         &self,
         server: u64,
@@ -534,15 +705,10 @@ impl ServerStore {
         bucket: u8,
         device: &MlsDevice,
     ) -> Result<Option<(ReceiptRepair, [Receipt; 2])>, AppError> {
-        Ok(self
-            .load_registry_epoch(server, group, bucket, device)?
-            .and_then(|state| state.unit.repair_state())
-            .filter(|state| state.install_pending)
-            .map(|state| {
-                let mut pair = [state.selected, state.losing];
-                pair.sort_by_key(Receipt::hash);
-                (state.repair, pair)
-            }))
+        Ok(registry_owed_replacement(
+            self.load_registry_epoch(server, group, bucket, device)?
+                .and_then(|state| state.unit.repair_state()),
+        ))
     }
 
     /// Whether a repair hold, not storage, must defer installing `selected` into this bucket.
@@ -606,6 +772,75 @@ impl ServerStore {
         Ok(state
             .held_repair()
             .map(|(repair, pair, _)| (repair.clone(), pair.receipts().clone())))
+    }
+
+    /// The bucket counterpart of `held_studio_repair_applied`: a held decision past B3 means the
+    /// bucket owes its replacement, read from the bounded owner record with no bucket restore.
+    pub(crate) fn held_registry_repair_applied(
+        &self,
+        server: u64,
+        group: &ServerGroup,
+        bucket: u8,
+        device: &MlsDevice,
+    ) -> Result<bool, AppError> {
+        if group.designated_committer() != Some(device.device_id()) {
+            return Ok(false);
+        }
+        let document = registry_document(&group.group_id(), bucket).map_err(invalid)?;
+        let (state, _) = self.load_epoch_owner_repair_state(
+            server,
+            &document,
+            &device.device_id(),
+            group.epoch(),
+        )?;
+        Ok(state.held_repair().is_some() && state.repair_applied())
+    }
+}
+
+/// The replacement a bucket owes, from its verified repair state: the committed repair and its
+/// full pair, sorted by hash as issuance sorts them. Shared by the prepared-provider
+/// classification the runtime uses and the custody read the store tests exercise, so a test of
+/// one pins the mapping of the other.
+pub(crate) fn registry_owed_replacement(
+    state: Option<catcoms_replication::SourceRepairState>,
+) -> Option<(ReceiptRepair, [Receipt; 2])> {
+    state.filter(|state| state.install_pending).map(|state| {
+        let mut pair = [state.selected, state.losing];
+        pair.sort_by_key(Receipt::hash);
+        (state.repair, pair)
+    })
+}
+
+/// Flow D pair assembly from one verified bucket, shared by the custody read above and the
+/// repair job's detached rebuild so both classify an offer identically.
+pub(super) fn offered_evidence_in(
+    unit: &RegistryEpoch,
+    repair: &ReceiptRepair,
+    offered: Option<&Receipt>,
+) -> OfferedRepairEvidence {
+    if unit
+        .repair_state()
+        .is_some_and(|s| s.repair == *repair && !s.install_pending)
+    {
+        return OfferedRepairEvidence::Terminal;
+    }
+    let mut held: Vec<Receipt> = Vec::new();
+    if let Some((a, b)) = unit.fault_evidence() {
+        held.extend([a.clone(), b.clone()]);
+    }
+    if let Ok(Some(head)) = unit.receipt_head() {
+        held.push(head.clone());
+    }
+    held.extend(unit.opening().cloned());
+    held.extend(offered.cloned());
+    // After B2 the fault is gone; the bucket's own resolved evidence still holds both.
+    if let Some(state) = unit.repair_state() {
+        held.extend([state.selected, state.losing]);
+    }
+    let find = |hash: &[u8; 32]| held.iter().find(|r| r.hash() == *hash).cloned();
+    match repair.receipt_hashes.each_ref().map(find) {
+        [Some(a), Some(b)] => OfferedRepairEvidence::Pair(Box::new([a, b])),
+        _ => OfferedRepairEvidence::Unverifiable,
     }
 }
 

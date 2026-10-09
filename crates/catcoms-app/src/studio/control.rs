@@ -430,6 +430,13 @@ pub enum StudioControlResponse {
         scope: super::StudioFaultScope,
         outcome: crate::store::StudioRepairOutcome,
     },
+    /// Whether an explicit decision was scheduled as a detached repair job. Nothing has been
+    /// decided or written when this is returned; the outcome is read back through the fault view.
+    RepairStarted {
+        target: StudioTarget,
+        scope: super::StudioFaultScope,
+        start: super::StudioRepairStart,
+    },
 }
 impl std::fmt::Debug for StudioControlResponse {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -457,6 +464,7 @@ impl std::fmt::Debug for StudioControlResponse {
             Self::Acknowledged(_) => "Acknowledged { .. }",
             Self::Fault(_) => "Fault { .. }",
             Self::Repaired { .. } => "Repaired { .. }",
+            Self::RepairStarted { .. } => "RepairStarted { .. }",
         })
     }
 }
@@ -496,7 +504,8 @@ impl StudioControlResponse {
             // final-conversion fence, so native must treat them like the other immediate
             // control responses rather than attempting to begin a nonexistent handoff.
             | Self::Fault(_)
-            | Self::Repaired { .. } => None,
+            | Self::Repaired { .. }
+            | Self::RepairStarted { .. } => None,
         }
     }
     /// The actor's half: begin the bounded handoff for any variant that carries a job's
@@ -530,7 +539,8 @@ impl StudioControlResponse {
             // Keep this classification paired with `delivery`: neither response owns a
             // preparation slot for the actor to transfer to native conversion.
             | Self::Fault(_)
-            | Self::Repaired { .. } => None,
+            | Self::Repaired { .. }
+            | Self::RepairStarted { .. } => None,
         }
     }
 }
