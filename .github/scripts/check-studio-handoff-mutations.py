@@ -150,7 +150,7 @@ MUTATIONS = [
      "                .iter()\n"
      "                .any(|(w, _)| server.sync.studio_has_inbound(&w.inner))\n"
      "            || self.catchup.result_parked()\n"
-     "            || self.catchup.service_owed(server)\n",
+     "            || self.catchup.captured_service_owed(server)\n",
      "        false\n"
      "            && (server.sync.has_epoch_service_interest()\n"
      "                || self\n"
@@ -158,7 +158,7 @@ MUTATIONS = [
      "                    .iter()\n"
      "                    .any(|(w, _)| server.sync.studio_has_inbound(&w.inner))\n"
      "                || self.catchup.result_parked()\n"
-     "                || self.catchup.service_owed(server))\n",
+     "                || self.catchup.captured_service_owed(server))\n",
      RECEIVER + "a_signing_visit_yields_to_a_members_checkpoint_request_until_it_is_served",
      "a signing slice ran while a member's checkpoint request waited"),
     # Each term the request exercises, removed alone: first while it is queued as service
@@ -169,10 +169,18 @@ MUTATIONS = [
      RECEIVER + "a_signing_visit_yields_to_a_members_checkpoint_request_until_it_is_served",
      "a signing slice ran while a member's checkpoint request waited"),
     ("handoff-priority-owed", "crates/catcoms-app/src/studio/receiver.rs",
-     "            || self.catchup.service_owed(server)\n",
-     "            || (false && self.catchup.service_owed(server))\n",
+     "            || self.catchup.captured_service_owed(server)\n",
+     "            || (false && self.catchup.captured_service_owed(server))\n",
      RECEIVER + "a_signing_visit_yields_to_a_members_checkpoint_request_until_it_is_served",
      "a signing slice ran while a member's checkpoint request waited"),
+    # F2's review, MEDIUM-1: the owed term counts only a request that has captured its source.
+    # One still waiting for a pool permit may be waiting for the signing job's own, so yielding
+    # to it stalls both; with the conjunct gone, a one-permit pool never completes the transfer.
+    ("handoff-priority-captured", "crates/catcoms-app/src/studio/receiver/catchup.rs",
+     "s.captured && server.sync.epoch_service_interest_is_current(&s.interest)",
+     "server.sync.epoch_service_interest_is_current(&s.interest)",
+     RECEIVER + "a_request_waiting_for_the_signing_jobs_permit_does_not_stall_signing",
+     "the transfer never completed while a request waited for its permit"),
     # The parked-result term. In the request's flow a parked preparation is always the reserved
     # request's own, so the owed term answers on the same turns and masks this one; a local owner
     # capture parks a result with no request behind it.

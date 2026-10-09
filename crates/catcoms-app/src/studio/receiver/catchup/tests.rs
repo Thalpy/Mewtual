@@ -2175,28 +2175,23 @@ async fn a_parked_catch_up_result_alone_makes_a_signing_slice_yield() {
     );
 }
 
-/// N31 at actor level (design 18.3 implementation review, F2): a signing slice reached through
-/// real background turns, with the authoritative work staged by a real second member.
-///
-/// `handoff_signing_pages_across_turns_and_a_priority_turn_signs_nothing` passes `handoff_sign`
-/// its priority answer directly, so nothing tested what `handoff_priority` computes, and the
-/// review's mutant forcing it to `false` survived. Here every turn is a production `run`. The
-/// priority work is Bob's checkpoint-head request, delivered over the transport and queued by the
-/// sync side after the observed slice ran (14.1, staging rule 2); nothing reaches into the store.
-///
-/// This is 14.1's count fixture: the branch is longer than `MAX_SIGNING_TURNS_PER_VISIT` and the
-/// injected clock never moves, so only the turn cap can bound the observed visit. The time
-/// fixture's bound is pinned at store level by
-/// `studio_overlay_handoff_signing_slice_reports_yield_bound_and_completion_apart`.
-///
-/// Its first run failed, and found a fourth term the answer needed (`service_owed`). Once
-/// catch-up had reserved the request and installed its source, none of 7.3's three terms held,
-/// so signing ran every turn to the end of the branch, H5's commit evicted the captured source,
-/// and Bob's request was dropped unanswered (`Transport(NoResponse)`).
-#[tokio::test]
-async fn a_signing_visit_yields_to_a_members_checkpoint_request_until_it_is_served() {
+/// F2's fixture: a real two-member group whose owner, `server`, is at H3 with nothing signed on a
+/// branch of `operations` (more than one slice), its receiver on a private pool of `permits`.
+/// Bob has joined and proven the owner's endpoint, so he can send it checkpoint requests.
+struct SigningOwner {
+    _hub: std::sync::Arc<Hub>,
+    _root: tempfile::TempDir,
+    server: Server<catcoms_rt::MemNetwork, ChaCha20Rng>,
+    bob: Server<catcoms_rt::MemNetwork, ChaCha20Rng>,
+    store: ServerStore,
+    receiver: StudioReceiver,
+    target: StudioTarget,
+    operations: usize,
+}
+
+async fn signing_owner(seed: u64, permits: usize) -> SigningOwner {
     let clock = ManualClock::new(1000);
-    let mut rng = ChaCha20Rng::seed_from_u64(1409);
+    let mut rng = ChaCha20Rng::seed_from_u64(seed);
     let hub = Hub::new();
     let mut server = Server::found(
         hub.join(PeerId::from_u64(1)),
@@ -2214,7 +2209,7 @@ async fn a_signing_visit_yields_to_a_members_checkpoint_request_until_it_is_serv
         Server::join(
             hub.join(PeerId::from_u64(2)),
             MlsDevice::generate().unwrap(),
-            ChaCha20Rng::seed_from_u64(1410),
+            ChaCha20Rng::seed_from_u64(seed + 1),
             Box::new(clock.clone()),
             "member",
             server.local_peer(),
@@ -2252,7 +2247,7 @@ async fn a_signing_visit_yields_to_a_members_checkpoint_request_until_it_is_serv
             Some(StudioRequest::Read { target }),
         )
         .unwrap();
-    receiver.catchup.inject_overlay_pool_for_test(4);
+    receiver.catchup.inject_overlay_pool_for_test(permits);
     for _ in 0..30 {
         receiver.run(&mut server, &mut store, 83, None).unwrap();
         if let Some(work) = receiver.detach(&mut server) {
@@ -2268,26 +2263,115 @@ async fn a_signing_visit_yields_to_a_members_checkpoint_request_until_it_is_serv
         "the fixture never reached H3, so this proves nothing"
     );
     assert_eq!(receiver.handoff.remaining_for_test(), Some(operations));
+    SigningOwner {
+        _hub: hub,
+        _root: root,
+        server,
+        bob,
+        store,
+        receiver,
+        target,
+        operations,
+    }
+}
+
+/// Displace the target's warm graph by reading another document, so serving the target needs a
+/// detached source preparation. Between turns, not inside a slice, which 7.3's slice-exclusivity
+/// rule allows: a write and a Read transaction, as any native request would make.
+fn displace_warm_graph(o: &mut SigningOwner) {
+    let other = StudioTarget::Flipnote {
+        channel: o.target.channel(),
+        object: [18; 16],
+    };
+    o.server.sync.with_registry_context(|g, d, _, _| {
+        crate::store::save_studio_source_fixture(&mut o.store, 83, g, d, other)
+    });
+    o.server
+        .studio_transaction(&mut o.store, 83, StudioRequest::Read { target: other })
+        .unwrap();
+    let target = o.target;
+    assert!(
+        !o.server
+            .sync
+            .with_registry_context(|g, d, _, _| o.store.studio_source_is_warm(83, g, target, d)),
+        "precondition: the document's graph is still warm, so serving it needs no preparation"
+    );
+}
+
+/// Bob asks the owner for the target's checkpoint head over the transport. Returns once the
+/// owner's sync has queued it as service interest; each tick is bounded, so a request that never
+/// arrives fails here rather than hanging the test.
+async fn deliver_head_request(
+    o: &mut SigningOwner,
+) -> tokio::task::JoinHandle<catcoms_sync::receipt_head::CompletedCheckpointHead> {
+    let request = o
+        .bob
+        .sync
+        .prepare_checkpoint_head(o.server.local_peer(), CheckpointTarget::Studio(o.target))
+        .unwrap();
+    let fetch = tokio::spawn(request.fetch());
+    tokio::task::yield_now().await;
+    for _ in 0..8 {
+        if o.server.sync.has_epoch_service_interest() {
+            break;
+        }
+        tokio::time::timeout(std::time::Duration::from_secs(60), o.server.sync_once())
+            .await
+            .expect("no transport event reached the owner")
+            .unwrap();
+    }
+    assert!(
+        o.server.sync.has_epoch_service_interest(),
+        "Bob's request never reached the owner's service queue"
+    );
+    fetch
+}
+
+/// N31 at actor level (design 18.3 implementation review, F2): a signing slice reached through
+/// real background turns, with the authoritative work staged by a real second member.
+///
+/// `handoff_signing_pages_across_turns_and_a_priority_turn_signs_nothing` passes `handoff_sign`
+/// its priority answer directly, so nothing tested what `handoff_priority` computes, and the
+/// review's mutant forcing it to `false` survived. Here every turn is a production `run`. The
+/// priority work is Bob's checkpoint-head request, delivered over the transport and queued by the
+/// sync side after the observed slice ran (14.1, staging rule 2), never from inside a slice.
+///
+/// This is 14.1's count fixture: the branch is longer than `MAX_SIGNING_TURNS_PER_VISIT` and the
+/// injected clock never moves, so only the turn cap can bound the observed visit. The time
+/// fixture's bound is pinned at store level by
+/// `studio_overlay_handoff_signing_slice_reports_yield_bound_and_completion_apart`.
+///
+/// Its first run failed, and found a fourth term the answer needed (`captured_service_owed`).
+/// Once catch-up had reserved the request and installed its source, none of 7.3's three terms
+/// held, so signing ran every turn to the end of the branch, H5's commit evicted the captured
+/// source, and Bob's request was dropped unanswered (`Transport(NoResponse)`).
+#[tokio::test]
+async fn a_signing_visit_yields_to_a_members_checkpoint_request_until_it_is_served() {
+    let mut o = signing_owner(1409, 4).await;
+    let operations = o.operations;
 
     // 1. The observed visit. Nothing the priority gate answers is pending at its entry, so the
     //    gate cannot be why it stops: it signs exactly a turn cap's worth and leaves work.
     assert!(
-        !server.sync.has_epoch_service_interest(),
+        !o.server.sync.has_epoch_service_interest(),
         "precondition: service interest was already pending"
     );
     assert!(
-        !receiver.catchup.result_parked(),
+        !o.receiver.catchup.result_parked(),
         "precondition: a background result was already parked"
     );
     assert!(
-        !receiver
+        !o.receiver
             .watches
             .iter()
-            .any(|(w, _)| server.sync.studio_has_inbound(&w.inner)),
+            .any(|(w, _)| o.server.sync.studio_has_inbound(&w.inner)),
         "precondition: a watch already had inbound"
     );
-    receiver.run(&mut server, &mut store, 83, None).unwrap();
-    let after = receiver
+    o.receiver
+        .run(&mut o.server, &mut o.store, 83, None)
+        .unwrap();
+    let after = o
+        .receiver
         .handoff
         .remaining_for_test()
         .expect("the job survived the observed visit");
@@ -2298,58 +2382,30 @@ async fn a_signing_visit_yields_to_a_members_checkpoint_request_until_it_is_serv
     );
     assert!(after > 0, "the observed visit finished the branch");
 
-    // Displace the document's warm graph, so serving it needs a detached source preparation whose
-    // result then waits, parked, for a custody visit. The request then passes through three of the
-    // priority answer's four terms in turn: queued service interest, a parked result, and, once
-    // the source is installed, a reserved request still owed its answer. Catch-up alternates
-    // serving with its own client turns, so that last state lasts at least one turn.
-    let other = StudioTarget::Flipnote {
-        channel: target.channel(),
-        object: [18; 16],
-    };
-    server.sync.with_registry_context(|g, d, _, _| {
-        crate::store::save_studio_source_fixture(&mut store, 83, g, d, other)
-    });
-    server
-        .studio_transaction(&mut store, 83, StudioRequest::Read { target: other })
-        .unwrap();
-    assert!(
-        !server
-            .sync
-            .with_registry_context(|g, d, _, _| store.studio_source_is_warm(83, g, target, d)),
-        "precondition: the document's graph is still warm, so nothing would park"
-    );
+    // Serving the document now needs a detached source preparation whose result then waits,
+    // parked, for a custody visit. The request then passes through three of the priority answer's
+    // four terms in turn: queued service interest, a parked result, and, once the source is
+    // installed, a captured request still owed its answer. Catch-up alternates serving with its
+    // own client turns, so that last state lasts at least one turn.
+    displace_warm_graph(&mut o);
 
     // 2. Bob asks the owner for this document's checkpoint head. Until the answer goes back, a
-    //    turn that starts with the request queued, or with a result parked for custody, must sign
-    //    nothing: those are the turns that serve it.
-    let request = bob
-        .sync
-        .prepare_checkpoint_head(server.local_peer(), CheckpointTarget::Studio(target))
-        .unwrap();
-    let fetch = tokio::spawn(request.fetch());
-    tokio::task::yield_now().await;
-    for _ in 0..8 {
-        if server.sync.has_epoch_service_interest() {
-            break;
-        }
-        server.sync_once().await.unwrap();
-    }
-    assert!(
-        server.sync.has_epoch_service_interest(),
-        "Bob's request never reached the owner's service queue"
-    );
+    //    turn that starts with any of those terms holding must sign nothing: those are the turns
+    //    that serve it.
+    let fetch = deliver_head_request(&mut o).await;
     let (mut queued_yields, mut parked_yields, mut owed_yields) = (0, 0, 0);
     for _ in 0..20 {
         if fetch.is_finished() {
             break;
         }
         // The priority answer's inputs at this turn's entry, read the way production reads them.
-        let queued = server.sync.has_epoch_service_interest();
-        let parked = receiver.catchup.result_parked();
-        let owed = receiver.catchup.service_owed(&server);
-        let before = receiver.handoff.remaining_for_test();
-        receiver.run(&mut server, &mut store, 83, None).unwrap();
+        let queued = o.server.sync.has_epoch_service_interest();
+        let parked = o.receiver.catchup.result_parked();
+        let owed = o.receiver.catchup.captured_service_owed(&o.server);
+        let before = o.receiver.handoff.remaining_for_test();
+        o.receiver
+            .run(&mut o.server, &mut o.store, 83, None)
+            .unwrap();
         if queued || parked || owed {
             if queued {
                 queued_yields += 1;
@@ -2359,13 +2415,13 @@ async fn a_signing_visit_yields_to_a_members_checkpoint_request_until_it_is_serv
                 owed_yields += 1;
             }
             assert_eq!(
-                receiver.handoff.remaining_for_test(),
+                o.receiver.handoff.remaining_for_test(),
                 before,
                 "a signing slice ran while a member's checkpoint request waited"
             );
         }
-        if let Some(work) = receiver.detach(&mut server) {
-            receiver.complete(&mut server, work.run(None).await);
+        if let Some(work) = o.receiver.detach(&mut o.server) {
+            o.receiver.complete(&mut o.server, work.run(None).await);
         }
         tokio::task::yield_now().await;
     }
@@ -2387,7 +2443,8 @@ async fn a_signing_visit_yields_to_a_members_checkpoint_request_until_it_is_serv
         owed_yields >= 1,
         "no turn began with the request reserved, installed and still unanswered"
     );
-    let answered = bob
+    let answered = o
+        .bob
         .sync
         .complete_checkpoint_head(fetch.await.expect("the fetch task"));
     assert!(
@@ -2396,34 +2453,105 @@ async fn a_signing_visit_yields_to_a_members_checkpoint_request_until_it_is_serv
     );
     // Authoritative progress came between two real signing slices: none signed in between.
     assert_eq!(
-        receiver.handoff.remaining_for_test(),
+        o.receiver.handoff.remaining_for_test(),
         Some(after),
         "signing resumed before the authoritative work was served"
     );
 
     // 3. Signing then resumes, and the transfer completes with the whole branch.
-    let mut updated = None;
-    for _ in 0..30 {
-        let (_, changed) = receiver.run(&mut server, &mut store, 83, None).unwrap();
-        if let Some(work) = receiver.detach(&mut server) {
-            receiver.complete(&mut server, work.run(None).await);
+    assert!(
+        drive_transfer_to_completion(&mut o).await,
+        "the transfer never completed after the yield"
+    );
+}
+
+/// Production turns, detaching whenever asked, until the transfer reports its target updated.
+/// Returns whether it did, and checks that the transferred branch is no longer retained.
+async fn drive_transfer_to_completion(o: &mut SigningOwner) -> bool {
+    for _ in 0..40 {
+        let (_, changed) = o
+            .receiver
+            .run(&mut o.server, &mut o.store, 83, None)
+            .unwrap();
+        if let Some(work) = o.receiver.detach(&mut o.server) {
+            o.receiver.complete(&mut o.server, work.run(None).await);
         }
-        if changed == Some(target) {
-            updated = changed;
+        if changed == Some(o.target) {
+            assert!(
+                o.store
+                    .load_epoch_intents(83, &o.target.document(&o.server.group_id()).unwrap())
+                    .unwrap()
+                    .overlay()
+                    .is_none(),
+                "the transferred branch was retained"
+            );
+            return true;
+        }
+    }
+    false
+}
+
+/// F2's review, MEDIUM-1: the signing yield must not wait for a request that is itself waiting
+/// for the signing job's pool permit.
+///
+/// With one permit in the pool, the handoff job holds it from H1 to H5. Bob's request for a
+/// document whose graph is cold is reserved, but its source preparation cannot get a permit, so
+/// it stays uncaptured. Yielding to it would be a priority inversion: H3 waits for the request,
+/// the request waits for H3's permit, and under this test's frozen clock the interest never
+/// expires, so neither would ever move. The answer is to sign through, as before F2; H5 then
+/// releases the permit, and the still-current request captures and is served.
+#[tokio::test]
+async fn a_request_waiting_for_the_signing_jobs_permit_does_not_stall_signing() {
+    let mut o = signing_owner(1419, 1).await;
+    displace_warm_graph(&mut o);
+    let fetch = deliver_head_request(&mut o).await;
+
+    // Signing must proceed on turns where the request is reserved but has not captured.
+    let mut signed_past_it = false;
+    let mut completed = false;
+    for _ in 0..40 {
+        let uncaptured = o
+            .receiver
+            .catchup
+            .service
+            .as_ref()
+            .is_some_and(|s| !s.captured)
+            && o.receiver.catchup.service_owed(&o.server);
+        let before = o.receiver.handoff.remaining_for_test();
+        let (_, changed) = o
+            .receiver
+            .run(&mut o.server, &mut o.store, 83, None)
+            .unwrap();
+        if uncaptured && before.is_some() && o.receiver.handoff.remaining_for_test() != before {
+            signed_past_it = true;
+        }
+        if let Some(work) = o.receiver.detach(&mut o.server) {
+            o.receiver.complete(&mut o.server, work.run(None).await);
+        }
+        completed |= changed == Some(o.target);
+        tokio::task::yield_now().await;
+        if completed && fetch.is_finished() {
             break;
         }
     }
-    assert_eq!(
-        updated,
-        Some(target),
-        "the transfer never completed after the yield"
+    assert!(
+        completed,
+        "the transfer never completed while a request waited for its permit"
     );
     assert!(
-        store
-            .load_epoch_intents(83, &target.document(&server.group_id()).unwrap())
-            .unwrap()
-            .overlay()
-            .is_none(),
-        "the transferred branch was retained"
+        signed_past_it,
+        "no turn signed while the request was reserved and uncaptured, so this proved nothing"
+    );
+    assert!(
+        fetch.is_finished(),
+        "the request was never answered once H5 released the permit"
+    );
+    let answered = o
+        .bob
+        .sync
+        .complete_checkpoint_head(fetch.await.expect("the fetch task"));
+    assert!(
+        answered.is_ok(),
+        "Bob's request was not served after the transfer: {answered:?}"
     );
 }

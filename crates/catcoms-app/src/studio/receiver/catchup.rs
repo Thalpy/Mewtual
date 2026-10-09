@@ -512,11 +512,8 @@ impl CatchupRuntime {
     /// A member's epoch-service request this runtime has reserved and not yet answered, while the
     /// request is still current. Once reserved it is no longer queued interest, and once its
     /// source preparation is installed no result is parked either, yet it is still owed an answer.
-    ///
-    /// `pending` counts it as work, and a signing slice must yield to it too (design 18.3 review,
-    /// F2, found by that test). A slice that signs ends its turn before catch-up, so without this
-    /// term signing ran every turn until the branch was done, and H5's commit then evicted the
-    /// source the request had captured, which drops a captured request unanswered.
+    /// `pending` counts it as work. The signing yield uses the narrower
+    /// [`captured_service_owed`](Self::captured_service_owed).
     pub(super) fn service_owed<T: MeshTransport, R: CryptoRngCore>(
         &self,
         server: &Server<T, R>,
@@ -524,6 +521,27 @@ impl CatchupRuntime {
         self.service
             .as_ref()
             .is_some_and(|s| server.sync.epoch_service_interest_is_current(&s.interest))
+    }
+    /// [`service_owed`](Self::service_owed), restricted to a request whose source preparation has
+    /// started (`captured`): one that can be answered without taking another pool permit.
+    ///
+    /// This is the term a signing slice yields to (design 18.3 review, F2, found by that test). A
+    /// slice that signs ends its turn before catch-up, so without it signing ran every turn until
+    /// the branch was done, and H5's commit then evicted the source the request had captured,
+    /// which drops a captured request unanswered.
+    ///
+    /// **Why only once captured** (F2's review, MEDIUM-1). A request that has not captured may be
+    /// waiting for a permit from the shared pool, and the signing job holds one of those permits
+    /// until H5. Yielding to it would be a priority inversion: H3 would wait for a request that
+    /// waits for H3, until the interest expires unanswered, and indefinitely under a clock that
+    /// does not move. Uncaptured, it is served after H5 releases the permit, as before F2.
+    pub(super) fn captured_service_owed<T: MeshTransport, R: CryptoRngCore>(
+        &self,
+        server: &Server<T, R>,
+    ) -> bool {
+        self.service.as_ref().is_some_and(|s| {
+            s.captured && server.sync.epoch_service_interest_is_current(&s.interest)
+        })
     }
     pub(super) fn replay_ready(&self) -> bool {
         !self.in_flight

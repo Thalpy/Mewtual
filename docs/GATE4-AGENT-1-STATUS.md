@@ -2488,7 +2488,7 @@ Everything else, including the classifier's 14 mutations, was checked by inspect
 | finding | what | disposition |
 |---|---|---|
 | F1 MEDIUM | S1a's exact-retry acknowledgement replayed the whole branch under custody (`overlay.read`) to return a projection no caller used | **fixed, landing with C-3 step 2** once Agent 2 freed their files (2026-10-09). They reviewed the diff against their files statically and found no change to their Save's outcome contract |
-| F2 MEDIUM | N31 is not the accepted actor-level test, and `handoff_priority` is unpinned | **fixed** (2026-10-09): a real second member's checkpoint request mid-signing, four CI entries, and a missing fourth term the test found; see "F2" below. The inbound term and the heavy-stage gate stay open |
+| F2 MEDIUM | N31 is not the accepted actor-level test, and `handoff_priority` is unpinned | **fixed** (2026-10-09): a real second member's checkpoint request mid-signing, five CI entries, and a missing fourth term the test found, narrowed by its review; see "F2" below. The inbound term and the heavy-stage gate stay open |
 | F3 MEDIUM | H5's custody terms are understated, and bounded custody is not established | **measured, deviation recorded**; see "H5's repeated terms, priced" below |
 | F4 LOW | a Save captured while the receiver is paused strands admission, a pool slot and a media hold | **fixed, `2b9ba0ae`**, in Agent 2's chosen shape, at both entry points (below) |
 | F5 LOW | the refused-result memo tests never checked what the memo returned | **fixed, `e01113a5`** |
@@ -2588,33 +2588,72 @@ before F4.
 - **Turns 5 and 6:** H5's commit evicted the warm source, and catch-up dropped the captured request
   unanswered.
 
-**The fix.** A fourth term, `CatchupRuntime::service_owed`: a reserved request whose interest is
-still current. Catch-up's own `pending` already counted it; it is now one method that both
-`pending` and `handoff_priority` call. Design 7.3 is amended to match.
+**The fix.** A fourth term, `CatchupRuntime::captured_service_owed`: a reserved request that has
+captured its source and whose interest is still current. Catch-up's own `pending` already counted
+reserved requests; that term is now the method `service_owed`, with no change in behaviour, and the
+signing yield takes its captured subset. Design 7.3 is amended to match.
+
+**Why only the captured subset** (the review below, MEDIUM-1). The first fix yielded to any
+reserved request, and that was a priority inversion. A request whose preparation found the shared
+pool full stays reserved and uncaptured, and the signing job holds one of that pool's permits until
+H5. H3 then yielded every turn to a request waiting for H3's own permit, until the interest expired
+unanswered, and for ever under a still clock; one member re-requesting at each expiry kept H3 to
+about one slice per 5 s. An uncaptured request is now signed past, as before F2, and is served once
+H5 releases the permit.
 
 **The parked term needed its own test.** In Bob's flow a parked preparation always belongs to the
-reserved request, so `service_owed` answers on the same turns and removing `result_parked` alone
+reserved request, so the owed term answers on the same turns and removing `result_parked` alone
 survives there. `a_parked_catch_up_result_alone_makes_a_signing_slice_yield` parks a real owner
 capture with no request behind it and asks the predicate directly. This is predicate level, not a
 signing turn, because with no priority work a signing slice takes every turn and catch-up never
 starts a capture mid-signing.
 
-**CI, four `handoff-priority*` entries in the handoff harness,** all DETECTED and PASS restored
+**The inversion's regression.** `a_request_waiting_for_the_signing_jobs_permit_does_not_stall_signing`
+runs the same fixture on a one-permit pool. Bob's request for a cold document is reserved
+uncaptured; the test requires a turn that signs past it, the transfer to complete, and the request
+then to be answered. The three F2 actor tests now share one fixture, `signing_owner`.
+
+**CI, five `handoff-priority*` entries in the handoff harness,** all DETECTED and PASS restored
 under `RUSTFLAGS='-D warnings'`:
 - `handoff-priority`, the reviewer's mutant: the whole predicate forced to `false`;
-- `-service`, `-owed` and `-parked`: one term removed each.
+- `-service`, `-owed` and `-parked`: one term removed each;
+- `-captured`: the owed term's `captured` conjunct removed.
 
 The harness now accepts a crate-absolute test name beginning `studio::receiver::catchup::tests::`.
 
 **Not covered, recorded:**
 - **The inbound term.** A production turn reaches the yield with inbound still queued only through
   the gossip fairness path (`gossip_runs >= 4` with background work), and no test stages that.
-- **The same gap at the heavy-stage gate, not fixed.** `replay_ready()` does not see a reserved
-  request either. If a request is captured while H4 runs off-actor, H5 can commit before it is
-  served, evicting the source and dropping the request, once per handoff; replay may do the same.
-  `replay_ready` is shared with replay, so the rule goes to Agent 2 before it changes.
+- **The same gap at the heavy-stage gate, not fixed** (the review below, MEDIUM-2).
+  `replay_ready()` does not see a reserved request either. If a request is captured while H4 runs
+  off-actor, H5 can commit before it is served, evicting the source and dropping the request.
+  Replay is gated the same way and runs on alternate turns, so it can do this too, not only once
+  per handoff. Each drop costs one `NoResponse` and the requester's own retry; nothing durable,
+  authorising or on the wire changes. `replay_ready` is shared with replay, so the rule goes to
+  Agent 2, with one constraint: a gate there must also exclude an uncaptured request, or H5, which
+  releases a permit, would wait on it as H3 did.
+- **A captured request can still wait behind H3 on a full pool** while a held client page waits:
+  catch-up's PageReady branch returns before `serve` when it cannot get a permit. Rarer, and
+  bounded by the interest's expiry.
 - **The time fixture** stays store-level, in
   `studio_overlay_handoff_signing_slice_reports_yield_bound_and_completion_apart`.
+
+### Review of F2 and step A (2026-10-09, Opus, static): no blocker or high
+
+The review read `4170707a..72e0b68e` and ran no build. Dispositions:
+
+| finding | what | disposition |
+|---|---|---|
+| MEDIUM-1 | the owed term yielded to a request waiting for the signing job's own pool permit | **fixed**: the yield takes only captured requests (above), with its regression and the `-captured` entry |
+| MEDIUM-2 | `replay_ready` ignores a reserved request, for H5 and replay alike (pre-existing) | **recorded, not blocking**: to Agent 2, with the captured constraint; the `background_step` comment that claimed catch-up is never starved now says where that stops being true |
+| LOW-1 | `handoff_sign`'s doc listed three terms | **fixed** |
+| LOW-2 | the test's `sync_once` ticks could hang rather than fail | **fixed**: each tick is bounded at 60 s, in `deliver_head_request` |
+| LOW-3 | "nothing reaches into the store" overclaimed | **fixed**: the displacement is a write and a Read between turns, which slice exclusivity allows, and the comments say so |
+
+**Confirmed sound by the review:** `pending()` unchanged; every path that clears an owed request
+(lifecycle change, expiry, removed channel, failed install, cancellation); no authority, wire or
+persistence change; step A equivalent to the old subset test, with the error order unchanged; all
+harness anchors unique, `qualified()` routing correct, and no mutant leaving unused code.
 
 ### F3: H5's repeated terms, priced
 

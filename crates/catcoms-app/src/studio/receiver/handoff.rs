@@ -675,9 +675,10 @@ impl StudioReceiver {
 
     /// H3. One bounded signing slice, under custody, on a background turn.
     ///
-    /// `priority` is 7.3's placement answer: authoritative service interest, inbound on any watch,
-    /// or a parked background result. A yield signs zero and says so, which is a different event
-    /// from a slice that hit its turn cap or its deadline with work left.
+    /// `priority` is 7.3's placement answer (`StudioReceiver::handoff_priority`): authoritative
+    /// service interest, inbound on any watch, a parked background result, or a reserved service
+    /// request that has captured its source. A yield signs zero and says so, which is a different
+    /// event from a slice that hit its turn cap or its deadline with work left.
     pub(super) fn handoff_sign<T: MeshTransport + 'static, R: CryptoRngCore>(
         &mut self,
         server: &mut Server<T, R>,

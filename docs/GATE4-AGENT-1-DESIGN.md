@@ -650,11 +650,17 @@ Closing Save, both Intents writes that rotate the token (Agent 2's review M1).
   has inbound, or a background result is parked.
 
   **Amended 2026-10-09 (implementation review F2):** they also yield while catch-up holds a
-  reserved service request still owed its answer (`CatchupRuntime::service_owed`). A request stops
-  being queued interest when catch-up reserves it, and its parked preparation result is gone once
-  installed, but it is not yet served. A slice that signs ends the turn before catch-up, so without
-  this term signing ran to the end of the branch, and H5's commit then evicted the source the
-  request had captured, which drops it unanswered. F2's actor-level test found this.
+  reserved service request that has captured its source and is still owed its answer
+  (`CatchupRuntime::captured_service_owed`). A request stops being queued interest when catch-up
+  reserves it, and its parked preparation result is gone once installed, but it is not yet served.
+  A slice that signs ends the turn before catch-up, so without this term signing ran to the end of
+  the branch, and H5's commit then evicted the source the request had captured, which drops it
+  unanswered. F2's actor-level test found this.
+
+  **Only once captured** (F2's review, MEDIUM-1). An uncaptured request may be waiting for a
+  permit from the shared pool, and the signing job holds one until H5. Yielding to it would stall
+  both until the interest expires, and for ever under a still clock. It is served after H5
+  releases the permit instead.
 - **Bounded slice.** `MAX_SIGNING_TURNS_PER_VISIT = 32` and `SIGNING_SLICE_BUDGET_MS = 250`,
   whichever comes first. These are an experiment configuration, not a responsiveness guarantee: the
   deadline is checked between signatures and can overrun by one whole operation including its

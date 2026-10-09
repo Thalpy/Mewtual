@@ -426,10 +426,16 @@ impl StudioReceiver {
         //
         // RT-002's rule applies to every heavy stage, and H5 and H1 are heavy: H5 drains an
         // inventory, reads the whole source and performs three accounted writes with flushes; H1
-        // drains an inventory too. Both wait for `replay_ready()`, so authoritative catch-up is
-        // never starved by transfer work. H3 is the documented exception: a signing slice needs
-        // no permit and no retained source, so 7.3 lets it run on any turn, subject to the
-        // priority answer, which is a yield rather than a gate.
+        // drains an inventory too. Both wait for `replay_ready()`, so they never run ahead of
+        // catch-up's own preparations, pages and checkpoints. **Not** ahead of a member's reserved
+        // service request, though: `replay_ready()` does not see one, so H5 can commit before it
+        // is answered and evict the source it captured, which drops it (F2's review, MEDIUM-2,
+        // recorded for Agent 2; replay shares the gate). Any fix must exclude a request still
+        // waiting for a pool permit, or H5, which releases one, would wait on it.
+        //
+        // H3 is the documented exception: a signing slice needs no permit and no retained source,
+        // so 7.3 lets it run on any turn, subject to the priority answer, which is a yield rather
+        // than a gate.
         //
         // Among themselves the order is H5, then H3, then H1: an assembled transfer is holding
         // admission, a shared slot and a signed candidate, and finishing it frees all three,
@@ -501,12 +507,13 @@ impl StudioReceiver {
 
     /// 7.3's placement answer for a signing slice: yield immediately to authoritative service
     /// interest, to inbound on any watch, to a background result already parked, or to a reserved
-    /// service request still owed its answer.
+    /// service request that has captured its source and is still owed its answer.
     ///
-    /// The last term is not in 7.3's list; the actor-level test for design 18.3 review F2 found it
-    /// missing. A request is queued interest only until catch-up reserves it, and a parked result
-    /// only until its source is installed. In the turns after that it is still unanswered, and
-    /// catch-up serves it only on a turn no slice has signed in.
+    /// The last term is not in 7.3's original list; the actor-level test for design 18.3 review F2
+    /// found it missing. A request is queued interest only until catch-up reserves it, and a parked
+    /// result only until its source is installed. In the turns after that it is still unanswered,
+    /// and catch-up serves it only on a turn no slice has signed in. It must have captured, or it
+    /// may be waiting for the pool permit this signing job holds (see `captured_service_owed`).
     fn handoff_priority<T: MeshTransport, R: CryptoRngCore>(&self, server: &Server<T, R>) -> bool {
         server.sync.has_epoch_service_interest()
             || self
@@ -514,7 +521,7 @@ impl StudioReceiver {
                 .iter()
                 .any(|(w, _)| server.sync.studio_has_inbound(&w.inner))
             || self.catchup.result_parked()
-            || self.catchup.service_owed(server)
+            || self.catchup.captured_service_owed(server)
     }
     /// Notify before any bounded event-channel await: native work never waits on the event
     /// consumer, and event backpressure must not conceal an already-queued inbox packet.
