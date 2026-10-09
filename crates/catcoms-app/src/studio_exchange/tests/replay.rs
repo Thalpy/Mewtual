@@ -355,9 +355,10 @@ async fn studio_replay_manual_move_on_a_small_vault_needs_no_detach() {
     // Pins the claim itself (batch review of step 2, LOW-3): the move's budget came from the
     // shared job. A revert to the old synchronous scan also detaches nothing and leaves the job
     // idle, so only the minted count tells the two apart.
-    assert!(
-        receiver.inventory_minted_for_test() >= 1,
-        "the manual move did not take its budget from the shared job"
+    assert_eq!(
+        receiver.inventory_minted_for_test(),
+        1,
+        "the manual move did not take its one budget from the shared job"
     );
 }
 

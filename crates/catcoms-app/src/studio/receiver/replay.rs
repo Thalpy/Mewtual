@@ -29,11 +29,14 @@ struct Pass {
 /// 2, HIGH-1). The classifier (`6a79e6f8`) validates small records of the uncached families inline,
 /// so what still parks is each cold Studio or Registry record and any record too large to validate
 /// inline. Each parked record costs one replay turn, about six seconds each in a quiet actor, and a
-/// five-family write between any two turns throws that progress away. (Written before the
-/// classifier landed, when every uncached record parked.) Without this bound a steadily edited document, sustained receive or another actor's
-/// writes could stall the move indefinitely, and while it waits its pass holds replay for every
-/// other watched target. The fallback adds no custody class: it is the scan this site always ran,
-/// under the same receive limits that every receive packet already pays.
+/// five-family write between any two turns throws that progress away. Without this bound a
+/// steadily edited document, sustained receive or another actor's writes could stall the move
+/// indefinitely, and while it waits its pass holds replay for every other watched target. The
+/// fallback adds no custody class: it is the scan this site always ran, under the same receive
+/// limits that every receive packet already pays.
+///
+/// The 60 s was chosen before the classifier landed, when every uncached record parked, and the
+/// design asks for it to be revisited once the classifier is measured in use.
 const MANUAL_MOVE_PATIENCE_MS: u64 = 60_000;
 
 /// The manual move's budget from one synchronous scan under the receive profile, inside this

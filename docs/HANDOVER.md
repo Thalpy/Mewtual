@@ -14,7 +14,8 @@ and ranks the live hazards in that path.
   - **C-3 step 2:** replay's manual move now takes its storage budget from a shared, turn-based
     inventory job that keeps a cursor across custody visits, the first production path to do so.
     Limitations, as `THREAT-MODEL.md` now states:
-    - the cursor and its directory stream live up to 30 s past the owner's last turn;
+    - the cursor and its directory stream live until the first visit 30 s or more past the
+      owner's last turn, about 35 s with the native idle wake;
     - a move the job cannot serve within 60 s falls back to the synchronous scan it ran before;
     - so the move, and its recovery notice, can wait up to 60 s;
     - the job takes permits from the same four-slot preparation pool as catch-up;
@@ -25,8 +26,10 @@ and ranks the live hazards in that path.
     `INTERFACES.md`).
   - **F4:** a Save captured while the receiver is paused is dropped with `Busy`, and a pause
     releases a capture still queued, freeing admission, the pool permit and the media hold. That
-    `Busy` is not free, since the visit paid for the scan and media admission, so callers must
-    back off while receive is paused rather than resend at once.
+    `Busy` is not free, since the visit paid for media admission and, for the Unconfirmed Save,
+    the budget scan. **Known gap:** a caller cannot tell it from the other `Busy`, because the
+    paused event is one-shot and neither Save ends a pause. A distinct `Paused` outcome is
+    proposed to Agent 2, and native Save must not register before it.
   - Native Save and repair commands remain unregistered, and F2 (an actor-level priority test)
     follows. This is not Gate 4 acceptance.
 

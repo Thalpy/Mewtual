@@ -1002,8 +1002,9 @@ impl ServerStore {
     /// worker read, and a later write may have replaced them, so it says nothing about the vault
     /// as it is now. Surfacing it pauses background receive, so the caller surfaces it only for a
     /// current job and otherwise restarts. Before this, such an error was dropped when this
-    /// actor's own write had overtaken the job (the uncharged refresh) but paused receive when
-    /// another actor's had (batch review of C-3 step 2, LOW-1).
+    /// actor's own write had overtaken the job within its uncharged-refresh cap, but paused receive
+    /// when another actor's write had, or an own write past that cap (batch review of C-3 step 2,
+    /// LOW-1).
     pub(crate) fn restart_epoch_inventory_job_if_overtaken(
         &mut self,
         job: &mut EpochInventoryJob,

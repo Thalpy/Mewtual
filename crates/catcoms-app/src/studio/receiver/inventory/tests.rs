@@ -303,6 +303,79 @@ fn a_validation_error_about_overtaken_bytes_is_a_charged_restart() {
     );
 }
 
+/// The same branch at the store's restart limit (re-review of the batch fixes, L-3). With every
+/// charged restart spent, an error about overtaken bytes neither surfaces nor restarts: the job is
+/// `Unstable` and the runtime backs off, exactly as an overtaken install does there.
+#[test]
+fn a_validation_error_at_the_restart_limit_backs_off() {
+    let mut env = Env::new(1);
+    env.source(1);
+    for n in 0..crate::store::MAX_INVENTORY_RESTARTS {
+        assert!(matches!(env.turn().unwrap(), InventoryTurn::NotYet));
+        let detach = env.rt.take_detach().expect("a park every cycle");
+        env.source(2 + n as u8); // another actor's write
+        env.validate_and_complete(detach);
+    }
+    // This turn spends the last charged restart and parks again.
+    assert!(matches!(env.turn().unwrap(), InventoryTurn::NotYet));
+    let detach = env.rt.take_detach().expect("a park after the last restart");
+    env.source(9);
+    env.rt
+        .complete(detach.token, Box::new(Err(invalid("validation failed"))));
+    drop(detach);
+
+    match env.turn() {
+        Ok(InventoryTurn::Unstable) => {}
+        Err(error) => panic!("an error about overtaken bytes was surfaced: {error}"),
+        Ok(_) => panic!("a job past its restart limit was restarted again"),
+    }
+    assert!(
+        env.rt.backoff_until_for_test().is_some(),
+        "Unstable without a backoff"
+    );
+}
+
+/// And past the own-write cap (re-review of the batch fixes, L-3): once `OWN_RESTARTS` uncharged
+/// refreshes are spent, an own write's overtaking reaches the charged branch like anyone's, so an
+/// error there is a charged restart.
+#[test]
+fn an_own_write_past_its_cap_with_a_validation_error_is_charged() {
+    let mut env = Env::new(1);
+    env.source(1);
+    for n in 0..OWN_RESTARTS {
+        assert!(matches!(env.turn().unwrap(), InventoryTurn::NotYet));
+        let detach = env.rt.take_detach().expect("a park every cycle");
+        env.own_write(2 + n as u8);
+        env.validate_and_complete(detach);
+    }
+    // This turn takes the last uncharged refresh and parks again.
+    assert!(matches!(env.turn().unwrap(), InventoryTurn::NotYet));
+    assert_eq!(
+        env.rt.own_restarts, OWN_RESTARTS,
+        "precondition: the cap is spent"
+    );
+    let detach = env.rt.take_detach().expect("a park after the last refresh");
+    env.own_write(9);
+    env.rt
+        .complete(detach.token, Box::new(Err(invalid("validation failed"))));
+    drop(detach);
+
+    match env.turn() {
+        Ok(InventoryTurn::NotYet) => {}
+        Err(error) => panic!("an error about overtaken bytes was surfaced: {error}"),
+        Ok(_) => panic!("the overtaken job neither restarted nor surfaced"),
+    }
+    let job = match &env.rt.state {
+        State::Stepping(job) | State::Parked { job, .. } => job,
+        _ => panic!("the overtaken job did not restart"),
+    };
+    assert_eq!(
+        job.restarts_for_test(),
+        1,
+        "an own write past the cap was not charged"
+    );
+}
+
 /// Overtake the job once per cycle with `write` while each body is out, until it is `Unstable`.
 /// Returns how many bodies were detached on the way and when the backoff ends.
 fn storm(env: &mut Env, write: fn(&mut Env, u8)) -> (usize, u64) {

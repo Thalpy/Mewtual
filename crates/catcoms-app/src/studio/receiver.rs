@@ -54,11 +54,22 @@ pub(crate) enum StudioOverlaySaveVisit {
     /// 7.2 reserves before the first body read precisely so this costs nothing.
     ///
     /// **The receiver is paused** (design 18.3 review, F4). This one is not free. The visit ran
-    /// classification and S1b (the budget's inventory scan, the mint, media admission, which can
-    /// promote a frame's PIX) before it dropped the capture. The dropped hold leaves any promoted PIX
-    /// unprotected, which RT-001 already accepts for a refused plan. So a caller must not resend at
-    /// once: back off while `studio-receive-paused` is in effect, since every resend repeats that
-    /// work. Native Save registration must honour this.
+    /// classification and S1b (the mint and media admission, which can promote a frame's PIX, and
+    /// for the Unconfirmed Save the budget's inventory scan, which the Closing Save's caller pays
+    /// instead) before it dropped the capture. The dropped hold leaves any promoted PIX unprotected,
+    /// which RT-001 already accepts for a refused plan.
+    ///
+    /// **A caller cannot yet tell the two apart**, and that is a known gap, not a contract a caller
+    /// can follow:
+    /// - `studio-receive-paused` is a one-shot transition event, not a queryable state;
+    /// - neither Save path clears the pause; only a successful explicit Studio document access
+    ///   through `run` does (a Read, an ordinary Save, Apply or ApplyOverlayCopy);
+    /// - the native Unconfirmed mapping answers `Busy` with "send the identical request again".
+    ///
+    /// So a caller resending on `Busy` while paused repeats that work each time. The fix proposed to
+    /// Agent 2, whose outcome type and native mapping this is, is a distinct `Paused` outcome from
+    /// the same refusal point. Native Save registration must not ship before it (re-review of the
+    /// batch fixes, M-1).
     Busy,
 }
 

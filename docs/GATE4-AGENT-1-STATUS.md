@@ -1574,7 +1574,7 @@ the memo, the parked-plan slot, pause and the lock. It found:
 | finding | disposition |
 |---|---|
 | M-1: step 2 shipped without its HANDOVER and THREAT-MODEL updates, and THREAT-MODEL said no path held a cursor across visits | **fixed**, both documents |
-| M-2: F4's paused `Busy` contradicted both `Busy` docs, and costs a scan and media admission per resend | **documented** on both variants and the helper. Integrators must back off while receive is paused. No `Paused` variant: a pause check before the budget would break the exact retry while paused |
+| M-2: F4's paused `Busy` contradicted both `Busy` docs, and costs a scan and media admission per resend | **documented** on both variants and the helper. The re-review (M-1) then showed a caller cannot follow a "back off while paused" contract: the event is one-shot, `Busy` is ambiguous, no Save clears the pause, and the native mapping says to resend. The docs now say so plainly. **A distinct `Paused` outcome** from the same refusal point, after S1, so exact retries stay `Saved`, **is proposed to Agent 2**, whose outcome type and native mapping it is. Native Save must not register before it. My earlier reason for not adding one, that the check would have to precede the budget, was wrong |
 | L-1: a validation error about bytes another actor's write replaced paused receive, while one about an own write was dropped | **fixed**: a charged restart (`restart_epoch_inventory_job_if_overtaken`). Pinned by `a_validation_error_about_overtaken_bytes_is_a_charged_restart`, which fails with every error surfaced |
 | L-2: stale "until 13.7" comments, and `memoize_overtaken_inventory_result` still dead in production | **fixed**; the function is now `#[cfg(test)]` |
 | L-3: the small-vault move test could not tell the shared job from the old scan | **fixed**: it now asserts a budget was minted, and fails with the move forced onto the fallback |
@@ -1589,6 +1589,28 @@ the memo, the parked-plan slot, pause and the lock. It found:
 - replay's job can take the last free permit from catch-up for a visit;
 - the I-4 writer audit predates writers added since `2df3564f`, which rely on the type-level
   guard and the raw-fs gate.
+
+**Re-review of those fixes (2026-10-09, Opus, static): no blocker or high.** It confirmed L-1's
+code change: no loop, no bypass of `MAX_INVENTORY_RESTARTS`, no masking of an error about current
+bytes, and a meaningful test.
+- **M-1:** the paused-`Busy` contract could not be followed, as recorded in the M-2 row above. The
+  docs now say so plainly, and a `Paused` outcome is proposed to Agent 2.
+- **L-1:** the comments said an own write was always handled by the uncharged refresh. That is
+  only within its cap; they now say so, and the module doc is current.
+- **L-2:** the exact-retry claim is narrowed in `control.rs` and here.
+- **L-3:** two new tests:
+  - an error at the restart limit backs off;
+  - an own write past its cap with an error is a charged restart.
+
+  The small-vault test now asserts exactly one minted budget.
+- **L-4:** comment precision: the slice and inline-rule wording, the 60 s note, about 35 s rather
+  than "up to 30 s", and the Closing budget's cost.
+
+**Residual risks it named:**
+- an error dropped by the charged restart is not traced;
+- a validator panic on an overtaken job can repeat up to the restart limit;
+- the context-change release runs in `lifecycle`, which an early-returning visit skips;
+- one minted budget proves the job minted, not that the move consumed it.
 
 ### I-4 writer audit at C-3 step 2 (2026-10-06, Opus, static, at `2df3564f`)
 
@@ -2516,7 +2538,10 @@ structural decodes of the intent record and one more authenticated read for the 
 ### F4: a capture made while paused is dropped, and a pause releases a queued one (`2b9ba0ae`)
 
 The shape is Agent 2's choice. The refusal sits at the capture, not at the Save's entry, so an exact
-retry of accepted work, answered at S1 before any capture, stays `Saved` while paused.
+retry of accepted work, answered at S1 before any capture, stays `Saved` while paused. The
+exception is when the overlay slot still holds other work. A capture already detached when the
+pause arrived parks as a plan for up to `OVERLAY_PARK_MS`, and a retry then answers `Busy`, as
+before F4.
 
 **What changed:**
 - `queue_capture_unless_paused` serves both entry points. While paused it drops a fresh capture,

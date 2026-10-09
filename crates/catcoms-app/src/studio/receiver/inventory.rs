@@ -17,8 +17,9 @@
 //!   one this runtime is waiting on is ignored. Tokens are never reused, so the result for a job
 //!   released while its body was out can never match a later job.
 //! - **Results are installed under custody**: a result arrives outside the vault lease, so it is
-//!   held and installed at the start of the next turn, which is also where a validation error is
-//!   surfaced and the job dropped (M7).
+//!   held and installed at the start of the next turn. A validation error is surfaced there, and
+//!   the job dropped, only if the job is still current (M7). An error about bytes a write has
+//!   since replaced restarts the job instead (batch review of step 2, LOW-1).
 //! - **Instability backs off** (L1): 30 s doubling to 300 s, reset by a completed inventory. A
 //!   store-wide condition, so it never becomes a per-target hold, and one owner giving up on the
 //!   job (`abandon_job`) does not lift it for the others. An owner refused with `Unstable` must
@@ -66,9 +67,10 @@ const IDLE_MS: u64 = 30_000;
 /// job restarting, and detached validations churning, forever.
 const OWN_RESTARTS: usize = 3;
 /// How long one owner's turn may step the shared job. The same order as the H3 signing slice,
-/// and like it an experiment configuration: the classifier's inline rule (C-3 runtime 14.2) was
-/// calibrated against it, but the slice itself has not been. The step's one-entry minimum means a
-/// visit can overrun it by one entry's work.
+/// and like it an experiment configuration that no measurement has calibrated. The classifier's
+/// inline rule (C-3 runtime 14.2) is calibrated per record under its own 25 ms cap, and only reads
+/// how much of this slice remains. The step's one-entry minimum means a visit can overrun it by
+/// one entry's work.
 pub(super) const INVENTORY_SLICE_MS: u64 = 250;
 
 /// A job held while its parked body is validated elsewhere. Deliberately offers no way to step it.
@@ -249,11 +251,12 @@ impl InventoryRuntime {
             };
             let step = match *result {
                 Ok(validated) => store.install_validated_job_record(&mut job, validated)?,
-                // An error is about the bytes the worker read. If another actor's write has
-                // overtaken the job since, they may no longer be the vault's: a charged restart,
-                // like any overtaken install, rather than a reason to pause receive. (An own
-                // write's overtaking was already answered by the uncharged refresh above.) Only
-                // an error about current bytes surfaces (batch review of step 2, LOW-1).
+                // An error is about the bytes the worker read. If a write has overtaken the job
+                // since, they may no longer be the vault's: a charged restart, like any overtaken
+                // install, rather than a reason to pause receive. That is another actor's write,
+                // or one of this actor's own once `OWN_RESTARTS` is spent; within that cap an own
+                // write was already answered by the uncharged refresh above. Only an error about
+                // current bytes surfaces (batch review of step 2, LOW-1).
                 Err(error) => match store.restart_epoch_inventory_job_if_overtaken(&mut job)? {
                     Some(step) => step,
                     None => return Err(error),

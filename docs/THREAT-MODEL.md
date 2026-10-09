@@ -289,7 +289,8 @@ table with the commit that closed it.
 - **Replay's manual move holds a cursor across visits** (C-3 step 2, the first production path to).
   Its shared, turn-based inventory job keeps an owned cursor and its directory stream between the
   receiver's custody visits.
-  - **How long:** for up to 30 s after its owner last asked for a budget, before the idle drop.
+  - **How long:** until the first visit 30 s or more after its owner last asked for a budget,
+    when the idle drop runs. That is about 35 s with the native 5 s idle wake.
   - **What is bounded:** a parked record's authenticated plaintext and its preparation permit are
     released at pause, at the lock reset and on context change. The job takes permits from the
     same four-slot process pool as catch-up preparation.
