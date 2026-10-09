@@ -317,9 +317,10 @@ table with the commit that closed it.
     same visit. On the actor that costs at most what resolution cost before Flow R, plus a
     discarded detached stage on a worker, once. The resolution completes there, so it cannot be
     repeated to hold the record Prepared.
-  - **While the record is Prepared,** catch-up's rotation, client pass and Registry maintenance
-    skip that document rather than pausing receive. A record stuck on Hold defers them for that
-    document until a fence or an explicit access resolves it.
+  - **While the record is Prepared,** catch-up's rotation, client pass, Registry maintenance and
+    replay skip that document rather than pausing receive. No path resolves a record stuck on
+    Hold, so they stay suspended for that document indefinitely; the eligibility view reports it
+    as `PreparedStuck`.
 - **A budgeted scan holds custody for a bounded validation only, and a memoized validation is
   reused only for identical bytes.** Under a deadline, `validation_fits` admits a fresh validation
   inline only in accounting mode, and only for four families:

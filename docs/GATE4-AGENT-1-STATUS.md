@@ -2515,7 +2515,7 @@ the inventory cache and the retained source graph, as a restart does, and runs o
 pool. Otherwise catch-up re-warms the source itself and the warm install goes untested; the first
 draft's mutant survived for exactly that reason.
 
-**CI:** `check-studio-resolution-mutations.py` has 16 entries, in a new `resolution` job, all
+**CI:** `check-studio-resolution-mutations.py` has 17 entries, in a new `resolution` job, all
 DETECTED and PASS restored under `RUSTFLAGS='-D warnings'`. They cover:
 - R3's intent comparison, as a branch and as a digest;
 - the source comparison and the fallback;
@@ -2523,7 +2523,7 @@ DETECTED and PASS restored under `RUSTFLAGS='-D warnings'`. They cover:
 - each shape predicate;
 - R1's Hold exit and its stale eviction;
 - the runtime's warm install and the probe's route;
-- the three rails' Prepared skips;
+- the four rails' Prepared skips (rotation, client pass, Registry, replay);
 - the budget-failure release;
 - the resolve job's authority.
 
@@ -2548,6 +2548,19 @@ DETECTED and PASS restored under `RUSTFLAGS='-D warnings'`. They cover:
 
 Clippy also failed at `fd90038e` (`large_enum_variant` on the plan's Complete arm). The Flow R
 commit had been made without a clippy run after the H5 one. Fixed by boxing the unit.
+
+**Re-review of those fixes (at `a09a1d49`, static): no blocker or high.** HIGH-1 and MEDIUM-1
+confirmed fixed. It found a fourth rail and four lows:
+
+| finding | what | disposition |
+|---|---|---|
+| MEDIUM-1 | replay re-applies own intents, and an ordinary Apply is refused while Prepared: the same pause and livelock, through Apply rather than a read | **fixed:** replay picks its next document among those not Prepared, and an active pass on a Prepared one waits; a test and a mutation. The test pins the skip itself, since no fixture stages an own intent for replay into the successor an interrupted handoff targets; the Apply refusal is by inspection |
+| LOW-1 | a stuck Hold suspends the rails permanently, not "until a fence resolves it": no path resolves a Hold | **docs fixed;** a bounded diagnostic for a long-skipped target is a follow-up |
+| LOW-2 | `handoff_prepared`'s doc was inserted under `result_parked`'s | **fixed** |
+| LOW-3 | the budget test did not pin the hold after the abandon | **fixed** |
+| LOW-4 | the rail tests do not show each rail resuming after resolution | **recorded:** `handoff_prepared` reads live state; the replay test does show replay resuming |
+
+The resolution harness now has 17 entries, all DETECTED and PASS restored.
 
 ## Design 18.3 bounded implementation review (2026-10-09, Opus, static): PASS WITH FINDINGS
 

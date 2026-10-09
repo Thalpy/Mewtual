@@ -1057,35 +1057,41 @@ Both highs confirmed answered. The review also confirmed:
   completion arm), with the job and completion types in `receiver/catchup.rs`.
 
 **A pre-existing hazard, found by the receiver tests and widened by the implementation review.**
-Three of catch-up's background rails read a watched target through the read-only service path:
-- owner rotation (`studio_owner_rotation_needed`);
-- the client pass (`prepared_studio_status`);
-- Registry maintenance (`prepared_studio_maintenance_state`).
+Four of the receiver's background rails touch a watched target in a way that refuses a Prepared
+destination:
+- owner rotation (`studio_owner_rotation_needed`), the client pass (`prepared_studio_status`) and
+  Registry maintenance (`prepared_studio_maintenance_state`) read through the read-only service
+  path;
+- replay re-applies own intents, and an ordinary Apply is refused while Prepared (found by the
+  re-review of the fixes, MEDIUM-1).
 
-That path refuses a Prepared destination, and the refusal escaped `catchup.run` and paused all of
-receive. When:
+Each refusal escaped as an error and paused all of receive. When:
 - **before Flow R:** reachable whenever a Prepared record outlived the probe, for example while a
   Hold sat in backoff;
 - **with Flow R:** routine, since the record stays Prepared from R1 to R3. In a group with a peer
-  online, the client pass paused receive before R2 could ever detach, a livelock until a fence
-  ran (implementation review, HIGH-1).
+  online, the client pass paused receive before R2 could ever detach: a livelock (implementation
+  review, HIGH-1). Replay did the same for a document with own intents to re-apply.
 
-All three now skip a target whose handoff is Prepared for that turn and move on along their rail,
-through one helper, `CatchupRuntime::handoff_prepared`. A fault in reading the record still falls
-through to the existing path and surfaces. A stuck Hold therefore defers that document's rotation,
-client pass and Registry maintenance quietly, until a fence or an explicit access resolves it.
-Page and seed service already ignore their own errors.
+All four now skip a target whose handoff is Prepared and move on along their rail, through one
+helper, `CatchupRuntime::handoff_prepared`. Replay picks its next document among the others, and an
+active pass on a Prepared document waits without completing. A fault in reading the record still
+falls through to the existing path and surfaces.
+
+No path resolves a Hold: the fences call the same resolver, which refuses it. So a stuck Hold
+suspends that document's rotation, client pass, Registry maintenance and replay indefinitely,
+quietly rather than by pausing receive. The eligibility view reports it as `PreparedStuck`. Page
+and seed service already ignore their own errors.
 
 **Tests:**
 - **Store level:** ten, in `handoff/resolution.rs`.
-- **Receiver level:** seven, in `catchup/tests.rs`:
+- **Receiver level:** eight, in `catchup/tests.rs`:
   - the scheduled route for both outcomes, with no restore on the custody thread;
-  - each of the three rails skipping a Prepared document: rotation, Registry maintenance on an
-    advancing clock, and the client pass with a proven peer online;
+  - each of the four rails skipping a Prepared document: rotation, Registry maintenance on an
+    advancing clock, the client pass with a proven peer online, and replay;
   - the transfer authority check leaving a resolve job alone;
   - a pause during R2;
-  - a budget failure releasing a resolve job's permit.
-- **CI:** 16 mutants in `check-studio-resolution-mutations.py`, in a new `resolution` job. All are
+  - a budget failure releasing a resolve job's permit and holding its target.
+- **CI:** 17 mutants in `check-studio-resolution-mutations.py`, in a new `resolution` job. All are
   DETECTED and pass restored under `RUSTFLAGS='-D warnings'`.
 
 **Two first drafts of the tests proved nothing, and the mutants showed it:**

@@ -2984,7 +2984,7 @@ async fn the_client_pass_skips_a_prepared_document_instead_of_pausing_receive() 
 /// held one of four process-wide permits for good.
 #[tokio::test]
 async fn a_resolve_job_whose_budget_will_not_build_releases_its_permit() {
-    let (mut server, _root, mut store, mut receiver, _target, pool, _clock) =
+    let (mut server, _root, mut store, mut receiver, target, pool, _clock) =
         interrupted_owner(1435, true, 4).await;
     let free = pool.available_permits();
     for _ in 0..10 {
@@ -3009,4 +3009,66 @@ async fn a_resolve_job_whose_budget_will_not_build_releases_its_permit() {
     );
     assert_eq!(pool.available_permits(), free);
     assert!(receiver.catchup.overlay_admission_available_for_test());
+    // And it is paced: a bare reset would also release the permit, but would re-run R1 and R2
+    // on every turn (the re-review of these fixes, LOW-3).
+    let now = server.runtime_clock().monotonic_ms();
+    assert!(
+        receiver.handoff_held_for_test(target, now),
+        "the abandoned resolve job's target was not backed off"
+    );
+}
+
+/// Replay skips a Prepared document (the re-review of Flow R's fixes, MEDIUM-1). Replay re-applies
+/// this device's own intents, and an ordinary Apply is refused while Prepared, with an error that
+/// pauses all of receive; preparing the document's cold source would also hold `replay_ready()`
+/// false and keep R2 from detaching.
+///
+/// Staging an own intent for replay to re-apply into the very successor an interrupted handoff
+/// targets needs a fixture no suite here has, so this pins the skip itself: while the record is
+/// Prepared, replay takes no pass for the document, and once it is resolved replay does.
+#[tokio::test]
+async fn replay_waits_for_a_prepared_document_to_be_resolved() {
+    let (mut server, _root, mut store, mut receiver, target, _pool, clock) =
+        interrupted_owner(1437, true, 4).await;
+    for _ in 0..10 {
+        receiver.run(&mut server, &mut store, 83, None).unwrap();
+        if receiver.handoff.stage_for_test() == Some("resolve-captured") {
+            break;
+        }
+    }
+    assert_eq!(receiver.handoff.stage_for_test(), Some("resolve-captured"));
+    // One message for both ways replay can fail here: taking up the document and completing a
+    // pass for it, or reaching a refusal that escapes as an error.
+    let took_it_up = "replay took up a document whose handoff was Prepared";
+    for _ in 0..4 {
+        clock.advance_ms(1_500);
+        receiver
+            .run(&mut server, &mut store, 83, None)
+            .expect(took_it_up);
+        assert_eq!(receiver.replay_state_for_test(), (false, 0), "{took_it_up}");
+    }
+    for _ in 0..10 {
+        if let Some(work) = receiver.detach(&mut server) {
+            receiver.complete(&mut server, work.run(None).await);
+        }
+        receiver.run(&mut server, &mut store, 83, None).unwrap();
+        if !prepared(&server, &store, target) {
+            break;
+        }
+    }
+    assert!(!prepared(&server, &store, target));
+    for _ in 0..6 {
+        clock.advance_ms(1_500);
+        receiver.run(&mut server, &mut store, 83, None).unwrap();
+        if let Some(work) = receiver.detach(&mut server) {
+            receiver.complete(&mut server, work.run(None).await);
+        }
+        if receiver.replay_state_for_test().1 > 0 {
+            break;
+        }
+    }
+    assert!(
+        receiver.replay_state_for_test().1 > 0,
+        "replay never took the document up once it was resolved"
+    );
 }

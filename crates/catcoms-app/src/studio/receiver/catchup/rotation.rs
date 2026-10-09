@@ -30,9 +30,10 @@ impl CatchupRuntime {
         // Prepared destination before any rotation fence could run, and that refusal would
         // surface as an error that pauses all of receive. Its resolution is already scheduled:
         // Flow R (design 6.4.2) or H1 resolves it within a few turns. Flow R made this window
-        // routine; before it, a Prepared record held back by a Hold reached here too. A stuck Hold
-        // therefore defers this document's rotation until a fence or an explicit access resolves
-        // it, quietly rather than by pausing receive. See `handoff_prepared`.
+        // routine; before it, a Prepared record held back by a Hold reached here too. No path
+        // resolves a Hold, so a stuck one suspends this document's rotation indefinitely, quietly
+        // rather than by pausing receive; the eligibility view reports it as `PreparedStuck`. See
+        // `handoff_prepared`.
         let prepared = Self::handoff_prepared(server, store, id, target);
         if prepared {
             self.owner_target = None;

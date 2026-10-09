@@ -175,20 +175,30 @@ impl StudioReceiver {
         }) {
             self.replay.active = None;
         }
+        // A document whose overlay handoff is Prepared is skipped (Flow R's re-review, MEDIUM-1).
+        // Replay re-applies this device's own intents, and an ordinary Apply is refused while
+        // Prepared, with an error that would pause all of receive; its preparation of a cold
+        // source would also hold `replay_ready()` false and keep R2 from detaching. Its resolution
+        // is already scheduled (see `CatchupRuntime::handoff_prepared`). An active pass on such a
+        // document waits without completing, and a new one is chosen among the others, so one
+        // stuck document does not stop replay of the rest.
         let target = self
             .replay
             .active
             .as_ref()
             .map(|p| (p.target, p.epoch))
             .or_else(|| {
-                self.watches
-                    .iter()
-                    .map(|(w, e)| (w.target, *e))
-                    .find(|b| !self.replay.completed.contains(b))
+                self.watches.iter().map(|(w, e)| (w.target, *e)).find(|b| {
+                    !self.replay.completed.contains(b)
+                        && !super::catchup::CatchupRuntime::handoff_prepared(server, store, id, b.0)
+                })
             });
         let Some((target, epoch)) = target else {
             return Ok(None);
         };
+        if super::catchup::CatchupRuntime::handoff_prepared(server, store, id, target) {
+            return Ok(None);
+        }
         if !self.catchup.prepare(server, store, id, target)? {
             return Ok(None);
         }

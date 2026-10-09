@@ -542,22 +542,24 @@ pub(super) struct CatchupRuntime {
     repair_failure_target: Option<StudioTarget>,
 }
 impl CatchupRuntime {
-    /// Never evict the source of a ready/active page or checkpoint just to start replay.
-    /// A detached result is waiting for a custody visit to consume it. 7.3 makes that a reason for
-    /// a signing slice to yield: the parked result is holding a shared slot.
     /// Whether `target`'s overlay handoff is Prepared right now, from a structural read of its
     /// intent record. A read that fails answers `false`, so a fault still reaches the caller's
     /// ordinary path and surfaces there.
     ///
-    /// **Every background rail that reads a watched target through the read-only service path
-    /// must skip it while this holds** (design 6.4.5, and Flow R's implementation review, HIGH-1).
-    /// That path (`with_studio_checkpoint_source`, `with_prepared_studio_source`) refuses a
-    /// Prepared destination with an error, and an error escaping `run` pauses all of receive. The
-    /// record is already being resolved: by Flow R, by H1's synchronous path, or by a fence.
-    /// Flow R keeps it Prepared from R1 to R3, a window of several turns, so without the skip a
-    /// warm source and a turn of catch-up were enough to pause receive and abandon the job, again
-    /// and again. The rails that read so are owner rotation, the client pass and Registry
-    /// maintenance; page and seed service already ignore their own errors.
+    /// **Every background rail that would read or write a watched target through a path that
+    /// refuses a Prepared destination must skip it while this holds** (design 6.4.5; Flow R's
+    /// implementation review, HIGH-1, and its re-review, MEDIUM-1). Such a refusal is an error,
+    /// and an error escaping `run` pauses all of receive. The record is already being resolved:
+    /// by Flow R, or by H1's synchronous path. Flow R keeps it Prepared from R1 to R3, a window
+    /// of several turns, so without the skip a warm source and a turn of catch-up were enough to
+    /// pause receive and abandon the job, again and again. The rails:
+    /// - owner rotation, the client pass and Registry maintenance read through the service path
+    ///   (`with_studio_checkpoint_source`, `with_prepared_studio_source`);
+    /// - replay re-applies own intents, and an ordinary Apply is refused while Prepared.
+    ///
+    /// Page and seed service already ignore their own errors. A record stuck on Hold is never
+    /// resolved by any path, so these rails stay suspended for that document indefinitely; the
+    /// eligibility view reports it as `PreparedStuck`.
     pub(super) fn handoff_prepared<T: MeshTransport, R: CryptoRngCore>(
         server: &Server<T, R>,
         store: &ServerStore,
@@ -570,6 +572,9 @@ impl CatchupRuntime {
             .and_then(|logical| store.load_epoch_intents_structural(id, &logical).ok())
             .is_some_and(|state| state.handoff_prepared())
     }
+    /// Never evict the source of a ready/active page or checkpoint just to start replay.
+    /// A detached result is waiting for a custody visit to consume it. 7.3 makes that a reason for
+    /// a signing slice to yield: the parked result is holding a shared slot.
     pub(super) fn result_parked(&self) -> bool {
         self.prepared.is_some()
             || self.registry_prepared.is_some()

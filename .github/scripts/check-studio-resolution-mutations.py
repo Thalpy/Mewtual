@@ -21,6 +21,7 @@ RUNTIME = "crates/catcoms-app/src/studio/receiver/handoff.rs"
 ROTATION = "crates/catcoms-app/src/studio/receiver/catchup/rotation.rs"
 CATCHUP = "crates/catcoms-app/src/studio/receiver/catchup.rs"
 REGISTRY = "crates/catcoms-app/src/studio/receiver/catchup/registry_runtime.rs"
+REPLAY = "crates/catcoms-app/src/studio/receiver/replay.rs"
 COMMAND = ["cargo", "test", "--locked", "-j", "4", "--config",
            "profile.test.package.catcoms-app.debug=0", "-p", "catcoms-app", "--lib"]
 MUTATIONS = [
@@ -122,6 +123,26 @@ MUTATIONS = [
      "        if false && Self::handoff_prepared(server, store, id, target) {",
      RECEIVER + "registry_maintenance_skips_a_prepared_document_instead_of_pausing_receive",
      "a background turn failed while a watched document's handoff was Prepared"),
+    # The re-review's MEDIUM-1: replay is a fourth such rail, through Apply rather than a read. Its
+    # skip has two halves, the new-pass filter and the active-pass check, so the mutant removes
+    # both in one span.
+    ("replay-skip", REPLAY,
+     "                        && !super::catchup::CatchupRuntime::handoff_prepared(server, store, id, b.0)\n"
+     "                })\n"
+     "            });\n"
+     "        let Some((target, epoch)) = target else {\n"
+     "            return Ok(None);\n"
+     "        };\n"
+     "        if super::catchup::CatchupRuntime::handoff_prepared(server, store, id, target) {\n",
+     "                        && !(false && super::catchup::CatchupRuntime::handoff_prepared(server, store, id, b.0))\n"
+     "                })\n"
+     "            });\n"
+     "        let Some((target, epoch)) = target else {\n"
+     "            return Ok(None);\n"
+     "        };\n"
+     "        if false && super::catchup::CatchupRuntime::handoff_prepared(server, store, id, target) {\n",
+     RECEIVER + "replay_waits_for_a_prepared_document_to_be_resolved",
+     "replay took up a document whose handoff was Prepared"),
     # MEDIUM-1: a resolve job whose budget will not build releases its permit and admission.
     ("budget-release", RUNTIME,
      "            if matches!(\n"
