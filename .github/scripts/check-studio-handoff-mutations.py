@@ -104,6 +104,28 @@ MUTATIONS = [
      " || blake3::hash(&landed.plain) != version.digest) {",
      "persisted::studio_overlay_handoff_refuses_a_persisted_source_whose_link_was_dropped",
      "refused by something other than the post-write proof"),
+    # Design M1 and M2 (design 18.3 review, F8): the plan's currency check keeps only the size of
+    # the intent, then of the source wrapper. Redundant by design with H5, so the observation is
+    # the early one the design names: a stale plan would reach a signing turn.
+    ("plan-intent-digest", "crates/catcoms-app/src/store/epoch_studio/handoff_capture.rs",
+     "if (blake3::hash(&intent.plain), intent.physical_bytes) != stamp.intent {",
+     "if intent.physical_bytes != stamp.intent.1 {",
+     "fences::studio_overlay_handoff_plan_is_stale_after_a_same_size_wrapper_replacement",
+     "a stale plan reached a signing turn: the intent wrapper"),
+    ("plan-source-digest", "crates/catcoms-app/src/store/epoch_studio/handoff_capture.rs",
+     "Ok((blake3::hash(&source.plain), source.physical_bytes) == stamp.source)",
+     "Ok(source.physical_bytes == stamp.source.1)",
+     "fences::studio_overlay_handoff_plan_is_stale_after_a_same_size_wrapper_replacement",
+     "a stale plan reached a signing turn: the source wrapper"),
+    # Design M6 (design 18.3 review, F8, which found the probe unbuilt): H1's pristine-successor
+    # probe answers "transferable" whatever the header says. Redundant by design with H2's
+    # check_overlay_successor, so the observation is that H2 would start.
+    ("successor-probe", "crates/catcoms-app/src/store/epoch_studio/handoff.rs",
+     "StudioEpoch::overlay_successor_hold_in_vault(bytes, target, owner, overlay)",
+     "StudioEpoch::overlay_successor_hold_in_vault(bytes, target, owner, overlay)"
+     ".map(|hold| hold.filter(|_| false))",
+     "fences::studio_overlay_handoff_h1_refuses_a_non_pristine_successor_before_capture",
+     "H2 started for a non-pristine successor"),
     # 9.1.1 A3: a proof cannot be spent after a five-family write landed since verification.
     ("proof-generation", "crates/catcoms-app/src/store/epoch_studio/source/persisted.rs",
      "&& Arc::ptr_eq(&self.generation, &store.inventory_generation);",

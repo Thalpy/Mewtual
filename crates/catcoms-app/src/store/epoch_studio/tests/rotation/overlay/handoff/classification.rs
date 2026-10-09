@@ -182,12 +182,15 @@ fn a_prepared_branch_over_a_faulted_source_is_manual_exactly_while_the_handoff_r
     );
     assert_eq!(classify(&f, &store), Some(E::Manual(R::Fault)));
     // The successor precondition's own refusal of a source that is no longer Open, not an
-    // incidental one from the inventory or the source read.
+    // incidental one from the inventory or the source read. Since the design 18.3 review (F8)
+    // that is H1's header probe, in the row's own terms, before anything is captured; it used to
+    // be H2's `check_overlay_successor` ("epoch does not accept operations"), after a detached
+    // reconstruction. A recorded contract change: the reason is the same, the stage is earlier.
     let refused = handoff(&f, &mut store, basis, Some(0)).unwrap_err();
     assert!(
         refused
             .to_string()
-            .contains("epoch does not accept operations"),
+            .contains("overlay handoff successor is not transferable: Fault"),
         "the handoff refuses the state the row calls faulted: {refused}"
     );
 }

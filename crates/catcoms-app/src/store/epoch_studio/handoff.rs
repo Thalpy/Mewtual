@@ -326,6 +326,33 @@ impl ServerStore {
             .ok_or_else(|| invalid("overlay metadata missing"))?
             .handoff_authority(device, group, tenure)
             .map_err(invalid)?;
+        // The pristine-successor probe (design 14, the guard M6 removes), from the record header
+        // alone: a bounded authenticated read, never a restore. H2's `check_overlay_successor`
+        // stays authoritative. This refuses, before anything is captured or scheduled, a successor
+        // that check would refuse, so a missing, Faulted, replaced or already-edited successor
+        // costs a header read rather than a detached reconstruction every probe period. It is the
+        // classification the eligibility view reports, and the eligibility tests hold it to the
+        // check on every state their fixtures reach. The design 18.3 review (F8) found it unbuilt.
+        //
+        // Last, after the authority mint, on purpose: every refusal H1 made before the probe
+        // existed keeps its own check and message (the live owner's receipt check above is what
+        // its tests isolate), and the probe adds only the successor states nothing earlier sees.
+        let overlay = state
+            .handoff_metadata()
+            .and_then(|metadata| metadata.overlay())
+            .ok_or_else(|| invalid("saved overlay basis is stale or unknown"))?;
+        let owner = group.designated_committer();
+        match self.with_vault_source(server, group, target, |bytes| {
+            StudioEpoch::overlay_successor_hold_in_vault(bytes, target, owner, overlay)
+        })? {
+            None => return Err(invalid("overlay handoff successor source missing")),
+            Some(Some(reason)) => {
+                return Err(invalid(format!(
+                    "overlay handoff successor is not transferable: {reason:?}"
+                )))
+            }
+            Some(None) => {}
+        }
         self.capture_studio_handoff(
             server, group, target, device, &document, basis, tenure, authority,
         )
