@@ -48,8 +48,17 @@ pub(crate) enum StudioOverlaySaveVisit {
     /// New authoring captured and handed to the background runtime. The caller asks again after
     /// a later visit; the request stays retryable and byte-stable in the meantime.
     Scheduled,
-    /// Admission or the shared four-slot pool is full. Retryable, and nothing was read, promoted
-    /// or held: 7.2 reserves before the first body read precisely so this costs nothing.
+    /// Retryable, for one of two reasons.
+    ///
+    /// **Admission or the shared four-slot pool is full.** Then nothing was read, promoted or held:
+    /// 7.2 reserves before the first body read precisely so this costs nothing.
+    ///
+    /// **The receiver is paused** (design 18.3 review, F4). This one is not free. The visit ran
+    /// classification and S1b (the budget's inventory scan, the mint, media admission, which can
+    /// promote a frame's PIX) before it dropped the capture. The dropped hold leaves any promoted PIX
+    /// unprotected, which RT-001 already accepts for a refused plan. So a caller must not resend at
+    /// once: back off while `studio-receive-paused` is in effect, since every resend repeats that
+    /// work. Native Save registration must honour this.
     Busy,
 }
 
@@ -455,10 +464,15 @@ impl StudioReceiver {
     /// Design 18.3 review, F4, in the shape Agent 2 asked for. A paused receiver hands out no work,
     /// and only an unrelated explicit access clears the pause, so a capture queued now would hold
     /// this actor's admission, one of the four process-wide preparation permits and its transient
-    /// media hold for as long as the pause lasts. Dropping it releases all three, and nothing
-    /// durable was written (RT-001). The check sits here, after classification, not at either
-    /// Save's entry: an exact retry of accepted work is answered at S1 before any capture, and
-    /// that answer must not depend on the receiver's state.
+    /// media hold for as long as the pause lasts. Dropping it releases all three. Nothing of the
+    /// Save is durable; media admission may have promoted the frame's PIX, which the dropped hold
+    /// no longer protects, the cost RT-001 already accepts for a refused plan. The paused `Busy`
+    /// is therefore not free, and `StudioOverlaySaveVisit::Busy` says how a caller must treat it.
+    ///
+    /// The check sits here, after classification, not at either Save's entry: an exact retry of
+    /// accepted work is answered at S1 before any capture, so it is not refused merely because the
+    /// receiver is paused. (It can still answer `Busy` while the overlay slot is held by other work,
+    /// as before this change; the batch review's LOW-4 narrowed this claim.)
     fn queue_capture_unless_paused(
         &mut self,
         capture: crate::store::StudioOverlayCapture,

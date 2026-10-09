@@ -66,8 +66,9 @@ const IDLE_MS: u64 = 30_000;
 /// job restarting, and detached validations churning, forever.
 const OWN_RESTARTS: usize = 3;
 /// How long one owner's turn may step the shared job. The same order as the H3 signing slice,
-/// and like it an experiment configuration until measurement 13.7 calibrates the classifier; the
-/// step's one-entry minimum means a visit can overrun it by one entry's work.
+/// and like it an experiment configuration: the classifier's inline rule (C-3 runtime 14.2) was
+/// calibrated against it, but the slice itself has not been. The step's one-entry minimum means a
+/// visit can overrun it by one entry's work.
 pub(super) const INVENTORY_SLICE_MS: u64 = 250;
 
 /// A job held while its parked body is validated elsewhere. Deliberately offers no way to step it.
@@ -138,6 +139,9 @@ pub(super) struct InventoryRuntime {
     foreign: bool,
     /// Uncharged restarts the current job has taken.
     own_restarts: usize,
+    /// Budgets this runtime has minted, so a test can tell the shared job from a fallback scan.
+    #[cfg(test)]
+    minted: usize,
 }
 
 impl InventoryRuntime {
@@ -243,7 +247,19 @@ impl InventoryRuntime {
             else {
                 unreachable!("checked above");
             };
-            match store.install_validated_job_record(&mut job, (*result)?)? {
+            let step = match *result {
+                Ok(validated) => store.install_validated_job_record(&mut job, validated)?,
+                // An error is about the bytes the worker read. If another actor's write has
+                // overtaken the job since, they may no longer be the vault's: a charged restart,
+                // like any overtaken install, rather than a reason to pause receive. (An own
+                // write's overtaking was already answered by the uncharged refresh above.) Only
+                // an error about current bytes surfaces (batch review of step 2, LOW-1).
+                Err(error) => match store.restart_epoch_inventory_job_if_overtaken(&mut job)? {
+                    Some(step) => step,
+                    None => return Err(error),
+                },
+            };
+            match step {
                 EpochInventoryStep::Unstable => return Ok(self.back_off(now)),
                 EpochInventoryStep::Restarted => {
                     self.foreign = false;
@@ -296,6 +312,10 @@ impl InventoryRuntime {
                     EpochInventoryOutcome::Complete(inventory) => {
                         let budget = store.studio_storage_budget(id, group, &inventory)?;
                         self.delay_ms = 0;
+                        #[cfg(test)]
+                        {
+                            self.minted += 1;
+                        }
                         Ok(InventoryTurn::Ready(Box::new(budget)))
                     }
                     EpochInventoryOutcome::Restarted(job) => {
@@ -413,6 +433,12 @@ impl InventoryRuntime {
     /// is no wake for the same reason: an owner told `Unstable` takes its own way forward.
     pub(super) fn pending(&self) -> bool {
         matches!(self.state, State::Parked { .. })
+    }
+
+    /// How many budgets this runtime has minted.
+    #[cfg(test)]
+    pub(super) fn minted_for_test(&self) -> usize {
+        self.minted
     }
 
     /// The state's name, for receiver-level tests that must see which state a visit left.

@@ -271,6 +271,38 @@ fn a_validation_error_is_surfaced_once() {
     );
 }
 
+/// Batch review of step 2, LOW-1. A validation error about bytes another actor's write has since
+/// replaced is not surfaced: the job restarts, charged like any overtaken install, and receive is
+/// not paused. Before, the same error paused receive here but was silently dropped when the
+/// overtaking write was this actor's own.
+#[test]
+fn a_validation_error_about_overtaken_bytes_is_a_charged_restart() {
+    let mut env = Env::new(1);
+    env.source(1);
+    env.turn().unwrap();
+    let detach = env.rt.take_detach().unwrap();
+    env.source(2); // between visits: another actor's write
+    env.rt
+        .complete(detach.token, Box::new(Err(invalid("validation failed"))));
+    drop(detach);
+
+    match env.turn() {
+        Ok(InventoryTurn::NotYet) => {}
+        Err(error) => panic!("an error about overtaken bytes was surfaced: {error}"),
+        Ok(_) => panic!("the overtaken job neither restarted nor surfaced"),
+    }
+    // The restarted cursor is stepped in the same turn, so it may already have parked again.
+    let job = match &env.rt.state {
+        State::Stepping(job) | State::Parked { job, .. } => job,
+        _ => panic!("the overtaken job did not restart"),
+    };
+    assert_eq!(job.restarts_for_test(), 1, "the restart was not charged");
+    assert_eq!(
+        env.rt.own_restarts, 0,
+        "a foreign write's restart went uncharged"
+    );
+}
+
 /// Overtake the job once per cycle with `write` while each body is out, until it is `Unstable`.
 /// Returns how many bodies were detached on the way and when the backoff ends.
 fn storm(env: &mut Env, write: fn(&mut Env, u8)) -> (usize, u64) {

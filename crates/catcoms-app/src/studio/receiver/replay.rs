@@ -26,10 +26,11 @@ struct Pass {
 
 /// How long a manual move waits on the shared inventory job before minting its budget the way it
 /// did before C-3 step 2, from one synchronous receive-profile scan in the visit (review of step
-/// 2, HIGH-1). Until 13.7 calibrates the classifier every uncached record parks, so the job needs
-/// one replay turn per Recovery, OwnerReceipts, Intents or DraftArchive record, about six seconds
-/// each in a quiet actor, and a five-family write between any two turns throws that progress
-/// away. Without this bound a steadily edited document, sustained receive or another actor's
+/// 2, HIGH-1). The classifier (`6a79e6f8`) validates small records of the uncached families inline,
+/// so what still parks is each cold Studio or Registry record and any record too large to validate
+/// inline. Each parked record costs one replay turn, about six seconds each in a quiet actor, and a
+/// five-family write between any two turns throws that progress away. (Written before the
+/// classifier landed, when every uncached record parked.) Without this bound a steadily edited document, sustained receive or another actor's
 /// writes could stall the move indefinitely, and while it waits its pass holds replay for every
 /// other watched target. The fallback adds no custody class: it is the scan this site always ran,
 /// under the same receive limits that every receive packet already pays.
@@ -101,6 +102,11 @@ impl StudioReceiver {
     #[cfg(test)]
     pub(crate) fn inventory_state_for_test(&self) -> &'static str {
         self.inventory.state_for_test()
+    }
+    /// How many budgets the shared inventory job has minted.
+    #[cfg(test)]
+    pub(crate) fn inventory_minted_for_test(&self) -> usize {
+        self.inventory.minted_for_test()
     }
     /// How long a manual move waits on the shared job before its synchronous fallback.
     #[cfg(test)]

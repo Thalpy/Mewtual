@@ -83,6 +83,12 @@ pub enum StudioUnconfirmedSaveOutcome {
     /// its own work so that an absent caller cannot hold the slot. Reporting that plan as saved
     /// would tell this caller an edit landed when it did not. A retry while this request's own plan
     /// is in flight is `Scheduled`, not `Busy`.
+    ///
+    /// **Also while the receiver is paused** (design 18.3 review, F4): the visit captured this
+    /// request's new work and dropped the capture, so the pause holds no slot or media for it. Do
+    /// not resend at once. That visit already paid for the budget's inventory scan, the mint and
+    /// media admission, and every resend pays again. Back off while `studio-receive-paused` is in
+    /// effect. An exact retry of already-saved work is still answered `Saved` while paused.
     Busy,
 }
 

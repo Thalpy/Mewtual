@@ -830,16 +830,17 @@ impl ServerStore {
 
     /// Memoize a detached result that its job is about to throw away (C-3 runtime design 14.3).
     ///
-    /// For a runtime that discards an `Installing` result itself rather than installing it, such
-    /// as step 2's uncharged refresh of an overtaken job. Call it **before** the job's cursor is
-    /// replaced: the result is checked against that cursor (its scan identity, its mount, and the
-    /// record it is awaiting) and against this store's current mount, and anything else warms
-    /// nothing. A result installed through [`Self::install_validated_job_record`] needs no call;
-    /// its own refusal warms the cache the same way.
+    /// **Test-only.** Step 2's runtime memoizes through
+    /// [`Self::restart_epoch_inventory_job_uncharged`], which takes the pending result itself so
+    /// the discard path cannot skip the memo. This entry point keeps the memo's own rules testable
+    /// in isolation: the result is checked against the cursor it came from (its scan identity, its
+    /// mount, and the record it is awaiting) and against this store's current mount, and anything
+    /// else warms nothing. A result installed through [`Self::install_validated_job_record`] needs
+    /// no call; its own refusal warms the cache the same way.
     ///
     /// Only Registry and Studio results are memoized, and never over an entry already present for
     /// that record. Returns whether the cache was warmed.
-    #[cfg_attr(not(test), allow(dead_code))] // Step 2's runtime calls it once that step lands.
+    #[cfg(test)]
     pub(crate) fn memoize_overtaken_inventory_result(
         &mut self,
         job: &EpochInventoryJob,
@@ -969,8 +970,8 @@ impl ServerStore {
     /// `pending` is the detached result the caller was about to install, if any. It is memoized
     /// against the old cursor **before** that cursor is replaced, because a refusal here is the
     /// same overtaken-result case `install_validated` memoizes (C-3 runtime design 14.3). Taking
-    /// it as an argument, rather than leaving the caller to call
-    /// [`Self::memoize_overtaken_inventory_result`] first, means this discard path cannot skip the
+    /// it as an argument, rather than leaving the caller to call the test-only
+    /// `memoize_overtaken_inventory_result` first, means this discard path cannot skip the
     /// memo (implementation review M-1). Under gossip this is the common path: receive's writes
     /// are the actor's own, so the first [`OWN_RESTARTS`](crate::studio) of every job come here.
     ///
@@ -992,6 +993,25 @@ impl ServerStore {
         }
         job.cursor = self.begin_epoch_storage_scan_with(job.profile)?;
         Ok(true)
+    }
+
+    /// If a write has overtaken this job, replace its cursor and charge its restart budget, exactly
+    /// as an overtaken install does; `None` if the job is current.
+    ///
+    /// For a detached validation that came back as an error. The error is about the bytes the
+    /// worker read, and a later write may have replaced them, so it says nothing about the vault
+    /// as it is now. Surfacing it pauses background receive, so the caller surfaces it only for a
+    /// current job and otherwise restarts. Before this, such an error was dropped when this
+    /// actor's own write had overtaken the job (the uncharged refresh) but paused receive when
+    /// another actor's had (batch review of C-3 step 2, LOW-1).
+    pub(crate) fn restart_epoch_inventory_job_if_overtaken(
+        &mut self,
+        job: &mut EpochInventoryJob,
+    ) -> Result<Option<EpochInventoryStep>, AppError> {
+        if std::sync::Arc::ptr_eq(&job.cursor.generation, &self.inventory_generation) {
+            return Ok(None);
+        }
+        self.restart_job(job).map(Some)
     }
 
     /// Drive a job for one visit against an **absolute** deadline (C-3 runtime design, S-3).
@@ -2005,6 +2025,15 @@ pub struct EpochInventoryJob {
     /// Reused by every restart, so a restarted job scans under exactly the limits it began with.
     profile: EpochInventoryProfile,
     restarts: usize,
+}
+
+impl EpochInventoryJob {
+    /// How many charged restarts this job has used, for tests that tell a charged restart from an
+    /// uncharged refresh.
+    #[cfg(test)]
+    pub(crate) fn restarts_for_test(&self) -> usize {
+        self.restarts
+    }
 }
 
 /// What one step of an inventory job did.

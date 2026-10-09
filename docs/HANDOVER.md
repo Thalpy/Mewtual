@@ -8,7 +8,27 @@ the protocol- vs honest-client-enforced boundary and the hardening backlog.
 [`MESSAGE-FLOW.md`](MESSAGE-FLOW.md) traces one message end to end (send, gossip, catch-up)
 and ranks the live hazards in that path.
 
-## Status (latest entry: 2026-10-08)
+## Status (latest entry: 2026-10-09)
+
+- **Gate 4 Agent 1: C-3 step 2, F1 and F4 (2026-10-09).**
+  - **C-3 step 2:** replay's manual move now takes its storage budget from a shared, turn-based
+    inventory job that keeps a cursor across custody visits, the first production path to do so.
+    Limitations, as `THREAT-MODEL.md` now states:
+    - the cursor and its directory stream live up to 30 s past the owner's last turn;
+    - a move the job cannot serve within 60 s falls back to the synchronous scan it ran before;
+    - so the move, and its recovery notice, can wait up to 60 s;
+    - the job takes permits from the same four-slot preparation pool as catch-up;
+    - a detached validation's error pauses background receive only if it is about bytes that
+      are still current.
+  - **F1:** an exact retry of an accepted overlay operation now returns
+    `StudioOverlaySave::Acknowledged { basis, accepted }` and rebuilds no draft (see
+    `INTERFACES.md`).
+  - **F4:** a Save captured while the receiver is paused is dropped with `Busy`, and a pause
+    releases a capture still queued, freeing admission, the pool permit and the media hold. That
+    `Busy` is not free, since the visit paid for the scan and media admission, so callers must
+    back off while receive is paused rather than resend at once.
+  - Native Save and repair commands remain unregistered, and F2 (an actor-level priority test)
+    follows. This is not Gate 4 acceptance.
 
 - **Gate 4 PR #35 reconciliation (2026-10-08).** The candidate now preserves
   `gate4-agent1-runtime` through `7310b22b76848c4b9f85fec816744cff00c1a64f`. Agent 2's newer

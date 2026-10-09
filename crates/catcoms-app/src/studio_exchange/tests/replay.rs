@@ -352,6 +352,13 @@ async fn studio_replay_manual_move_on_a_small_vault_needs_no_detach() {
         "backoff",
         "the move completed by falling back, not through the shared job"
     );
+    // Pins the claim itself (batch review of step 2, LOW-3): the move's budget came from the
+    // shared job. A revert to the old synchronous scan also detaches nothing and leaves the job
+    // idle, so only the minted count tells the two apart.
+    assert!(
+        receiver.inventory_minted_for_test() >= 1,
+        "the manual move did not take its budget from the shared job"
+    );
 }
 
 /// The runtime's receiver-level wiring (review of step 2, MEDIUM-1), each against the state the

@@ -1567,6 +1567,29 @@ that target's own close record, so taking another target's plan could only drop 
 caller redo the work. The park deadline (`OVERLAY_PARK_MS`) already bounds a stranded plan, so a
 Closing Save on another target answers `Busy` for at most that long.
 
+**Batch review (2026-10-09, Opus, static, at `03e3d672`): no blocker or high.** It covered step 2
+on this base, F1 after the rebase and F4. It confirmed step 2's integration with the classifier,
+the memo, the parked-plan slot, pause and the lock. It found:
+
+| finding | disposition |
+|---|---|
+| M-1: step 2 shipped without its HANDOVER and THREAT-MODEL updates, and THREAT-MODEL said no path held a cursor across visits | **fixed**, both documents |
+| M-2: F4's paused `Busy` contradicted both `Busy` docs, and costs a scan and media admission per resend | **documented** on both variants and the helper. Integrators must back off while receive is paused. No `Paused` variant: a pause check before the budget would break the exact retry while paused |
+| L-1: a validation error about bytes another actor's write replaced paused receive, while one about an own write was dropped | **fixed**: a charged restart (`restart_epoch_inventory_job_if_overtaken`). Pinned by `a_validation_error_about_overtaken_bytes_is_a_charged_restart`, which fails with every error surfaced |
+| L-2: stale "until 13.7" comments, and `memoize_overtaken_inventory_result` still dead in production | **fixed**; the function is now `#[cfg(test)]` |
+| L-3: the small-vault move test could not tell the shared job from the old scan | **fixed**: it now asserts a budget was minted, and fails with the move forced onto the fallback |
+| L-4: the F4 doc overstated that an exact retry never depends on receiver state | **narrowed**: it can still answer `Busy` while the slot holds other work |
+
+**Residual risks, recorded rather than fixed here:**
+- a UI lock does not release a queued or parked Save plan (Agent 2's area; the inventory job's
+  own lock rule argues for the same);
+- a fresh job can detach a second validation while an abandoned one still holds a permit,
+  bounded by the pool;
+- pause and lock lift the job's backoff;
+- replay's job can take the last free permit from catch-up for a visit;
+- the I-4 writer audit predates writers added since `2df3564f`, which rely on the type-level
+  guard and the raw-fs gate.
+
 ### I-4 writer audit at C-3 step 2 (2026-10-06, Opus, static, at `2df3564f`)
 
 Section 8 of the runtime design requires the audit to be re-run before the first production code
@@ -2940,8 +2963,10 @@ changes. **Step 3 stays gated** (14.5).
   extending the memo to Intents must carry the intent facts.
 - **A detached Registry or Studio result refused as `Invalidated` is memoized.** This happens in
   `install_validated` before the job restarts, and never over an entry already present.
-  `ServerStore::memoize_overtaken_inventory_result` is the same entry point for a runtime that
-  discards a result itself. Each memoized result is checked against:
+  A runtime that discards a result itself memoizes it through
+  `restart_epoch_inventory_job_uncharged(job, pending)`, which step 2's runtime uses.
+  `ServerStore::memoize_overtaken_inventory_result` is now test-only and keeps the memo's rules
+  testable in isolation. Each memoized result is checked against:
   - the job's own cursor (scan identity, mount, awaited record);
   - the store's current mount.
 - **A test-only switch, `detach_every_validation_for_test`, is on `ServerStore`**, so a job's
@@ -3029,15 +3054,14 @@ it without forging. It memoizes the same way as the first exit.
 
 ### What is not done
 
-- **Part B's runtime half lands with step 2** (`ccd00dbc`). Until then
-  `memoize_overtaken_inventory_result` has no production caller and carries a dead-code allowance
-  in non-test builds. Its implementation review (M-1) pointed out that nothing makes step 2 use
-  it: a port that keeps the uncharged restart as it is would drop every own-write result again,
-  which is exactly the gossip case. So **two conditions gate step 2's merge**:
+- **Part B's runtime half: landed with step 2 (2026-10-09).** Its implementation review (M-1) set
+  two conditions on step 2's merge, and both hold:
   - the store's uncharged restart takes the pending result and memoizes it before replacing the
-    cursor, for example `restart_epoch_inventory_job_uncharged(job, pending)`, so discarding
-    through that path cannot skip the memo;
-  - the own-write storm test asserts that `reused_records` rises after an uncharged refresh.
+    cursor (`restart_epoch_inventory_job_uncharged(job, pending)`);
+  - `an_own_write_refresh_memoizes_the_overtaken_result` pins that the refresh memoizes.
+
+  `memoize_overtaken_inventory_result` therefore never gained a production caller. It is now
+  `#[cfg(test)]`, kept to test the memo's rules in isolation.
 - **Part C and step 3 are not built.** The follow-up measurements are in design 14.7: structured
   Recovery shapes, and version-2 owner journals at their cap.
 
