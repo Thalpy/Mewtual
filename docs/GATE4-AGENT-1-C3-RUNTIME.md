@@ -1532,3 +1532,74 @@ to 147 ms between the one-frame and 998-frame full-branch rows) is not yet attri
 **Recommendation: build item 0's first half, then re-measure, before deciding.** It is mechanical
 and changes no boundary. The second half and the branch-length attribution come next. Item 8 is
 decided on the post-item-0 table, not on extrapolation.
+
+### 15.11 Item 0, first half: H5 computes its reference sets once (proposal, 2026-10-09)
+
+**Where the projections are.** In the H5 path today, the candidate's `blob_cids` and the seed's
+`base_blob_cids` (a graph load) run here:
+
+| site | candidate `blob_cids` | seed `base_blob_cids` |
+|---|---|---|
+| barrier 1: `check_handoff_references(&prepared, &candidate, &state)` (`handoff.rs:414`) | 1 | 1 |
+| the Source write: `save_studio_source_checked`'s `hold_creative(unit.blob_cids())` (`epoch_studio.rs:645`) | 1 | none |
+| resolve, Complete arm: its flush-only save's hold (the same writer) | 1 | none |
+| resolve, Complete arm: `check_handoff_references(metadata, &source.unit, &state)` (`handoff.rs:725`) | 1 | 1 |
+
+That is four candidate projections and two seed graph loads. At 998 frames that comes to about
+24 + 26 ms.
+
+**The proposal.** Change only the two reference checks, which are pure.
+1. **Split the check.** `check_handoff_references` becomes a pure computation,
+   `handoff_references(metadata, source) -> (candidate_cids, base_cids)`, plus a check
+   `check_handoff_references_with(&refs, state)`. The old entry point stays, as the two composed,
+   for its non-H5 callers: restart resolution and repair.
+2. **Barrier 1 computes `refs` once** from `prepared` and `candidate`, and checks with them.
+3. **`VerifiedPersistedSource` carries `refs`.** H5 hands them to
+   `verify_persisted_studio_source`, which stores them next to the unit and the landed snapshot it
+   already binds. `into_checked` returns them, and resolve's Complete arm, on the `Some(proof)`
+   path only, checks with them instead of recomputing. The `None` path, restart resolution,
+   recomputes as now.
+4. **The writer's two holds are unchanged.** They protect pixels before potentially durable I/O,
+   and the shared writer's signature stays as it is. Cutting them is item 0's second half, with
+   the carried H4 projection.
+
+Saved at 998 frames: one candidate projection and one seed graph load, about 19 ms.
+
+**Why carrying them is sound.**
+- **The sets are pure functions of `candidate` and of `prepared`'s overlay base.** `prepared` is
+  the overlay H5 itself installs as Prepared and that resolve reads back as `metadata`. Its base
+  (seed) is fixed for the branch's life.
+- **The proof binds the unit to the landed bytes** (9.1). The candidate is moved into the writer
+  and returned unchanged in content:
+  - `check_studio_handoff_write` takes `&mut` only for `snapshot()`, `evidence` and
+    `preserves_vault_source`, which save or read the Automerge document but do not edit it;
+  - the writer encodes the unit; it does not change it.
+
+  So the candidate's references at barrier 1 are the persisted unit's references.
+- **The proof is spendable only under the same inventory generation** (A3). So no five-family
+  write lands between computing the sets and using them.
+- **Resolve's `metadata` on the proof path is the Prepared record H5 wrote.** Barrier 1 checked
+  `prepared` against H2's `state`, while resolve checks `metadata` against the state it reads
+  then. The second check is therefore still against the current pending set: only the projection
+  is reused, never the pending intents.
+
+**Tests:**
+- **A projection counter, as `test-counters` counts reconstructions:** a `cfg(feature)` counter in
+  `StudioEpoch::blob_cids` and `StudioOverlay::base_blob_cids`. An H5 commit performs exactly
+  three candidate projections (barrier 1 and the two holds) and one seed load; before, four and
+  two.
+- **The existing reference regressions,** unchanged:
+  `studio_overlay_handoff_rechecks_source_after_prepared_before_candidate_write` and the base-blob
+  release refusal.
+- **A new negative:** a proof is constructed only by H5, so a `Some(proof)` resolve with sets that
+  do not match the unit is unreachable. A unit test of `into_checked` pins that the sets travel
+  with the unit they came from.
+
+**Out of scope:** the writer's holds, carrying H2's and H4's projections (the second half), and the
+branch-length growth.
+
+**Open questions for the review:**
+1. Is there any H5-to-resolve path on which the proof's unit can differ in content from barrier
+   1's candidate?
+2. Is reusing the seed set on resolve's proof path sound, given that resolve may run in a later
+   visit after a restart? (On restart the proof does not exist, and the `None` path recomputes.)
