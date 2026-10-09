@@ -1145,13 +1145,23 @@ largest of these items, so it comes first.
 Both inputs revision 2 waited on now exist:
 - **9.1 is built** (`17dd54fc`).
 - **The commit phase is measured on its own**, in release on a host shared with two other agents'
-  builds (STATUS, "H5's repeated terms, priced"). H5's commit is about 25 ms for one operation,
-  83 ms at 256 title operations, and 64 ms at 128 frames.
+  builds (STATUS, "H5's repeated terms, priced"). H5's commit is:
+  - about 25 ms for one operation;
+  - 83 ms at 256 title operations;
+  - 45 ms for an Index at its object cap;
+  - **113 ms at 256 frames.**
 
-So **the scan's share of the 125 ms visit is about 40 ms at a full branch**, and about 95 ms at a
-short one. The repeated encodes are not where the commit's time goes (each is under the clock's
-resolution). So F3 of the design 18.3 review records them as a deviation, not a fix, and this
-share stands.
+So **the scan's share of the 125 ms visit depends on the branch:**
+- about 100 ms for a short one;
+- about 40 ms at a full title branch;
+- **about 12 ms at a full frame branch.**
+
+The repeated snapshot encodes are not where the commit's time goes (each is under the clock's
+resolution). So F3 of the design 18.3 review records them as a deviation, not a fix. The repeated
+`blob_cids` projections are: about 21 ms for H5's three at 256 frames. Computing it once recovers
+about 14 ms, which raises the full-frame share to about 26 ms. That is item 0 of the order of work
+below. The rest of the commit's growth is unattributed, and attributing it is item 0's second
+half.
 
 **Nothing below is built.** It answers 15.7 finding by finding, then orders the work.
 
@@ -1239,11 +1249,16 @@ the design 18.3 review's F5), because a plain accounting scan consults the same 
 
 - **Today: automatic receive pauses on any vault over 64 records, 8 MiB read or 256 KiB cold.**
   Writes between nearly every turn therefore happen only in vaults of at most 64 records.
-  - Their traversal is at most 8 MiB, about 16 ms at 2 us per KiB, inside the 40 ms share before
-    any per-file cost, which 15.5 still has to measure.
+  - Their traversal is at most 8 MiB, about 16 ms at 2 us per KiB, before any per-file cost,
+    which 15.5 still has to measure. That fits the share at a title branch (about 40 ms).
+  - **It does not fit at a full frame branch** (about 12 ms). Even with `blob_cids` computed once
+    (about 26 ms), it fits only in vaults of under about 5 MiB of five-family bytes. So until
+    item 0's attribution finds more, a full frame branch in a vault near the receive limit is held
+    under gossip until a quiet gap, as L6 says.
   - With M1 and the writer warms, every record but the one just written is a hit, and that one
     was warmed by its writer.
-  - So step 3 completes under gossip in this regime.
+  - So step 3 completes under gossip in this regime **for branches whose commit leaves the share
+    the vault's traversal needs**, which item 4's measurements turn into a table.
   - The current 64-entry LRU holds such a vault exactly, but with no headroom, which is one
     reason M2 still comes first.
 - **Larger vaults, today.** Rotations come from rarer writers: local Save, sync repairs and
@@ -1252,10 +1267,11 @@ the design 18.3 review's F5), because a plain accounting scan consults the same 
     parks each Studio and Registry record again, and a scan of a few hundred records takes as
     many detached validations.
   - With M2 the second scan is all hits, and completes in a few visits between rare writes.
-- **After step 5 lifts the receive limits, the traversal bound becomes real.** At 40 ms and 2 us
-  per KiB, with the classifier's factor of 4 as margin, the bound is about 5 MiB of five-family
-  bytes per visit. Past it, a handoff under sustained gossip is held until a quiet gap. That is
-  L6's existing "held and retried under sustained writes", now priced.
+- **After step 5 lifts the receive limits, the traversal bound becomes real.** At 2 us per KiB,
+  with the classifier's factor of 4 as margin, the bound is about 5 MiB of five-family bytes per
+  visit at a 40 ms share, and about 1.5 MiB at a full frame branch's 12 ms. Past it, a handoff
+  under sustained gossip is held until a quiet gap. That is L6's existing "held and retried
+  under sustained writes", now priced.
   - **The touched-path cursor 15.7 offered** is the route past the bound, because it re-reads
     only paths written since the scan began.
   - **It is deferred to step 5**, where the bound first binds. It needs its own design and an
@@ -1291,10 +1307,16 @@ What it needs:
   holds an inventory entry per record during every scan.
 - **Pruning** runs only after `finish_with` succeeds, and only within that scan's coverage.
 - **The 60 MiB figure in 15.4** is superseded by the per-regime bound above. It had no margin, and
-  it assumed the whole 125 ms rather than the 40 ms the commit leaves.
+  it assumed the whole 125 ms rather than what the commit leaves.
 
 #### Order of work for step 3
 
+0. **Shrink H5's commit at frame-heavy branches.**
+   - Compute the candidate's `blob_cids` once and pass it to the three places that project it.
+     This is a pure function of the candidate H5 already holds, so it changes no boundary, and it
+     recovers about 14 ms at 256 frames.
+   - Then attribute the rest of the commit's growth with branch length. The profile prices
+     encodes, projections and seed loads, and none of them is it.
 1. **M1 with the writer warms and MEDIUM-2's three gates**, as one checkpoint with its own
    implementation review. Its tests are listed above, plus the per-writer equality tests.
 2. **MEDIUM-3's progress rule**, with a test that a job warmed record by record across restarts
@@ -1314,7 +1336,10 @@ What it needs:
 1. Is the validator-at-write form acceptable on the Save and receive paths? Its worst case is
    about 11 ms, for a maximal Intents ledger. The alternative is the writer-facts form for
    Intents, which costs nothing but carries an equality obligation like Studio's.
-2. Is L6 stated per regime acceptable, with the touched-path cursor deferred to step 5?
+2. Is L6 stated per regime acceptable, with the touched-path cursor deferred to step 5? In
+   particular, is "a full frame branch in a near-limit vault waits for a quiet gap under gossip"
+   an acceptable limitation for step 3, or must item 0 bring the frame-branch commit under a
+   stated figure first?
 3. Is MEDIUM-3's rule, charged only when nothing cold was memoized, sound and bounded as argued?
 4. Does any of the seven writer sites warm bytes that are not, or were not, on disk? Each warm
    follows its write's success, but `CommittedButNotDurable` is the edge.

@@ -2451,6 +2451,9 @@ consumes it, and asserts that H4's carried bytes equal the candidate's encoding.
 | Flipnote, 256 title ops | 82 ms | < 1 ms | 1 ms | < 1 ms |
 | Flipnote, 32 frames | 35 ms | < 1 ms | 1 ms | 1 ms |
 | Flipnote, 128 frames | 64 ms | < 1 ms | 4 ms | < 1 ms |
+| **Flipnote, 256 frames** | **113 ms** (max 248) | < 1 ms | 7 ms | < 1 ms |
+| Index, 16 PutObjects | 34 ms | < 1 ms | < 1 ms | < 1 ms |
+| Index, 63 PutObjects (the cap less the base's one) | 45 ms | < 1 ms | 1 ms | < 1 ms |
 
 "< 1 ms" means every one of the five samples read zero at the clock's millisecond resolution.
 
@@ -2458,14 +2461,33 @@ What it settles:
 - **Reusing H4's snapshot bytes is not worth its boundary change.** Three encodes cost under a
   millisecond together at every shape measured, and reuse would have the writer trust
   caller-supplied snapshot bytes. **Deviation recorded:** H5 keeps re-encoding.
-- **The projections are the larger repeated term:** about 12 ms for three `blob_cids` at 128 frames.
-- **Most of H5's growth with branch length is neither.** 27 to 83 ms from 1 to 256 operations is
-  not encodes, projections or seed loads. What remains is unattributed: barrier 2's evidence
-  comparison, the Prepared and Completed intent-record encodes, and larger durable writes. The
-  1-op floor of about 25 ms is three durable writes with flushes.
+- **The projections are the larger repeated term, and at a full frame branch they matter:** three
+  `blob_cids` cost about 21 ms at 256 frames. Computing it once would recover about 14 ms. This
+  is now a prerequisite of C-3 step 3, not an option (C-3 runtime 15.8).
+- **Most of H5's growth with branch length is neither.** 27 to 83 ms from 1 to 256 title
+  operations, and 35 to 113 ms from 32 to 256 frames, is not encodes, projections or seed loads.
+  What remains is unattributed: barrier 2's evidence comparison, the Prepared and Completed
+  intent-record encodes, and larger durable writes. The 1-op floor of about 25 ms is three durable
+  writes with flushes.
 
-So the scan's share in C-3 runtime design 15.1 is 125 ms less about 85 ms at a full title branch.
-That is about 40 ms.
+So the scan's share in C-3 runtime design 15.1, 125 ms less the commit, depends on the branch:
+
+| branch | commit | share left |
+|---|---|---|
+| short (1 op) | 25 ms | about 100 ms |
+| full title branch | 83 ms | about 40 ms |
+| Index at its object cap | 45 ms | about 80 ms |
+| full frame branch | 113 ms | **about 12 ms** |
+
+That is less than the 16 ms traversal of an 8 MiB vault.
+
+Two other figures from the same run:
+- **H1 costs 29 ms with 63 PutObjects.** It still restores once per referenced object, the "H1
+  still restores per PutObject" item under 9.1.
+- **The full-profile inventory for that 64-record vault costs 11 ms.**
+
+The full run took 52 minutes, most of it building the 256-frame fixtures, whose Saves are
+quadratic in branch length.
 
 ### F7: the finding was right about the proof, not about the record
 
@@ -5424,8 +5446,10 @@ makes that more important, not less.
      `6a79e6f8`.
    - **Step 3, and Flow R after it, need more than the classifier** (C-3 runtime 15.7). In order:
      - design 9.1 built, so H5 commits without a graph restore;
-     - the commit phase measured on its own: **done 2026-10-09** (release, shared host), about
-       85 ms at a full branch, leaving about 40 ms of the 125 ms share for the scan;
+     - the commit phase measured on its own: **done 2026-10-09** (release, shared host). It leaves
+       about 40 ms of the 125 ms share at a full title branch, but **about 12 ms at a full frame
+       branch** (113 ms commit), so H5's repeated `blob_cids` must be computed once first
+       (C-3 runtime 15.8);
      - an all-family memo with writer warms;
      - an indexed, pruned memo;
      - traversal measurements, or a touched-path cursor;
