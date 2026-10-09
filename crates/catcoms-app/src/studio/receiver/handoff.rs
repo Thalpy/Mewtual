@@ -116,6 +116,11 @@ pub(super) struct HandoffRuntime {
 
 const FIRST_HOLD_MS: u64 = 30_000;
 const MAX_HOLD_MS: u64 = 300_000;
+/// The most live holds kept for targets that are no longer watched. A target is held only after
+/// a probe selected it, and the probe selects only watched targets, so this is reached only by
+/// heavy watch churn inside one `MAX_HOLD_MS` window. Past it the hold expiring soonest goes
+/// first: the least cooldown lost (the PR #27 review, LOW-1).
+const MAX_UNWATCHED_HOLDS: usize = 64;
 /// Flat retry after the shared pool is full. Short, because the condition is other actors' work
 /// finishing rather than anything about this document, and non-escalating for the same reason.
 const CAPACITY_RETRY_MS: u64 = 2_000;
@@ -326,6 +331,52 @@ impl HandoffRuntime {
         }
     }
 
+    /// Keep the per-target bookkeeping to the watch rail (the PR #27 review, LOW-1).
+    ///
+    /// The receiver caps its watches at 16, but evicting a watch did not touch the targets
+    /// recorded here: `quiet` and the pacing maps grew with every target ever probed, not with
+    /// the live set, and `is_quiet` searched all of them. Now:
+    /// - `quiet` keeps only rail targets. It is a memo, and cheap to rebuild.
+    /// - A pacing entry for a target off the rail is kept while its hold is live, so rewatching a
+    ///   target cannot erase its cooldown, and dropped once the hold has expired. Its doubling
+    ///   then starts afresh if it is watched again, as for a target never held.
+    /// - At most `MAX_UNWATCHED_HOLDS` such live holds are kept; past that the soonest to expire
+    ///   goes first.
+    ///
+    /// The live job's target is kept whatever the rail says.
+    fn reconcile(&mut self, rail: &[StudioTarget], now: u64) {
+        let live = self.job.as_ref().map(|job| job.target);
+        let kept = |target: &StudioTarget| rail.contains(target) || live == Some(*target);
+        self.quiet.retain(|target| rail.contains(target));
+        let expired: Vec<StudioTarget> = self
+            .next_at
+            .iter()
+            .filter(|(target, at)| !kept(target) && now >= **at)
+            .map(|(target, _)| *target)
+            .collect();
+        for target in expired {
+            self.next_at.remove(&target);
+            self.hold_ms.remove(&target);
+        }
+        let next_at = &self.next_at;
+        self.hold_ms
+            .retain(|target, _| kept(target) || next_at.contains_key(target));
+        let mut unwatched: Vec<(u64, StudioTarget)> = self
+            .next_at
+            .iter()
+            .filter(|(target, _)| !kept(target))
+            .map(|(target, at)| (*at, *target))
+            .collect();
+        if unwatched.len() > MAX_UNWATCHED_HOLDS {
+            unwatched.sort();
+            let excess = unwatched.len() - MAX_UNWATCHED_HOLDS;
+            for (_, target) in unwatched.into_iter().take(excess) {
+                self.next_at.remove(&target);
+                self.hold_ms.remove(&target);
+            }
+        }
+    }
+
     fn quiet_for(&mut self, generation: &Arc<()>, target: StudioTarget) {
         if !self
             .quiet_generation
@@ -412,6 +463,14 @@ impl HandoffRuntime {
     #[cfg(test)]
     pub(super) fn probe_retry_for_test(&self) -> Option<u64> {
         self.probe_retry_at
+    }
+
+    /// Whether any per-target bookkeeping (the quiet memo or either pacing map) names `target`.
+    #[cfg(test)]
+    pub(super) fn tracks_for_test(&self, target: StudioTarget) -> bool {
+        self.quiet.contains(&target)
+            || self.next_at.contains_key(&target)
+            || self.hold_ms.contains_key(&target)
     }
 
     #[cfg(test)]
@@ -528,11 +587,15 @@ impl StudioReceiver {
         // work while this returns immediately, holding the receiver at its active cadence for
         // ever. Every path out of this function that is not the retry's own gate therefore
         // consumes it, which is what makes "due implies the next probe does something" true.
+        let now = server.runtime_clock().monotonic_ms();
+        let rail: Vec<_> = self.watches.iter().map(|(w, _)| w.target).collect();
+        // Bound the per-target bookkeeping to the live watch set first, on every probe, busy or
+        // not (the PR #27 review, LOW-1).
+        self.handoff.reconcile(&rail, now);
         if self.handoff.busy() || self.watches.is_empty() {
             self.handoff.probe_retry_at = None;
             return;
         }
-        let now = server.runtime_clock().monotonic_ms();
         // 7.2, whose section title is "Reservation precedes every body read". The rail scan below
         // is body reads: `load_epoch_intents_structural` reads and structurally decodes an
         // authenticated intent record per candidate. Reserving after it, which is what "before the
@@ -545,7 +608,6 @@ impl StudioReceiver {
         // penalised a perfectly eligible document for being unlucky, and escalated contention the
         // same way it escalates genuine ineligibility.
         let generation = store.intent_generation();
-        let rail: Vec<_> = self.watches.iter().map(|(w, _)| w.target).collect();
         // Whether any target could need a body read at all is decided from memoised state and
         // deadlines alone: `intent_generation` is a token comparison, and `is_quiet`/`held` are
         // in-memory lookups. Reserving before *this* would take a process-wide permit on every
@@ -1082,7 +1144,82 @@ fn probe_tenure(live: Option<u64>, prepared: bool) -> Option<Option<u64>> {
 
 #[cfg(test)]
 mod tests {
-    use super::probe_tenure;
+    use super::{probe_tenure, HandoffRuntime, FIRST_HOLD_MS, MAX_UNWATCHED_HOLDS};
+    use catcoms_replication::studio::StudioTarget;
+    use std::sync::Arc;
+
+    fn target(n: u8) -> StudioTarget {
+        StudioTarget::Flipnote {
+            channel: [1; 16],
+            object: [n; 16],
+        }
+    }
+
+    /// The PR #27 review, LOW-1: watch churn must not grow the quiet memo or the pacing maps.
+    /// Forty targets come and go through a 16-watch rail with no intent-generation change, each
+    /// memoised quiet and each held once; past the holds' expiry only the live rail's remain.
+    #[test]
+    fn handoff_bookkeeping_stays_bounded_by_the_watch_rail_under_churn() {
+        let mut runtime = HandoffRuntime::default();
+        let generation = Arc::new(());
+        let mut now = 1_000;
+        for n in 0..40u8 {
+            runtime.quiet_for(&generation, target(n));
+            runtime.hold_target(target(n), now);
+            let rail: Vec<_> = (n.saturating_sub(15)..=n).map(target).collect();
+            runtime.reconcile(&rail, now);
+            assert!(
+                runtime.quiet.len() <= 16,
+                "the quiet memo outgrew the watch rail"
+            );
+            now += 10;
+        }
+        now += FIRST_HOLD_MS + 1;
+        let rail: Vec<_> = (24..40u8).map(target).collect();
+        runtime.reconcile(&rail, now);
+        assert!(runtime.quiet.iter().all(|t| rail.contains(t)));
+        assert!(
+            runtime.next_at.keys().all(|t| rail.contains(t)),
+            "an evicted target's expired hold was kept"
+        );
+        assert!(runtime.hold_ms.keys().all(|t| rail.contains(t)));
+    }
+
+    /// Reconciling must not erase a live cooldown: a target evicted while held, and rewatched
+    /// before the hold expires, is still held.
+    #[test]
+    fn a_target_rewatched_before_its_hold_expires_keeps_its_cooldown() {
+        let mut runtime = HandoffRuntime::default();
+        runtime.hold_target(target(7), 1_000);
+        runtime.reconcile(&[target(8)], 2_000);
+        runtime.reconcile(&[target(7)], 3_000);
+        assert!(
+            runtime.held(target(7), 3_000),
+            "reconciling erased a live cooldown"
+        );
+    }
+
+    /// Live holds of unwatched targets are bounded, and what is dropped first is the hold that
+    /// expires soonest.
+    #[test]
+    fn live_unwatched_holds_are_capped_soonest_expiry_first() {
+        let mut runtime = HandoffRuntime::default();
+        let total = MAX_UNWATCHED_HOLDS + 10;
+        for n in 0..total as u8 {
+            runtime.hold_target(target(n), 1_000 + u64::from(n));
+        }
+        runtime.reconcile(&[], 1_500);
+        assert_eq!(
+            runtime.next_at.len(),
+            MAX_UNWATCHED_HOLDS,
+            "unwatched live holds were not capped"
+        );
+        assert!(
+            !runtime.next_at.contains_key(&target(0)),
+            "the soonest-expiring hold was kept over later ones"
+        );
+        assert!(runtime.next_at.contains_key(&target(total as u8 - 1)));
+    }
 
     /// The probe's tenure decision as a table. The receiver-level path to a branch that is
     /// Prepared while this actor has no observed tenure needs an ownership change, which no

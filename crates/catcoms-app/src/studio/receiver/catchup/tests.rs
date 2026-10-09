@@ -1130,6 +1130,51 @@ async fn a_rail_with_nothing_eligible_also_consumes_the_capacity_retry() {
     assert!(!receiver.handoff.probe_due(now, &[paced]));
 }
 
+/// The PR #27 review, LOW-1, at the call site. The unit tests in `handoff.rs` drive `reconcile`
+/// directly, so they stay green with its call deleted from the probe. Here a held target is no
+/// longer watched: one probe keeps it while its hold is live, and once the hold has expired one
+/// more probe, taking its earliest exit (an empty rail), forgets it.
+#[tokio::test]
+async fn the_probe_forgets_an_unwatched_target_once_its_hold_expires() {
+    let clock = ManualClock::new(1000);
+    let mut rng = ChaCha20Rng::seed_from_u64(2214);
+    let mut server = Server::found(
+        Hub::new().join(PeerId::from_u64(1)),
+        MlsDevice::generate().unwrap(),
+        rng.clone(),
+        Box::new(clock.clone()),
+        "owner",
+    )
+    .unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let mut store = ServerStore::open(root.path(), b"flow-h-reconcile", &mut rng).unwrap();
+    let evicted = StudioTarget::Flipnote {
+        channel: crate::channel_id("general").to_be_bytes(),
+        object: [31; 16],
+    };
+    let mut receiver = StudioReceiver::default();
+    let start = server.runtime_clock().monotonic_ms();
+    receiver.handoff.hold_target_for_test(evicted, start);
+    assert!(
+        receiver.watches.is_empty(),
+        "the target must be off the rail"
+    );
+
+    receiver.handoff_probe(&mut server, &mut store, 94);
+    assert!(
+        receiver.handoff.tracks_for_test(evicted),
+        "the probe dropped a live hold, so a rewatch would lose its cooldown"
+    );
+
+    // Past the longest hold (`MAX_HOLD_MS`, five minutes), whatever this one's doubling was.
+    clock.advance_ms(300_000);
+    receiver.handoff_probe(&mut server, &mut store, 94);
+    assert!(
+        !receiver.handoff.tracks_for_test(evicted),
+        "the probe kept an unwatched target's bookkeeping after its hold expired"
+    );
+}
+
 /// Two deadline systems, one gate. The capacity retry has to dominate per-target pacing.
 ///
 /// A target whose own hold has expired is due, and `handoff_probe` reaches its eligibility test

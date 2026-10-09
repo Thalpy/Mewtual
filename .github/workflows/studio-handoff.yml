@@ -49,9 +49,10 @@ jobs:
     # 17dd54fc until 528f0d2e); with every entry running, that run was cancelled in its last phase.
     # F2's five handoff-priority entries add about 20 more (17 locally, 2026-10-09): four of them
     # run an actor-level test, about two minutes per run, once mutated and once restored. Step
-    # A's three base-coverage entries add about two in all, so about 77. The limit is 120 for
-    # headroom: a 55-minute run was cancelled at the old 45, and CI runners can be slower than
-    # these local timings.
+    # A's three base-coverage entries add about two in all, and the PR #27 review's four
+    # `reconcile-*` entries about three (half a minute each mutated, plus the restored runs), so
+    # about 80. The limit is 120 for headroom: a 55-minute run was cancelled at the old 45, and CI
+    # runners can be slower than these local timings.
     timeout-minutes: 120
     steps:
       - uses: actions/checkout@v4

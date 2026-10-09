@@ -13,6 +13,9 @@ ROOT = Path(__file__).resolve().parents[2]
 PREFIX = "store::epoch_studio::tests::rotation::overlay::handoff::"
 # The receiver's actor-level tests live outside PREFIX; an entry names one in full from here.
 RECEIVER = "studio::receiver::catchup::tests::"
+# So do the unit tests of the receiver's handoff bookkeeping, named in full the same way.
+HANDOFF_UNIT = "studio::receiver::handoff::tests::"
+RECEIVER_HANDOFF = "crates/catcoms-app/src/studio/receiver/handoff.rs"
 CORE = "crates/catcoms-replication/src/studio/overlay/handoff.rs"
 STORE = "crates/catcoms-app/src/store/epoch_studio/handoff.rs"
 COMMAND = ["cargo", "test", "--locked", "-j", "4", "--config",
@@ -206,12 +209,36 @@ MUTATIONS = [
      "base.is_some_and(|base| {",
      "references::studio_overlay_handoff_base_coverage_with_no_base_accepts",
      "a document with no overlay was refused for its base"),
+    # The PR #27 review, LOW-1: the probe's per-target bookkeeping is bounded by the watch rail.
+    # Each part of `reconcile` is removed alone against the unit test that names it, and the call
+    # itself against a probe-level test, since the unit tests call `reconcile` directly.
+    ("reconcile-quiet", RECEIVER_HANDOFF,
+     "self.quiet.retain(|target| rail.contains(target));",
+     "self.quiet.retain(|_| true);",
+     HANDOFF_UNIT + "handoff_bookkeeping_stays_bounded_by_the_watch_rail_under_churn",
+     "the quiet memo outgrew the watch rail"),
+    ("reconcile-expiry", RECEIVER_HANDOFF,
+     ".filter(|(target, at)| !kept(target) && now >= **at)",
+     ".filter(|(target, at)| !kept(target) && { let _ = (at, now); true })",
+     HANDOFF_UNIT + "a_target_rewatched_before_its_hold_expires_keeps_its_cooldown",
+     "reconciling erased a live cooldown"),
+    ("reconcile-cap", RECEIVER_HANDOFF,
+     "if unwatched.len() > MAX_UNWATCHED_HOLDS {",
+     "if unwatched.len() > MAX_UNWATCHED_HOLDS && false {",
+     HANDOFF_UNIT + "live_unwatched_holds_are_capped_soonest_expiry_first",
+     "unwatched live holds were not capped"),
+    ("reconcile-call", RECEIVER_HANDOFF,
+     "        self.handoff.reconcile(&rail, now);\n",
+     "",
+     RECEIVER + "the_probe_forgets_an_unwatched_target_once_its_hold_expires",
+     "the probe kept an unwatched target's bookkeeping after its hold expired"),
 ]
 
 
 def qualified(test):
-    """A name relative to PREFIX, or a crate-absolute one beginning at `RECEIVER`."""
-    return test if test.startswith(RECEIVER) else PREFIX + test
+    """A name relative to PREFIX, or a crate-absolute one beginning at `RECEIVER` or
+    `HANDOFF_UNIT`."""
+    return test if test.startswith((RECEIVER, HANDOFF_UNIT)) else PREFIX + test
 
 
 def run(test):

@@ -75,13 +75,20 @@ and ranks the live hazards in that path.
     resolver would, or refuses with nothing written; tests compare the two byte for byte. The
     fences (rotation, adoption, repair) keep the synchronous resolver. Design 6.4.2 to 6.4.5 in
     `GATE4-AGENT-1-DESIGN.md`.
-    - **Fixed on the way:** three of catch-up's background rails no longer pause all of receive
-      when a watched document's handoff is Prepared: owner rotation, the client pass and Registry
-      maintenance. Each skips that document for the turn. This was reachable before Flow R too,
-      whenever a Prepared record outlived the probe. With Flow R and a peer online it was a
-      livelock, found by the implementation review.
+    - **Fixed on the way:** four of the receiver's background rails no longer pause all of receive
+      when a watched document's handoff is Prepared: owner rotation, the client pass, Registry
+      maintenance and replay. Each skips that document for the turn. This was reachable before
+      Flow R too, whenever a Prepared record outlived the probe. With Flow R and a peer online it
+      was a livelock, found by the implementation review. A Prepared record held back by a Hold
+      is never resolved, so it suspends these rails for its document indefinitely.
     - **Residual:** while a resolution is in flight the actor's one overlay slot is taken, so a
       Save on that server answers `Busy` for a few turns longer than before.
+  - **PR #36 merged into this line, and the PR #27 review:** Agent 3's repair runtime is merged
+    in, with both rails' skips kept (repair first, then Prepared). The review's LOW-1 is fixed:
+    the handoff probe's per-target bookkeeping is now bounded by the 16-watch rail, plus at most
+    64 unexpired holds of unwatched targets. Its MEDIUM-1 is in Agent 3's repair commit and open
+    with Agent 3: the inventory budget is built before the rebuild is installed, so a cold
+    source over the inline threshold fails S3 and the rebuild is discarded.
   - Native Save and repair commands remain unregistered. This is not Gate 4 acceptance.
 
 - **Gate 4 PR #35 reconciliation (2026-10-08).** The candidate now preserves

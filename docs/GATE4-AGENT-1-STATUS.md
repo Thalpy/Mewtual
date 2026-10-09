@@ -2562,6 +2562,48 @@ confirmed fixed. It found a fourth rail and four lows:
 
 The resolution harness now has 17 entries, all DETECTED and PASS restored.
 
+### PR #36 merged into this line, and the PR #27 review (2026-10-09, pinned at `db46ef0a`)
+
+**The merge.** Agent 3's repair runtime (PR #36, merged to `origin/gate4-agent1-runtime` as
+`db46ef0a`) is merged into this line at `16eaf7b8`. Two files conflicted, and both conflicts were
+the same shape: two rails that each skip a target someone else owns.
+- **Owner rotation** (`catchup/rotation.rs`): Agent 3's `repair_claimed` skip runs first, then
+  Flow R's `handoff_prepared` skip.
+- **The client pass** (`catchup.rs`): the same order. Agent 3's `RepairRebuild` job and its
+  completion sit beside Flow R's `HandoffResolve` and `Resolved`.
+
+Both guards were kept unchanged. After the merge, every anchor in Agent 3's three mutation
+harnesses was checked and is still unique.
+
+**The review.** A user-run review of PR #27 at `db46ef0a` asked for changes. It had one medium
+and one low:
+
+| finding | what | disposition |
+|---|---|---|
+| MEDIUM-1 | `repair_commit` builds its inventory budget before `install_prepared_studio_source` installs or memoizes the validated rebuild, so a cold source over the inline threshold fails S3 and the rebuild is thrown away | **Agent 3's code (`catchup/repair_job.rs`), not changed here.** Confirmed by reading: the budget is built at the top of `repair_commit` and the install happens in `repair_execute`. It is the ordering Flow R's design review raised as HIGH-2. Flow R's helpers fit the fix the reviewer suggests: `studio_inventory_warmth`, `warm_studio_inventory` and `evict_stale_studio_inventory`. Raised with the user for Agent 3 |
+| LOW-1 | the handoff probe's quiet memo and pacing maps kept every target ever probed, not only the 16 watched | **fixed:** see below |
+
+**LOW-1, the fix.** `HandoffRuntime::reconcile` runs at the top of every `handoff_probe`, before
+the busy and empty-rail exit:
+- the quiet memo keeps only targets on the rail;
+- a pacing entry for a target off the rail is kept while its hold is live, so rewatching a target
+  inside its cooldown does not reset it, and is dropped once the hold expires;
+- such live holds are capped at `MAX_UNWATCHED_HOLDS` (64), dropping the hold that expires soonest
+  first;
+- the live job's target is always kept.
+
+**Tests, each broken on purpose.** Each mutant fails only its own test:
+
+| mutant | fails |
+|---|---|
+| the quiet memo keeps everything | `handoff_bookkeeping_stays_bounded_by_the_watch_rail_under_churn` (40 targets churned through a 16-watch rail) |
+| expired-or-not, off-rail pacing is dropped | `a_target_rewatched_before_its_hold_expires_keeps_its_cooldown` |
+| the cap is disabled | `live_unwatched_holds_are_capped_soonest_expiry_first` |
+| the call is removed from the probe | `the_probe_forgets_an_unwatched_target_once_its_hold_expires` (receiver level: the unit tests call `reconcile` directly, so they cannot see this) |
+
+All four are entries in the handoff harness (`reconcile-quiet`, `reconcile-expiry`,
+`reconcile-cap`, `reconcile-call`).
+
 ## Design 18.3 bounded implementation review (2026-10-09, Opus, static): PASS WITH FINDINGS
 
 **No blocker, no high.** Three mediums and five lows. The review covered Agent 1's runtime
