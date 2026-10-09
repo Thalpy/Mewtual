@@ -6,8 +6,9 @@ it is at revision 2 after its design review and re-review, A and B are built, an
 gated (14.5). Section 15 proposes a route to step 3; its design review found it not yet ready,
 and 15.7 lists what step 3 needs, starting with design 9.1. 9.1 is built and the commit phase is
 measured, so 15.8 is revision 2 of that route. Its design review (15.9) found no blocker and one
-high: H5's cost grows with the source, which nothing has measured yet. 15.9's order of work
-replaces 15.8's, and starts there.** It extends
+high: H5's cost grows with the source. 15.10 has since measured that: the commit alone exceeds
+the visit for a maximal Flipnote with a full branch. 15.9's order of work replaces 15.8's, and
+15.10 sizes its first item.** It extends
 `GATE4-AGENT-1-DESIGN.md` section 9.2 (the cursor and I-4) and 5.5 (the overlay job). The storage
 half of C-3 is implemented and reviewed; this is the runtime half, ledger row G4-A1-C3.
 
@@ -1474,3 +1475,60 @@ measurement varies.**
 - a writer-facts warm that diverges from validation, which M4's cross-check mitigates;
 - pruning only after a complete full scan;
 - the memo resident for the mount's life, UI lock included.
+
+### 15.10 The source axis, measured (2026-10-09): HIGH-1 holds
+
+15.9's first measurement: `profile_studio_overlay_handoff_source_axis_{256,512,998}`. Each times
+H1 to H5 for a one-operation and a full title branch over a Flipnote whose base already holds that
+many frames. Release build, on a host shared with other agents' builds. Upper medians of 3 trials,
+in milliseconds. The one-frame rows are the stage profile's.
+
+| base frames | branch ops | H5 commit | one `blob_cids` | one seed graph | H2 (detached) | H4 (detached) |
+|---|---|---|---|---|---|---|
+| 1 | 1 | 27 | < 1 | 1 | 2 | 0 |
+| 256 | 1 | 42 | 1 | 3 | 28 | 6 |
+| 512 | 1 | 56 | 3 | 6 | 57 | 12 |
+| 998 | 1 | **86** | 6 | 13 | 119 | 26 |
+| 1 | 256 | 82 | 1 | < 1 | 857 | 242 |
+| 256 | 256 | 99 | 3 | 3 | 3 651 | 885 |
+| 512 | 256 | 118 | 6 | 6 | 6 873 | 1 662 |
+| 998 | 256 | **147** | 8 | 13 | 13 291 | 2 966 |
+
+**What it settles:**
+- **The commit grows with the source, about 0.06 ms per base frame, even at one operation.** The
+  one-operation commit on a maximal Flipnote is 86 ms. With a full branch it is 147 ms, past
+  the 125 ms visit before any scan. As 15.9 HIGH-1 predicted, the share is a function of source
+  and branch, and at the corner it is negative.
+- **The repeated source terms are about half of the one-operation commit at 998 frames:**
+  - three candidate `blob_cids`, about 18 ms;
+  - two seed graph loads through `base_blob_cids`, about 26 ms.
+  Snapshot encodes stay at or below the clock's resolution.
+- **H1 stays small:** 2 to 5 ms. So does H5's budget inventory: 1 to 3 ms here, for a small vault.
+
+**Item 0, sized by these figures.** Two halves, neither changing a boundary:
+1. **Compute each projection once in H5:** about 25 ms back at 998 frames (two `blob_cids`, one
+   seed graph).
+2. **Carry what the detached stages already computed:** H2 holds the seed graph and H4 the
+   candidate, so the seed's `base_blob_cids` and the candidate's `blob_cids` can travel in the
+   commit, bound by the stamp like H2's facts. That is about 19 ms more. This half is a design
+   change to the commit's contents, and needs its own review, as 9.1's facts did.
+
+With both, the projection estimate is about 42 ms at 998 frames and one operation. At 998 frames
+with a full branch it is still about 100 ms, because the remaining growth with branch length (82
+to 147 ms between the one-frame and 998-frame full-branch rows) is not yet attributed.
+
+**What that leaves for 15.9 item 8 (the touched-path cursor).**
+- **What regime 1 needs:** a near-limit vault's traversal costs about 27 ms unmargined (11 ms of
+  per-file cost plus 16 ms for 8 MiB), and about 75 ms with the review's factor of 4 on the bytes.
+- **What it gets:** a maximal Flipnote with a full branch would leave about 25 ms after item 0.
+- **So no scan-based step 3 completes there under gossip.** Neither does a touched-path cursor,
+  which saves traversal but not the commit.
+- **What remains is a choice:**
+  - accept, as a stated L6 regression, that such handoffs wait for a quiet gap (today they
+    complete in one long visit);
+  - or keep this corner on today's single long visit;
+  - either way, first attribute and cut the branch-length growth.
+
+**Recommendation: build item 0's first half, then re-measure, before deciding.** It is mechanical
+and changes no boundary. The second half and the branch-length attribution come next. Item 8 is
+decided on the post-item-0 table, not on extrapolation.

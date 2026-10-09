@@ -5555,9 +5555,15 @@ makes that more important, not less.
      (`17dd54fc`), and the commit phase is measured on its own (2026-10-09, release, shared
      host). The route's revision 2 is C-3 runtime 15.8, and its design review is 15.9: no
      blocker, one high. **The order of work is 15.9's:**
-     1. H5's source-growing terms computed once, with a source-axis measurement (base sources of
-        256, 512 and 999 frames). 15.9 HIGH-1: no measurement yet varies the source, and the
-        commit may consume the visit for a large flipnote even at one operation;
+     1. H5's source-growing terms computed once. **The source axis is measured** (C-3 runtime
+        15.10, 2026-10-09). The commit grows about 0.06 ms per base frame: 86 ms at 998 frames
+        and one operation, and 147 ms with a full branch, past the visit. The repeated
+        projections are about half of the former. Next:
+        - item 0's first half (compute each once in H5);
+        - re-measure;
+        - its second half (carry H2's and H4's projections, a design change needing review);
+        - attribute the branch-length growth;
+     … and the remaining items as listed;
      2. the indexed, pruned memo (M2);
      3. the all-family memo with warms at all eight writers, behind a forced-warm token;
      4. the restart progress rule, with per-key credit and a ceiling;
