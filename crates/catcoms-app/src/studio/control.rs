@@ -84,25 +84,26 @@ pub enum StudioUnconfirmedSaveOutcome {
     /// would tell this caller an edit landed when it did not. A retry while this request's own plan
     /// is in flight is `Scheduled`, not `Busy`.
     ///
-    /// **Also while the receiver is paused** (design 18.3 review, F4): the visit captured this
-    /// request's new work and dropped the capture, so the pause holds no slot or media for it. That
-    /// visit already paid for the budget's inventory scan, the mint and media admission, and every
-    /// resend pays again.
-    ///
-    /// **A caller cannot yet tell this `Busy` from the others** (re-review of the batch fixes, M-1):
-    /// - `studio-receive-paused` is one-shot, not a queryable state;
-    /// - this Save never clears the pause, which only a successful explicit Studio document access
-    ///   through `run` does;
-    /// - the native mapping still answers "send the identical request again".
-    ///
-    /// A distinct `Paused` outcome from the same refusal point is proposed. Until it exists, native
-    /// Save must not register.
-    ///
-    /// An exact retry of already-saved work is answered `Saved` while paused, unless the overlay
-    /// slot still holds other work. A capture that was already detached when the pause arrived
-    /// parks as a plan, and holds the slot for up to `OVERLAY_PARK_MS`. A retry in that window
-    /// first finishes that plan, or finds the slot taken, and answers `Busy`, as before F4.
+    /// While the receiver is paused, an exact retry of already-saved work is still answered
+    /// `Saved`, unless the overlay slot holds other work. A capture already detached when the pause
+    /// arrived parks as a plan and holds the slot for up to `OVERLAY_PARK_MS`. A retry in that
+    /// window first finishes that plan, or finds the slot taken, and answers `Busy`. New work
+    /// captured while paused is `Paused`, not `Busy`.
     Busy,
+    /// Nothing of this request was saved because the receiver is paused (design 18.3 review, F4,
+    /// and its re-review's M-1). The visit captured this request's new work and dropped the
+    /// capture, so the pause holds no slot, permit or media for it.
+    ///
+    /// **Unlike `Busy`, resending now does not help.**
+    /// - Every resend pays again for the budget's inventory scan, the mint and media admission.
+    /// - No Save ends a pause; only a successful explicit Studio document access through `run`
+    ///   does (`studio-receive-paused` is the one-shot event that announced it).
+    ///
+    /// So native reports a paused state, telling the renderer to resend only after such an access.
+    ///
+    /// Never the answer to an exact retry: that is answered at S1, before any capture, and stays
+    /// `Saved` while paused. Only new authoring reaches the refusal.
+    Paused,
 }
 
 pub struct StudioRecoveryApply {

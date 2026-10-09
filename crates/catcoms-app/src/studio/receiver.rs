@@ -60,17 +60,15 @@ pub(crate) enum StudioOverlaySaveVisit {
     /// instead) before it dropped the capture. The dropped hold leaves any promoted PIX unprotected,
     /// which RT-001 already accepts for a refused plan.
     ///
-    /// **A caller cannot yet tell the two apart**, and that is a known gap, not a contract a caller
-    /// can follow:
-    /// - `studio-receive-paused` is a one-shot transition event, not a queryable state;
-    /// - neither Save path clears the pause; only a successful explicit Studio document access
-    ///   through `run` does (a Read, an ordinary Save, Apply or ApplyOverlayCopy);
-    /// - the native Unconfirmed mapping answers `Busy` with "send the identical request again".
-    ///
-    /// So a caller resending on `Busy` while paused repeats that work each time. The fix proposed to
-    /// Agent 2, whose outcome type and native mapping this is, is a distinct `Paused` outcome from
-    /// the same refusal point. Native Save registration must not ship before it (re-review of the
-    /// batch fixes, M-1).
+    /// **The Unconfirmed Save tells the two apart; the Closing `save_overlay` does not yet.** The
+    /// Unconfirmed Save never returns this visit for a pause. It signals the capture-time refusal
+    /// itself, and answers `StudioUnconfirmedSaveOutcome::Paused`, natively
+    /// `retry:"afterExplicitAccess"` (2026-10-10, closing the batch re-review's M-1). A resend
+    /// into a pause would repeat the work above, and neither Save path clears a pause: only a
+    /// successful explicit Studio document access through `run` does (a Read, an ordinary Save,
+    /// Apply or ApplyOverlayCopy), and `studio-receive-paused` is a one-shot event. The Closing
+    /// `save_overlay` still answers this `Busy` while paused, so its native result, when it has
+    /// one, needs the same distinction before it registers.
     Busy,
 }
 
@@ -113,6 +111,20 @@ impl StudioReceiver {
         // The UI-lock reset: a parked inventory body is authenticated plaintext, and no visit
         // runs while locked, so it must not stay resident (C-3 runtime design 4, review M6).
         self.inventory.release();
+        // The same rule for a Save's work in the overlay slot: a queued capture, a parked plan or
+        // a detached job's returning plan (the F2 batch review's residual risk). The request it
+        // belonged to is forgotten with it, so its retry plans afresh rather than waiting.
+        if self.catchup.release_overlay_for_lock() {
+            self.closing_scheduled = None;
+            self.unconfirmed_scheduled = None;
+        }
+    }
+
+    /// Test-only: lose the ready previews alone, as an expiry or eviction does, without the rest of
+    /// the lock reset. A test that needs a parked plan to outlive its preview uses this.
+    #[cfg(test)]
+    pub(crate) fn forget_previews_for_test(&mut self) {
+        self.catchup.preview.reset();
     }
 
     /// Scheduled local Save (Flow S), under the actor's custody lease.
@@ -526,15 +538,16 @@ impl StudioReceiver {
     }
 
     /// Queue a fresh Save capture for its detached plan, unless the receiver is paused. Returns
-    /// whether it was queued; the caller answers `Busy` if not and records no scheduling request.
+    /// whether it was queued. If not, the caller records no scheduling request and answers for the
+    /// pause: the Unconfirmed Save with `Paused`, the Closing `save_overlay` (for now) with `Busy`.
     ///
     /// Design 18.3 review, F4, in the shape Agent 2 asked for. A paused receiver hands out no work,
     /// and only an unrelated explicit access clears the pause, so a capture queued now would hold
     /// this actor's admission, one of the four process-wide preparation permits and its transient
     /// media hold for as long as the pause lasts. Dropping it releases all three. Nothing of the
     /// Save is durable; media admission may have promoted the frame's PIX, which the dropped hold
-    /// no longer protects, the cost RT-001 already accepts for a refused plan. The paused `Busy`
-    /// is therefore not free, and `StudioOverlaySaveVisit::Busy` says how a caller must treat it.
+    /// no longer protects, the cost RT-001 already accepts for a refused plan. The paused refusal is
+    /// therefore not free, and `StudioOverlaySaveVisit::Busy` says how each caller reports it.
     ///
     /// The check sits here, after classification, not at either Save's entry: an exact retry of
     /// accepted work is answered at S1 before any capture, so it is not refused merely because the

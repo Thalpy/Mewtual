@@ -78,6 +78,16 @@ impl StudioReceiver {
                     save.branch,
                     operation,
                 )?;
+                let visit = match visit {
+                    UnconfirmedSaveVisit::Paused => {
+                        let outcome = StudioUnconfirmedSaveOutcome::Paused;
+                        return Ok(StudioControlResponse::UnconfirmedOverlaySaved {
+                            target,
+                            outcome,
+                        });
+                    }
+                    UnconfirmedSaveVisit::Visit(visit) => visit,
+                };
                 let outcome = match visit {
                     StudioOverlaySaveVisit::Saved(saved) => match *saved {
                         StudioOverlaySave::Local(draft) => StudioUnconfirmedSaveOutcome::Saved {
@@ -150,7 +160,8 @@ impl StudioReceiver {
         basis: [u8; 32],
         branch: [u8; 32],
         operation: DomainOp,
-    ) -> Result<StudioOverlaySaveVisit, AppError> {
+    ) -> Result<UnconfirmedSaveVisit, AppError> {
+        use UnconfirmedSaveVisit::Visit;
         let request = overlay_request_fingerprint(1, target, &basis, &branch, &operation)?;
         // Any parked plan is finished first, whatever its target: its transient hold protects its
         // pixels, and while it is parked the slot refuses every reservation on this actor. S3
@@ -198,10 +209,12 @@ impl StudioReceiver {
                 if let Err(error) = committed {
                     tracing::warn!(%error, "a parked overlay plan of another request did not commit");
                 }
-                return Ok(StudioOverlaySaveVisit::Busy);
+                return Ok(Visit(StudioOverlaySaveVisit::Busy));
             }
             return committed.map(|draft| {
-                StudioOverlaySaveVisit::Saved(Box::new(StudioOverlaySave::Local(draft)))
+                Visit(StudioOverlaySaveVisit::Saved(Box::new(
+                    StudioOverlaySave::Local(draft),
+                )))
             });
         }
         // 7.2: reserve before the first bounded read, release by dropping if nothing is scheduled.
@@ -209,11 +222,11 @@ impl StudioReceiver {
             // The slot is busy with work in flight. If that work is this very request's, say so:
             // "nothing of this request was saved" would be untrue of a plan already running
             // (review of `b35e23d2`, LOW-1).
-            return Ok(if self.unconfirmed_scheduled == Some(request) {
+            return Ok(Visit(if self.unconfirmed_scheduled == Some(request) {
                 StudioOverlaySaveVisit::Scheduled
             } else {
                 StudioOverlaySaveVisit::Busy
-            });
+            }));
         };
         let attempt = self.catchup.preview.mint(server, store, id, target);
         let mut budget = save_budget(server, store, id)?;
@@ -240,17 +253,30 @@ impl StudioReceiver {
                 // durable acceptance on a retry still changes what the row should show.
                 self.settlement
                     .note(target, StudioSettlementState::RefreshRequired);
-                Ok(StudioOverlaySaveVisit::Saved(saved))
+                Ok(Visit(StudioOverlaySaveVisit::Saved(saved)))
             }
             StudioOverlayStart::Captured(capture) => {
+                // Refused at the capture, not at the door: everything above answers an exact
+                // retry, so only new authoring reaches this (design 18.3 review, F4).
                 if !self.queue_capture_unless_paused(*capture, ownership, target) {
-                    return Ok(StudioOverlaySaveVisit::Busy);
+                    return Ok(UnconfirmedSaveVisit::Paused);
                 }
                 self.unconfirmed_scheduled = Some(request);
-                Ok(StudioOverlaySaveVisit::Scheduled)
+                Ok(Visit(StudioOverlaySaveVisit::Scheduled))
             }
         }
     }
+}
+
+/// One visit of the Unconfirmed Save: what the Flow S visit concluded, or new work refused because
+/// the receiver is paused.
+///
+/// The refusal has its own variant so the caller can be told to wait for the pause to end rather
+/// than to resend, which `Busy` means. A resend does not end a pause, and each one pays for the
+/// inventory scan, the mint and media admission again (re-review of the F4 batch, M-1).
+pub(crate) enum UnconfirmedSaveVisit {
+    Visit(StudioOverlaySaveVisit),
+    Paused,
 }
 
 /// A budget from a completed five-family inventory, as every lifecycle control takes one. Called

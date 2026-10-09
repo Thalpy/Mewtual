@@ -533,6 +533,10 @@ fn disposal_value(v: &StudioOverlayDisposal) -> Result<Value, String> {
 /// `pending` and `busy` both mean "send the identical request again". They are told apart because
 /// `pending` means this request's work is scheduled, and `busy` means none of this request was
 /// saved: capacity was full, or the visit finished another request's work.
+///
+/// `paused` means none of this request was saved because Studio receive is paused, and resending
+/// now would only repeat the work. Its `retry` is `afterExplicitAccess`: resend after a
+/// successful explicit Studio document access has ended the pause. No Save ends one.
 fn unconfirmed_save_value(
     target: StudioTarget,
     outcome: StudioUnconfirmedSaveOutcome,
@@ -553,6 +557,11 @@ fn unconfirmed_save_value(
             json!({"state":"pending","retry":"sameRequest"})
         }
         StudioUnconfirmedSaveOutcome::Busy => json!({"state":"busy","retry":"sameRequest"}),
+        // Resending does not help while paused; only an explicit Studio document access ends
+        // the pause (design 18.3 review, F4, M-1).
+        StudioUnconfirmedSaveOutcome::Paused => {
+            json!({"state":"paused","retry":"afterExplicitAccess"})
+        }
     };
     for (key, field) in fields.as_object().expect("an object literal") {
         value[key] = field.clone();

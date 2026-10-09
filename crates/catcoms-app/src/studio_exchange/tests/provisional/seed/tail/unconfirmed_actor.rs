@@ -247,7 +247,9 @@ async fn studio_actor_unconfirmed_save_schedules_commits_and_retries_from_the_li
         "a later append is scheduled too: {scheduled:?}"
     );
     settle(&mut receiver, &mut p).await;
-    receiver.clear_previews();
+    // The preview alone goes, not a lock: a lock would release the parked plan too, and then
+    // this would be S1b's refusal rather than the commit visit's.
+    receiver.forget_previews_for_test();
     let refused = save(&mut receiver, &mut p, target, &second)
         .unwrap_err()
         .to_string();
@@ -551,12 +553,13 @@ async fn studio_actor_unconfirmed_save_retry_of_its_own_scheduled_plan_is_pendin
 }
 
 /// Design 18.3 review, F4, at the Unconfirmed Save's entry point. While the receiver is paused a
-/// fresh capture is dropped and the visit answers `Busy`: a paused receiver hands out no work, so a
-/// queued capture would hold admission, a pool permit and its media hold for the whole pause.
-/// Nothing was durable, and after the pause, ended by an explicit access as in production, the
-/// identical request plans afresh and saves.
+/// fresh capture is dropped and the visit answers `Paused`: a paused receiver hands out no work, so
+/// a queued capture would hold admission, a pool permit and its media hold for the whole pause.
+/// `Paused`, not `Busy`, because resending does not end a pause and pays the visit's costs again
+/// (the batch re-review, M-1). Nothing was durable, and after the pause, ended by an explicit
+/// access as in production, the identical request plans afresh and saves.
 #[tokio::test]
-async fn studio_actor_unconfirmed_save_captured_while_paused_answers_busy_and_holds_nothing() {
+async fn studio_actor_unconfirmed_save_captured_while_paused_answers_paused_and_holds_nothing() {
     let (mut p, mut receiver, target, basis, branch) = ready_receiver().await;
     let pool = receiver.inject_overlay_pool_for_test(4);
     let a = new_entry(&mut p, (basis, branch), 101, [8; 16]);
@@ -564,8 +567,8 @@ async fn studio_actor_unconfirmed_save_captured_while_paused_answers_busy_and_ho
 
     let visit = save(&mut receiver, &mut p, target, &a).unwrap();
     assert!(
-        matches!(visit, StudioUnconfirmedSaveOutcome::Busy),
-        "a capture made while paused was not refused: {visit:?}"
+        matches!(visit, StudioUnconfirmedSaveOutcome::Paused),
+        "a capture made while paused was not refused as paused: {visit:?}"
     );
     assert_eq!(
         pool.available_permits(),
@@ -666,6 +669,81 @@ async fn studio_actor_unconfirmed_save_a_capture_queued_then_paused_is_released(
         save(&mut receiver, &mut p, target, &a).unwrap(),
         StudioUnconfirmedSaveOutcome::Saved { accepted: 1, .. }
     ));
+}
+
+/// A UI lock releases whatever a Save holds in the overlay slot (the F2 batch review's residual
+/// risk). Each of these holds draft plaintext, admission and a pool permit:
+/// - a capture still queued, released by the lock;
+/// - a parked plan, released by the lock;
+/// - a job already detached when the lock arrives, whose plan is dropped as it returns rather
+///   than parked.
+///
+/// No visit runs while locked, so neither the pause release nor the park deadline would reach
+/// them. Nothing was durable in any case.
+#[tokio::test]
+async fn studio_actor_unconfirmed_save_a_lock_releases_queued_parked_and_returning_work() {
+    // Queued.
+    let (mut p, mut receiver, target, basis, branch) = ready_receiver().await;
+    let pool = receiver.inject_overlay_pool_for_test(4);
+    let a = new_entry(&mut p, (basis, branch), 111, [8; 16]);
+    assert!(matches!(
+        save(&mut receiver, &mut p, target, &a).unwrap(),
+        StudioUnconfirmedSaveOutcome::Scheduled
+    ));
+    assert_eq!(pool.available_permits(), 3, "precondition: queued");
+    receiver.clear_previews();
+    assert_eq!(
+        pool.available_permits(),
+        4,
+        "the lock did not release a queued capture"
+    );
+    assert!(receiver.detach(&mut p.bob).is_none());
+    assert_eq!(pending(&mut p, target), 0, "nothing was durable");
+
+    // Parked.
+    let (mut p, mut receiver, target, basis, branch) = ready_receiver().await;
+    let pool = receiver.inject_overlay_pool_for_test(4);
+    let a = new_entry(&mut p, (basis, branch), 112, [8; 16]);
+    assert!(matches!(
+        save(&mut receiver, &mut p, target, &a).unwrap(),
+        StudioUnconfirmedSaveOutcome::Scheduled
+    ));
+    settle(&mut receiver, &mut p).await;
+    assert_eq!(pool.available_permits(), 3, "precondition: parked");
+    receiver.clear_previews();
+    assert_eq!(
+        pool.available_permits(),
+        4,
+        "the lock did not release a parked plan"
+    );
+    assert_eq!(pending(&mut p, target), 0, "nothing was durable");
+
+    // Detached when the lock arrives.
+    let (mut p, mut receiver, target, basis, branch) = ready_receiver().await;
+    let pool = receiver.inject_overlay_pool_for_test(4);
+    let a = new_entry(&mut p, (basis, branch), 113, [8; 16]);
+    assert!(matches!(
+        save(&mut receiver, &mut p, target, &a).unwrap(),
+        StudioUnconfirmedSaveOutcome::Scheduled
+    ));
+    let job = receiver
+        .detach(&mut p.bob)
+        .expect("precondition: the capture detaches");
+    receiver.clear_previews();
+    // Before the job returns, the request has been forgotten with it. Its retry finds the slot
+    // still held by the running worker and is `busy`, not `pending` for work about to be dropped.
+    let retried = save(&mut receiver, &mut p, target, &a).unwrap();
+    assert!(
+        matches!(retried, StudioUnconfirmedSaveOutcome::Busy),
+        "a retry after the lock was told its dropped work is still pending: {retried:?}"
+    );
+    receiver.complete(&mut p.bob, job.run(None).await);
+    assert_eq!(
+        pool.available_permits(),
+        4,
+        "the lock did not drop a detached job's plan when it returned"
+    );
+    assert_eq!(pending(&mut p, target), 0, "nothing was durable");
 }
 
 /// The confirmed checkpoint arrives on this member: the very receipt and seed the preview was of,

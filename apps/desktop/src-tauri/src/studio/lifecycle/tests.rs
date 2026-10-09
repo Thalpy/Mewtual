@@ -57,14 +57,24 @@ fn an_unconfirmed_save_crosses_as_local_unconfirmed_work_with_no_content() {
         "a Save result carries no document content: {saved}"
     );
 
-    for (outcome, state) in [
-        (StudioUnconfirmedSaveOutcome::Scheduled, "pending"),
-        (StudioUnconfirmedSaveOutcome::Busy, "busy"),
+    // A paused receiver is not told to resend: that pays again and ends nothing (F4, M-1).
+    for (outcome, state, retry) in [
+        (
+            StudioUnconfirmedSaveOutcome::Scheduled,
+            "pending",
+            "sameRequest",
+        ),
+        (StudioUnconfirmedSaveOutcome::Busy, "busy", "sameRequest"),
+        (
+            StudioUnconfirmedSaveOutcome::Paused,
+            "paused",
+            "afterExplicitAccess",
+        ),
     ] {
         let value = response_value(Response::UnconfirmedOverlaySaved { target, outcome }).unwrap();
         assert_eq!(
             (&value["state"], &value["retry"]),
-            (&json!(state), &json!("sameRequest"))
+            (&json!(state), &json!(retry))
         );
         assert!(
             value.get("localOnly").is_none(),

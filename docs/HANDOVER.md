@@ -48,9 +48,11 @@ and ranks the live hazards in that path.
   - **F4:** a Save captured while the receiver is paused is dropped with `Busy`, and a pause
     releases a capture still queued, freeing admission, the pool permit and the media hold. That
     `Busy` is not free, since the visit paid for media admission and, for the Unconfirmed Save,
-    the budget scan. **Known gap:** a caller cannot tell it from the other `Busy`, because the
-    paused event is one-shot and neither Save ends a pause. A distinct `Paused` outcome is
-    proposed to Agent 2, and native Save must not register before it.
+    the budget scan. A caller could not tell it from the other `Busy`, because the paused event
+    is one-shot and neither Save ends a pause. *Closed for the Unconfirmed Save on 2026-10-10:* it
+    answers `Paused` (natively `retry:"afterExplicitAccess"`). The Closing `save_overlay` still
+    answers `Busy` while paused, and needs the same distinction before its native result
+    registers.
   - **F2:** an actor-level test of Flow H's signing yield, with a second member's checkpoint
     request arriving mid-signing. It found that a request catch-up had reserved, and whose source
     it had installed, was invisible to the yield. Signing then ran to the end, and H5's commit

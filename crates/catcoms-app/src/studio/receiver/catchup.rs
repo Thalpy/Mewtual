@@ -506,6 +506,9 @@ pub(super) struct CatchupRuntime {
     /// `overlay_admission` and is proved by a live `Arc`, so a cancelled waiter clearing this
     /// flag does not make a second job admissible.
     overlay_detached: bool,
+    /// Set by a UI lock that found a job detached: that job's plan is dropped when it returns
+    /// instead of parked ([`release_overlay_for_lock`](Self::release_overlay_for_lock)).
+    overlay_drop_returning: bool,
     overlay_admission: OverlayAdmission,
     /// Test-only simulated process pool. All preparation classes in that process share it;
     /// unrelated fixtures must not consume capacity against independent simulated clocks.
@@ -1079,6 +1082,32 @@ impl CatchupRuntime {
     /// parks, and the park deadline drops it, because that expiry runs outside the pause gate.
     pub(super) fn release_queued_overlay(&mut self) -> bool {
         self.overlay.take().is_some()
+    }
+
+    /// For a UI lock: release whatever the overlay slot holds.
+    ///
+    /// The slot holds at most one of three things, and each holds draft plaintext, admission, a
+    /// pool permit and a media hold:
+    /// - a queued capture, dropped now;
+    /// - a parked plan, dropped now;
+    /// - a detached job, whose plan is dropped when it comes back.
+    ///
+    /// No visit runs while locked, so neither the pause release nor the park deadline would reach
+    /// any of them, and the lock rule (the inventory job's, C-3 runtime design 4) is that no
+    /// plaintext stays resident. Safe for RT-001's reason: nothing durable was written, and the
+    /// request reclassifies from durable state on its retry. Returns whether a request's work was
+    /// released, so the caller can forget which request scheduled it.
+    ///
+    /// **Only for a caller after which no visit runs**, which today means the lock reset. It drops a
+    /// committable plan, which a visit would otherwise have committed on the request's retry. Any
+    /// other caller must accept that cost on purpose.
+    pub(super) fn release_overlay_for_lock(&mut self) -> bool {
+        let queued = self.overlay.take().is_some();
+        let parked = self.overlay_planned.take().is_some();
+        if self.overlay_detached {
+            self.overlay_drop_returning = true;
+        }
+        queued || parked || self.overlay_detached
     }
 
     #[cfg(test)]
@@ -1689,7 +1718,11 @@ impl StudioReceiver {
                 // RT-001. A refusal parks nothing: the worker released admission and the shared
                 // slot when planning failed, and the capture took its media hold with it. The
                 // request stays retryable and the next Save reclassifies from durable state.
-                if let Ok((plan, ownership)) = result {
+                // A UI lock released the slot while this job was detached, so its plan is dropped
+                // as it returns rather than parked: nothing may hold draft plaintext through a
+                // lock, and no visit runs while locked to expire it.
+                let dropped_for_lock = std::mem::take(&mut self.catchup.overlay_drop_returning);
+                if let (Ok((plan, ownership)), false) = (result, dropped_for_lock) {
                     self.catchup.overlay_planned = Some((context, plan, ownership));
                     self.catchup.overlay_planned_until = server
                         .runtime_clock()
@@ -1707,6 +1740,7 @@ impl StudioReceiver {
                 // so admission and the shared slot remain occupied until it ends by itself. What
                 // it produces is never parked, so the remembered request is cleared as above.
                 self.catchup.overlay_detached = false;
+                self.catchup.overlay_drop_returning = false;
                 self.closing_scheduled = None;
                 self.unconfirmed_scheduled = None;
             }

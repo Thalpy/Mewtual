@@ -3181,3 +3181,131 @@ async fn an_active_replay_pass_on_a_prepared_document_does_not_stall_the_rest() 
     );
     assert!(prepared(&server, &store, stuck));
 }
+
+/// A server, a store and a receiver on a private pool, for the lock-release tests below.
+fn lock_fixture(
+    seed: u64,
+) -> (
+    Server<catcoms_rt::MemNetwork, ChaCha20Rng>,
+    ServerStore,
+    tempfile::TempDir,
+    StudioReceiver,
+    Arc<tokio::sync::Semaphore>,
+) {
+    let clock = ManualClock::new(1000);
+    let mut rng = ChaCha20Rng::seed_from_u64(seed);
+    let server = Server::found(
+        Hub::new().join(PeerId::from_u64(1)),
+        MlsDevice::generate().unwrap(),
+        rng.clone(),
+        Box::new(clock),
+        "owner",
+    )
+    .unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let store = ServerStore::open(root.path(), b"lock-release", &mut rng).unwrap();
+    let mut receiver = StudioReceiver::default();
+    let pool = receiver.catchup.inject_overlay_pool_for_test(4);
+    (server, store, root, receiver, pool)
+}
+
+/// Queue a real capture of `target`'s Closing overlay for this receiver, and detach it.
+fn detach_overlay(
+    server: &mut Server<catcoms_rt::MemNetwork, ChaCha20Rng>,
+    store: &mut ServerStore,
+    receiver: &mut StudioReceiver,
+    target: StudioTarget,
+) -> StudioBackgroundJob<catcoms_rt::MemNetwork> {
+    let capture = server.sync.with_registry_context(|g, d, _, _| {
+        crate::store::studio_closing_capture_fixture(store, 83, g, d, target, false)
+    });
+    let ownership = receiver
+        .catchup
+        .reserve_overlay()
+        .expect("precondition: the slot is free");
+    receiver
+        .catchup
+        .queue_overlay_for_test(capture, ownership, target);
+    receiver
+        .detach(server)
+        .expect("precondition: the overlay is selected")
+}
+
+fn object(n: u8) -> StudioTarget {
+    StudioTarget::Flipnote {
+        channel: crate::channel_id("general").to_be_bytes(),
+        object: [n; 16],
+    }
+}
+
+/// The lock's drop flag is spent by the one job it was set for (review of the lock release,
+/// MEDIUM-1). A lock while a job is detached drops that job's plan as it returns. The next job,
+/// started after the lock, parks as normal. A flag that was only read, never taken, would drop
+/// every later plan until some cancellation happened to clear it.
+#[tokio::test]
+async fn a_lock_drops_only_the_returning_plan_it_found_detached() {
+    let (mut server, mut store, _root, mut receiver, pool) = lock_fixture(921);
+    let work = detach_overlay(&mut server, &mut store, &mut receiver, object(31));
+    assert!(receiver.catchup.release_overlay_for_lock());
+    receiver.complete(&mut server, work.run(None).await);
+    assert!(
+        receiver.catchup.overlay_planned.is_none(),
+        "the plan returning after a lock was parked"
+    );
+    assert_eq!(pool.available_permits(), 4);
+
+    let work = detach_overlay(&mut server, &mut store, &mut receiver, object(32));
+    receiver.complete(&mut server, work.run(None).await);
+    assert!(
+        receiver.catchup.overlay_planned.is_some(),
+        "a lock's drop flag outlived the job it was set for"
+    );
+}
+
+/// A cancelled waiter clears the lock's drop flag (review of the lock release, MEDIUM-2). The
+/// cancelled worker's plan is never parked anyway, so a flag left set would instead drop the plan
+/// of the next job, one the lock never saw. The cancellation is real: the worker is held at its
+/// barrier while the lease's signal fires, as in N14(a) above.
+#[tokio::test]
+async fn a_cancelled_waiter_clears_the_lock_drop_flag() {
+    let (mut server, mut store, _root, mut receiver, pool) = lock_fixture(922);
+    let work = detach_overlay(&mut server, &mut store, &mut receiver, object(33));
+    let (work, entered, release) = work.pause_overlay_for_test();
+    assert!(receiver.catchup.release_overlay_for_lock());
+    let (cancel, signal) = tokio::sync::watch::channel(false);
+    let cancellation = catcoms_rt::RequestCancellation::new(signal, None);
+    let (result, ()) = tokio::join!(work.run(Some(cancellation)), async {
+        tokio::time::timeout(std::time::Duration::from_secs(60), entered)
+            .await
+            .expect("the worker never reached its barrier")
+            .expect("the worker entered while owning the bundle");
+        cancel.send(true).expect("the cancellation signal is live");
+    });
+    assert!(matches!(result, StudioBackgroundResult::CancelledOverlay));
+    receiver.complete(&mut server, result);
+    assert!(
+        !receiver.catchup.overlay_drop_returning,
+        "a cancelled waiter left the lock's drop flag set"
+    );
+
+    // The worker finishes by itself and frees the slot; the next job then parks.
+    release.send(()).expect("the worker is still running");
+    for _ in 0..600 {
+        if pool.available_permits() == 4 {
+            break;
+        }
+        catcoms_rt::Clock::sleep(
+            &catcoms_rt::SystemClock,
+            std::time::Duration::from_millis(5),
+        )
+        .await;
+    }
+    assert_eq!(
+        pool.available_permits(),
+        4,
+        "precondition: the worker ended"
+    );
+    let work = detach_overlay(&mut server, &mut store, &mut receiver, object(34));
+    receiver.complete(&mut server, work.run(None).await);
+    assert!(receiver.catchup.overlay_planned.is_some());
+}

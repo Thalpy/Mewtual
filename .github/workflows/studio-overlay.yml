@@ -87,22 +87,31 @@ jobs:
         env:
           RUST_MIN_STACK: '33554432'
 
-  # Each mutation recompiles one crate, about 90 seconds in CI, so ten of them plus the restored
-  # runs need most of an hour on their own. The harness sets RUST_MIN_STACK itself.
+  # Each mutation recompiles one crate. On `af113f24` the single job detected 45 entries in the
+  # 54 minutes after its 6-minute setup, about 1.2 minutes each, and was cancelled at its 60-minute
+  # limit before the restored phase. So the entries are split across shards by index
+  # (`--shard K/N` in the harness). A new entry joins a shard automatically, and each shard runs
+  # its own restored phase. Three shards leave room to grow; raise N when a shard nears the limit.
+  # The harness sets RUST_MIN_STACK itself.
   lifecycle-mutations:
     runs-on: ubuntu-latest
     timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3]
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.89.0
       - uses: Swatinem/rust-cache@v2
-      - name: Verify isolated lifecycle mutations and restored regressions
-        run: python3 .github/scripts/check-studio-overlay-lifecycle-mutations.py
+      # N comes from the matrix itself, so growing the matrix cannot leave entries unassigned.
+      - name: Verify isolated lifecycle mutations and restored regressions (shard ${{ matrix.shard }} of ${{ strategy.job-total }})
+        run: python3 .github/scripts/check-studio-overlay-lifecycle-mutations.py --shard ${{ matrix.shard }}/${{ strategy.job-total }}
       - name: Preserve lifecycle mutation and restoration evidence
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: studio-overlay-lifecycle-mutations
+          name: studio-overlay-lifecycle-mutations-${{ matrix.shard }}
           path: |
             logs/gate4-overlay-lifecycle-mutation-*.log
             logs/gate4-overlay-lifecycle-restored-*.log

@@ -1486,6 +1486,25 @@ Agent 1's Flow S is not implemented, this path is not implemented either; it is 
   RT-001 makes the drop safe. A late caller re-captures, and for a Flipnote frame it may have to
   republish the frame's PIX, since the plan's media hold was not durable protection. The deadline
   covers Agent 1's Closing `save_overlay` too, since it parks in the same slot.
+- **A paused receiver** (design 18.3 review, F4, built by Agent 1 in Agent 2's shape). New work
+  is refused at the capture, not at the door, so an exact retry of accepted work is still
+  answered `saved` while paused. A capture made while paused is dropped, and the Save answers
+  `paused`, with nothing reserved; `pause()` itself releases a capture still queued.
+  - *`paused`, not `busy`* (2026-10-10; the batch re-review's M-1). Resending into a pause pays
+    the inventory scan, the mint and media admission again, and no Save ends a pause. Only an
+    explicit Studio document access through `run` does. So native says `retry:"afterExplicitAccess"`
+    instead of `sameRequest`. Pinned by entry `unconfirmed-save-paused-outcome`.
+- **A UI lock releases the overlay slot** (2026-10-10; the F2 batch review's residual risk).
+  `clear_previews`, the actor's lock reset, releases whatever a Save holds there: a queued capture
+  and a parked plan at once, and a job detached at lock time when its plan returns
+  (`overlay_drop_returning`).
+  - *Why.* Each holds draft plaintext, admission, a pool permit and a media hold. No visit runs
+    while locked, so neither the pause release nor the park deadline would reach them. The lock
+    rule is the inventory job's: nothing plaintext stays resident.
+  - *Safety.* RT-001 makes every drop safe, and the request is forgotten so its retry plans
+    afresh. After a lock that retry needs a fresh preview anyway, since the lock also clears the
+    previews.
+  - *Pinned* by `unconfirmed-save-lock-releases-queued`, `-releases-parked` and `-drops-returning`.
 - **The ticket refuses a device that is no longer a member.** The mint checks the provider's
   membership, not this device's.
 - **The two Saves stay apart.** Neither action is reachable through the control transaction: both
@@ -1498,7 +1517,10 @@ Agent 1's Flow S is not implemented, this path is not implemented either; it is 
   Agent 1's `StudioOverlayMint` (their review, L4b).
 - **Native results:**
   - `unconfirmedOverlaySaveTicket`.
-  - `unconfirmedOverlaySave` with `state` saved, pending, busy, disposed or handedOff.
+  - `unconfirmedOverlaySave` with `state` saved, pending, busy, paused, disposed or handedOff.
+    `pending` and `busy` carry `retry:"sameRequest"`. `paused` carries
+    `retry:"afterExplicitAccess"`: resend only after a successful explicit Studio document
+    access has ended the receive pause.
   - A saved state says `localOnly`, `provisional` and `provenance:"unconfirmed"`, and carries no
     content.
   - Not natively registered (Agent 4; P5 false).

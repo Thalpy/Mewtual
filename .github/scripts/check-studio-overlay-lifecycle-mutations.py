@@ -489,6 +489,80 @@ MUTATIONS = [
         "studio_actor_unconfirmed_save_a_parked_plan_never_blocks_another_target",
         "finishing A's plan changed A's document, so its row is refreshed",
     ),
+    # Design 18.3 review, F4, and its re-review's M-1: new work captured while paused is `Paused`,
+    # not `Busy`, so a caller is not told to resend into a pause. The mutant answers `Busy` again.
+    # It still constructs `Paused` once: that line is the variant's only construction, and
+    # removing it would fail to compile under -D warnings (dead_code), not at the assertion.
+    (
+        "unconfirmed-save-paused-outcome", "catcoms-app",
+        "studio_exchange::tests::provisional::seed::tail::unconfirmed_actor::",
+        "crates/catcoms-app/src/studio/receiver/unconfirmed.rs",
+        "                    return Ok(UnconfirmedSaveVisit::Paused);\n",
+        "                    let _paused = UnconfirmedSaveVisit::Paused;\n"
+        "                    return Ok(Visit(StudioOverlaySaveVisit::Busy));\n",
+        "studio_actor_unconfirmed_save_captured_while_paused_answers_paused_and_holds_nothing",
+        "a capture made while paused was not refused as paused",
+    ),
+    # The F2 batch review's residual risk: a UI lock releases whatever the overlay slot holds. One
+    # entry per form: the queued capture and the parked plan are kept, or the detached job's plan
+    # is parked as it returns. Each mutant leaves its operand used under -D warnings.
+    (
+        "unconfirmed-save-lock-releases-queued", "catcoms-app",
+        "studio_exchange::tests::provisional::seed::tail::unconfirmed_actor::",
+        "crates/catcoms-app/src/studio/receiver/catchup.rs",
+        "        let queued = self.overlay.take().is_some();\n",
+        "        let queued = self.overlay.is_some();\n",
+        "studio_actor_unconfirmed_save_a_lock_releases_queued_parked_and_returning_work",
+        "the lock did not release a queued capture",
+    ),
+    (
+        "unconfirmed-save-lock-releases-parked", "catcoms-app",
+        "studio_exchange::tests::provisional::seed::tail::unconfirmed_actor::",
+        "crates/catcoms-app/src/studio/receiver/catchup.rs",
+        "        let parked = self.overlay_planned.take().is_some();\n",
+        "        let parked = self.overlay_planned.is_some();\n",
+        "studio_actor_unconfirmed_save_a_lock_releases_queued_parked_and_returning_work",
+        "the lock did not release a parked plan",
+    ),
+    (
+        "unconfirmed-save-lock-drops-returning", "catcoms-app",
+        "studio_exchange::tests::provisional::seed::tail::unconfirmed_actor::",
+        "crates/catcoms-app/src/studio/receiver/catchup.rs",
+        "            self.overlay_drop_returning = true;\n",
+        "            self.overlay_drop_returning = false;\n",
+        "studio_actor_unconfirmed_save_a_lock_releases_queued_parked_and_returning_work",
+        "the lock did not drop a detached job's plan when it returned",
+    ),
+    # Review of the lock release, MEDIUM-3: a lock that finds only a detached job still forgets the
+    # request, so its retry is `busy`, not `pending` for work the lock will drop.
+    (
+        "unconfirmed-save-lock-forgets-detached", "catcoms-app",
+        "studio_exchange::tests::provisional::seed::tail::unconfirmed_actor::",
+        "crates/catcoms-app/src/studio/receiver/catchup.rs",
+        "        queued || parked || self.overlay_detached\n",
+        "        queued || parked || (self.overlay_detached && false)\n",
+        "studio_actor_unconfirmed_save_a_lock_releases_queued_parked_and_returning_work",
+        "a retry after the lock was told its dropped work is still pending",
+    ),
+    # Review of the lock release, MEDIUM-1 and MEDIUM-2: the drop flag is spent by the one job it
+    # was set for, and a cancelled waiter clears it. Either mutant drops a later, unrelated plan.
+    (
+        "unconfirmed-save-lock-flag-taken-once", "catcoms-app", "studio::receiver::catchup::tests::",
+        "crates/catcoms-app/src/studio/receiver/catchup.rs",
+        "                let dropped_for_lock = std::mem::take(&mut self.catchup.overlay_drop_returning);\n",
+        "                let dropped_for_lock = self.catchup.overlay_drop_returning;\n",
+        "a_lock_drops_only_the_returning_plan_it_found_detached",
+        "a lock's drop flag outlived the job it was set for",
+    ),
+    (
+        "unconfirmed-save-lock-flag-cleared-on-cancel", "catcoms-app",
+        "studio::receiver::catchup::tests::",
+        "crates/catcoms-app/src/studio/receiver/catchup.rs",
+        "                self.catchup.overlay_drop_returning = false;\n",
+        "",
+        "a_cancelled_waiter_clears_the_lock_drop_flag",
+        "a cancelled waiter left the lock's drop flag set",
+    ),
     # Re-review of `5ccc4647`, MEDIUM: a parked plan is dropped at its deadline. The mutant never
     # drops it, so after the deadline the slot is still held and another target's Save is `busy`.
     # `&& false` keeps the retention call used.
@@ -536,8 +610,8 @@ MUTATIONS = [
         "unconfirmed-save-own-plan-pending", "catcoms-app",
         "studio_exchange::tests::provisional::seed::tail::unconfirmed_actor::",
         "crates/catcoms-app/src/studio/receiver/unconfirmed.rs",
-        "            return Ok(if self.unconfirmed_scheduled == Some(request) {\n",
-        "            return Ok(if self.unconfirmed_scheduled == Some(request) && false {\n",
+        "            return Ok(Visit(if self.unconfirmed_scheduled == Some(request) {\n",
+        "            return Ok(Visit(if self.unconfirmed_scheduled == Some(request) && false {\n",
         "studio_actor_unconfirmed_save_retry_of_its_own_scheduled_plan_is_pending",
         "a retry of its own in-flight plan is pending, not busy",
     ),
@@ -621,15 +695,48 @@ def run(package, prefix, test):
     )
 
 
+def parse_args(argv):
+    """Entry names, and an optional `--shard K/N`.
+
+    Names select a subset for diagnosis or for proving new entries, as the handoff harness allows.
+    `--shard K/N` keeps every Nth entry by its index in `MUTATIONS`, starting at the Kth (1-based).
+    CI splits the run across N jobs this way, because one job no longer fits its time limit. By
+    index, not by a list of names: a new entry lands in a shard automatically, and a name list in
+    the workflow could forget one, which would then never run in CI. Each shard still runs its own
+    restored-regression phase.
+    """
+    names, shard = [], None
+    args = iter(argv)
+    for arg in args:
+        if arg == "--shard" or arg.startswith("--shard="):
+            spec = arg.split("=", 1)[1] if "=" in arg else next(args, "")
+            try:
+                k, n = (int(part) for part in spec.split("/"))
+            except ValueError:
+                raise ValueError(f"--shard takes K/N, got {spec!r}") from None
+            if not 1 <= k <= n:
+                raise ValueError(f"--shard {spec}: K must be between 1 and N")
+            shard = (k, n)
+        else:
+            names.append(arg)
+    return set(names), shard
+
+
 def main():
-    # Optional entry names select a subset for diagnosis or for proving new entries, as the handoff
-    # harness allows. With none, every entry runs: the CI invocation passes no arguments and is
-    # unchanged. An unknown name refuses rather than silently running nothing.
-    selected = set(sys.argv[1:])
+    # With no names, every entry runs (in the shard, when one is given). An unknown name refuses
+    # rather than silently running nothing, and so does a shard that selects nothing.
+    selected, shard = parse_args(sys.argv[1:])
     unknown = selected - {m[0] for m in MUTATIONS}
     if unknown:
         raise ValueError(f"unknown mutation selector: {sorted(unknown)}")
-    mutations = [m for m in MUTATIONS if not selected or m[0] in selected]
+    mutations = [
+        m
+        for index, m in enumerate(MUTATIONS)
+        if (not selected or m[0] in selected)
+        and (shard is None or index % shard[1] == shard[0] - 1)
+    ]
+    if not mutations:
+        raise ValueError("this selection runs no mutation entry")
     log_dir = ROOT / "logs"
     log_dir.mkdir(exist_ok=True)
     for name, package, prefix, path, before, after, test, assertion in mutations:
