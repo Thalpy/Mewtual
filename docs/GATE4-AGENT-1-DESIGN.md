@@ -609,6 +609,176 @@ R1 capture (membership only), R2 detached restore plus `evidence` and the next s
 under stamp equality. The synchronous resolver at the rotation, adoption, shared-write and
 publication fences is unchanged as a backstop.
 
+#### 6.4.1 Flow R in detail (revision 1, proposal, 2026-10-09)
+
+**What it replaces.** A Prepared record is what an interrupted H5 leaves: barrier 1 wrote it, and
+the crash or refusal came before the Completed write. Today the H1 probe finds it (its structural
+read already reports `handoff_prepared()`), and `start_studio_handoff_with_io` resolves it
+synchronously, under custody, before anything else. `resolve_studio_handoff_with_io` with `None`
+does, in that one visit:
+1. a five-family inventory (H1 builds it anyway) and a structural decode of the intent record;
+2. **a full source restore** (`checked_studio_source`), the only expensive step;
+3. `evidence`, then one of three outcomes:
+   - **Absent:** `return_to_active`, a clone, then one accounted intents write;
+   - **Complete:** a flush-only save of the unchanged source, the base-blob reference check,
+     `complete` (a clone and an encode), then one accounted intents write;
+   - **Hold:** a refusal, so the probe backs off, and the next expiry pays the restore again
+     (9.1.1, step 4b's recorded cost).
+
+Flow R moves step 2 and `evidence` off custody, as H2 did for the forward path. The decision
+table, writes, barriers and generations stay those of the one resolution algorithm (9.1); only
+where the restore runs changes.
+
+**Stages:**
+
+| # | Stage | Custody | Work |
+|---|---|---|---|
+| R1 | Capture | yes | membership, the inventory, the structural decode (still Prepared, target matches), two bounded authenticated reads, the stamp |
+| R2 | Resolve | detached | decode both records, restore the source from the captured bytes, `evidence`, the next overlay state |
+| R3 | Commit | yes | membership, stamp equality, then the outcome's writes, exactly as the resolver does them |
+
+**R1, the capture.** `ServerStore::capture_studio_resolution(server, group, target, device,
+budget) -> Result<StudioResolveCapture, AppError>`. It runs the resolver's own preamble
+(`current_member`, `enter_studio_budget`, `checked_epoch_replay_state`, `check_target`), and
+requires `is_prepared()`. A record that is no longer Prepared is not an R job: R1 refuses, and
+H1's ordinary path takes over on the next probe. Then it reads:
+- the intent record, with `read_scoped_intent_plain`, as H1's capture does;
+- the source record, with `read_studio_record`, the **family** bound (`MAX_SEALED_BYTES`) that
+  `checked_studio_source` uses, **not** H1's 8 MiB `MAX_RETAINED_BYTES`. After an interrupted H5
+  the source may be the successor H5 just wrote, which 9.1.1's hazard note says can exceed 8 MiB.
+  It also checks the intent link (`check_studio_intent_link`), as the resolver's restore does.
+
+**The stamp** (`StudioResolveStamp`), minimal for what resolution depends on:
+- mount, numeric server, document and complete target;
+- actor and actor key, because the restore takes the actor and `current_member` checks the key;
+- the designated owner, because the restore takes it and can normalise owner state with it;
+- the intent record's and the source record's (plaintext blake3, physical size).
+
+It deliberately has **no tenure and no MLS epoch**. Resolution signs nothing and mints no
+authority. The resolver needs only current membership today (9.1.1, step 4b), and the restore's
+inputs are group id, target, actor and owner (9.1.1: H2's `prepare_vault_source` and
+`checked_studio_source` are the same restore over the same inputs).
+
+**R2, detached** (`StudioResolveCapture::resolve(self)`). It holds no store, Server, key or
+writer, as H2 does:
+1. decode the intent state (`EpochIntentState::decode`) and the source record (`decode_record`),
+   requiring the stamped target;
+2. `StudioEpoch::prepare_vault_source(snapshot, group_id, target, actor, owner)`;
+3. `before = unit.snapshot()`, and the facts R3's accounting needs: the source's
+   `storage_protocol_bytes`, and the blake3 of the bytes actually decoded;
+4. `evidence = metadata.evidence(&unit, &ledger)`, then:
+   - **Absent:** `next = metadata.return_to_active(&unit, &ledger)`. The unit is dropped;
+   - **Complete:** `next = metadata.complete(&unit, &ledger)`. The unit and `before` are carried
+     for R3's flush-only save;
+   - **Hold:** an error carrying the resolver's own message, so the job is abandoned and the
+     target backed off, exactly as H1's refusal is today.
+
+It returns `StudioResolvePlan { stamp, state, outcome: Absent { next } | Complete { next, unit,
+before, facts } }`.
+
+**R3, the commit.** `ServerStore::commit_studio_resolution(server, group, target, device, plan,
+rng, budget)`:
+1. `current_member`, `enter_studio_budget`;
+2. **stamp equality**, by the same comparison `studio_handoff_is_current` makes for H3 and H5,
+   but against the resolve stamp and with the family bound for the source. Any difference
+   refuses before anything durable, with no fallback;
+3. `checked_epoch_replay_state` again, which verifies the intent record against this visit's
+   inventory, and requires it still Prepared with the same target. The digest equality in step 2
+   already makes it byte-identical to what R2 decoded;
+4. by outcome:
+   - **Absent:** `state.overlay = Some(next)`, then `persist_handoff_intents(.., false,
+     WriteTag::Active, ..)`;
+   - **Complete:** build `observed` the way `stamped_studio_source` does, from the stamped
+     physical size and R2's protocol bytes, with `verify_record` against this visit's budget.
+     Then the resolver's own sequence: `save_studio_source(.., unit, Some(observed), &before,
+     .., WriteStep::flush_only(WriteTag::Source, ..), ..)`, `check_handoff_references(metadata,
+     &source.unit, &state)` and `persist_handoff_intents(.., WriteTag::Completed, ..)`, with
+     `state.overlay = Some(next)`.
+
+**Why carrying R2's results is sound.** It is H2's argument (9.1.1, step 1):
+- `next` and the evidence are pure functions of the decoded metadata, the ledger and the
+  restored unit;
+- the unit is a deterministic function of the source plaintext, the group id, the target, the
+  actor and the owner;
+- R3's stamp equality proves every one of those inputs unchanged since R1.
+
+So R3 writes exactly what the synchronous resolver would write if it ran at R3's moment. Nothing
+from the worker is trusted beyond that:
+- the reference check runs in R3 on the carried unit, against R3's own state;
+- `verify_record` checks R2's accounting fact;
+- the flush-only save re-snapshots the unit and must equal `before`, or it refuses (`WriteStep`'s
+  routing fault).
+
+**What custody keeps.** R1: the inventory, a structural decode and two bounded reads, as H1
+already pays. R3: the inventory, the stamp's two reads and hashes, and then:
+- **Absent:** one intents write;
+- **Complete:** the flush, the reference check's projections (about 20 ms at the caps, 15.10)
+  and one intents write.
+
+The restore and `evidence` leave custody. At the caps the restore is roughly H2's one-operation
+figure, about 0.1 s. A Hold now costs R1's reads per backoff expiry, not a restore.
+
+**Runtime.** The same job slot, admission and pool permit as Flow H, since one overlay operation
+per actor is a property of the actor:
+- **Stages:** `HandoffStage` gains `ResolveCaptured(capture, ownership)` and `ResolveReady(plan,
+  ownership)`. `Detached` is reused.
+- **Probe:** a selected branch that is Prepared goes to R1 instead of `start_studio_handoff`,
+  with or without a tenure (`probe_tenure` already admits a Prepared branch without one).
+- **Detach:** `ResolveCaptured` becomes `StudioBackgroundJob::HandoffResolve`, with the same
+  ownership discipline as H2: the worker owns the bundle, and drops it on its own failure.
+- **Completion:** `HandoffCompletion::Resolved(token, ..)`, routed on the job token like the
+  others. `Ok` becomes `ResolveReady`, and `Err` (Hold included) abandons the job.
+- **Commit:** `ResolveReady` is committed where H5 is, behind `replay_ready()` and `can_commit`.
+- **Authority:** an R job carries no tenure or MLS epoch, and `handoff_check_authority` skips it.
+  R3's stamp and membership checks are its authority.
+- **Pacing:** each outcome mirrors today's H1 resolution:
+  - **Complete:** `progressed` and a `RefreshRequired` settlement note, as H1's `Settled` arm;
+  - **Absent:** the job ends with no pacing change, so the next probe enters H1 for the Active
+    branch, as H1 continued into capture today; the doubling state is kept;
+  - **any refusal:** `hold_target`.
+- **Pause, lock and release:** `release_if_stalled` releases both new holding stages, like
+  `Captured` and `Ready`.
+
+**Races:**
+- **A fence (rotation, adoption, repair) resolves while R2 runs:** the intent record changes, so
+  R3's stamp refuses and the target backs off. The fence's resolution is the one that stands.
+- **H5 cannot interleave:** an R job occupies the actor's one handoff slot.
+- **A Save on the document:** this is an Intents write, so the stamp refuses.
+- **A crash during R2:** nothing is durable, and the next probe finds the same Prepared record.
+- **A crash during R3:** this is the resolver's own write sequence and barriers, so restart is
+  today's restart.
+
+**The synchronous paths stay:**
+- the fences call `resolve_studio_handoff` as now;
+- `start_studio_handoff_with_io` keeps its resolve-first branch for its synchronous callers (the
+  adapter and the tests). Only the scheduled probe routes a Prepared branch to R.
+
+**Tests:**
+- **Equivalence oracle, store level, per outcome:** build `interrupted_handoff` at
+  `WriteTag::Completed` (Complete evidence), at `WriteTag::Source` (Absent), and a Hold state
+  (from the classification fixtures), each copied with `copy_vault`. Resolve one copy
+  synchronously and the other through R1, R2 and R3. Both copies must end with byte-identical
+  records (`canonical`) and the same intent state. For Hold, R2 refuses and nothing changes.
+- **No restore under custody:** `studio_full_restores_for_test` does not move across R1 or R3.
+- **Stamp refusals:** a same-size authenticated replacement of the intent record, then of the
+  source record, between R1 and R3; an owner change; a device that is no longer a member. Each
+  refuses with the records unchanged.
+- **A fence wins:** a synchronous resolution between R2 and R3 makes R3 refuse, and the fence's
+  result stands.
+- **Runtime:** the probe sends a Prepared branch to R and detaches `handoff-resolve`. No restore
+  runs on the actor's thread over all custody turns.
+  - Complete settles with a notice.
+  - Absent returns the branch to Active, and the next probe captures it.
+  - Hold backs the target off.
+- **Harness mutations:**
+  - R3's stamp comparison removed, for the intent record and for the source record;
+  - R3's membership check removed;
+  - the probe routing a Prepared branch back to synchronous H1.
+
+**Out of scope:** the fences' backstop resolver stays synchronous, and H5 keeps its single visit
+(C-3 runtime 15.14). R1 and R3 still pay the five-family inventory under custody, as H1 and H5
+do.
+
 ### 6.5 Custody-visit sources
 
 Any `StudioReceiver::run` pass: the native receive driver (paced at one second while
