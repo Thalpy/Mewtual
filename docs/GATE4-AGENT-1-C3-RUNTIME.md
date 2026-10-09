@@ -4,7 +4,8 @@ Status: **step 1 (section 3) accepted for implementation; steps 2 to 5 need the 
 section 11 reviewed before each is built. Section 14 proposes the classifier from measurement 13.7;
 it is at revision 2 after its design review and re-review, A and B are built, and step 3 stays
 gated (14.5). Section 15 proposes a route to step 3; its design review found it not yet ready,
-and 15.7 lists what step 3 needs, starting with design 9.1.** It extends
+and 15.7 lists what step 3 needs, starting with design 9.1. 9.1 is built and the commit phase is
+measured, so 15.8 is revision 2 of that route, awaiting its design review.** It extends
 `GATE4-AGENT-1-DESIGN.md` section 9.2 (the cursor and I-4) and 5.5 (the overlay job). The storage
 half of C-3 is implemented and reviewed; this is the runtime half, ledger row G4-A1-C3.
 
@@ -951,7 +952,7 @@ ready to build once its two mediums are answered.
 hardware at once, so re-derive it per component once those measurements exist. Debug builds can
 hold an inline validation for about 63 ms.
 
-## 15. A route to step 3 (proposal, revision 1, 2026-10-08: reviewed, not ready)
+## 15. A route to step 3 (revision 1 reviewed, not ready; revision 2 in 15.8, 2026-10-09)
 
 **Nothing here is built.** Section 14.5 said what step 3 needs. This section proposes how to get
 it, says what no proposal of this kind can get, and lists the measurements that decide whether
@@ -1138,3 +1139,182 @@ restores, plus the Intents facts, which M1 adds. **M2's capacity is right.**
 
 **Revision 2 of this section waits on 1 and 2.** 9.1 is part of the accepted Flow H design and the
 largest of these items, so it comes first.
+
+### 15.8 Revision 2 (2026-10-09): 15.7 answered, with 1 and 2 done
+
+Both inputs revision 2 waited on now exist:
+- **9.1 is built** (`17dd54fc`).
+- **The commit phase is measured on its own**, in release on a host shared with two other agents'
+  builds (STATUS, "H5's repeated terms, priced"). H5's commit is about 25 ms for one operation,
+  83 ms at 256 title operations, and 64 ms at 128 frames.
+
+So **the scan's share of the 125 ms visit is about 40 ms at a full branch**, and about 95 ms at a
+short one. The repeated encodes are not where the commit's time goes (each is under the clock's
+resolution). So F3 of the design 18.3 review records them as a deviation, not a fix, and this
+share stands.
+
+**Nothing below is built.** It answers 15.7 finding by finding, then orders the work.
+
+#### HIGH-1: every byte-changing writer warms the memo it invalidated
+
+A read-only static map of the 24 production `epoch_mutation_guard()` sites (2026-10-09, at
+`0808f5a2`) found them complete: no family record is written or removed without the guard. Seven
+of them replace a record's bytes, and every one of those has, in scope right after its write, the
+plaintext it sealed, the physical size (`plain.len() + 40`) and the `StorageRecord` it charged. The
+others flush unchanged bytes, which leaves a warm entry valid, or remove a record, which M2's
+pruning handles.
+
+The warm sits at those seven sites, after the write returns and the guard drops, not in their
+callers. A caller-side warm is what HIGH-1 found missing: `retain_received_studio_source` does
+nothing while another document holds the source slot, and `cache_studio_source_footprint` refuses
+anything over 8 MiB. The memo entry is metadata, about 330 bytes whatever the source's size, so the
+8 MiB bound belongs to the retained graph and not to the memo.
+
+| family | writer (site at `0808f5a2`) | entry produced by |
+|---|---|---|
+| DraftArchive | `write_studio_draft_archive_with_io` (`epoch_draft_archive.rs:255`) | the validator |
+| Intents | `write_prepared_intents` (`epoch_intents.rs:864`) | the validator |
+| Intents | `retire_included_with_io` (`epoch_intents/retirement.rs:355`) | the validator |
+| Recovery | `update_epoch_recovery_accounted_with_writer` (`epoch_recovery.rs:374`) | the validator |
+| OwnerReceipts | `write_epoch_owner_state` (`epoch_owner.rs:642`) | the validator |
+| Registry | `update_registry_with_io`, replace branch (`epoch_registry.rs:492`) | the writer's facts |
+| Studio | `save_studio_source_checked`, replace branch (`epoch_studio.rs:704`) | the writer's facts |
+
+**Two ways of producing the entry, chosen per family:**
+
+- **The validator, for the four families whose accounting validation is cheap.** The writer calls
+  `validate_record_body(family, plain, scope, server, document, size, false)` on the plaintext it
+  just sealed. That keeps the memo's one invariant (every put is the true pure validation of the
+  bytes its digest names) true by construction, and it gives Intents the facts M1 needs from the
+  same function a scan uses. The cost moves into the writer:
+  - Intents accounting tracks entries, about 11 ms at the largest ledger measured, microseconds
+    at ordinary sizes;
+  - Recovery, 9 ms at 4 MiB;
+  - DraftArchive, nothing that grows with size;
+  - OwnerReceipts, its signature checks over at most nine receipts.
+- **The writer's own facts, for Registry and Studio**, where validation is a restore. Both
+  already warm this way: `remember_installed_registry`, and `SourceVersion` through
+  `cache_studio_source_footprint`. Each writer gets a test that its entry equals a fresh
+  `validate_record_body` of the bytes on disk, which is the review's per-writer equality test.
+
+The Studio warm covers every Studio writer at once, because they all end in
+`save_studio_source_checked`:
+- gossip ingest;
+- catch-up pages;
+- adoption;
+- rotation;
+- repair;
+- local Save;
+- `send_saved_studio_once`;
+- H5.
+
+So the HIGH-1 failure (Flipnote A open, a peer drawing on B, each receive turn writing B cold)
+closes, for any source size.
+
+**Order with respect to I-4.** The guard rotates `inventory_generation` before the write. The warm
+comes after the write and puts an entry for bytes now on disk. A scan captured before the write is
+still refused by the rotation. The restarted scan then hits the entry, which is the point.
+- **A write that fails before its rename** warms nothing.
+- **One that returns `CommittedButNotDurable`** has its bytes in place, so it may warm. That is
+  harmless either way, since a hit needs those bytes' digest.
+
+#### MEDIUM-2: the three gates widen together
+
+1. `evict_mismatch` runs on every family's read, not only Registry and Studio's.
+2. `ValidatedRecordBody::accounting_only` and `memoize_refused` carry
+   `Option<EpochIntentInventoryFacts>`, and a hit restores them.
+3. `a_budgeted_scan_memoizes_only_registry_and_studio_records` changes deliberately, to "every
+   family is memoized in accounting mode, none in reference mode". That is a recorded contract
+   change.
+
+M1's tests are those of 15.5:
+- an Intents hit restores the facts, and the Unconfirmed tally equals a cold scan's;
+- an OwnerReceipts hit equals a fresh validation;
+- mutations: drop the facts from the value; re-admit the family gate.
+
+The oracle in every memo test is a scan run after emptying the memo (`fresh_inventory`, added for
+the design 18.3 review's F5), because a plain accounting scan consults the same memo.
+
+#### MEDIUM-1: L6, stated per regime
+
+- **Today: automatic receive pauses on any vault over 64 records, 8 MiB read or 256 KiB cold.**
+  Writes between nearly every turn therefore happen only in vaults of at most 64 records.
+  - Their traversal is at most 8 MiB, about 16 ms at 2 us per KiB, inside the 40 ms share before
+    any per-file cost, which 15.5 still has to measure.
+  - With M1 and the writer warms, every record but the one just written is a hit, and that one
+    was warmed by its writer.
+  - So step 3 completes under gossip in this regime.
+  - The current 64-entry LRU holds such a vault exactly, but with no headroom, which is one
+    reason M2 still comes first.
+- **Larger vaults, today.** Rotations come from rarer writers: local Save, sync repairs and
+  maintenance. A scan may span several visits.
+  - Without M2 the 64-entry LRU thrashes on more than 64 records, so every scan of such a vault
+    parks each Studio and Registry record again, and a scan of a few hundred records takes as
+    many detached validations.
+  - With M2 the second scan is all hits, and completes in a few visits between rare writes.
+- **After step 5 lifts the receive limits, the traversal bound becomes real.** At 40 ms and 2 us
+  per KiB, with the classifier's factor of 4 as margin, the bound is about 5 MiB of five-family
+  bytes per visit. Past it, a handoff under sustained gossip is held until a quiet gap. That is
+  L6's existing "held and retried under sustained writes", now priced.
+  - **The touched-path cursor 15.7 offered** is the route past the bound, because it re-reads
+    only paths written since the scan began.
+  - **It is deferred to step 5**, where the bound first binds. It needs its own design and an
+    audit of I-4's class.
+
+#### MEDIUM-3: a restart that made progress is not charged
+
+An attempt overtaken by a write is charged against `MAX_INVENTORY_RESTARTS` and backoff **only if
+it memoized nothing it found cold**. The job counts the entries its own validations added (inline
+installs and refused results), and does not count writer warms.
+
+**Why this is bounded:** every byte-changing writer now warms its own record, so the only cold
+records a job can meet are those cold since launch. Each uncharged restart therefore warms at
+least one of a finite set, at most `MAX_ACCOUNTED_RECORDS`.
+
+What to measure: the time to a first handoff from an empty memo, on 100- and 1 000-record vaults.
+
+#### MEDIUM-4: receive admission becomes history-dependent
+
+With M1, warm bytes stop counting against the 256 KiB cold rail for every family, so whether a
+receive pauses depends on what has been read before. That is the rail's stated meaning, work for
+fresh validation, but it is user-visible.
+
+What it needs:
+- HANDOVER's limitation is rewritten to say so;
+- a test pins both directions: a vault that pauses cold and proceeds warm, and a write that makes
+  it cold again.
+
+#### The lows
+
+- **Memory** is about 330 bytes per entry and, with pruning, proportional to the vault's record
+  count: about 21 MiB at 65 536 records, resident for the mount's life. A vault that size already
+  holds an inventory entry per record during every scan.
+- **Pruning** runs only after `finish_with` succeeds, and only within that scan's coverage.
+- **The 60 MiB figure in 15.4** is superseded by the per-regime bound above. It had no margin, and
+  it assumed the whole 125 ms rather than the 40 ms the commit leaves.
+
+#### Order of work for step 3
+
+1. **M1 with the writer warms and MEDIUM-2's three gates**, as one checkpoint with its own
+   implementation review. Its tests are listed above, plus the per-writer equality tests.
+2. **MEDIUM-3's progress rule**, with a test that a job warmed record by record across restarts
+   is never charged, and one that an attempt warming nothing is.
+3. **M2:** an indexed memo at `MAX_ACCOUNTED_RECORDS`, with pruning. Its tests are 15.5's.
+4. **15.5's traversal measurements**, on NTFS in release:
+   - the per-file cost;
+   - warm full scans of about 100, 1 000 and 4 000 mixed records.
+
+   They decide whether the regime boundaries above sit where this section says.
+5. **The H5 write-every-turn test**, in HIGH-1's three variants: a non-retained Studio document,
+   a source over 8 MiB, and a Recovery record over 64 KiB.
+6. **Step 3 itself**, then Flow R.
+
+#### Questions for the review
+
+1. Is the validator-at-write form acceptable on the Save and receive paths? Its worst case is
+   about 11 ms, for a maximal Intents ledger. The alternative is the writer-facts form for
+   Intents, which costs nothing but carries an equality obligation like Studio's.
+2. Is L6 stated per regime acceptable, with the touched-path cursor deferred to step 5?
+3. Is MEDIUM-3's rule, charged only when nothing cold was memoized, sound and bounded as argued?
+4. Does any of the seven writer sites warm bytes that are not, or were not, on disk? Each warm
+   follows its write's success, but `CommittedButNotDurable` is the edge.

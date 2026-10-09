@@ -2381,6 +2381,132 @@ and are marked accordingly; 13.7 is re-run in the next checkpoint rather than be
 arithmetic here. `a_well_resolved_batch_is_not_reported_as_unresolved` pins all three rules this
 predicate has had wrong in sequence: the raw-sum rule, the zero-median rule and the per-unit rule.
 
+## Design 18.3 bounded implementation review (2026-10-09, Opus, static): PASS WITH FINDINGS
+
+**No blocker, no high.** Three mediums and five lows. The review covered Agent 1's runtime
+boundary at `524315a7` against base `5a899c22`, and is checkpoint 1 of design 18.3 only. It is
+**not Gate 4 acceptance**, which stays with Agent 4, and Gate 5 stays closed. F1 to F3 had to be
+fixed or explicitly accepted before native Save registers.
+
+Per-item verdicts:
+- **PASS:** I-4 and its writer audit; C-3's storage half with the classifier and refused-result
+  memo; C-1 (closure preserved); C-4 (closure preserved).
+- **PASS WITH FINDINGS:** the runtime (Flows S and H as scheduled jobs, admission, scheduling,
+  commit seams, 9.1's no-restore commit).
+
+What the reviewer executed:
+- `check-store-raw-fs.sh` and `check-no-ambient.sh`: both passed.
+- Four baseline tests: passed.
+- Three hand mutations:
+  - M5a (turn cap disabled): detected;
+  - M5b (deadline disabled): detected;
+  - the priority predicate forced to `false`: **survived** (F2).
+
+Everything else, including the classifier's 14 mutations, was checked by inspection.
+
+| finding | what | disposition |
+|---|---|---|
+| F1 MEDIUM | S1a's exact-retry acknowledgement replayed the whole branch under custody (`overlay.read`) to return a projection no caller used | **fixed locally, `7af4fdca`, not pushed:** it edits four of Agent 2's files (below) |
+| F2 MEDIUM | N31 is not the accepted actor-level test, and `handoff_priority` is unpinned | **open.** Needs a receiver-level test in a file shared with Agent 2; asked |
+| F3 MEDIUM | H5's custody terms are understated, and bounded custody is not established | **measured, deviation recorded**; see "H5's repeated terms, priced" below |
+| F4 LOW | a Save captured while the receiver is paused strands admission, a pool slot and a media hold | **open.** The fix sits in Agent 2's Save entry point; two shapes offered to them |
+| F5 LOW | the refused-result memo tests never checked what the memo returned | **fixed, `e01113a5`** |
+| F6 LOW | the raw-fs gate's allowlist counted lines per file | **fixed, `c61a8560`** |
+| F7 LOW | "each check redundant by construction" was untrue at the link byte | **fixed, `7258b525`**, with a correction of the finding itself (below) |
+| F8 LOW | no executed evidence for design M1, M2 and M6, and no fixture for them | **fixed, `e5bb38ef`**, and M6's guard turned out to be unbuilt (below) |
+
+### F1: S1a acknowledges without rebuilding (local `7af4fdca`)
+
+`StudioOverlaySave` gains `Acknowledged { basis, accepted }`. Both fields are structural facts of
+the stored branch, and S1a returns them with no replay. Agent 2's Unconfirmed receiver maps the
+new variant to the `Saved { basis, accepted }` it already reported, so their outcome is unchanged.
+
+**Contract change, recorded:** an exact retry no longer returns `StudioOverlaySave::Local`. Seven
+tests asserted the retry's projection. They now take the acknowledgement and compare the stored
+draft, read back through `local_draft`, which checks the same property (the retry left the
+authored draft as it was) against what is on disk.
+
+The regression is `studio_overlay_store_exact_retry_rebuilds_no_draft`:
+- it counts draft rebuilds through a test-only counter in `local_draft`;
+- its control reads the draft and must move the counter;
+- it failed before the fix;
+- CI's overlay harness gains `retry-rebuild`, which puts the rebuild back beside the
+  acknowledgement, so only the counter can catch it. DETECTED locally.
+
+Held because it touches Agent 2's `receiver/unconfirmed.rs` (one match arm), two of their
+Unconfirmed Save test files and `studio/copy/tests.rs`. It is ordered last in the local line, so
+everything else ships without it. 13.5's 426 ms retry figure at depth 255 is now attributed: it
+was this replay.
+
+### F3: H5's repeated terms, priced
+
+The release stage profile now times one of each repeated H5 term on the commit before H5
+consumes it, and asserts that H4's carried bytes equal the candidate's encoding. Upper medians of
+5 trials, release, **on a host shared with two other agents' builds**:
+
+| shape | H5 commit | one snapshot encode | one `blob_cids` | one seed graph |
+|---|---|---|---|---|
+| Index, 1 op | 27 ms | < 1 ms | < 1 ms | 1 ms |
+| Index, 256 title ops | 83 ms | < 1 ms | 2 ms | < 1 ms |
+| Flipnote, 256 title ops | 82 ms | < 1 ms | 1 ms | < 1 ms |
+| Flipnote, 32 frames | 35 ms | < 1 ms | 1 ms | 1 ms |
+| Flipnote, 128 frames | 64 ms | < 1 ms | 4 ms | < 1 ms |
+
+"< 1 ms" means every one of the five samples read zero at the clock's millisecond resolution.
+
+What it settles:
+- **Reusing H4's snapshot bytes is not worth its boundary change.** Three encodes cost under a
+  millisecond together at every shape measured, and reuse would have the writer trust
+  caller-supplied snapshot bytes. **Deviation recorded:** H5 keeps re-encoding.
+- **The projections are the larger repeated term:** about 12 ms for three `blob_cids` at 128 frames.
+- **Most of H5's growth with branch length is neither.** 27 to 83 ms from 1 to 256 operations is
+  not encodes, projections or seed loads. What remains is unattributed: barrier 2's evidence
+  comparison, the Prepared and Completed intent-record encodes, and larger durable writes. The
+  1-op floor of about 25 ms is three durable writes with flushes.
+
+So the scan's share in C-3 runtime design 15.1 is 125 ms less about 85 ms at a full title branch.
+That is about 40 ms.
+
+### F7: the finding was right about the proof, not about the record
+
+Within the post-write proof, only the size-and-digest comparison sees the trailing link byte:
+- `check_studio_intent_link` accepts an unlinked record;
+- dropping the link leaves the snapshot hash unchanged.
+
+The new test lands the candidate's own plaintext with its link dropped, and H5 refuses at the
+proof. But removing the comparison does not let that record through. The encoding is canonical
+(a link is a trailing `1`), so a dropped link always shrinks the record, and resolve's flush-only
+fence checks the file length and refuses it later, as "retry file changed". So the CI entry
+`proof-digest` pins the refusal **to the proof**, the designed point that spends the budget before
+resolve reads anything. It does not pin the refusal itself.
+
+The earlier claim below, "the proof's digest and its field checks are each redundant with the
+others by construction", is corrected to: the digest overlaps the field checks except at the link
+byte.
+
+### F8: M1, M2 executed; M6's guard built, then executed
+
+- **M1 and M2** (the plan's currency check keeps only the size of the intent, then the source,
+  wrapper): `studio_overlay_handoff_plan_is_stale_after_a_same_size_wrapper_replacement` reseals
+  each record with one plaintext byte changed at the same size, between H2 and a signing turn. The
+  plan must stop being current. CI entries `plan-intent-digest` and `plan-source-digest`, both
+  DETECTED at "a stale plan reached a signing turn".
+- **M6's guard did not exist.** H1 captured whatever successor was installed, so a missing,
+  Faulted, replaced or already-edited successor was refused only by H2's
+  `check_overlay_successor`, detached, after the reconstruction the probe exists to spare, every
+  probe period. H1 now runs the header classification the eligibility view already uses
+  (`overlay_successor_hold_in_vault`: a bounded authenticated read, no restore) and refuses
+  before capture. H2's check stays authoritative.
+  - **Ordering:** the probe runs last, after the live authority mint, so every earlier refusal
+    keeps its own check and message. A first placement before the Index check broke
+    `..._old_owner_receipt_refuses_even_when_original_author_is_current`, because the probe
+    pre-empted the `verify_current_owner` refusal that test isolates.
+  - **Contract change, recorded:** a Prepared branch over a faulted source is now refused at H1
+    as "successor is not transferable: Fault", the reason the lifecycle row already gave, instead
+    of at H2 as "epoch does not accept operations".
+  - Pinned by `studio_overlay_handoff_h1_refuses_a_non_pristine_successor_before_capture`; CI
+    entry `successor-probe`, DETECTED at "H2 started for a non-pristine successor".
+
 ## Design 9.1, no graph restore on the commit path, built (2026-10-08)
 
 This builds 9.1 as its implementation plan, 9.1.1 revision 2, specifies. That plan's design review
@@ -2457,9 +2583,12 @@ Four of them are now CI entries in `check-studio-handoff-mutations.py`, each DET
 
 **Two things no mutation can show, and why:**
 
-- **The proof's digest and its field checks are each redundant with the others by construction.**
-  The plaintext is scope, channel, snapshot and link, each checked. So removing any one check is
-  undetectable, and M17 is the whole re-read removed.
+- **The proof's digest overlaps its field checks, except at the link byte** (corrected after the
+  design 18.3 review, F7; this said "each redundant with the others by construction"). The
+  plaintext is scope, channel, snapshot and link. The field checks see the first three, but the
+  link check accepts an unlinked record, so a dropped link is seen only by the size-and-digest
+  comparison, and later by resolve's flush-only length fence. `proof-digest` now pins it. M17
+  remains the whole re-read removed.
 - **The facts-to-stamp equality cannot be reached from the tests.** `HandoffFacts`' fields are
   private to the capture module, and in normal flows they always agree.
 
@@ -2548,7 +2677,8 @@ What it already says:
 - **These sources are small.** At most 0.2 MB of title-only history, and no frames.
 
 So the release run must add a frame-heavy source, and an Index with many PutObjects, before C-3
-15.7 can price what remains of the 125 ms share.
+15.7 can price what remains of the 125 ms share. **Done 2026-10-09, in release:** see "H5's
+repeated terms, priced" under the design 18.3 review, and the full table below.
 
 ## Fix: the Studio header readers refused repaired records (2026-10-08)
 
@@ -5294,7 +5424,8 @@ makes that more important, not less.
      `6a79e6f8`.
    - **Step 3, and Flow R after it, need more than the classifier** (C-3 runtime 15.7). In order:
      - design 9.1 built, so H5 commits without a graph restore;
-     - the commit phase measured on its own;
+     - the commit phase measured on its own: **done 2026-10-09** (release, shared host), about
+       85 ms at a full branch, leaving about 40 ms of the 125 ms share for the scan;
      - an all-family memo with writer warms;
      - an indexed, pruned memo;
      - traversal measurements, or a touched-path cursor;
@@ -5325,8 +5456,13 @@ makes that more important, not less.
    land" clause is an integration alternative, not an opt-out from a deployed cursor's discipline.
 7. Keep native Save unregistered and out of FLIPNOTE-UI-HOOKS until Agent 2's manual lifecycle
    passes its own review and their status note says so. Agent 2's P5 is still false.
-8. Do not send the design 18.3 implementation review until the scope it names has real evidence. A
-   partial branch is not a checkpoint.
+8. **Design 18.3's implementation review is back** (2026-10-09): a bounded PASS WITH FINDINGS, no
+   blocker or high. See its section above. Still open, and both needing files Agent 2 works in:
+   - **F2:** the actor-level N31, plus a mutation entry for `handoff_priority`;
+   - **F4:** pause stranding a queued Save capture.
+
+   F1 is fixed locally and waits on the same files. Native Save must not register until F2 and
+   F4 are closed, besides Agent 2's P5.
 9. **Reconcile the landed archive code with its review status.** This item was stale and is
    rewritten. At this head `epoch_draft_archive.rs` already contains
    `write_studio_draft_archive_with_io`, `release_studio_draft_archive_with_io` and
