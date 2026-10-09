@@ -2457,6 +2457,15 @@ Everything else, including the classifier's 14 mutations, was checked by inspect
 the stored branch, and S1a returns them with no replay. Agent 2's Unconfirmed receiver maps the
 new variant to the `Saved { basis, accepted }` it already reported, so their outcome is unchanged.
 
+**Who could notice (checked 2026-10-09, at Agent 2's request).** No production code receives a
+retry's outcome expecting a draft:
+- the Tauri workspace and `bins` never name `StudioOverlaySave`;
+- `Server::save_studio_closing_overlay` has no caller outside tests;
+- the Closing receiver's `save_overlay` has none at all.
+
+When native Save registers, its Closing result must map `Acknowledged`, as Agent 2's Unconfirmed
+result already does. That is with Agent 4.
+
 **Contract change, recorded:** an exact retry no longer returns `StudioOverlaySave::Local`. Seven
 tests asserted the retry's projection. They now take the acknowledgement and compare the stored
 draft, read back through `local_draft`, which checks the same property (the retry left the
