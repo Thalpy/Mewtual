@@ -79,7 +79,17 @@ pub(super) fn fixture(
     store: &mut ServerStore,
     count: usize,
 ) -> ([u8; 32], StudioProjection) {
-    let (close, basis) = closing(f, store);
+    let closed = closing(f, store);
+    fixture_after(f, store, count, closed)
+}
+
+/// [`fixture`] over a Closing source the caller has already built.
+fn fixture_after(
+    f: &Fixture,
+    store: &mut ServerStore,
+    count: usize,
+    (close, basis): (CloseRecord, StudioClosingOverlayBasis),
+) -> ([u8; 32], StudioProjection) {
     let mut state = store.load_epoch_intents(SERVER, &f.logical).unwrap();
     let mut prefix = Vec::new();
     let mut records = Vec::new();
@@ -512,6 +522,86 @@ fn index_branch(f: &Fixture, store: &mut ServerStore, objects: usize) -> [u8; 32
     basis.fingerprint()
 }
 
+/// A published PIX distinct for every `n` below 65 536: [`published_pix`] varies one palette byte,
+/// which gives only 256 distinct blobs, and a base of up to 998 frames needs more.
+fn published_pix_wide(store: &ServerStore, f: &Fixture, n: u16) -> ([u8; 32], u64) {
+    let mut bytes = pix();
+    let [high, low] = n.to_be_bytes();
+    bytes[8] = low; // palette entry 1, red
+    bytes[9] = high; // palette entry 1, green
+    crate::creative::validate_pix(&bytes).expect("a varied palette is still a valid PIX");
+    let mut blobs = store.blob_store(&hex::encode(f.group.group_id())).unwrap();
+    let cid = blobs.put(&bytes).unwrap();
+    (*cid.as_bytes(), bytes.len() as u64)
+}
+
+/// A Closing Flipnote whose closed epoch already holds `frames` frames after the fixture's base
+/// frame, each naming its own blob, so the successor's seed holds them all.
+///
+/// C-3 runtime 15.9 HIGH-1: H5's projections walk the **whole** source (the projection, the seed's
+/// CIDs and every signed operation), so the commit must be priced against the source as well as
+/// against the branch. Every other shape here starts from a one-frame source. A Flipnote holds at
+/// most `FLIPNOTE_MAX_FRAMES` (999), and the fixture's own frame is one of them.
+fn closing_with_frames(
+    f: &Fixture,
+    store: &mut ServerStore,
+    frames: usize,
+) -> (CloseRecord, StudioClosingOverlayBasis) {
+    assert!(frames < catcoms_replication::studio::FLIPNOTE_MAX_FRAMES);
+    eligible(f, store);
+    let mut after = [1u8; 16];
+    for n in 0..frames {
+        let (cid, bytes) = published_pix_wide(store, f, n as u16);
+        let frame = (n as u128 + 20_000).to_be_bytes();
+        let mut op = f.domain(
+            FlipnoteOp::InsertFrame {
+                frame,
+                after: Some(after),
+                cid,
+                bytes,
+            }
+            .encode()
+            .unwrap(),
+            0,
+        );
+        op.nonce = (n as u128 + 30_000).to_be_bytes();
+        let mut b = budget(store, f);
+        f.edit(store, &mut b, op);
+        after = frame;
+    }
+    seal_source(f, store)
+}
+
+/// The source axis: a short and a full title branch over Flipnotes whose base already holds 256,
+/// 512 and 998 frames (C-3 runtime 15.9's order of work, item 1).
+fn source_stages() {
+    for base in [
+        256,
+        512,
+        catcoms_replication::studio::FLIPNOTE_MAX_FRAMES - 1,
+    ] {
+        for ops in [1, catcoms_replication::studio::MAX_STUDIO_OVERLAY_OPS] {
+            let mut samples: [Vec<u64>; 9] = Default::default();
+            let mut source_bytes = 0;
+            for _ in 0..STAGE_TRIALS {
+                let root = tempfile::tempdir().unwrap();
+                let f = Fixture::new(true);
+                let mut store = open(root.path());
+                let closed = closing_with_frames(&f, &mut store, base);
+                let (basis, _) = fixture_after(&f, &mut store, ops, closed);
+                time_stages(&f, &mut store, basis, ops, &mut samples);
+                source_bytes = fs::metadata(f.path(&store)).unwrap().len();
+            }
+            report_stages(
+                &format!("flipnote_base_{base}_frames"),
+                ops,
+                source_bytes,
+                samples,
+            );
+        }
+    }
+}
+
 /// The shapes C-3 runtime design 15.7's step 2 asks for beyond title-only branches: frame
 /// insertions up to a full branch, and an Index branch at its object ceiling.
 fn heavy_stages() {
@@ -566,7 +656,31 @@ fn studio_overlay_handoff_stage_profile_fixtures_hand_off() {
     let mut store = open(root.path());
     let basis = index_branch(&f, &mut store, 2);
     time_stages(&f, &mut store, basis, 2, &mut samples);
-    assert!(samples.iter().all(|s| s.len() == 2));
+    let root = tempfile::tempdir().unwrap();
+    let f = Fixture::new(true);
+    let mut store = open(root.path());
+    let closed = closing_with_frames(&f, &mut store, 4);
+    let (basis, _) = fixture_after(&f, &mut store, 2, closed);
+    time_stages(&f, &mut store, basis, 2, &mut samples);
+    let StudioProjection::Flipnote(successor) = f.load(&store).unwrap().projection().unwrap()
+    else {
+        panic!("a Flipnote fixture produced another projection");
+    };
+    assert_eq!(
+        successor.timeline.len(),
+        5,
+        "the successor does not hold the base's four frames and the fixture's own"
+    );
+    assert!(samples.iter().all(|s| s.len() == 3));
+}
+
+/// Opt-in, real clock, release: H1 to H5 against the **source's** size, not only the branch's
+/// (C-3 runtime 15.9's order of work, item 1). Separate from the stage profile, which already
+/// takes about 50 minutes; building a 998-frame base costs as many Open-epoch edits.
+#[test]
+#[ignore = "opt-in custody measurement, not a latency acceptance test"]
+fn profile_studio_overlay_handoff_source_axis() {
+    source_stages();
 }
 
 #[test]
