@@ -492,9 +492,19 @@ fn replace_at_the_same_size(store: &ServerStore, path: &Path) {
 /// guard until the review of these fixes found it (M-1). What the comparisons add is that nothing
 /// is signed first, which the gate assertion observes: `studio_handoff_plan_is_current` is the
 /// receiver's gate before every signing slice. The second half drives the stale plan through H5
-/// anyway and requires the changed record to survive untouched. CI's handoff harness
-/// (`plan-intent-digest`, `plan-source-digest`) keeps only the size in each comparison and
-/// requires this test to fail at the gate.
+/// anyway and requires the changed record to survive untouched.
+///
+/// **For the intent, the gate is asserted last, after H5,** so that one CI entry pins both
+/// guards. `plan-intent-digest` reduces the shared comparison to size, which disables H5's own
+/// currency check as well as the gate. Then:
+/// - with step 6 present, H5 still refuses, and the test fails at the gate's assertion, which is
+///   the one the entry names;
+/// - with step 6 removed, it fails earlier, at "H5 committed a plan whose intent record changed",
+///   which the harness rejects as the wrong assertion.
+///
+/// For the source the gate stays first, because without its comparison barrier 1 writes Prepared
+/// before barrier 2's capability refuses. `plan-source-digest` is the other entry; it fails at the
+/// gate (re-review of these fixes, MEDIUM-1).
 #[test]
 fn studio_overlay_handoff_plan_is_stale_after_a_same_size_wrapper_replacement() {
     for intent in [true, false] {
@@ -538,16 +548,18 @@ fn studio_overlay_handoff_plan_is_stale_after_a_same_size_wrapper_replacement() 
         // is about H5's checks rather than the inventory's.
         let mut b = budget(&mut store, &f);
         replace_at_the_same_size(&store, &path);
-        assert!(
-            !store
-                .studio_handoff_plan_is_current(&f.group, &f.device, Some(0), &plan)
-                .unwrap(),
-            "a stale plan reached a signing turn: the {which} wrapper changed at the same size"
-        );
+        // Observed now, before any signing; asserted now for the source, after H5 for the intent.
+        let gate_refused = !store
+            .studio_handoff_plan_is_current(&f.group, &f.device, Some(0), &plan)
+            .unwrap();
+        let gate =
+            "a stale plan reached a signing turn: the {which} wrapper changed at the same size";
+        if !intent {
+            assert!(gate_refused, "{}", gate.replace("{which}", which));
+        }
 
         // The durable half: the stale plan is signed and assembled anyway, as if the gate had let
-        // it through, and H5 must still refuse with nothing written. Under the `plan-intent-digest`
-        // mutant this is what H5's step 6 catches on its own, against the captured stamp.
+        // it through, and H5 must still refuse with nothing written.
         let replaced = fs::read(&path).unwrap();
         assert!(plan
             .sign_slice(&f.device, &f.group, 0, false, usize::MAX, None)
@@ -569,6 +581,9 @@ fn studio_overlay_handoff_plan_is_stale_after_a_same_size_wrapper_replacement() 
             committed.is_err(),
             "H5 committed a plan whose {which} record changed at the same size"
         );
+        // For the intent this byte comparison is the durable check: Prepared would replace the
+        // record. The Prepared check below is vacuous there, since the replaced record does not
+        // decode, and it is meaningful for the source.
         assert_eq!(
             fs::read(&path).unwrap(),
             replaced,
@@ -581,6 +596,9 @@ fn studio_overlay_handoff_plan_is_stale_after_a_same_size_wrapper_replacement() 
                 .unwrap_or(false),
             "H5 wrote Prepared over the changed {which} record"
         );
+        if intent {
+            assert!(gate_refused, "{}", gate.replace("{which}", which));
+        }
     }
 }
 

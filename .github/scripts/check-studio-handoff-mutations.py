@@ -106,7 +106,10 @@ MUTATIONS = [
      "refused by something other than the post-write proof"),
     # Design M1 and M2 (design 18.3 review, F8): the plan's currency check keeps only the size of
     # the intent, then of the source wrapper. Redundant by design with H5, so the observation is
-    # the early one the design names: a stale plan would reach a signing turn.
+    # the early one the design names: a stale plan would reach a signing turn. For the intent the
+    # test asserts that gate only after driving the plan through H5, so this entry also pins H5's
+    # step 6: with step 6 removed as well, the test fails earlier, at "H5 committed a plan", and
+    # this entry reports the wrong assertion (verified 2026-10-09).
     ("plan-intent-digest", "crates/catcoms-app/src/store/epoch_studio/handoff_capture.rs",
      "if (blake3::hash(&intent.plain), intent.physical_bytes) != stamp.intent {",
      "if intent.physical_bytes != stamp.intent.1 {",

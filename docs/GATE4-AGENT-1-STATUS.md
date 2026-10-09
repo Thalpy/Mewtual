@@ -2406,7 +2406,7 @@ Everything else, including the classifier's 14 mutations, was checked by inspect
 
 | finding | what | disposition |
 |---|---|---|
-| F1 MEDIUM | S1a's exact-retry acknowledgement replayed the whole branch under custody (`overlay.read`) to return a projection no caller used | **fixed locally, not pushed:** the last commit of the local line, since it edits four of Agent 2's files (below). Its SHA changes whenever that line is rebased, so it is not cited here |
+| F1 MEDIUM | S1a's exact-retry acknowledgement replayed the whole branch under custody (`overlay.read`) to return a projection no caller used | **fixed locally, not pushed:** the last two commits of the local line, the change and its review follow-up, since they edit four of Agent 2's files (below). Their SHAs change whenever that line is rebased, so they are not cited here |
 | F2 MEDIUM | N31 is not the accepted actor-level test, and `handoff_priority` is unpinned | **open.** Needs a receiver-level test in a file shared with Agent 2; asked |
 | F3 MEDIUM | H5's custody terms are understated, and bounded custody is not established | **measured, deviation recorded**; see "H5's repeated terms, priced" below |
 | F4 LOW | a Save captured while the receiver is paused strands admission, a pool slot and a media hold | **open.** The fix sits in Agent 2's Save entry point; two shapes offered to them |
@@ -2532,6 +2532,11 @@ byte.
       pre-empted the `verify_current_owner` refusal that test isolates.
     - A second, after the Index check, made a non-pristine Index successor pay that check's
       restores every probe period (review LOW-1, below).
+    - The move also put the Index object check after the authority mint. So an Index branch
+      with both a missing object and a stale receipt now refuses at the mint instead of with
+      "unavailable Flipnote", which the eligibility row reports. That affects diagnostics only:
+      no test depends on it, and the receiver discards H1's error. It also means a device with
+      stale authority no longer pays for the restores.
   - **Contract change, recorded:** a Prepared branch over a faulted source is now refused at H1
     as "successor is not transferable: Fault", the reason the lifecycle row already gave, instead
     of at H2 as "epoch does not accept operations".
@@ -2555,7 +2560,7 @@ two mediums and five lows.
 | M-1 MEDIUM: M1 was the only guard, since H5's step 6 compared its own two reads | **fixed, `505b3a24`** (below) |
 | M-2 MEDIUM: F1's rebuild counter misses a direct `StudioOverlay::read` and the full intent decode's replay | **open, in F1's held commit**; F1 waits on Agent 2 anyway |
 | LOW-1: the probe ran after the Index check's restores | **fixed, `505b3a24`**: the probe now precedes it, and a new test counts zero restores |
-| LOW-2: `INTERFACES.md` and `HANDOVER.md` still describe a retry returning the draft | **open, with F1**: they change in the same commit as the contract |
+| LOW-2: `INTERFACES.md` and `HANDOVER.md` still describe a retry returning the draft | **open, with F1**: they change in F1's held follow-up commit, so they ship with the contract |
 | LOW-3: STATUS and doc-comment truthfulness | **fixed here**, except the stale test name in F1's own doc comment, which goes with F1 |
 | LOW-4: test level differs from the design (M6 and M1/M2 are store-level, not actor-level) | **recorded** below; the M6 test now requires `SuccessorNotPristine` |
 | LOW-5: the raw-fs gate keyed only the matched line of an open chain | **fixed, `505b3a24`**: the open flags that change a file are matched too |
@@ -2569,17 +2574,44 @@ two mediums and five lows.
 - **The regression:** `studio_overlay_handoff_plan_is_stale_after_a_same_size_wrapper_replacement`
   now also drives the stale plan through signing, assembly and H5, and requires the changed record
   to survive with no Prepared.
-- **Executed both ways:**
-  - with the M1 mutant and the fix, it passes, because step 6 refuses alone;
-  - with the M1 mutant and the old step 6, it fails at "H5 committed a plan whose intent record
+- **Executed both ways, at first only by hand.** The two runs made at `505b3a24` both had the
+  test's gate assertion temporarily disabled:
+  - with the M1 mutant and the fix, the test passed, because step 6 refused alone;
+  - with the M1 mutant and the old step 6, it failed at "H5 committed a plan whose intent record
     changed at the same size".
-- **What this means for M1:** it is now redundant as the design says. So its CI entry observes
-  the early refusal, which is all a redundant guard can show.
+
+  As committed there, the gate assertion came first, so neither CI nor any test could notice step
+  6 being removed. The re-review of these fixes found that (MEDIUM-1). The committed test now
+  asserts the intent's gate **last**, after H5, so the CI entry `plan-intent-digest` itself pins
+  both guards:
+  - DETECTED at the gate's assertion with step 6 present;
+  - "did not fail at its intended assertion" with step 6 also removed, since the test then fails
+    at "H5 committed a plan".
+
+  Both were executed through the harness on 2026-10-09.
+- **What this means for M1:** it is now redundant as the design says. Its entry observes the early
+  refusal, and through the reordered test it also guards step 6.
 
 **LOW-4, recorded rather than closed.** Three of these tests sit below the level the design names:
 - M6's evidence is store-level: a `Captured` start is what the receiver schedules H2 from.
 - M1 and M2 observe the H3 gate's return value, not a counted signing turn.
 - Both are the same class as F2: actor-level N31 coverage needs the receiver.
+
+**Re-review of those fixes (2026-10-09, Opus, static plus `cargo tree`): no blocker or high.**
+- **Confirmed sound:**
+  - step 6's placement: nothing can bypass it, and it changes no legitimate outcome;
+  - the probe move;
+  - the `test-counters` feature's hygiene: it is absent from every non-test build, catcomsctl
+    and the src-tauri workspace included, and `Cargo.lock` and `cargo deny` are unaffected;
+  - every harness anchor and mutant.
+- **MEDIUM-1:** step 6 had no automatic regression, and these notes overstated the evidence.
+  **Fixed,** as described under M-1 above.
+- **LOW-1:** the Index check's move was unrecorded. **Recorded** under F8's ordering.
+- **LOW-2:** documentation nits. Fixed here; the `INTERFACES.md` placement goes with F1.
+- **Residual risks, as it lists them:**
+  - a reconstruction moved onto another thread would escape the thread-local counter;
+  - seed-only graph loads are not counted;
+  - the raw-fs gate cannot see open flags passed as variables.
 
 ## Design 9.1, no graph restore on the commit path, built (2026-10-08)
 
