@@ -10,6 +10,7 @@ mod catchup;
 #[cfg(test)]
 pub(crate) use catchup::PreviewHarness;
 mod handoff;
+mod inventory;
 mod replay;
 mod unconfirmed;
 pub(crate) use catchup::{HandoffCompletion, StudioBackgroundJob, StudioBackgroundResult};
@@ -27,6 +28,8 @@ pub(crate) struct StudioReceiver {
     replay: replay::ReplayRuntime,
     replay_turn: bool,
     handoff: handoff::HandoffRuntime,
+    /// C-3's one shared, turn-based inventory job for background owners (C-3 runtime design 2.2).
+    inventory: inventory::InventoryRuntime,
     /// Which Unconfirmed Save request scheduled the plan now parked, if one did (design 8.7). A plan
     /// does not record its request, and the overlay slot holds one plan for a target whichever
     /// request made it. So a later visit must know whether that plan is its own before reporting
@@ -86,6 +89,9 @@ fn overlay_request_fingerprint(
 impl StudioReceiver {
     pub(crate) fn clear_previews(&mut self) {
         self.catchup.preview.reset();
+        // The UI-lock reset: a parked inventory body is authenticated plaintext, and no visit
+        // runs while locked, so it must not stay resident (C-3 runtime design 4, review M6).
+        self.inventory.release();
     }
 
     /// Scheduled local Save (Flow S), under the actor's custody lease.
@@ -430,7 +436,10 @@ impl StudioReceiver {
         }
         self.replay_turn = !self.replay_turn;
         if self.replay_turn {
-            if let Some(saved) = self.replay_step(server, store, id)? {
+            // One inventory slice per visit, from this visit's one clock sample (C-3 S-3): what
+            // the H-stages above spent comes out of replay's share rather than adding to it.
+            let deadline = handoff_now.saturating_add(inventory::INVENTORY_SLICE_MS);
+            if let Some(saved) = self.replay_step(server, store, id, deadline)? {
                 return Ok(saved);
             }
         }
@@ -532,6 +541,9 @@ impl StudioReceiver {
                 // never schedules that visit, so the thirty-second bound the code claims is not
                 // a bound at all: four such actors strand the whole pool indefinitely.
                 || self.catchup.registry_expiry_due(now)
+                // A parked inventory body holds a pool permit and plaintext until a visit detaches
+                // it. Only that: the job's other states wait on an owner's own paced turn.
+                || self.inventory.pending()
                 || self.catchup.pending(server, &self.watches)))
             // A parked Save plan past its deadline (design 8.7), outside the pause gate: a paused
             // receiver must still release the admission and process-wide permit a plan holds,
@@ -619,6 +631,9 @@ impl StudioReceiver {
         self.pause_notice = true;
         self.handoff
             .release_if_stalled(server.runtime_clock().monotonic_ms());
+        // A paused receiver runs no turn, so a held inventory job and its plaintext are released
+        // now rather than left resident for the whole pause.
+        self.inventory.release();
     }
     pub(crate) fn take_pause_notice(&mut self) -> bool {
         std::mem::take(&mut self.pause_notice)
@@ -677,6 +692,22 @@ impl StudioReceiver {
         id: u64,
         request: Option<StudioRequest>,
     ) -> Result<(StudioSavedTransaction, Option<StudioTarget>), AppError> {
+        // C-3 N-M1: compare the vault's inventory token with how the last visit left it before
+        // anything here can write, and mark how this one leaves it on every exit, so the next
+        // visit can tell this actor's writes from anyone else's.
+        self.inventory.begin_visit(store);
+        let result = self.run_visit(server, store, id, request);
+        self.inventory.end_visit(store);
+        result
+    }
+
+    fn run_visit<T: MeshTransport + 'static, R: CryptoRngCore>(
+        &mut self,
+        server: &mut Server<T, R>,
+        store: &mut ServerStore,
+        id: u64,
+        request: Option<StudioRequest>,
+    ) -> Result<(StudioSavedTransaction, Option<StudioTarget>), AppError> {
         // A background pass may not reinterpret existing watches under a different vault or
         // numeric server, including lifecycle snapshot writes. Explicit access rebinds them.
         if request.is_none()
@@ -691,6 +722,8 @@ impl StudioReceiver {
             return Err(invalid("Studio receive mount or numeric server changed"));
         }
         self.catchup.lifecycle(server, store, id);
+        self.inventory
+            .lifecycle(store, id, server.runtime_clock().monotonic_ms());
         // A parked Save plan whose caller never came back holds this actor's admission and a
         // process-wide preparation permit; only a Save visit consumes it. Bounded like the
         // retained Registry source, and its request forgotten with it (design 8.7).

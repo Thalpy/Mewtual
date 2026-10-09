@@ -126,6 +126,9 @@ pub(crate) enum StudioBackgroundJob<T: MeshTransport> {
     HandoffPrepare(Box<StudioHandoffCapture>, OverlayOwnership, OverlayContext),
     /// Flow H, stage H4: `finish`, `complete`, snapshot and the record encodings.
     HandoffAssemble(Box<StudioHandoffPlan>, OverlayOwnership, OverlayContext),
+    /// C-3: the shared inventory job's parked record body, validated off custody. The permit
+    /// moves into the blocking closure, so a cancelled waiter cannot release it early.
+    InventoryValidate(super::inventory::InventoryDetach),
 }
 
 /// A finished Flow H detached stage, tagged with the `HandoffJob::token` it was detached for.
@@ -162,6 +165,14 @@ pub(crate) enum StudioBackgroundResult {
     /// only; there is nothing to release here. That is I-2, and 7.1's first bullet.
     CancelledOverlay,
     CancelledRegistry(Option<Arc<()>>),
+    /// The shared inventory job's validation result, routed by its token.
+    InventoryValidated(
+        u64,
+        Box<Result<crate::store::ValidatedEpochRecord, AppError>>,
+    ),
+    /// That validation's waiter was cancelled. Its own variant, so it cannot fall into the
+    /// default arm, which would tear down an unrelated catch-up pass (C-3 review H3).
+    InventoryCancelled(u64),
     Cancelled {
         preparation: Option<PreparationContext>,
     },
@@ -221,6 +232,7 @@ impl<T: MeshTransport + 'static> StudioBackgroundJob<T> {
             Self::OverlayPlan(..) => "overlay-plan",
             Self::HandoffPrepare(..) => "handoff-prepare",
             Self::HandoffAssemble(..) => "handoff-assemble",
+            Self::InventoryValidate(..) => "inventory-validate",
         }
     }
 
@@ -251,6 +263,9 @@ impl<T: MeshTransport + 'static> StudioBackgroundJob<T> {
             Self::HandoffPrepare(_, _, context) | Self::HandoffAssemble(_, _, context) => {
                 StudioBackgroundResult::Handoff(HandoffCompletion::Cancelled(context.token))
             }
+            Self::InventoryValidate(detach) => {
+                StudioBackgroundResult::InventoryCancelled(detach.token)
+            }
             _ => StudioBackgroundResult::Cancelled { preparation: None },
         };
         let work = async move {
@@ -273,6 +288,24 @@ impl<T: MeshTransport + 'static> StudioBackgroundJob<T> {
                 }
                 Self::Page(attempt) => {
                     StudioBackgroundResult::Page(Box::new(attempt.fetch().await))
+                }
+                Self::InventoryValidate(super::inventory::InventoryDetach {
+                    body,
+                    permit,
+                    token,
+                }) => {
+                    let result = tokio::task::spawn_blocking(move || {
+                        let validated = (*body).validate();
+                        drop(permit);
+                        validated
+                    })
+                    .await;
+                    StudioBackgroundResult::InventoryValidated(
+                        token,
+                        Box::new(result.unwrap_or_else(|_| {
+                            Err(invalid("Studio inventory validation worker failed"))
+                        })),
+                    )
                 }
                 Self::Prepare(capture, permit, context) => {
                     let result = tokio::task::spawn_blocking(move || {
@@ -803,7 +836,7 @@ impl CatchupRuntime {
         self.preparation_pool()
     }
 
-    fn preparation_pool(&self) -> Arc<tokio::sync::Semaphore> {
+    pub(super) fn preparation_pool(&self) -> Arc<tokio::sync::Semaphore> {
         #[cfg(test)]
         if let Some(pool) = &self.overlay_pool {
             return pool.clone();
@@ -911,6 +944,17 @@ impl CatchupRuntime {
         let pool = Arc::new(tokio::sync::Semaphore::new(permits));
         self.overlay_pool = Some(pool.clone());
         pool
+    }
+
+    /// Mark a network pass in flight without one, for a test of `detach`'s ordering against the
+    /// flag (C-3 step 2: a parked inventory body must not wait behind it).
+    #[cfg(test)]
+    pub(super) fn set_in_flight_for_test(&mut self, in_flight: bool) {
+        self.in_flight = in_flight;
+    }
+    #[cfg(test)]
+    pub(super) fn in_flight_for_test(&self) -> bool {
+        self.in_flight
     }
 
     /// Exactly what `complete` does for a cancelled overlay waiter, without needing a Server.
@@ -1237,6 +1281,11 @@ impl StudioReceiver {
             Some(StudioBackgroundJob::Prepare(capture, permit, context))
         } else if let Some((job, generation)) = self.catchup.registry_preparation.take() {
             Some(StudioBackgroundJob::PrepareRegistry(job, generation))
+        } else if let Some(detach) = self.inventory.take_detach() {
+            // C-3 runtime design 4: after source and Registry preparation and before the
+            // `in_flight` check, so a network pass in flight cannot strand a parked body (which
+            // holds a pool permit and authenticated plaintext) behind it.
+            Some(StudioBackgroundJob::InventoryValidate(detach))
         } else if self.catchup.in_flight
             || (self.catchup.discovery_plan.is_some()
                 && server.runtime_clock().monotonic_ms() < self.catchup.checkpoint_retry)
@@ -1352,6 +1401,8 @@ impl StudioReceiver {
             Some(
                 StudioBackgroundJob::HandoffPrepare(..) | StudioBackgroundJob::HandoffAssemble(..),
             ) => {}
+            // The inventory runtime moved itself to `Validating` when it produced this job.
+            Some(StudioBackgroundJob::InventoryValidate(..)) => {}
             Some(StudioBackgroundJob::Page(..) | StudioBackgroundJob::RegistryPage(..)) => {
                 self.catchup.in_flight = true
             }
@@ -1368,6 +1419,10 @@ impl StudioReceiver {
         result: StudioBackgroundResult,
     ) {
         match result {
+            StudioBackgroundResult::InventoryValidated(token, result) => {
+                self.inventory.complete(token, result)
+            }
+            StudioBackgroundResult::InventoryCancelled(token) => self.inventory.cancelled(token),
             StudioBackgroundResult::Preview(generation, completed) => {
                 if matches!(
                     completed,

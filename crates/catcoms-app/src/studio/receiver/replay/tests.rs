@@ -40,6 +40,7 @@ fn replay_pending_requires_its_own_current_watch_not_another_healthy_watch() {
         order: VecDeque::new(),
         manual: BTreeSet::new(),
         history_ids: vec![],
+        inventory_since: None,
     });
     assert!(receiver.replay.pending(&receiver.watches, 1000, |w| server
         .sync
