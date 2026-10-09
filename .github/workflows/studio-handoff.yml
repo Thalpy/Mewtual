@@ -43,7 +43,10 @@ jobs:
           if-no-files-found: ignore
   handoff:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    # About 16 minutes of tests, then 18 mutants and their restored regressions, about 55 in all
+    # on 2026-10-09. 45 was enough only while a broken entry stopped the harness early (from
+    # 17dd54fc until 528f0d2e); with every entry running, that run was cancelled in its last phase.
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.89.0
