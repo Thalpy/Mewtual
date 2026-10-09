@@ -309,6 +309,13 @@ table with the commit that closed it.
   - **What a member can do:** fill a shared Flipnote to the frame cap. The draft is the
     handing-off device's own, and a device hands off only documents it drafted on, so this buys
     at most one such pause per draft, with no amplification.
+- **An interrupted handoff is resolved off custody (Flow R, design 6.4.2).** The source restore
+  that used to run under custody, twice when the source was cold, now runs on a worker, and the
+  commit performs exactly the synchronous resolver's writes behind a stamp.
+  - **What a member can do:** send operations to the document while it is Prepared. That changes
+    its source under the stamp, and the commit then falls back to the synchronous resolver in the
+    same visit. That is exactly the pre-Flow R cost, once, and the resolution completes there, so
+    it cannot be repeated to hold the record Prepared.
 - **A budgeted scan holds custody for a bounded validation only, and a memoized validation is
   reused only for identical bytes.** Under a deadline, `validation_fits` admits a fresh validation
   inline only in accounting mode, and only for four families:

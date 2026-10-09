@@ -2462,6 +2462,79 @@ foundation" workflow's `lifecycle-mutations` job has been cancelled at its 60-mi
 every push back to at least `83328240`. That harness is shared with Agent 2, so splitting it
 across jobs is a decision for both of us; it is listed in next actions.
 
+## Flow R: the staged resolution of an interrupted handoff, built (2026-10-09)
+
+**What it is.** A Prepared record is what an interrupted H5 leaves. The H1 probe used to resolve
+it synchronously, restoring the source under custody, twice when the source was cold (the
+inventory scan's inline validation, then the resolver's own restore). Flow R resolves it in three
+stages, so no restore runs on the actor:
+- **R1, custody:** two bounded reads, the stamp, and a framing-only Hold exit. No inventory.
+- **R2, detached:** the restore, the evidence, the next state, and the source's inventory
+  validation.
+- **R3, custody:** the inventory is warmed with R2's validation, then R3 checks the stamp and
+  performs the resolver's own writes.
+
+The fences keep the synchronous resolver. Design 6.4.2 is the design; 6.4.3 and 6.4.4 are its two
+reviews.
+
+**The design's path:**
+- **Revision 1:** two highs.
+  - **HIGH-1:** inbound writes to a Prepared destination defeat the source stamp. R3 now falls
+    back to the synchronous resolver in the same visit.
+  - **HIGH-2:** the synchronous inventory restores a cold source. R1 now takes no inventory, and
+    R3 warms the cache with R2's validation.
+- **Revision 2:** one medium. A stale cached version refused the warm install, so R1 now evicts
+  it.
+
+**Equivalence is what is tested.** Every resolving test compares the result with a copy of the
+same vault resolved by the synchronous resolver: by every record's bytes, and by the intents
+record's authenticated plaintext, which `canonical()` omits. The cases:
+- Index and Flipnote, Complete and Absent;
+- a received operation landing between R2 and R3;
+- interruption at each of R3's writes.
+
+**Where the restores went, counted:**
+- **The counters:** `studio_full_restores_for_test`, and a new per-record count of the
+  inventory's inline Studio validations. The second is needed because a scan's inline validation
+  is a full restore the first cannot see.
+- **The results:** neither moves across R1 or R3, from a cold vault or from a stale cache, or
+  across every custody turn of the scheduled route at receiver level.
+
+**A pre-existing hazard the receiver tests found, fixed.** Catch-up's owner rotation asked
+`studio_owner_rotation_needed` about every watched target. That reads through the read-only
+service path, which refuses a Prepared destination, and the refusal escaped and paused all of
+receive:
+- **before Flow R:** reachable whenever a Prepared record outlived the probe, such as a Hold in
+  backoff;
+- **with Flow R:** routine.
+
+Owner rotation now skips a Prepared target for that turn. A read fault still surfaces as before.
+
+**Tests:** ten at store level and four at receiver level. The receiver-level route test forgets the
+inventory cache and the retained source graph, as a restart does, and runs on a one-permit pool.
+Otherwise catch-up re-warms the source itself and the warm install goes untested; the first
+draft's mutant survived for exactly that reason.
+
+**CI:** `check-studio-resolution-mutations.py` has 13 entries, in a new `resolution` job, all
+DETECTED and PASS restored under `RUSTFLAGS='-D warnings'`. They cover:
+- R3's intent comparison, as a branch and as a digest;
+- the source comparison and the fallback;
+- `verify_record`;
+- each shape predicate;
+- R1's Hold exit and its stale eviction;
+- the runtime's warm install and the probe's route;
+- the rotation skip;
+- the resolve job's authority.
+
+**Not covered, recorded:**
+- **R3's `current_member`:** a device removed from its own group needs an MLS commit the fixture
+  cannot make, and a different device is refused first by the stamp.
+- **Two of 9.1.1 step 7's unbuilt fixtures:** the repaired destination and the 8 MiB successor.
+- **A CI mutation of R3's reference-check call:** no honest flow reaches it.
+- **Not yet measured:** R1's `evidence_in_vault` and R3's Complete custody cost at the caps.
+- **Residuals:** admission is held from R1 to R3, so a Save answers `Busy` for longer. R2 runs
+  two restore-equivalents, the restore and the validation.
+
 ## Design 18.3 bounded implementation review (2026-10-09, Opus, static): PASS WITH FINDINGS
 
 **No blocker, no high.** Three mediums and five lows. The review covered Agent 1's runtime
@@ -5798,10 +5871,10 @@ makes that more important, not less.
      8. the touched-path cursor decision, which moves into step 3 if item 1 leaves no margined
         share.
    - **Steps 4 and 5** still need section 7's measurements.
-2. **Flow R next** (decision, 2026-10-09). It needs no media and is independent. It was sequenced
-   after this boundary so it would not be built on the single-visit path and split again; with
-   H5's single visit accepted (C-3 runtime 15.14), it is built on that path, and R3 joins H5 in
-   the deferred split if the target is ever restored.
+2. **Flow R is built** (2026-10-09; see "Flow R: the staged resolution of an interrupted handoff,
+   built" above, and design 6.4.2 to 6.4.5). With H5's single visit accepted (C-3 runtime 15.14),
+   R3 joins H5 in the deferred split if that target is ever restored. Still to do: its
+   implementation review, and measuring R1's and R3's custody at the caps.
 3. Produce design 13's eight measurements as each item lands; C-1's before-and-after is cheap,
    since the opt-in profile already exists. **13.7 (updated 2026-10-08):** Recovery, Registry
    and Studio were measured earlier. Intents, OwnerReceipts and DraftArchive were measured on

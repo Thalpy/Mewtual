@@ -11,6 +11,7 @@ mod metadata;
 mod performance;
 mod persisted;
 mod references;
+mod resolution;
 
 fn transfer(f: &Fixture, store: &mut ServerStore, basis: [u8; 32]) -> StudioHandoffOutcome {
     let mut b = budget(store, f);

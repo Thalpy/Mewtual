@@ -1590,6 +1590,10 @@ impl EpochStorageCursor {
                             });
                             return Ok(self.progress);
                         }
+                        #[cfg(test)]
+                        if matches!(family, EpochRecordKind::Studio) {
+                            INLINE_STUDIO_VALIDATIONS.with(|seen| seen.borrow_mut().push(hash));
+                        }
                         validate_record_body(
                             family,
                             &plain,
@@ -2341,6 +2345,128 @@ fn memoize(
             .inventory_cache
             .put_if_vacant(key, size, digest, record),
     }
+}
+
+/// One Studio record's inventory validation, computed off custody over plaintext the caller holds
+/// and keyed exactly as the scan keys it (Flow R, design 6.4.2, R2 and R3).
+///
+/// A detached stage that already has a record's authenticated plaintext runs this alongside its
+/// own work, and the next custody visit memoizes the result before it builds a budget. Without
+/// that, the synchronous scan behind every handoff budget would validate the cold record inline,
+/// and a Studio validation is a full `restore_scoped`: the very restore the stage was detached to
+/// keep off custody (design 6.4.3, HIGH-2).
+pub(crate) struct StudioInventoryWarmth {
+    key: (EpochRecordKind, [u8; 32]),
+    size: u64,
+    digest: blake3::Hash,
+    record: StorageRecord,
+}
+
+impl std::fmt::Debug for StudioInventoryWarmth {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("StudioInventoryWarmth { .. }")
+    }
+}
+
+/// The scan's own steps for one Studio record, without the store: the scope from the plaintext's
+/// first field, the server and document derived from it, the record key `blake3(scope)`, the
+/// digest `blake3(plaintext)`, and [`validate_record_body`] in accounting mode. `size` is the
+/// record's physical size, as the scan reads it from the file. Pure, so it can run on a worker.
+///
+/// **What makes memoizing it sound:** the cache answers only an exact (key, physical size,
+/// plaintext digest) match, so this entry can only ever serve the bytes it was computed from, and
+/// for those bytes it is exactly what the scan would compute.
+pub(in crate::store) fn studio_inventory_warmth(
+    plain: &[u8],
+    size: u64,
+) -> Result<StudioInventoryWarmth, AppError> {
+    let mut d = Decoder::new(plain);
+    let scope = d.get_bytes().map_err(invalid)?;
+    let (server, document) = decode_record_scope(scope, EpochRecordKind::Studio)?;
+    let body = validate_record_body(
+        EpochRecordKind::Studio,
+        plain,
+        scope,
+        server,
+        &document,
+        size,
+        false,
+    )?;
+    Ok(StudioInventoryWarmth {
+        key: (EpochRecordKind::Studio, *blake3::hash(scope).as_bytes()),
+        size,
+        digest: blake3::hash(plain),
+        record: body.record,
+    })
+}
+
+impl ServerStore {
+    /// Memoize a [`StudioInventoryWarmth`], never displacing an entry already cached for that
+    /// record (C-3 runtime 14.3's `IfVacant`). Returns whether the cache was written.
+    ///
+    /// `IfVacant` assumes the read that produced the result has already evicted any cached
+    /// version those bytes contradict, as the scan does on every read. A caller that read the
+    /// record outside a scan must do that itself, with [`Self::evict_stale_studio_inventory`],
+    /// or a stale entry silently refuses the install.
+    pub(in crate::store) fn warm_studio_inventory(
+        &mut self,
+        warmth: StudioInventoryWarmth,
+    ) -> bool {
+        memoize(
+            self,
+            warmth.key,
+            warmth.size,
+            warmth.digest,
+            warmth.record,
+            Memoize::IfVacant,
+        )
+    }
+
+    /// The scan's read discipline for a Studio record read outside a scan: evict a cached
+    /// validation that these bytes (by physical size and plaintext digest) contradict, which can
+    /// never hit again (design 6.4.2's re-review, M-1). Flow R's capture runs this, so the warm
+    /// install R3 makes later is not refused by a version H1's or H5's scan cached before H5
+    /// rewrote the source.
+    /// Forget what a restart forgets of Studio work reuse, without reopening the vault (which
+    /// would also cost a receiver its watches and its mount): every memoized validation, and the
+    /// retained source graph. Both are needed: retaining a source also caches its inventory
+    /// footprint (`cache_studio_source_footprint`), so a retained graph alone re-warms the cache.
+    #[cfg(test)]
+    pub(crate) fn forget_warm_studio_state_for_test(&mut self) {
+        self.inventory_cache.clear_for_test();
+        self.studio_source = None;
+    }
+
+    pub(in crate::store) fn evict_stale_studio_inventory(
+        &mut self,
+        scope: &[u8],
+        size: u64,
+        digest: blake3::Hash,
+    ) {
+        self.inventory_cache.evict_mismatch(
+            (EpochRecordKind::Studio, *blake3::hash(scope).as_bytes()),
+            size,
+            digest,
+        );
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    static INLINE_STUDIO_VALIDATIONS: std::cell::RefCell<Vec<[u8; 32]>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// How many times a scan on this thread validated the Studio record whose scope hashes to
+/// `scope_hash` inline, under custody. Each one is a full source restore that
+/// `studio_full_restores_for_test` does not count (design 6.4.3, HIGH-2), so a test that claims
+/// "no restore of this source under custody" must read both. Per record, because a cold vault's
+/// other records are validated inline by any synchronous scan, which is not what such a test is
+/// about (the re-review's L-3).
+#[cfg(test)]
+pub(crate) fn inline_studio_validations_for_test(scope_hash: [u8; 32]) -> usize {
+    INLINE_STUDIO_VALIDATIONS
+        .with(|seen| seen.borrow().iter().filter(|h| **h == scope_hash).count())
 }
 
 /// The typed validation of one authenticated record body, for every family.

@@ -674,6 +674,52 @@ pub(crate) fn studio_handoff_ready_fixture(
     basis.fingerprint()
 }
 
+/// `studio_handoff_ready_fixture`, then a real synchronous handoff interrupted just before one of
+/// its writes, leaving the durable Prepared record that Flow R resolves (design 6.4.2).
+///
+/// `source_written` chooses the crash: just before the Completed write, so the Source write
+/// landed and the evidence is Complete; or just before the Source write, so it never happened and
+/// the evidence is Absent. Returns the branch's basis.
+pub(crate) fn studio_handoff_interrupted_fixture(
+    store: &mut ServerStore,
+    server: u64,
+    group: &ServerGroup,
+    device: &MlsDevice,
+    target: StudioTarget,
+    operations: usize,
+    source_written: bool,
+) -> [u8; 32] {
+    let basis = studio_handoff_ready_fixture(store, server, group, device, target, operations);
+    let mut b = {
+        let inv = inventory(store);
+        store.studio_storage_budget(server, group, &inv).unwrap()
+    };
+    let interrupted = store.handoff_studio_overlay_with_io(
+        server,
+        group,
+        target,
+        device,
+        basis,
+        Some(0),
+        &mut ChaCha20Rng::seed_from_u64(27),
+        &mut b,
+        &mut WriteHooks::fail_before_write(FailError::Io("injected crash")).at(if source_written {
+            WriteTag::Completed
+        } else {
+            WriteTag::Source
+        }),
+    );
+    assert!(
+        matches!(interrupted, Err(ref e) if e.to_string().contains("injected crash")),
+        "the handoff was not interrupted where the fixture meant: {interrupted:?}"
+    );
+    assert!(store
+        .load_epoch_intents(server, &target.document(&group.group_id()).unwrap())
+        .unwrap()
+        .handoff_prepared());
+    basis
+}
+
 #[test]
 fn studio_source_profile_smoke() {
     measure(33, &ManualClock::new(0));

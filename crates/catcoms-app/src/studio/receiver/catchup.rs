@@ -126,6 +126,14 @@ pub(crate) enum StudioBackgroundJob<T: MeshTransport> {
     HandoffPrepare(Box<StudioHandoffCapture>, OverlayOwnership, OverlayContext),
     /// Flow H, stage H4: `finish`, `complete`, snapshot and the record encodings.
     HandoffAssemble(Box<StudioHandoffPlan>, OverlayOwnership, OverlayContext),
+    /// Flow R, stage R2 (design 6.4.2): restore an interrupted Prepared handoff's source from
+    /// captured bytes, classify its evidence and compute the next state and the source's
+    /// inventory validation, all off custody.
+    HandoffResolve(
+        Box<crate::store::StudioResolveCapture>,
+        OverlayOwnership,
+        OverlayContext,
+    ),
     /// C-3: the shared inventory job's parked record body, validated off custody. The permit
     /// moves into the blocking closure, so a cancelled waiter cannot release it early.
     InventoryValidate(super::inventory::InventoryDetach),
@@ -145,6 +153,11 @@ pub(crate) enum HandoffCompletion {
     Assembled(
         u64,
         Result<(Box<StudioHandoffCommit>, OverlayOwnership), AppError>,
+    ),
+    /// Flow R's R2 came back, routed on the job token like the others.
+    Resolved(
+        u64,
+        Result<(Box<crate::store::StudioResolvePlan>, OverlayOwnership), AppError>,
     ),
     /// The waiter was cancelled, or the worker died. Either way the bundle went with it.
     Cancelled(u64),
@@ -194,6 +207,14 @@ impl<T: MeshTransport> StudioBackgroundJob<T> {
     ) -> Self {
         Self::HandoffAssemble(plan, ownership, OverlayContext::handoff(target, token))
     }
+    pub(super) fn handoff_resolve(
+        capture: Box<crate::store::StudioResolveCapture>,
+        ownership: OverlayOwnership,
+        target: StudioTarget,
+        token: u64,
+    ) -> Self {
+        Self::HandoffResolve(capture, ownership, OverlayContext::handoff(target, token))
+    }
 }
 
 impl<T: MeshTransport + 'static> StudioBackgroundJob<T> {
@@ -232,6 +253,7 @@ impl<T: MeshTransport + 'static> StudioBackgroundJob<T> {
             Self::OverlayPlan(..) => "overlay-plan",
             Self::HandoffPrepare(..) => "handoff-prepare",
             Self::HandoffAssemble(..) => "handoff-assemble",
+            Self::HandoffResolve(..) => "handoff-resolve",
             Self::InventoryValidate(..) => "inventory-validate",
         }
     }
@@ -260,7 +282,9 @@ impl<T: MeshTransport + 'static> StudioBackgroundJob<T> {
             }
             Self::OverlayPlan(..) => StudioBackgroundResult::CancelledOverlay,
             // Same rule as the overlay plan: the worker owns the bundle and keeps it.
-            Self::HandoffPrepare(_, _, context) | Self::HandoffAssemble(_, _, context) => {
+            Self::HandoffPrepare(_, _, context)
+            | Self::HandoffAssemble(_, _, context)
+            | Self::HandoffResolve(_, _, context) => {
                 StudioBackgroundResult::Handoff(HandoffCompletion::Cancelled(context.token))
             }
             Self::InventoryValidate(detach) => {
@@ -395,6 +419,23 @@ impl<T: MeshTransport + 'static> StudioBackgroundJob<T> {
                     .await;
                     StudioBackgroundResult::Handoff(match result {
                         Ok(result) => HandoffCompletion::Assembled(token, result),
+                        Err(_) => HandoffCompletion::Cancelled(token),
+                    })
+                }
+                // R2. Same ownership discipline as H2: authenticated plaintext and public context
+                // in, no store, Server, key or writer; a refusal releases the bundle at once.
+                Self::HandoffResolve(capture, ownership, context) => {
+                    let token = context.token;
+                    let result = tokio::task::spawn_blocking(move || match capture.resolve() {
+                        Ok(plan) => Ok((Box::new(plan), ownership)),
+                        Err(error) => {
+                            drop(ownership);
+                            Err(error)
+                        }
+                    })
+                    .await;
+                    StudioBackgroundResult::Handoff(match result {
+                        Ok(result) => HandoffCompletion::Resolved(token, result),
                         Err(_) => HandoffCompletion::Cancelled(token),
                     })
                 }
@@ -1442,7 +1483,9 @@ impl StudioReceiver {
             // The handoff runtime moved its own stage to `Detached` when it produced this job;
             // the catch-up flags are not its bookkeeping.
             Some(
-                StudioBackgroundJob::HandoffPrepare(..) | StudioBackgroundJob::HandoffAssemble(..),
+                StudioBackgroundJob::HandoffPrepare(..)
+                | StudioBackgroundJob::HandoffAssemble(..)
+                | StudioBackgroundJob::HandoffResolve(..),
             ) => {}
             // The inventory runtime moved itself to `Validating` when it produced this job.
             Some(StudioBackgroundJob::InventoryValidate(..)) => {}

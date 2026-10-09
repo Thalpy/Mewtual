@@ -48,6 +48,17 @@ and ranks the live hazards in that path.
     At the caps (999 frames, 256 draft operations) it takes about 0.15 s, past the design's
     0.125 s target, once per handoff. Splitting it (C-3 step 3's remaining route) is deferred, and
     Flow R is next. See `GATE4-AGENT-1-C3-RUNTIME.md` 15.14.
+  - **Flow R, built:** an interrupted handoff's Prepared record is now resolved by the background
+    scheduler in three stages, with the source restore detached, instead of synchronously under
+    custody, where a cold source was restored twice. R3 writes exactly what the synchronous
+    resolver would, or refuses with nothing written; tests compare the two byte for byte. The
+    fences (rotation, adoption, repair) keep the synchronous resolver. Design 6.4.2 to 6.4.5 in
+    `GATE4-AGENT-1-DESIGN.md`.
+    - **Fixed on the way:** catch-up's owner rotation no longer pauses all of receive when a
+      watched document's handoff is Prepared; it skips that document for the turn. This was
+      reachable before Flow R too, whenever a Prepared record outlived the probe.
+    - **Residual:** while a resolution is in flight the actor's one overlay slot is taken, so a
+      Save on that server answers `Busy` for a few turns longer than before.
   - Native Save and repair commands remain unregistered. This is not Gate 4 acceptance.
 
 - **Gate 4 PR #35 reconciliation (2026-10-08).** The candidate now preserves

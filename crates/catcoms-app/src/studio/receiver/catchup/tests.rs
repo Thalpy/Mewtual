@@ -2555,3 +2555,270 @@ async fn a_request_waiting_for_the_signing_jobs_permit_does_not_stall_signing() 
         "Bob's request was not served after the transfer: {answered:?}"
     );
 }
+
+/// A single-member owner whose handoff was interrupted, leaving a durable Prepared record, and a
+/// receiver watching the document on a private pool of `permits`. `source_written` chooses
+/// Complete evidence (the Source write landed) or Absent (it never did).
+async fn interrupted_owner(
+    seed: u64,
+    source_written: bool,
+    permits: usize,
+) -> (
+    Server<catcoms_rt::MemNetwork, ChaCha20Rng>,
+    tempfile::TempDir,
+    ServerStore,
+    StudioReceiver,
+    StudioTarget,
+    Arc<tokio::sync::Semaphore>,
+) {
+    let clock = ManualClock::new(1000);
+    let mut rng = ChaCha20Rng::seed_from_u64(seed);
+    let mut server = Server::found(
+        Hub::new().join(PeerId::from_u64(1)),
+        MlsDevice::generate().unwrap(),
+        rng.clone(),
+        Box::new(clock),
+        "owner",
+    )
+    .unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let mut store = ServerStore::open(root.path(), b"flow-r", &mut rng).unwrap();
+    let target = StudioTarget::Flipnote {
+        channel: crate::channel_id("general").to_be_bytes(),
+        object: [23; 16],
+    };
+    server.sync.with_registry_context(|g, d, _, _| {
+        crate::store::studio_handoff_interrupted_fixture(
+            &mut store,
+            83,
+            g,
+            d,
+            target,
+            1,
+            source_written,
+        )
+    });
+    let mut receiver = StudioReceiver::default();
+    receiver
+        .run(
+            &mut server,
+            &mut store,
+            83,
+            Some(StudioRequest::Read { target }),
+        )
+        .unwrap();
+    let pool = receiver.catchup.inject_overlay_pool_for_test(permits);
+    (server, root, store, receiver, target, pool)
+}
+
+fn prepared(
+    server: &Server<catcoms_rt::MemNetwork, ChaCha20Rng>,
+    store: &ServerStore,
+    target: StudioTarget,
+) -> bool {
+    store
+        .load_epoch_intents(83, &target.document(&server.group_id()).unwrap())
+        .unwrap()
+        .handoff_prepared()
+}
+
+/// Flow R through the scheduled runtime (design 6.4.2): an interrupted handoff's Prepared record
+/// is resolved by R1, a detached R2 and R3 over ordinary background turns, with **no source
+/// restore on the actor's custody path**. That is counted on this thread, where every custody
+/// turn runs, both as full restores and as the inventory's inline validations of this source;
+/// the detached stage runs on a blocking worker and is not counted.
+///
+/// Complete settles the transfer with a notice and resets pacing. Absent returns the branch to
+/// Active and makes the target due at once, so the very next probe captures it for a new handoff,
+/// as H1 used to carry straight on into capture.
+///
+/// **One permit, and a forgotten cache**, so the warm install is what is tested. With the source's
+/// cached validation and retained graph forgotten, as after a restart, catch-up would otherwise
+/// prepare the cold watched source itself and re-warm the cache before R3. With the resolve job
+/// holding the only permit it cannot, so only R2's warm install keeps R3's scan from restoring it.
+#[tokio::test]
+async fn flow_r_resolves_an_interrupted_handoff_through_scheduled_turns() {
+    for source_written in [true, false] {
+        let (mut server, _root, mut store, mut receiver, target, _pool) =
+            interrupted_owner(1421, source_written, 1).await;
+        let key = crate::store::studio_inventory_key_for_test(
+            83,
+            &target.document(&server.group_id()).unwrap(),
+        );
+        assert!(
+            prepared(&server, &store, target),
+            "precondition: a Prepared record"
+        );
+        // The opening Read cached the source as it stands and retained its graph, which re-caches
+        // it. Forget both, as a restart would, so the source is cold when R3's budget is built
+        // and only the warm install from R2's validation can keep that scan from restoring it.
+        store.forget_warm_studio_state_for_test();
+        let counted = || {
+            (
+                crate::store::studio_full_restores_for_test(),
+                crate::store::inline_studio_validations_for_test(key),
+            )
+        };
+        let before = counted();
+        let mut detached = Vec::new();
+        for _ in 0..30 {
+            receiver.run(&mut server, &mut store, 83, None).unwrap();
+            if let Some(work) = receiver.detach(&mut server) {
+                detached.push(work.kind_for_test());
+                receiver.complete(&mut server, work.run(None).await);
+            }
+            if !prepared(&server, &store, target) {
+                break;
+            }
+        }
+        assert!(
+            !prepared(&server, &store, target),
+            "the scheduled runtime never resolved the Prepared record; detached: {detached:?}"
+        );
+        assert_eq!(
+            counted(),
+            before,
+            "a custody turn restored the source while resolving (written: {source_written})"
+        );
+        assert!(
+            detached.contains(&"handoff-resolve"),
+            "R2 did not detach: {detached:?}"
+        );
+        assert!(
+            !detached.contains(&"handoff-prepare"),
+            "a new transfer started before the interrupted one was resolved: {detached:?}"
+        );
+        let now = server.runtime_clock().monotonic_ms();
+        let metadata = store
+            .load_epoch_intents(83, &target.document(&server.group_id()).unwrap())
+            .unwrap();
+        let overlay = metadata.handoff_metadata().and_then(|m| m.overlay());
+        if source_written {
+            assert!(
+                overlay.is_none(),
+                "Complete evidence did not complete the branch"
+            );
+            assert!(
+                receiver
+                    .take_settlement_notices()
+                    .iter()
+                    .any(|(t, _)| *t == target),
+                "the completed resolution published no settlement notice"
+            );
+        } else {
+            assert!(
+                overlay.is_some(),
+                "Absent evidence did not return the branch to Active"
+            );
+            assert!(
+                !receiver.handoff_held_for_test(target, now),
+                "a returned branch was held back instead of being captured at once"
+            );
+            receiver.run(&mut server, &mut store, 83, None).unwrap();
+            assert_eq!(
+                receiver.handoff.stage_for_test(),
+                Some("captured"),
+                "the next probe did not capture the returned branch for a new handoff"
+            );
+        }
+    }
+}
+
+/// Owner rotation skips a watched document whose handoff is Prepared instead of pausing all of
+/// receive (design 6.4.5). Its rotation check reads through the read-only service path, which
+/// refuses a Prepared destination, and that refusal used to escape `catchup.run`.
+///
+/// The conditions that reach it: a warm source and a free permit, so rotation gets as far as its
+/// check, and a record that stays Prepared across turns, which Flow R makes routine. Every turn
+/// must succeed until the resolution lands.
+#[tokio::test]
+async fn owner_rotation_skips_a_prepared_document_instead_of_pausing_receive() {
+    let (mut server, _root, mut store, mut receiver, target, _pool) =
+        interrupted_owner(1427, true, 4).await;
+    for _ in 0..30 {
+        receiver
+            .run(&mut server, &mut store, 83, None)
+            .expect("a background turn failed while a watched document's handoff was Prepared");
+        if let Some(work) = receiver.detach(&mut server) {
+            receiver.complete(&mut server, work.run(None).await);
+        }
+        if !prepared(&server, &store, target) {
+            break;
+        }
+    }
+    assert!(!prepared(&server, &store, target));
+    assert!(
+        !receiver.take_pause_notice(),
+        "receive was paused while the handoff was Prepared"
+    );
+}
+
+/// A resolve job carries no transfer authority, so the authority check a transfer needs must
+/// leave it alone: resolution signs nothing, and an MLS commit (a member joining, a key rotating)
+/// must not kill it (design 6.4.2). The precondition each helper moves is a transfer job's; on a
+/// resolve job they move nothing, and the job carries on to its commit.
+#[tokio::test]
+async fn a_resolve_job_is_not_abandoned_by_the_transfer_authority_check() {
+    let (mut server, _root, mut store, mut receiver, target, _pool) =
+        interrupted_owner(1423, true, 4).await;
+    for _ in 0..10 {
+        receiver.run(&mut server, &mut store, 83, None).unwrap();
+        if receiver.handoff.stage_for_test() == Some("resolve-captured") {
+            break;
+        }
+    }
+    assert_eq!(receiver.handoff.stage_for_test(), Some("resolve-captured"));
+    receiver.handoff.stale_tenure_for_test();
+    receiver.handoff.stale_mls_for_test();
+    receiver.run(&mut server, &mut store, 83, None).unwrap();
+    assert!(
+        receiver.handoff_has_job_for_test(),
+        "the transfer authority check abandoned a resolve job"
+    );
+    for _ in 0..10 {
+        if let Some(work) = receiver.detach(&mut server) {
+            receiver.complete(&mut server, work.run(None).await);
+        }
+        receiver.run(&mut server, &mut store, 83, None).unwrap();
+        if !prepared(&server, &store, target) {
+            break;
+        }
+    }
+    assert!(
+        !prepared(&server, &store, target),
+        "the resolve job never committed"
+    );
+}
+
+/// R2 finishing after the receiver paused releases its bundle without another visit, as H2 and
+/// H4 do: `ResolveReady` holds admission and a shared permit, and a paused receiver schedules no
+/// further turn.
+#[tokio::test]
+async fn a_resolve_worker_finishing_after_a_pause_releases_its_bundle() {
+    let (mut server, _root, mut store, mut receiver, _target, pool) =
+        interrupted_owner(1425, true, 4).await;
+    let free = pool.available_permits();
+    let mut detached = None;
+    for _ in 0..10 {
+        receiver.run(&mut server, &mut store, 83, None).unwrap();
+        if let Some(work) = receiver.detach(&mut server) {
+            detached = Some(work);
+            break;
+        }
+    }
+    let work = detached.expect("R2 never detached");
+    assert_eq!(work.kind_for_test(), "handoff-resolve");
+    receiver.pause_for_test();
+    let result = work.run(None).await;
+    receiver.complete(&mut server, result);
+    assert!(
+        !receiver.handoff_has_job_for_test(),
+        "a resolution arriving during a pause parked its bundle where no turn will visit"
+    );
+    assert_eq!(
+        pool.available_permits(),
+        free,
+        "the shared preparation slot was stranded by the pause"
+    );
+    assert!(receiver.catchup.overlay_admission_available_for_test());
+}

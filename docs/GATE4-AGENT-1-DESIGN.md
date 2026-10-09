@@ -1027,6 +1027,66 @@ branch, for its synchronous callers; restart. Only the scheduled probe routes to
 | L-6 | the longer `Busy` window | **recorded** as residual |
 | Q4 | `evidence_in_vault` | **taken** as R1's Hold early exit only |
 
+#### 6.4.4 Re-review of revision 2 (2026-10-09, Opus, static): no blocker or high
+
+Both highs confirmed answered. The review also confirmed:
+- the warm install is sound with a mount check only;
+- `handoff_budget`'s scan does consult the cache for Studio;
+- the fallback adds no race and no double write;
+- R1's framing-only Hold exit never refuses a record the resolver would resolve;
+- the shape predicate needs no new core API.
+
+| finding | what | disposition (built) |
+|---|---|---|
+| M-1 | `IfVacant` refuses the warm install while an older version is cached, and R1 no longer reads through the scan that evicts it: after an H5 that refused once its Source write landed, with no restart, R3 restored inline after all | **fixed:** R1 evicts any cached version its source bytes contradict (`evict_stale_studio_inventory`, the scan's discipline); a warm-but-stale test and a mutation pin it |
+| L-1 | the fallback must report its outcome | **fixed:** R3 re-reads the record after the fallback and returns Returned or Completed; a test asserts both |
+| L-2 | `evidence_in_vault` takes the snapshot | **as built:** R1 decodes the record and passes the snapshot |
+| L-3 | the inline-validation counter must count the target only | **fixed:** counted per record key |
+| L-4 | the install must take only a validated result | **as built:** `StudioInventoryWarmth` has private fields and one producer, the pure validation |
+| L-5 | R1 finding the record not Prepared should continue into H1 in the same visit | **fixed:** the probe falls through to H1's path |
+| L-6 | `evidence_in_vault`'s custody cost at the caps, and the 8 MiB-bound mutation | **recorded:** to measure; the bound mutation waits for its fixture |
+| (d) | strengthen the shape predicate | **taken:** Absent also compares branch id, provenance, the floor and the disposal; Complete compares the outcome's epoch and document id with the carried unit's |
+
+#### 6.4.5 Built (2026-10-09)
+
+**Where:**
+- the store side is `store/epoch_studio/resolution.rs` (R1, R2, the warm install, R3);
+- the inventory helpers `studio_inventory_warmth`, `warm_studio_inventory` and
+  `evict_stale_studio_inventory` are in `epoch_recovery/inventory.rs`;
+- the runtime is `studio/receiver/handoff.rs` (the stages, the probe route, the commit arm, the
+  completion arm), with the job and completion types in `receiver/catchup.rs`.
+
+**A pre-existing hazard the receiver tests found.** Catch-up's owner rotation asks
+`studio_owner_rotation_needed` about every watched target. That reads through the read-only
+service path, which refuses a Prepared destination, and the refusal escaped `catchup.run` and
+paused all of receive:
+- **before Flow R:** reachable whenever a Prepared record outlived the probe, for example while a
+  Hold sat in backoff;
+- **with Flow R:** routine, since the record stays Prepared from R1 to R3.
+
+Owner rotation now skips a target whose handoff is Prepared for that turn, and moves on along the
+rail. A fault in reading the record still falls through to the existing path and surfaces. The
+rotation fence would resolve the record first in any case.
+
+**Tests:**
+- **Store level:** ten, in `handoff/resolution.rs`.
+- **Receiver level:** four, in `catchup/tests.rs`:
+  - the scheduled route for both outcomes, with no restore on the custody thread;
+  - owner rotation skipping a Prepared document;
+  - the transfer authority check leaving a resolve job alone;
+  - a pause during R2.
+- **CI:** 13 mutants in `check-studio-resolution-mutations.py`, in a new `resolution` job. All are
+  DETECTED and pass restored under `RUSTFLAGS='-D warnings'`.
+
+**Two first drafts of the tests proved nothing, and the mutants showed it:**
+- **The warm install looked untested.** Retaining a source graph re-caches its inventory footprint,
+  and catch-up prepares a cold watched source itself. So the route test now forgets both the cache
+  and the retained graph, as a restart does, and runs on a one-permit pool, so catch-up cannot
+  re-warm the source before R3.
+- **The rotation skip needed its own test.** On one permit, rotation never reaches its check.
+- **The `verify_record` mutant was wrong, not the guard.** It must remove the call rather than
+  ignore its result, because a mismatch also invalidates the budget.
+
 ### 6.5 Custody-visit sources
 
 Any `StudioReceiver::run` pass: the native receive driver (paced at one second while

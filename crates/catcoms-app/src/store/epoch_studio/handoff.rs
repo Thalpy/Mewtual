@@ -585,8 +585,10 @@ impl ServerStore {
             .ok_or_else(|| invalid("handoff remains held"))
     }
 
+    /// The handoff family's one accounted intents write. `pub(super)` so Flow R's commit
+    /// (`resolution.rs`) writes through exactly the resolver's path (design 6.4.2, R3).
     #[allow(clippy::too_many_arguments)]
-    fn persist_handoff_intents(
+    pub(super) fn persist_handoff_intents(
         &mut self,
         server: u64,
         document: &LogicalDocument,
@@ -767,7 +769,8 @@ impl ServerStore {
             )),
         }
     }
-    fn check_handoff_references(
+    /// `pub(super)` for Flow R's commit, which runs the resolver's own reference check.
+    pub(super) fn check_handoff_references(
         &self,
         metadata: &StudioOverlayState,
         source: &StudioEpoch,

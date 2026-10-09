@@ -62,6 +62,8 @@ pub use epoch_recovery::cleanup::{
     EpochStorageCleanup, EpochStorageCleanup as EpochRecoveryCleanup, EpochStorageCleanupProgress,
     EpochStorageCleanupProgress as RecoveryCleanupProgress,
 };
+#[cfg(test)]
+pub(crate) use epoch_recovery::inventory::inline_studio_validations_for_test;
 pub use epoch_recovery::inventory::{
     EpochInventoryCoverage, EpochRecordKind, EpochStorageCursor, EpochStorageInventory,
     EpochStorageInventory as EpochRecoveryInventory, EpochStorageInventoryEntry,
@@ -84,9 +86,12 @@ pub(crate) use epoch_studio::copy_capture::{StudioOverlayCopyCapture, StudioOver
 #[cfg(test)]
 pub(crate) use epoch_studio::source::studio_full_restores_for_test;
 #[cfg(test)]
+pub(crate) use epoch_studio::studio_inventory_key_for_test;
+#[cfg(test)]
 pub(crate) use epoch_studio::tests::performance::{
     fill_studio_epoch_fixture, save_studio_source_fixture, save_studio_source_fixture_ops,
-    studio_closing_capture_fixture, studio_handoff_ready_fixture, studio_owner_decision_fixture,
+    studio_closing_capture_fixture, studio_handoff_interrupted_fixture,
+    studio_handoff_ready_fixture, studio_owner_decision_fixture,
 };
 #[cfg(test)]
 pub(crate) use epoch_studio::StudioRotationBoundary;
@@ -98,6 +103,10 @@ pub(crate) use epoch_studio::{
     PreparedStudioSource, SigningSlice, StudioHandoffCapture, StudioHandoffCommit,
     StudioHandoffPlan, StudioHandoffStart, StudioOverlayCapture, StudioOverlayPlan,
     StudioOverlayStart, StudioSourceCapture, MAX_SIGNING_TURNS_PER_VISIT, SIGNING_SLICE_BUDGET_MS,
+};
+// Flow R, the scheduled resolution of an interrupted Prepared handoff (Agent 1, design 6.4.2).
+pub(crate) use epoch_studio::{
+    StudioResolveCapture, StudioResolvePlan, StudioResolveStart, StudioResolved,
 };
 // The provenance-general Flow S mint (G4-A1-S), used in production by the preview Save
 // (G4-A2-PREVIEW, `studio/receiver/unconfirmed.rs`).

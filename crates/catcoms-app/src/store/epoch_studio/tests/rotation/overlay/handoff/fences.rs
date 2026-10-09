@@ -470,8 +470,9 @@ fn studio_overlay_handoff_all_exact_resolution_in_fault_does_not_clear_fault() {
 }
 
 /// Reseal a record's plaintext with its last byte flipped: the same size, still authenticating,
-/// a different digest. Only a digest comparison tells it from the original.
-fn replace_at_the_same_size(store: &ServerStore, path: &Path) {
+/// a different digest. Only a digest comparison tells it from the original. Flow R's tests use it
+/// too (`resolution.rs`).
+pub(super) fn replace_at_the_same_size(store: &ServerStore, path: &Path) {
     let key = store.keys.db_key().unwrap();
     let framed = fs::read(path).unwrap();
     let mut plain = catcoms_crypto::unseal(&key, &unframe(&framed).unwrap()).unwrap();

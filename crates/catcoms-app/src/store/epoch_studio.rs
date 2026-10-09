@@ -39,6 +39,10 @@ mod recovery_disposition;
 mod registry;
 mod repair;
 pub use repair::{StudioFaultEvidence, StudioRepairOutcome, StudioRepairRequest};
+mod resolution;
+pub(crate) use resolution::{
+    StudioResolveCapture, StudioResolvePlan, StudioResolveStart, StudioResolved,
+};
 mod rotation;
 pub use adoption::StudioAdoptionOutcome;
 #[cfg(test)]
@@ -870,6 +874,12 @@ fn decode_record_link<'a>(
     };
     d.finish().map_err(invalid)?;
     Ok((target, snapshot, intent_link))
+}
+/// A Studio source record's inventory key, `blake3(scope)`, for tests that count that one
+/// record's inline validations (`inline_studio_validations_for_test`) from outside the store.
+#[cfg(test)]
+pub(crate) fn studio_inventory_key_for_test(server: u64, document: &LogicalDocument) -> [u8; 32] {
+    *blake3::hash(&scope_bytes(server, document).unwrap()).as_bytes()
 }
 pub(super) fn scope_bytes(server: u64, document: &LogicalDocument) -> Result<Vec<u8>, AppError> {
     if document.server_id.is_empty()

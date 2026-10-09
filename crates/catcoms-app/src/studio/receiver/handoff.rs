@@ -17,8 +17,21 @@
 //!
 //! Only H3 is paged. H2 and H4 are single detached jobs, and H5 is the accepted durable
 //! transaction, unchanged.
+//!
+//! **Flow R** (design 6.4.2) shares the slot. When the probe selects a branch whose intent record
+//! is Prepared, which is what an interrupted H5 leaves, it resolves it in three stages rather than
+//! through H1's synchronous resolver:
+//!
+//! ```text
+//! R1 capture   custody      membership, two bounded reads, the Hold early exit; no inventory
+//! R2 resolve   detached     restore, evidence, next state, the source's inventory validation
+//! R3 commit    custody      warm the inventory, stamp equality, the resolver's own writes
+//! ```
 use super::*;
-use crate::store::{StudioHandoffCapture, StudioHandoffCommit, StudioHandoffPlan};
+use crate::store::{
+    StudioHandoffCapture, StudioHandoffCommit, StudioHandoffPlan, StudioResolveCapture,
+    StudioResolvePlan, StudioResolveStart, StudioResolved,
+};
 use crate::studio::overlay::OverlayOwnership;
 use std::collections::BTreeMap;
 
@@ -34,6 +47,10 @@ pub(super) enum HandoffStage {
     Signing(Box<StudioHandoffPlan>, OverlayOwnership),
     /// H4 done; waiting for a custody visit to run H5.
     Ready(Box<StudioHandoffCommit>, OverlayOwnership),
+    /// Flow R's R1 done; waiting for a background turn to detach R2.
+    ResolveCaptured(Box<StudioResolveCapture>, OverlayOwnership),
+    /// R2 done; waiting for a custody visit to run R3.
+    ResolveReady(Box<StudioResolvePlan>, OverlayOwnership),
 }
 
 pub(super) struct HandoffJob {
@@ -48,17 +65,18 @@ pub(super) struct HandoffJob {
     /// into the live job: a plan pinned to the superseded epoch, unsignable for ever, in place of
     /// a capture that was fine.
     pub(super) token: u64,
-    /// The observed owner tenure H1 minted this job's authority under.
-    pub(super) tenure: u64,
-    /// The MLS epoch H1 minted it under.
+    /// The observed owner tenure and the MLS epoch H1 minted a **transfer** job's authority
+    /// under; `None` for a Flow R resolve job, which signs nothing and mints no authority. R3's
+    /// stamp and membership checks are its authority, and an MLS change must not kill it, so
+    /// `handoff_check_authority` skips it (design 6.4.2).
     ///
-    /// Tenure alone is **not** enough, and assuming it was is what made the first version of this
-    /// check blind to the very failure it was written for. `observed_owner_tenure_start` reports
-    /// when the current owner's tenure *began*, and a same-owner MLS commit preserves that value
-    /// (`OwnerTenure::applied` takes the "same owner preserves knowledge" branch). But
-    /// `StudioHandoffAuthority` pins `group.epoch()`, so that same commit makes the job
-    /// permanently unsignable while the tenure comparison still matches.
-    pub(super) mls: u64,
+    /// For a transfer, tenure alone is **not** enough, and assuming it was is what made the first
+    /// version of the check blind to the very failure it was written for.
+    /// `observed_owner_tenure_start` reports when the current owner's tenure *began*, and a
+    /// same-owner MLS commit preserves that value (`OwnerTenure::applied` takes the "same owner
+    /// preserves knowledge" branch). But `StudioHandoffAuthority` pins `group.epoch()`, so that
+    /// same commit makes the job permanently unsignable while the tenure comparison still matches.
+    pub(super) authority: Option<(u64, u64)>,
 }
 
 /// Per-actor handoff scheduling. Holds at most one job.
@@ -116,8 +134,14 @@ impl HandoffRuntime {
         self.stage_due(now, |stage| matches!(stage, HandoffStage::Signing(..)))
     }
 
+    /// H5's stage or R3's: both are heavy custody commits behind the same placement gate.
     pub(super) fn can_commit(&self, now: u64) -> bool {
-        self.stage_due(now, |stage| matches!(stage, HandoffStage::Ready(..)))
+        self.stage_due(now, |stage| {
+            matches!(
+                stage,
+                HandoffStage::Ready(..) | HandoffStage::ResolveReady(..)
+            )
+        })
     }
 
     fn stage_due(&self, now: u64, want: impl Fn(&HandoffStage) -> bool) -> bool {
@@ -151,9 +175,20 @@ impl HandoffRuntime {
         self.next_at.remove(&target);
     }
 
-    /// The tenure and MLS epoch the live job was minted under, if there is one.
+    /// Make `target` due for a probe now, without touching its doubling state.
+    ///
+    /// After R3 returns a branch to Active the next probe should capture it at once, as H1 used to
+    /// carry straight on into capture; with no deadline at all nothing would report the probe due,
+    /// and it would wait for the next idle tick (design 6.4.3, L-1). `hold_ms` is left alone so a
+    /// handoff that keeps failing after its Prepared write stays paced by its own doubling.
+    fn due_now(&mut self, target: StudioTarget, now: u64) {
+        self.next_at.insert(target, now);
+    }
+
+    /// The tenure and MLS epoch the live **transfer** job was minted under. `None` with no job and
+    /// for a resolve job.
     fn authority(&self) -> Option<(u64, u64)> {
-        self.job.as_ref().map(|job| (job.tenure, job.mls))
+        self.job.as_ref().and_then(|job| job.authority)
     }
 
     /// A job that could make progress this turn. `busy` alone is not that: a job held by backoff,
@@ -322,6 +357,8 @@ impl HandoffRuntime {
             HandoffStage::Detached => "detached",
             HandoffStage::Signing(..) => "signing",
             HandoffStage::Ready(..) => "ready",
+            HandoffStage::ResolveCaptured(..) => "resolve-captured",
+            HandoffStage::ResolveReady(..) => "resolve-ready",
         })
     }
 
@@ -329,8 +366,8 @@ impl HandoffRuntime {
     /// change or an unobserved gap does.
     #[cfg(test)]
     pub(super) fn stale_tenure_for_test(&mut self) {
-        if let Some(job) = self.job.as_mut() {
-            job.tenure = u64::MAX;
+        if let Some((tenure, _)) = self.job.as_mut().and_then(|job| job.authority.as_mut()) {
+            *tenure = u64::MAX;
         }
     }
 
@@ -342,8 +379,8 @@ impl HandoffRuntime {
     /// simulated; the comparison, the abandonment and the receiver's reaction are production.
     #[cfg(test)]
     pub(super) fn stale_mls_for_test(&mut self) {
-        if let Some(job) = self.job.as_mut() {
-            job.mls = job.mls.wrapping_add(1);
+        if let Some((_, mls)) = self.job.as_mut().and_then(|job| job.authority.as_mut()) {
+            *mls = mls.wrapping_add(1);
         }
     }
 
@@ -600,18 +637,47 @@ impl StudioReceiver {
             return;
         };
 
+        // Flow R (design 6.4.2). A Prepared record is what an interrupted H5 leaves, and H1 would
+        // resolve it synchronously, restoring the source under custody, twice when it is cold.
+        // R1 instead captures it with no inventory, R2 restores it detached, and R3 commits under
+        // stamp equality. It needs no tenure: resolution signs nothing.
+        if prepared {
+            let started = server.sync.with_registry_context(|g, d, _, _| {
+                store.capture_studio_resolution(id, g, target, d)
+            });
+            match started {
+                Ok(StudioResolveStart::Captured(capture)) => {
+                    self.handoff.next_token = self.handoff.next_token.saturating_add(1);
+                    self.handoff.job = Some(HandoffJob {
+                        target,
+                        stage: HandoffStage::ResolveCaptured(capture, ownership),
+                        token: self.handoff.next_token,
+                        authority: None,
+                    });
+                    return;
+                }
+                // Not Prepared after all. Nothing writes between the structural read above and
+                // R1, so this is unreachable today; if the two reads ever disagreed, carrying on
+                // into H1 in this same visit is what keeps it from spinning unpaced (design
+                // 6.4.2's re-review, L-5).
+                Ok(StudioResolveStart::NotPrepared) => {}
+                // A framing-only Hold means the resolver would refuse: back off with no worker
+                // and no restore anywhere.
+                Ok(StudioResolveStart::Hold) | Err(_) => {
+                    self.handoff.hold_target(target, now);
+                    return;
+                }
+            }
+        }
+
         // A transfer needs a live tenure to mint its authority. Without one there is nothing to
         // capture, and the reservation is released by dropping `ownership` on return.
         //
-        // **Except a Prepared branch, which H1 still enters to resolve** (design 9.1.1, step 4b).
-        // A Prepared record holds the target's page and tail service, and one is left whenever an
-        // H5 refuses after its first write. Resolution needs only current membership, never a
-        // tenure, and H1 resolves before it asks for one. So with tenure Unknown or Imported, H1
-        // runs with none: it resolves from the actual bytes, settles a completed transfer, or
-        // returns the branch to Active and then refuses at the tenure check, which backs off as
-        // before. Without this the hold would last until a fence ran.
-        let Some(tenure) = probe_tenure(server.sync.authoring_owner_tenure_start(), prepared)
-        else {
+        // A Prepared branch does not reach this point: Flow R took it above, with no tenure
+        // (design 6.4.2), and only a branch R1 found not Prepared falls through. So the probe asks
+        // `probe_tenure` about a branch with nothing to resolve. Its Prepared-without-tenure case is
+        // design 9.1.1 step 4b's rule for H1, which the synchronous adapter still relies on.
+        let Some(tenure) = probe_tenure(server.sync.authoring_owner_tenure_start(), false) else {
             self.handoff.hold_target(target, now);
             return;
         };
@@ -634,8 +700,10 @@ impl StudioReceiver {
                     target,
                     stage: HandoffStage::Captured(capture, ownership),
                     token: self.handoff.next_token,
-                    tenure,
-                    mls: server.sync.with_registry_context(|g, _, _, _| g.epoch()),
+                    authority: Some((
+                        tenure,
+                        server.sync.with_registry_context(|g, _, _, _| g.epoch()),
+                    )),
                 });
             }
             Ok(crate::store::StudioHandoffStart::Settled(_)) => {
@@ -665,6 +733,10 @@ impl StudioReceiver {
             // H4 detaches only once the whole branch is signed; a partly signed plan goes back.
             HandoffStage::Signing(plan, ownership) if plan.remaining() == 0 => Some(
                 StudioBackgroundJob::handoff_assemble(plan, ownership, target, token),
+            ),
+            // Flow R's R2.
+            HandoffStage::ResolveCaptured(capture, ownership) => Some(
+                StudioBackgroundJob::handoff_resolve(capture, ownership, target, token),
             ),
             stage => {
                 job.stage = stage;
@@ -787,6 +859,14 @@ impl StudioReceiver {
             .as_ref()
             .expect("checked just above")
             .target;
+        // R3's first half: memoize R2's validation of the source before the budget's synchronous
+        // scan runs, so the scan finds it warm instead of restoring it inline (design 6.4.2). The
+        // cache is content-addressed, so this can only ever serve the bytes R2 validated.
+        if let Some(HandoffStage::ResolveReady(plan, _)) =
+            self.handoff.job.as_mut().map(|job| &mut job.stage)
+        {
+            store.warm_studio_resolution(plan);
+        }
         // The budget is built BEFORE the job is taken. Taking first meant any transient inventory
         // or generation failure discarded H1 to H4 entirely: a detached full vault decode plus
         // every signature, thrown away for a retryable error. Flow S gets this right by taking its
@@ -796,8 +876,15 @@ impl StudioReceiver {
             return None;
         };
         let job = self.handoff.job.take().expect("checked just above");
-        let HandoffStage::Ready(commit, ownership) = job.stage else {
-            unreachable!("can_commit checked the stage")
+        let (commit, ownership) = match job.stage {
+            HandoffStage::Ready(commit, ownership) => (commit, ownership),
+            HandoffStage::ResolveReady(plan, ownership) => {
+                self.resolve_commit(server, store, id, target, *plan, &mut budget, now);
+                // As H5's arm below: the bundle goes only after the write attempt returned.
+                drop(ownership);
+                return None;
+            }
+            _ => unreachable!("can_commit checked the stage"),
         };
         let tenure = server.sync.authoring_owner_tenure_start();
         let committed = server.sync.with_registry_context(|group, device, _, rng| {
@@ -836,6 +923,42 @@ impl StudioReceiver {
         }
     }
 
+    /// R3: commit a Flow R resolution, with the job already taken and its inventory warmed.
+    ///
+    /// Pacing mirrors what H1's synchronous resolution did (design 6.4.2):
+    /// - **Completed** is durable progress and settles the transfer: `progressed` and a
+    ///   `RefreshRequired` note, as H1's `Settled` arm. No `StudioUpdated`, as today.
+    /// - **Returned** leaves the branch Active. H1 used to carry straight on into capture, so the
+    ///   target is made due now; its doubling state is kept, so a handoff that keeps failing after
+    ///   its Prepared write is still paced by H5's own holds.
+    /// - **Superseded** means someone else resolved it: nothing to pace.
+    /// - Any refusal holds the target, as every other stage's refusal does.
+    #[allow(clippy::too_many_arguments)]
+    fn resolve_commit<T: MeshTransport + 'static, R: CryptoRngCore>(
+        &mut self,
+        server: &mut Server<T, R>,
+        store: &mut ServerStore,
+        id: u64,
+        target: StudioTarget,
+        plan: StudioResolvePlan,
+        budget: &mut crate::store::EpochStudioBudget,
+        now: u64,
+    ) {
+        let resolved = server.sync.with_registry_context(|group, device, _, rng| {
+            store.commit_studio_resolution(id, group, target, device, plan, rng, budget)
+        });
+        match resolved {
+            Ok(StudioResolved::Completed) => {
+                self.handoff.progressed(target);
+                self.settlement
+                    .note(target, StudioSettlementState::RefreshRequired);
+            }
+            Ok(StudioResolved::Returned) => self.handoff.due_now(target, now),
+            Ok(StudioResolved::Superseded) => {}
+            Err(_) => self.handoff.hold_target(target, now),
+        }
+    }
+
     /// A detached handoff stage came back.
     ///
     /// The three outcomes are deliberately **not** collapsed into one arm. A completion that does
@@ -863,9 +986,17 @@ impl StudioReceiver {
                 self.handoff.job.as_mut().expect("checked").stage =
                     HandoffStage::Ready(commit, ownership);
             }
-            // A stage this actor asked for refused. The worker already released its bundle.
+            HandoffCompletion::Resolved(token, Ok((plan, ownership)))
+                if mine(&self.handoff.job, token) =>
+            {
+                self.handoff.job.as_mut().expect("checked").stage =
+                    HandoffStage::ResolveReady(plan, ownership);
+            }
+            // A stage this actor asked for refused (for R2, a Hold only a restore could see). The
+            // worker already released its bundle.
             HandoffCompletion::Prepared(token, Err(_))
             | HandoffCompletion::Assembled(token, Err(_))
+            | HandoffCompletion::Resolved(token, Err(_))
                 if mine(&self.handoff.job, token) =>
             {
                 self.handoff.abandon(now);

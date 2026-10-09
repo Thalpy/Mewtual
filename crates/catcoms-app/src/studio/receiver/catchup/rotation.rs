@@ -25,6 +25,24 @@ impl CatchupRuntime {
             .owner_target
             .filter(|t| watches.iter().any(|(w, _)| w.target == *t))
             .unwrap_or(watches[self.owner_selection % watches.len()].0.target);
+        // A target whose overlay handoff is Prepared is skipped this turn, and the rail moves on.
+        // The rotation check below reads it through the read-only service path, which refuses a
+        // Prepared destination, and that refusal would surface as an error that pauses all of
+        // receive. Its resolution is already scheduled: Flow R (design 6.4.2) or H1 resolves it
+        // within a few turns, and the rotation fence would resolve it first in any case. Flow R
+        // made this window routine; before it, a Prepared record held back by a Hold reached here
+        // too. An unreadable record falls through to the existing path, so a fault still surfaces.
+        let prepared = target
+            .document(&server.group_id())
+            .ok()
+            .and_then(|logical| store.load_epoch_intents_structural(id, &logical).ok())
+            .is_some_and(|state| state.handoff_prepared());
+        if prepared {
+            self.owner_target = None;
+            self.owner_selection = self.owner_selection.wrapping_add(1);
+            self.owner_next_at = now.saturating_add(5_000);
+            return Ok(None);
+        }
         self.owner_target = Some(target);
         if !self.prepare(server, store, id, target)? {
             // Captured, busy or superseded work must all pay the same local cadence. The
