@@ -398,9 +398,10 @@ fn report_stages(shape: &str, count: usize, source_bytes: u64, samples: [Vec<u64
     } else {
         "release"
     };
+    let trials = samples[0].len();
     let [h1, h2, h3, h4, inventory, h5, encode, cids, seed] = samples.map(|s| Spread::of(&s, 1));
     println!(
-        "HANDOFF_STAGES build={build} shape={shape} count={count} source_bytes={source_bytes} trials={STAGE_TRIALS} units=min/upper_median/max_us(zero_samples raw_upper_median_ms) h1={h1} h2_detached={h2} h3_signing={h3} h4_detached={h4} h5_inventory={inventory} h5_commit={h5} one_snapshot_encode={encode} one_blob_cids={cids} one_seed_graph={seed}"
+        "HANDOFF_STAGES build={build} shape={shape} count={count} source_bytes={source_bytes} trials={trials} units=min/upper_median/max_us(zero_samples raw_upper_median_ms) h1={h1} h2_detached={h2} h3_signing={h3} h4_detached={h4} h5_inventory={inventory} h5_commit={h5} one_snapshot_encode={encode} one_blob_cids={cids} one_seed_graph={seed}"
     );
 }
 
@@ -549,6 +550,17 @@ fn closing_with_frames(
 ) -> (CloseRecord, StudioClosingOverlayBasis) {
     assert!(frames < catcoms_replication::studio::FLIPNOTE_MAX_FRAMES);
     eligible(f, store);
+    // In memory, then one durable save, as `eligible` inflates the epoch. An edit per frame through
+    // the store re-encodes and rewrites the whole epoch every time, about 2.2 MB of inflated
+    // history, and the first version of this fixture spent two hours on two of six shapes that way.
+    let mut b = budget(store, f);
+    let state = f.load(store).unwrap();
+    let observed = state
+        .source
+        .as_ref()
+        .map(crate::store::epoch_studio::source::SourceVersion::record);
+    let mut unit = state.unit;
+    let before = unit.snapshot().unwrap();
     let mut after = [1u8; 16];
     for n in 0..frames {
         let (cid, bytes) = published_pix_wide(store, f, n as u16);
@@ -565,40 +577,50 @@ fn closing_with_frames(
             0,
         );
         op.nonce = (n as u128 + 30_000).to_be_bytes();
-        let mut b = budget(store, f);
-        f.edit(store, &mut b, op);
+        unit.edit_or_reseal(&f.device, &f.group, &mut rng(), &op, 100)
+            .unwrap();
         after = frame;
     }
+    let state = store
+        .save_studio_source(
+            SERVER,
+            unit,
+            observed,
+            &before,
+            WritePurpose::Ordinary,
+            &mut rng(),
+            &mut b.storage,
+            WriteStep::new(WriteTag::Source),
+            &mut WriteHooks::None,
+        )
+        .unwrap();
+    store.retain_studio_source(&f.group, &f.device, state);
     seal_source(f, store)
 }
 
-/// The source axis: a short and a full title branch over Flipnotes whose base already holds 256,
-/// 512 and 998 frames (C-3 runtime 15.9's order of work, item 1).
-fn source_stages() {
-    for base in [
-        256,
-        512,
-        catcoms_replication::studio::FLIPNOTE_MAX_FRAMES - 1,
-    ] {
-        for ops in [1, catcoms_replication::studio::MAX_STUDIO_OVERLAY_OPS] {
-            let mut samples: [Vec<u64>; 9] = Default::default();
-            let mut source_bytes = 0;
-            for _ in 0..STAGE_TRIALS {
-                let root = tempfile::tempdir().unwrap();
-                let f = Fixture::new(true);
-                let mut store = open(root.path());
-                let closed = closing_with_frames(&f, &mut store, base);
-                let (basis, _) = fixture_after(&f, &mut store, ops, closed);
-                time_stages(&f, &mut store, basis, ops, &mut samples);
-                source_bytes = fs::metadata(f.path(&store)).unwrap().len();
-            }
-            report_stages(
-                &format!("flipnote_base_{base}_frames"),
-                ops,
-                source_bytes,
-                samples,
-            );
+/// The source axis at one base size: a short and a full title branch over a Flipnote whose base
+/// already holds `base` frames (C-3 runtime 15.9's order of work, item 1).
+fn source_stages(base: usize) {
+    for ops in [1, catcoms_replication::studio::MAX_STUDIO_OVERLAY_OPS] {
+        let mut samples: [Vec<u64>; 9] = Default::default();
+        let mut source_bytes = 0;
+        // Three trials, not five: each builds its base from scratch, and the 998-frame fixtures
+        // dominate the run.
+        for _ in 0..3 {
+            let root = tempfile::tempdir().unwrap();
+            let f = Fixture::new(true);
+            let mut store = open(root.path());
+            let closed = closing_with_frames(&f, &mut store, base);
+            let (basis, _) = fixture_after(&f, &mut store, ops, closed);
+            time_stages(&f, &mut store, basis, ops, &mut samples);
+            source_bytes = fs::metadata(f.path(&store)).unwrap().len();
         }
+        report_stages(
+            &format!("flipnote_base_{base}_frames"),
+            ops,
+            source_bytes,
+            samples,
+        );
     }
 }
 
@@ -675,12 +697,25 @@ fn studio_overlay_handoff_stage_profile_fixtures_hand_off() {
 }
 
 /// Opt-in, real clock, release: H1 to H5 against the **source's** size, not only the branch's
-/// (C-3 runtime 15.9's order of work, item 1). Separate from the stage profile, which already
-/// takes about 50 minutes; building a 998-frame base costs as many Open-epoch edits.
+/// (C-3 runtime 15.9's order of work, item 1), at bases of 256, 512 and 998 frames. One test per
+/// base, so each fits a two-hour run on its own; together they are the axis. Separate from the
+/// stage profile, which already takes about 50 minutes.
 #[test]
 #[ignore = "opt-in custody measurement, not a latency acceptance test"]
-fn profile_studio_overlay_handoff_source_axis() {
-    source_stages();
+fn profile_studio_overlay_handoff_source_axis_256() {
+    source_stages(256);
+}
+
+#[test]
+#[ignore = "opt-in custody measurement, not a latency acceptance test"]
+fn profile_studio_overlay_handoff_source_axis_512() {
+    source_stages(512);
+}
+
+#[test]
+#[ignore = "opt-in custody measurement, not a latency acceptance test"]
+fn profile_studio_overlay_handoff_source_axis_998() {
+    source_stages(catcoms_replication::studio::FLIPNOTE_MAX_FRAMES - 1);
 }
 
 #[test]
