@@ -44,6 +44,10 @@ and ranks the live hazards in that path.
       - On a full pool, a held client page or Registry page can keep catch-up from serving at all,
         while H3 yields to a request it cannot reach.
       - The inbound term has no actor-level test.
+  - **Decision, technical debt:** a Studio handoff's final commit (H5) stays one blocking step.
+    At the caps (999 frames, 256 draft operations) it takes about 0.15 s, past the design's
+    0.125 s target, once per handoff. Splitting it (C-3 step 3's remaining route) is deferred, and
+    Flow R is next. See `GATE4-AGENT-1-C3-RUNTIME.md` 15.14.
   - Native Save and repair commands remain unregistered. This is not Gate 4 acceptance.
 
 - **Gate 4 PR #35 reconciliation (2026-10-08).** The candidate now preserves
@@ -4373,6 +4377,17 @@ lives in `App.svelte`: it has been extracted into `apps/desktop/src/call-audio.t
    for a hostile review on that class of change. Worth running before voice is "done".
 
 ## Known limitations / deferred (the security-relevant ones)
+
+- **Technical debt: a Studio handoff's final commit is one blocking step of up to about 0.15 s**
+  (decided 2026-10-09). This is H5, which transfers a closed document's local draft. It grows with
+  the document and the draft. At their caps (`FLIPNOTE_MAX_FRAMES` 999, `MAX_STUDIO_OVERLAY_OPS`
+  256) it measured 147 ms, and once 248 ms on a busy host, past the 125 ms custody-visit target;
+  that server's background work and Studio requests wait meanwhile.
+  - **Exposure:** a member can fill a shared Flipnote to the frame cap, but the draft is the
+    handing-off device's own. So a peer gets at most one such pause per local draft, with no
+    amplification.
+  - **To pay it down:** split the commit across visits, starting from
+    `GATE4-AGENT-1-C3-RUNTIME.md` 15.10 and 15.12; Flow R's commit would then need the same.
 
 - **Desktop networking: the transport paths are wired, but public infrastructure is not
   deployed by the app.** The `apps/desktop` bridge binds all interfaces and the

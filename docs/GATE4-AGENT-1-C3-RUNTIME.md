@@ -1699,3 +1699,34 @@ order is unchanged too: the candidate's set, then the intents', then the base's.
 reaches the refusal, so removing the call fails no test; the wiring stays checked by inspection,
 which is HIGH-1's point. Step B's `cfg(test)` recompute-and-compare is what will exercise the call
 on the proof path.
+
+### 15.14 Decision (2026-10-09): H5 stays one visit; step 3's target is relaxed for it
+
+**Decided by the project owner.** H5's commit stays a single custody visit, as it is today. The
+125 ms visit target no longer applies to it, and this is recorded as technical debt rather than
+designed away.
+
+**What is accepted.** The commit grows with the source and the branch (15.10). Both are capped:
+the base by `FLIPNOTE_MAX_FRAMES` (999) and the branch by `MAX_STUDIO_OVERLAY_OPS` (256). At both
+caps it measured 147 ms (upper median of 3, release, shared host). The largest single sample in
+F3's runs was 248 ms. Below the caps it is shorter: 86 ms at 998 frames and one operation, and
+under 60 ms at 512 frames. It happens once per handoff, when a closed document's local draft is
+transferred.
+
+**As an attack surface.** Another member can fill a shared Flipnote to the frame cap, but the
+branch is the handing-off device's own operations, and a device hands off only documents it has
+itself drafted on while they were Closing. So the most a peer can force is one commit over a
+maximal source for each such draft: a pause of roughly 0.1 to 0.15 s per handoff, with no
+amplification. No cap change is needed. Lowering `FLIPNOTE_MAX_FRAMES` would be a format change,
+and saves only about 0.06 ms per frame.
+
+**What changes in the plan:**
+- **Deferred, not dropped:** step B (item 0's first half) and the rest of 15.12's route, including
+  the touched-path cursor decision (15.9 item 8).
+- **Kept:** step A (15.13). It closed a test gap that predates item 0 and stands on its own.
+- **Next:** Flow R, building its commit (R3) on the same single-visit path as H5.
+- **If the target is restored later,** both H5 and R3 need splitting, not only H5. The 15.10 table
+  and 15.12's plan are where that work starts.
+
+Also recorded in `THREAT-MODEL.md` (the pause a member can cause) and in `HANDOVER.md`'s known
+limitations.

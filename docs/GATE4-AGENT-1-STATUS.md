@@ -5770,6 +5770,10 @@ makes that more important, not less.
      has freed the shared receiver files.
    - **The classifier and refused-result memo** (C-3 runtime 14, parts A and B) are built at
      `6a79e6f8`.
+   - **Decision, 2026-10-09: H5 stays one visit, and Flow R is next** (C-3 runtime 15.14).
+     The project owner accepted H5's single long visit at the caps, about 0.15 s, as technical
+     debt. The step-3 route below (step B onwards) is deferred, not dropped; step A stays. The
+     text below is kept as the plan to resume from.
    - **Step 3, and Flow R after it, need more than the classifier.** Design 9.1 is built
      (`17dd54fc`), and the commit phase is measured on its own (2026-10-09, release, shared
      host). The route's revision 2 is C-3 runtime 15.8, and its design review is 15.9: no
@@ -5794,8 +5798,10 @@ makes that more important, not less.
      8. the touched-path cursor decision, which moves into step 3 if item 1 leaves no margined
         share.
    - **Steps 4 and 5** still need section 7's measurements.
-2. Then **Flow R**, which needs no media and is independent. It was deliberately sequenced after
-   this boundary so it is not built on the unbounded inventory path and then split again.
+2. **Flow R next** (decision, 2026-10-09). It needs no media and is independent. It was sequenced
+   after this boundary so it would not be built on the single-visit path and split again; with
+   H5's single visit accepted (C-3 runtime 15.14), it is built on that path, and R3 joins H5 in
+   the deferred split if the target is ever restored.
 3. Produce design 13's eight measurements as each item lands; C-1's before-and-after is cheap,
    since the opt-in profile already exists. **13.7 (updated 2026-10-08):** Recovery, Registry
    and Studio were measured earlier. Intents, OwnerReceipts and DraftArchive were measured on

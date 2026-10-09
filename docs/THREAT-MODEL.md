@@ -301,6 +301,14 @@ table with the commit that closed it.
   - **Fallback:** a move that the job cannot serve within 60 s falls back to the synchronous scan
     it used before step 2. So the move, and its recovery notice, can be delayed by up to that
     long.
+- **A Studio handoff's final commit (H5) runs in one custody visit, accepted as technical debt**
+  (decision 2026-10-09, `GATE4-AGENT-1-C3-RUNTIME.md` 15.14). It grows with the document and the
+  local draft, both capped (999 frames, 256 draft operations). At both caps it measured about
+  0.15 s, and once 0.25 s on a busy host, against a 0.125 s visit target. While it runs, the
+  server's background work and Studio requests wait.
+  - **What a member can do:** fill a shared Flipnote to the frame cap. The draft is the
+    handing-off device's own, and a device hands off only documents it drafted on, so this buys
+    at most one such pause per draft, with no amplification.
 - **A budgeted scan holds custody for a bounded validation only, and a memoized validation is
   reused only for identical bytes.** Under a deadline, `validation_fits` admits a fresh validation
   inline only in accounting mode, and only for four families:
