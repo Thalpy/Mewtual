@@ -243,7 +243,9 @@ impl StudioReceiver {
                 Ok(StudioOverlaySaveVisit::Saved(saved))
             }
             StudioOverlayStart::Captured(capture) => {
-                self.catchup.schedule_overlay(*capture, ownership, target);
+                if !self.queue_capture_unless_paused(*capture, ownership, target) {
+                    return Ok(StudioOverlaySaveVisit::Busy);
+                }
                 self.unconfirmed_scheduled = Some(request);
                 Ok(StudioOverlaySaveVisit::Scheduled)
             }

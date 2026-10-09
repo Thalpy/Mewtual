@@ -929,6 +929,18 @@ impl CatchupRuntime {
             .map(|(context, plan, ownership)| (context.target, plan, ownership))
     }
 
+    /// Drop a capture queued for its detached plan but not yet handed out, releasing admission, its
+    /// pool permit and its transient media hold with it. Returns whether one was dropped.
+    ///
+    /// For `pause` (design 18.3 review, F4). A paused receiver hands out no work, and only an
+    /// unrelated explicit access clears the pause, so a queued capture would strand all three for
+    /// the whole pause. Safe for RT-001's reason: nothing durable was written, and the caller's
+    /// identical retry plans afresh. A capture already detached is the worker's: it completes,
+    /// parks, and the park deadline drops it, because that expiry runs outside the pause gate.
+    pub(super) fn release_queued_overlay(&mut self) -> bool {
+        self.overlay.take().is_some()
+    }
+
     #[cfg(test)]
     pub(super) fn overlay_admission_available_for_test(&mut self) -> bool {
         self.overlay_admission.can_admit()

@@ -1939,6 +1939,70 @@ async fn a_refused_plan_releases_admission_and_its_pool_slot_without_a_second_vi
     assert!(receiver.catchup.reserve_overlay().is_some());
 }
 
+/// Design 18.3 review, F4: `pause` releases a Save capture that was queued but not yet detached.
+///
+/// A paused receiver hands out no work, and only an unrelated explicit access clears the pause, so
+/// before this the queued capture held this actor's admission, a process-wide pool permit and its
+/// transient media hold for the whole pause. The release is entry-point agnostic: it is the same
+/// for a Closing and an Unconfirmed Save's capture.
+///
+/// The media hold is not observed here: this fixture captures a title operation, which holds no
+/// media. It is released by the same drop of the capture that releases the other two, which is
+/// what RT-001's refused-plan path relies on too.
+#[tokio::test]
+async fn a_pause_releases_a_queued_save_capture_with_its_admission_and_permit() {
+    let clock = ManualClock::new(1000);
+    let mut rng = ChaCha20Rng::seed_from_u64(409);
+    let mut server = Server::found(
+        Hub::new().join(PeerId::from_u64(1)),
+        MlsDevice::generate().unwrap(),
+        rng.clone(),
+        Box::new(clock.clone()),
+        "owner",
+    )
+    .unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let mut store = ServerStore::open(root.path(), b"paused-capture", &mut rng).unwrap();
+    let target = StudioTarget::Flipnote {
+        channel: crate::channel_id("general").to_be_bytes(),
+        object: [9; 16],
+    };
+    let capture = server.sync.with_registry_context(|g, d, _, _| {
+        crate::store::studio_closing_capture_fixture(&mut store, 83, g, d, target, false)
+    });
+
+    let mut receiver = StudioReceiver::default();
+    let pool = receiver.catchup.inject_overlay_pool_for_test(4);
+    let free = pool.available_permits();
+    let ownership = receiver
+        .catchup
+        .reserve_overlay()
+        .expect("the job is admitted");
+    receiver
+        .catchup
+        .queue_overlay_for_test(capture, ownership, target);
+    assert_eq!(pool.available_permits(), free - 1);
+
+    receiver.pause_at_for_test(&server);
+    assert!(
+        receiver.catchup.overlay.is_none(),
+        "the queued capture survived the pause"
+    );
+    assert!(
+        receiver.catchup.overlay_admission_available_for_test(),
+        "a paused receiver kept the queued capture's admission"
+    );
+    assert_eq!(
+        pool.available_permits(),
+        free,
+        "a paused receiver kept the queued capture's pool permit"
+    );
+    assert!(
+        receiver.detach(&mut server).is_none(),
+        "a paused receiver handed out work"
+    );
+}
+
 /// RT-002. S2 is a heavy stage, so 7.3's placement rule applies: authoritative catch-up work is
 /// selected first and the overlay plan waits for `replay_ready()`. The design accepts that overlay
 /// work may starve under sustained catch-up (L7); the reverse was never accepted.

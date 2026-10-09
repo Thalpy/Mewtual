@@ -189,7 +189,9 @@ impl StudioReceiver {
                 Ok(StudioOverlaySaveVisit::Saved(saved))
             }
             crate::store::StudioOverlayStart::Captured(capture) => {
-                self.catchup.schedule_overlay(*capture, ownership, target);
+                if !self.queue_capture_unless_paused(*capture, ownership, target) {
+                    return Ok(StudioOverlaySaveVisit::Busy);
+                }
                 self.closing_scheduled = Some(request);
                 Ok(StudioOverlaySaveVisit::Scheduled)
             }
@@ -447,6 +449,31 @@ impl StudioReceiver {
         Ok((StudioSavedTransaction::empty(), updated))
     }
 
+    /// Queue a fresh Save capture for its detached plan, unless the receiver is paused. Returns
+    /// whether it was queued; the caller answers `Busy` if not and records no scheduling request.
+    ///
+    /// Design 18.3 review, F4, in the shape Agent 2 asked for. A paused receiver hands out no work,
+    /// and only an unrelated explicit access clears the pause, so a capture queued now would hold
+    /// this actor's admission, one of the four process-wide preparation permits and its transient
+    /// media hold for as long as the pause lasts. Dropping it releases all three, and nothing
+    /// durable was written (RT-001). The check sits here, after classification, not at either
+    /// Save's entry: an exact retry of accepted work is answered at S1 before any capture, and
+    /// that answer must not depend on the receiver's state.
+    fn queue_capture_unless_paused(
+        &mut self,
+        capture: crate::store::StudioOverlayCapture,
+        ownership: crate::studio::overlay::OverlayOwnership,
+        target: StudioTarget,
+    ) -> bool {
+        if self.paused {
+            drop(capture);
+            drop(ownership);
+            return false;
+        }
+        self.catchup.schedule_overlay(capture, ownership, target);
+        true
+    }
+
     /// 7.3's placement answer for a signing slice: yield immediately to authoritative service
     /// interest, to inbound on any watch, or to a background result already parked.
     fn handoff_priority<T: MeshTransport, R: CryptoRngCore>(&self, server: &Server<T, R>) -> bool {
@@ -634,6 +661,14 @@ impl StudioReceiver {
         // A paused receiver runs no turn, so a held inventory job and its plaintext are released
         // now rather than left resident for the whole pause.
         self.inventory.release();
+        // Likewise a Save capture still queued for its plan (design 18.3 review, F4): it would
+        // hold admission, a pool permit and its media hold for the whole pause. The slot holds at
+        // most one of a queued capture, a detached job and a parked plan, so the request it
+        // belonged to is whichever of the two is set; forget both.
+        if self.catchup.release_queued_overlay() {
+            self.closing_scheduled = None;
+            self.unconfirmed_scheduled = None;
+        }
     }
     pub(crate) fn take_pause_notice(&mut self) -> bool {
         std::mem::take(&mut self.pause_notice)
