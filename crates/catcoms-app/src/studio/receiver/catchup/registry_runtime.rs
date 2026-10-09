@@ -155,6 +155,14 @@ impl CatchupRuntime {
             self.registry_selection = self.registry_selection.wrapping_add(1);
             return Ok(false);
         }
+        if self.registry_decision_waiting(server, store, id, bucket, now) {
+            // A held owner decision owns this bucket's turn and its work is backing off.
+            // Preparing would buy nothing this turn: a detached rebuild when cold, and the eviction
+            // of the single warm source another target may need. Spend the turn and move on.
+            self.registry_target = None;
+            self.registry_selection = self.registry_selection.wrapping_add(1);
+            return Ok(true);
+        }
         if !self.prepare(server, store, id, target)?
             || !self.prepare_registry_inventory(server, store, id, bucket)?
         {

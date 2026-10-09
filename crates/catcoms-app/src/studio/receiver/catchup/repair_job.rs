@@ -314,8 +314,10 @@ impl CatchupRuntime {
             }
         };
         if input.explicit() {
-            // A new decision's outcome must never be read from an earlier job's report.
+            // A new decision's outcome must never be read from an earlier job's report, and its
+            // target starts a fresh resume backoff rather than the last decision's doubled one.
             self.repair_reports.remove(&target);
+            self.repair_visits.remove(&target);
         }
         let tenure = server.sync.authoring_owner_tenure_start();
         let mls = server.sync.with_registry_context(|g, _, _, _| g.epoch());

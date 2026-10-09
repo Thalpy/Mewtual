@@ -231,6 +231,83 @@ impl Owed {
         (runtime, pool)
     }
 
+    /// A second document of Alice's, faulted and decided the same way, so it too owes a
+    /// replacement. Returns the receipt its decision selected.
+    fn decide_another(&mut self, target: StudioTarget) -> Receipt {
+        use catcoms_replication::studio::{FlipnoteHeader, FlipnoteOp};
+        let StudioOwnerTenure::Known(start) = self.alice.observed_owner_tenure() else {
+            panic!("the founder observes its own tenure")
+        };
+        let mut b = CatchupRuntime::budget(&mut self.alice, &mut self.store, SERVER).unwrap();
+        let store = &mut self.store;
+        let [chosen, rival] = self
+            .alice
+            .sync
+            .with_registry_context(|group, device, clock, rng| {
+                let logical = target.document(&group.group_id()).unwrap();
+                let op = DomainOp {
+                    nonce: [2; 16],
+                    doc_type: logical.doc_type,
+                    logical_key: logical.logical_key.clone(),
+                    body: FlipnoteOp::SetHeader(FlipnoteHeader::Title("sun".into()))
+                        .encode()
+                        .unwrap(),
+                };
+                let id = catcoms_replication::epoch_zero_id(logical.doc_type, &logical.logical_key);
+                let (_, state) = store
+                    .edit_studio_epoch(SERVER, group, target, id, device, op, 100, rng, &mut b)
+                    .unwrap();
+                let signed = [30u8, 31].map(|salt| {
+                    let mut projection = state.projection().unwrap();
+                    let StudioProjection::Flipnote(art) = &mut projection else {
+                        panic!("a Flipnote target")
+                    };
+                    art.epoch = 10;
+                    let seed = projection.checkpoint([salt; 32]).unwrap();
+                    Receipt::sign(
+                        logical.clone(),
+                        10,
+                        [salt; 32],
+                        seed.change_hash(),
+                        start,
+                        InheritedCheckpoint::EpochZero,
+                        device,
+                    )
+                    .unwrap()
+                });
+                for receipt in &signed {
+                    store
+                        .adopt_studio_checkpoint(
+                            SERVER, group, target, device, receipt, None, start, clock, rng, &mut b,
+                        )
+                        .unwrap();
+                }
+                signed
+            });
+        let mut pair = [chosen.clone(), rival];
+        pair.sort_by_key(Receipt::hash);
+        let snapshot = self.snapshot();
+        let mut b = CatchupRuntime::budget(&mut self.alice, &mut self.store, SERVER).unwrap();
+        let (_, outcome, _) = self
+            .alice
+            .issue_studio_fault_repair(
+                &mut self.store,
+                SERVER,
+                target,
+                &snapshot,
+                StudioRepairRequest {
+                    receipt_a: pair[0].hash(),
+                    receipt_b: pair[1].hash(),
+                    selected: chosen.hash(),
+                },
+                None,
+                &mut b,
+            )
+            .unwrap();
+        assert_eq!(outcome, StudioRepairOutcome::AwaitingSeed);
+        chosen
+    }
+
     fn replace(&self) -> RepairInput {
         RepairInput::Replace {
             repair: Box::new(self.repair.clone().expect("decided")),
@@ -249,6 +326,21 @@ fn only_source(root: &std::path::Path) -> Vec<u8> {
         .collect::<Vec<_>>();
     assert_eq!(sources.len(), 1);
     sources.pop().unwrap()
+}
+
+/// Every owner-record file, by path, so a test can roll the records back as a crash would.
+fn owner_records(
+    root: &std::path::Path,
+) -> std::collections::BTreeMap<std::path::PathBuf, Vec<u8>> {
+    std::fs::read_dir(root.join("servers"))
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .filter(|p| p.extension().is_some_and(|x| x == "owner-receipts"))
+        .map(|p| {
+            let bytes = std::fs::read(&p).unwrap();
+            (p, bytes)
+        })
+        .collect()
 }
 
 fn source_path(root: &std::path::Path) -> std::path::PathBuf {
@@ -831,11 +923,207 @@ async fn an_owner_owing_only_a_seed_fetches_it_instead_of_rerunning_the_job() {
         .as_ref()
         .expect("the owed seed is fetched");
     assert_eq!(minted.inner.selected_receipt(), &owed.chosen);
+    // This target's next resume visit waits; the round-robin cadence for the others does not.
     assert!(
-        runtime.repair_next_at >= now + 60_000,
-        "and the resume backs off"
+        runtime
+            .repair_visits
+            .get(&owed.scope())
+            .is_some_and(|(until, _)| *until >= now + 60_000),
+        "and this target's resume backs off"
+    );
+    assert!(
+        runtime.repair_next_at < now + 60_000,
+        "without delaying any other target"
     );
     assert_eq!(owed.source(), source);
+}
+
+/// Review MEDIUM-1 on the fairness round: a target whose selected seed never arrives must not be
+/// refetched every minute for ever. Each started fetch defers only that target's next visit, and
+/// the deferral doubles from 60 s to the 15 min cap, so over 40 minutes it starts six fetches,
+/// not forty-one. A fixed 60 s let K such targets start K fetches a minute, each holding the
+/// single checkpoint slot that ordinary catch-up waits on. The streak ends with the repair: the
+/// terminal install clears it.
+#[tokio::test]
+async fn a_seed_that_never_arrives_is_refetched_ever_more_rarely_until_the_repair_ends() {
+    let mut owed = Owed::new(true).await;
+    let (mut runtime, _pool) = owed.runtime(4);
+    let (scope, target) = (owed.scope(), owed.target);
+    let watch = owed
+        .alice
+        .watch_studio_epoch(&owed.store, SERVER, target)
+        .unwrap();
+    let watches = VecDeque::from([(watch, 0)]);
+    let start = owed.clock.monotonic_ms();
+    let mut fetches = Vec::new();
+    // A visit every 5 s turn for 40 minutes. No fetch ever completes: each pass is dropped, as a
+    // failed fetch would be.
+    for _ in 0..=(40 * 60 / 5) {
+        runtime
+            .repair_owner(&mut owed.alice, &mut owed.store, SERVER, &watches)
+            .unwrap();
+        assert!(runtime.repair_job_target().is_none(), "never a rerun job");
+        if runtime.checkpoint.take().is_some() {
+            fetches.push((owed.clock.monotonic_ms() - start) / 1_000);
+        }
+        owed.clock.advance_ms(5_000);
+    }
+    assert_eq!(
+        fetches,
+        vec![0, 60, 180, 420, 900, 1_800],
+        "fetch starts, in seconds: gaps of 60, 120, 240 and 480 s, then the 15 min cap"
+    );
+    // The repair ends: the terminal install clears the streak, so a later fault starts afresh.
+    let input = owed.replace();
+    runtime.start_repair(
+        &mut owed.alice,
+        &mut owed.store,
+        SERVER,
+        scope,
+        Some(target),
+        input,
+    );
+    rebuild(&mut runtime, &owed).await;
+    runtime
+        .repair_commit(&mut owed.alice, &mut owed.store, SERVER)
+        .unwrap();
+    assert_eq!(
+        runtime.repair_report(scope),
+        Some(StudioRepairReport::Completed(
+            StudioRepairOutcome::Installed
+        ))
+    );
+    assert!(
+        !runtime.repair_visits.contains_key(&scope),
+        "a terminal outcome ends the backoff"
+    );
+}
+
+/// Review MEDIUM-1 on the fairness round, the hold half: each persistent hold (a recovery
+/// warning, a storage refusal, a failed capture) defers the target's next resume visit, doubling
+/// like a refetch does, so K targets that need the user no longer rerun K whole jobs a minute.
+/// A hold while a deferral is still running belongs to the same attempt and never doubles it. A
+/// deferral quiet for a whole cap after it ran out is forgotten, and a new explicit decision
+/// starts its target afresh.
+#[tokio::test]
+async fn repeated_holds_back_a_target_off_further_and_a_new_decision_starts_it_afresh() {
+    let mut owed = Owed::new(false).await;
+    let (mut runtime, _pool) = owed.runtime(4);
+    let (scope, target) = (owed.scope(), owed.target);
+    let other = CheckpointTarget::Registry(9);
+    // Times are offsets from `t0`; each hold is passed its moment explicitly.
+    let t0 = owed.clock.monotonic_ms();
+    let until = |runtime: &CatchupRuntime, scope| {
+        runtime
+            .repair_visits
+            .get(&scope)
+            .map(|(until, _)| *until - t0)
+    };
+    runtime.hold_repair(scope, t0);
+    assert_eq!(until(&runtime, scope), Some(60_000));
+    // A second hold inside the window extends it but does not double it.
+    runtime.hold_repair(scope, t0 + 30_000);
+    assert_eq!(until(&runtime, scope), Some(90_000));
+    // Holds after each window ran out: 120 s, 240 s, 480 s, then the 15 min cap.
+    let mut at = 90_000;
+    for expected in [120_000, 240_000, 480_000, 900_000, 900_000] {
+        runtime.hold_repair(scope, t0 + at);
+        assert_eq!(until(&runtime, scope), Some(at + expected));
+        at += expected;
+    }
+    // Quiet for a whole cap after the last window ran out: forgotten when anything else defers.
+    runtime.hold_repair(other, t0 + at + 900_000);
+    assert!(!runtime.repair_visits.contains_key(&scope));
+    runtime.hold_repair(scope, t0 + at + 900_000);
+    assert_eq!(
+        until(&runtime, scope),
+        Some(at + 900_000 + 60_000),
+        "a forgotten target starts again at 60 s"
+    );
+    // Back it off once more, then decide: the explicit decision starts the target afresh.
+    runtime.hold_repair(scope, t0 + at + 960_000);
+    assert_eq!(
+        runtime.repair_visits.get(&scope).map(|(_, streak)| *streak),
+        Some(1)
+    );
+    runtime.owner_snapshot = Some(owed.snapshot());
+    let request = owed.request();
+    let started = runtime
+        .repair_fault(&mut owed.alice, &mut owed.store, SERVER, target, request)
+        .unwrap();
+    assert!(
+        matches!(
+            started,
+            StudioControlResponse::RepairStarted {
+                start: StudioRepairStart::Scheduled,
+                ..
+            }
+        ),
+        "{started:?}"
+    );
+    assert!(
+        !runtime.repair_visits.contains_key(&scope),
+        "a new decision does not inherit the old backoff"
+    );
+}
+
+/// Second re-review MEDIUM: an owed source that is cold at every visit, once a fetch came to
+/// nothing, falls back to a resume job, because B3 alone cannot tell it from a landed install. On
+/// a busy owner that job's finish often cannot start the seed fetch (here a discovery is in
+/// flight), and ordinary catch-up evicts the source again before the next visit. A scheduled job
+/// now defers the target like a started fetch, so ten minutes cost three jobs, not one per visit.
+#[tokio::test]
+async fn a_cold_owed_source_whose_fetch_cannot_start_reruns_its_job_ever_more_rarely() {
+    let mut owed = Owed::new(true).await;
+    let (mut runtime, _pool) = owed.runtime(4);
+    let (scope, target) = (owed.scope(), owed.target);
+    let watch = owed
+        .alice
+        .watch_studio_epoch(&owed.store, SERVER, target)
+        .unwrap();
+    let watches = VecDeque::from([(watch, 0)]);
+    let start = owed.clock.monotonic_ms();
+    // The first cold visit fetches the seed, and that fetch fails.
+    evict(&mut owed);
+    runtime
+        .repair_owner(&mut owed.alice, &mut owed.store, SERVER, &watches)
+        .unwrap();
+    assert!(
+        runtime.checkpoint.take().is_some(),
+        "the first cold visit fetches the seed"
+    );
+    let mut jobs = Vec::new();
+    for _ in 0..(10 * 60 / 5) {
+        owed.clock.advance_ms(5_000);
+        evict(&mut owed);
+        runtime
+            .repair_owner(&mut owed.alice, &mut owed.store, SERVER, &watches)
+            .unwrap();
+        assert!(runtime.checkpoint.is_none(), "no refetch from a visit");
+        if runtime.repair_job_target().is_some() {
+            jobs.push((owed.clock.monotonic_ms() - start) / 1_000);
+            assert!(jobs.len() <= 10, "a job on every visit: {jobs:?}");
+            // Another target's discovery is in flight, so the job's finish cannot fetch.
+            runtime.in_flight = true;
+            rebuild(&mut runtime, &owed).await;
+            runtime
+                .repair_commit(&mut owed.alice, &mut owed.store, SERVER)
+                .unwrap();
+            runtime.in_flight = false;
+            assert_eq!(
+                runtime.repair_report(scope),
+                Some(StudioRepairReport::Completed(
+                    StudioRepairOutcome::AwaitingSeed
+                ))
+            );
+            assert!(runtime.checkpoint.is_none(), "the finish could not fetch");
+        }
+    }
+    assert_eq!(
+        jobs,
+        vec![60, 180, 420],
+        "resume jobs, in seconds: one per doubling window"
+    );
 }
 
 /// Review M2 on `54c79846` and design N16: a newcomer that never observed the owner take office
@@ -1140,4 +1428,443 @@ async fn a_cold_owed_owner_fetches_the_seed_from_its_durable_record() {
         .as_ref()
         .expect("the owed seed is fetched");
     assert_eq!(minted.inner.selected_receipt(), &owed.chosen);
+}
+
+/// Plan D: fairness across held targets. A target whose last job ended in a persistent hold must
+/// not delay any other target's resume. One shared cadence did: visiting the held target pushed
+/// every resume back 60 s, so N held targets could hold a healthy one off for N minutes. Now only
+/// the held target's next visit waits, and the next 5 s turn reaches the other one.
+#[tokio::test]
+async fn a_held_target_never_delays_another_targets_resume() {
+    let mut owed = Owed::new(true).await;
+    let other = StudioTarget::Flipnote {
+        channel: owed.target.channel(),
+        object: [9; 16],
+    };
+    let other_chosen = owed.decide_another(other);
+    let (mut runtime, _pool) = owed.runtime(4);
+    let held = owed.target;
+    runtime.hold_repair(owed.scope(), owed.clock.monotonic_ms());
+    let watches = VecDeque::from([
+        (
+            owed.alice
+                .watch_studio_epoch(&owed.store, SERVER, held)
+                .unwrap(),
+            0,
+        ),
+        (
+            owed.alice
+                .watch_studio_epoch(&owed.store, SERVER, other)
+                .unwrap(),
+            0,
+        ),
+    ]);
+    runtime
+        .repair_owner(&mut owed.alice, &mut owed.store, SERVER, &watches)
+        .unwrap();
+    assert!(
+        runtime.checkpoint.is_none(),
+        "the held target fetches nothing"
+    );
+    owed.clock.advance_ms(5_000);
+    runtime
+        .repair_owner(&mut owed.alice, &mut owed.store, SERVER, &watches)
+        .unwrap();
+    let minted = runtime
+        .checkpoint
+        .as_ref()
+        .expect("the next 5 s turn fetches the other target's owed seed");
+    assert_eq!(minted.inner.selected_receipt(), &other_chosen);
+}
+
+/// Plan D: an unrelated actor keeps making progress while a repair S2 is paused. Two independent
+/// servers share one four-slot pool, as two actors share the process pool. Actor A's rebuild is
+/// detached and never finishes here (a large or stalled worker). Actor B's whole job still gets a
+/// slot, rebuilds, commits and releases it, and A's paused worker keeps exactly its own slot and
+/// claim until it ends, when A commits too.
+///
+/// Limits: A's turn runs with no watches, so this shows A's actor turning without failing or
+/// releasing, not A's own catch-up progressing while paused. And four paused S2 workers, from any
+/// actors, exhaust the process pool; every new job and preparation then answers `Full` until one
+/// ends.
+#[tokio::test]
+async fn an_unrelated_actor_progresses_while_a_repair_rebuild_is_paused() {
+    let mut a = Owed::new(true).await;
+    let mut b = Owed::new(true).await;
+    let pool = Arc::new(tokio::sync::Semaphore::new(4));
+    let (mut runtime_a, _) = a.runtime(4);
+    let (mut runtime_b, _) = b.runtime(4);
+    runtime_a.overlay_pool = Some(pool.clone());
+    runtime_b.overlay_pool = Some(pool.clone());
+    let (a_scope, a_target) = (a.scope(), a.target);
+    let (b_scope, b_target) = (b.scope(), b.target);
+
+    let input = a.replace();
+    let started = runtime_a.start_repair(
+        &mut a.alice,
+        &mut a.store,
+        SERVER,
+        a_scope,
+        Some(a_target),
+        input,
+    );
+    assert_eq!(started.start(), StudioRepairStart::Scheduled);
+    // A's worker takes the bundle and stalls: the job holds nothing but its identity.
+    let paused = runtime_a
+        .repair_detach::<MemNetwork>()
+        .expect("A's rebuild detaches");
+    assert_eq!(pool.available_permits(), 3);
+    // A's actor keeps taking turns: nothing commits, nothing is released, nothing fails.
+    let updated = runtime_a
+        .run(&mut a.alice, &mut a.store, SERVER, &VecDeque::new())
+        .unwrap();
+    assert_eq!(updated, None);
+    assert!(runtime_a.repair_claimed(a.scope()));
+
+    // B, meanwhile, runs a whole job to completion.
+    let input = b.replace();
+    let started = runtime_b.start_repair(
+        &mut b.alice,
+        &mut b.store,
+        SERVER,
+        b_scope,
+        Some(b_target),
+        input,
+    );
+    assert_eq!(
+        started.start(),
+        StudioRepairStart::Scheduled,
+        "a paused S2 elsewhere takes one slot, not the pool"
+    );
+    assert_eq!(pool.available_permits(), 2);
+    rebuild(&mut runtime_b, &b).await;
+    runtime_b
+        .repair_commit(&mut b.alice, &mut b.store, SERVER)
+        .unwrap();
+    assert_eq!(
+        runtime_b.repair_report(b.scope()),
+        Some(StudioRepairReport::Completed(
+            StudioRepairOutcome::Installed
+        ))
+    );
+    assert_eq!(b.phase(), EpochPhase::Open);
+    assert_eq!(
+        pool.available_permits(),
+        3,
+        "B released its slot; A's worker still owns one"
+    );
+
+    // A's worker finally ends, and A commits on its next turn.
+    let StudioBackgroundResult::Repair(completion) = paused.run(None).await else {
+        panic!("a repair result")
+    };
+    runtime_a.repair_complete(completion, a.clock.monotonic_ms());
+    runtime_a
+        .repair_commit(&mut a.alice, &mut a.store, SERVER)
+        .unwrap();
+    assert_eq!(
+        runtime_a.repair_report(a.scope()),
+        Some(StudioRepairReport::Completed(
+            StudioRepairOutcome::Installed
+        ))
+    );
+    assert_eq!(pool.available_permits(), 4);
+}
+
+/// Plan D, an interrupted repair recovered through the job, for a Studio source (the Registry
+/// counterpart is `an_owner_that_crashed_between_install_and_recycle_resumes_and_recycles`). The
+/// owner's replacement install and its record's recycle are separate writes. After a crash
+/// between them the record still holds the decision with B3 set, although the source owes
+/// nothing. The owner's resume must recognise that and resume, which recycles; a seed fetch would
+/// be deferred by the held decision for good. A warm source is classified exactly at once. A cold
+/// one is classified from B3, so the first visit fetches a seed. The router then prepares the
+/// source for that pass, finds it owing nothing behind the held decision, and resumes on the
+/// spot (review MEDIUM-2 on the fairness round). Waiting for this target's next visit relied on
+/// the single warm cache surviving until then, while ordinary catch-up prepares another target
+/// every few seconds; the test evicts it to show the resume no longer needs it. If no peer ever
+/// serves the seed, that pass never reaches the router; the second visit then resumes instead of
+/// fetching again (re-review LOW-1), so recovery never depends on a peer having the seed.
+#[tokio::test]
+async fn an_owner_that_crashed_between_install_and_recycle_resumes_a_studio_source() {
+    for case in ["warm", "cold, seed served", "cold, seed never served"] {
+        let mut owed = Owed::new(true).await;
+        let (mut runtime, _pool) = owed.runtime(4);
+        let (scope, target) = (owed.scope(), owed.target);
+        crash_after_install(&mut owed, &mut runtime).await;
+        if case != "warm" {
+            evict(&mut owed);
+        }
+        runtime.owner_snapshot = Some(owed.snapshot());
+        let watch = owed
+            .alice
+            .watch_studio_epoch(&owed.store, SERVER, target)
+            .unwrap();
+        let watches = VecDeque::from([(watch, 0)]);
+        owed.clock.advance_ms(5_001);
+        runtime
+            .repair_owner(&mut owed.alice, &mut owed.store, SERVER, &watches)
+            .unwrap();
+        if case != "warm" {
+            assert!(
+                runtime.checkpoint.is_some(),
+                "cold, B3 alone looks like a missing seed"
+            );
+            assert!(runtime.repair_job_target().is_none());
+        }
+        if case == "cold, seed served" {
+            // That pass reaches the router just after `advance_checkpoint` has prepared, and so
+            // warmed, the source. The router's deferred branch reads no seed bytes, so this
+            // unfetched pass stands in for the fetched one.
+            warm_up(&mut owed);
+            let routed = runtime
+                .route_checkpoint_install(&mut owed.alice, &mut owed.store, SERVER, Some(target))
+                .unwrap();
+            assert_eq!(routed, Some(None), "the held decision defers the install");
+            assert!(runtime.checkpoint.is_none());
+            // Ordinary catch-up then prepares another target, which leaves this one cold again
+            // long before its next visit. The resume no longer waits for that visit.
+            evict(&mut owed);
+        }
+        if case == "cold, seed never served" {
+            // The fetch fails, and the source is still cold at the next visit, which resumes.
+            runtime.checkpoint = None;
+            evict(&mut owed);
+            owed.clock.advance_ms(60_000);
+            runtime
+                .repair_owner(&mut owed.alice, &mut owed.store, SERVER, &watches)
+                .unwrap();
+            assert!(runtime.checkpoint.is_none(), "no second fetch");
+        }
+        assert_eq!(
+            runtime.repair_job_target(),
+            Some(scope),
+            "the exact classification resumes the decision ({case})"
+        );
+        rebuild(&mut runtime, &owed).await;
+        runtime
+            .repair_commit(&mut owed.alice, &mut owed.store, SERVER)
+            .unwrap();
+        assert_eq!(
+            runtime.repair_report(scope),
+            Some(StudioRepairReport::Completed(
+                StudioRepairOutcome::AlreadyRepaired
+            ))
+        );
+        let logical = target.document(&owed.alice.group_id()).unwrap();
+        assert!(
+            owed.store
+                .load_epoch_owner_receipts(SERVER, &logical)
+                .is_ok(),
+            "the resume recycled the owner record ({case})"
+        );
+    }
+}
+
+/// The owner installs the owed replacement through a job, then crashes before its record's
+/// recycle: the source keeps the install, and the record still holds the decision with B3 set.
+async fn crash_after_install(owed: &mut Owed, runtime: &mut CatchupRuntime) {
+    let (scope, target) = (owed.scope(), owed.target);
+    let held_records = owner_records(owed.root.path());
+    let input = owed.replace();
+    runtime.start_repair(
+        &mut owed.alice,
+        &mut owed.store,
+        SERVER,
+        scope,
+        Some(target),
+        input,
+    );
+    rebuild(runtime, owed).await;
+    runtime
+        .repair_commit(&mut owed.alice, &mut owed.store, SERVER)
+        .unwrap();
+    assert_eq!(
+        runtime.repair_report(scope),
+        Some(StudioRepairReport::Completed(
+            StudioRepairOutcome::Installed
+        ))
+    );
+    for (path, bytes) in &held_records {
+        std::fs::write(path, bytes).unwrap();
+    }
+    let (store, alice) = (&owed.store, &mut owed.alice);
+    assert!(alice
+        .sync
+        .with_registry_context(|g, d, _, _| store.held_studio_repair_applied(SERVER, g, target, d))
+        .unwrap());
+}
+
+/// Leave the source cold, as a restart or preparing any other target would.
+fn evict(owed: &mut Owed) {
+    let (store, alice, target) = (&mut owed.store, &mut owed.alice, owed.target);
+    let _ = alice
+        .sync
+        .with_registry_context(|g, d, _, _| store.capture_studio_source(SERVER, g, target, d))
+        .unwrap();
+}
+
+/// Make the source warm, as installing a finished preparation does.
+fn warm_up(owed: &mut Owed) {
+    let (store, alice, target) = (&mut owed.store, &mut owed.alice, owed.target);
+    alice.sync.with_registry_context(|g, d, _, _| {
+        let state = store
+            .load_studio_epoch(SERVER, g, target, d)
+            .unwrap()
+            .unwrap();
+        store.retain_studio_source(g, d, state);
+    });
+}
+
+/// Re-review LOW-2: the router's own resume of a landed install needs a current durable owner
+/// snapshot, like every other owner path. Without one, S3 would refuse after a whole capture and
+/// rebuild and hold the target. The router starts nothing, and the owner's visit resumes once it
+/// has a snapshot again.
+#[tokio::test]
+async fn the_router_resumes_a_landed_install_only_under_a_current_snapshot() {
+    let mut owed = Owed::new(true).await;
+    let (mut runtime, pool) = owed.runtime(4);
+    let (scope, target) = (owed.scope(), owed.target);
+    crash_after_install(&mut owed, &mut runtime).await;
+    evict(&mut owed);
+    runtime.owner_snapshot = Some(owed.snapshot());
+    let watch = owed
+        .alice
+        .watch_studio_epoch(&owed.store, SERVER, target)
+        .unwrap();
+    let watches = VecDeque::from([(watch, 0)]);
+    owed.clock.advance_ms(5_001);
+    runtime
+        .repair_owner(&mut owed.alice, &mut owed.store, SERVER, &watches)
+        .unwrap();
+    assert!(
+        runtime.checkpoint.is_some(),
+        "the cold visit fetches a seed"
+    );
+    // The pass reaches the router after the snapshot was lost.
+    warm_up(&mut owed);
+    runtime.owner_snapshot = None;
+    let routed = runtime
+        .route_checkpoint_install(&mut owed.alice, &mut owed.store, SERVER, Some(target))
+        .unwrap();
+    assert_eq!(
+        routed,
+        Some(None),
+        "the held decision still defers the install"
+    );
+    assert!(
+        runtime.repair_job_target().is_none(),
+        "no job starts without a current snapshot"
+    );
+    assert_eq!(pool.available_permits(), 4);
+    // With a current snapshot again, the owner's next visit resumes.
+    runtime.owner_snapshot = Some(owed.snapshot());
+    owed.clock.advance_ms(60_000);
+    runtime
+        .repair_owner(&mut owed.alice, &mut owed.store, SERVER, &watches)
+        .unwrap();
+    assert_eq!(runtime.repair_job_target(), Some(scope));
+}
+
+/// Re-review MEDIUM-1: once the person acknowledges the recovery warning that held a document,
+/// its doubled backoff describes nothing any more. A successful Acknowledge clears it, for the
+/// source and its bucket, so the next 5 s visit acts instead of up to 15 min later.
+#[tokio::test]
+async fn acknowledging_a_documents_warning_ends_its_repair_backoff() {
+    use crate::store::EpochRecoveryAction;
+    use catcoms_replication::studio::StudioRecovery;
+    use catcoms_replication::RecoveryReason;
+    let mut owed = Owed::new(true).await;
+    let (scope, target) = (owed.scope(), owed.target);
+    let bucket = CheckpointTarget::Registry(owed.alice.studio_registry_bucket(target).unwrap());
+    // Three staged recovery versions put the document over its cap: a warning to acknowledge.
+    let logical = target.document(&owed.alice.group_id()).unwrap();
+    let (store, alice) = (&owed.store, &mut owed.alice);
+    let projection = alice
+        .sync
+        .with_registry_context(|g, d, _, _| store.load_studio_epoch(SERVER, g, target, d))
+        .unwrap()
+        .unwrap()
+        .projection()
+        .unwrap();
+    let mut ids = Vec::new();
+    for n in 1..=3u8 {
+        let saved = StudioRecovery::snapshot(
+            &projection,
+            None,
+            RecoveryReason::Excluded,
+            [n; 32],
+            &std::collections::BTreeMap::new(),
+        )
+        .unwrap();
+        ids.push(saved.id().unwrap());
+        owed.store
+            .update_epoch_recovery(
+                SERVER,
+                &logical,
+                EpochRecoveryAction::Stage(saved),
+                &ManualClock::new(100),
+                &mut ChaCha20Rng::seed_from_u64(40 + u64::from(n)),
+            )
+            .unwrap();
+    }
+    let mut receiver = StudioReceiver::default();
+    receiver.catchup.owner_snapshot = Some(owed.snapshot());
+    receiver.catchup.inject_overlay_pool_for_test(4);
+    // The warning held the repair again and again, so its deferral has doubled to 480 s.
+    for _ in 0..3 {
+        let now = owed.clock.monotonic_ms();
+        receiver.catchup.hold_repair(scope, now);
+        receiver.catchup.hold_repair(bucket, now);
+        let (until, _) = receiver.catchup.repair_visits[&scope];
+        owed.clock.advance_ms(until - now);
+    }
+    let now = owed.clock.monotonic_ms();
+    receiver.catchup.hold_repair(scope, now);
+    receiver.catchup.hold_repair(bucket, now);
+    assert_eq!(receiver.catchup.repair_visits[&scope], (now + 480_000, 3));
+
+    let (_, _, response) = receiver
+        .control(
+            &mut owed.alice,
+            &mut owed.store,
+            SERVER,
+            StudioControlRequest {
+                target,
+                action: StudioControlAction::Acknowledge {
+                    oldest_snapshot: ids[0],
+                    staged_snapshot: ids[2],
+                },
+            },
+        )
+        .unwrap();
+    assert!(
+        matches!(response, Some(StudioControlResponse::Acknowledged(_))),
+        "{response:?}"
+    );
+    for scope in [scope, bucket] {
+        assert!(
+            !receiver.catchup.repair_visits.contains_key(&scope)
+                && !receiver.catchup.repair_backoff.contains_key(&scope),
+            "the acknowledgement ends the backoff ({scope:?})"
+        );
+    }
+    // The next 5 s visit acts at once: the owed seed is fetched.
+    owed.clock.advance_ms(5_000);
+    let watch = owed
+        .alice
+        .watch_studio_epoch(&owed.store, SERVER, target)
+        .unwrap();
+    receiver
+        .catchup
+        .repair_owner(
+            &mut owed.alice,
+            &mut owed.store,
+            SERVER,
+            &VecDeque::from([(watch, 0)]),
+        )
+        .unwrap();
+    assert!(
+        receiver.catchup.checkpoint.is_some(),
+        "the next visit fetches the owed seed"
+    );
 }

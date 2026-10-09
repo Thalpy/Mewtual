@@ -3,9 +3,13 @@
 //! crash in the same slot as rotation, after discovery, seed and page work. Repair work, for a
 //! Studio source or a Registry bucket alike, never runs in these entry points: each schedules the
 //! detached job in `repair_job`, and the `execute_*` handlers below are its S3. Round-robin over
-//! watched targets, with a 5 s cadence that backs off to 60 s on any hold; a persistent hold also
-//! stops that target's seed refetches and automatic jobs for 60 s. A hold is always a per-target
-//! wait: nothing here returns an error that would pause catch-up.
+//! watched targets on a 5 s cadence. A hold, a failure, a started seed fetch or a started resume
+//! job defers only that target's next visit, never the cadence for the others: by 60 s, doubling
+//! each time the target is deferred again up to 15 min, until it reaches a terminal outcome, the
+//! owner decides anew or the person acknowledges its warning. A persistent hold also stops that
+//! target's seed refetches and automatic jobs for 60 s. A hold is always a per-target wait:
+//! nothing here returns an error that would pause catch-up. This paces the owner's resume visits
+//! only; a peer's repaired-seed fetch is paced by the checkpoint slot and holds alone.
 use super::repair_job::{RepairInput, RepairSchedule};
 use super::*;
 use crate::store::{
@@ -20,8 +24,11 @@ use zeroize::Zeroizing;
 /// job; forgetting a report only hides it.
 const MAX_REMEMBERED_REPAIRS: usize = 64;
 /// How long a persistent repair hold suppresses refetching that target's selected seed. The same
-/// 60 s the ordinary installer waits after a recovery warning.
+/// 60 s the ordinary installer waits after a recovery warning. Also the first step of a target's
+/// owner-resume visit deferral, which doubles from here (see `defer_visit`).
 const REPAIR_HOLD_BACKOFF_MS: u64 = 60_000;
+/// The cap on one target's owner-resume visit deferral: 60 s doubled four times would be 16 min.
+const MAX_VISIT_DEFERRAL_MS: u64 = 15 * 60_000;
 
 impl CatchupRuntime {
     #[cfg(test)]
@@ -495,7 +502,8 @@ impl CatchupRuntime {
 
     /// The owner resumes a held Registry decision for the bucket behind `target`. The explicit
     /// decision itself is never made here: only one already persisted at B1 is continued, as a
-    /// job. Paced like the Studio step: a hold backs off to 60 s instead of every Registry turn.
+    /// job. Paced like the Studio step: a hold, failure or started seed fetch defers only this
+    /// bucket's work, by 60 s doubling to 15 min, instead of retrying every Registry turn.
     ///
     /// Returns whether a held decision owns the bucket; the caller then gives this turn to it.
     ///
@@ -516,9 +524,7 @@ impl CatchupRuntime {
         bucket: u8,
     ) -> Result<bool, AppError> {
         let now = server.runtime_clock().monotonic_ms();
-        if now < self.registry_repair_next_at {
-            return Ok(false);
-        }
+        let scope = CheckpointTarget::Registry(bucket);
         let Some(snapshot) = self.owner_snapshot.clone() else {
             return Ok(false);
         };
@@ -528,10 +534,26 @@ impl CatchupRuntime {
         let held = server
             .sync
             .with_registry_context(|g, d, _, _| store.held_registry_repair(id, g, bucket, d));
-        let Ok(Some((repair, pair))) = held else {
-            return Ok(false);
+        if self.visit_deferred(scope, now) {
+            // Only the work waits. A held decision still owns the bucket's turn, so ordinary
+            // bucket work does not run under it, however long this bucket is backing off; that
+            // costs one bounded owner-record read per deferred turn. The exceptions are those
+            // above and here: with no current owner snapshot, or an unreadable record, the
+            // ordinary turn runs as it always did. An unreadable record is reported by the first
+            // turn after the deferral ends. (`work_registry` asks `registry_decision_waiting`
+            // first and skips the whole turn, so this branch is a backstop.)
+            return Ok(matches!(held, Ok(Some(_))));
+        }
+        let (repair, pair) = match held {
+            Ok(Some(held)) => held,
+            Ok(None) => return Ok(false),
+            Err(error) => {
+                // An unreadable owner record is neither silent nor retried every turn.
+                self.note_repair_failure(target, &error);
+                self.defer_visit(scope, now);
+                return Ok(false);
+            }
         };
-        let scope = CheckpointTarget::Registry(bucket);
         let owes_only_seed = match self.registry_classification(server, store, id, bucket) {
             Some(owed) => Ok(owed.is_some_and(|(owed, _)| owed.hash() == repair.hash())),
             None => server.sync.with_registry_context(|g, d, _, _| {
@@ -541,22 +563,25 @@ impl CatchupRuntime {
         match owes_only_seed {
             Ok(true) => {
                 // B2 already crossed: a resume would only flush the same bucket again. Fetch the
-                // seed instead; only a fetch that actually started earns the long cadence.
+                // seed instead; only this bucket's own started fetch defers its next visit.
                 self.await_repaired_seed(server, store, id, scope, Some(target), &repair, &pair);
-                if self.checkpoint.is_some() || self.repair_backoff.contains_key(&scope) {
-                    self.registry_repair_next_at = now.saturating_add(60_000);
+                if self.seed_fetch_settled(scope, now) {
+                    self.defer_visit(scope, now);
                 }
             }
             Ok(false) => {
-                if self.start_repair(server, store, id, scope, Some(target), RepairInput::Resume)
-                    == RepairSchedule::Held
+                // As for a Studio target, a started job defers this bucket's next visit.
+                match self.start_repair(server, store, id, scope, Some(target), RepairInput::Resume)
                 {
-                    self.registry_repair_next_at = now.saturating_add(60_000);
+                    RepairSchedule::Scheduled | RepairSchedule::Held => {
+                        self.defer_visit(scope, now)
+                    }
+                    RepairSchedule::Busy | RepairSchedule::Full => {}
                 }
             }
             Err(error) => {
                 self.note_repair_failure(target, &error);
-                self.registry_repair_next_at = now.saturating_add(60_000);
+                self.defer_visit(scope, now);
             }
         }
         Ok(true)
@@ -585,6 +610,11 @@ impl CatchupRuntime {
         let target = watches[self.repair_selection % watches.len()].0.target;
         self.repair_selection = self.repair_selection.wrapping_add(1);
         self.repair_next_at = now.saturating_add(5_000);
+        let scope = CheckpointTarget::Studio(target);
+        if self.visit_deferred(scope, now) {
+            // Only this target waits; the next turn visits the next one on the 5 s cadence.
+            return Ok(None);
+        }
         let held = server
             .sync
             .with_registry_context(|g, d, _, _| store.held_studio_repair(id, g, target, d));
@@ -593,11 +623,10 @@ impl CatchupRuntime {
             Ok(None) => return Ok(None),
             Err(error) => {
                 self.note_repair_failure(target, &error);
-                self.repair_next_at = now.saturating_add(60_000);
+                self.defer_visit(scope, now);
                 return Ok(None);
             }
         };
-        let scope = CheckpointTarget::Studio(target);
         // Is only the seed missing? A warm source answers exactly; a cold one is classified from
         // the owner record's B3 flag, which needs no source restore (review LOW-2 on 4bc753a6).
         let warm = server
@@ -613,31 +642,44 @@ impl CatchupRuntime {
                 store.held_studio_repair_applied(id, g, target, d)
             });
             match applied {
-                Ok(true) => Some((held.clone(), held_pair)),
-                Ok(false) => None,
+                // B3 alone cannot tell an owed seed from an install that landed just before a
+                // crash, its recycle lost. The first visit fetches the seed, which is cheap, and
+                // the router resumes on the spot if the install had landed. Once this target has
+                // been deferred before (that fetch, or anything else, came to nothing), resume
+                // instead: the job classifies exactly at S3, so recovering a landed install never
+                // depends on some peer serving the seed (re-review LOW-1). A seed still owed is
+                // then fetched from the job's finish, at most once per deferral window.
+                Ok(true) if !self.repair_visits.contains_key(&scope) => {
+                    Some((held.clone(), held_pair))
+                }
+                Ok(_) => None,
                 Err(error) => {
                     self.note_repair_failure(target, &error);
-                    self.repair_next_at = now.saturating_add(60_000);
+                    self.defer_visit(scope, now);
                     return Ok(None);
                 }
             }
         };
         if let Some((owed, pair)) = owed {
             // B2 already crossed for this decision; only its seed is missing. A resume would just
-            // flush the same source again, so fetch the seed instead. Only a fetch that actually
-            // started earns the long cadence; one that could not start yet asks again soon.
+            // flush the same source again, so fetch the seed instead. Only this target's own
+            // started fetch defers its next visit; one that could not start yet asks again soon.
             self.await_repaired_seed(server, store, id, scope, Some(target), &owed, &pair);
-            if self.checkpoint.is_some() || self.repair_backoff.contains_key(&scope) {
-                self.repair_next_at = now.saturating_add(60_000);
+            if self.seed_fetch_settled(scope, now) {
+                self.defer_visit(scope, now);
             }
             return Ok(None);
         }
-        // `Busy` is another job or a full pool, retried on the ordinary cadence; only a hold on
-        // this target slows the round-robin.
-        if self.start_repair(server, store, id, scope, Some(target), RepairInput::Resume)
-            == RepairSchedule::Held
-        {
-            self.repair_next_at = now.saturating_add(60_000);
+        // A started job counts like a started fetch: it defers this target's next visit, so the
+        // owner runs at most one resume job per deferral window, whatever the job's finish could
+        // start. Without it, an owed cold source whose finish cannot fetch (another pass out, a
+        // discovery pending) and which ordinary catch-up evicts again before the next visit
+        // reran capture, rebuild and a B2 flush on every visit (second re-review MEDIUM). A
+        // terminal outcome clears the deferral; a hold only defers. `Busy` is another job or a
+        // full pool, retried on the ordinary cadence.
+        match self.start_repair(server, store, id, scope, Some(target), RepairInput::Resume) {
+            RepairSchedule::Scheduled | RepairSchedule::Held => self.defer_visit(scope, now),
+            RepairSchedule::Busy | RepairSchedule::Full => {}
         }
         Ok(None)
     }
@@ -801,6 +843,14 @@ impl CatchupRuntime {
         let scope = CheckpointTarget::Studio(target);
         let now = server.runtime_clock().monotonic_ms();
         let phase = state.phase();
+        if self.target == Some(target) && self.pass.is_some() {
+            // A page fetched before this transaction is stale against the source it wrote. A
+            // retarget or replacement leaves that source not Open or replaced, and saving the page
+            // then would be refused with its pass already Paused, which pauses all catch-up. S3
+            // returns before the page step, so drop the page here; a later pass fetches against
+            // the repaired source. Every other path that rewrites a source drops it the same way.
+            self.pass = None;
+        }
         server
             .sync
             .with_registry_context(|g, d, _, _| store.retain_studio_source(g, d, state));
@@ -809,17 +859,21 @@ impl CatchupRuntime {
         match outcome {
             outcome if outcome.is_terminal() => {
                 self.repair_backoff.remove(&scope);
+                self.repair_visits.remove(&scope);
                 self.remember_repair(scope, repair);
             }
             StudioRepairOutcome::AwaitingSeed => {
-                // The owner's next resume would only flush the same B2 again; the seed fetch below
-                // and later offers carry the work from here (review M1).
-                self.repair_next_at = self.repair_next_at.max(now.saturating_add(60_000));
+                // The seed fetch below and later offers carry the work from here (review M1); the
+                // owner's resume classifies an owed seed exactly, so it never reruns the job. Only
+                // this target's own started fetch defers its next visit.
                 let pair = server
                     .sync
                     .with_registry_context(|g, d, _, _| store.owed_studio_repair(id, g, target, d));
                 if let Some((owed, pair)) = pair {
                     self.await_repaired_seed(server, store, id, scope, Some(target), &owed, &pair);
+                }
+                if self.seed_fetch_settled(scope, now) {
+                    self.defer_visit(scope, now);
                 }
             }
             StudioRepairOutcome::Held(_) if offered => self.hold_offer(scope, repair.hash(), now),
@@ -828,12 +882,128 @@ impl CatchupRuntime {
         }
     }
 
-    /// Stop refetching `target`'s repaired seed for a while; expired holds are dropped here, so
-    /// the map stays as small as the set of targets currently held.
+    /// Stop refetching `target`'s repaired seed and starting its automatic jobs for a while;
+    /// expired holds are dropped here, so the map stays as small as the set of targets currently
+    /// held. A hold is a persistent outcome, so it also defers the owner's next resume visit of
+    /// that target, which is what makes repeated holds back off further (see `defer_visit`).
     pub(super) fn hold_repair(&mut self, target: CheckpointTarget, now: u64) {
         self.repair_backoff.retain(|_, until| now < *until);
         self.repair_backoff
             .insert(target, now.saturating_add(REPAIR_HOLD_BACKOFF_MS));
+        self.defer_visit(target, now);
+    }
+
+    /// Defer only `target`'s next owner-resume visit. The round-robin keeps its 5 s cadence for
+    /// every other target, so a held, failing or already-fetching target can never delay
+    /// another's resume (plan D, fairness across held targets). A single shared cadence did: each
+    /// held target visited pushed every resume back 60 s, so N held targets could hold a healthy
+    /// one off for N minutes. Unlike `hold_repair` this blocks nothing but the visit: an offered
+    /// repair or a fetched seed for the target still runs.
+    ///
+    /// The deferral doubles each time the target is deferred again after its last one ran out,
+    /// from 60 s to a 15 min cap (review MEDIUM-1 on the fairness round). A fixed 60 s let total
+    /// work grow with the number of held targets: K targets owing seeds no peer serves started K
+    /// fetches a minute, each holding the single checkpoint slot ordinary catch-up waits on, and
+    /// K targets that need the user reran K whole jobs a minute. Now each target's own rate
+    /// decays, without one target's backoff ever delaying another. A deferral that arrives while
+    /// one is still running belongs to the same attempt, so it can extend the wait but never
+    /// doubles it. A terminal outcome or a new explicit decision clears the entry; one that has
+    /// been quiet for a whole cap after it ran out is dropped here, which bounds the map to targets
+    /// deferred within the last two cap windows.
+    fn defer_visit(&mut self, target: CheckpointTarget, now: u64) {
+        let delay = |streak: u32| {
+            REPAIR_HOLD_BACKOFF_MS
+                .saturating_mul(1u64 << streak.min(4))
+                .min(MAX_VISIT_DEFERRAL_MS)
+        };
+        self.repair_visits
+            .retain(|_, (until, _)| now < until.saturating_add(MAX_VISIT_DEFERRAL_MS));
+        let entry = match self.repair_visits.get(&target) {
+            Some(&(until, streak)) if now < until => {
+                (until.max(now.saturating_add(delay(streak))), streak)
+            }
+            Some(&(_, streak)) => {
+                let streak = streak.saturating_add(1);
+                (now.saturating_add(delay(streak)), streak)
+            }
+            None => (now.saturating_add(delay(0)), 0),
+        };
+        self.repair_visits.insert(target, entry);
+    }
+
+    fn visit_deferred(&self, target: CheckpointTarget, now: u64) -> bool {
+        self.repair_visits
+            .get(&target)
+            .is_some_and(|(until, _)| now < *until)
+    }
+
+    /// The person resolved what held `target` (a successful Acknowledge of its recovery warning).
+    /// Its backoff, doubled while the hold repeated, describes the state before that, so the next
+    /// visit or offer may act at once rather than up to 15 min later (re-review MEDIUM-1). Its
+    /// bucket is cleared too, since the same warning can hold either; clearing only ever allows
+    /// one earlier attempt, and the next hold starts again at 60 s.
+    ///
+    /// Only an explicit acknowledgement does this. An ordinary Read must not: the renderer reads
+    /// again after every refresh notice, so a repair outcome would clear its own backoff.
+    pub(in crate::studio::receiver) fn repair_user_resolved<T: MeshTransport, R: CryptoRngCore>(
+        &mut self,
+        server: &Server<T, R>,
+        target: StudioTarget,
+    ) {
+        let mut scopes = vec![CheckpointTarget::Studio(target)];
+        if let Ok(bucket) = server.studio_registry_bucket(target) {
+            scopes.push(CheckpointTarget::Registry(bucket));
+        }
+        for scope in scopes {
+            self.repair_visits.remove(&scope);
+            self.repair_backoff.remove(&scope);
+        }
+    }
+
+    /// Whether `bucket`'s Registry turn belongs to a held owner decision whose work is backing
+    /// off. `work_registry` asks before preparing anything (re-review LOW-3): preparing would be a
+    /// detached rebuild when cold, and would evict the single warm source, for a turn the decision
+    /// owns anyway. Costs one bounded owner-record read, and only while deferred.
+    pub(super) fn registry_decision_waiting<T: MeshTransport, R: CryptoRngCore>(
+        &self,
+        server: &mut Server<T, R>,
+        store: &ServerStore,
+        id: u64,
+        bucket: u8,
+        now: u64,
+    ) -> bool {
+        if !self.visit_deferred(CheckpointTarget::Registry(bucket), now) {
+            return false;
+        }
+        let current = self
+            .owner_snapshot
+            .as_ref()
+            .is_some_and(|snapshot| server.owner_head_snapshot_is_current(store, id, snapshot));
+        current
+            && matches!(
+                server.sync.with_registry_context(
+                    |g, d, _, _| store.held_registry_repair(id, g, bucket, d)
+                ),
+                Ok(Some(_))
+            )
+    }
+
+    /// Whether `target`'s own repaired-seed pass is out: a fetch that started for it.
+    fn seed_fetch_started(&self, target: CheckpointTarget) -> bool {
+        self.checkpoint
+            .as_ref()
+            .is_some_and(|pass| pass.inner.target() == target)
+    }
+
+    /// Whether `target`'s own repaired-seed fetch is out, or it is backing off: the two cases in
+    /// which its next resume visit waits. Another target's pass does not count; that one is only
+    /// a queue this target waits in, and the next visit asks again.
+    fn seed_fetch_settled(&self, target: CheckpointTarget, now: u64) -> bool {
+        self.seed_fetch_started(target)
+            || self
+                .repair_backoff
+                .get(&target)
+                .is_some_and(|until| now < *until)
     }
 
     /// S3 of a Registry bucket job, for every input. `prepared` was found current a moment ago
@@ -994,12 +1164,14 @@ impl CatchupRuntime {
     }
 
     /// The Registry counterpart of `finish_studio_repair`. A bucket has no settlement phase of
-    /// its own and no warm cache to retain into; the prepared page provider is what goes stale.
+    /// its own and no warm cache to retain into; the prepared page provider is what goes stale. A
+    /// pending Registry page for this bucket needs no drop here: `persist_registry_page` already
+    /// discards a page whose physical epoch or phase a local write superseded.
     ///
-    /// The owner's shared Registry resume cadence is not touched here. It is one value for every
-    /// bucket, so lengthening it for this bucket's outcome would also delay a held decision in
-    /// another (review LOW-1). This bucket waits on its own: a hold sets its backoff, which
-    /// `start_repair` honours, and an owed seed is classified by the resume and fetched, not rerun.
+    /// This bucket waits on its own, never on another's: a hold sets its backoff, which
+    /// `start_repair` honours, and an owed seed is fetched, after which only this bucket's next
+    /// resume visit is deferred (`defer_visit`, doubling while it repeats), exactly as for a
+    /// Studio target.
     #[allow(clippy::too_many_arguments)]
     fn finish_registry_repair<T: MeshTransport, R: CryptoRngCore>(
         &mut self,
@@ -1019,12 +1191,16 @@ impl CatchupRuntime {
         self.report_repair(scope, Ok(outcome));
         if outcome.is_terminal() {
             self.repair_backoff.remove(&scope);
+            self.repair_visits.remove(&scope);
             self.remember_repair(scope, repair);
             return;
         }
         match (outcome, pair) {
             (StudioRepairOutcome::AwaitingSeed, Some(pair)) => {
                 self.await_repaired_seed(server, store, id, scope, failure_target, repair, &pair);
+                if self.seed_fetch_settled(scope, now) {
+                    self.defer_visit(scope, now);
+                }
             }
             (StudioRepairOutcome::AwaitingSeed, None) => {}
             (StudioRepairOutcome::Held(_), _) if offered => {
@@ -1179,6 +1355,7 @@ impl CatchupRuntime {
         match deferred {
             Ok(false) => Ok(None),
             Ok(true) => {
+                self.resume_landed_install(server, store, id, target, failure_target);
                 self.retry_discovery(now);
                 Ok(Some(None))
             }
@@ -1188,6 +1365,54 @@ impl CatchupRuntime {
                 self.retry_discovery(now);
                 Ok(Some(None))
             }
+        }
+    }
+
+    /// The router has just found this source owing nothing while a held decision defers the
+    /// install. The source was prepared for this pass a moment ago (a Studio source is warm, and
+    /// a bucket was classified from its current provider), so this is exact. If this device is
+    /// the owner and its record says B3, the replacement was installed and only the recycle
+    /// after it was lost to a crash. Resume now. Waiting for the owner's next visit relied on
+    /// the single warm Studio cache surviving 60 s, while ordinary catch-up prepares another
+    /// target every few seconds. A cold visit then reads B3 alone, fetches a seed and lands
+    /// here again, and recovery waits on luck (review MEDIUM-2 on the fairness round). The
+    /// resume answers `AlreadyRepaired` and recycles. One fetched pass leads to at most one
+    /// such start, and `start_repair` honours this target's backoff.
+    fn resume_landed_install<T: MeshTransport, R: CryptoRngCore>(
+        &mut self,
+        server: &mut Server<T, R>,
+        store: &mut ServerStore,
+        id: u64,
+        target: CheckpointTarget,
+        failure_target: Option<StudioTarget>,
+    ) {
+        if self.current_owner_snapshot(server, store, id).is_err() {
+            // Without a current durable snapshot S3 would refuse, after a whole capture and
+            // rebuild, and hold the target; the owner's visit retries once it has one.
+            return;
+        }
+        let landed = server.sync.with_registry_context(|g, d, _, _| {
+            if g.designated_committer() != Some(d.device_id()) {
+                return Ok(false);
+            }
+            match target {
+                CheckpointTarget::Studio(studio) => {
+                    store.held_studio_repair_applied(id, g, studio, d)
+                }
+                CheckpointTarget::Registry(bucket) => {
+                    store.held_registry_repair_applied(id, g, bucket, d)
+                }
+            }
+        });
+        if matches!(landed, Ok(true)) {
+            let _ = self.start_repair(
+                server,
+                store,
+                id,
+                target,
+                failure_target,
+                RepairInput::Resume,
+            );
         }
     }
 }

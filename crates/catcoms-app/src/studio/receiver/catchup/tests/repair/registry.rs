@@ -14,18 +14,35 @@ use catcoms_replication::registry_epoch::RegistryEpoch;
 /// are for a later epoch and adopted without seeds, so a decision owes a replacement that needs
 /// `chosen`'s seed; otherwise they seal the current epoch, so a decision is terminal at once.
 struct Bucket {
+    /// The Studio target whose pointer lives in this bucket; decisions are made for it.
+    target: StudioTarget,
     bucket: u8,
     pair: [Receipt; 2],
     chosen: Receipt,
     chosen_seed: Vec<u8>,
-    /// The bucket file after the first receipt only: a different, valid version of it.
+    /// The bucket file after the first receipt only: a different, valid version of it. Empty
+    /// when the store already held another bucket's file (see `bucket_file`).
     earlier: Vec<u8>,
 }
 
 impl Bucket {
     fn new(owed: &mut Owed, later: bool) -> Self {
         let target = owed.target;
+        Self::for_target(owed, target, later)
+    }
+
+    /// The same fault in the bucket behind any Studio target of Alice's.
+    fn for_target(owed: &mut Owed, target: StudioTarget, later: bool) -> Self {
         let bucket = owed.alice.studio_registry_bucket(target).unwrap();
+        let first = !owed.root.path().join("servers").exists()
+            || std::fs::read_dir(owed.root.path().join("servers"))
+                .unwrap()
+                .all(|e| {
+                    e.unwrap()
+                        .path()
+                        .extension()
+                        .is_none_or(|x| x != "registry-epoch")
+                });
         let StudioOwnerTenure::Known(start) = owed.alice.observed_owner_tenure() else {
             panic!("the founder observes its own tenure")
         };
@@ -97,7 +114,7 @@ impl Bucket {
                                         budget,
                                     )?;
                                 }
-                                if n == 0 {
+                                if n == 0 && first {
                                     earlier = bucket_file(&root);
                                 }
                             }
@@ -115,6 +132,7 @@ impl Bucket {
             .map(|(_, seed)| seed.clone())
             .unwrap();
         let fault = Self {
+            target,
             bucket,
             pair,
             chosen,
@@ -154,10 +172,29 @@ impl Bucket {
                 &mut owed.alice,
                 &mut owed.store,
                 SERVER,
-                owed.target,
+                self.target,
                 self.request(),
             )
             .unwrap()
+    }
+
+    /// The owner's decision for this bucket, persisted and applied directly, as before a restart:
+    /// with `later` receipts it now owes its replacement.
+    fn decide_directly(&self, owed: &mut Owed) {
+        let snapshot = owed.snapshot();
+        let mut b =
+            CatchupRuntime::inventory_budget(&mut owed.alice, &mut owed.store, SERVER).unwrap();
+        owed.alice
+            .issue_registry_fault_repair(
+                &mut owed.store,
+                SERVER,
+                self.target,
+                &snapshot,
+                self.request(),
+                None,
+                &mut b,
+            )
+            .unwrap();
     }
 }
 
@@ -287,6 +324,10 @@ async fn an_owed_bucket_replacement_is_fetched_then_installed_by_a_job() {
     assert_eq!(minted.inner.target(), scope);
     assert_eq!(minted.inner.selected_receipt(), &fault.chosen);
     assert!(runtime.checkpoint_sealed && !minted.inner.is_fetched());
+    assert!(
+        runtime.repair_visits.contains_key(&scope),
+        "the started fetch defers this bucket's next visit"
+    );
     let repair = minted
         .inner
         .fault_repair()
@@ -335,6 +376,10 @@ async fn an_owed_bucket_replacement_is_fetched_then_installed_by_a_job() {
         Some(StudioRepairReport::Completed(
             StudioRepairOutcome::Installed
         ))
+    );
+    assert!(
+        !runtime.repair_visits.contains_key(&scope),
+        "a terminal bucket outcome ends the backoff"
     );
     assert_eq!(fault.phase(&mut owed), EpochPhase::Open);
     let logical = registry_document(&owed.alice.group_id(), fault.bucket).unwrap();
@@ -502,21 +547,6 @@ async fn a_claimed_bucket_gets_no_registry_turn() {
         runtime.registry_provider.is_none(),
         "not even a preparation was started for it"
     );
-}
-
-/// Every owner-record file, by path, so a test can roll the records back as a crash would.
-fn owner_records(
-    root: &std::path::Path,
-) -> std::collections::BTreeMap<std::path::PathBuf, Vec<u8>> {
-    std::fs::read_dir(root.join("servers"))
-        .unwrap()
-        .map(|e| e.unwrap().path())
-        .filter(|p| p.extension().is_some_and(|x| x == "owner-receipts"))
-        .map(|p| {
-            let bytes = std::fs::read(&p).unwrap();
-            (p, bytes)
-        })
-        .collect()
 }
 
 /// Run S2 and S3 of the job the runtime holds.
@@ -747,4 +777,91 @@ async fn a_bucket_commit_never_strands_a_queued_registry_preparation() {
             .is_some_and(|p| !p.has_prepared_source()),
         "the superseded graph was not attached"
     );
+}
+
+/// Re-review LOW-3: a bucket whose held decision is backing off spends its Registry turn without
+/// preparing anything. Preparing it would be a detached rebuild when cold, and would evict the
+/// single warm source, for a turn the decision owns anyway.
+#[tokio::test]
+async fn a_backing_off_held_bucket_spends_its_turn_without_preparing_anything() {
+    let mut owed = Owed::new(false).await;
+    let fault = Bucket::new(&mut owed, true);
+    fault.decide_directly(&mut owed);
+    let (mut runtime, _pool) = owed.runtime(4);
+    runtime.hold_repair(fault.scope(), owed.clock.monotonic_ms());
+    let watch = owed
+        .alice
+        .watch_studio_epoch(&owed.store, SERVER, owed.target)
+        .unwrap();
+    let watches = VecDeque::from([(watch, 0)]);
+    let selection = runtime.registry_selection;
+    let worked = runtime
+        .work_registry(&mut owed.alice, &mut owed.store, SERVER, &watches)
+        .unwrap();
+    assert!(worked, "the held decision's turn is spent");
+    assert!(
+        runtime.preparation.is_none()
+            && runtime.registry_preparation.is_none()
+            && runtime.registry_provider.is_none(),
+        "nothing was prepared for it"
+    );
+    assert!(runtime.registry_target.is_none());
+    assert_eq!(
+        runtime.registry_selection,
+        selection.wrapping_add(1),
+        "the turn moves on"
+    );
+}
+
+/// Plan D, fairness, for buckets: a held bucket never delays another bucket's resume. The one
+/// shared Registry resume cadence did; now only the held bucket's next visit waits.
+#[tokio::test]
+async fn a_held_bucket_never_delays_another_buckets_resume() {
+    let mut owed = Owed::new(false).await;
+    let first = Bucket::new(&mut owed, true);
+    // A second document whose pointer lives in another bucket.
+    let other = (1u8..=255)
+        .map(|n| StudioTarget::Flipnote {
+            channel: owed.target.channel(),
+            object: [n; 16],
+        })
+        .find(|t| owed.alice.studio_registry_bucket(*t).unwrap() != first.bucket)
+        .expect("another bucket");
+    let second = Bucket::for_target(&mut owed, other, true);
+    first.decide_directly(&mut owed);
+    second.decide_directly(&mut owed);
+    let (mut runtime, _pool) = owed.runtime(4);
+    runtime.hold_repair(first.scope(), owed.clock.monotonic_ms());
+
+    assert!(
+        runtime
+            .resume_registry_repair(
+                &mut owed.alice,
+                &mut owed.store,
+                SERVER,
+                first.target,
+                first.bucket
+            )
+            .unwrap(),
+        "the held bucket's decision owns its turn"
+    );
+    assert!(
+        runtime.checkpoint.is_none(),
+        "the held bucket fetches nothing"
+    );
+    // The other bucket's turn, at the same moment.
+    assert!(runtime
+        .resume_registry_repair(
+            &mut owed.alice,
+            &mut owed.store,
+            SERVER,
+            second.target,
+            second.bucket
+        )
+        .unwrap());
+    let minted = runtime
+        .checkpoint
+        .as_ref()
+        .expect("the other bucket's owed seed is fetched without waiting");
+    assert_eq!(minted.inner.selected_receipt(), &second.chosen);
 }

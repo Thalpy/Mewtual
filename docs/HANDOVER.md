@@ -8,7 +8,26 @@ the protocol- vs honest-client-enforced boundary and the hardening backlog.
 [`MESSAGE-FLOW.md`](MESSAGE-FLOW.md) traces one message end to end (send, gossip, catch-up)
 and ranks the live hazards in that path.
 
-## Status (latest entry: 2026-10-06)
+## Status (latest entry: 2026-10-09)
+
+- **Gate 4 repair: real-peer Registry Flow D and plan D (2026-10-09).** A peer now takes a bucket
+  repair from a real discovery answer and installs its network-fetched replacement through the
+  router's Replace job, all through spawned actors. A replayed repair held by the transaction
+  holds only itself on a real peer. Plan D's remaining items each have a test:
+  - another actor progressing while an S2 is paused;
+  - S3 with a pending page on the claimed target;
+  - fairness across held targets;
+  - crash recovery through the job.
+
+  Fairness needed a runtime change. The owner resume's single shared cadence, which any held
+  target pushed to 60 s, is now a per-target visit deferral that doubles while it repeats (60 s to
+  a 15 min cap). It resets on a terminal outcome, a new decision, or the person acknowledging the
+  document's recovery warning. Its review added two more fixes. The router itself now resumes an
+  install that landed just before a crash, and a cold owner resumes rather than refetching once a
+  fetch has come to nothing. S3 now drops a page fetched for the source it rewrote, which before
+  could pause catch-up. Still open: a peer's repaired-seed refetch is not paced (pre-existing),
+  a hosted CI run (it needs a new PR) and a bounded repair verdict. Details are in
+  `GATE4-AGENT-3-STATUS.md`.
 
 - **Gate 4 repair runtime evidence (2026-10-06).** A two-peer run through spawned actors now
   covers:

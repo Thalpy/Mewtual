@@ -78,6 +78,23 @@ table with the commit that closed it.
   a false absence claim. While a job owns a bucket, Registry maintenance, pointer refresh, page
   persistence and installs into it are skipped or deferred. A Studio-side pointer write is not
   claim-checked; like any other change, it makes the rebuild stale and the job writes nothing.
+  The owner's automatic repair work is paced per target. A hold, a failure, a started
+  repaired-seed fetch or a started resume job defers only that Studio target's or bucket's next
+  owner-resume visit: by 60 s, doubling while it repeats, up to 15 min. Every persistent hold
+  also backs off that target's automatic jobs. A terminal outcome, a new explicit decision, or the person
+  acknowledging the document's recovery warning resets it. One held target therefore never
+  delays another's resume, and the owner's resume work for a target whose seed no peer serves,
+  or that needs the user, costs less and less. That pacing covers the owner's resume visits
+  only. A repaired-seed fetch started any other way (from an answer that carries a repair, from
+  the router, or after a job) is paced only by the single checkpoint slot and a hold, so a peer
+  owing a seed nobody serves refetches it on every reporting discovery of that target, as it
+  always has (an open follow-up). Nor is the pacing a global cap: K newly held targets can still
+  start K seed fetches in their first minute, each holding the single checkpoint slot, and the
+  deferral state lives in memory, so a restart starts every target afresh. A page fetched before
+  an S3 that rewrote its source is dropped, never saved against the repaired source. After a
+  crash between an owner's replacement install and its record's recycle, the router resumes the
+  decision as soon as it finds the source owing nothing behind it; if no peer serves the seed,
+  the owner's next visit resumes instead of fetching again.
 
 - **Automatic recovery is conservative and author-local.** Studio replay checks the complete
   own envelope, every retained/staged historical selection and the fresh current projection.

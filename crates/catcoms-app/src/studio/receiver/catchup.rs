@@ -460,10 +460,14 @@ pub(super) struct CatchupRuntime {
     registry_target: Option<StudioTarget>,
     registry_next_at: u64,
     registry_selection: usize,
-    // The repair step's own cadence and round-robin, so a held fault cannot starve rotation.
+    // The repair step's own 5 s cadence and round-robin, so a held fault cannot starve rotation,
+    // and the per-target visit deferrals (Studio targets and Registry buckets alike) that keep one
+    // held target from delaying any other's resume, growing while its outcome repeats. Bounded:
+    // a deferral quiet for a whole maximum window is dropped.
     repair_next_at: u64,
     repair_selection: usize,
-    registry_repair_next_at: u64,
+    // Per target: when its next visit may come, and how many times in a row it was deferred.
+    repair_visits: std::collections::BTreeMap<CheckpointTarget, (u64, u32)>,
     // Rotates which peer a repaired seed is requested from.
     repair_seed_peer: usize,
     // Targets whose owed repair hit a persistent hold (recovery warning, storage refusal, held

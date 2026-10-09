@@ -253,6 +253,9 @@ impl StudioReceiver {
                 view.annotate_runtime(running, self.catchup.repair_report(scope));
             }
             if let Ok(StudioControlResponse::Acknowledged(list)) = &result {
+                // The person dealt with the warning that may have held this document's repair;
+                // its doubled backoff no longer describes anything.
+                self.catchup.repair_user_resolved(server, target);
                 if let Some(source) = &list.source {
                     self.settlement.note(target, source.phase.into());
                 }

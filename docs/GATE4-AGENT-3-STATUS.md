@@ -4,9 +4,140 @@ Owner: Agent 3 ([assignment](GATE4-AGENT-HANDOFFS.md#agent-3-runtime-signed-faul
 Proposal: [GATE4-AGENT-3-DESIGN](GATE4-AGENT-3-DESIGN.md), revision 16 follow-up.
 Review preamble: 3. Current entries override older ones.
 
+## Re-review of the fairness fixes: dispositions, 2026-10-09
+
+The short re-review of the entry below found no BLOCKER and no HIGH, and confirmed each claimed
+fix against the code. It raised two new MEDIUM findings and five LOW. A second short re-review of
+those fixes found no BLOCKER or HIGH and one more MEDIUM, in the LOW-1 fix; it agreed the peer
+refetch (MEDIUM-2) is a tracked follow-up, not a blocker. Its residual: an exact-retry Acknowledge
+succeeds again, so whatever can send Acknowledge can clear a document's backoff repeatedly. That
+is no new authority, since an explicit decision already bypasses the backoff.
+
+| Finding | Disposition |
+|---|---|
+| MEDIUM-1: after the person resolves a hold, the resume could wait up to 15 min (the doubled deferral; 60 s before). | **Fixed.** A successful Acknowledge of the document's recovery warning clears its deferral and hold, and its bucket's (`repair_user_resolved`). An ordinary Read deliberately does not: the renderer reads again after every refresh notice, so a repair outcome would clear its own backoff. Test: `acknowledging_a_documents_warning_ends_its_repair_backoff` (streak 3 at 480 s, Acknowledge through the receiver's control path, then the next 5 s visit fetches). A storage refusal has no such action and still waits out its window. |
+| MEDIUM-2: THREAT-MODEL and the entry below claimed pacing beyond the owner's resume. A repaired-seed fetch started from an answer carrying a repair, from the router or after a job is paced only by the checkpoint slot and a hold; a peer owing a seed nobody serves refetches on every reporting discovery. | **Wording fixed; follow-up open.** Both now scope the pacing to the owner's resume visits and name the peer refetch as pre-existing and unpaced. The real fix, a per-target doubling refetch deferral in `await_repaired_seed` set when a repaired pass fails, touches the peer seed path every Flow D liveness test depends on, so it is left as a follow-up rather than added late in this round. |
+| LOW-1: landed-install recovery still needed some peer to serve the seed. | **Fixed.** A cold B3 visit to a target that has been deferred before resumes instead of fetching again; the job classifies exactly at S3. A seed still owed is then fetched from the job's finish. New case `cold, seed never served` in the crash test. A second re-review found that this fallback could rerun a whole job on every visit (next row). |
+| MEDIUM (second re-review): the cold fallback scheduled a Resume without deferring the visit. On a busy owner the job's finish often cannot start its fetch (another pass out, a discovery pending), and ordinary catch-up evicts the source again before the next visit, so every visit reran capture, rebuild and a B2 flush, holding the single job slot. | **Fixed.** A scheduled resume now defers the target's next visit like a started fetch does, so the owner runs at most one resume job per doubling window per target. Test: `a_cold_owed_source_whose_fetch_cannot_start_reruns_its_job_ever_more_rarely` (an owed cold source, evicted before every visit, each finish unable to fetch: three jobs in ten minutes, at 60, 180 and 420 s). |
+| LOW-2: `resume_landed_install` skipped the durable-snapshot gate. | **Fixed.** Test: `the_router_resumes_a_landed_install_only_under_a_current_snapshot`. |
+| LOW-3: a deferred held bucket's Registry turn still prepared its Studio target and bucket. | **Fixed.** `work_registry` asks `registry_decision_waiting` before preparing and spends the turn. Test: `a_backing_off_held_bucket_spends_its_turn_without_preparing_anything`. |
+| LOW-4: Registry terminal reset unpinned. | **Fixed.** Asserted in `an_owed_bucket_replacement_is_fetched_then_installed_by_a_job`, with its own mutant. |
+| LOW-5: "never runs under the decision" omitted the stale-snapshot and unreadable-record cases. | **Wording fixed** in the code comment and the entry below. |
+
+**Harness.** Six new runtime mutants (26 in all): `RUNTIME-acknowledge-ends-backoff`,
+`RUNTIME-cold-b3-resumes-after-a-deferral`, `RUNTIME-landed-install-needs-snapshot`,
+`RUNTIME-held-bucket-turn-prepares-nothing`, `RUNTIME-registry-terminal-ends-backoff` and
+`RUNTIME-scheduled-resume-defers`. `RUNTIME-router-resumes-landed-install` now matches the crash
+test's renamed case. Subset runs of these seven detected each at its intended assertion and
+passed each restored control. The scheduled-resume deferral applies to the Registry resume too.
+
+## Review of the fairness round: dispositions, 2026-10-09
+
+The adversarial review of the entry below found no BLOCKER and no HIGH: two MEDIUM, eight LOW.
+Every fix has a regression, and each regression was broken to confirm it fails (as a runtime
+harness mutant, below). The entry below is corrected in place where the review found it
+overclaimed.
+
+| Finding | Disposition |
+|---|---|
+| MEDIUM-1: per-target deferral removed the only cap on total automatic work. K held targets owing seeds no peer serves started K fetches a minute, each holding the single checkpoint slot ordinary catch-up waits on; K targets needing the user reran K whole jobs a minute. | **Fixed.** A target's visit deferral now doubles each time it is deferred again after the last one ran out: 60, 120, 240, 480 s, then a 15 min cap. Every persistent hold (`hold_repair`: a recovery warning, a storage refusal, a failed capture or rebuild) now also defers the visit, so job reruns back off too. A deferral that arrives while one is running extends it but never doubles it. A terminal outcome or a new explicit decision clears it; one quiet for a whole cap after it ran out is dropped, which bounds the map. Tests: `a_seed_that_never_arrives_is_refetched_ever_more_rarely_until_the_repair_ends` (six fetch starts in 40 minutes, not 41, then the install clears the streak) and `repeated_holds_back_a_target_off_further_and_a_new_decision_starts_it_afresh`. A shared floor between owner starts, the review's alternative, was tried first and dropped: it couples every target's first start to whichever target started last, the cross-target dependency the fairness fix had just removed. |
+| MEDIUM-2: Studio cold crash recovery relied on the single warm cache surviving until the target's next visit; the test assumed it did. | **Fixed.** In the router's deferred branch, an owner whose prepared source owes nothing while its record holds the decision with B3 set resumes at once (`resume_landed_install`); the resume answers `AlreadyRepaired` and recycles. The cold test now runs the real router on the pass (unfetched: a sealed pass reaches the router only once fetched, but the deferred branch reads no seed bytes), then evicts the source to show the resume no longer needs it. That recovery still needs some peer to serve the seed; the re-review entry above removes that dependency. |
+| LOW-1: stale `finish_registry_repair` doc. | **Fixed.** |
+| LOW-2: `finish_studio_repair` deferred even when no fetch started. | **Fixed.** It defers only when this target's own fetch started or it is backing off; the Registry `AwaitingSeed` finish now does the same. |
+| LOW-3: Registry Flow D's route overstated. | **Wording fixed** here and in the test's doc: the repair arrives through the bucket leg of either query. |
+| LOW-4: an S3 that writes, with a page pending, could pause catch-up (suspected). | **Confirmed and fixed** (row in the table below). |
+| LOW-5: held-replay test comment contradicted the code. | **Fixed.** It is a different repair with the same sequence number, after the seed fetch was dropped. |
+| LOW-6: unrelated-actor test thin on A's own progress; pool limit unstated. | **Documented** (table below). |
+| LOW-7: "Interrupted B2/B3" row pointed at post-B6 crash tests. | **Reworded** (table below). |
+| LOW-8: Registry held-read errors dropped silently. | **Fixed.** Reported and deferred like Studio's. |
+
+**One more behaviour change.** While a bucket's visit is deferred, a held decision still owns its
+Registry turn: the turn reads the owner record and answers "owned", so ordinary bucket work does
+not run under the decision. That costs one bounded owner-record read per deferred turn. Before,
+any deferral (the old shared cadence included) let the ordinary turn run. The exceptions: with no
+current owner snapshot, or an unreadable record, the ordinary turn runs as it always did.
+
+**Harness.** Six new runtime mutants, and `RUNTIME-per-target-visit` re-anchored (20 in all):
+`RUNTIME-visit-deferral-doubles`, `RUNTIME-terminal-ends-backoff`,
+`RUNTIME-decision-starts-afresh`, `RUNTIME-deferred-bucket-turn-owned`,
+`RUNTIME-router-resumes-landed-install` and `RUNTIME-s3-drops-stale-page`. That run exposed a
+harness defect: a test name containing `::` skips the core harness's prefix, so the two two-peer
+mutants (`RUNTIME-held-offer-holds-repair-only`, added in the entry below and never run before,
+and `RUNTIME-s3-drops-stale-page`) ran zero tests and were rejected. They now use a `TWO_PEER`
+prefix; the other two harnesses already name full paths. A subset run of these eight then
+detected each at its intended assertion and passed each restored control.
+
+**Residuals.**
+- The pacing covers the owner's resume visits only (re-review MEDIUM-2): see the entry above.
+- Not a global cap: K newly held targets still start K fetches in their first minute; the
+  owner's resume work for them then decays to about K per 15 minutes.
+- `repair_visits` lives in memory, so a restart starts every target afresh.
+- A cancelled or authority-abandoned job holds nothing and may rerun on the next visit.
+- The round-robin index can skip or repeat a target when the watch list is reordered.
+
+## Real-peer Registry Flow D, plan D remainder, fairness fix, 2026-10-09
+
+The entry below claimed to answer plan D's remaining items; it did not. These close them.
+
+**Plan D, item by item.** Every new test was broken to confirm it fails.
+
+| Plan D item | Evidence |
+|---|---|
+| Full-pool deferral with no mutation | `a_repair_job_reserves_a_slot_before_reading_and_waits_flat_when_the_pool_is_full` (earlier). |
+| Cancellation and result holding | `a_cancelled_waiter_never_releases_the_slot_or_claim_its_worker_still_owns` (earlier). |
+| Another actor progressing while a large S2 is paused | **New:** `an_unrelated_actor_progresses_while_a_repair_rebuild_is_paused`. Two servers share a four-slot pool. A's detached rebuild never finishes, yet B's whole job gets a slot, commits and releases it. A's worker keeps exactly one slot and its claim until it ends, then A commits. Over-reserving the pool fails it. Limits: A's own turn runs with no watches, so A's own catch-up progress while paused is not shown; and four paused S2 workers, from any actors, exhaust the process pool, after which every new job and preparation answers `Full` until one ends. |
+| S3 within bounded turns: Selected pass carrying a repair | HIGH-1 liveness test (earlier), and Carol's actor run in the two-peer tests. |
+| S3 within bounded turns: `PageReady` pass on the claimed target | **New:** `a_pending_page_on_the_claimed_target_never_delays_s3`. Bob's page reaches Carol through the real fetch adapters while her job is parked; one turn commits S3, then persists the page. Restoring the `replay_ready` gate on S3 fails it. That S3 writes nothing (the offer is held as unverifiable). An S3 that writes is the next row. |
+| An S3 that writes, with a page pending on its target | **New, with a fix** (review LOW-4 on the fairness round): `a_repair_that_retargets_a_source_with_a_pending_page_never_pauses_catch_up`. Carol sits healthy on R1's successor with Bob's page `PageReady`; Bob's repair choosing R2 retargets her source. S3 returns before the page step, so the next turn saved the page against the retargeted source, was refused with the pass already `Paused`, and paused all catch-up. `finish_studio_repair` now drops the target's pending page. |
+| S3 within bounded turns: faulted target under reporting discovery | The two-peer Studio and Registry actor runs. |
+| Stale rebuild refused with no write | Studio and Registry stale-rebuild tests (earlier). |
+| Fairness across held targets | **New, with a fix** (below): `a_held_target_never_delays_another_targets_resume` and `a_held_bucket_never_delays_another_buckets_resume`. |
+| Interrupted repair, recovered through the job | **New:** `an_owner_that_crashed_between_install_and_recycle_resumes_a_studio_source`, warm and cold, alongside the Registry one (earlier). These crash after the replacement install, before the owner record's recycle. No runtime test crashes between B1 and B2 or between B2 and B3: those interruptions are covered at store level, where S3 runs the same transactions unchanged, and the runtime's part is that the owner resume schedules a job for any held decision. The cold case now goes through the real router (review MEDIUM-2 on the fairness round). Classifying from B3 alone fails it, and so does removing the router's own resume. |
+| Two-peer Fault, decision, replacement, restart and newcomer through the actor | The two-peer Studio run (earlier). |
+
+**Registry Flow D on a real peer**
+(`a_peer_applies_a_bucket_repair_from_a_real_answer_and_installs_its_replacement`, through spawned
+actors):
+- Bob installed and published his bucket's R1, then met a rival R2; Carol holds both receipts and
+  no seed.
+- Bob's bucket decision is a job.
+- Bob's real Registry discovery answer carries the repair to Carol. It comes through the bucket
+  leg of a query: either her fault-reporting Registry turn or an ordinary Studio discovery, which
+  always asks for the bucket first, and the head answer carries an applied repair whether or not
+  a report was sent. The test pins that the repair comes from a real answer, not which leg.
+- Her job applies it, and she fetches R1's bucket seed from Bob through a repaired pass. The
+  router hands the seed to a Replace job, which installs it.
+- Both buckets end on R1's successor.
+- Refusing the offer fails the test, and so does blocking the router's bucket Replace step.
+
+**MEDIUM-1, held half, on a real peer**
+(`a_held_replay_on_a_real_peer_holds_only_itself_and_the_owed_seed_is_still_fetched`):
+- Carol, with an observed tenure, applies Bob's repair and owes its replacement.
+- A second current-tenure repair of the same pair with the same sequence number, choosing the
+  other receipt, arrives. The transaction holds it with `SequenceNotNewer`. (A byte-identical
+  replay never reaches a job: the owed filter sends it to the seed fetch.)
+- Only the replay is held. Carol's seed fetch still mints, and the replay costs no further job.
+- Charging the hold to the document fails the test.
+
+**Fairness fix (runtime change).** Both owner-resume round-robins had one shared cadence. Any
+held target bumped it to 60 s: a hold, a failed read, a started seed fetch, an `AwaitingSeed`
+finish. So N held targets could hold a healthy one off for N minutes; reviews had flagged this
+twice as a LOW residual.
+- Each target, Studio target or Registry bucket alike, now carries its own visit deferral
+  (`repair_visits`), bounded by expiry. It doubles while it repeats (see the entry above).
+- The round-robin keeps its 5 s cadence. A deferral blocks nothing but that target's visit:
+  offered repairs and fetched seeds still run.
+- A started seed fetch defers only its own target; another target's pass is just a queue.
+- `registry_repair_next_at` is gone.
+- Contract change: the M1 test pinned the shared 60 s bump; it now pins this target's deferral
+  and an undelayed cadence.
+
+**Harness.** The runtime harness gains `RUNTIME-per-target-visit` and
+`RUNTIME-held-offer-holds-repair-only` (14 mutants; 20 after the entry above).
+
 ## Runtime evidence: harness, two-peer run, S3 cost, 2026-10-06
 
-This answers the remaining items of plan D below, except Registry Flow D on a real peer.
+(Corrected by the entry above: this entry did not cover every remaining plan D item.)
 
 **Scripted mutants.** `scripts/check-agent3-runtime-mutations.py` reuses the core harness, and a
 new workflow `agent3-repair-runtime.yml` runs it on Linux and Windows. It has 12 mutants:
