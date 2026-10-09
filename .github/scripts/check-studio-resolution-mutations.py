@@ -19,6 +19,8 @@ RESOLUTION = "crates/catcoms-app/src/store/epoch_studio/resolution.rs"
 INVENTORY = "crates/catcoms-app/src/store/epoch_recovery/inventory.rs"
 RUNTIME = "crates/catcoms-app/src/studio/receiver/handoff.rs"
 ROTATION = "crates/catcoms-app/src/studio/receiver/catchup/rotation.rs"
+CATCHUP = "crates/catcoms-app/src/studio/receiver/catchup.rs"
+REGISTRY = "crates/catcoms-app/src/studio/receiver/catchup/registry_runtime.rs"
 COMMAND = ["cargo", "test", "--locked", "-j", "4", "--config",
            "profile.test.package.catcoms-app.debug=0", "-p", "catcoms-app", "--lib"]
 MUTATIONS = [
@@ -107,6 +109,29 @@ MUTATIONS = [
      "        if false && prepared {\n            self.owner_target = None;",
      RECEIVER + "owner_rotation_skips_a_prepared_document_instead_of_pausing_receive",
      "a background turn failed while a watched document's handoff was Prepared"),
+    # The same skip on the other two rails that read a watched target through the refusing
+    # service path (Flow R's implementation review, HIGH-1): the client pass, which needs a proven
+    # peer to run, and Registry maintenance.
+    ("client-pass-skip", CATCHUP,
+     "        if Self::handoff_prepared(server, store, id, watch.target) {",
+     "        if false && Self::handoff_prepared(server, store, id, watch.target) {",
+     RECEIVER + "the_client_pass_skips_a_prepared_document_instead_of_pausing_receive",
+     "a background turn failed while a watched document's handoff was Prepared"),
+    ("registry-skip", REGISTRY,
+     "        if Self::handoff_prepared(server, store, id, target) {",
+     "        if false && Self::handoff_prepared(server, store, id, target) {",
+     RECEIVER + "registry_maintenance_skips_a_prepared_document_instead_of_pausing_receive",
+     "a background turn failed while a watched document's handoff was Prepared"),
+    # MEDIUM-1: a resolve job whose budget will not build releases its permit and admission.
+    ("budget-release", RUNTIME,
+     "            if matches!(\n"
+     "                self.handoff.job.as_ref().map(|job| &job.stage),\n"
+     "                Some(HandoffStage::ResolveReady(..))\n",
+     "            if false && matches!(\n"
+     "                self.handoff.job.as_ref().map(|job| &job.stage),\n"
+     "                Some(HandoffStage::ResolveReady(..))\n",
+     RECEIVER + "a_resolve_job_whose_budget_will_not_build_releases_its_permit",
+     "a resolve job kept its permit through a budget failure"),
     # A resolve job carries no transfer authority, so the authority check leaves it alone.
     ("resolve-authority", RUNTIME,
      "                        authority: None,",

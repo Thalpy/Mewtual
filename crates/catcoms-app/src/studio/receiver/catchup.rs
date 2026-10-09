@@ -545,6 +545,31 @@ impl CatchupRuntime {
     /// Never evict the source of a ready/active page or checkpoint just to start replay.
     /// A detached result is waiting for a custody visit to consume it. 7.3 makes that a reason for
     /// a signing slice to yield: the parked result is holding a shared slot.
+    /// Whether `target`'s overlay handoff is Prepared right now, from a structural read of its
+    /// intent record. A read that fails answers `false`, so a fault still reaches the caller's
+    /// ordinary path and surfaces there.
+    ///
+    /// **Every background rail that reads a watched target through the read-only service path
+    /// must skip it while this holds** (design 6.4.5, and Flow R's implementation review, HIGH-1).
+    /// That path (`with_studio_checkpoint_source`, `with_prepared_studio_source`) refuses a
+    /// Prepared destination with an error, and an error escaping `run` pauses all of receive. The
+    /// record is already being resolved: by Flow R, by H1's synchronous path, or by a fence.
+    /// Flow R keeps it Prepared from R1 to R3, a window of several turns, so without the skip a
+    /// warm source and a turn of catch-up were enough to pause receive and abandon the job, again
+    /// and again. The rails that read so are owner rotation, the client pass and Registry
+    /// maintenance; page and seed service already ignore their own errors.
+    pub(super) fn handoff_prepared<T: MeshTransport, R: CryptoRngCore>(
+        server: &Server<T, R>,
+        store: &ServerStore,
+        id: u64,
+        target: StudioTarget,
+    ) -> bool {
+        target
+            .document(&server.group_id())
+            .ok()
+            .and_then(|logical| store.load_epoch_intents_structural(id, &logical).ok())
+            .is_some_and(|state| state.handoff_prepared())
+    }
     pub(super) fn result_parked(&self) -> bool {
         self.prepared.is_some()
             || self.registry_prepared.is_some()
@@ -1285,6 +1310,13 @@ impl CatchupRuntime {
         }
         if watch.server != id || !Arc::ptr_eq(&watch.mount, &store.registry_mount()) {
             return Err(invalid("catch-up mount changed"));
+        }
+        // Its status read below would refuse a Prepared destination with an error that pauses
+        // all of receive; its resolution is already scheduled (see `handoff_prepared`).
+        if Self::handoff_prepared(server, store, id, watch.target) {
+            self.selection = self.selection.wrapping_add(1);
+            self.next_at = now.saturating_add(1_000);
+            return Ok(None);
         }
         if !self.prepare(server, store, id, watch.target)? {
             return Ok(None);

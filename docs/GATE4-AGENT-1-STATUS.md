@@ -2510,12 +2510,12 @@ receive:
 
 Owner rotation now skips a Prepared target for that turn. A read fault still surfaces as before.
 
-**Tests:** ten at store level and four at receiver level. The receiver-level route test forgets the
-inventory cache and the retained source graph, as a restart does, and runs on a one-permit pool.
-Otherwise catch-up re-warms the source itself and the warm install goes untested; the first
+**Tests:** ten at store level and seven at receiver level. The receiver-level route test forgets
+the inventory cache and the retained source graph, as a restart does, and runs on a one-permit
+pool. Otherwise catch-up re-warms the source itself and the warm install goes untested; the first
 draft's mutant survived for exactly that reason.
 
-**CI:** `check-studio-resolution-mutations.py` has 13 entries, in a new `resolution` job, all
+**CI:** `check-studio-resolution-mutations.py` has 16 entries, in a new `resolution` job, all
 DETECTED and PASS restored under `RUSTFLAGS='-D warnings'`. They cover:
 - R3's intent comparison, as a branch and as a digest;
 - the source comparison and the fallback;
@@ -2523,7 +2523,8 @@ DETECTED and PASS restored under `RUSTFLAGS='-D warnings'`. They cover:
 - each shape predicate;
 - R1's Hold exit and its stale eviction;
 - the runtime's warm install and the probe's route;
-- the rotation skip;
+- the three rails' Prepared skips;
+- the budget-failure release;
 - the resolve job's authority.
 
 **Not covered, recorded:**
@@ -2534,6 +2535,19 @@ DETECTED and PASS restored under `RUSTFLAGS='-D warnings'`. They cover:
 - **Not yet measured:** R1's `evidence_in_vault` and R3's Complete custody cost at the caps.
 - **Residuals:** admission is held from R1 to R3, so a Save answers `Busy` for longer. R2 runs
   two restore-equivalents, the restore and the validation.
+
+### Flow R's implementation review (2026-10-09, Opus, static, at `fd90038e`): no blocker; one high
+
+| finding | what | disposition |
+|---|---|---|
+| HIGH-1 | the client pass and Registry maintenance read a watched target through the same refusing service path as rotation, so with a peer online Flow R livelocked: receive paused before R2 could detach | **fixed:** one helper, `CatchupRuntime::handoff_prepared`, now guards all three rails. Two receiver tests reproduce the conditions the single-member, frozen-clock tests could not: a proven peer online for the client pass, and an advancing clock for Registry maintenance. Each has a CI mutation |
+| MEDIUM-1 | a resolve job whose R3 budget will not build kept its admission and a shared permit with nothing to release them, since it has no authority an MLS change could expire | **fixed:** a budget failure abandons a resolve job, releasing both; a transfer job keeps its retry; a test and a mutation |
+| LOW-1 | R3 trusts R2's Absent/Complete classification behind the stamp, rather than re-deriving it | **recorded:** the same argument as H5's trust in H2's facts (stamp equality plus determinism); the docs no longer claim more |
+| LOW-2 | the "changed and still Prepared" refusal and the owner-moved fallback have no test; the CI filter missed the rotation test | **filter fixed;** the two branches recorded as untested: no fixture writes a still-Prepared intent record that decodes, or moves the owner |
+| LOW-3 | a misplaced doc comment, a false "the rotation fence resolves it first", a stale `probe_tenure` note, eligibility's "what H1 does", and the threat model's fallback cost | **fixed** |
+
+Clippy also failed at `fd90038e` (`large_enum_variant` on the plan's Complete arm). The Flow R
+commit had been made without a clippy run after the H5 one. Fixed by boxing the unit.
 
 ## Design 18.3 bounded implementation review (2026-10-09, Opus, static): PASS WITH FINDINGS
 

@@ -108,6 +108,10 @@ pub(super) struct HandoffRuntime {
     /// tells it when capacity returns. One flat, non-escalating deadline, cleared as soon as a
     /// reservation succeeds.
     probe_retry_at: Option<u64>,
+    /// Make the next handoff budget refuse, for tests of what a commit stage does when its
+    /// inventory will not build.
+    #[cfg(test)]
+    pub(super) fail_budget_for_test: bool,
 }
 
 const FIRST_HOLD_MS: u64 = 30_000;
@@ -675,8 +679,10 @@ impl StudioReceiver {
         //
         // A Prepared branch does not reach this point: Flow R took it above, with no tenure
         // (design 6.4.2), and only a branch R1 found not Prepared falls through. So the probe asks
-        // `probe_tenure` about a branch with nothing to resolve. Its Prepared-without-tenure case is
-        // design 9.1.1 step 4b's rule for H1, which the synchronous adapter still relies on.
+        // `probe_tenure` about a branch with nothing to resolve, and that function's
+        // Prepared-without-tenure arm (design 9.1.1 step 4b) is now reached only by its own unit
+        // test. It is kept as the statement of the rule should the probe ever route a Prepared
+        // branch to H1 again.
         let Some(tenure) = probe_tenure(server.sync.authoring_owner_tenure_start(), false) else {
             self.handoff.hold_target(target, now);
             return;
@@ -872,7 +878,19 @@ impl StudioReceiver {
         // every signature, thrown away for a retryable error. Flow S gets this right by taking its
         // plan only when the commit is about to run.
         let Ok(mut budget) = self.handoff_budget(server, store, id) else {
-            self.handoff.hold_target(target, now);
+            // A resolve job gives everything back (Flow R's implementation review, MEDIUM-1). It
+            // is cheap to redo from R1, and it has no authority an MLS change could expire, so if
+            // its budget will not build nothing else would ever release the admission and the
+            // shared permit it holds. A transfer job keeps its signed work for the paced retry, as
+            // before.
+            if matches!(
+                self.handoff.job.as_ref().map(|job| &job.stage),
+                Some(HandoffStage::ResolveReady(..))
+            ) {
+                self.handoff.abandon(now);
+            } else {
+                self.handoff.hold_target(target, now);
+            }
             return None;
         };
         let job = self.handoff.job.take().expect("checked just above");
@@ -1033,6 +1051,10 @@ impl StudioReceiver {
         store: &mut ServerStore,
         id: u64,
     ) -> Result<crate::store::EpochStudioBudget, AppError> {
+        #[cfg(test)]
+        if self.handoff.fail_budget_for_test {
+            return Err(invalid("injected handoff budget failure"));
+        }
         let mut scan = store.scan_epoch_storage_with_studio()?;
         while !scan.step()?.complete {}
         let inventory = scan.finish()?;

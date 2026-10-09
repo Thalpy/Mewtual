@@ -2422,11 +2422,6 @@ impl ServerStore {
         )
     }
 
-    /// The scan's read discipline for a Studio record read outside a scan: evict a cached
-    /// validation that these bytes (by physical size and plaintext digest) contradict, which can
-    /// never hit again (design 6.4.2's re-review, M-1). Flow R's capture runs this, so the warm
-    /// install R3 makes later is not refused by a version H1's or H5's scan cached before H5
-    /// rewrote the source.
     /// Forget what a restart forgets of Studio work reuse, without reopening the vault (which
     /// would also cost a receiver its watches and its mount): every memoized validation, and the
     /// retained source graph. Both are needed: retaining a source also caches its inventory
@@ -2437,6 +2432,11 @@ impl ServerStore {
         self.studio_source = None;
     }
 
+    /// The scan's read discipline for a Studio record read outside a scan: evict a cached
+    /// validation that these bytes (by physical size and plaintext digest) contradict, which can
+    /// never hit again (design 6.4.2's re-review, M-1). Flow R's capture runs this, so the warm
+    /// install R3 makes later is not refused by a version H1's or H5's scan cached before H5
+    /// rewrote the source.
     pub(in crate::store) fn evict_stale_studio_inventory(
         &mut self,
         scope: &[u8],

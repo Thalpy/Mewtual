@@ -136,6 +136,13 @@ impl CatchupRuntime {
         let target = self
             .registry_target
             .unwrap_or(watches[self.registry_selection % watches.len()].0.target);
+        // Its maintenance read refuses a Prepared destination with an error that pauses all of
+        // receive; its resolution is already scheduled (see `handoff_prepared`). Move on.
+        if Self::handoff_prepared(server, store, id, target) {
+            self.registry_target = None;
+            self.registry_selection = self.registry_selection.wrapping_add(1);
+            return Ok(false);
+        }
         self.registry_target = Some(target);
         let key = pointer(target, &server.group_id())?;
         let bucket = key.bucket();

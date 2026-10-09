@@ -54,9 +54,11 @@ and ranks the live hazards in that path.
     resolver would, or refuses with nothing written; tests compare the two byte for byte. The
     fences (rotation, adoption, repair) keep the synchronous resolver. Design 6.4.2 to 6.4.5 in
     `GATE4-AGENT-1-DESIGN.md`.
-    - **Fixed on the way:** catch-up's owner rotation no longer pauses all of receive when a
-      watched document's handoff is Prepared; it skips that document for the turn. This was
-      reachable before Flow R too, whenever a Prepared record outlived the probe.
+    - **Fixed on the way:** three of catch-up's background rails no longer pause all of receive
+      when a watched document's handoff is Prepared: owner rotation, the client pass and Registry
+      maintenance. Each skips that document for the turn. This was reachable before Flow R too,
+      whenever a Prepared record outlived the probe. With Flow R and a peer online it was a
+      livelock, found by the implementation review.
     - **Residual:** while a resolution is in flight the actor's one overlay slot is taken, so a
       Save on that server answers `Busy` for a few turns longer than before.
   - Native Save and repair commands remain unregistered. This is not Gate 4 acceptance.

@@ -110,7 +110,8 @@ impl ServerStore {
         if overlay.author() != device.device_id() {
             return manual(R::NotCurrentAuthor);
         }
-        // A Prepared branch is classified by what H1 does with it, which starts with the resolution:
+        // A Prepared branch is classified by what its resolution does with it (Flow R in the
+        // scheduled runtime, H1's synchronous path elsewhere; the same decision either way):
         // from the Prepared record alone and with no tenure (V8), Complete evidence settles it,
         // Hold leaves it held permanently, and Absent returns it to active. The evidence is read
         // from the record's framing, without a restore, by the same comparisons `evidence` makes.

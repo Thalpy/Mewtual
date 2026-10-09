@@ -314,8 +314,12 @@ table with the commit that closed it.
   commit performs exactly the synchronous resolver's writes behind a stamp.
   - **What a member can do:** send operations to the document while it is Prepared. That changes
     its source under the stamp, and the commit then falls back to the synchronous resolver in the
-    same visit. That is exactly the pre-Flow R cost, once, and the resolution completes there, so
-    it cannot be repeated to hold the record Prepared.
+    same visit. On the actor that costs at most what resolution cost before Flow R, plus a
+    discarded detached stage on a worker, once. The resolution completes there, so it cannot be
+    repeated to hold the record Prepared.
+  - **While the record is Prepared,** catch-up's rotation, client pass and Registry maintenance
+    skip that document rather than pausing receive. A record stuck on Hold defers them for that
+    document until a fence or an explicit access resolves it.
 - **A budgeted scan holds custody for a bounded validation only, and a memoized validation is
   reused only for identical bytes.** Under a deadline, `validation_fits` admits a fresh validation
   inline only in accounting mode, and only for four families:

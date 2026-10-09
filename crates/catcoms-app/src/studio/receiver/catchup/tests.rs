@@ -2570,6 +2570,7 @@ async fn interrupted_owner(
     StudioReceiver,
     StudioTarget,
     Arc<tokio::sync::Semaphore>,
+    ManualClock,
 ) {
     let clock = ManualClock::new(1000);
     let mut rng = ChaCha20Rng::seed_from_u64(seed);
@@ -2577,7 +2578,7 @@ async fn interrupted_owner(
         Hub::new().join(PeerId::from_u64(1)),
         MlsDevice::generate().unwrap(),
         rng.clone(),
-        Box::new(clock),
+        Box::new(clock.clone()),
         "owner",
     )
     .unwrap();
@@ -2608,7 +2609,7 @@ async fn interrupted_owner(
         )
         .unwrap();
     let pool = receiver.catchup.inject_overlay_pool_for_test(permits);
-    (server, root, store, receiver, target, pool)
+    (server, root, store, receiver, target, pool, clock)
 }
 
 fn prepared(
@@ -2639,7 +2640,7 @@ fn prepared(
 #[tokio::test]
 async fn flow_r_resolves_an_interrupted_handoff_through_scheduled_turns() {
     for source_written in [true, false] {
-        let (mut server, _root, mut store, mut receiver, target, _pool) =
+        let (mut server, _root, mut store, mut receiver, target, _pool, _clock) =
             interrupted_owner(1421, source_written, 1).await;
         let key = crate::store::studio_inventory_key_for_test(
             83,
@@ -2733,7 +2734,7 @@ async fn flow_r_resolves_an_interrupted_handoff_through_scheduled_turns() {
 /// must succeed until the resolution lands.
 #[tokio::test]
 async fn owner_rotation_skips_a_prepared_document_instead_of_pausing_receive() {
-    let (mut server, _root, mut store, mut receiver, target, _pool) =
+    let (mut server, _root, mut store, mut receiver, target, _pool, _clock) =
         interrupted_owner(1427, true, 4).await;
     for _ in 0..30 {
         receiver
@@ -2759,7 +2760,7 @@ async fn owner_rotation_skips_a_prepared_document_instead_of_pausing_receive() {
 /// resolve job they move nothing, and the job carries on to its commit.
 #[tokio::test]
 async fn a_resolve_job_is_not_abandoned_by_the_transfer_authority_check() {
-    let (mut server, _root, mut store, mut receiver, target, _pool) =
+    let (mut server, _root, mut store, mut receiver, target, _pool, _clock) =
         interrupted_owner(1423, true, 4).await;
     for _ in 0..10 {
         receiver.run(&mut server, &mut store, 83, None).unwrap();
@@ -2795,7 +2796,7 @@ async fn a_resolve_job_is_not_abandoned_by_the_transfer_authority_check() {
 /// further turn.
 #[tokio::test]
 async fn a_resolve_worker_finishing_after_a_pause_releases_its_bundle() {
-    let (mut server, _root, mut store, mut receiver, _target, pool) =
+    let (mut server, _root, mut store, mut receiver, _target, pool, _clock) =
         interrupted_owner(1425, true, 4).await;
     let free = pool.available_permits();
     let mut detached = None;
@@ -2820,5 +2821,192 @@ async fn a_resolve_worker_finishing_after_a_pause_releases_its_bundle() {
         free,
         "the shared preparation slot was stranded by the pause"
     );
+    assert!(receiver.catchup.overlay_admission_available_for_test());
+}
+
+/// Drive a Flow R job to R1 and hold it there, so the record stays Prepared, then give catch-up
+/// `turns` turns `step_ms` apart, as a running app does, each of which must succeed. Then let the
+/// resolution finish. Shared by the rail tests below.
+async fn catch_up_while_prepared(
+    server: &mut Server<catcoms_rt::MemNetwork, ChaCha20Rng>,
+    store: &mut ServerStore,
+    receiver: &mut StudioReceiver,
+    clock: &ManualClock,
+    target: StudioTarget,
+    turns: usize,
+    step_ms: u64,
+) {
+    // Every turn here must succeed, including the one in which R1 runs: catch-up runs after the
+    // probe in that same turn and already sees the record Prepared.
+    let prepared_turn = "a background turn failed while a watched document's handoff was Prepared";
+    for _ in 0..10 {
+        receiver.run(server, store, 83, None).expect(prepared_turn);
+        if receiver.handoff.stage_for_test() == Some("resolve-captured") {
+            break;
+        }
+    }
+    assert_eq!(
+        receiver.handoff.stage_for_test(),
+        Some("resolve-captured"),
+        "precondition: R1 holds the record Prepared"
+    );
+    // No detach here, so R2 waits and the record stays Prepared through these turns.
+    for _ in 0..turns {
+        clock.advance_ms(step_ms);
+        receiver.run(server, store, 83, None).expect(prepared_turn);
+    }
+    assert!(
+        !receiver.take_pause_notice(),
+        "receive was paused while the handoff was Prepared"
+    );
+    for _ in 0..10 {
+        if let Some(work) = receiver.detach(server) {
+            receiver.complete(server, work.run(None).await);
+        }
+        receiver.run(server, store, 83, None).expect(prepared_turn);
+        if !prepared(server, store, target) {
+            break;
+        }
+    }
+    assert!(
+        !prepared(server, store, target),
+        "the resolution never landed"
+    );
+}
+
+/// Registry maintenance skips a Prepared document instead of pausing receive (Flow R's
+/// implementation review, HIGH-1). With no peers its rail runs on every catch-up turn whose 5 s
+/// pacing has passed, so an advancing clock with a warm source reaches its maintenance read.
+#[tokio::test]
+async fn registry_maintenance_skips_a_prepared_document_instead_of_pausing_receive() {
+    let (mut server, _root, mut store, mut receiver, target, _pool, clock) =
+        interrupted_owner(1431, true, 4).await;
+    catch_up_while_prepared(
+        &mut server,
+        &mut store,
+        &mut receiver,
+        &clock,
+        target,
+        4,
+        6_000,
+    )
+    .await;
+}
+
+/// The client pass skips a Prepared document instead of pausing receive (Flow R's implementation
+/// review, HIGH-1). This needs a proven peer online, which a single-member fixture never has: with
+/// one, after the source is warm, the pass's status read refused the Prepared destination and
+/// paused receive before R2 could detach, a livelock until a fence ran.
+#[tokio::test]
+async fn the_client_pass_skips_a_prepared_document_instead_of_pausing_receive() {
+    let clock = ManualClock::new(1000);
+    let mut rng = ChaCha20Rng::seed_from_u64(1433);
+    let hub = Hub::new();
+    let mut server = Server::found(
+        hub.join(PeerId::from_u64(1)),
+        MlsDevice::generate().unwrap(),
+        rng.clone(),
+        Box::new(clock.clone()),
+        "owner",
+    )
+    .unwrap();
+    server.subscribe_control().await.unwrap();
+    let invite = server.mint_invite([1; 16], u64::MAX, vec![]).unwrap();
+    let (bob, tick) = tokio::join!(
+        Server::join(
+            hub.join(PeerId::from_u64(2)),
+            MlsDevice::generate().unwrap(),
+            ChaCha20Rng::seed_from_u64(1434),
+            Box::new(clock.clone()),
+            "member",
+            server.local_peer(),
+            &invite,
+        ),
+        server.sync_once()
+    );
+    tick.unwrap();
+    let mut bob = bob.unwrap();
+    // Each proves the other's endpoint, so the owner's client pass has a peer to page from.
+    let (proof, tick) = tokio::join!(
+        bob.sync
+            .request_catchup(server.local_peer(), catcoms_wire::DocType::Wiki, 43),
+        server.sync_once()
+    );
+    proof.unwrap();
+    tick.unwrap();
+    let (proof, tick) = tokio::join!(
+        server
+            .sync
+            .request_catchup(bob.local_peer(), catcoms_wire::DocType::Wiki, 43),
+        bob.sync_once()
+    );
+    proof.unwrap();
+    tick.unwrap();
+    assert!(
+        !server.sync.studio_page_peers().is_empty(),
+        "precondition: a proven peer, so the client pass runs"
+    );
+
+    let root = tempfile::tempdir().unwrap();
+    let mut store = ServerStore::open(root.path(), b"flow-r-pair", &mut rng).unwrap();
+    let target = StudioTarget::Flipnote {
+        channel: crate::channel_id("general").to_be_bytes(),
+        object: [29; 16],
+    };
+    server.sync.with_registry_context(|g, d, _, _| {
+        crate::store::studio_handoff_interrupted_fixture(&mut store, 83, g, d, target, 1, true)
+    });
+    let mut receiver = StudioReceiver::default();
+    receiver
+        .run(
+            &mut server,
+            &mut store,
+            83,
+            Some(StudioRequest::Read { target }),
+        )
+        .unwrap();
+    receiver.catchup.inject_overlay_pool_for_test(4);
+    catch_up_while_prepared(
+        &mut server,
+        &mut store,
+        &mut receiver,
+        &clock,
+        target,
+        4,
+        1_500,
+    )
+    .await;
+}
+
+/// A resolve job whose R3 budget will not build gives back its admission and its shared permit at
+/// once (Flow R's implementation review, MEDIUM-1). It holds no transfer authority an MLS change
+/// could expire, so before this nothing but a pause released it, and a scan that kept failing
+/// held one of four process-wide permits for good.
+#[tokio::test]
+async fn a_resolve_job_whose_budget_will_not_build_releases_its_permit() {
+    let (mut server, _root, mut store, mut receiver, _target, pool, _clock) =
+        interrupted_owner(1435, true, 4).await;
+    let free = pool.available_permits();
+    for _ in 0..10 {
+        receiver.run(&mut server, &mut store, 83, None).unwrap();
+        if let Some(work) = receiver.detach(&mut server) {
+            receiver.complete(&mut server, work.run(None).await);
+        }
+        if receiver.handoff.stage_for_test() == Some("resolve-ready") {
+            break;
+        }
+    }
+    assert_eq!(receiver.handoff.stage_for_test(), Some("resolve-ready"));
+    assert!(
+        pool.available_permits() < free,
+        "precondition: the job holds a permit"
+    );
+    receiver.handoff.fail_budget_for_test = true;
+    receiver.run(&mut server, &mut store, 83, None).unwrap();
+    assert!(
+        !receiver.handoff_has_job_for_test(),
+        "a resolve job kept its permit through a budget failure"
+    );
+    assert_eq!(pool.available_permits(), free);
     assert!(receiver.catchup.overlay_admission_available_for_test());
 }

@@ -82,10 +82,11 @@ pub(crate) enum StudioResolveStart {
 enum ResolveOutcome {
     /// The source holds none of the branch: return it to Active.
     Absent { next: StudioOverlayState },
-    /// The source holds the whole branch: flush it unchanged, then complete.
+    /// The source holds the whole branch: flush it unchanged, then complete. The unit is boxed
+    /// so the two arms stay comparable in size.
     Complete {
         next: StudioOverlayState,
-        unit: StudioEpoch,
+        unit: Box<StudioEpoch>,
         before: Zeroizing<Vec<u8>>,
     },
 }
@@ -165,7 +166,7 @@ impl StudioResolveCapture {
             },
             StudioHandoffEvidence::Complete => ResolveOutcome::Complete {
                 next: metadata.complete(&unit, &state.ledger).map_err(invalid)?,
-                unit,
+                unit: Box::new(unit),
                 before,
             },
             // The resolver's own refusal and message. R1's framing-only exit makes this rare,
@@ -432,7 +433,7 @@ impl ServerStore {
                 // checks it against `before` and against disk, and refuses any difference.
                 let source = self.save_studio_source(
                     server,
-                    unit,
+                    *unit,
                     Some(observed),
                     &before,
                     WritePurpose::Ordinary,

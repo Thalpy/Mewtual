@@ -73,11 +73,11 @@ jobs:
             logs/gate4-handoff-restored-*.log
           if-no-files-found: ignore
   # Flow R, the staged resolution of an interrupted handoff (design 6.4.2). Its own job, because
-  # its 13 mutants would push the handoff job past its limit: each rebuilds the crate and runs a
-  # store or actor test once mutated and once restored, about 45 minutes in all locally.
+  # its 16 mutants would push the handoff job past its limit: each rebuilds the crate and runs a
+  # store or actor test once mutated and once restored, about 55 minutes in all locally.
   resolution:
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    timeout-minutes: 100
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.89.0
@@ -85,7 +85,8 @@ jobs:
       - name: Test Flow R's staged resolution against the synchronous resolver
         run: >-
           cargo test --locked -j 4 --config 'profile.test.package.catcoms-app.debug=0'
-          -p catcoms-app --lib -- resolution:: flow_r a_resolve_ --test-threads=4
+          -p catcoms-app --lib -- resolution:: flow_r a_resolve_ _skips_a_prepared_document
+          --test-threads=4
       - name: Verify isolated mutations and restored regressions
         run: python3 .github/scripts/check-studio-resolution-mutations.py
       - name: Preserve mutation and restoration evidence

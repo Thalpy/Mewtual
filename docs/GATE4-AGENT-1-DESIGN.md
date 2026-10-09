@@ -1056,26 +1056,36 @@ Both highs confirmed answered. The review also confirmed:
 - the runtime is `studio/receiver/handoff.rs` (the stages, the probe route, the commit arm, the
   completion arm), with the job and completion types in `receiver/catchup.rs`.
 
-**A pre-existing hazard the receiver tests found.** Catch-up's owner rotation asks
-`studio_owner_rotation_needed` about every watched target. That reads through the read-only
-service path, which refuses a Prepared destination, and the refusal escaped `catchup.run` and
-paused all of receive:
+**A pre-existing hazard, found by the receiver tests and widened by the implementation review.**
+Three of catch-up's background rails read a watched target through the read-only service path:
+- owner rotation (`studio_owner_rotation_needed`);
+- the client pass (`prepared_studio_status`);
+- Registry maintenance (`prepared_studio_maintenance_state`).
+
+That path refuses a Prepared destination, and the refusal escaped `catchup.run` and paused all of
+receive. When:
 - **before Flow R:** reachable whenever a Prepared record outlived the probe, for example while a
   Hold sat in backoff;
-- **with Flow R:** routine, since the record stays Prepared from R1 to R3.
+- **with Flow R:** routine, since the record stays Prepared from R1 to R3. In a group with a peer
+  online, the client pass paused receive before R2 could ever detach, a livelock until a fence
+  ran (implementation review, HIGH-1).
 
-Owner rotation now skips a target whose handoff is Prepared for that turn, and moves on along the
-rail. A fault in reading the record still falls through to the existing path and surfaces. The
-rotation fence would resolve the record first in any case.
+All three now skip a target whose handoff is Prepared for that turn and move on along their rail,
+through one helper, `CatchupRuntime::handoff_prepared`. A fault in reading the record still falls
+through to the existing path and surfaces. A stuck Hold therefore defers that document's rotation,
+client pass and Registry maintenance quietly, until a fence or an explicit access resolves it.
+Page and seed service already ignore their own errors.
 
 **Tests:**
 - **Store level:** ten, in `handoff/resolution.rs`.
-- **Receiver level:** four, in `catchup/tests.rs`:
+- **Receiver level:** seven, in `catchup/tests.rs`:
   - the scheduled route for both outcomes, with no restore on the custody thread;
-  - owner rotation skipping a Prepared document;
+  - each of the three rails skipping a Prepared document: rotation, Registry maintenance on an
+    advancing clock, and the client pass with a proven peer online;
   - the transfer authority check leaving a resolve job alone;
-  - a pause during R2.
-- **CI:** 13 mutants in `check-studio-resolution-mutations.py`, in a new `resolution` job. All are
+  - a pause during R2;
+  - a budget failure releasing a resolve job's permit.
+- **CI:** 16 mutants in `check-studio-resolution-mutations.py`, in a new `resolution` job. All are
   DETECTED and pass restored under `RUSTFLAGS='-D warnings'`.
 
 **Two first drafts of the tests proved nothing, and the mutants showed it:**
