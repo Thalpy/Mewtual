@@ -1499,22 +1499,23 @@ in milliseconds. The one-frame rows are the stage profile's.
   one-operation commit on a maximal Flipnote is 86 ms. With a full branch it is 147 ms, past
   the 125 ms visit before any scan. As 15.9 HIGH-1 predicted, the share is a function of source
   and branch, and at the corner it is negative.
-- **The repeated source terms are about half of the one-operation commit at 998 frames:**
-  - three candidate `blob_cids`, about 18 ms;
+- **The repeated source terms are more than half of the one-operation commit at 998 frames:**
+  - four candidate `blob_cids`, about 24 ms (corrected from "three" by 15.12 L1: barrier 1, the
+    Source write's hold, resolve's flush hold and resolve's check);
   - two seed graph loads through `base_blob_cids`, about 26 ms.
   Snapshot encodes stay at or below the clock's resolution.
 - **H1 stays small:** 2 to 5 ms. So does H5's budget inventory: 1 to 3 ms here, for a small vault.
 
-**Item 0, sized by these figures.** Two halves, neither changing a boundary:
-1. **Compute each projection once in H5:** about 25 ms back at 998 frames (two `blob_cids`, one
-   seed graph).
-2. **Carry what the detached stages already computed:** H2 holds the seed graph and H4 the
-   candidate, so the seed's `base_blob_cids` and the candidate's `blob_cids` can travel in the
-   commit, bound by the stamp like H2's facts. That is about 19 ms more. This half is a design
-   change to the commit's contents, and needs its own review, as 9.1's facts did.
+**Item 0, sized by these figures.** Two halves:
+1. **Compute the reference check's sets once in H5** and reuse them in resolve: one candidate
+   projection and one seed graph, about 19 ms back at 998 frames (15.11).
+2. **Carry what the detached stages already computed,** and cut the writer's two holds: H2 holds
+   the seed graph and H4 the candidate. That is up to about 31 ms more. Sets carried from a
+   worker are worker-supplied, so this half needs its own binding and review, as 9.1's facts
+   did.
 
-With both, the projection estimate is about 42 ms at 998 frames and one operation. At 998 frames
-with a full branch it is still about 100 ms, because the remaining growth with branch length (82
+With both, the projection estimate is about 36 ms at 998 frames and one operation. At 998 frames
+with a full branch it is still about 95 ms, because the remaining growth with branch length (82
 to 147 ms between the one-frame and 998-frame full-branch rows) is not yet attributed.
 
 **What that leaves for 15.9 item 8 (the touched-path cursor).**
@@ -1603,3 +1604,72 @@ branch-length growth.
    1's candidate?
 2. Is reusing the seed set on resolve's proof path sound, given that resolve may run in a later
    visit after a restart? (On restart the proof does not exist, and the `None` path recomputes.)
+
+### 15.12 Design review of 15.11 (2026-10-09, Opus, static): no blocker; one high
+
+**The two questions, answered:**
+1. **No.** The current code does not change the unit's content between barrier 1 and resolve, but
+   that rests on convention: no `&mut` method on the path edits it, and the types do not enforce
+   that.
+2. **Yes.** The proof is minted and spent within one call and never persisted. So after a restart
+   only the `None` path exists, and it recomputes. The base is fixed for the branch's life.
+
+**HIGH-1: the reference check this change rewires has never been exercised.**
+- No test reaches "handoff would release a base blob reference", and no CI mutation targets it.
+  The two tests 15.11 cited do not touch it. Agent 1's N19 was never built.
+- No honest flow can trip it: H2's `check_overlay_successor` forces the successor's seed to be the
+  overlay's base, so the candidate always covers the base.
+- So a carried set that was swapped or emptied, or a missing overlay turned into an empty set,
+  would make the proof-path check vacuous, with every test still green.
+- 15.11's proposed `into_checked` test is tautological: it proves only that what went in comes
+  out.
+
+**MEDIUM-1: 15.11's generation argument is false.** Both of H5's writes rotate the generation
+after the sets are computed, and the proof captures it only at verification. What actually holds
+the sets to resolve's `metadata` today:
+- one exclusive borrow;
+- barrier 2's metadata hash;
+- the absence of production write hooks.
+
+Nothing checks that the carried seed set belongs to the branch resolve reads. The fix:
+- carry `prepared.overlay().basis()` with the sets, and require it on the proof path;
+- `base_blob_cids` depends only on fields the basis fingerprint covers;
+- keep the sets outside `VerifiedPersistedSource`'s proof claim.
+
+**MEDIUM-2:** the `verified-restore` mutant replaces `into_checked`'s call. If that call's return
+type changes, the mutant stops compiling, which is the `index-commit` failure again.
+
+**Lows:**
+- **L1:** 15.10 counted three candidate projections, not four. Corrected above.
+- **L2:** `evidence` takes `&`. `snapshot()` and `preserves_vault_source` need `&mut` for a change
+  lookup, not a save. The conclusion stands.
+- **L3:** `test-counters` exists only in F1's held commits, not on the pushed line. The counter
+  should be an app-side wrapper, or land with that feature.
+- **L4:** the old entry point's callers also include H1's interrupted-Prepared resolution,
+  adoption and rotation.
+- **L5:** the seed set should be an `Option`, `Some` required on the proof path.
+- **L6, an alternative:** have the shared writer return the set it computes for its hold. Resolve
+  could then reuse it on both paths with nothing carried, at the cost of the writer's signature.
+
+**Revised plan.**
+
+**Step A**, independent of item 0, and closing a gap that predates it:
+1. Extract the coverage rule as a pure function: is every base blob covered by the candidate or a
+   still-pending intent?
+2. Unit-test it three ways:
+   - it refuses an uncovered base;
+   - it accepts coverage that comes only from a pending intent;
+   - it refuses once that intent is gone;
+   - plus `None` handling.
+3. Add a CI mutation on the subset test.
+
+**Step B**, item 0's first half, built only after A:
+- carry `(basis, candidate set, Some(seed set))`, and require the basis on the proof path;
+- a `cfg(test)` recompute-and-compare on the proof path, kept out of any counter;
+- a mutation that empties the carried seed set, which that cross-check detects;
+- a hook-driven negative that swaps the intent record after the Source write;
+- the `verified-restore` mutant updated in the same change, under `RUSTFLAGS='-D warnings'`;
+- 15.11's text corrected per MEDIUM-1, L2 and L4.
+
+**Not before B is re-reviewed:** L6's writer-return alternative, item 0's second half, and the
+branch-length attribution.
