@@ -31,6 +31,15 @@ is no new authority, since an explicit decision already bypasses the backoff.
 test's renamed case. Subset runs of these seven detected each at its intended assertion and
 passed each restored control. The scheduled-resume deferral applies to the Registry resume too.
 
+**Full harness run.** On `14cfc724` all 26 runtime mutants were detected at their intended
+assertions, every source was restored byte for byte, and every restored control passed. The run
+went through the unmodified harness in two halves of 13, to stay within a 2 h tool limit. The
+hosted workflow run still needs a PR.
+
+**Suites on `14cfc724`:** root `cargo test --all --all-features` 2149 passed, 0 failed, 18
+ignored; native 331 passed; frontend 1282 passed; `cargo fmt --check`, strict Clippy and
+`check-no-ambient.sh` clean.
+
 ## Review of the fairness round: dispositions, 2026-10-09
 
 The adversarial review of the entry below found no BLOCKER and no HIGH: two MEDIUM, eight LOW.
