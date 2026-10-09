@@ -35,11 +35,15 @@ and ranks the live hazards in that path.
     it had installed, was invisible to the yield. Signing then ran to the end, and H5's commit
     evicted the source and dropped the request unanswered. The yield now waits for such a request
     once it has captured its source (`CatchupRuntime::captured_service_owed`). An uncaptured one
-    may be waiting for the signing job's own pool permit, so it is signed past and served after
-    H5.
-    - **Still open:** `replay_ready()`, the gate for H5 and replay, has the same blind spot. A
-      request captured just before H5 or a replay step can still be dropped, costing the requester
-      a retry. The inbound term has no actor-level test.
+    may be waiting for the signing job's own pool permit, so it is signed past. It is served after
+    H5 only if it is still current then (5 s from arrival) and wins the freed permit; otherwise the
+    requester retries.
+    - **Still open:**
+      - `replay_ready()`, the gate for H5 and replay, has the same blind spot. A request captured
+        just before H5 or a replay step can still be dropped, costing the requester a retry.
+      - On a full pool, a held client page or Registry page can keep catch-up from serving at all,
+        while H3 yields to a request it cannot reach.
+      - The inbound term has no actor-level test.
   - Native Save and repair commands remain unregistered. This is not Gate 4 acceptance.
 
 - **Gate 4 PR #35 reconciliation (2026-10-08).** The candidate now preserves

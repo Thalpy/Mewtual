@@ -659,8 +659,9 @@ Closing Save, both Intents writes that rotate the token (Agent 2's review M1).
 
   **Only once captured** (F2's review, MEDIUM-1). An uncaptured request may be waiting for a
   permit from the shared pool, and the signing job holds one until H5. Yielding to it would stall
-  both until the interest expires, and for ever under a still clock. It is served after H5
-  releases the permit instead.
+  both until the interest expires, and for ever under a still clock. It is signed past instead.
+  Once H5 releases the permit it can capture and be served, if it is still current then (5 s from
+  arrival) and wins that permit; otherwise the requester retries.
 - **Bounded slice.** `MAX_SIGNING_TURNS_PER_VISIT = 32` and `SIGNING_SLICE_BUDGET_MS = 250`,
   whichever comes first. These are an experiment configuration, not a responsiveness guarantee: the
   deadline is checked between signatures and can overrun by one whole operation including its

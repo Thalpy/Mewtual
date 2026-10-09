@@ -2598,8 +2598,10 @@ reserved request, and that was a priority inversion. A request whose preparation
 pool full stays reserved and uncaptured, and the signing job holds one of that pool's permits until
 H5. H3 then yielded every turn to a request waiting for H3's own permit, until the interest expired
 unanswered, and for ever under a still clock; one member re-requesting at each expiry kept H3 to
-about one slice per 5 s. An uncaptured request is now signed past, as before F2, and is served once
-H5 releases the permit.
+about one slice per 5 s. An uncaptured request is now signed past, as before F2. Once H5 releases
+the permit it can capture and be served, but only if it is still current then (5 s from arrival)
+and wins that permit. A long branch plus H4 and H5 can outlast that, and the requester then
+retries.
 
 **The parked term needed its own test.** In Bob's flow a parked preparation always belongs to the
 reserved request, so the owed term answers on the same turns and removing `result_parked` alone
@@ -2632,9 +2634,18 @@ The harness now accepts a crate-absolute test name beginning `studio::receiver::
   authorising or on the wire changes. `replay_ready` is shared with replay, so the rule goes to
   Agent 2, with one constraint: a gate there must also exclude an uncaptured request, or H5, which
   releases a permit, would wait on it as H3 did.
-- **A captured request can still wait behind H3 on a full pool** while a held client page waits:
-  catch-up's PageReady branch returns before `serve` when it cannot get a permit. Rarer, and
-  bounded by the interest's expiry.
+- **H3 can still yield to a request catch-up cannot reach, on a full pool** (pre-existing; the
+  re-review, LOW-2). Two steps in catch-up's `run` return before `serve` when they cannot get a
+  permit:
+  - a held client page, through the PageReady branch;
+  - a held Registry page, through `persist_registry_page`, whose inventory preparation needs one.
+
+  While one does, a captured request waits, and so does a queued one, which is never even
+  reserved. H3 yields to both while holding a permit that step needs. A captured request is
+  bounded by its expiry. Queued interest needs no free permit, so a member re-requesting at each
+  5 s expiry can renew it for as long as the pool stays full. It needs a cold held page and a full
+  pool, so LOW. The fix belongs in the order of steps in catch-up's `run`, not in the yield, and
+  goes to Agent 2 with MEDIUM-2.
 - **The time fixture** stays store-level, in
   `studio_overlay_handoff_signing_slice_reports_yield_bound_and_completion_apart`.
 
@@ -2654,6 +2665,23 @@ The review read `4170707a..72e0b68e` and ran no build. Dispositions:
 (lifecycle change, expiry, removed channel, failed install, cancellation); no authority, wire or
 persistence change; step A equivalent to the old subset test, with the error order unchanged; all
 harness anchors unique, `qualified()` routing correct, and no mutant leaving unused code.
+
+**Re-review of the fix, `aef7fccc` (2026-10-09, Opus, static): no blocker, high or medium.**
+- **Confirmed:**
+  - Once captured, a request never asks the pool for another permit. A cold captured Studio
+    request is dropped when nothing is in flight, a captured Registry request is never prepared
+    again, and every failure path clears it.
+  - F2's original test still counts an owed turn with the production predicate, and the fixture
+    refactor kept every assertion.
+  - The new test is deterministic, and `signed_past_it` cannot be satisfied another way.
+- **Three lows, dispositioned:**
+  - **LOW-1, an overclaim:** "served after H5" holds only while the request is current and wins
+    the freed permit. Reworded in the code, design 7.3, here and in HANDOVER.
+  - **LOW-2, the residual list incomplete:** the held Registry page, and the queued-interest
+    exposure. Recorded above, for Agent 2.
+  - **LOW-3, CI headroom:** about 77 of 90 minutes. The handoff job's limit is now 120.
+- **Optional, not taken:** asserting `available_permits() == 0` on the signed-past turn. The
+  fixture's single injected pool already implies it.
 
 ### F3: H5's repeated terms, priced
 

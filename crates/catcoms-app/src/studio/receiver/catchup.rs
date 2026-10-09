@@ -534,7 +534,9 @@ impl CatchupRuntime {
     /// waiting for a permit from the shared pool, and the signing job holds one of those permits
     /// until H5. Yielding to it would be a priority inversion: H3 would wait for a request that
     /// waits for H3, until the interest expires unanswered, and indefinitely under a clock that
-    /// does not move. Uncaptured, it is served after H5 releases the permit, as before F2.
+    /// does not move. Uncaptured, it is signed past, as before F2. Once H5 releases the permit it
+    /// can capture and be served, if it is still current then and wins that permit. Otherwise it
+    /// expires unanswered and the requester retries.
     pub(super) fn captured_service_owed<T: MeshTransport, R: CryptoRngCore>(
         &self,
         server: &Server<T, R>,
