@@ -51,9 +51,11 @@ table with the commit that closed it.
   holds nothing else. While a job owns a target, ordinary installs, page receive, owner rotation,
   preparation and foreground Apply into it defer or refuse. Own-operation replay and gossip
   ingest that needs source preparation wait through the same preparation check. Gossip ingest
-  into an already warm source and Flow S/H writes are not claim-checked; a change from them makes
-  the rebuild stale, and the job writes nothing (an automatic job reruns; an explicit decision is
-  reported abandoned, to be made again).
+  into an already warm source and Flow S, H and R writes (including the handoff's commit, H5, and
+  Flow R's commit, R3) are not claim-checked; a change from them makes the rebuild stale, and the
+  job writes nothing (an automatic job reruns; an explicit decision is reported abandoned, to be
+  made again). S3 commits a rebuild only after installing it, and builds its storage budget only
+  then, so a cold source over the receive scan's cold-byte limit is never validated inline.
   Registry bucket repair executes only as the same job, scoped to the bucket. This covers the
   explicit decision, Flow D, the owner's resume and the owed replacement. The bucket is captured
   as bounded authenticated bytes and rebuilt detached. At commit the issue/apply transaction

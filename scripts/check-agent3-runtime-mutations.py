@@ -264,6 +264,25 @@ core.MUTATIONS = [
         "the stale offer waits the short stale retry",
     ),
     (
+        # PR #27 review MEDIUM-1: S3 builds its budget only after installing the rebuild.
+        "RUNTIME-install-before-budget", JOB,
+        "                let installed = server.sync.with_registry_context(|g, d, _, _| {\n"
+        "                    store.install_prepared_studio_source(g, d, *prepared)\n",
+        "                let _ = Self::commit_budget(server, store, id, &input)?;\n"
+        "                let installed = server.sync.with_registry_context(|g, d, _, _| {\n"
+        "                    store.install_prepared_studio_source(g, d, *prepared)\n",
+        "a_cold_source_over_the_receive_limit_commits_without_an_inline_validation",
+        "the decision commits on the source S2 rebuilt",
+    ),
+    (
+        # Agent 1's note on PR #36's merge: a Prepared document's skip resumes its bucket first.
+        "RUNTIME-prepared-skip-resumes-bucket", REGISTRY_RUNTIME,
+        "                if !self.repair_claimed(CheckpointTarget::Registry(bucket)) {\n",
+        "                if false && !self.repair_claimed(CheckpointTarget::Registry(bucket)) {\n",
+        REGISTRY + "a_prepared_document_never_strands_its_buckets_held_decision",
+        "the held decision resumed despite the Prepared document",
+    ),
+    (
         # Re-review LOW-2: the router's resume needs a current durable snapshot.
         "RUNTIME-landed-install-needs-snapshot", REPAIR,
         "        if self.current_owner_snapshot(server, store, id).is_err() {\n",

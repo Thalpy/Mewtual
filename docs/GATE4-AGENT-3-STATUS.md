@@ -4,6 +4,37 @@ Owner: Agent 3 ([assignment](GATE4-AGENT-HANDOFFS.md#agent-3-runtime-signed-faul
 Proposal: [GATE4-AGENT-3-DESIGN](GATE4-AGENT-3-DESIGN.md), revision 16 follow-up.
 Review preamble: 3. Current entries override older ones.
 
+## PR #27 review MEDIUM-1 and Agent 1's interface notes, 2026-10-10
+
+A user-run review of PR #27, pinned at `db46ef0a` (the merge of PR #36), raised one MEDIUM in
+this runtime; Agent 1 relayed it with two points where our code meets. This branch was first
+fast-forwarded to `gate4-agent1-runtime` at `af113f24`.
+
+| Item | Disposition |
+|---|---|
+| MEDIUM-1: S3 built its storage budget before installing the rebuild. S1's capture evicts the warm Studio copy, so the budget's inventory scan validated that record inline, and the receive scan refuses a cold record over its 256 KiB cold-byte limit. The rebuild S2 had validated was discarded and the target held. | **Fixed by reordering** (Agent 1's shape 1). S3 now installs the Studio rebuild first, which caches its inventory footprint (`retain_studio_source` → `cache_studio_source_footprint`, an overwriting put), and only then builds the budget (`commit_budget`). A bucket gets the same order: `warm_registry_repair_inventory` rechecks the bucket on disk against the capture and memoizes the rebuild's footprint before the budget. A budget that fails after the install leaves only the warm source, a cache. Test: `a_cold_source_over_the_receive_limit_commits_without_an_inline_validation` (a Flipnote of about 290 KiB, `forget_warm_studio_state_for_test`, a one-permit pool: the decision commits, and `inline_studio_validations_for_test` for that record does not move). Mutant `RUNTIME-install-before-budget` (budget first) fails it. **Gap:** the bucket half has no regression, since a bucket over 256 KiB needs thousands of pointers; a Registry capture does not evict the cache, so it bites only on a never-warmed large bucket. |
+| The repair claim is not consulted by H5 or Flow R's R3, though `RepairClaims::claimed` said every installing path consults it. | **Comment narrowed** to the paths that do, naming the writers that don't (warm gossip ingest, Flow S, H5, R3). Nothing is corrupted: S3's digest recheck makes the rebuild stale (`repair_stale`) and R3 has its stamp fallback; the cost is a wasted rebuild. THREAT-MODEL says the same. Agent 1's follow-up (a `repair_claimed` skip at the handoff probe, a hold at `handoff_commit`) stays theirs. |
+| A Prepared document delayed its bucket's held owner decision: Registry maintenance's Prepared skip came before `resume_registry_repair`, and a record stuck on Hold is never resolved. | **Reordered.** Before skipping a Prepared document, Registry maintenance resumes the bucket's held decision, which reads only the bucket and its owner record. An error there is recorded, never returned, so the skip still cannot pause receive. Test: `registry::a_prepared_document_never_strands_its_buckets_held_decision`. Mutant `RUNTIME-prepared-skip-resumes-bucket`. Agent 1's `registry-skip` mutant disables the whole block, so its meaning is unchanged. |
+| The merge kept both sides' skips (rotation, the client pass, Registry maintenance). | Noted; no change. |
+
+A short static review of this delta found no BLOCKER, HIGH or MEDIUM and confirmed all three
+changes, with two LOW:
+- **LOW-1, taken.** The bucket half lacked a regression. A store-level test now checks the
+  bucket footprint against the scan: a cold scan; then the cache cleared, a repair rebuild
+  captured and memoized with `warm_registry_repair_inventory`; then a rescan. The rescan reuses
+  the entry, with no uncached bytes, and produces records identical to the cold scan's
+  (`store::epoch_registry::tests::inventory_cache::a_repair_rebuilds_memoized_footprint_is_what_the_scan_computes`).
+  A large cold bucket through the whole job remains untested.
+- **LOW-2, follow-up (cosmetic).** On the Prepared-skip path a bucket failure is reported in the
+  Prepared document's failure slot, and a later S3 sends that document `RefreshRequired`. The fix
+  is a `failure_target: Option<StudioTarget>` on `resume_registry_repair`, passing `None` from the
+  skip, which touches every caller.
+
+Residual, as before: the receive scan's cold-byte limit is a running total over the vault, and
+the fix takes only the job's own record out of it.
+
+The runtime harness has 34 mutants. Root suite on this delta: 2309 passed, 0 failed, 23 ignored.
+
 ## PR #36 residual findings: dispositions, 2026-10-09
 
 The same external review, on `c9858396`, raised two LOW residuals and one test refinement.

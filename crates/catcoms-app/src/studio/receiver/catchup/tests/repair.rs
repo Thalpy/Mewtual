@@ -1852,6 +1852,120 @@ async fn a_cold_guess_behind_a_busy_slot_waits_rather_than_resumes() {
     );
 }
 
+/// PR #27 review MEDIUM-1: S3 builds its budget only after installing the rebuild. S1's capture
+/// evicts the warm copy, so a budget built first validated this record inline, which the receive
+/// scan refuses for a cold record over its cold-byte limit (256 KiB); the rebuild S2 had already
+/// validated was discarded and the target held. Here the source is a Flipnote well over that
+/// limit, the vault is cold for real (the inventory cache and the retained graph both forgotten,
+/// as a restart leaves them), and the pool has one permit. The decision commits, and S3 never
+/// validates this record inline.
+#[tokio::test]
+async fn a_cold_source_over_the_receive_limit_commits_without_an_inline_validation() {
+    let mut owed = Owed::new(false).await;
+    let target = StudioTarget::Flipnote {
+        channel: owed.target.channel(),
+        object: [5; 16],
+    };
+    let scope = CheckpointTarget::Studio(target);
+    let StudioOwnerTenure::Known(start) = owed.alice.observed_owner_tenure() else {
+        panic!("the founder observes its own tenure")
+    };
+    // A large source, warm as the runtime would have prepared it before adopting into it.
+    let (store, alice) = (&mut owed.store, &mut owed.alice);
+    let (logical, signed) = alice.sync.with_registry_context(|group, device, _, _| {
+        // About 0.7 KiB per operation: 420 is roughly 290 KiB, clear of the 256 KiB limit.
+        crate::store::save_studio_source_fixture_ops(store, SERVER, group, device, target, 420, 0);
+        let logical = target.document(&group.group_id()).unwrap();
+        let warm = store
+            .load_studio_epoch(SERVER, group, target, device)
+            .unwrap()
+            .unwrap();
+        let projection = warm.projection().unwrap();
+        store.retain_studio_source(group, device, warm);
+        let signed = [40u8, 41].map(|salt| {
+            let mut projection = projection.clone();
+            let StudioProjection::Flipnote(art) = &mut projection else {
+                panic!("a Flipnote target")
+            };
+            art.epoch = 10;
+            let seed = projection.checkpoint([salt; 32]).unwrap();
+            Receipt::sign(
+                logical.clone(),
+                10,
+                [salt; 32],
+                seed.change_hash(),
+                start,
+                InheritedCheckpoint::EpochZero,
+                device,
+            )
+            .unwrap()
+        });
+        (logical, signed)
+    });
+    let largest = std::fs::read_dir(owed.root.path().join("servers"))
+        .unwrap()
+        .map(|e| e.unwrap().metadata().unwrap().len())
+        .max()
+        .unwrap();
+    assert!(
+        largest > 256 * 1024,
+        "precondition: the source exceeds the receive scan's cold-byte limit ({largest} bytes)"
+    );
+    // Both receipts adopted without seeds: a Fault the owner decides.
+    let mut b = CatchupRuntime::budget(&mut owed.alice, &mut owed.store, SERVER).unwrap();
+    let (store, alice) = (&mut owed.store, &mut owed.alice);
+    alice
+        .sync
+        .with_registry_context(|group, device, clock, rng| {
+            for receipt in &signed {
+                let (_, state) = store
+                    .adopt_studio_checkpoint(
+                        SERVER, group, target, device, receipt, None, start, clock, rng, &mut b,
+                    )
+                    .unwrap();
+                store.retain_studio_source(group, device, state);
+            }
+        });
+    let mut pair = signed.clone();
+    pair.sort_by_key(Receipt::hash);
+    let request = StudioRepairRequest {
+        receipt_a: pair[0].hash(),
+        receipt_b: pair[1].hash(),
+        selected: signed[0].hash(),
+    };
+    // Cold for real, and one permit.
+    let (mut runtime, pool) = owed.runtime(1);
+    owed.store.forget_warm_studio_state_for_test();
+    let started = runtime.start_repair(
+        &mut owed.alice,
+        &mut owed.store,
+        SERVER,
+        scope,
+        Some(target),
+        RepairInput::Decide(request),
+    );
+    assert_eq!(started.start(), StudioRepairStart::Scheduled);
+    rebuild(&mut runtime, &owed).await;
+    let key = crate::store::studio_inventory_key_for_test(SERVER, &logical);
+    let inline = crate::store::inline_studio_validations_for_test(key);
+    runtime
+        .repair_commit(&mut owed.alice, &mut owed.store, SERVER)
+        .unwrap();
+    assert_eq!(
+        runtime.repair_report(scope),
+        Some(StudioRepairReport::Completed(
+            StudioRepairOutcome::AwaitingSeed
+        )),
+        "the decision commits on the source S2 rebuilt"
+    );
+    assert_eq!(
+        crate::store::inline_studio_validations_for_test(key),
+        inline,
+        "S3 validated the cold source inline"
+    );
+    assert_eq!(pool.available_permits(), 1);
+}
+
 /// Re-review MEDIUM-1: once the person acknowledges the recovery warning that held a document,
 /// its doubled backoff describes nothing any more. A successful Acknowledge clears it, for the
 /// source and its bucket, so the next 5 s visit acts instead of up to 15 min later.

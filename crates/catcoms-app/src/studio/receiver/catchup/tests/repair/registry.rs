@@ -872,6 +872,48 @@ async fn a_backing_off_held_bucket_spends_its_turn_without_preparing_anything() 
     );
 }
 
+/// Agent 1's note on the merge of PR #36: Registry maintenance skips a document whose handoff is
+/// Prepared, and a record stuck on Hold is never resolved. That skip came before the bucket's
+/// held owner decision was resumed, so while the stuck document was the only watched one in its
+/// bucket, the decision never resumed. The resume reads only the bucket and its owner record,
+/// never the document's source, so it now runs before the skip.
+#[tokio::test]
+async fn a_prepared_document_never_strands_its_buckets_held_decision() {
+    let mut owed = Owed::new(false).await;
+    let target = StudioTarget::Flipnote {
+        channel: owed.target.channel(),
+        object: [23; 16],
+    };
+    let (store, alice) = (&mut owed.store, &mut owed.alice);
+    alice.sync.with_registry_context(|g, d, _, _| {
+        crate::store::studio_handoff_interrupted_fixture(store, SERVER, g, d, target, 1, true);
+    });
+    let fault = Bucket::for_target(&mut owed, target, true);
+    fault.decide_directly(&mut owed);
+    let (mut runtime, _pool) = owed.runtime(4);
+    assert!(
+        CatchupRuntime::handoff_prepared(&owed.alice, &owed.store, SERVER, target),
+        "precondition: the only watched document is Prepared"
+    );
+    let watch = owed
+        .alice
+        .watch_studio_epoch(&owed.store, SERVER, target)
+        .unwrap();
+    let watches = VecDeque::from([(watch, 0)]);
+    runtime
+        .work_registry(&mut owed.alice, &mut owed.store, SERVER, &watches)
+        .unwrap();
+    let minted = runtime
+        .checkpoint
+        .as_ref()
+        .expect("the held decision resumed despite the Prepared document: its seed is fetched");
+    assert_eq!(minted.inner.target(), fault.scope());
+    assert!(
+        runtime.registry_target.is_none(),
+        "the Prepared document's turn is still skipped"
+    );
+}
+
 /// Plan D, fairness, for buckets: a held bucket never delays another bucket's resume. The one
 /// shared Registry resume cadence did; now only the held bucket's next visit waits.
 #[tokio::test]
