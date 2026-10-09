@@ -31,6 +31,46 @@ and ranks the live hazards in that path.
   its document. Still open: a peer's repaired-seed refetch is not paced (pre-existing), hosted
   CI on PR #36 and a bounded repair verdict. Details are in `GATE4-AGENT-3-STATUS.md`.
 
+- **Gate 4 Agent 1: C-3 step 2, F1 and F4 (2026-10-09).**
+  - **C-3 step 2:** replay's manual move now takes its storage budget from a shared, turn-based
+    inventory job that keeps a cursor across custody visits, the first production path to do so.
+    Limitations, as `THREAT-MODEL.md` now states:
+    - the cursor and its directory stream live until the first visit 30 s or more past the
+      owner's last turn, about 35 s with the native idle wake;
+    - a move the job cannot serve within 60 s falls back to the synchronous scan it ran before;
+    - so the move, and its recovery notice, can wait up to 60 s;
+    - the job takes permits from the same four-slot preparation pool as catch-up;
+    - a detached validation's error pauses background receive only if it is about bytes that
+      are still current.
+  - **F1:** an exact retry of an accepted overlay operation now returns
+    `StudioOverlaySave::Acknowledged { basis, accepted }` and rebuilds no draft (see
+    `INTERFACES.md`).
+  - **F4:** a Save captured while the receiver is paused is dropped with `Busy`, and a pause
+    releases a capture still queued, freeing admission, the pool permit and the media hold. That
+    `Busy` is not free, since the visit paid for media admission and, for the Unconfirmed Save,
+    the budget scan. **Known gap:** a caller cannot tell it from the other `Busy`, because the
+    paused event is one-shot and neither Save ends a pause. A distinct `Paused` outcome is
+    proposed to Agent 2, and native Save must not register before it.
+  - **F2:** an actor-level test of Flow H's signing yield, with a second member's checkpoint
+    request arriving mid-signing. It found that a request catch-up had reserved, and whose source
+    it had installed, was invisible to the yield. Signing then ran to the end, and H5's commit
+    evicted the source and dropped the request unanswered. The yield now waits for such a request
+    once it has captured its source (`CatchupRuntime::captured_service_owed`). An uncaptured one
+    may be waiting for the signing job's own pool permit, so it is signed past. It is served after
+    H5 only if it is still current then (5 s from arrival) and wins the freed permit; otherwise the
+    requester retries.
+    - **Still open:**
+      - `replay_ready()`, the gate for H5 and replay, has the same blind spot. A request captured
+        just before H5 or a replay step can still be dropped, costing the requester a retry.
+      - On a full pool, a held client page or Registry page can keep catch-up from serving at all,
+        while H3 yields to a request it cannot reach.
+      - The inbound term has no actor-level test.
+  - **Decision, technical debt:** a Studio handoff's final commit (H5) stays one blocking step.
+    At the caps (999 frames, 256 draft operations) it takes about 0.15 s, past the design's
+    0.125 s target, once per handoff. Splitting it (C-3 step 3's remaining route) is deferred, and
+    Flow R is next. See `GATE4-AGENT-1-C3-RUNTIME.md` 15.14.
+  - Native Save and repair commands remain unregistered. This is not Gate 4 acceptance.
+
 - **Gate 4 PR #35 reconciliation (2026-10-08).** The candidate now preserves
   `gate4-agent1-runtime` through `7310b22b76848c4b9f85fec816744cff00c1a64f`. Agent 2's newer
   `EpochIntentBudget` implementation remains the sole owner of the 3-branch/8 MiB rails and their
@@ -736,7 +776,10 @@ and ranks the live hazards in that path.
   snapshot/quarantine, unchanged source identity, receipt, close, expected seed and owner-tenure
   input, successful fresh preparation, a different basis, and exact stale-basis refusal with
   unchanged intent bytes. Already accepted exact retry still returns the same complete draft
-  with its original timestamp/count. First acceptance has a positive control using the fresh basis.
+  with its original timestamp/count. *(Superseded on 2026-10-09. An exact retry now returns
+  `StudioOverlaySave::Acknowledged { basis, accepted }` without rebuilding the draft, and these
+  tests compare the stored draft read back instead; see `docs/INTERFACES.md` and the F1 entry of
+  `docs/GATE4-AGENT-1-STATUS.md`.)* First acceptance has a positive control using the fresh basis.
   The harness now tests the reviewer's constant-source-version mutation independently against
   both regressions. The focused pair passes (2 tests, 64.20s). Each constant-version mutation
   fails at `overlay basis ignored changed persisted Closing source version` with exactly one
@@ -4424,6 +4467,17 @@ lives in `App.svelte`: it has been extracted into `apps/desktop/src/call-audio.t
    for a hostile review on that class of change. Worth running before voice is "done".
 
 ## Known limitations / deferred (the security-relevant ones)
+
+- **Technical debt: a Studio handoff's final commit is one blocking step of up to about 0.15 s**
+  (decided 2026-10-09). This is H5, which transfers a closed document's local draft. It grows with
+  the document and the draft. At their caps (`FLIPNOTE_MAX_FRAMES` 999, `MAX_STUDIO_OVERLAY_OPS`
+  256) it measured 147 ms, and once 248 ms on a busy host, past the 125 ms custody-visit target;
+  that server's background work and Studio requests wait meanwhile.
+  - **Exposure:** a member can fill a shared Flipnote to the frame cap, but the draft is the
+    handing-off device's own. So a peer gets at most one such pause per local draft, with no
+    amplification.
+  - **To pay it down:** split the commit across visits, starting from
+    `GATE4-AGENT-1-C3-RUNTIME.md` 15.10 and 15.12; Flow R's commit would then need the same.
 
 - **Desktop networking: the transport paths are wired, but public infrastructure is not
   deployed by the app.** The `apps/desktop` bridge binds all interfaces and the

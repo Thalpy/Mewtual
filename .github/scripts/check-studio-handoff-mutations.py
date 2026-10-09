@@ -11,6 +11,8 @@ import sys
 
 ROOT = Path(__file__).resolve().parents[2]
 PREFIX = "store::epoch_studio::tests::rotation::overlay::handoff::"
+# The receiver's actor-level tests live outside PREFIX; an entry names one in full from here.
+RECEIVER = "studio::receiver::catchup::tests::"
 CORE = "crates/catcoms-replication/src/studio/overlay/handoff.rs"
 STORE = "crates/catcoms-app/src/store/epoch_studio/handoff.rs"
 COMMAND = ["cargo", "test", "--locked", "-j", "4", "--config",
@@ -138,7 +140,78 @@ MUTATIONS = [
      "&& { let _ = &self.generation; true };",
      "persisted::studio_overlay_handoff_verified_source_binds_target_candidate_and_generation",
      "a proof was spent after a write landed"),
+    # Design 7.3's placement answer for H3 (design 18.3 review, F2, whose reviewer forced this
+    # predicate to `false` and saw nothing fail). The test drives production turns while a second
+    # member's checkpoint request waits, so these entries name the receiver's test in full.
+    ("handoff-priority", "crates/catcoms-app/src/studio/receiver.rs",
+     "        server.sync.has_epoch_service_interest()\n"
+     "            || self\n"
+     "                .watches\n"
+     "                .iter()\n"
+     "                .any(|(w, _)| server.sync.studio_has_inbound(&w.inner))\n"
+     "            || self.catchup.result_parked()\n"
+     "            || self.catchup.captured_service_owed(server)\n",
+     "        false\n"
+     "            && (server.sync.has_epoch_service_interest()\n"
+     "                || self\n"
+     "                    .watches\n"
+     "                    .iter()\n"
+     "                    .any(|(w, _)| server.sync.studio_has_inbound(&w.inner))\n"
+     "                || self.catchup.result_parked()\n"
+     "                || self.catchup.captured_service_owed(server))\n",
+     RECEIVER + "a_signing_visit_yields_to_a_members_checkpoint_request_until_it_is_served",
+     "a signing slice ran while a member's checkpoint request waited"),
+    # Each term the request exercises, removed alone: first while it is queued as service
+    # interest, then once it is reserved and its source installed but it is still unanswered.
+    ("handoff-priority-service", "crates/catcoms-app/src/studio/receiver.rs",
+     "        server.sync.has_epoch_service_interest()\n            || self\n",
+     "        (false && server.sync.has_epoch_service_interest())\n            || self\n",
+     RECEIVER + "a_signing_visit_yields_to_a_members_checkpoint_request_until_it_is_served",
+     "a signing slice ran while a member's checkpoint request waited"),
+    ("handoff-priority-owed", "crates/catcoms-app/src/studio/receiver.rs",
+     "            || self.catchup.captured_service_owed(server)\n",
+     "            || (false && self.catchup.captured_service_owed(server))\n",
+     RECEIVER + "a_signing_visit_yields_to_a_members_checkpoint_request_until_it_is_served",
+     "a signing slice ran while a member's checkpoint request waited"),
+    # F2's review, MEDIUM-1: the owed term counts only a request that has captured its source.
+    # One still waiting for a pool permit may be waiting for the signing job's own, so yielding
+    # to it stalls both; with the conjunct gone, a one-permit pool never completes the transfer.
+    ("handoff-priority-captured", "crates/catcoms-app/src/studio/receiver/catchup.rs",
+     "s.captured && server.sync.epoch_service_interest_is_current(&s.interest)",
+     "server.sync.epoch_service_interest_is_current(&s.interest)",
+     RECEIVER + "a_request_waiting_for_the_signing_jobs_permit_does_not_stall_signing",
+     "the transfer never completed while a request waited for its permit"),
+    # The parked-result term. In the request's flow a parked preparation is always the reserved
+    # request's own, so the owed term answers on the same turns and masks this one; a local owner
+    # capture parks a result with no request behind it.
+    ("handoff-priority-parked", "crates/catcoms-app/src/studio/receiver.rs",
+     "            || self.catchup.result_parked()\n",
+     "            || (false && self.catchup.result_parked())\n",
+     RECEIVER + "a_parked_catch_up_result_alone_makes_a_signing_slice_yield",
+     "a parked result did not make a signing slice yield"),
+    # C-3 runtime 15.12, step A: the base-blob coverage rule. No honest flow reaches its refusal,
+    # so its unit tests are its only executed evidence, and each part is mutated against them.
+    ("base-coverage", "crates/catcoms-app/src/store/epoch_studio/handoff.rs",
+     ".all(|cid| candidate.contains(cid) || pending.contains(cid))",
+     ".any(|cid| candidate.contains(cid) || pending.contains(cid))",
+     "references::studio_overlay_handoff_base_coverage_refuses_a_base_blob_nothing_retains",
+     "an uncovered base blob was accepted"),
+    ("base-coverage-pending", "crates/catcoms-app/src/store/epoch_studio/handoff.rs",
+     "|| pending.contains(cid))",
+     "|| (pending.contains(cid) && false))",
+     "references::studio_overlay_handoff_base_coverage_counts_a_pending_intent",
+     "a pending intent's reference did not count as retention"),
+    ("base-coverage-none", "crates/catcoms-app/src/store/epoch_studio/handoff.rs",
+     "base.is_none_or(|base| {",
+     "base.is_some_and(|base| {",
+     "references::studio_overlay_handoff_base_coverage_with_no_base_accepts",
+     "a document with no overlay was refused for its base"),
 ]
+
+
+def qualified(test):
+    """A name relative to PREFIX, or a crate-absolute one beginning at `RECEIVER`."""
+    return test if test.startswith(RECEIVER) else PREFIX + test
 
 
 def run(test):
@@ -146,7 +219,7 @@ def run(test):
     env["CARGO_INCREMENTAL"] = "0"
     if os.name == "nt":
         env["_LINK_"] = "/DEBUG:NONE"
-    return subprocess.run(COMMAND + [PREFIX + test, "--", "--exact", "--nocapture"],
+    return subprocess.run(COMMAND + [qualified(test), "--", "--exact", "--nocapture"],
                           cwd=ROOT, env=env, text=True, encoding="utf-8", errors="replace",
                           stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=900, check=False)
 

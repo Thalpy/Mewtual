@@ -347,8 +347,30 @@ table with the commit that closed it.
   Every finished inventory, budget or reference, is therefore confirmed against one fresh
   names-only listing and refused on any mismatch: an inventory job restarts, and a synchronous
   scan's caller gets an error, which pauses background receive. On such a filesystem Studio
-  storage work can be refused, never budgeted from an undercount. No production path keeps a
-  cursor across visits yet; replay's manual move (C-3 step 2) is the first.
+  storage work can be refused, never budgeted from an undercount.
+- **Replay's manual move holds a cursor across visits** (C-3 step 2, the first production path to).
+  Its shared, turn-based inventory job keeps an owned cursor and its directory stream between the
+  receiver's custody visits.
+  - **How long:** until the first visit 30 s or more after its owner last asked for a budget,
+    when the idle drop runs. That is about 35 s with the native 5 s idle wake.
+  - **What is bounded:** a parked record's authenticated plaintext and its preparation permit are
+    released at pause, at the lock reset and on context change. The job takes permits from the
+    same four-slot process pool as catch-up preparation.
+  - **Under writes:** a write by another actor charges the job's restart budget, and an exhausted
+    budget backs off; this actor's own writes refresh it uncharged, within a cap.
+  - **Errors:** a detached validation's error pauses background receive only if it is about bytes
+    still current. An error about bytes a later write replaced restarts the job.
+  - **Fallback:** a move that the job cannot serve within 60 s falls back to the synchronous scan
+    it used before step 2. So the move, and its recovery notice, can be delayed by up to that
+    long.
+- **A Studio handoff's final commit (H5) runs in one custody visit, accepted as technical debt**
+  (decision 2026-10-09, `GATE4-AGENT-1-C3-RUNTIME.md` 15.14). It grows with the document and the
+  local draft, both capped (999 frames, 256 draft operations). At both caps it measured about
+  0.15 s, and once 0.25 s on a busy host, against a 0.125 s visit target. While it runs, the
+  server's background work and Studio requests wait.
+  - **What a member can do:** fill a shared Flipnote to the frame cap. The draft is the
+    handing-off device's own, and a device hands off only documents it drafted on, so this buys
+    at most one such pause per draft, with no amplification.
 - **A budgeted scan holds custody for a bounded validation only, and a memoized validation is
   reused only for identical bytes.** Under a deadline, `validation_fits` admits a fresh validation
   inline only in accounting mode, and only for four families:

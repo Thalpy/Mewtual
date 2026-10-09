@@ -1,9 +1,17 @@
 //! Overlay entries share the ordinary writer, budgets and exact-retry flush barrier.
 use super::*;
-use catcoms_replication::studio::{StudioLocalDraft, StudioTarget};
+use catcoms_replication::studio::{StudioOverlaySave, StudioTarget};
 
 impl ServerStore {
     /// The exact-retry flush barrier for an accepted overlay operation, and nothing else.
+    ///
+    /// Design 6.2's S1a: terminal and flush-only. The acknowledgement carries the stored branch's
+    /// basis and accepted count, both structural, and **the branch is never reconstructed here**.
+    /// An earlier version returned `overlay.read(..)`, which loads the seed graph and replays every
+    /// accepted entry, so a retry cost the branch's whole depth under custody, and every retry of
+    /// an Unconfirmed Save paid it (design 18.3 review, F1). No caller used the projection.
+    /// `studio_overlay_store_exact_retry_rebuilds_no_draft` pins this, counting reconstructions in
+    /// the replication crate, so a full decode or a direct `StudioOverlay::read` here is caught too.
     ///
     /// This used to be the new-authoring writer as well, minting a branch with
     /// `unwrap_or_else(StudioOverlayState::new)` and `append`. New authoring moved to the staged
@@ -29,7 +37,7 @@ impl ServerStore {
         budget: &mut EpochStorageBudget,
         intents: &mut EpochIntentBudget,
         hooks: &mut WriteHooks<'_>,
-    ) -> Result<StudioLocalDraft, AppError> {
+    ) -> Result<StudioOverlaySave, AppError> {
         if document.server_id != group.group_id()
             || group.member_signature_key(&device.device_id()).as_deref()
                 != Some(device.public_key_bytes().as_slice())
@@ -59,7 +67,10 @@ impl ServerStore {
                 "not an exact retry of an accepted overlay operation",
             ));
         }
-        let view = overlay.read(&state.ledger).map_err(invalid)?;
+        let acknowledged = StudioOverlaySave::Acknowledged {
+            basis: overlay.basis(),
+            accepted: overlay.accepted(),
+        };
         self.write_prepared_intents(
             server,
             document,
@@ -72,6 +83,6 @@ impl ServerStore {
             WriteStep::new(WriteTag::Intents),
             hooks,
         )?;
-        Ok(view)
+        Ok(acknowledged)
     }
 }

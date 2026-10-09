@@ -830,16 +830,17 @@ impl ServerStore {
 
     /// Memoize a detached result that its job is about to throw away (C-3 runtime design 14.3).
     ///
-    /// For a runtime that discards an `Installing` result itself rather than installing it, such
-    /// as step 2's uncharged refresh of an overtaken job. Call it **before** the job's cursor is
-    /// replaced: the result is checked against that cursor (its scan identity, its mount, and the
-    /// record it is awaiting) and against this store's current mount, and anything else warms
-    /// nothing. A result installed through [`Self::install_validated_job_record`] needs no call;
-    /// its own refusal warms the cache the same way.
+    /// **Test-only.** Step 2's runtime memoizes through
+    /// [`Self::restart_epoch_inventory_job_uncharged`], which takes the pending result itself so
+    /// the discard path cannot skip the memo. This entry point keeps the memo's own rules testable
+    /// in isolation: the result is checked against the cursor it came from (its scan identity, its
+    /// mount, and the record it is awaiting) and against this store's current mount, and anything
+    /// else warms nothing. A result installed through [`Self::install_validated_job_record`] needs
+    /// no call; its own refusal warms the cache the same way.
     ///
     /// Only Registry and Studio results are memoized, and never over an entry already present for
     /// that record. Returns whether the cache was warmed.
-    #[cfg_attr(not(test), allow(dead_code))] // Step 2's runtime calls it once that step lands.
+    #[cfg(test)]
     pub(crate) fn memoize_overtaken_inventory_result(
         &mut self,
         job: &EpochInventoryJob,
@@ -854,7 +855,7 @@ impl ServerStore {
     /// Such a test should also assert that something parked, because a test that stops
     /// exercising the detached path can keep passing for other reasons.
     #[cfg(test)]
-    pub(in crate::store) fn detach_every_validation_for_test(&mut self) {
+    pub(crate) fn detach_every_validation_for_test(&mut self) {
         self.detach_every_validation = true;
     }
 
@@ -939,6 +940,79 @@ impl ServerStore {
         self.repeat_syncs
             .note(path, bytes, &before, &self.inventory_generation);
         Ok(())
+    }
+
+    /// What a five-family write does to every live cursor, and nothing else: rotate the token
+    /// (the mutation guard alone). For a test outside the store that needs another actor's write
+    /// between visits without that write also adding records or network traffic.
+    #[cfg(test)]
+    pub(crate) fn overtake_inventory_for_test(&mut self) {
+        let _guard = self.epoch_mutation_guard();
+    }
+
+    /// A mark of the vault's current inventory token, which an actor takes at the end of its
+    /// custody visit (C-3 runtime design, N-M1). Opaque on purpose: it can only be compared with
+    /// [`Self::epoch_inventory_quiet_since`], never installed into a cursor or an inventory, so
+    /// holding one authorizes nothing.
+    pub(crate) fn epoch_inventory_quiet_mark(&self) -> EpochInventoryQuiet {
+        EpochInventoryQuiet(self.inventory_generation.clone())
+    }
+
+    /// Whether no five-family mutation has landed since `mark` was taken. Exact under I-4: every
+    /// such mutation rotates the token before its first I/O and never restores an old one.
+    pub(crate) fn epoch_inventory_quiet_since(&self, mark: &EpochInventoryQuiet) -> bool {
+        std::sync::Arc::ptr_eq(&mark.0, &self.inventory_generation)
+    }
+
+    /// If a write has overtaken this job, give it a fresh cursor **without** charging its restart
+    /// budget, and say whether it did. A parked or awaited record is discarded with the old cursor.
+    ///
+    /// `pending` is the detached result the caller was about to install, if any. It is memoized
+    /// against the old cursor **before** that cursor is replaced, because a refusal here is the
+    /// same overtaken-result case `install_validated` memoizes (C-3 runtime design 14.3). Taking
+    /// it as an argument, rather than leaving the caller to call the test-only
+    /// `memoize_overtaken_inventory_result` first, means this discard path cannot skip the
+    /// memo (implementation review M-1). Under gossip this is the common path: receive's writes
+    /// are the actor's own, so the first [`OWN_RESTARTS`](crate::studio) of every job come here.
+    ///
+    /// Soundness is unaffected: a fresh cursor is always a correct cursor, and its inventory is
+    /// still checked against the token at every resume and at finish. What this waives is only the
+    /// liveness bound [`MAX_INVENTORY_RESTARTS`] provides, so it is for a caller that has proved
+    /// the overtaking writes were its own (N-M1), or that the cursor had done no work to lose, and
+    /// that caps how often it does this per job. Crate-private for that reason.
+    pub(crate) fn restart_epoch_inventory_job_uncharged(
+        &mut self,
+        job: &mut EpochInventoryJob,
+        pending: Option<&ValidatedEpochRecord>,
+    ) -> Result<bool, AppError> {
+        if std::sync::Arc::ptr_eq(&job.cursor.generation, &self.inventory_generation) {
+            return Ok(false);
+        }
+        if let Some(validated) = pending {
+            job.cursor.memoize_refused(self, validated);
+        }
+        job.cursor = self.begin_epoch_storage_scan_with(job.profile)?;
+        Ok(true)
+    }
+
+    /// If a write has overtaken this job, replace its cursor and charge its restart budget, exactly
+    /// as an overtaken install does; `None` if the job is current.
+    ///
+    /// For a detached validation that came back as an error. The error is about the bytes the
+    /// worker read, and a later write may have replaced them, so it says nothing about the vault
+    /// as it is now. Surfacing it pauses background receive, so the caller surfaces it only for a
+    /// current job and otherwise restarts. Before this, such an error was dropped when this
+    /// actor's own write had overtaken the job within its uncharged-refresh cap, but paused receive
+    /// when another actor's write had, or an own write past that cap (batch review of C-3 step 2,
+    /// LOW-1).
+    pub(crate) fn restart_epoch_inventory_job_if_overtaken(
+        &mut self,
+        job: &mut EpochInventoryJob,
+    ) -> Result<Option<EpochInventoryStep>, AppError> {
+        if std::sync::Arc::ptr_eq(&job.cursor.generation, &self.inventory_generation) {
+            return Ok(None);
+        }
+        self.restart_job(job).map(Some)
     }
 
     /// Drive a job for one visit against an **absolute** deadline (C-3 runtime design, S-3).
@@ -1954,6 +2028,15 @@ pub struct EpochInventoryJob {
     restarts: usize,
 }
 
+impl EpochInventoryJob {
+    /// How many charged restarts this job has used, for tests that tell a charged restart from an
+    /// uncharged refresh.
+    #[cfg(test)]
+    pub(crate) fn restarts_for_test(&self) -> usize {
+        self.restarts
+    }
+}
+
 /// What one step of an inventory job did.
 #[derive(Debug)]
 pub enum EpochInventoryStep {
@@ -2034,6 +2117,17 @@ impl RepeatSyncMemo {
         self.entries.push((path.to_owned(), bytes, after.clone()));
     }
 }
+
+impl EpochInventoryJob {
+    /// Whether the current cursor has visited any entry, so a restart of it would lose work.
+    pub(crate) fn has_progress(&self) -> bool {
+        self.cursor.progress.visited_entries > 0
+    }
+}
+
+/// See [`ServerStore::epoch_inventory_quiet_mark`]. Holds the token only so it can be compared.
+#[derive(Debug)]
+pub struct EpochInventoryQuiet(std::sync::Arc<()>);
 
 impl std::fmt::Debug for EpochInventoryJob {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

@@ -2103,13 +2103,27 @@ caller. Save takes the basis fingerprint, that branch and a canonical domain ope
 must resend its original request's branch: after a transfer or disposal, a fresh ticket names the
 *next* branch. Timestamps come from the runtime clock and are preserved on exact retries.
 
-The result is `StudioOverlaySave::Local(StudioLocalDraft)`;
-`StudioOverlaySave::HandedOff(StudioHandoffOutcome)` for a retry of a transferred operation; or
-`StudioOverlaySave::Disposed(StudioOverlayDisposal)` for a retry of an operation in the most
-recently disposed branch. The last two are terminal acknowledgements that accept nothing and open
-no branch. A request naming a branch no admission would open is refused as stale. A handoff is
-shared pending history, not receipt finality. No actor/native overlay command or automatic
-promotion/disposition is enabled by these internal adapters.
+The result is one of:
+- `StudioOverlaySave::Local(StudioLocalDraft)` for newly accepted work;
+- `StudioOverlaySave::Acknowledged { basis, accepted }` for an exact retry of an operation the
+  live branch already accepted;
+- `StudioOverlaySave::HandedOff(StudioHandoffOutcome)` for a retry of a transferred operation;
+- `StudioOverlaySave::Disposed(StudioOverlayDisposal)` for a retry of an operation in the most
+  recently disposed branch.
+
+The last three are terminal acknowledgements that accept nothing and open no branch.
+
+`Acknowledged` carries the stored branch's basis fingerprint and accepted count, the same values
+a rebuilt draft would report. It is flush-only and does **not** rebuild the draft, which costs the
+branch's whole depth. A caller that wants the projection reads it explicitly, through
+`local_draft()` or the overlay read path.
+
+A request naming a branch no admission would open is refused as stale. A handoff is shared pending
+history, not receipt finality. No actor/native overlay command or automatic promotion/disposition
+is enabled by these internal adapters.
+
+(Until 2026-10-09 an exact retry returned `Local` with a full draft, rebuilt under custody; design
+18.3 review, F1.)
 
 `EpochIntentState::overlay()` exposes immutable acceptance metadata and `local_draft()` rebuilds
 the local projection. The existing ledger's encoding is unchanged. Its enclosing record is

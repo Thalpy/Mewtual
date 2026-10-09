@@ -84,6 +84,11 @@ impl StudioReceiver {
                             basis: draft.basis(),
                             accepted: draft.accepted(),
                         },
+                        // An exact retry: the same two facts, read from the stored branch rather
+                        // than from a rebuilt draft (design 6.2, S1a).
+                        StudioOverlaySave::Acknowledged { basis, accepted } => {
+                            StudioUnconfirmedSaveOutcome::Saved { basis, accepted }
+                        }
                         StudioOverlaySave::Disposed(manifest) => {
                             StudioUnconfirmedSaveOutcome::Disposed(manifest)
                         }
@@ -238,7 +243,9 @@ impl StudioReceiver {
                 Ok(StudioOverlaySaveVisit::Saved(saved))
             }
             StudioOverlayStart::Captured(capture) => {
-                self.catchup.schedule_overlay(*capture, ownership, target);
+                if !self.queue_capture_unless_paused(*capture, ownership, target) {
+                    return Ok(StudioOverlaySaveVisit::Busy);
+                }
                 self.unconfirmed_scheduled = Some(request);
                 Ok(StudioOverlaySaveVisit::Scheduled)
             }

@@ -131,6 +131,9 @@ pub(crate) enum StudioBackgroundJob<T: MeshTransport> {
     /// Repair job, stage S2: the detached source rebuild, tagged with the job's token. The
     /// ownership (a pool slot and the target's live claim) moves into the worker with it.
     RepairRebuild(u64, RepairRebuild, RepairOwnership),
+    /// C-3: the shared inventory job's parked record body, validated off custody. The permit
+    /// moves into the blocking closure, so a cancelled waiter cannot release it early.
+    InventoryValidate(super::inventory::InventoryDetach),
 }
 
 /// A finished Flow H detached stage, tagged with the `HandoffJob::token` it was detached for.
@@ -168,6 +171,14 @@ pub(crate) enum StudioBackgroundResult {
     /// only; there is nothing to release here. That is I-2, and 7.1's first bullet.
     CancelledOverlay,
     CancelledRegistry(Option<Arc<()>>),
+    /// The shared inventory job's validation result, routed by its token.
+    InventoryValidated(
+        u64,
+        Box<Result<crate::store::ValidatedEpochRecord, AppError>>,
+    ),
+    /// That validation's waiter was cancelled. Its own variant, so it cannot fall into the
+    /// default arm, which would tear down an unrelated catch-up pass (C-3 review H3).
+    InventoryCancelled(u64),
     Cancelled {
         preparation: Option<PreparationContext>,
     },
@@ -228,6 +239,7 @@ impl<T: MeshTransport + 'static> StudioBackgroundJob<T> {
             Self::HandoffPrepare(..) => "handoff-prepare",
             Self::HandoffAssemble(..) => "handoff-assemble",
             Self::RepairRebuild(..) => "repair-rebuild",
+            Self::InventoryValidate(..) => "inventory-validate",
         }
     }
 
@@ -262,6 +274,9 @@ impl<T: MeshTransport + 'static> StudioBackgroundJob<T> {
             Self::RepairRebuild(token, ..) => {
                 StudioBackgroundResult::Repair(RepairCompletion::Cancelled(*token))
             }
+            Self::InventoryValidate(detach) => {
+                StudioBackgroundResult::InventoryCancelled(detach.token)
+            }
             _ => StudioBackgroundResult::Cancelled { preparation: None },
         };
         let work = async move {
@@ -284,6 +299,24 @@ impl<T: MeshTransport + 'static> StudioBackgroundJob<T> {
                 }
                 Self::Page(attempt) => {
                     StudioBackgroundResult::Page(Box::new(attempt.fetch().await))
+                }
+                Self::InventoryValidate(super::inventory::InventoryDetach {
+                    body,
+                    permit,
+                    token,
+                }) => {
+                    let result = tokio::task::spawn_blocking(move || {
+                        let validated = (*body).validate();
+                        drop(permit);
+                        validated
+                    })
+                    .await;
+                    StudioBackgroundResult::InventoryValidated(
+                        token,
+                        Box::new(result.unwrap_or_else(|_| {
+                            Err(invalid("Studio inventory validation worker failed"))
+                        })),
+                    )
                 }
                 Self::Prepare(capture, permit, context) => {
                     let result = tokio::task::spawn_blocking(move || {
@@ -509,6 +542,42 @@ impl CatchupRuntime {
             || self.registry_prepared.is_some()
             || self.overlay_planned.is_some()
             || self.repair_parked()
+    }
+    /// A member's epoch-service request this runtime has reserved and not yet answered, while the
+    /// request is still current. Once reserved it is no longer queued interest, and once its
+    /// source preparation is installed no result is parked either, yet it is still owed an answer.
+    /// `pending` counts it as work. The signing yield uses the narrower
+    /// [`captured_service_owed`](Self::captured_service_owed).
+    pub(super) fn service_owed<T: MeshTransport, R: CryptoRngCore>(
+        &self,
+        server: &Server<T, R>,
+    ) -> bool {
+        self.service
+            .as_ref()
+            .is_some_and(|s| server.sync.epoch_service_interest_is_current(&s.interest))
+    }
+    /// [`service_owed`](Self::service_owed), restricted to a request whose source preparation has
+    /// started (`captured`): one that can be answered without taking another pool permit.
+    ///
+    /// This is the term a signing slice yields to (design 18.3 review, F2, found by that test). A
+    /// slice that signs ends its turn before catch-up, so without it signing ran every turn until
+    /// the branch was done, and H5's commit then evicted the source the request had captured,
+    /// which drops a captured request unanswered.
+    ///
+    /// **Why only once captured** (F2's review, MEDIUM-1). A request that has not captured may be
+    /// waiting for a permit from the shared pool, and the signing job holds one of those permits
+    /// until H5. Yielding to it would be a priority inversion: H3 would wait for a request that
+    /// waits for H3, until the interest expires unanswered, and indefinitely under a clock that
+    /// does not move. Uncaptured, it is signed past, as before F2. Once H5 releases the permit it
+    /// can capture and be served, if it is still current then and wins that permit. Otherwise it
+    /// expires unanswered and the requester retries.
+    pub(super) fn captured_service_owed<T: MeshTransport, R: CryptoRngCore>(
+        &self,
+        server: &Server<T, R>,
+    ) -> bool {
+        self.service.as_ref().is_some_and(|s| {
+            s.captured && server.sync.epoch_service_interest_is_current(&s.interest)
+        })
     }
     pub(super) fn replay_ready(&self) -> bool {
         !self.in_flight
@@ -765,12 +834,7 @@ impl CatchupRuntime {
         if self.head_result.is_some() {
             return true;
         }
-        if server.sync.has_epoch_service_interest()
-            || self
-                .service
-                .as_ref()
-                .is_some_and(|s| server.sync.epoch_service_interest_is_current(&s.interest))
-        {
+        if server.sync.has_epoch_service_interest() || self.service_owed(server) {
             return true;
         }
         if !watches
@@ -841,7 +905,7 @@ impl CatchupRuntime {
         self.preparation_pool()
     }
 
-    fn preparation_pool(&self) -> Arc<tokio::sync::Semaphore> {
+    pub(super) fn preparation_pool(&self) -> Arc<tokio::sync::Semaphore> {
         #[cfg(test)]
         if let Some(pool) = &self.overlay_pool {
             return pool.clone();
@@ -934,6 +998,18 @@ impl CatchupRuntime {
             .map(|(context, plan, ownership)| (context.target, plan, ownership))
     }
 
+    /// Drop a capture queued for its detached plan but not yet handed out, releasing admission, its
+    /// pool permit and its transient media hold with it. Returns whether one was dropped.
+    ///
+    /// For `pause` (design 18.3 review, F4). A paused receiver hands out no work, and only an
+    /// unrelated explicit access clears the pause, so a queued capture would strand all three for
+    /// the whole pause. Safe for RT-001's reason: nothing durable was written, and the caller's
+    /// identical retry plans afresh. A capture already detached is the worker's: it completes,
+    /// parks, and the park deadline drops it, because that expiry runs outside the pause gate.
+    pub(super) fn release_queued_overlay(&mut self) -> bool {
+        self.overlay.take().is_some()
+    }
+
     #[cfg(test)]
     pub(super) fn overlay_admission_available_for_test(&mut self) -> bool {
         self.overlay_admission.can_admit()
@@ -949,6 +1025,17 @@ impl CatchupRuntime {
         let pool = Arc::new(tokio::sync::Semaphore::new(permits));
         self.overlay_pool = Some(pool.clone());
         pool
+    }
+
+    /// Mark a network pass in flight without one, for a test of `detach`'s ordering against the
+    /// flag (C-3 step 2: a parked inventory body must not wait behind it).
+    #[cfg(test)]
+    pub(super) fn set_in_flight_for_test(&mut self, in_flight: bool) {
+        self.in_flight = in_flight;
+    }
+    #[cfg(test)]
+    pub(super) fn in_flight_for_test(&self) -> bool {
+        self.in_flight
     }
 
     /// Exactly what `complete` does for a cancelled overlay waiter, without needing a Server.
@@ -1309,6 +1396,13 @@ impl StudioReceiver {
             // this job ends, so a pending discovery must never park its S2 (design 10.3, HIGH-1).
             // It is already bounded by its own reserved slot.
             Some(job)
+        } else if let Some(detach) = self.inventory.take_detach() {
+            // C-3 runtime design 4: after source and Registry preparation and before the
+            // `in_flight` check, so a network pass in flight cannot strand a parked body (which
+            // holds a pool permit and authenticated plaintext) behind it. A captured repair job
+            // detaches first; each already holds its own permit, so neither waits on the other
+            // for more than one selection.
+            Some(StudioBackgroundJob::InventoryValidate(detach))
         } else if self.catchup.in_flight
             || (self.catchup.discovery_plan.is_some()
                 && server.runtime_clock().monotonic_ms() < self.catchup.checkpoint_retry)
@@ -1426,6 +1520,8 @@ impl StudioReceiver {
             ) => {}
             // Likewise: the repair job moved its own stage to `Detached`.
             Some(StudioBackgroundJob::RepairRebuild(..)) => {}
+            // The inventory runtime moved itself to `Validating` when it produced this job.
+            Some(StudioBackgroundJob::InventoryValidate(..)) => {}
             Some(StudioBackgroundJob::Page(..) | StudioBackgroundJob::RegistryPage(..)) => {
                 self.catchup.in_flight = true
             }
@@ -1442,6 +1538,10 @@ impl StudioReceiver {
         result: StudioBackgroundResult,
     ) {
         match result {
+            StudioBackgroundResult::InventoryValidated(token, result) => {
+                self.inventory.complete(token, result)
+            }
+            StudioBackgroundResult::InventoryCancelled(token) => self.inventory.cancelled(token),
             StudioBackgroundResult::Preview(generation, completed) => {
                 if matches!(
                     completed,

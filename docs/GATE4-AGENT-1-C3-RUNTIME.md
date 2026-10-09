@@ -6,8 +6,9 @@ it is at revision 2 after its design review and re-review, A and B are built, an
 gated (14.5). Section 15 proposes a route to step 3; its design review found it not yet ready,
 and 15.7 lists what step 3 needs, starting with design 9.1. 9.1 is built and the commit phase is
 measured, so 15.8 is revision 2 of that route. Its design review (15.9) found no blocker and one
-high: H5's cost grows with the source, which nothing has measured yet. 15.9's order of work
-replaces 15.8's, and starts there.** It extends
+high: H5's cost grows with the source. 15.10 has since measured that: the commit alone exceeds
+the visit for a maximal Flipnote with a full branch. 15.9's order of work replaces 15.8's, and
+15.10 sizes its first item.** It extends
 `GATE4-AGENT-1-DESIGN.md` section 9.2 (the cursor and I-4) and 5.5 (the overlay job). The storage
 half of C-3 is implemented and reviewed; this is the runtime half, ledger row G4-A1-C3.
 
@@ -1474,3 +1475,258 @@ measurement varies.**
 - a writer-facts warm that diverges from validation, which M4's cross-check mitigates;
 - pruning only after a complete full scan;
 - the memo resident for the mount's life, UI lock included.
+
+### 15.10 The source axis, measured (2026-10-09): HIGH-1 holds
+
+15.9's first measurement: `profile_studio_overlay_handoff_source_axis_{256,512,998}`. Each times
+H1 to H5 for a one-operation and a full title branch over a Flipnote whose base already holds that
+many frames. Release build, on a host shared with other agents' builds. Upper medians of 3 trials,
+in milliseconds. The one-frame rows are the stage profile's.
+
+| base frames | branch ops | H5 commit | one `blob_cids` | one seed graph | H2 (detached) | H4 (detached) |
+|---|---|---|---|---|---|---|
+| 1 | 1 | 27 | < 1 | 1 | 2 | 0 |
+| 256 | 1 | 42 | 1 | 3 | 28 | 6 |
+| 512 | 1 | 56 | 3 | 6 | 57 | 12 |
+| 998 | 1 | **86** | 6 | 13 | 119 | 26 |
+| 1 | 256 | 82 | 1 | < 1 | 857 | 242 |
+| 256 | 256 | 99 | 3 | 3 | 3 651 | 885 |
+| 512 | 256 | 118 | 6 | 6 | 6 873 | 1 662 |
+| 998 | 256 | **147** | 8 | 13 | 13 291 | 2 966 |
+
+**What it settles:**
+- **The commit grows with the source, about 0.06 ms per base frame, even at one operation.** The
+  one-operation commit on a maximal Flipnote is 86 ms. With a full branch it is 147 ms, past
+  the 125 ms visit before any scan. As 15.9 HIGH-1 predicted, the share is a function of source
+  and branch, and at the corner it is negative.
+- **The repeated source terms are more than half of the one-operation commit at 998 frames:**
+  - four candidate `blob_cids`, about 24 ms (corrected from "three" by 15.12 L1: barrier 1, the
+    Source write's hold, resolve's flush hold and resolve's check);
+  - two seed graph loads through `base_blob_cids`, about 26 ms.
+  Snapshot encodes stay at or below the clock's resolution.
+- **H1 stays small:** 2 to 5 ms. So does H5's budget inventory: 1 to 3 ms here, for a small vault.
+
+**Item 0, sized by these figures.** Two halves:
+1. **Compute the reference check's sets once in H5** and reuse them in resolve: one candidate
+   projection and one seed graph, about 19 ms back at 998 frames (15.11).
+2. **Carry what the detached stages already computed,** and cut the writer's two holds: H2 holds
+   the seed graph and H4 the candidate. That is up to about 31 ms more. Sets carried from a
+   worker are worker-supplied, so this half needs its own binding and review, as 9.1's facts
+   did.
+
+With both, the projection estimate is about 36 ms at 998 frames and one operation. At 998 frames
+with a full branch it is still about 95 ms, because the remaining growth with branch length (82
+to 147 ms between the one-frame and 998-frame full-branch rows) is not yet attributed.
+
+**What that leaves for 15.9 item 8 (the touched-path cursor).**
+- **What regime 1 needs:** a near-limit vault's traversal costs about 27 ms unmargined (11 ms of
+  per-file cost plus 16 ms for 8 MiB), and about 75 ms with the review's factor of 4 on the bytes.
+- **What it gets:** a maximal Flipnote with a full branch would leave about 25 ms after item 0.
+- **So no scan-based step 3 completes there under gossip.** Neither does a touched-path cursor,
+  which saves traversal but not the commit.
+- **What remains is a choice:**
+  - accept, as a stated L6 regression, that such handoffs wait for a quiet gap (today they
+    complete in one long visit);
+  - or keep this corner on today's single long visit;
+  - either way, first attribute and cut the branch-length growth.
+
+**Recommendation: build item 0's first half, then re-measure, before deciding.** It is mechanical
+and changes no boundary. The second half and the branch-length attribution come next. Item 8 is
+decided on the post-item-0 table, not on extrapolation.
+
+### 15.11 Item 0, first half: H5 computes its reference sets once (proposal, 2026-10-09)
+
+**Where the projections are.** In the H5 path today, the candidate's `blob_cids` and the seed's
+`base_blob_cids` (a graph load) run here:
+
+| site | candidate `blob_cids` | seed `base_blob_cids` |
+|---|---|---|
+| barrier 1: `check_handoff_references(&prepared, &candidate, &state)` (`handoff.rs:414`) | 1 | 1 |
+| the Source write: `save_studio_source_checked`'s `hold_creative(unit.blob_cids())` (`epoch_studio.rs:645`) | 1 | none |
+| resolve, Complete arm: its flush-only save's hold (the same writer) | 1 | none |
+| resolve, Complete arm: `check_handoff_references(metadata, &source.unit, &state)` (`handoff.rs:725`) | 1 | 1 |
+
+That is four candidate projections and two seed graph loads. At 998 frames that comes to about
+24 + 26 ms.
+
+**The proposal.** Change only the two reference checks, which are pure.
+1. **Split the check.** `check_handoff_references` becomes a pure computation,
+   `handoff_references(metadata, source) -> (candidate_cids, base_cids)`, plus a check
+   `check_handoff_references_with(&refs, state)`. The old entry point stays, as the two composed,
+   for its non-H5 callers: restart resolution and repair.
+2. **Barrier 1 computes `refs` once** from `prepared` and `candidate`, and checks with them.
+3. **`VerifiedPersistedSource` carries `refs`.** H5 hands them to
+   `verify_persisted_studio_source`, which stores them next to the unit and the landed snapshot it
+   already binds. `into_checked` returns them, and resolve's Complete arm, on the `Some(proof)`
+   path only, checks with them instead of recomputing. The `None` path, restart resolution,
+   recomputes as now.
+4. **The writer's two holds are unchanged.** They protect pixels before potentially durable I/O,
+   and the shared writer's signature stays as it is. Cutting them is item 0's second half, with
+   the carried H4 projection.
+
+Saved at 998 frames: one candidate projection and one seed graph load, about 19 ms.
+
+**Why carrying them is sound.**
+- **The sets are pure functions of `candidate` and of `prepared`'s overlay base.** `prepared` is
+  the overlay H5 itself installs as Prepared and that resolve reads back as `metadata`. Its base
+  (seed) is fixed for the branch's life.
+- **The proof binds the unit to the landed bytes** (9.1). The candidate is moved into the writer
+  and returned unchanged in content:
+  - `check_studio_handoff_write` takes `&mut` only for `snapshot()`, `evidence` and
+    `preserves_vault_source`, which save or read the Automerge document but do not edit it;
+  - the writer encodes the unit; it does not change it.
+
+  So the candidate's references at barrier 1 are the persisted unit's references.
+- **The proof is spendable only under the same inventory generation** (A3). So no five-family
+  write lands between computing the sets and using them.
+- **Resolve's `metadata` on the proof path is the Prepared record H5 wrote.** Barrier 1 checked
+  `prepared` against H2's `state`, while resolve checks `metadata` against the state it reads
+  then. The second check is therefore still against the current pending set: only the projection
+  is reused, never the pending intents.
+
+**Tests:**
+- **A projection counter, as `test-counters` counts reconstructions:** a `cfg(feature)` counter in
+  `StudioEpoch::blob_cids` and `StudioOverlay::base_blob_cids`. An H5 commit performs exactly
+  three candidate projections (barrier 1 and the two holds) and one seed load; before, four and
+  two.
+- **The existing reference regressions,** unchanged:
+  `studio_overlay_handoff_rechecks_source_after_prepared_before_candidate_write` and the base-blob
+  release refusal.
+- **A new negative:** a proof is constructed only by H5, so a `Some(proof)` resolve with sets that
+  do not match the unit is unreachable. A unit test of `into_checked` pins that the sets travel
+  with the unit they came from.
+
+**Out of scope:** the writer's holds, carrying H2's and H4's projections (the second half), and the
+branch-length growth.
+
+**Open questions for the review:**
+1. Is there any H5-to-resolve path on which the proof's unit can differ in content from barrier
+   1's candidate?
+2. Is reusing the seed set on resolve's proof path sound, given that resolve may run in a later
+   visit after a restart? (On restart the proof does not exist, and the `None` path recomputes.)
+
+### 15.12 Design review of 15.11 (2026-10-09, Opus, static): no blocker; one high
+
+**The two questions, answered:**
+1. **No.** The current code does not change the unit's content between barrier 1 and resolve, but
+   that rests on convention: no `&mut` method on the path edits it, and the types do not enforce
+   that.
+2. **Yes.** The proof is minted and spent within one call and never persisted. So after a restart
+   only the `None` path exists, and it recomputes. The base is fixed for the branch's life.
+
+**HIGH-1: the reference check this change rewires has never been exercised.**
+- No test reaches "handoff would release a base blob reference", and no CI mutation targets it.
+  The two tests 15.11 cited do not touch it. Agent 1's N19 was never built.
+- No honest flow can trip it: H2's `check_overlay_successor` forces the successor's seed to be the
+  overlay's base, so the candidate always covers the base.
+- So a carried set that was swapped or emptied, or a missing overlay turned into an empty set,
+  would make the proof-path check vacuous, with every test still green.
+- 15.11's proposed `into_checked` test is tautological: it proves only that what went in comes
+  out.
+
+**MEDIUM-1: 15.11's generation argument is false.** Both of H5's writes rotate the generation
+after the sets are computed, and the proof captures it only at verification. What actually holds
+the sets to resolve's `metadata` today:
+- one exclusive borrow;
+- barrier 2's metadata hash;
+- the absence of production write hooks.
+
+Nothing checks that the carried seed set belongs to the branch resolve reads. The fix:
+- carry `prepared.overlay().basis()` with the sets, and require it on the proof path;
+- `base_blob_cids` depends only on fields the basis fingerprint covers;
+- keep the sets outside `VerifiedPersistedSource`'s proof claim.
+
+**MEDIUM-2:** the `verified-restore` mutant replaces `into_checked`'s call. If that call's return
+type changes, the mutant stops compiling, which is the `index-commit` failure again.
+
+**Lows:**
+- **L1:** 15.10 counted three candidate projections, not four. Corrected above.
+- **L2:** `evidence` takes `&`. `snapshot()` and `preserves_vault_source` need `&mut` for a change
+  lookup, not a save. The conclusion stands.
+- **L3:** `test-counters` exists only in F1's held commits, not on the pushed line. The counter
+  should be an app-side wrapper, or land with that feature.
+- **L4:** the old entry point's callers also include H1's interrupted-Prepared resolution,
+  adoption and rotation.
+- **L5:** the seed set should be an `Option`, `Some` required on the proof path.
+- **L6, an alternative:** have the shared writer return the set it computes for its hold. Resolve
+  could then reuse it on both paths with nothing carried, at the cost of the writer's signature.
+
+**Revised plan.**
+
+**Step A**, independent of item 0, and closing a gap that predates it:
+1. Extract the coverage rule as a pure function: is every base blob covered by the candidate or a
+   still-pending intent?
+2. Unit-test it three ways:
+   - it refuses an uncovered base;
+   - it accepts coverage that comes only from a pending intent;
+   - it refuses once that intent is gone;
+   - plus `None` handling.
+3. Add a CI mutation on the subset test.
+
+**Step B**, item 0's first half, built only after A:
+- carry `(basis, candidate set, Some(seed set))`, and require the basis on the proof path;
+- a `cfg(test)` recompute-and-compare on the proof path, kept out of any counter;
+- a mutation that empties the carried seed set, which that cross-check detects;
+- a hook-driven negative that swaps the intent record after the Source write;
+- the `verified-restore` mutant updated in the same change, under `RUSTFLAGS='-D warnings'`;
+- 15.11's text corrected per MEDIUM-1, L2 and L4.
+
+**Not before B is re-reviewed:** L6's writer-return alternative, item 0's second half, and the
+branch-length attribution.
+
+### 15.13 Step A, built (2026-10-09)
+
+**What changed.** The rule is `base_blobs_covered(base, candidate, pending)` in
+`store/epoch_studio/handoff.rs`: every base blob must be a candidate blob or a pending intent's,
+and `None` (no overlay) is covered. `check_handoff_references` computes the three sets as before
+and calls it, so its two H5 callers and every other caller are unchanged in behaviour. The error
+order is unchanged too: the candidate's set, then the intents', then the base's.
+
+**Tests**, in the handoff `references` tests:
+- `..._refuses_a_base_blob_nothing_retains`: an uncovered base blob, and the same case once the
+  retaining intent is gone;
+- `..._counts_a_pending_intent`: coverage from a pending intent alone, and from the candidate
+  alone;
+- `..._with_no_base_accepts`: `None`, and an empty base.
+
+**CI, three handoff-harness entries,** each DETECTED at its named assertion and PASS restored under
+`RUSTFLAGS='-D warnings'`:
+- `base-coverage`: `all` turned into `any`;
+- `base-coverage-pending`: the pending term removed;
+- `base-coverage-none`: `is_none_or` turned into `is_some_and`.
+
+**What it does not pin:** that `check_handoff_references` calls the rule at all. No honest flow
+reaches the refusal, so removing the call fails no test; the wiring stays checked by inspection,
+which is HIGH-1's point. Step B's `cfg(test)` recompute-and-compare is what will exercise the call
+on the proof path.
+
+### 15.14 Decision (2026-10-09): H5 stays one visit; step 3's target is relaxed for it
+
+**Decided by the project owner.** H5's commit stays a single custody visit, as it is today. The
+125 ms visit target no longer applies to it, and this is recorded as technical debt rather than
+designed away.
+
+**What is accepted.** The commit grows with the source and the branch (15.10). Both are capped:
+the base by `FLIPNOTE_MAX_FRAMES` (999) and the branch by `MAX_STUDIO_OVERLAY_OPS` (256). At both
+caps it measured 147 ms (upper median of 3, release, shared host). The largest single sample in
+F3's runs was 248 ms. Below the caps it is shorter: 86 ms at 998 frames and one operation, and
+under 60 ms at 512 frames. It happens once per handoff, when a closed document's local draft is
+transferred.
+
+**As an attack surface.** Another member can fill a shared Flipnote to the frame cap, but the
+branch is the handing-off device's own operations, and a device hands off only documents it has
+itself drafted on while they were Closing. So the most a peer can force is one commit over a
+maximal source for each such draft: a pause of roughly 0.1 to 0.15 s per handoff, with no
+amplification. No cap change is needed. Lowering `FLIPNOTE_MAX_FRAMES` would be a format change,
+and saves only about 0.06 ms per frame.
+
+**What changes in the plan:**
+- **Deferred, not dropped:** step B (item 0's first half) and the rest of 15.12's route, including
+  the touched-path cursor decision (15.9 item 8).
+- **Kept:** step A (15.13). It closed a test gap that predates item 0 and stands on its own.
+- **Next:** Flow R, building its commit (R3) on the same single-visit path as H5.
+- **If the target is restored later,** both H5 and R3 need splitting, not only H5. The 15.10 table
+  and 15.12's plan are where that work starts.
+
+Also recorded in `THREAT-MODEL.md` (the pause a member can cause) and in `HANDOVER.md`'s known
+limitations.

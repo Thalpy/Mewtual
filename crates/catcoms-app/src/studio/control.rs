@@ -83,6 +83,25 @@ pub enum StudioUnconfirmedSaveOutcome {
     /// its own work so that an absent caller cannot hold the slot. Reporting that plan as saved
     /// would tell this caller an edit landed when it did not. A retry while this request's own plan
     /// is in flight is `Scheduled`, not `Busy`.
+    ///
+    /// **Also while the receiver is paused** (design 18.3 review, F4): the visit captured this
+    /// request's new work and dropped the capture, so the pause holds no slot or media for it. That
+    /// visit already paid for the budget's inventory scan, the mint and media admission, and every
+    /// resend pays again.
+    ///
+    /// **A caller cannot yet tell this `Busy` from the others** (re-review of the batch fixes, M-1):
+    /// - `studio-receive-paused` is one-shot, not a queryable state;
+    /// - this Save never clears the pause, which only a successful explicit Studio document access
+    ///   through `run` does;
+    /// - the native mapping still answers "send the identical request again".
+    ///
+    /// A distinct `Paused` outcome from the same refusal point is proposed. Until it exists, native
+    /// Save must not register.
+    ///
+    /// An exact retry of already-saved work is answered `Saved` while paused, unless the overlay
+    /// slot still holds other work. A capture that was already detached when the pause arrived
+    /// parks as a plan, and holds the slot for up to `OVERLAY_PARK_MS`. A retry in that window
+    /// first finishes that plan, or finds the slot taken, and answers `Busy`, as before F4.
     Busy,
 }
 

@@ -121,6 +121,8 @@ impl EpochIntentState {
     pub(crate) fn handoff_prepared(&self) -> bool {
         self.overlay.as_ref().is_some_and(|m| m.is_prepared())
     }
+    /// Rebuild the live branch's draft: the seed graph plus a replay of every accepted entry, so
+    /// its cost is the branch's depth. Explicit reads only; an exact retry must not pay it.
     pub fn local_draft(
         &self,
     ) -> Result<Option<catcoms_replication::studio::StudioLocalDraft>, AppError> {

@@ -18,6 +18,23 @@ const _: () = assert!(MAX_STUDIO_UNCONFIRMED_OVERLAY_OPS <= MAX_STUDIO_OVERLAY_O
 const MAX_METADATA: usize = 64 * 1024;
 const MAX_EXTENSION: usize = MAX_CHECKPOINT_BYTES + MAX_METADATA;
 
+#[cfg(feature = "test-counters")]
+thread_local! {
+    static RECONSTRUCTIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// How many branch drafts this thread has rebuilt through [`StudioOverlay::read`], by any caller:
+/// an explicit draft read, a full intent-record decode that replays its branch, or a direct call.
+///
+/// Test instrumentation, behind the `test-counters` feature, which only `catcoms-app`'s
+/// dev-dependency turns on, so no production build carries it. It lives here rather than in the
+/// app because every reconstruction passes through `read`, whereas an app-side counter sees only
+/// the app's own call sites (implementation review of the 18.3 fixes, M-2).
+#[cfg(feature = "test-counters")]
+pub fn overlay_reconstructions_on_this_thread() -> usize {
+    RECONSTRUCTIONS.get()
+}
+
 pub(in crate::studio) mod archive;
 pub(in crate::studio) mod disposal;
 mod eligibility;
@@ -563,7 +580,11 @@ impl StudioOverlay {
         }
         Ok(out)
     }
+    /// Rebuild the branch's draft: the seed graph, then every accepted entry replayed onto it. Its
+    /// cost is the branch's depth, so callers that only need structural facts must not use it.
     pub fn read(&self, ledger: &IntentLedger) -> Result<StudioLocalDraft, ReplError> {
+        #[cfg(feature = "test-counters")]
+        RECONSTRUCTIONS.set(RECONSTRUCTIONS.get() + 1);
         let entries = self.checked_entries(ledger)?;
         let (mut doc, mut projection) = self.base.graph()?;
         let mut operations = BTreeMap::new();

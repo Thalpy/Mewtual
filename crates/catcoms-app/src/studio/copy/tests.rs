@@ -834,7 +834,7 @@ async fn a_closing_drafts_operation_resent_as_an_unconfirmed_save_is_refused() {
         matches!(
             acknowledged,
             crate::store::StudioOverlayStart::Settled(ref saved)
-                if matches!(**saved, StudioOverlaySave::Local(_))
+                if matches!(**saved, StudioOverlaySave::Acknowledged { .. })
         ),
         "precondition: the store alone acknowledges the resend"
     );

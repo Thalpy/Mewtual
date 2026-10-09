@@ -32,6 +32,9 @@ tokio = { workspace = true, features = ["rt", "sync", "macros", "time"] }
 windows-sys = { version = "0.61", features = ["Win32_Storage_FileSystem"] }
 
 [dev-dependencies]
+# Turns on the replication crate's test-only reconstruction counter for this crate's tests, so the
+# exact-retry regression can see a branch rebuilt by any path, not only the app's own draft reader.
+catcoms-replication = { path = "../catcoms-replication", features = ["test-counters"] }
 # A driver-acknowledgement seam exercises replay cancellation and ambiguous submission without
 # sockets or sleeps. These are existing workspace dependencies, used only by test transports.
 async-trait.workspace = true

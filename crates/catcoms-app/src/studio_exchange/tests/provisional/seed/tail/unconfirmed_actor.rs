@@ -550,6 +550,124 @@ async fn studio_actor_unconfirmed_save_retry_of_its_own_scheduled_plan_is_pendin
     ));
 }
 
+/// Design 18.3 review, F4, at the Unconfirmed Save's entry point. While the receiver is paused a
+/// fresh capture is dropped and the visit answers `Busy`: a paused receiver hands out no work, so a
+/// queued capture would hold admission, a pool permit and its media hold for the whole pause.
+/// Nothing was durable, and after the pause, ended by an explicit access as in production, the
+/// identical request plans afresh and saves.
+#[tokio::test]
+async fn studio_actor_unconfirmed_save_captured_while_paused_answers_busy_and_holds_nothing() {
+    let (mut p, mut receiver, target, basis, branch) = ready_receiver().await;
+    let pool = receiver.inject_overlay_pool_for_test(4);
+    let a = new_entry(&mut p, (basis, branch), 101, [8; 16]);
+    receiver.pause_for_test();
+
+    let visit = save(&mut receiver, &mut p, target, &a).unwrap();
+    assert!(
+        matches!(visit, StudioUnconfirmedSaveOutcome::Busy),
+        "a capture made while paused was not refused: {visit:?}"
+    );
+    assert_eq!(
+        pool.available_permits(),
+        4,
+        "a capture made while paused kept its pool permit"
+    );
+    assert_eq!(pending(&mut p, target), 0, "nothing was durable");
+
+    receiver
+        .run(
+            &mut p.bob,
+            &mut p.b_store,
+            SERVER,
+            Some(crate::studio::StudioRequest::Read { target }),
+        )
+        .unwrap();
+    assert!(matches!(
+        save(&mut receiver, &mut p, target, &a).unwrap(),
+        StudioUnconfirmedSaveOutcome::Scheduled
+    ));
+    settle(&mut receiver, &mut p).await;
+    assert!(matches!(
+        save(&mut receiver, &mut p, target, &a).unwrap(),
+        StudioUnconfirmedSaveOutcome::Saved { accepted: 1, .. }
+    ));
+}
+
+/// F4's boundary: the refusal is at the capture, not at the door. An exact retry of accepted work
+/// is answered at S1 before any capture, so it stays `Saved` while the receiver is paused.
+#[tokio::test]
+async fn studio_actor_unconfirmed_save_exact_retry_while_paused_is_still_saved() {
+    let (mut p, mut receiver, target, basis, branch) = ready_receiver().await;
+    let a = new_entry(&mut p, (basis, branch), 102, [8; 16]);
+    assert!(matches!(
+        save(&mut receiver, &mut p, target, &a).unwrap(),
+        StudioUnconfirmedSaveOutcome::Scheduled
+    ));
+    settle(&mut receiver, &mut p).await;
+    assert!(matches!(
+        save(&mut receiver, &mut p, target, &a).unwrap(),
+        StudioUnconfirmedSaveOutcome::Saved { accepted: 1, .. }
+    ));
+
+    receiver.pause_for_test();
+    let retried = save(&mut receiver, &mut p, target, &a).unwrap();
+    assert!(
+        matches!(
+            retried,
+            StudioUnconfirmedSaveOutcome::Saved { accepted: 1, .. }
+        ),
+        "an exact retry while paused was not answered as saved: {retried:?}"
+    );
+}
+
+/// F4's other half: a capture queued before the pause is released by the pause itself, through
+/// the production transition, and the request it belonged to is forgotten. Its retry after the
+/// pause plans afresh, so it is `Scheduled`, not a stale `Scheduled` for a capture that is gone.
+#[tokio::test]
+async fn studio_actor_unconfirmed_save_a_capture_queued_then_paused_is_released() {
+    let (mut p, mut receiver, target, basis, branch) = ready_receiver().await;
+    let pool = receiver.inject_overlay_pool_for_test(4);
+    let a = new_entry(&mut p, (basis, branch), 103, [8; 16]);
+    assert!(matches!(
+        save(&mut receiver, &mut p, target, &a).unwrap(),
+        StudioUnconfirmedSaveOutcome::Scheduled
+    ));
+    assert_eq!(
+        pool.available_permits(),
+        3,
+        "precondition: the capture is queued"
+    );
+
+    receiver.pause_at_for_test(&p.bob);
+    assert_eq!(
+        pool.available_permits(),
+        4,
+        "the pause did not release the queued capture's pool permit"
+    );
+    assert!(
+        receiver.detach(&mut p.bob).is_none(),
+        "a paused receiver still had the capture to hand out"
+    );
+
+    receiver
+        .run(
+            &mut p.bob,
+            &mut p.b_store,
+            SERVER,
+            Some(crate::studio::StudioRequest::Read { target }),
+        )
+        .unwrap();
+    assert!(matches!(
+        save(&mut receiver, &mut p, target, &a).unwrap(),
+        StudioUnconfirmedSaveOutcome::Scheduled
+    ));
+    settle(&mut receiver, &mut p).await;
+    assert!(matches!(
+        save(&mut receiver, &mut p, target, &a).unwrap(),
+        StudioUnconfirmedSaveOutcome::Saved { accepted: 1, .. }
+    ));
+}
+
 /// The confirmed checkpoint arrives on this member: the very receipt and seed the preview was of,
 /// installed by checkpoint adoption, as discovery installs it after a fresh owner proof.
 ///

@@ -206,3 +206,57 @@ fn studio_overlay_handoff_reference_scan_requires_metadata_with_the_complete_sco
         assert!(store.creative_references_known());
     }
 }
+
+/// A set of content ids, for the coverage rule's tests below.
+fn cids(ids: &[u8]) -> std::collections::BTreeSet<catcoms_replication::studio::ContentId> {
+    ids.iter().map(|&id| [id; 32]).collect()
+}
+
+/// C-3 runtime 15.12, step A. The base-blob coverage rule refuses a base blob nothing will
+/// retain, both when nothing ever did and once the pending intent that did is gone.
+///
+/// No honest flow reaches this refusal (see `base_blobs_covered`), so these tests are its only
+/// executed evidence, and CI's handoff harness mutates the rule against them.
+#[test]
+fn studio_overlay_handoff_base_coverage_refuses_a_base_blob_nothing_retains() {
+    use crate::store::epoch_studio::handoff::base_blobs_covered;
+    let base = cids(&[1, 2]);
+    assert!(
+        !base_blobs_covered(Some(&base), &cids(&[1, 3]), &cids(&[4])),
+        "an uncovered base blob was accepted"
+    );
+    // The case the next test accepts, with its pending intent gone.
+    assert!(
+        !base_blobs_covered(Some(&base), &cids(&[1]), &cids(&[])),
+        "a base blob was accepted after the intent retaining it was gone"
+    );
+}
+
+/// The same rule counts a still-pending intent's reference as retention, so a base blob covered
+/// only by an intent is kept and the handoff may proceed.
+#[test]
+fn studio_overlay_handoff_base_coverage_counts_a_pending_intent() {
+    use crate::store::epoch_studio::handoff::base_blobs_covered;
+    assert!(
+        base_blobs_covered(Some(&cids(&[1, 2])), &cids(&[1]), &cids(&[2])),
+        "a pending intent's reference did not count as retention"
+    );
+    assert!(
+        base_blobs_covered(Some(&cids(&[1, 2])), &cids(&[1, 2]), &cids(&[])),
+        "a base the candidate covers alone was refused"
+    );
+}
+
+/// A document with no overlay has no base to keep, and an empty base is covered by anything.
+#[test]
+fn studio_overlay_handoff_base_coverage_with_no_base_accepts() {
+    use crate::store::epoch_studio::handoff::base_blobs_covered;
+    assert!(
+        base_blobs_covered(None, &cids(&[]), &cids(&[])),
+        "a document with no overlay was refused for its base"
+    );
+    assert!(
+        base_blobs_covered(Some(&cids(&[])), &cids(&[]), &cids(&[])),
+        "an empty base was refused"
+    );
+}

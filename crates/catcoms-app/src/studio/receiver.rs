@@ -11,6 +11,7 @@ mod catchup;
 #[cfg(test)]
 pub(crate) use catchup::PreviewHarness;
 mod handoff;
+mod inventory;
 mod replay;
 mod unconfirmed;
 pub(crate) use catchup::{HandoffCompletion, StudioBackgroundJob, StudioBackgroundResult};
@@ -28,6 +29,8 @@ pub(crate) struct StudioReceiver {
     replay: replay::ReplayRuntime,
     replay_turn: bool,
     handoff: handoff::HandoffRuntime,
+    /// C-3's one shared, turn-based inventory job for background owners (C-3 runtime design 2.2).
+    inventory: inventory::InventoryRuntime,
     /// Which Unconfirmed Save request scheduled the plan now parked, if one did (design 8.7). A plan
     /// does not record its request, and the overlay slot holds one plan for a target whichever
     /// request made it. So a later visit must know whether that plan is its own before reporting
@@ -46,8 +49,28 @@ pub(crate) enum StudioOverlaySaveVisit {
     /// New authoring captured and handed to the background runtime. The caller asks again after
     /// a later visit; the request stays retryable and byte-stable in the meantime.
     Scheduled,
-    /// Admission or the shared four-slot pool is full. Retryable, and nothing was read, promoted
-    /// or held: 7.2 reserves before the first body read precisely so this costs nothing.
+    /// Retryable, for one of two reasons.
+    ///
+    /// **Admission or the shared four-slot pool is full.** Then nothing was read, promoted or held:
+    /// 7.2 reserves before the first body read precisely so this costs nothing.
+    ///
+    /// **The receiver is paused** (design 18.3 review, F4). This one is not free. The visit ran
+    /// classification and S1b (the mint and media admission, which can promote a frame's PIX, and
+    /// for the Unconfirmed Save the budget's inventory scan, which the Closing Save's caller pays
+    /// instead) before it dropped the capture. The dropped hold leaves any promoted PIX unprotected,
+    /// which RT-001 already accepts for a refused plan.
+    ///
+    /// **A caller cannot yet tell the two apart**, and that is a known gap, not a contract a caller
+    /// can follow:
+    /// - `studio-receive-paused` is a one-shot transition event, not a queryable state;
+    /// - neither Save path clears the pause; only a successful explicit Studio document access
+    ///   through `run` does (a Read, an ordinary Save, Apply or ApplyOverlayCopy);
+    /// - the native Unconfirmed mapping answers `Busy` with "send the identical request again".
+    ///
+    /// So a caller resending on `Busy` while paused repeats that work each time. The fix proposed to
+    /// Agent 2, whose outcome type and native mapping this is, is a distinct `Paused` outcome from
+    /// the same refusal point. Native Save registration must not ship before it (re-review of the
+    /// batch fixes, M-1).
     Busy,
 }
 
@@ -87,6 +110,9 @@ fn overlay_request_fingerprint(
 impl StudioReceiver {
     pub(crate) fn clear_previews(&mut self) {
         self.catchup.preview.reset();
+        // The UI-lock reset: a parked inventory body is authenticated plaintext, and no visit
+        // runs while locked, so it must not stay resident (C-3 runtime design 4, review M6).
+        self.inventory.release();
     }
 
     /// Scheduled local Save (Flow S), under the actor's custody lease.
@@ -184,7 +210,9 @@ impl StudioReceiver {
                 Ok(StudioOverlaySaveVisit::Saved(saved))
             }
             crate::store::StudioOverlayStart::Captured(capture) => {
-                self.catchup.schedule_overlay(*capture, ownership, target);
+                if !self.queue_capture_unless_paused(*capture, ownership, target) {
+                    return Ok(StudioOverlaySaveVisit::Busy);
+                }
                 self.closing_scheduled = Some(request);
                 Ok(StudioOverlaySaveVisit::Scheduled)
             }
@@ -448,10 +476,16 @@ impl StudioReceiver {
         //
         // RT-002's rule applies to every heavy stage, and H5 and H1 are heavy: H5 drains an
         // inventory, reads the whole source and performs three accounted writes with flushes; H1
-        // drains an inventory too. Both wait for `replay_ready()`, so authoritative catch-up is
-        // never starved by transfer work. H3 is the documented exception: a signing slice needs
-        // no permit and no retained source, so 7.3 lets it run on any turn, subject to the
-        // priority answer, which is a yield rather than a gate.
+        // drains an inventory too. Both wait for `replay_ready()`, so they never run ahead of
+        // catch-up's own preparations, pages and checkpoints. **Not** ahead of a member's reserved
+        // service request, though: `replay_ready()` does not see one, so H5 can commit before it
+        // is answered and evict the source it captured, which drops it (F2's review, MEDIUM-2,
+        // recorded for Agent 2; replay shares the gate). Any fix must exclude a request still
+        // waiting for a pool permit, or H5, which releases one, would wait on it.
+        //
+        // H3 is the documented exception: a signing slice needs no permit and no retained source,
+        // so 7.3 lets it run on any turn, subject to the priority answer, which is a yield rather
+        // than a gate.
         //
         // Among themselves the order is H5, then H3, then H1: an assembled transfer is holding
         // admission, a shared slot and a signed candidate, and finishing it frees all three,
@@ -480,7 +514,10 @@ impl StudioReceiver {
         }
         self.replay_turn = !self.replay_turn;
         if self.replay_turn {
-            if let Some(saved) = self.replay_step(server, store, id)? {
+            // One inventory slice per visit, from this visit's one clock sample (C-3 S-3): what
+            // the H-stages above spent comes out of replay's share rather than adding to it.
+            let deadline = handoff_now.saturating_add(inventory::INVENTORY_SLICE_MS);
+            if let Some(saved) = self.replay_step(server, store, id, deadline)? {
                 return Ok(saved);
             }
         }
@@ -488,8 +525,45 @@ impl StudioReceiver {
         Ok((StudioSavedTransaction::empty(), updated))
     }
 
+    /// Queue a fresh Save capture for its detached plan, unless the receiver is paused. Returns
+    /// whether it was queued; the caller answers `Busy` if not and records no scheduling request.
+    ///
+    /// Design 18.3 review, F4, in the shape Agent 2 asked for. A paused receiver hands out no work,
+    /// and only an unrelated explicit access clears the pause, so a capture queued now would hold
+    /// this actor's admission, one of the four process-wide preparation permits and its transient
+    /// media hold for as long as the pause lasts. Dropping it releases all three. Nothing of the
+    /// Save is durable; media admission may have promoted the frame's PIX, which the dropped hold
+    /// no longer protects, the cost RT-001 already accepts for a refused plan. The paused `Busy`
+    /// is therefore not free, and `StudioOverlaySaveVisit::Busy` says how a caller must treat it.
+    ///
+    /// The check sits here, after classification, not at either Save's entry: an exact retry of
+    /// accepted work is answered at S1 before any capture, so it is not refused merely because the
+    /// receiver is paused. (It can still answer `Busy` while the overlay slot is held by other work,
+    /// as before this change; the batch review's LOW-4 narrowed this claim.)
+    fn queue_capture_unless_paused(
+        &mut self,
+        capture: crate::store::StudioOverlayCapture,
+        ownership: crate::studio::overlay::OverlayOwnership,
+        target: StudioTarget,
+    ) -> bool {
+        if self.paused {
+            drop(capture);
+            drop(ownership);
+            return false;
+        }
+        self.catchup.schedule_overlay(capture, ownership, target);
+        true
+    }
+
     /// 7.3's placement answer for a signing slice: yield immediately to authoritative service
-    /// interest, to inbound on any watch, or to a background result already parked.
+    /// interest, to inbound on any watch, to a background result already parked, or to a reserved
+    /// service request that has captured its source and is still owed its answer.
+    ///
+    /// The last term is not in 7.3's original list; the actor-level test for design 18.3 review F2
+    /// found it missing. A request is queued interest only until catch-up reserves it, and a parked
+    /// result only until its source is installed. In the turns after that it is still unanswered,
+    /// and catch-up serves it only on a turn no slice has signed in. It must have captured, or it
+    /// may be waiting for the pool permit this signing job holds (see `captured_service_owed`).
     fn handoff_priority<T: MeshTransport, R: CryptoRngCore>(&self, server: &Server<T, R>) -> bool {
         server.sync.has_epoch_service_interest()
             || self
@@ -497,6 +571,7 @@ impl StudioReceiver {
                 .iter()
                 .any(|(w, _)| server.sync.studio_has_inbound(&w.inner))
             || self.catchup.result_parked()
+            || self.catchup.captured_service_owed(server)
     }
     /// Notify before any bounded event-channel await: native work never waits on the event
     /// consumer, and event backpressure must not conceal an already-queued inbox packet.
@@ -582,6 +657,9 @@ impl StudioReceiver {
                 // never schedules that visit, so the thirty-second bound the code claims is not
                 // a bound at all: four such actors strand the whole pool indefinitely.
                 || self.catchup.registry_expiry_due(now)
+                // A parked inventory body holds a pool permit and plaintext until a visit detaches
+                // it. Only that: the job's other states wait on an owner's own paced turn.
+                || self.inventory.pending()
                 || self.catchup.pending(server, &self.watches)))
             // A parked Save plan past its deadline (design 8.7), outside the pause gate: a paused
             // receiver must still release the admission and process-wide permit a plan holds,
@@ -671,6 +749,17 @@ impl StudioReceiver {
             .release_if_stalled(server.runtime_clock().monotonic_ms());
         // The same reason for a repair job that is not detached: it holds a pool slot.
         self.catchup.repair_release_for_pause();
+        // A paused receiver runs no turn, so a held inventory job and its plaintext are released
+        // now rather than left resident for the whole pause.
+        self.inventory.release();
+        // Likewise a Save capture still queued for its plan (design 18.3 review, F4): it would
+        // hold admission, a pool permit and its media hold for the whole pause. The slot holds at
+        // most one of a queued capture, a detached job and a parked plan, so the request it
+        // belonged to is whichever of the two is set; forget both.
+        if self.catchup.release_queued_overlay() {
+            self.closing_scheduled = None;
+            self.unconfirmed_scheduled = None;
+        }
     }
     pub(crate) fn take_pause_notice(&mut self) -> bool {
         std::mem::take(&mut self.pause_notice)
@@ -729,6 +818,22 @@ impl StudioReceiver {
         id: u64,
         request: Option<StudioRequest>,
     ) -> Result<(StudioSavedTransaction, Option<StudioTarget>), AppError> {
+        // C-3 N-M1: compare the vault's inventory token with how the last visit left it before
+        // anything here can write, and mark how this one leaves it on every exit, so the next
+        // visit can tell this actor's writes from anyone else's.
+        self.inventory.begin_visit(store);
+        let result = self.run_visit(server, store, id, request);
+        self.inventory.end_visit(store);
+        result
+    }
+
+    fn run_visit<T: MeshTransport + 'static, R: CryptoRngCore>(
+        &mut self,
+        server: &mut Server<T, R>,
+        store: &mut ServerStore,
+        id: u64,
+        request: Option<StudioRequest>,
+    ) -> Result<(StudioSavedTransaction, Option<StudioTarget>), AppError> {
         // A background pass may not reinterpret existing watches under a different vault or
         // numeric server, including lifecycle snapshot writes. Explicit access rebinds them.
         if request.is_none()
@@ -743,6 +848,8 @@ impl StudioReceiver {
             return Err(invalid("Studio receive mount or numeric server changed"));
         }
         self.catchup.lifecycle(server, store, id);
+        self.inventory
+            .lifecycle(store, id, server.runtime_clock().monotonic_ms());
         // A parked Save plan whose caller never came back holds this actor's admission and a
         // process-wide preparation permit; only a Save visit consumes it. Bounded like the
         // retained Registry source, and its request forgotten with it (design 8.7).

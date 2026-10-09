@@ -1542,17 +1542,75 @@ yet installed, `drive` reports `Stepped` when out of time and an error when time
 planned runtime cannot reach that state, because a job whose body is out for validation is not
 stepped (design section 4).
 
-### Step 2 (replay's manual move): staged in a private worktree, reviewed, not yet shipped
+### Step 2 (replay's manual move): landing (2026-10-09)
 
-Built and reviewed as `GATE4-AGENT-1-C3-RUNTIME.md` section 12 records: the shared,
-turn-based `InventoryRuntime`, its detached validation through the receiver's background-job
-machinery, N-M1's own-write accounting, and replay's manual move taking its budget from it with
-a synchronous fallback (on `Unstable`, or after 60 s of patience). Its adversarial review found no
-blocker and one high, a liveness stall under ordinary writes, which the fallback answers. It ships
-once Agent 2 confirms the two shared receiver files are free; until then no production path parks
-a cursor across visits. Step 2 is the runtime and its tests, ready for 13.7's classifier, more than
-a custody improvement for busy vaults today: with every uncached record parking, a busy or large
-vault ends in the same synchronous scan as before.
+Built and reviewed as `GATE4-AGENT-1-C3-RUNTIME.md` section 12 records:
+- the shared, turn-based `InventoryRuntime`;
+- its detached validation through the receiver's background-job machinery;
+- N-M1's own-write accounting;
+- replay's manual move taking its budget from the runtime, with a synchronous fallback on
+  `Unstable` or after 60 s of patience.
+
+Its adversarial review found no blocker and one high, a liveness stall under ordinary writes,
+which the fallback answers. Since the classifier landed (`6a79e6f8`), small records of the
+uncached families validate inline, so only cold Studio and Registry records, and oversized others,
+detach.
+
+**Landed** in the batch with F1 and F4, once Agent 2 freed the shared receiver files. Before
+landing, both of their constraints were checked:
+- the new `pending_at` term sits inside the pause gate, and `pause()` releases the job;
+- the Closing `save_overlay` still takes only its own target's parked plan, so it clears
+  `unconfirmed_scheduled` exactly as before.
+
+The `take_any_planned_overlay` mirror I had promised them was not built. A Closing commit needs
+that target's own close record, so taking another target's plan could only drop it and make its
+caller redo the work. The park deadline (`OVERLAY_PARK_MS`) already bounds a stranded plan, so a
+Closing Save on another target answers `Busy` for at most that long.
+
+**Batch review (2026-10-09, Opus, static, at `03e3d672`): no blocker or high.** It covered step 2
+on this base, F1 after the rebase and F4. It confirmed step 2's integration with the classifier,
+the memo, the parked-plan slot, pause and the lock. It found:
+
+| finding | disposition |
+|---|---|
+| M-1: step 2 shipped without its HANDOVER and THREAT-MODEL updates, and THREAT-MODEL said no path held a cursor across visits | **fixed**, both documents |
+| M-2: F4's paused `Busy` contradicted both `Busy` docs, and costs a scan and media admission per resend | **documented** on both variants and the helper. The re-review (M-1) then showed a caller cannot follow a "back off while paused" contract: the event is one-shot, `Busy` is ambiguous, no Save clears the pause, and the native mapping says to resend. The docs now say so plainly. **A distinct `Paused` outcome** from the same refusal point, after S1, so exact retries stay `Saved`, **is proposed to Agent 2**, whose outcome type and native mapping it is. Native Save must not register before it. My earlier reason for not adding one, that the check would have to precede the budget, was wrong |
+| L-1: a validation error about bytes another actor's write replaced paused receive, while one about an own write was dropped | **fixed**: a charged restart (`restart_epoch_inventory_job_if_overtaken`). Pinned by `a_validation_error_about_overtaken_bytes_is_a_charged_restart`, which fails with every error surfaced |
+| L-2: stale "until 13.7" comments, and `memoize_overtaken_inventory_result` still dead in production | **fixed**; the function is now `#[cfg(test)]` |
+| L-3: the small-vault move test could not tell the shared job from the old scan | **fixed**: it now asserts a budget was minted, and fails with the move forced onto the fallback |
+| L-4: the F4 doc overstated that an exact retry never depends on receiver state | **narrowed**: it can still answer `Busy` while the slot holds other work |
+
+**Residual risks, recorded rather than fixed here:**
+- a UI lock does not release a queued or parked Save plan (Agent 2's area; the inventory job's
+  own lock rule argues for the same);
+- a fresh job can detach a second validation while an abandoned one still holds a permit,
+  bounded by the pool;
+- pause and lock lift the job's backoff;
+- replay's job can take the last free permit from catch-up for a visit;
+- the I-4 writer audit predates writers added since `2df3564f`, which rely on the type-level
+  guard and the raw-fs gate.
+
+**Re-review of those fixes (2026-10-09, Opus, static): no blocker or high.** It confirmed L-1's
+code change: no loop, no bypass of `MAX_INVENTORY_RESTARTS`, no masking of an error about current
+bytes, and a meaningful test.
+- **M-1:** the paused-`Busy` contract could not be followed, as recorded in the M-2 row above. The
+  docs now say so plainly, and a `Paused` outcome is proposed to Agent 2.
+- **L-1:** the comments said an own write was always handled by the uncharged refresh. That is
+  only within its cap; they now say so, and the module doc is current.
+- **L-2:** the exact-retry claim is narrowed in `control.rs` and here.
+- **L-3:** two new tests:
+  - an error at the restart limit backs off;
+  - an own write past its cap with an error is a charged restart.
+
+  The small-vault test now asserts exactly one minted budget.
+- **L-4:** comment precision: the slice and inline-rule wording, the 60 s note, about 35 s rather
+  than "up to 30 s", and the Closing budget's cost.
+
+**Residual risks it named:**
+- an error dropped by the charged restart is not traced;
+- a validator panic on an overtaken job can repeat up to the restart limit;
+- the context-change release runs in `lifecycle`, which an early-returning visit skips;
+- one minted budget proves the job minted, not that the move consumed it.
 
 ### I-4 writer audit at C-3 step 2 (2026-10-06, Opus, static, at `2df3564f`)
 
@@ -2429,10 +2487,10 @@ Everything else, including the classifier's 14 mutations, was checked by inspect
 
 | finding | what | disposition |
 |---|---|---|
-| F1 MEDIUM | S1a's exact-retry acknowledgement replayed the whole branch under custody (`overlay.read`) to return a projection no caller used | **fixed locally, not pushed:** the last two commits of the local line, the change and its review follow-up, since they edit four of Agent 2's files (below). Their SHAs change whenever that line is rebased, so they are not cited here |
-| F2 MEDIUM | N31 is not the accepted actor-level test, and `handoff_priority` is unpinned | **open.** Needs a receiver-level test in a file shared with Agent 2; asked |
+| F1 MEDIUM | S1a's exact-retry acknowledgement replayed the whole branch under custody (`overlay.read`) to return a projection no caller used | **fixed, landing with C-3 step 2** once Agent 2 freed their files (2026-10-09). They reviewed the diff against their files statically and found no change to their Save's outcome contract |
+| F2 MEDIUM | N31 is not the accepted actor-level test, and `handoff_priority` is unpinned | **fixed** (2026-10-09): a real second member's checkpoint request mid-signing, five CI entries, and a missing fourth term the test found, narrowed by its review; see "F2" below. The inbound term and the heavy-stage gate stay open |
 | F3 MEDIUM | H5's custody terms are understated, and bounded custody is not established | **measured, deviation recorded**; see "H5's repeated terms, priced" below |
-| F4 LOW | a Save captured while the receiver is paused strands admission, a pool slot and a media hold | **open.** The fix sits in Agent 2's Save entry point; two shapes offered to them |
+| F4 LOW | a Save captured while the receiver is paused strands admission, a pool slot and a media hold | **fixed, `2b9ba0ae`**, in Agent 2's chosen shape, at both entry points (below) |
 | F5 LOW | the refused-result memo tests never checked what the memo returned | **fixed, `e01113a5`** |
 | F6 LOW | the raw-fs gate's allowlist counted lines per file | **fixed, `c61a8560`** |
 | F7 LOW | "each check redundant by construction" was untrue at the link byte | **fixed, `7258b525`**, with a correction of the finding itself (below) |
@@ -2444,17 +2502,30 @@ Everything else, including the classifier's 14 mutations, was checked by inspect
 the stored branch, and S1a returns them with no replay. Agent 2's Unconfirmed receiver maps the
 new variant to the `Saved { basis, accepted }` it already reported, so their outcome is unchanged.
 
+**Who could notice (checked 2026-10-09, at Agent 2's request).** No production code receives a
+retry's outcome expecting a draft:
+- the Tauri workspace and `bins` never name `StudioOverlaySave`;
+- `Server::save_studio_closing_overlay` has no caller outside tests;
+- the Closing receiver's `save_overlay` has none at all.
+
+When native Save registers, its Closing result must map `Acknowledged`, as Agent 2's Unconfirmed
+result already does. That is with Agent 4.
+
 **Contract change, recorded:** an exact retry no longer returns `StudioOverlaySave::Local`. Seven
 tests asserted the retry's projection. They now take the acknowledgement and compare the stored
 draft, read back through `local_draft`, which checks the same property (the retry left the
 authored draft as it was) against what is on disk.
 
 The regression is `studio_overlay_store_exact_retry_rebuilds_no_draft`:
-- it counts draft rebuilds through a test-only counter in `local_draft`;
+- **it counts every reconstruction.** The counter sits inside `StudioOverlay::read`, behind the
+  replication crate's test-only `test-counters` feature, which only `catcoms-app`'s
+  dev-dependency enables. A first version counted only `local_draft` calls, which missed a direct
+  `overlay.read` and the full decode's replay (review of these fixes, M-2);
 - its control reads the draft and must move the counter;
 - it failed before the fix;
-- CI's overlay harness gains `retry-rebuild`, which puts the rebuild back beside the
-  acknowledgement, so only the counter can catch it. DETECTED locally.
+- CI's overlay harness gains `retry-rebuild` (through `local_draft`) and `retry-read` (a direct
+  `overlay.read`, the defect's own form). Each puts the rebuild back beside the
+  acknowledgement, so only the counter can catch it. Both DETECTED locally.
 
 Held because it touches Agent 2's `receiver/unconfirmed.rs` (one match arm), two of their
 Unconfirmed Save test files and `studio/copy/tests.rs`. It is ordered last in the local line, so
@@ -2463,6 +2534,154 @@ everything else ships without it.
 **13.5's 426 ms retry figure at depth 255 is attributed to this replay by reading the code, not
 by re-measurement.** No measurement has been taken since the fix. The retry still does two
 structural decodes of the intent record and one more authenticated read for the flush.
+
+### F4: a capture made while paused is dropped, and a pause releases a queued one (`2b9ba0ae`)
+
+The shape is Agent 2's choice. The refusal sits at the capture, not at the Save's entry, so an exact
+retry of accepted work, answered at S1 before any capture, stays `Saved` while paused. The
+exception is when the overlay slot still holds other work. A capture already detached when the
+pause arrived parks as a plan for up to `OVERLAY_PARK_MS`, and a retry then answers `Busy`, as
+before F4.
+
+**What changed:**
+- `queue_capture_unless_paused` serves both entry points. While paused it drops a fresh capture,
+  answers `Busy` and records no scheduling request, releasing admission, the pool permit and the
+  media hold with the capture.
+- `pause()` releases a capture still queued, and forgets its request. A detached one completes
+  and parks, and the park deadline drops it.
+
+**Tests, each broken on purpose:**
+- **The capture check removed:** fails
+  `studio_actor_unconfirmed_save_captured_while_paused_answers_busy_and_holds_nothing`.
+- **A check at the entry instead:** fails
+  `studio_actor_unconfirmed_save_exact_retry_while_paused_is_still_saved`.
+- **The pause release removed:** fails both
+  `studio_actor_unconfirmed_save_a_capture_queued_then_paused_is_released` and the catch-up level
+  `a_pause_releases_a_queued_save_capture_with_its_admission_and_permit`.
+
+**What is not covered:**
+- The Closing `save_overlay` has no caller yet, so its use of the shared helper is covered through
+  the helper, not end to end.
+- The media-hold release is not observed: the catch-up fixture captures a title operation, which
+  holds no media.
+
+### F2: the actor-level N31, and the fourth priority term it found (2026-10-09)
+
+**The test.** `a_signing_visit_yields_to_a_members_checkpoint_request_until_it_is_served`, in
+`catchup/tests.rs`, is design 14.1's count fixture driven entirely by production `run` turns:
+1. Bob joins for real and proves the owner's endpoint. The owner reaches H3 on a branch of
+   `MAX_SIGNING_TURNS_PER_VISIT + 5` operations, with the injected clock still.
+2. The observed visit starts with no service interest, no watch inbound and no parked result, and
+   signs exactly the turn cap, leaving five.
+3. Bob asks for the document's checkpoint head over the transport. The owner's warm graph was
+   displaced first, so serving it needs a detached source preparation.
+4. Every turn that starts with priority work signs nothing, and the test counts each kind. Bob's
+   request is then answered with no signature in between, and the transfer completes.
+
+**What its first run found.** Bob's request came back `Transport(NoResponse)`. Per turn:
+- **Turns 1 and 2:** it was queued interest, and both yielded. Turn 2 reserved it and detached the
+  preparation.
+- **Turn 3:** the parked result yielded; catch-up installed the source, but spent its turn on
+  client work, since it alternates that with serving.
+- **Turn 4:** none of 7.3's three terms held, so a slice signed the rest of the branch. A slice
+  that signs ends the turn before catch-up.
+- **Turns 5 and 6:** H5's commit evicted the warm source, and catch-up dropped the captured request
+  unanswered.
+
+**The fix.** A fourth term, `CatchupRuntime::captured_service_owed`: a reserved request that has
+captured its source and whose interest is still current. Catch-up's own `pending` already counted
+reserved requests; that term is now the method `service_owed`, with no change in behaviour, and the
+signing yield takes its captured subset. Design 7.3 is amended to match.
+
+**Why only the captured subset** (the review below, MEDIUM-1). The first fix yielded to any
+reserved request, and that was a priority inversion. A request whose preparation found the shared
+pool full stays reserved and uncaptured, and the signing job holds one of that pool's permits until
+H5. H3 then yielded every turn to a request waiting for H3's own permit, until the interest expired
+unanswered, and for ever under a still clock; one member re-requesting at each expiry kept H3 to
+about one slice per 5 s. An uncaptured request is now signed past, as before F2. Once H5 releases
+the permit it can capture and be served, but only if it is still current then (5 s from arrival)
+and wins that permit. A long branch plus H4 and H5 can outlast that, and the requester then
+retries.
+
+**The parked term needed its own test.** In Bob's flow a parked preparation always belongs to the
+reserved request, so the owed term answers on the same turns and removing `result_parked` alone
+survives there. `a_parked_catch_up_result_alone_makes_a_signing_slice_yield` parks a real owner
+capture with no request behind it and asks the predicate directly. This is predicate level, not a
+signing turn, because with no priority work a signing slice takes every turn and catch-up never
+starts a capture mid-signing.
+
+**The inversion's regression.** `a_request_waiting_for_the_signing_jobs_permit_does_not_stall_signing`
+runs the same fixture on a one-permit pool. Bob's request for a cold document is reserved
+uncaptured; the test requires a turn that signs past it, the transfer to complete, and the request
+then to be answered. The three F2 actor tests now share one fixture, `signing_owner`.
+
+**CI, five `handoff-priority*` entries in the handoff harness,** all DETECTED and PASS restored
+under `RUSTFLAGS='-D warnings'`:
+- `handoff-priority`, the reviewer's mutant: the whole predicate forced to `false`;
+- `-service`, `-owed` and `-parked`: one term removed each;
+- `-captured`: the owed term's `captured` conjunct removed.
+
+The harness now accepts a crate-absolute test name beginning `studio::receiver::catchup::tests::`.
+
+**Not covered, recorded:**
+- **The inbound term.** A production turn reaches the yield with inbound still queued only through
+  the gossip fairness path (`gossip_runs >= 4` with background work), and no test stages that.
+- **The same gap at the heavy-stage gate, not fixed** (the review below, MEDIUM-2).
+  `replay_ready()` does not see a reserved request either. If a request is captured while H4 runs
+  off-actor, H5 can commit before it is served, evicting the source and dropping the request.
+  Replay is gated the same way and runs on alternate turns, so it can do this too, not only once
+  per handoff. Each drop costs one `NoResponse` and the requester's own retry; nothing durable,
+  authorising or on the wire changes. `replay_ready` is shared with replay, so the rule goes to
+  Agent 2, with one constraint: a gate there must also exclude an uncaptured request, or H5, which
+  releases a permit, would wait on it as H3 did.
+- **H3 can still yield to a request catch-up cannot reach, on a full pool** (pre-existing; the
+  re-review, LOW-2). Two steps in catch-up's `run` return before `serve` when they cannot get a
+  permit:
+  - a held client page, through the PageReady branch;
+  - a held Registry page, through `persist_registry_page`, whose inventory preparation needs one.
+
+  While one does, a captured request waits, and so does a queued one, which is never even
+  reserved. H3 yields to both while holding a permit that step needs. A captured request is
+  bounded by its expiry. Queued interest needs no free permit, so a member re-requesting at each
+  5 s expiry can renew it for as long as the pool stays full. It needs a cold held page and a full
+  pool, so LOW. The fix belongs in the order of steps in catch-up's `run`, not in the yield, and
+  goes to Agent 2 with MEDIUM-2.
+- **The time fixture** stays store-level, in
+  `studio_overlay_handoff_signing_slice_reports_yield_bound_and_completion_apart`.
+
+### Review of F2 and step A (2026-10-09, Opus, static): no blocker or high
+
+The review read `4170707a..72e0b68e` and ran no build. Dispositions:
+
+| finding | what | disposition |
+|---|---|---|
+| MEDIUM-1 | the owed term yielded to a request waiting for the signing job's own pool permit | **fixed**: the yield takes only captured requests (above), with its regression and the `-captured` entry |
+| MEDIUM-2 | `replay_ready` ignores a reserved request, for H5 and replay alike (pre-existing) | **recorded, not blocking**: to Agent 2, with the captured constraint; the `background_step` comment that claimed catch-up is never starved now says where that stops being true |
+| LOW-1 | `handoff_sign`'s doc listed three terms | **fixed** |
+| LOW-2 | the test's `sync_once` ticks could hang rather than fail | **fixed**: each tick is bounded at 60 s, in `deliver_head_request` |
+| LOW-3 | "nothing reaches into the store" overclaimed | **fixed**: the displacement is a write and a Read between turns, which slice exclusivity allows, and the comments say so |
+
+**Confirmed sound by the review:** `pending()` unchanged; every path that clears an owed request
+(lifecycle change, expiry, removed channel, failed install, cancellation); no authority, wire or
+persistence change; step A equivalent to the old subset test, with the error order unchanged; all
+harness anchors unique, `qualified()` routing correct, and no mutant leaving unused code.
+
+**Re-review of the fix, `aef7fccc` (2026-10-09, Opus, static): no blocker, high or medium.**
+- **Confirmed:**
+  - Once captured, a request never asks the pool for another permit. A cold captured Studio
+    request is dropped when nothing is in flight, a captured Registry request is never prepared
+    again, and every failure path clears it.
+  - F2's original test still counts an owed turn with the production predicate, and the fixture
+    refactor kept every assertion.
+  - The new test is deterministic, and `signed_past_it` cannot be satisfied another way.
+- **Three lows, dispositioned:**
+  - **LOW-1, an overclaim:** "served after H5" holds only while the request is current and wins
+    the freed permit. Reworded in the code, design 7.3, here and in HANDOVER.
+  - **LOW-2, the residual list incomplete:** the held Registry page, and the queued-interest
+    exposure. Recorded above, for Agent 2.
+  - **LOW-3, CI headroom:** about 77 of 90 minutes. The handoff job's limit is now 120.
+- **Optional, not taken:** asserting `available_permits() == 0` on the signed-past turn. The
+  fixture's single injected pool already implies it.
 
 ### F3: H5's repeated terms, priced
 
@@ -2581,9 +2800,9 @@ two mediums and five lows.
 | finding | disposition |
 |---|---|
 | M-1 MEDIUM: M1 was the only guard, since H5's step 6 compared its own two reads | **fixed, `505b3a24`** (below) |
-| M-2 MEDIUM: F1's rebuild counter misses a direct `StudioOverlay::read` and the full intent decode's replay | **open, in F1's held commit**; F1 waits on Agent 2 anyway |
+| M-2 MEDIUM: F1's rebuild counter misses a direct `StudioOverlay::read` and the full intent decode's replay | **fixed, with F1 (held)**: the counter moved into `StudioOverlay::read`, plus a second harness entry |
 | LOW-1: the probe ran after the Index check's restores | **fixed, `505b3a24`**: the probe now precedes it, and a new test counts zero restores |
-| LOW-2: `INTERFACES.md` and `HANDOVER.md` still describe a retry returning the draft | **open, with F1**: they change in F1's held follow-up commit, so they ship with the contract |
+| LOW-2: `INTERFACES.md` and `HANDOVER.md` still describe a retry returning the draft | **fixed, with F1 (held)**: in F1's follow-up commit, so they ship with the contract |
 | LOW-3: STATUS and doc-comment truthfulness | **fixed here**, except the stale test name in F1's own doc comment, which goes with F1 |
 | LOW-4: test level differs from the design (M6 and M1/M2 are store-level, not actor-level) | **recorded** below; the M6 test now requires `SuccessorNotPristine` |
 | LOW-5: the raw-fs gate keyed only the matched line of an open chain | **fixed, `505b3a24`**: the open flags that change a file are matched too |
@@ -2887,8 +3106,10 @@ changes. **Step 3 stays gated** (14.5).
   extending the memo to Intents must carry the intent facts.
 - **A detached Registry or Studio result refused as `Invalidated` is memoized.** This happens in
   `install_validated` before the job restarts, and never over an entry already present.
-  `ServerStore::memoize_overtaken_inventory_result` is the same entry point for a runtime that
-  discards a result itself. Each memoized result is checked against:
+  A runtime that discards a result itself memoizes it through
+  `restart_epoch_inventory_job_uncharged(job, pending)`, which step 2's runtime uses.
+  `ServerStore::memoize_overtaken_inventory_result` is now test-only and keeps the memo's rules
+  testable in isolation. Each memoized result is checked against:
   - the job's own cursor (scan identity, mount, awaited record);
   - the store's current mount.
 - **A test-only switch, `detach_every_validation_for_test`, is on `ServerStore`**, so a job's
@@ -2976,15 +3197,14 @@ it without forging. It memoizes the same way as the first exit.
 
 ### What is not done
 
-- **Part B's runtime half lands with step 2** (`ccd00dbc`). Until then
-  `memoize_overtaken_inventory_result` has no production caller and carries a dead-code allowance
-  in non-test builds. Its implementation review (M-1) pointed out that nothing makes step 2 use
-  it: a port that keeps the uncharged restart as it is would drop every own-write result again,
-  which is exactly the gossip case. So **two conditions gate step 2's merge**:
+- **Part B's runtime half: landed with step 2 (2026-10-09).** Its implementation review (M-1) set
+  two conditions on step 2's merge, and both hold:
   - the store's uncharged restart takes the pending result and memoizes it before replacing the
-    cursor, for example `restart_epoch_inventory_job_uncharged(job, pending)`, so discarding
-    through that path cannot skip the memo;
-  - the own-write storm test asserts that `reused_records` rises after an uncharged refresh.
+    cursor (`restart_epoch_inventory_job_uncharged(job, pending)`);
+  - `an_own_write_refresh_memoizes_the_overtaken_result` pins that the refresh memoizes.
+
+  `memoize_overtaken_inventory_result` therefore never gained a production caller. It is now
+  `#[cfg(test)]`, kept to test the memo's rules in isolation.
 - **Part C and step 3 are not built.** The follow-up measurements are in design 14.7: structured
   Recovery shapes, and version-2 owner journals at their cap.
 
@@ -5545,19 +5765,30 @@ makes that more important, not less.
    **Status: the storage half is done.** See the C-3 section above. What remains is the runtime
    adoption of the cursor at six call sites, which is its own checkpoint.
 
-   **Status, 2026-10-08:**
-   - **Step 2** (replay's manual move) is built and tested locally as `06526bd9`, rebased onto
-     `6a79e6f8`, with both of the implementation review's M-1 gates. It lands once Agent 2 confirms
-     `studio/receiver.rs` and `receiver/catchup.rs` are free.
+   **Status, 2026-10-09:**
+   - **Step 2** (replay's manual move) **lands** in the batch with F1 and F4, now that Agent 2
+     has freed the shared receiver files.
    - **The classifier and refused-result memo** (C-3 runtime 14, parts A and B) are built at
      `6a79e6f8`.
+   - **Decision, 2026-10-09: H5 stays one visit, and Flow R is next** (C-3 runtime 15.14).
+     The project owner accepted H5's single long visit at the caps, about 0.15 s, as technical
+     debt. The step-3 route below (step B onwards) is deferred, not dropped; step A stays. The
+     text below is kept as the plan to resume from.
    - **Step 3, and Flow R after it, need more than the classifier.** Design 9.1 is built
      (`17dd54fc`), and the commit phase is measured on its own (2026-10-09, release, shared
      host). The route's revision 2 is C-3 runtime 15.8, and its design review is 15.9: no
      blocker, one high. **The order of work is 15.9's:**
-     1. H5's source-growing terms computed once, with a source-axis measurement (base sources of
-        256, 512 and 999 frames). 15.9 HIGH-1: no measurement yet varies the source, and the
-        commit may consume the visit for a large flipnote even at one operation;
+     1. H5's source-growing terms computed once. **The source axis is measured** (C-3 runtime
+        15.10, 2026-10-09). The commit grows about 0.06 ms per base frame: 86 ms at 998 frames
+        and one operation, and 147 ms with a full branch, past the visit. The repeated
+        projections are about half of the former. 15.12's review of item 0's first half put a
+        step A before it, and **step A is built** (C-3 runtime 15.13, 2026-10-09): the
+        base-blob coverage rule is a pure function with unit tests and three CI mutations. Next:
+        - item 0's first half (compute each once in H5), as 15.12's step B;
+        - re-measure;
+        - its second half (carry H2's and H4's projections, a design change needing review);
+        - attribute the branch-length growth;
+     … and the remaining items as listed;
      2. the indexed, pruned memo (M2);
      3. the all-family memo with warms at all eight writers, behind a forced-warm token;
      4. the restart progress rule, with per-key credit and a ceiling;
@@ -5567,8 +5798,10 @@ makes that more important, not less.
      8. the touched-path cursor decision, which moves into step 3 if item 1 leaves no margined
         share.
    - **Steps 4 and 5** still need section 7's measurements.
-2. Then **Flow R**, which needs no media and is independent. It was deliberately sequenced after
-   this boundary so it is not built on the unbounded inventory path and then split again.
+2. **Flow R next** (decision, 2026-10-09). It needs no media and is independent. It was sequenced
+   after this boundary so it would not be built on the single-visit path and split again; with
+   H5's single visit accepted (C-3 runtime 15.14), it is built on that path, and R3 joins H5 in
+   the deferred split if the target is ever restored.
 3. Produce design 13's eight measurements as each item lands; C-1's before-and-after is cheap,
    since the opt-in profile already exists. **13.7 (updated 2026-10-08):** Recovery, Registry
    and Studio were measured earlier. Intents, OwnerReceipts and DraftArchive were measured on
@@ -5593,16 +5826,13 @@ makes that more important, not less.
 7. Keep native Save unregistered and out of FLIPNOTE-UI-HOOKS until Agent 2's manual lifecycle
    passes its own review and their status note says so. Agent 2's P5 is still false.
 8. **Design 18.3's implementation review is back** (2026-10-09): a bounded PASS WITH FINDINGS, no
-   blocker or high. See its section above. Still open, and both needing files Agent 2 works in:
-   - **F2:** the actor-level N31, plus a mutation entry for `handoff_priority`;
-   - **F4:** pause stranding a queued Save capture.
-
-   F1 is fixed locally and waits on the same files. Native Save must not register until F2 and
-   F4 are closed, besides Agent 2's P5.
+   blocker or high. See its section above. F1 and F4 land in the batch with C-3 step 2.
+   **F2 is fixed** (2026-10-09), with the fourth priority term its test found. Still open from it,
+   for Agent 2's view: whether `replay_ready()`, the heavy-stage gate, should also wait for a
+   reserved service request. Native Save still waits for Agent 2's P5.
 
    **Also with Agent 2:** the shared overlay-lifecycle harness exceeds its 60-minute CI job on
-   every push, and should be split across two jobs. F1's two overlay harness entries also still
-   need a run under `RUSTFLAGS='-D warnings'` before they land.
+   every push. Agent 2 will shard it by index (`--shard K/N`) after this batch lands.
 9. **Reconcile the landed archive code with its review status.** This item was stale and is
    rewritten. At this head `epoch_draft_archive.rs` already contains
    `write_studio_draft_archive_with_io`, `release_studio_draft_archive_with_io` and

@@ -127,10 +127,9 @@ pub(super) fn check(accepted: bool) {
         assert_eq!(fs::read(&intent_path).unwrap(), original_intents);
         let source_after_ingest = canonical(&store);
         if let Some(saved) = saved {
-            let retry = save(&f, &mut store, &close, basis.fingerprint(), f.title(), 999);
-            assert_eq!(retry.accepted(), 1);
-            assert_eq!(retry.basis(), saved.basis());
-            assert_eq!(retry.projection(), saved.projection());
+            let acknowledged = retry(&f, &mut store, &close, basis.fingerprint(), f.title(), 999);
+            assert_eq!(acknowledged, (saved.basis(), 1));
+            assert_eq!(stored_draft(&f, &store).projection(), saved.projection());
             assert_eq!(fs::read(&intent_path).unwrap(), original_intents);
 
             // A ticket prepared now carries the fresh basis but still names the live branch, and

@@ -30,6 +30,8 @@ pub use recovery::{StudioProjection, StudioRecovery};
 mod admission;
 pub use admission::StudioTarget;
 mod overlay;
+#[cfg(feature = "test-counters")]
+pub use overlay::overlay_reconstructions_on_this_thread;
 pub use overlay::{
     StudioClosingOverlayBasis, StudioDiscardConfirmation, StudioDisposalDecision,
     StudioDisposalMode, StudioDraftArchive, StudioHandoffAuthority, StudioHandoffCandidate,
