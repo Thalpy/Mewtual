@@ -181,6 +181,23 @@ MUTATIONS = [
      "            || (false && self.catchup.result_parked())\n",
      RECEIVER + "a_parked_catch_up_result_alone_makes_a_signing_slice_yield",
      "a parked result did not make a signing slice yield"),
+    # C-3 runtime 15.12, step A: the base-blob coverage rule. No honest flow reaches its refusal,
+    # so its unit tests are its only executed evidence, and each part is mutated against them.
+    ("base-coverage", "crates/catcoms-app/src/store/epoch_studio/handoff.rs",
+     ".all(|cid| candidate.contains(cid) || pending.contains(cid))",
+     ".any(|cid| candidate.contains(cid) || pending.contains(cid))",
+     "references::studio_overlay_handoff_base_coverage_refuses_a_base_blob_nothing_retains",
+     "an uncovered base blob was accepted"),
+    ("base-coverage-pending", "crates/catcoms-app/src/store/epoch_studio/handoff.rs",
+     "|| pending.contains(cid))",
+     "|| (pending.contains(cid) && false))",
+     "references::studio_overlay_handoff_base_coverage_counts_a_pending_intent",
+     "a pending intent's reference did not count as retention"),
+    ("base-coverage-none", "crates/catcoms-app/src/store/epoch_studio/handoff.rs",
+     "base.is_none_or(|base| {",
+     "base.is_some_and(|base| {",
+     "references::studio_overlay_handoff_base_coverage_with_no_base_accepts",
+     "a document with no overlay was refused for its base"),
 ]
 
 

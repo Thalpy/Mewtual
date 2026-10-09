@@ -1673,3 +1673,29 @@ type changes, the mutant stops compiling, which is the `index-commit` failure ag
 
 **Not before B is re-reviewed:** L6's writer-return alternative, item 0's second half, and the
 branch-length attribution.
+
+### 15.13 Step A, built (2026-10-09)
+
+**What changed.** The rule is `base_blobs_covered(base, candidate, pending)` in
+`store/epoch_studio/handoff.rs`: every base blob must be a candidate blob or a pending intent's,
+and `None` (no overlay) is covered. `check_handoff_references` computes the three sets as before
+and calls it, so its two H5 callers and every other caller are unchanged in behaviour. The error
+order is unchanged too: the candidate's set, then the intents', then the base's.
+
+**Tests**, in the handoff `references` tests:
+- `..._refuses_a_base_blob_nothing_retains`: an uncovered base blob, and the same case once the
+  retaining intent is gone;
+- `..._counts_a_pending_intent`: coverage from a pending intent alone, and from the candidate
+  alone;
+- `..._with_no_base_accepts`: `None`, and an empty base.
+
+**CI, three handoff-harness entries,** each DETECTED at its named assertion and PASS restored under
+`RUSTFLAGS='-D warnings'`:
+- `base-coverage`: `all` turned into `any`;
+- `base-coverage-pending`: the pending term removed;
+- `base-coverage-none`: `is_none_or` turned into `is_some_and`.
+
+**What it does not pin:** that `check_handoff_references` calls the rule at all. No honest flow
+reaches the refusal, so removing the call fails no test; the wiring stays checked by inspection,
+which is HIGH-1's point. Step B's `cfg(test)` recompute-and-compare is what will exercise the call
+on the proof path.

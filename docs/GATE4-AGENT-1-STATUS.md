@@ -5710,8 +5710,10 @@ makes that more important, not less.
      1. H5's source-growing terms computed once. **The source axis is measured** (C-3 runtime
         15.10, 2026-10-09). The commit grows about 0.06 ms per base frame: 86 ms at 998 frames
         and one operation, and 147 ms with a full branch, past the visit. The repeated
-        projections are about half of the former. Next:
-        - item 0's first half (compute each once in H5);
+        projections are about half of the former. 15.12's review of item 0's first half put a
+        step A before it, and **step A is built** (C-3 runtime 15.13, 2026-10-09): the
+        base-blob coverage rule is a pure function with unit tests and three CI mutations. Next:
+        - item 0's first half (compute each once in H5), as 15.12's step B;
         - re-measure;
         - its second half (carry H2's and H4's projections, a design change needing review);
         - attribute the branch-length growth;

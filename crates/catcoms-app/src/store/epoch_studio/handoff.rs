@@ -13,6 +13,29 @@ pub(crate) enum StudioHandoffStart {
     Captured(Box<StudioHandoffCapture>),
 }
 
+/// The rule `check_handoff_references` enforces, kept pure so it can be tested on its own (C-3
+/// runtime 15.12, step A).
+///
+/// A handoff replaces the document's source with the candidate. Every blob the overlay's base
+/// references must still be referenced afterwards, by the candidate itself or by an intent still
+/// pending; otherwise reclamation could delete pixels the base needs. `base` is `None` for a
+/// document with no overlay, which has no base to keep.
+///
+/// **No honest flow reaches a refusal.** H2's `check_overlay_successor` makes the successor's seed
+/// the overlay's base, so the candidate always covers it. That is why this rule is unit-tested
+/// directly and pinned by a CI mutation: a flow test could never tell a broken rule from a
+/// working one.
+pub(super) fn base_blobs_covered(
+    base: Option<&std::collections::BTreeSet<catcoms_replication::studio::ContentId>>,
+    candidate: &std::collections::BTreeSet<catcoms_replication::studio::ContentId>,
+    pending: &std::collections::BTreeSet<catcoms_replication::studio::ContentId>,
+) -> bool {
+    base.is_none_or(|base| {
+        base.iter()
+            .all(|cid| candidate.contains(cid) || pending.contains(cid))
+    })
+}
+
 /// Minted only here, after the Prepared record crosses its first durability barrier.
 pub(super) struct CheckedHandoffWrite {
     metadata: [u8; 32],
@@ -750,21 +773,21 @@ impl ServerStore {
         source: &StudioEpoch,
         state: &EpochIntentState,
     ) -> Result<(), AppError> {
-        let mut retained = source.blob_cids().map_err(invalid)?;
+        let candidate = source.blob_cids().map_err(invalid)?;
+        let mut pending = std::collections::BTreeSet::new();
         for (_, intent) in state.pending() {
-            retained.extend(
+            pending.extend(
                 catcoms_replication::studio::operation_blob_cid(&intent.operation)
                     .map_err(invalid)?,
             );
         }
-        if let Some(overlay) = metadata.overlay() {
-            if !overlay
-                .base_blob_cids()
-                .map_err(invalid)?
-                .is_subset(&retained)
-            {
-                return Err(invalid("handoff would release a base blob reference"));
-            }
+        let base = metadata
+            .overlay()
+            .map(|overlay| overlay.base_blob_cids())
+            .transpose()
+            .map_err(invalid)?;
+        if !base_blobs_covered(base.as_ref(), &candidate, &pending) {
+            return Err(invalid("handoff would release a base blob reference"));
         }
         Ok(())
     }
