@@ -391,8 +391,10 @@ table with the commit that closed it.
     document before its turn would resume a held owner decision for the document's pointer
     bucket, and that bucket is shared with other documents. While the stuck document is the only
     watched one in its bucket, maintenance does not resume that decision; a watched document in
-    the same bucket resumes it on its own turn. Repair's other resume routes do not pass through
-    this skip.
+    the same bucket resumes it on its own turn. There is no fallback: maintenance's turn is a
+    held bucket decision's only ordinary resume route. Repair's Studio-scope resumes and the
+    router's resume of a landed install do not pass through this skip, but neither resumes a
+    held bucket decision in general.
 - **A budgeted scan holds custody for a bounded validation only, and a memoized validation is
   reused only for identical bytes.** Under a deadline, `validation_fits` admits a fresh validation
   inline only in accounting mode, and only for four families:

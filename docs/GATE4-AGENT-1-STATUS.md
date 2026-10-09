@@ -2621,6 +2621,17 @@ every match. Every anchor in all ten mutation harnesses is unique.
 | LOW-2 | watch churn resets the doubling: once an off-rail hold expires it is dropped with its doubling, so evict, wait and rewatch starts again at 30 s | **recorded, as designed:** only the user's own UI churn drives it, and it needs the document evicted from a 16-watch rail for longer than its hold. Keeping off-rail entries until `at + hold_ms` is an option if it matters |
 | LOW-3 | HANDOVER's "repair first, then Prepared" is wrong for Registry maintenance, which checks the Prepared document first and then the repair claim on its bucket. Separately, `repair_job.rs` says every path that would install into a claimed source consults the claim, but H5 and R3 do not | **HANDOVER fixed.** The claim gap is **recorded as a follow-up**: nothing is corrupted, because S3's digest recheck and R3's stamp fallback catch the conflict, and the cost is wasted work and a 5 s repair retry. The likely fix is a `repair_claimed` skip at the probe's selection, with a hold at `handoff_commit`, and the comment is Agent 3's |
 
+**Short re-review of those fixes (at `44dcf5a3`, static): no blocker or high.** It found dropping
+the pass safe: everything in it is derived and recomputed by the next pass, the shared inventory
+job is not tied to it, and no spin or re-plan loop follows, since a document becomes Prepared
+only through an H5 refusal, paced by the target's hold. It confirmed that the removed later check
+was redundant. Two lows, both fixed:
+
+| finding | what | disposition |
+|---|---|---|
+| LOW-A | the replay test checked how many documents completed, not which, so a wrong fix that completed the stuck document instead of moving on would pass | **fixed:** it asserts the completed set is exactly the other document. Broken on purpose with that wrong fix, the count check passed and only the new assertion failed |
+| LOW-B | THREAT-MODEL's "repair's other resume routes do not pass through this skip" read as a fallback for the bucket's held decision, which has none | **fixed:** it now says maintenance's turn is that decision's only ordinary resume route |
+
 ## Design 18.3 bounded implementation review (2026-10-09, Opus, static): PASS WITH FINDINGS
 
 **No blocker, no high.** Three mediums and five lows. The review covered Agent 1's runtime

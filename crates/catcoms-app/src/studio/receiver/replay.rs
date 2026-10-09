@@ -101,6 +101,11 @@ impl StudioReceiver {
     pub(crate) fn replay_state_for_test(&self) -> (bool, usize) {
         (self.replay.active.is_some(), self.replay.completed.len())
     }
+    /// The documents replay has completed a pass for, by target and watch epoch.
+    #[cfg(test)]
+    pub(crate) fn replay_completed_for_test(&self) -> Vec<(StudioTarget, u128)> {
+        self.replay.completed.iter().copied().collect()
+    }
     /// Make an empty pass active for `target` at `epoch`, as though replay had begun it. A real
     /// pass needs own intents staged for the document, which no receiver fixture writes.
     #[cfg(test)]

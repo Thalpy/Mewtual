@@ -3151,12 +3151,15 @@ async fn an_active_replay_pass_on_a_prepared_document_does_not_stall_the_rest() 
         (false, 0),
         "replay had already taken the other document up, so this proves nothing"
     );
-    let epoch = receiver
-        .watches
-        .iter()
-        .find(|(w, _)| w.target == stuck)
-        .map(|(_, e)| *e)
-        .expect("the stuck document is watched");
+    let epoch_of = |target: StudioTarget| {
+        receiver
+            .watches
+            .iter()
+            .find(|(w, _)| w.target == target)
+            .map(|(_, e)| *e)
+            .expect("both documents are watched")
+    };
+    let (epoch, other_epoch) = (epoch_of(stuck), epoch_of(other));
     receiver.begin_replay_pass_for_test(stuck, epoch);
 
     // Past replay's own one-second pacing, then exactly one replay turn. One message for both
@@ -3167,5 +3170,14 @@ async fn an_active_replay_pass_on_a_prepared_document_does_not_stall_the_rest() 
         .replay_step_for_test(&mut server, &mut store, 83)
         .expect(stalled);
     assert_eq!(receiver.replay_state_for_test(), (false, 1), "{stalled}");
+    // Which document completed, not only how many: had replay completed the stuck one without
+    // replaying it (as it does for a source that is not Open), the count alone would still pass,
+    // and replay would never return to that document while its watch stands (the re-review of
+    // `44dcf5a3`, LOW-A).
+    assert_eq!(
+        receiver.replay_completed_for_test(),
+        vec![(other, other_epoch)],
+        "{stalled}"
+    );
     assert!(prepared(&server, &store, stuck));
 }
