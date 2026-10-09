@@ -1388,3 +1388,180 @@ async fn a_repair_that_retargets_a_source_with_a_pending_page_never_pauses_catch
         "the page fetched for the old source was dropped, never saved"
     );
 }
+
+/// Bob's repair of the fork's pair, choosing `selected`, signed in his current tenure.
+fn sign_repair(
+    bob: &mut Node,
+    [chosen, rival]: [&Receipt; 2],
+    selected: &Receipt,
+    sequence: u64,
+) -> ReceiptRepair {
+    let StudioOwnerTenure::Known(start) = bob.observed_owner_tenure() else {
+        panic!("the owner observes its own tenure")
+    };
+    let mut hashes = [chosen.hash(), rival.hash()];
+    hashes.sort();
+    bob.sync.with_registry_context(|_, device, _, _| {
+        ReceiptRepair::sign_in_tenure(
+            chosen.document.clone(),
+            chosen.tenure_id,
+            hashes,
+            selected.hash(),
+            sequence,
+            start,
+            device,
+        )
+        .unwrap()
+    })
+}
+
+/// A peer-side runtime watching `target`, with a private pool.
+fn peer_runtime(target: StudioTarget) -> CatchupRuntime {
+    let mut runtime = CatchupRuntime {
+        target: Some(target),
+        ..Default::default()
+    };
+    runtime.inject_overlay_pool_for_test(4);
+    runtime
+}
+
+/// PR #36 review MEDIUM-1: the same signed repair can arrive again, while its job runs, with the
+/// receipt the first answer lacked. Carol sits healthy on R1, and Bob's repair choosing R2 names a
+/// pair she can complete only with R2 from an answer. The first offer carries no receipt; while
+/// its rebuild is detached, the same repair arrives with R2. That receipt is kept for S3, which
+/// retargets her source, instead of holding the repair as unverifiable for a minute.
+#[tokio::test]
+async fn a_repeated_offer_brings_the_receipt_its_running_job_lacked() {
+    let Cast {
+        clock,
+        mut bob,
+        mut carol,
+        ..
+    } = cast().await;
+    let target = index_target();
+    let scope = CheckpointTarget::Studio(target);
+    let (bob_root, carol_root) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let mut bob_store = store_at(&bob_root, 251);
+    let mut carol_store = store_at(&carol_root, 252);
+    let ([chosen, rival], chosen_seed) = fork(&mut bob, &mut bob_store, target);
+    assert_eq!(
+        adopt(
+            &mut carol,
+            &mut carol_store,
+            target,
+            &chosen,
+            Some(&chosen_seed)
+        ),
+        StudioAdoptionOutcome::Installed
+    );
+    let repair = sign_repair(&mut bob, [&chosen, &rival], &rival, 1);
+    let mut runtime = peer_runtime(target);
+    assert!(
+        runtime.offer_repair(
+            &mut carol,
+            &mut carol_store,
+            SERVER,
+            target,
+            &repair,
+            None,
+            false
+        ),
+        "the first answer, with no receipt, starts a job"
+    );
+    let job = runtime
+        .repair_detach::<MemNetwork>()
+        .expect("its rebuild detaches");
+    // The same repair again, now with R2, while that rebuild runs.
+    assert!(runtime.offer_repair(
+        &mut carol,
+        &mut carol_store,
+        SERVER,
+        target,
+        &repair,
+        Some(&rival),
+        false
+    ));
+    let StudioBackgroundResult::Repair(completion) = job.run(None).await else {
+        panic!("a repair result")
+    };
+    runtime.repair_complete(completion, clock.monotonic_ms());
+    runtime
+        .repair_commit(&mut carol, &mut carol_store, SERVER)
+        .unwrap();
+    assert_eq!(
+        runtime.repair_report(scope),
+        Some(StudioRepairReport::Completed(
+            StudioRepairOutcome::AwaitingSeed
+        )),
+        "S3 used the receipt the second answer brought"
+    );
+    assert!(!runtime
+        .repair_unverifiable
+        .contains_key(&(scope, repair.hash())));
+}
+
+/// PR #36 review MEDIUM-2: an offered repair for a document this peer holds no copy of holds that
+/// repair, never the document. Once a copy arrives, another legitimate repair of it is taken at
+/// once; a document-wide hold kept that one waiting a minute.
+#[tokio::test]
+async fn an_offer_for_a_document_this_peer_lacks_holds_only_that_offer() {
+    let Cast {
+        mut bob, mut carol, ..
+    } = cast().await;
+    let target = index_target();
+    let scope = CheckpointTarget::Studio(target);
+    let (bob_root, carol_root) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let mut bob_store = store_at(&bob_root, 261);
+    let mut carol_store = store_at(&carol_root, 262);
+    let ([chosen, rival], chosen_seed) = fork(&mut bob, &mut bob_store, target);
+    let first = sign_repair(&mut bob, [&chosen, &rival], &chosen, 1);
+    let mut runtime = peer_runtime(target);
+    assert!(
+        !runtime.offer_repair(
+            &mut carol,
+            &mut carol_store,
+            SERVER,
+            target,
+            &first,
+            None,
+            false
+        ),
+        "no copy here, so nothing to repair"
+    );
+    assert!(runtime.repair_job_target().is_none());
+    assert!(
+        runtime
+            .repair_unverifiable
+            .contains_key(&(scope, first.hash())),
+        "that offer is held"
+    );
+    assert!(
+        !runtime.repair_backoff.contains_key(&scope),
+        "its document is not held"
+    );
+    // A copy arrives, and with it another legitimate repair of the document.
+    assert_eq!(
+        adopt(
+            &mut carol,
+            &mut carol_store,
+            target,
+            &chosen,
+            Some(&chosen_seed)
+        ),
+        StudioAdoptionOutcome::Installed
+    );
+    let second = sign_repair(&mut bob, [&chosen, &rival], &rival, 2);
+    assert!(
+        runtime.offer_repair(
+            &mut carol,
+            &mut carol_store,
+            SERVER,
+            target,
+            &second,
+            Some(&rival),
+            false
+        ),
+        "another repair of the document is taken at once"
+    );
+    assert_eq!(runtime.repair_job_target(), Some(scope));
+}

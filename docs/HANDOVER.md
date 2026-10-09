@@ -25,9 +25,11 @@ and ranks the live hazards in that path.
   document's recovery warning. Its review added two more fixes. The router itself now resumes an
   install that landed just before a crash, and a cold owner resumes rather than refetching once a
   fetch has come to nothing. S3 now drops a page fetched for the source it rewrote, which before
-  could pause catch-up. Still open: a peer's repaired-seed refetch is not paced (pre-existing),
-  a hosted CI run on PR #36 and a bounded repair verdict. Details are in
-  `GATE4-AGENT-3-STATUS.md`.
+  could pause catch-up. The PR #36 review added three more: an owner alone (no peer at all)
+  still recovers from that crash; the same repair offered again while its job runs completes
+  that job's evidence; and an offered repair's failure at any stage holds only that repair, never
+  its document. Still open: a peer's repaired-seed refetch is not paced (pre-existing), hosted
+  CI on PR #36 and a bounded repair verdict. Details are in `GATE4-AGENT-3-STATUS.md`.
 
 - **Gate 4 PR #35 reconciliation (2026-10-08).** The candidate now preserves
   `gate4-agent1-runtime` through `7310b22b76848c4b9f85fec816744cff00c1a64f`. Agent 2's newer

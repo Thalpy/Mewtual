@@ -554,7 +554,9 @@ impl CatchupRuntime {
                 return Ok(false);
             }
         };
-        let owes_only_seed = match self.registry_classification(server, store, id, bucket) {
+        let classification = self.registry_classification(server, store, id, bucket);
+        let guessed = classification.is_none();
+        let owes_only_seed = match classification {
             Some(owed) => Ok(owed.is_some_and(|(owed, _)| owed.hash() == repair.hash())),
             None => server.sync.with_registry_context(|g, d, _, _| {
                 store.held_registry_repair_applied(id, g, bucket, d)
@@ -567,18 +569,13 @@ impl CatchupRuntime {
                 self.await_repaired_seed(server, store, id, scope, Some(target), &repair, &pair);
                 if self.seed_fetch_settled(scope, now) {
                     self.defer_visit(scope, now);
+                } else if guessed && server.sync.studio_page_peers().is_empty() {
+                    // As for a cold Studio source (PR #36 review HIGH-1): B3 only guessed, and
+                    // there is no peer to fetch from at all, so resume and let S3 classify exactly.
+                    self.schedule_resume(server, store, id, scope, Some(target), now);
                 }
             }
-            Ok(false) => {
-                // As for a Studio target, a started job defers this bucket's next visit.
-                match self.start_repair(server, store, id, scope, Some(target), RepairInput::Resume)
-                {
-                    RepairSchedule::Scheduled | RepairSchedule::Held => {
-                        self.defer_visit(scope, now)
-                    }
-                    RepairSchedule::Busy | RepairSchedule::Full => {}
-                }
-            }
+            Ok(false) => self.schedule_resume(server, store, id, scope, Some(target), now),
             Err(error) => {
                 self.note_repair_failure(target, &error);
                 self.defer_visit(scope, now);
@@ -647,8 +644,9 @@ impl CatchupRuntime {
                 // the router resumes on the spot if the install had landed. Once this target has
                 // been deferred before (that fetch, or anything else, came to nothing), resume
                 // instead: the job classifies exactly at S3, so recovering a landed install never
-                // depends on some peer serving the seed (re-review LOW-1). A seed still owed is
-                // then fetched from the job's finish, at most once per deferral window.
+                // depends on some peer serving the seed (re-review LOW-1). A fetch that cannot
+                // even start resumes at once (below). A seed still owed is then fetched from the
+                // job's finish.
                 Ok(true) if !self.repair_visits.contains_key(&scope) => {
                     Some((held.clone(), held_pair))
                 }
@@ -663,25 +661,58 @@ impl CatchupRuntime {
         if let Some((owed, pair)) = owed {
             // B2 already crossed for this decision; only its seed is missing. A resume would just
             // flush the same source again, so fetch the seed instead. Only this target's own
-            // started fetch defers its next visit; one that could not start yet asks again soon.
+            // started fetch defers its next visit.
             self.await_repaired_seed(server, store, id, scope, Some(target), &owed, &pair);
             if self.seed_fetch_settled(scope, now) {
                 self.defer_visit(scope, now);
+                return Ok(None);
             }
-            return Ok(None);
+            let alone = server.sync.studio_page_peers().is_empty();
+            if warm || !alone {
+                // Classified exactly, or a peer can be asked once the slot frees (another pass
+                // out, a discovery pending). No job would help yet: the next visit asks again, at
+                // the cost of a read, and a fetch that then comes to nothing defers this target,
+                // after which a cold visit resumes (above).
+                return Ok(None);
+            }
+            // Cold, B3 only guessed "just the seed", and there is no peer to fetch it from at
+            // all. Nothing would ever defer this target, so every visit guessed again and never
+            // resumed, and an owner alone could not recycle an install already on its own disk
+            // (PR #36 review HIGH-1). Resume instead: the job classifies exactly at S3, and a
+            // scheduled job defers this target like a started fetch, so this costs at most one
+            // job per deferral window.
         }
-        // A started job counts like a started fetch: it defers this target's next visit, so the
-        // owner runs at most one resume job per deferral window, whatever the job's finish could
-        // start. Without it, an owed cold source whose finish cannot fetch (another pass out, a
-        // discovery pending) and which ordinary catch-up evicts again before the next visit
-        // reran capture, rebuild and a B2 flush on every visit (second re-review MEDIUM). A
-        // terminal outcome clears the deferral; a hold only defers. `Busy` is another job or a
-        // full pool, retried on the ordinary cadence.
-        match self.start_repair(server, store, id, scope, Some(target), RepairInput::Resume) {
+        self.schedule_resume(server, store, id, scope, Some(target), now);
+        Ok(None)
+    }
+
+    /// Schedule the owner's resume job for `scope`, a Studio target or a bucket. A started job
+    /// counts like a started fetch: it defers this target's next visit, so the owner runs at most
+    /// one resume job per deferral window, whatever the job's finish could start. Without it, an
+    /// owed cold source whose finish cannot fetch (another pass out, a discovery pending) and
+    /// which ordinary catch-up evicts again before the next visit reran capture, rebuild and a B2
+    /// flush on every visit (second re-review MEDIUM). A terminal outcome clears the deferral; a
+    /// hold only defers. `Busy` is another job or a full pool, retried on the ordinary cadence.
+    fn schedule_resume<T: MeshTransport, R: CryptoRngCore>(
+        &mut self,
+        server: &mut Server<T, R>,
+        store: &mut ServerStore,
+        id: u64,
+        scope: CheckpointTarget,
+        failure_target: Option<StudioTarget>,
+        now: u64,
+    ) {
+        match self.start_repair(
+            server,
+            store,
+            id,
+            scope,
+            failure_target,
+            RepairInput::Resume,
+        ) {
             RepairSchedule::Scheduled | RepairSchedule::Held => self.defer_visit(scope, now),
             RepairSchedule::Busy | RepairSchedule::Full => {}
         }
-        Ok(None)
     }
 
     /// S3 of an explicit decision: issuance, B1 and Flow A in the unchanged transaction, on the

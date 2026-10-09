@@ -4,6 +4,34 @@ Owner: Agent 3 ([assignment](GATE4-AGENT-HANDOFFS.md#agent-3-runtime-signed-faul
 Proposal: [GATE4-AGENT-3-DESIGN](GATE4-AGENT-3-DESIGN.md), revision 16 follow-up.
 Review preamble: 3. Current entries override older ones.
 
+## PR #36 review: dispositions, 2026-10-09
+
+An external adversarial review of `0ad625e0`, the PR head after merging `gate4-agent1-runtime`,
+requested changes: one HIGH and two MEDIUM. All three were confirmed against the code and fixed.
+
+| Finding | Disposition |
+|---|---|
+| HIGH-1: an owner alone after a crash between install and recycle never recovered. The source was cold, so B3 guessed "only the seed is missing", and with no peer the fetch could not even start. Nothing deferred the target, so every visit guessed again and never resumed. | **Fixed.** A cold guess with no peer to fetch from resumes at once, and S3 classifies exactly. A bucket whose provider is unknown does the same. A scheduled resume still defers its target (`schedule_resume`, now shared by both kinds), so this costs at most one job per deferral window. Tests: `an_owner_alone_after_a_crash_between_install_and_recycle_still_recycles` (Bob removed, so no peers: the first visit resumes and recycles) and `registry::an_owner_alone_whose_bucket_seed_cannot_be_fetched_resumes_instead`. |
+| MEDIUM-1: an offer of the same repair while its job ran was answered `Scheduled` and its receipt dropped, so S3 could hold as unverifiable a repair it could now verify. | **Fixed.** `RepairInput::absorb` keeps a receipt the repair names when the running job has none that it names. S3 still verifies everything. `Replace` keeps its first seed, which was already checked against the selected receipt. Test: `two_peer::a_repeated_offer_brings_the_receipt_its_running_job_lacked`. |
+| MEDIUM-2: an offered repair's S1 or S2 failure, its S3 budget failure, or a document this device has no copy of, held the whole document. | **Fixed.** `end_repair_job` holds only the offered repair at every stage, and so does an absent copy. Test: `two_peer::an_offer_for_a_document_this_peer_lacks_holds_only_that_offer`. |
+| Tracked risk: a peer's repaired-seed refetch is unpaced. | Unchanged follow-up, as recorded below. |
+
+A short static re-review of these fixes found no BLOCKER or HIGH, confirmed all three, and
+raised two LOW:
+- **LOW-1, a refinement, taken.** The immediate resume now applies only when there is no peer
+  at all; a cold guess behind a merely busy slot waits a visit rather than paying a whole job.
+  Test: `a_cold_guess_behind_a_busy_slot_waits_rather_than_resumes`.
+- **LOW-2, wording fixed.** THREAT-MODEL said every stop of an offered repair holds only that
+  repair. An applied offer that then needs the user (a recovery warning, a storage refusal)
+  rightly holds the document, since that hold is the device's own state.
+
+**Harness.** Five new runtime mutants (31 in all): `RUNTIME-cold-guess-without-fetch-resumes`,
+`RUNTIME-busy-slot-waits`, `RUNTIME-bucket-guess-without-fetch-resumes`,
+`RUNTIME-repeat-offer-keeps-evidence` and `RUNTIME-absent-copy-holds-offer`.
+`RUNTIME-offer-holds-repair-only` now lands in the shared `end_repair_job`, and
+`RUNTIME-scheduled-resume-defers` in `schedule_resume`. Subset runs detected all seven at their
+intended assertions and passed each restored control.
+
 ## Re-review of the fairness fixes: dispositions, 2026-10-09
 
 The short re-review of the entry below found no BLOCKER and no HIGH, and confirmed each claimed

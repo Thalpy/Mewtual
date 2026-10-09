@@ -1765,6 +1765,93 @@ async fn the_router_resumes_a_landed_install_only_under_a_current_snapshot() {
     assert_eq!(runtime.repair_job_target(), Some(scope));
 }
 
+/// PR #36 review HIGH-1: recovering from a crash between install and recycle must not need
+/// another device. The owner restarts cold and alone, so the first visit's seed fetch cannot even
+/// start, and nothing deferred the target: every visit guessed "only the seed is missing" from B3
+/// again and never resumed. Now a cold guess whose fetch cannot start resumes at once; the job
+/// finds the install already landed and recycles, with no network at all.
+#[tokio::test]
+async fn an_owner_alone_after_a_crash_between_install_and_recycle_still_recycles() {
+    let mut owed = Owed::new(true).await;
+    let (mut runtime, _pool) = owed.runtime(4);
+    let (scope, target) = (owed.scope(), owed.target);
+    crash_after_install(&mut owed, &mut runtime).await;
+    // Alone: the only other member is removed, so no peer can serve any seed.
+    let bob = owed._bob.my_fingerprint();
+    owed.alice.remove_member(&bob).await.unwrap();
+    assert!(owed.alice.sync.studio_page_peers().is_empty());
+    evict(&mut owed);
+    runtime.owner_snapshot = Some(owed.snapshot());
+    let watch = owed
+        .alice
+        .watch_studio_epoch(&owed.store, SERVER, target)
+        .unwrap();
+    let watches = VecDeque::from([(watch, 0)]);
+    owed.clock.advance_ms(5_001);
+    runtime
+        .repair_owner(&mut owed.alice, &mut owed.store, SERVER, &watches)
+        .unwrap();
+    assert!(runtime.checkpoint.is_none(), "no peer, so no fetch");
+    assert_eq!(
+        runtime.repair_job_target(),
+        Some(scope),
+        "a cold visit whose fetch cannot start resumes"
+    );
+    rebuild(&mut runtime, &owed).await;
+    runtime
+        .repair_commit(&mut owed.alice, &mut owed.store, SERVER)
+        .unwrap();
+    assert_eq!(
+        runtime.repair_report(scope),
+        Some(StudioRepairReport::Completed(
+            StudioRepairOutcome::AlreadyRepaired
+        ))
+    );
+    let logical = target.document(&owed.alice.group_id()).unwrap();
+    assert!(
+        owed.store
+            .load_epoch_owner_receipts(SERVER, &logical)
+            .is_ok(),
+        "the owner record is recycled with no peer at all"
+    );
+}
+
+/// The refinement of PR #36 review HIGH-1 from its re-review: with a peer to ask, a cold B3 guess
+/// whose fetch cannot start only because the slot is busy waits a visit rather than paying a
+/// whole job. Nothing defers it, and the next visit, the slot free, fetches the seed.
+#[tokio::test]
+async fn a_cold_guess_behind_a_busy_slot_waits_rather_than_resumes() {
+    let mut owed = Owed::new(true).await;
+    let (mut runtime, _pool) = owed.runtime(4);
+    let (scope, target) = (owed.scope(), owed.target);
+    evict(&mut owed);
+    let watch = owed
+        .alice
+        .watch_studio_epoch(&owed.store, SERVER, target)
+        .unwrap();
+    let watches = VecDeque::from([(watch, 0)]);
+    // Another target's discovery is in flight, so no fetch can start this turn.
+    runtime.in_flight = true;
+    runtime
+        .repair_owner(&mut owed.alice, &mut owed.store, SERVER, &watches)
+        .unwrap();
+    assert!(
+        runtime.repair_job_target().is_none(),
+        "a busy slot waits; it does not resume"
+    );
+    assert!(runtime.checkpoint.is_none());
+    assert!(!runtime.repair_visits.contains_key(&scope), "nor defers");
+    runtime.in_flight = false;
+    owed.clock.advance_ms(5_000);
+    runtime
+        .repair_owner(&mut owed.alice, &mut owed.store, SERVER, &watches)
+        .unwrap();
+    assert!(
+        runtime.checkpoint.is_some(),
+        "the slot free, the next visit fetches the seed"
+    );
+}
+
 /// Re-review MEDIUM-1: once the person acknowledges the recovery warning that held a document,
 /// its doubled backoff describes nothing any more. A successful Acknowledge clears it, for the
 /// source and its bucket, so the next 5 s visit acts instead of up to 15 min later.

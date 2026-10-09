@@ -212,6 +212,47 @@ core.MUTATIONS = [
         "a job on every visit",
     ),
     (
+        # PR #36 review HIGH-1: a cold B3 guess whose fetch cannot start resumes instead.
+        "RUNTIME-cold-guess-without-fetch-resumes", REPAIR,
+        "            if warm || !alone {\n",
+        "            if true || warm || !alone {\n",
+        "an_owner_alone_after_a_crash_between_install_and_recycle_still_recycles",
+        "a cold visit whose fetch cannot start resumes",
+    ),
+    (
+        # ... but only with no peer at all: a busy slot waits a visit instead of paying a job.
+        "RUNTIME-busy-slot-waits", REPAIR,
+        "            if warm || !alone {\n",
+        "            if warm || (false && !alone) {\n",
+        "a_cold_guess_behind_a_busy_slot_waits_rather_than_resumes",
+        "a busy slot waits; it does not resume",
+    ),
+    (
+        # ... and for a bucket whose provider is unknown.
+        "RUNTIME-bucket-guess-without-fetch-resumes", REPAIR,
+        "                } else if guessed && server.sync.studio_page_peers().is_empty() {\n",
+        "                } else if false && guessed && server.sync.studio_page_peers().is_empty() {\n",
+        REGISTRY + "an_owner_alone_whose_bucket_seed_cannot_be_fetched_resumes_instead",
+        "a guessed seed that cannot be fetched resumes",
+    ),
+    (
+        # PR #36 review MEDIUM-1: a repeated offer's receipt reaches the running job's S3.
+        "RUNTIME-repeat-offer-keeps-evidence", JOB,
+        "            if !offered.as_deref().is_some_and(named) && named(&new) {\n",
+        "            if false && !offered.as_deref().is_some_and(named) && named(&new) {\n",
+        TWO_PEER + "a_repeated_offer_brings_the_receipt_its_running_job_lacked",
+        "S3 used the receipt the second answer brought",
+    ),
+    (
+        # PR #36 review MEDIUM-2: an offer for an absent copy holds that offer, not the document.
+        "RUNTIME-absent-copy-holds-offer", JOB,
+        "                    Some(repair) => self.hold_offer(target, repair, now),\n"
+        "                    None => self.hold_repair(target, now),\n",
+        "                    Some(_) | None => self.hold_repair(target, now),\n",
+        TWO_PEER + "an_offer_for_a_document_this_peer_lacks_holds_only_that_offer",
+        "that offer is held",
+    ),
+    (
         # Re-review LOW-2: the router's resume needs a current durable snapshot.
         "RUNTIME-landed-install-needs-snapshot", REPAIR,
         "        if self.current_owner_snapshot(server, store, id).is_err() {\n",

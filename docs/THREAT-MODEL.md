@@ -62,9 +62,13 @@ table with the commit that closed it.
   fresh read verified against the live budget. Its writer re-reads the bytes once more before
   writing. The authority checks are the custody path's own: V5, channel, durable snapshot, owner
   refusal for Flow A, and `verify_current_owner`. Offered bucket repairs pass the same owner and
-  authoring-tenure pre-check before capture as Studio's. A held outcome or a failed commit of an
-  offered repair, Studio or Registry, holds that repair rather than its target, so a replayed
-  older repair cannot keep a target's legitimate replacement from being fetched.
+  authoring-tenure pre-check before capture as Studio's. Every failure or held outcome of an
+  offered repair, Studio or Registry, at any stage (no local copy, a failed capture or rebuild, a
+  held outcome, a failed commit), holds that repair rather than its target, so a replayed older
+  repair cannot keep a target's legitimate replacement from being fetched. An offered repair that
+  was applied and now needs the user (a recovery warning, a storage refusal) holds the document,
+  since that hold is this device's own state. The same repair offered again while its
+  job runs may complete that job's evidence; it is never trusted beyond what S3 verifies.
   The router still classifies a pending replacement only from the exact-current verified source
   already retained by the bounded preparation boundary; a held owner decision is read from the
   bounded owner record. Missing, cold, stale, retargeted or unreadable preparation is unknown and
@@ -93,8 +97,10 @@ table with the commit that closed it.
   deferral state lives in memory, so a restart starts every target afresh. A page fetched before
   an S3 that rewrote its source is dropped, never saved against the repaired source. After a
   crash between an owner's replacement install and its record's recycle, the router resumes the
-  decision as soon as it finds the source owing nothing behind it; if no peer serves the seed,
-  the owner's next visit resumes instead of fetching again.
+  decision as soon as it finds the source owing nothing behind it. If no fetch can start (an
+  owner alone has no peer at all), the owner resumes at once, and if a fetch comes to nothing,
+  its next visit resumes, so recovering an install already on the owner's disk never needs
+  another device.
 
 - **Automatic recovery is conservative and author-local.** Studio replay checks the complete
   own envelope, every retained/staged historical selection and the fresh current projection.

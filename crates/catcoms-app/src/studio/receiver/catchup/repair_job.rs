@@ -105,6 +105,38 @@ impl RepairInput {
     fn explicit(&self) -> bool {
         matches!(self, Self::Decide(_))
     }
+
+    /// The offered repair's hash, if this job applies one. Whatever stops an offered repair is
+    /// charged to that repair, never to its target (`hold_offer`): an offer is untrusted input.
+    fn offered_repair(&self) -> Option<[u8; 32]> {
+        match self {
+            Self::Offered { repair, .. } => Some(repair.hash()),
+            _ => None,
+        }
+    }
+
+    /// Keep evidence that a repeated request for the same work brings and this job lacks. An
+    /// offered repair's pair is assembled at S3 from the rebuilt source plus the receipt its
+    /// answer offered, and the same signed repair can arrive again, while this job runs, with the
+    /// receipt the first answer lacked. Dropping it left S3 unable to verify a repair it now could,
+    /// holding that repair for a minute (PR #36 review MEDIUM-1). Nothing here is trusted: S3
+    /// uses the receipt only if the repair names its hash, and the transaction checks it all. A
+    /// receipt the repair names is never replaced. `Replace` keeps its first seed: that seed was
+    /// already checked against the selected receipt under this device's observed tenure.
+    fn absorb(&mut self, other: Self) {
+        if let (
+            Self::Offered { repair, offered },
+            Self::Offered {
+                offered: Some(new), ..
+            },
+        ) = (self, other)
+        {
+            let named = |receipt: &Receipt| repair.receipt_hashes.contains(&receipt.hash());
+            if !offered.as_deref().is_some_and(named) && named(&new) {
+                *offered = Some(new);
+            }
+        }
+    }
 }
 
 /// S2's input: the bounded authenticated capture, nothing else.
@@ -243,8 +275,8 @@ impl CatchupRuntime {
             .is_some_and(|job| matches!(job.stage, RepairStage::Ready(..)))
     }
 
-    /// S1. Reserve before reading, claim, capture. Never pauses catch-up: every failure here is
-    /// that target's hold, surfaced through the failure slot.
+    /// S1. Reserve before reading, claim, capture. Never pauses catch-up: every failure here is a
+    /// hold (the target's, or only the offered repair's), surfaced through the failure slot.
     pub(super) fn start_repair<T: MeshTransport, R: CryptoRngCore>(
         &mut self,
         server: &mut Server<T, R>,
@@ -255,8 +287,10 @@ impl CatchupRuntime {
         input: RepairInput,
     ) -> RepairSchedule {
         let now = server.runtime_clock().monotonic_ms();
-        if let Some(job) = &self.repair_job {
+        if let Some(job) = &mut self.repair_job {
             return if job.target == target && job.input.same_work(&input) {
+                // The same work again may carry evidence the running job lacks; keep it for S3.
+                job.input.absorb(input);
                 RepairSchedule::Scheduled
             } else {
                 RepairSchedule::Busy
@@ -298,18 +332,24 @@ impl CatchupRuntime {
         let rebuild = match captured {
             Ok(Some(rebuild)) => rebuild,
             // A device holding no copy of this document has nothing to repair. That is ordinary
-            // for automatic work, so it is only held; an explicit decision is told why.
+            // for automatic work, so it is only held: an offered repair holds itself, so a copy
+            // that arrives later is not kept from another repair (PR #36 review MEDIUM-2); the
+            // owner's own work holds the target. An explicit decision is told why.
             Ok(None) if !input.explicit() => {
-                self.hold_repair(target, now);
+                match input.offered_repair() {
+                    Some(repair) => self.hold_offer(target, repair, now),
+                    None => self.hold_repair(target, now),
+                }
                 return RepairSchedule::Held;
             }
             Ok(None) => {
                 let absent = invalid("a repair never creates a source");
-                self.end_repair_job(target, failure_target, &absent, now);
+                self.end_repair_job(target, failure_target, None, &absent, now);
                 return RepairSchedule::Held;
             }
             Err(error) => {
-                self.end_repair_job(target, failure_target, &error, now);
+                let offered = input.offered_repair();
+                self.end_repair_job(target, failure_target, offered, &error, now);
                 return RepairSchedule::Held;
             }
         };
@@ -372,7 +412,8 @@ impl CatchupRuntime {
             }
             RepairCompletion::Rebuilt(_, Err(error)) => {
                 let job = self.repair_job.take().expect("live job");
-                self.end_repair_job(job.target, job.failure_target, &error, now);
+                let offered = job.input.offered_repair();
+                self.end_repair_job(job.target, job.failure_target, offered, &error, now);
             }
             RepairCompletion::Cancelled(_) => {
                 let job = self.repair_job.take().expect("live job");
@@ -383,17 +424,23 @@ impl CatchupRuntime {
     }
 
     /// Every way a job can end without committing reports for its target, so a fault view never
-    /// shows an earlier job's outcome as this one's. Failures that persist also hold the target.
+    /// shows an earlier job's outcome as this one's. A failure also holds: the target for the
+    /// device's own work, and for an `offered` repair only that repair, at every stage, so an
+    /// untrusted offer never backs off its document (PR #36 review MEDIUM-2).
     fn end_repair_job(
         &mut self,
         target: CheckpointTarget,
         failure_target: Option<StudioTarget>,
+        offered: Option<[u8; 32]>,
         error: &AppError,
         now: u64,
     ) {
         self.note_repair_failure_for(failure_target, error);
         self.report_repair(target, Err(error));
-        self.hold_repair(target, now);
+        match offered {
+            Some(repair) => self.hold_offer(target, repair, now),
+            None => self.hold_repair(target, now),
+        }
     }
 
     /// Checked every turn: a new tenure or MLS epoch abandons the job at any stage. A detached
@@ -462,14 +509,11 @@ impl CatchupRuntime {
         let RepairStage::Ready(rebuilt, ownership) = stage else {
             unreachable!("checked by repair_parked")
         };
-        let offered = match &input {
-            RepairInput::Offered { repair, .. } => Some(repair.hash()),
-            _ => None,
-        };
+        let offered = input.offered_repair();
         let mut budget = match budget {
             Ok(budget) => budget,
             Err(error) => {
-                self.end_repair_job(target, failure_target, &error, now);
+                self.end_repair_job(target, failure_target, offered, &error, now);
                 return Ok(None);
             }
         };
@@ -493,14 +537,7 @@ impl CatchupRuntime {
             // use refuses the old graph anyway; dropping it now also frees its pool slot.
             self.invalidate_registry_provider();
         }
-        match offered {
-            Some(repair) => {
-                self.note_repair_failure_for(failure_target, &error);
-                self.report_repair(target, Err(&error));
-                self.hold_offer(target, repair, now);
-            }
-            None => self.end_repair_job(target, failure_target, &error, now),
-        }
+        self.end_repair_job(target, failure_target, offered, &error, now);
         Ok(None)
     }
 

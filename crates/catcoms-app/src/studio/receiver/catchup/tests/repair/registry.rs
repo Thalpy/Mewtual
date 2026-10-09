@@ -440,6 +440,36 @@ async fn an_owner_whose_bucket_owes_only_its_seed_fetches_it_without_a_job() {
     assert_eq!(minted.inner.selected_receipt(), &fault.chosen);
 }
 
+/// PR #36 review HIGH-1, for buckets: with the provider unknown, the record's B3 flag alone says
+/// only the seed is missing. If that seed fetch cannot even start (here no peer at all), the
+/// resume runs instead, which classifies exactly at S3, rather than the same guess every turn.
+#[tokio::test]
+async fn an_owner_alone_whose_bucket_seed_cannot_be_fetched_resumes_instead() {
+    let mut owed = Owed::new(false).await;
+    let fault = Bucket::new(&mut owed, true);
+    fault.decide_directly(&mut owed);
+    let bob = owed._bob.my_fingerprint();
+    owed.alice.remove_member(&bob).await.unwrap();
+    assert!(owed.alice.sync.studio_page_peers().is_empty());
+    let (mut runtime, _pool) = owed.runtime(4);
+    let resumed = runtime
+        .resume_registry_repair(
+            &mut owed.alice,
+            &mut owed.store,
+            SERVER,
+            owed.target,
+            fault.bucket,
+        )
+        .unwrap();
+    assert!(resumed, "a held decision owns the bucket's turn");
+    assert!(runtime.checkpoint.is_none(), "no peer, so no fetch");
+    assert_eq!(
+        runtime.repair_job_target(),
+        Some(fault.scope()),
+        "a guessed seed that cannot be fetched resumes"
+    );
+}
+
 #[tokio::test]
 async fn an_offered_bucket_repair_this_device_cannot_verify_holds_only_that_repair() {
     let mut owed = Owed::new(false).await;
