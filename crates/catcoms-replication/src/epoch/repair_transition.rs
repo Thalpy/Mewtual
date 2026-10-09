@@ -264,7 +264,7 @@ impl RepairSource<'_> {
         repair: &ReceiptRepair,
         a: &Receipt,
         b: &Receipt,
-        group: &ServerGroup,
+        group: &(impl OwnerAuthority + ?Sized),
         issuer_tenure: u64,
     ) -> Result<SourceRepairOutcome, ReplError> {
         match self.plan(repair, a, b, group, issuer_tenure)? {
@@ -282,7 +282,7 @@ impl RepairSource<'_> {
         repair: &ReceiptRepair,
         a: &Receipt,
         b: &Receipt,
-        group: &ServerGroup,
+        group: &(impl OwnerAuthority + ?Sized),
         issuer_tenure: u64,
     ) -> Result<RepairPlan, ReplError> {
         repair.verify_current_owner(group, issuer_tenure)?;

@@ -15,7 +15,7 @@ use catcoms_mls::{MlsDevice, ServerGroup};
 use catcoms_wire::{Decoder, DocType, Encoder};
 use sha2::{Digest, Sha256};
 
-use crate::{EncryptedDoc, ReplError, SignedOp};
+use crate::{EncryptedDoc, OwnerAuthority, ReplError, SignedOp};
 
 /// Maximum canonical bytes in a domain-operation envelope.
 pub const MAX_DOMAIN_OP_BYTES: usize = 64 * 1024;
@@ -1124,7 +1124,7 @@ impl Receipt {
     /// same device becomes owner in two non-contiguous tenures: an old receipt would still verify.
     pub fn verify_current_owner(
         &self,
-        group: &ServerGroup,
+        group: &(impl OwnerAuthority + ?Sized),
         expected_tenure_start_group_epoch: u64,
     ) -> Result<VerifiedReceipt, ReplError> {
         if self.document.server_id != group.group_id() {
@@ -1375,7 +1375,7 @@ impl ReceiptRepair {
     /// issuer-tenure observation must hold, never substitute the repair's own claimed epoch.
     pub fn verify_current_owner(
         &self,
-        group: &ServerGroup,
+        group: &(impl OwnerAuthority + ?Sized),
         expected_issuer_tenure_start: u64,
     ) -> Result<(), ReplError> {
         if self.document.server_id != group.group_id() {
@@ -1762,7 +1762,7 @@ impl ReceiptBook {
     pub fn apply_repair(
         &mut self,
         repair: &ReceiptRepair,
-        group: &ServerGroup,
+        group: &(impl OwnerAuthority + ?Sized),
         expected_issuer_tenure_start: u64,
     ) -> Result<(ReceiptRepairIngest, Receipt), ReplError> {
         // Authority must precede the retry shortcut: a returning key is not its old tenure.

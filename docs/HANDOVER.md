@@ -10,6 +10,27 @@ and ranks the live hazards in that path.
 
 ## Status (latest entry: 2026-10-09)
 
+- **Gate 4 repair: real-peer Registry Flow D and plan D (2026-10-09).** A peer now takes a bucket
+  repair from a real discovery answer and installs its network-fetched replacement through the
+  router's Replace job, all through spawned actors. A replayed repair held by the transaction
+  holds only itself on a real peer. Plan D's remaining items each have a test:
+  - another actor progressing while an S2 is paused;
+  - S3 with a pending page on the claimed target;
+  - fairness across held targets;
+  - crash recovery through the job.
+
+  Fairness needed a runtime change. The owner resume's single shared cadence, which any held
+  target pushed to 60 s, is now a per-target visit deferral that doubles while it repeats (60 s to
+  a 15 min cap). It resets on a terminal outcome, a new decision, or the person acknowledging the
+  document's recovery warning. Its review added two more fixes. The router itself now resumes an
+  install that landed just before a crash, and a cold owner resumes rather than refetching once a
+  fetch has come to nothing. S3 now drops a page fetched for the source it rewrote, which before
+  could pause catch-up. The PR #36 review added three more: an owner alone (no peer at all)
+  still recovers from that crash; the same repair offered again while its job runs completes
+  that job's evidence; and an offered repair's failure at any stage holds only that repair, never
+  its document. Still open: a peer's repaired-seed refetch is not paced (pre-existing), hosted
+  CI on PR #36 and a bounded repair verdict. Details are in `GATE4-AGENT-3-STATUS.md`.
+
 - **Gate 4 Agent 1: C-3 step 2, F1 and F4 (2026-10-09).**
   - **C-3 step 2:** replay's manual move now takes its storage budget from a shared, turn-based
     inventory job that keeps a cursor across custody visits, the first production path to do so.
@@ -98,6 +119,75 @@ and ranks the live hazards in that path.
     - the A' product decision (design 9.6).
 
     P5 remains false.
+
+- **Gate 4 repair runtime evidence (2026-10-06).** A two-peer run through spawned actors now
+  covers:
+  - a real Fault;
+  - the owner's decision as a job;
+  - a peer applying the owner's repair and installing its replacement with a seed fetched over the
+    network;
+  - a restart;
+  - a document newcomer installing the repaired version.
+
+  The run found that a faulted peer's late reports were staged again after the owner's repair
+  finished. That suppressed proof of the selected receipt, so no newcomer could install the
+  repaired document. Such a report is now answered by the repair the source carries (see
+  THREAT-MODEL).
+
+  The run also confirmed a protocol limit: after an owner succession, no fresh MLS member can
+  join until a succession proof exists.
+
+  New: a 12-mutant runtime harness with its own workflow (`agent3-repair-runtime.yml`) and an
+  opt-in S3 cost profile. Still open: Registry Flow D on a real peer and a bounded repair
+  verdict. Details are in `GATE4-AGENT-3-STATUS.md`.
+
+- **Gate 4 detached Registry repair job (2026-10-06).** Agent 4's Registry fail-closed gate is
+  removed: every Registry repair path now runs through the same design 10.3 job as a Studio
+  source, scoped to the bucket. That covers:
+  - the explicit `RepairRegistryFault`;
+  - Flow D from Registry discovery answers;
+  - the owner's resume of a held bucket decision;
+  - the owed bucket replacement.
+
+  How the bucket job differs from the Studio job:
+  - **S1** reads bounded authenticated bytes and **S2** rebuilds the bucket detached
+    (`RegistryEpoch::prepare_vault_source`).
+  - **S3** hands the rebuild to the unchanged issue/apply transaction. That transaction
+    rechecks context, digest, physical size and the live budget, and its writer re-reads the
+    bytes before using the rebuild. A stale rebuild is an ordinary rerun.
+  - Owed-repair facts come from the retained prepared provider; an unknown fact defers. Nothing
+    restores a bucket under custody to decide.
+  - The bucket claim also stops Registry maintenance and page persistence for that bucket.
+
+  Still open:
+  - Registry Flow D on a real second peer;
+  - the two-peer scenario;
+  - the S3 cost measurement;
+  - claims on gossip ingest, replay and Flow S/H.
+
+  Native repair commands remain unregistered, P5 is false and Gate 4 remains open. Details are
+  in `GATE4-AGENT-3-STATUS.md`.
+
+- **Gate 4 detached Studio repair job (2026-10-06).** Studio fault repair runs again, but only as
+  Agent 3's design 10.3 job; Agent 4's fail-closed gate (`3fcde979`) then covered Registry alone,
+  until the Registry job above removed it.
+  - **S1:** reserves a shared preparation-pool slot and a per-target live claim before any body
+    read, then captures the bounded plaintext.
+  - **S2:** rebuilds the source detached.
+  - **S3:** installs the rebuild only if its context and digest still match disk, then runs the
+    unchanged Server transaction (issuance, resume, Flow D or the owed replacement).
+  - **S4:** drops the slot and claim after the attempt.
+
+  Explicit decisions answer `RepairStarted`, or an error when they cannot start (including while
+  catch-up is paused). The fault view reports a `Scheduled` blocker and a bounded `lastAttempt`
+  for every way a job ends. Offered repairs are authority-checked before capture. The repaired
+  replacement is installed through the same job. The core gained a sealed owner-authority view
+  for a later detached adoption half.
+
+  At the time the Registry job was still open (since built, above), with the two-peer scenario,
+  the S3 cost measurement, and claims on gossip ingest, replay and Flow S/H. Native repair
+  commands remain unregistered, P5 is false and Gate 4 remains open. Details are in
+  `GATE4-AGENT-3-STATUS.md`.
 
 - **Gate 4 Agent 2: the Unconfirmed Save through the actor, 8.6 reconciliation, N-T5 and the
   cross-document copy regressions (2026-10-06).** This updates the 2026-10-05 entry's "Unconfirmed Flow S and its app-side

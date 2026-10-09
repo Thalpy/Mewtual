@@ -911,6 +911,166 @@ fn sorted_pair(a: &Receipt, b: &Receipt) -> [Receipt; 2] {
     pair
 }
 
+/// Review AG3-IMP-003 on `02280999`: report admission is evidence persistence and precedes the
+/// head's Fault refusal (design 6.5, U-7). While the owner's own source is Faulted on A, an
+/// independently authorized report of another pair B must cross B0 and stay retained although
+/// the same request is then refused service. The answered-report check must not move B0 behind
+/// a source read. Warm and cold sources, and B independent of A or sharing one of its receipts
+/// (the three-receipt shape).
+#[test]
+fn a_faulted_owner_source_retains_another_reported_pair_before_refusing_service() {
+    for (warm, shared) in [(true, false), (true, true), (false, false), (false, true)] {
+        let root = tempfile::tempdir().unwrap();
+        let mut store = open(root.path());
+        let f = Fixture::new(false);
+        let mut b = budget(&mut store, &f);
+        f.edit(&mut store, &mut b, f.insert());
+        let (a1, a1_seed) = checkpoint(&f, &store, 10, 10);
+        let (a2, _) = checkpoint(&f, &store, 10, 11);
+        let (b1, _) = checkpoint(&f, &store, 10, 12);
+        let (b2, _) = checkpoint(&f, &store, 10, 13);
+        adopt(&f, &mut store, &a1, None);
+        adopt(&f, &mut store, &a2, None);
+        let faulted = f.load(&store).unwrap();
+        assert_eq!(faulted.phase(), EpochPhase::Fault);
+        if warm {
+            store.retain_studio_source(&f.group, &f.device, faulted);
+        }
+        let source = fs::read(f.path(&store)).unwrap();
+        let a = sorted_pair(&a1, &a2);
+        let reported = if shared {
+            sorted_pair(&a1, &b1)
+        } else {
+            sorted_pair(&b1, &b2)
+        };
+        let hashes = [reported[0].hash(), reported[1].hash()];
+
+        let mut b = budget(&mut store, &f);
+        let answer = store.prepare_studio_head_with_fault_repair(
+            SERVER,
+            &f.group,
+            f.target,
+            &f.device,
+            Some(0),
+            None,
+            Some(&reported),
+            &mut rng(),
+            &mut b,
+        );
+        assert!(
+            answer.is_err(),
+            "a Faulted or unprepared source still refuses service (warm {warm})"
+        );
+        assert_eq!(
+            fs::read(f.path(&store)).unwrap(),
+            source,
+            "no winner was chosen"
+        );
+        let reserved = |store: &ServerStore| {
+            store
+                .load_epoch_owner_repair_state(SERVER, &f.logical, &f.device.device_id(), 0)
+                .unwrap()
+                .0
+                .retained_pairs()
+                .1
+                .map(|pair| pair.hashes())
+        };
+        assert_eq!(
+            reserved(&store),
+            Some(hashes),
+            "the report crossed B0 before the refusal (warm {warm}, shared {shared})"
+        );
+        drop(store);
+        let mut store = open(root.path());
+        assert_eq!(reserved(&store), Some(hashes), "and it survives a restart");
+
+        // Priority: the source's own fault is decided first; the retained pair waits behind it.
+        let decidable = |store: &mut ServerStore| {
+            let evidence = store
+                .studio_fault_evidence(SERVER, &f.group, f.target, &f.device, Some(0))
+                .unwrap()
+                .unwrap();
+            (
+                evidence.decidable.map(|d| [d[0].hash(), d[1].hash()]),
+                evidence.waiting,
+            )
+        };
+        assert_eq!(
+            decidable(&mut store),
+            (Some([a[0].hash(), a[1].hash()]), 1),
+            "A, the source's own fault, is decided first and B waits"
+        );
+        let (repair, _, _) = issue(&f, &mut store, request([&a1, &a2], &a1), None).unwrap();
+        let (outcome, _) = apply(&f, &mut store, &repair, &a, Some(a1_seed.bytes())).unwrap();
+        assert_eq!(outcome, StudioRepairOutcome::Installed);
+        assert_eq!(
+            decidable(&mut store).0,
+            Some(hashes),
+            "once A is resolved, B is the next decidable pair (shared {shared})"
+        );
+    }
+}
+
+/// Found by design 10.3's two-peer actor run. A faulted peer reports its frozen pair on every
+/// discovery until it has applied the repair, so some reports reach the owner after its own
+/// decision has finished and recycled the record. Staging one again reopened a decided pair: it
+/// suppressed proof of the very receipt the repair selected (no newcomer could install the
+/// repaired document) and offered the pair for a second decision. Such a report is answered by
+/// the repair the source carries; any other pair still stages.
+#[test]
+fn a_report_of_a_pair_the_owner_already_repaired_is_answered_not_restaged() {
+    let root = tempfile::tempdir().unwrap();
+    let mut store = open(root.path());
+    let f = Fixture::new(false);
+    let mut b = budget(&mut store, &f);
+    f.edit(&mut store, &mut b, f.insert());
+    let (chosen, seed) = checkpoint(&f, &store, 10, 10);
+    let (rival, _) = checkpoint(&f, &store, 10, 11);
+    let (other, _) = checkpoint(&f, &store, 10, 12);
+    adopt(&f, &mut store, &chosen, None);
+    adopt(&f, &mut store, &rival, None);
+    let pair = sorted_pair(&chosen, &rival);
+    let (repair, _, _) = issue(&f, &mut store, request([&chosen, &rival], &chosen), None).unwrap();
+    let (outcome, state) = apply(&f, &mut store, &repair, &pair, Some(seed.bytes())).unwrap();
+    assert_eq!(outcome, StudioRepairOutcome::Installed);
+    assert!(owner_is_ordinary(&f, &store), "the decision finished");
+    store.retain_studio_source(&f.group, &f.device, state);
+
+    // The peer's late report of exactly that pair.
+    let mut b = budget(&mut store, &f);
+    let (_, served) = store
+        .prepare_studio_head_with_fault_repair(
+            SERVER,
+            &f.group,
+            f.target,
+            &f.device,
+            Some(0),
+            None,
+            Some(&pair),
+            &mut rng(),
+            &mut b,
+        )
+        .unwrap();
+    assert_eq!(
+        served.as_ref(),
+        Some(&repair),
+        "the answer carries the repair that resolves the report"
+    );
+    assert!(
+        owner_is_ordinary(&f, &store),
+        "a pair the owner already repaired is not staged again"
+    );
+
+    // Exact pair only: a report this source carries no repair for still stages.
+    let state = f.load(&store).unwrap();
+    store.retain_studio_source(&f.group, &f.device, state);
+    head(&f, &mut store, Some(&sorted_pair(&chosen, &other)));
+    assert!(
+        !owner_is_ordinary(&f, &store),
+        "a different pair is still evidence the owner must decide"
+    );
+}
+
 /// N50 / CORE-005: the application consumes only the witness produced by a real, contiguous MLS
 /// retirement and carried through a durably saved sync snapshot. No test constructor or receipt
 /// claim supplies historical authority here.
@@ -1093,6 +1253,7 @@ async fn archived_observed_tenure_admits_only_its_exact_pair_after_restart() {
                 tenure,
                 None,
                 &alice_pair,
+                None,
                 random,
                 &mut studio_budget.storage,
             )
@@ -1114,6 +1275,7 @@ async fn archived_observed_tenure_admits_only_its_exact_pair_after_restart() {
                 tenure,
                 archive,
                 &alice_pair,
+                None,
                 random,
                 &mut studio_budget.storage,
             )
@@ -1142,6 +1304,7 @@ async fn archived_observed_tenure_admits_only_its_exact_pair_after_restart() {
                 tenure,
                 Some(archived),
                 &bob_pair,
+                None,
                 random,
                 &mut studio_budget.storage,
             )
@@ -1173,6 +1336,7 @@ async fn archived_observed_tenure_admits_only_its_exact_pair_after_restart() {
                 tenure,
                 None,
                 &bob_pair,
+                None,
                 random,
                 &mut studio_budget.storage,
             )
@@ -1794,4 +1958,95 @@ fn an_adopting_fault_replaces_only_after_repair_recovery_and_keeps_every_intent(
             "an exact retry stages nothing new"
         );
     }
+}
+
+/// Design 10.3's cost obligation: how long a repair job holds actor/store custody at a large
+/// source, with the detached S2 reported apart. Each stage runs through the same store call the
+/// job makes (`capture_studio_source`, `rebuild`, `install_prepared_studio_source`, then the
+/// unchanged transaction), so no second algorithm is timed. The cold custody restore printed
+/// beside it is what the synchronous repair paid inside custody before the job existed.
+///
+/// Millisecond `Clock` resolution, one sample per stage: these are orders of magnitude, not
+/// benchmarks, and nothing here asserts a speed.
+fn repair_job_stages(count: usize, clock: &dyn catcoms_rt::Clock) {
+    let timed = |run: &mut dyn FnMut()| {
+        let start = clock.monotonic_ms();
+        run();
+        clock.monotonic_ms().saturating_sub(start)
+    };
+    let root = tempfile::tempdir().unwrap();
+    let mut store = open(root.path());
+    // A Flipnote: the dense builder's operations are Flipnote edits, as `measure` uses them.
+    let f = Fixture::new(true);
+    super::performance::save_studio_source_fixture_ops(
+        &mut store, SERVER, &f.group, &f.device, f.target, count, 0,
+    );
+    let (chosen, seed) = checkpoint(&f, &store, 10, 10);
+    let (rival, _) = checkpoint(&f, &store, 10, 11);
+    // A source this large exceeds the cold byte limit for automatic adoption: the runtime adopts
+    // into it only once it is warm (prepared detached), so the fixture keeps it warm the same way.
+    let warm = f.load(&store).unwrap();
+    store.retain_studio_source(&f.group, &f.device, warm);
+    let (_, state) = adopt(&f, &mut store, &chosen, None);
+    store.retain_studio_source(&f.group, &f.device, state);
+    adopt(&f, &mut store, &rival, None);
+    let pair = sorted_pair(&chosen, &rival);
+    let bytes = fs::metadata(f.path(&store)).unwrap().len();
+    let ops = f.load(&store).unwrap().op_count();
+    let cold = timed(&mut || drop(f.load(&store).unwrap()));
+
+    // One whole job: S1 under custody, S2 detached, S3 under custody.
+    let job = |store: &mut ServerStore, s3: &mut dyn FnMut(&mut ServerStore)| {
+        let mut capture = None;
+        let s1 = timed(&mut || {
+            capture = store
+                .capture_studio_source(SERVER, &f.group, f.target, &f.device)
+                .unwrap();
+        });
+        let mut prepared = None;
+        let s2 = timed(&mut || prepared = Some(capture.take().unwrap().rebuild().unwrap()));
+        let mut installed = false;
+        let install = timed(&mut || {
+            installed = store
+                .install_prepared_studio_source(&f.group, &f.device, prepared.take().unwrap())
+                .unwrap();
+        });
+        assert!(installed, "the rebuild is current");
+        let transaction = timed(&mut || s3(store));
+        (s1, s2, install, transaction)
+    };
+    let mut repair = None;
+    let (s1, s2, install, decide) = job(&mut store, &mut |store| {
+        let (issued, outcome, _) =
+            issue(&f, store, request([&chosen, &rival], &chosen), None).unwrap();
+        assert_eq!(outcome, StudioRepairOutcome::AwaitingSeed);
+        repair = Some(issued);
+    });
+    println!(
+        "REPAIR_PROFILE ops={ops} physical_bytes={bytes} cold_restore_ms={cold} \
+         decide: s1_capture_ms={s1} s2_rebuild_detached_ms={s2} s3_install_ms={install} \
+         s3_transaction_ms={decide} custody_ms={}",
+        s1 + install + decide
+    );
+    let repair = repair.unwrap();
+    let (s1, s2, install, replace) = job(&mut store, &mut |store| {
+        let (outcome, _) = apply(&f, store, &repair, &pair, Some(seed.bytes())).unwrap();
+        assert_eq!(outcome, StudioRepairOutcome::Installed);
+    });
+    println!(
+        "REPAIR_PROFILE ops={ops} replace: s1_capture_ms={s1} s2_rebuild_detached_ms={s2} \
+         s3_install_ms={install} s3_transaction_ms={replace} custody_ms={}",
+        s1 + install + replace
+    );
+}
+
+#[test]
+fn repair_job_stage_profile_smoke() {
+    repair_job_stages(64, &ManualClock::new(1_000));
+}
+
+#[test]
+#[ignore = "opt-in release profiling of repair job custody; no machine-speed assertion"]
+fn profile_repair_job_stages() {
+    repair_job_stages(20_000, &catcoms_rt::SystemClock);
 }

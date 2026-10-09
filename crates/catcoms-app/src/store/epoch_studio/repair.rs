@@ -513,6 +513,24 @@ impl ServerStore {
         Ok((outcome, state))
     }
 
+    /// Whether this exact repair is already applied and owes nothing here, read from the warm
+    /// source only. A cold source answers `false`, so the caller does the work rather than
+    /// skipping it on a guess.
+    pub(crate) fn studio_repair_is_terminal(
+        &self,
+        server: u64,
+        group: &ServerGroup,
+        target: StudioTarget,
+        device: &MlsDevice,
+        repair: &ReceiptRepair,
+    ) -> bool {
+        self.warm_studio_unit(server, group, target, device, |unit| {
+            unit.repair_state()
+                .is_some_and(|s| s.repair == *repair && !s.install_pending)
+        })
+        .unwrap_or(false)
+    }
+
     /// Assemble the complete pair a distributed repair names from evidence this device already
     /// holds (its fault pair, current head and installed opening) plus the receipt the same
     /// authenticated answer offered. `None` means there is nothing to do: either this repair is
@@ -581,6 +599,32 @@ impl ServerStore {
         Ok(state
             .held_repair()
             .map(|(repair, pair, _)| (repair.clone(), pair.receipts().clone())))
+    }
+
+    /// Whether the owner's held decision has crossed B3. B3 is written only once B2 has left
+    /// the source owing a replacement, so a held, applied decision means the source owes that
+    /// replacement, read from the bounded owner record with no source restore. A warm source,
+    /// when there is one, is the better witness: a crash between the successor write and the
+    /// recycle leaves a held, applied record over an installed source, which only a resume
+    /// clears.
+    pub(crate) fn held_studio_repair_applied(
+        &self,
+        server: u64,
+        group: &ServerGroup,
+        target: StudioTarget,
+        device: &MlsDevice,
+    ) -> Result<bool, AppError> {
+        if group.designated_committer() != Some(device.device_id()) {
+            return Ok(false);
+        }
+        let document = target.document(&group.group_id()).map_err(invalid)?;
+        let (state, _) = self.load_epoch_owner_repair_state(
+            server,
+            &document,
+            &device.device_id(),
+            group.epoch(),
+        )?;
+        Ok(state.held_repair().is_some() && state.repair_applied())
     }
 
     /// S-4, read-only. Derives the decidable pair exactly as issuance would, under explicit

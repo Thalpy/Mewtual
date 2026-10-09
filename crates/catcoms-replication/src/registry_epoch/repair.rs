@@ -4,8 +4,8 @@
 use super::*;
 use crate::epoch::repair_transition::RepairSource;
 use crate::{
-    CloseRecord, OwnerReceiptJournal, ReceiptRepair, ReceiptRepairPlan, SourceRepairOutcome,
-    SourceRepairState,
+    CloseRecord, OwnerAuthority, OwnerReceiptJournal, ReceiptRepair, ReceiptRepairPlan,
+    SourceRepairOutcome, SourceRepairState,
 };
 
 impl RegistryEpoch {
@@ -23,7 +23,7 @@ impl RegistryEpoch {
         b: &Receipt,
         journal: &OwnerReceiptJournal,
         retiring_close: Option<&CloseRecord>,
-        group: &ServerGroup,
+        group: &(impl OwnerAuthority + ?Sized),
         issuer_tenure_start: u64,
     ) -> Result<ReceiptRepairPlan, ReplError> {
         // Reject invalid authority before serializing the bounded but potentially large source.
@@ -59,7 +59,7 @@ impl RegistryEpoch {
         &mut self,
         plan: ReceiptRepairPlan,
         current_journal: &OwnerReceiptJournal,
-        group: &ServerGroup,
+        group: &(impl OwnerAuthority + ?Sized),
         issuer_tenure_start: u64,
     ) -> Result<SourceRepairOutcome, ReplError> {
         plan.repair()
@@ -84,7 +84,7 @@ impl RegistryEpoch {
         repair: &ReceiptRepair,
         a: &Receipt,
         b: &Receipt,
-        group: &ServerGroup,
+        group: &(impl OwnerAuthority + ?Sized),
         issuer_tenure_start: u64,
     ) -> Result<SourceRepairOutcome, ReplError> {
         RepairSource {

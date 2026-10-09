@@ -1,7 +1,7 @@
 //! Automatic joining reuses the private head selection and recovery-first installer. Network
 //! completion is not a disk commit: current mount/native custody is regained for every step.
 use super::*;
-use crate::store::{StudioAdoptionOutcome, StudioRepairOutcome};
+use crate::store::StudioAdoptionOutcome;
 use crate::studio_exchange::discovery::ServerCheckpointDiscovery;
 
 pub(super) struct DiscoveryPlan {
@@ -135,61 +135,47 @@ impl CatchupRuntime {
             let result = server.complete_checkpoint_discovery(store, id, *completed);
             match result {
                 Ok(Some(ServerCheckpointDiscovery::Selected(pass))) => {
-                    // Flow D before the seed. If the source now owes a replacement, its selected
-                    // seed is fetched through a repaired pass INSTEAD of this one, even when the
-                    // owner proved that very receipt: the repaired selection is made under this
-                    // device's authoring tenure, not the proof's claim (6.3), and minting it
-                    // supersedes this pass's selection, so the two must never race.
+                    // Flow D before the seed. A repair this answer carries is offered to the
+                    // repair job; when the job takes it, this pass is dropped rather than raced:
+                    // the job's S3 applies the repair to a rebuilt source and, if a replacement is
+                    // then owed, fetches its selected seed through a repaired pass made under this
+                    // device's authoring tenure, never under this proof's own claim (6.3).
                     let mut keep = true;
                     if let Some(repair) = pass.inner.fault_repair().cloned() {
-                        if !Self::automatic_repair_execution_ready() {
-                            // The pass cannot fall through to ordinary installation: its repair
-                            // needs the not-yet-built admitted detached execution boundary.
-                            keep = false;
-                            self.retry_discovery(now);
-                        }
                         let offered = pass.inner.selected_receipt().clone();
-                        let applied = if keep {
-                            match target {
-                                CheckpointTarget::Studio(studio) => self.apply_offered_repair(
+                        match target {
+                            CheckpointTarget::Studio(studio) => {
+                                if self.offer_repair(
                                     server,
                                     store,
                                     id,
                                     studio,
                                     &repair,
                                     Some(&offered),
-                                )?,
-                                CheckpointTarget::Registry(bucket) => self
-                                    .apply_offered_registry_repair(
-                                        server,
-                                        store,
-                                        id,
-                                        bucket,
-                                        &repair,
-                                        Some(&offered),
-                                    )?,
+                                    true,
+                                ) {
+                                    keep = false;
+                                    self.retry_discovery(now);
+                                }
                             }
-                        } else {
-                            None
-                        };
-                        let failure_target = match target {
-                            CheckpointTarget::Studio(studio) => Some(studio),
-                            CheckpointTarget::Registry(_) => self.target,
-                        };
-                        if let Some((StudioRepairOutcome::AwaitingSeed, pair)) = applied {
-                            keep = false;
-                            self.checkpoint = None;
-                            self.await_repaired_seed(
-                                server,
-                                store,
-                                id,
-                                target,
-                                failure_target,
-                                &repair,
-                                &pair,
-                            );
-                            if self.checkpoint.is_none() {
-                                self.retry_discovery(now);
+                            CheckpointTarget::Registry(bucket) => {
+                                // The same rule for a bucket. When the job does not take it, the
+                                // pass reaches the router, which defers it for any owed or held
+                                // repair the prepared provider shows, or while it is unknown.
+                                let failure_target = self.target;
+                                if self.offer_registry_repair(
+                                    server,
+                                    store,
+                                    id,
+                                    bucket,
+                                    failure_target,
+                                    &repair,
+                                    Some(&offered),
+                                    true,
+                                ) {
+                                    keep = false;
+                                    self.retry_discovery(now);
+                                }
                             }
                         }
                     }
@@ -201,30 +187,22 @@ impl CatchupRuntime {
                     }
                 }
                 Ok(Some(ServerCheckpointDiscovery::Hint(answer))) if registry => {
-                    // A faulted bucket's only way out is the repair the owner's answer carries.
+                    // A faulted bucket's only way out is the repair the owner's answer carries. A
+                    // hint carries no pass to drop; the job, or the owed seed fetch, does the rest.
                     if let (CheckpointTarget::Registry(bucket), Some(repair)) =
                         (target, answer.repair.as_ref())
                     {
-                        let applied = self.apply_offered_registry_repair(
+                        let failure_target = self.target;
+                        self.offer_registry_repair(
                             server,
                             store,
                             id,
                             bucket,
+                            failure_target,
                             repair,
                             answer.receipt.as_ref(),
-                        )?;
-                        if let Some((StudioRepairOutcome::AwaitingSeed, pair)) = applied {
-                            let failure_target = self.target;
-                            self.await_repaired_seed(
-                                server,
-                                store,
-                                id,
-                                target,
-                                failure_target,
-                                repair,
-                                &pair,
-                            );
-                        }
+                            false,
+                        );
                     }
                     if self.checkpoint.is_none() {
                         self.discovery_plan = self.after_registry.take();
@@ -252,25 +230,17 @@ impl CatchupRuntime {
                     if let (CheckpointTarget::Studio(studio), Some(repair)) =
                         (target, answer.repair.as_ref())
                     {
-                        let applied = self.apply_offered_repair(
+                        // A hint carries no pass to drop; the job, or the owed seed fetch, does
+                        // everything else.
+                        self.offer_repair(
                             server,
                             store,
                             id,
                             studio,
                             repair,
                             answer.receipt.as_ref(),
-                        )?;
-                        if let Some((StudioRepairOutcome::AwaitingSeed, pair)) = applied {
-                            self.await_repaired_seed(
-                                server,
-                                store,
-                                id,
-                                target,
-                                Some(studio),
-                                repair,
-                                &pair,
-                            );
-                        }
+                            false,
+                        );
                     }
                     if let (CheckpointTarget::Studio(target), Some(inner)) =
                         (target, &self.discovery_watch)
@@ -303,14 +273,18 @@ impl CatchupRuntime {
             let CheckpointTarget::Registry(bucket) = pass.inner.target() else {
                 unreachable!()
             };
-            let source_fits = store.registry_receive_source_fits(id, &server.group_id(), bucket)?;
-            // Disabled automatic repair still needs an exact local classification before an
+            if self.repair_claimed(CheckpointTarget::Registry(bucket)) {
+                // Same rule for a bucket a repair job owns: drop before any preparation.
+                self.checkpoint = None;
+                self.retry_discovery(now);
+                return Ok(None);
+            }
+            // The router classifies an owed or held repair from the prepared provider, never from
+            // a restore under custody, so it needs an exact local classification before an
             // ordinary pass can install. Prepare even a small source; otherwise a fresh receiver
             // would repeatedly discard the pass as unknown without ever scheduling the detached
             // work that can resolve it. Checked absence is retained separately from cold state.
-            if (!Self::automatic_repair_execution_ready() || !source_fits)
-                && !self.prepare_registry_inventory(server, store, id, bucket)?
-            {
+            if !self.prepare_registry_inventory(server, store, id, bucket)? {
                 return Ok(None);
             }
             // A repaired bucket pass reports to the target it was minted for; an owner's may have
@@ -339,6 +313,13 @@ impl CatchupRuntime {
             }
             return Ok(None);
         };
+        if self.repair_claimed(CheckpointTarget::Studio(target)) {
+            // Before `prepare`, which refuses a claimed target and would leave this pass parked
+            // (blocking `replay_ready`) for the job's whole length. The job is what unblocks it.
+            self.checkpoint = None;
+            self.retry_discovery(now);
+            return Ok(None);
+        }
         if !self.prepare(server, store, id, target)? {
             return Ok(None);
         }

@@ -224,7 +224,7 @@ impl OwnerReceiptJournal {
         a: &Receipt,
         b: &Receipt,
         retiring_close: Option<&CloseRecord>,
-        group: &ServerGroup,
+        group: &(impl OwnerAuthority + ?Sized),
         issuer_tenure_start_group_epoch: u64,
     ) -> Result<JournalRepairEffect, ReplError> {
         repair.verify_current_owner(group, issuer_tenure_start_group_epoch)?;

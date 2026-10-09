@@ -3695,6 +3695,32 @@ where
     changed
 }
 
+#[cfg(test)]
+type StudioPoolsForTest = (
+    std::sync::Arc<tokio::sync::Semaphore>,
+    std::sync::Arc<tokio::sync::Semaphore>,
+);
+
+#[cfg(test)]
+thread_local! {
+    /// Private preparation pools for the next actor this thread spawns. A fixture driving
+    /// several actors keeps their slots (and the Registry graphs those slots retain for up to
+    /// 30 s) out of the process-wide pool other tests in the same process depend on.
+    static STUDIO_POOLS_FOR_NEXT_SPAWN: std::cell::RefCell<Option<StudioPoolsForTest>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Test-only: give the next actor `spawn` creates on this thread its own shared and preview
+/// preparation pools, exactly as `StudioReceiver::preparation_pools_for_test` gives a receiver
+/// built directly. Consumed by that one `spawn`.
+#[cfg(test)]
+pub(crate) fn studio_pools_for_next_spawn(
+    shared: std::sync::Arc<tokio::sync::Semaphore>,
+    preview: std::sync::Arc<tokio::sync::Semaphore>,
+) {
+    STUDIO_POOLS_FOR_NEXT_SPAWN.with(|pools| *pools.borrow_mut() = Some((shared, preview)));
+}
+
 /// Move `server` into a background task. Returns a [`ServerActor`] handle, a receiver of
 /// [`AppEvent`]s, and the task's [`JoinHandle`].
 #[rustfmt::skip] // Preserve the existing command-table layout previously inside select! macro.
@@ -3714,10 +3740,17 @@ where
     let (studio_preparation_signal, studio_preparing) = tokio::sync::watch::channel(false);
     #[cfg(test)]
     let (studio_hint_signal, studio_hints) = tokio::sync::watch::channel(None);
+    // Read on the spawning thread, before the task can move to another worker.
+    #[cfg(test)]
+    let studio_pools = STUDIO_POOLS_FOR_NEXT_SPAWN.with(|pools| pools.borrow_mut().take());
     let handle = tokio::spawn(async move {
         let mut studio_receiver = crate::studio::StudioReceiver::default();
         #[cfg(test)]
         studio_receiver.observe_hints_for_test(studio_hint_signal);
+        #[cfg(test)]
+        if let Some((shared, preview)) = studio_pools {
+            studio_receiver.preparation_pools_for_test(shared, preview);
+        }
         let mut studio_jobs = tokio::task::JoinSet::<crate::studio::StudioBackgroundResult>::new();
         // Per open channel: a content signature of its messages, topic and jukebox (see
         // `channel_delta`), so an edit/delete/add all surface a `ChannelUpdated` that says which

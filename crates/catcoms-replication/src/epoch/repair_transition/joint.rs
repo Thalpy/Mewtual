@@ -93,7 +93,7 @@ impl RepairSource<'_> {
         journal: &OwnerReceiptJournal,
         retiring_close: Option<&CloseRecord>,
         source_version: Hash32,
-        group: &ServerGroup,
+        group: &(impl OwnerAuthority + ?Sized),
         issuer_tenure: u64,
     ) -> Result<ReceiptRepairPlan, ReplError> {
         let expected = self.stamp()?;
@@ -149,7 +149,7 @@ impl RepairSource<'_> {
         plan: ReceiptRepairPlan,
         current_journal: &OwnerReceiptJournal,
         source_version: Hash32,
-        group: &ServerGroup,
+        group: &(impl OwnerAuthority + ?Sized),
         issuer_tenure: u64,
     ) -> Result<SourceRepairOutcome, ReplError> {
         // Delayed plans and exact retries are not authority leases. This check must precede

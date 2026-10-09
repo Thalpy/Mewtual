@@ -24,6 +24,7 @@ STUDIO_REPAIR = "crates/catcoms-app/src/store/epoch_studio/repair.rs"
 STUDIO_ADOPTION = "crates/catcoms-app/src/store/epoch_studio/adoption.rs"
 STUDIO_HEAD = "crates/catcoms-app/src/store/epoch_studio/discovery.rs"
 APP_FAULT = "crates/catcoms-app/src/studio/fault.rs"
+OWNER_REPAIR = "crates/catcoms-app/src/store/epoch_owner/repair.rs"
 REPAIR_TESTS = "store::epoch_studio::tests::repair::"
 core.MUTATIONS = [
     (
@@ -183,6 +184,28 @@ core.MUTATIONS = [
         REPAIR_TESTS
         + "a_current_tenure_report_stages_suppresses_proof_and_is_decided_from_the_reserved_slot",
         "only a current-tenure pair can be staged as live",
+    ),
+    (
+        # Design 10.3's two-peer run: a late report of a pair the owner already repaired must be
+        # answered by the repair it carries, never staged again (it would suppress proof).
+        "REPAIR-answered-report", OWNER_REPAIR,
+        "        if answered {\n",
+        "        if false && answered {\n",
+        REPAIR_TESTS + "a_report_of_a_pair_the_owner_already_repaired_is_answered_not_restaged",
+        "a pair the owner already repaired is not staged again",
+    ),
+    (
+        # Review AG3-IMP-003: a source read that can refuse (Fault, cold) must never precede B0,
+        # or an independently authorized report is dropped with the refused answer.
+        "REPAIR-b0-before-source-refusal", STUDIO_HEAD,
+        "        // S-3 before the response is decided (U-7). A failed or uncertain stage refuses the\n",
+        "        let _premature =\n"
+        "            self.with_studio_checkpoint_source(server, group, target, device, budget, |state| {\n"
+        "                Ok(state.unit.receipt_head().map_err(invalid)?.cloned())\n"
+        "            })?;\n"
+        "        // S-3 before the response is decided (U-7). A failed or uncertain stage refuses the\n",
+        REPAIR_TESTS + "a_faulted_owner_source_retains_another_reported_pair_before_refusing_service",
+        "the report crossed B0 before the refusal",
     ),
 ]
 

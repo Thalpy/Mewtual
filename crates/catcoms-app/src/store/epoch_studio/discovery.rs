@@ -261,6 +261,29 @@ impl ServerStore {
         // whole answer rather than proving either side of a conflict it could not record.
         if let (Some(report), Some(tenure)) = (fault_report, durable_tenure) {
             let document = target.document(&group.group_id()).map_err(invalid)?;
+            // Whether the report is already answered (`admit_fault_report_with_writer`) needs
+            // the repair this exact source carries. It is read from the warm source only, after
+            // the same byte-for-byte check against disk every warm read makes, and nothing here
+            // can fail or invalidate the budget: B0 must never depend on the source being
+            // servable (review AG3-IMP-003 on 02280999). Only a source this answer can serve
+            // passes its repair on: a Faulted one refuses service below, so it answers nothing.
+            // A cold, changed or Faulted source, or one with no repair, gives `None`, and the
+            // report stages exactly as it always did. The authoritative read below still accounts
+            // the source and refuses Fault, after B0.
+            let carried = if self.studio_source_is_warm(server, group, target, device) {
+                self.with_prepared_studio_source(server, group, target, device, |state| {
+                    Ok(state
+                        .unit
+                        .repair_state()
+                        .filter(|_| state.unit.receipt_head().is_ok())
+                        .map(|state| state.repair))
+                })
+                .ok()
+                .flatten()
+            } else {
+                None
+            };
+            let carried = carried.as_ref();
             self.with_studio_protocol_budget(server, group, budget, |store, storage| {
                 store.admit_fault_report(
                     server,
@@ -270,11 +293,14 @@ impl ServerStore {
                     tenure,
                     archived_owner,
                     report,
+                    carried,
                     rng,
                     storage,
                 )
             })?;
         }
+        // Only after B0: account the exact source and decide head eligibility. A Faulted source
+        // refuses service here, never before an independently authorized report is retained.
         let source =
             self.with_studio_checkpoint_source(server, group, target, device, budget, |state| {
                 Ok((

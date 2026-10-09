@@ -54,7 +54,9 @@ mod seed;
 pub use receive::RegistryPageAdmission;
 mod recovery;
 mod repair;
-pub(crate) use repair::OfferedRepairEvidence;
+pub(crate) use repair::{registry_owed_replacement, OfferedRepairEvidence};
+mod repair_source;
+pub(crate) use repair_source::{PreparedRegistryRepair, RegistryRepairCapture};
 mod replay;
 pub use installation::RegistryInstallOutcome;
 pub use pass::{
@@ -389,13 +391,62 @@ impl ServerStore {
         step: WriteStep,
         hooks: &mut WriteHooks<'_>,
     ) -> Result<(T, EpochRegistryState), AppError> {
+        self.update_registry_prepared_with_io(
+            server,
+            group,
+            bucket,
+            device,
+            allow_create,
+            purpose,
+            rng,
+            budget,
+            None,
+            apply,
+            step,
+            hooks,
+        )
+    }
+
+    /// The single checked writer, optionally reusing a source a repair job rebuilt detached.
+    /// The record is re-read under custody exactly as before; a `prepared` unit replaces the
+    /// restore only if that re-read is byte-for-byte what it was rebuilt from and its live
+    /// context (mount, server, group, bucket, actor, owner, MLS epoch) still matches, and
+    /// otherwise the write refuses as stale. Callers check that context first too; this is the
+    /// last line before a rebuild's state is written.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn update_registry_prepared_with_io<T, R: CryptoRngCore>(
+        &mut self,
+        server: u64,
+        group: &ServerGroup,
+        bucket: u8,
+        device: &MlsDevice,
+        allow_create: bool,
+        purpose: WritePurpose,
+        rng: &mut R,
+        budget: &mut EpochStorageBudget,
+        prepared: Option<repair_source::PreparedRegistryRepair>,
+        apply: impl FnOnce(&mut RegistryEpoch, &mut R) -> Result<T, AppError>,
+        step: WriteStep,
+        hooks: &mut WriteHooks<'_>,
+    ) -> Result<(T, EpochRegistryState), AppError> {
         let document = registry_document(&group.group_id(), bucket).map_err(invalid)?;
         let scope = scope_bytes(server, &document)?;
         let storage_scope = StorageScope::new(server, &document.server_id).map_err(invalid)?;
         let loaded = (|| {
             let held = self.read_registry_record(&scope)?;
-            let unit = match &held {
-                Some(bytes) => {
+            let unit = match (&held, prepared) {
+                (Some(bytes), Some(prepared)) => {
+                    // Callers have already rechecked the context; this writer does too, as the
+                    // last line before a rebuild's state is written (review LOW-6).
+                    if !prepared.context_matches(self, server, group, bucket, device)
+                        || !prepared.record_matches(bytes)
+                    {
+                        return Err(invalid("prepared Registry source changed"));
+                    }
+                    prepared.unit
+                }
+                (None, Some(_)) => return Err(invalid("prepared Registry source changed")),
+                (Some(bytes), None) => {
                     let (stored_bucket, snapshot) = decode_record(&bytes.plain, &scope, &document)?;
                     if stored_bucket != bucket {
                         return Err(invalid("wrong bucket"));
@@ -403,7 +454,9 @@ impl ServerStore {
                     RegistryEpoch::restore(snapshot, group, bucket, device.device_id())
                         .map_err(invalid)?
                 }
-                None => RegistryEpoch::new(group, bucket, device.device_id()).map_err(invalid)?,
+                (None, None) => {
+                    RegistryEpoch::new(group, bucket, device.device_id()).map_err(invalid)?
+                }
             };
             Ok((held, unit))
         })();

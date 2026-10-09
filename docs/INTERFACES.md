@@ -878,6 +878,33 @@ but still refuses service; failed or uncertain B0 takes precedence over that exp
 the prepared adapter does not reconstruct the source. Historical evidence never becomes a live
 source seal or current-tenure overflow hold. Native repair commands remain unregistered.
 
+Studio repair execution is a detached job, never a call inside the request (Agent 3 design 10.3).
+`RepairFault` answers `StudioControlResponse::RepairStarted { target, scope, start }`. Here `start`
+is `Scheduled`, either newly or because the identical decision's job is already running, or `Busy`:
+another repair job is running or the shared preparation pool is full, nothing was reserved, and the
+caller asks again. Nothing has been decided or written when the reply is sent. The native encoding
+is `kind: "faultRepairStarted"` with `start: "scheduled" | "busy"` and `refreshRequired: true`.
+
+When a decision cannot start at all, for example because the source cannot be captured,
+`RepairFault` returns that error instead; asking again would fail the same way. The job's
+outcome reaches the renderer only through the fault view:
+- `blockedBy: "scheduled"` while the job or its worker still owns the target;
+- `lastAttempt` afterwards, for every way the job ends: the store's repair outcome, or
+  `outcome: "failed"` with bounded text when it was abandoned (owner tenure or MLS epoch moved,
+  catch-up paused, cancelled), found the document changed mid-rebuild, or failed. A new decision
+  clears the previous report, so it is never shown as the new one's outcome. The report is
+  volatile, local and bounded.
+
+`RepairRegistryFault` follows the same contract for the target's Registry bucket. It answers
+`RepairStarted` with `scope: RegistryBucket(bucket)`, and its outcome is read through that
+bucket's fault view. Registry Flow D, the owner's resume of a held bucket decision and the owed
+bucket replacement are the same job, scoped to the bucket. Whether a bucket owes a replacement
+is classified from the retained prepared page provider, never by restoring the bucket inside the
+request; a held owner decision is read from the bounded owner record. While the provider is
+cold or stale, a fetched bucket pass is deferred, not installed.
+While a job owns a target, foreground `Apply` and `ApplyOverlayCopy` into it are refused for retry.
+While a job owns a bucket, Registry maintenance, pointer refresh and page persistence skip it.
+
 `studio_recovery_list`, `studio_recovery_read`, `studio_recovery_export`, and
 `studio_recovery_acknowledge` use the same actor/native custody as Save. They authenticate all
 retained/staged typed recovery slots; historical reads/backup export do not invent a current view.

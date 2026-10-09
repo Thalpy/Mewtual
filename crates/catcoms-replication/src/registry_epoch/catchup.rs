@@ -88,6 +88,12 @@ impl RegistryPageSource {
     pub fn repair_install_pending(&self) -> bool {
         self.0.repair_install_pending()
     }
+    /// The committed repair and its full pair, as this verified source holds them. A read-only
+    /// local fact for scheduling the owed replacement's seed fetch; never authority by itself:
+    /// the repair is verified again under the current owner before anything acts on it.
+    pub fn repair_state(&self) -> Option<crate::SourceRepairState> {
+        self.0.repair_state()
+    }
     pub fn checkpoint_bytes_by_hash(
         &mut self,
         id: u128,

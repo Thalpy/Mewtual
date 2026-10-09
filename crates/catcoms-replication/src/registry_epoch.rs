@@ -20,7 +20,8 @@ use crate::registry::{
 };
 use crate::{
     epoch_zero_id, Admission, DomainOp, EncryptedDoc, EpochGate, EpochPhase, LogicalDocument,
-    Receipt, ReceiptBook, ReceiptIngest, ReplError, SealedOp, SignedOp, MAX_CHECKPOINT_BYTES,
+    OwnerAuthority, Receipt, ReceiptBook, ReceiptIngest, ReplError, SealedOp, SignedOp,
+    MAX_CHECKPOINT_BYTES,
 };
 
 mod adoption;
@@ -98,7 +99,7 @@ impl RegistryEpoch {
     /// This does NOT replace, settle or discard a predecessor. The caller must first satisfy
     /// recovery/durable-install ordering before selecting this as its current epoch.
     pub fn from_checkpoint(
-        group: &ServerGroup,
+        group: &(impl OwnerAuthority + ?Sized),
         bucket: u8,
         actor: DeviceId,
         receipt: Receipt,
@@ -428,6 +429,21 @@ impl RegistryEpoch {
             .designated_committer()
             .ok_or(ReplError::EpochAuthority)?;
         Self::restore_scoped(bytes, &group.group_id(), bucket, actor, owner)
+    }
+
+    /// The same restore with the group's public facts passed in, so a detached worker that holds
+    /// no MLS state can rebuild a source captured under custody (Agent 3 design 10.3, S2). The
+    /// caller binds `server`, `actor` and `owner` to the live group at capture and rechecks all
+    /// of them, and the saved bytes, before anything rebuilt here is written. Mirrors
+    /// `StudioEpoch::prepare_vault_source`.
+    pub fn prepare_vault_source(
+        bytes: &[u8],
+        server: &[u8],
+        bucket: u8,
+        actor: DeviceId,
+        owner: DeviceId,
+    ) -> Result<Self, ReplError> {
+        Self::restore_scoped(bytes, server, bucket, actor, owner)
     }
 
     /// Validate a locally authenticated vault snapshot for storage inventory, even after the
