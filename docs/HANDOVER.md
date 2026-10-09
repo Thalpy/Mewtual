@@ -79,12 +79,17 @@ and ranks the live hazards in that path.
       when a watched document's handoff is Prepared: owner rotation, the client pass, Registry
       maintenance and replay. Each skips that document for the turn. This was reachable before
       Flow R too, whenever a Prepared record outlived the probe. With Flow R and a peer online it
-      was a livelock, found by the implementation review. A Prepared record held back by a Hold
-      is never resolved, so it suspends these rails for its document indefinitely.
+      was a livelock, found by the implementation review. Replay also drops a pass it had begun on
+      such a document, which would otherwise stop replay of every other. A Prepared record held
+      back by a Hold is never resolved, so it suspends these rails for its document indefinitely,
+      and also Registry maintenance's resume of a held owner decision for the document's shared
+      pointer bucket, unless another watched document in that bucket takes the turn.
     - **Residual:** while a resolution is in flight the actor's one overlay slot is taken, so a
       Save on that server answers `Busy` for a few turns longer than before.
   - **PR #36 merged into this line, and the PR #27 review:** Agent 3's repair runtime is merged
-    in, with both rails' skips kept (repair first, then Prepared). The review's LOW-1 is fixed:
+    in, and every rail keeps both skips. Rotation and the client pass check the repair claim
+    first, then the Prepared record. Registry maintenance checks the Prepared document first,
+    then the repair claim on its bucket, a different key. The review's LOW-1 is fixed:
     the handoff probe's per-target bookkeeping is now bounded by the 16-watch rail, plus at most
     64 unexpired holds of unwatched targets. Its MEDIUM-1 is in Agent 3's repair commit and open
     with Agent 3: the inventory budget is built before the rebuild is installed, so a cold

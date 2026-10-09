@@ -3117,3 +3117,55 @@ async fn replay_waits_for_a_prepared_document_to_be_resolved() {
         "replay never took the document up once it was resolved"
     );
 }
+
+/// An active replay pass on a document whose handoff is Prepared is dropped, and replay moves on
+/// (the re-review of `d1c1f80c`, LOW-1). While a pass is active it is replay's only candidate, so
+/// keeping it waiting stopped replay of every other watched document, indefinitely under a Hold.
+///
+/// The pass is begun by a test hook, with the document's real watch epoch so the eviction check
+/// cannot be what drops it: a real pass needs own intents staged into the very successor an
+/// interrupted handoff targets, which no fixture writes. The other document has no own intents,
+/// so taking it up completes its pass in the same step.
+#[tokio::test]
+async fn an_active_replay_pass_on_a_prepared_document_does_not_stall_the_rest() {
+    let (mut server, _root, mut store, mut receiver, stuck, _pool, clock) =
+        interrupted_owner(1438, true, 4).await;
+    let other = StudioTarget::Flipnote {
+        channel: crate::channel_id("general").to_be_bytes(),
+        object: [24; 16],
+    };
+    server.sync.with_registry_context(|g, d, _, _| {
+        crate::store::save_studio_source_fixture(&mut store, 83, g, d, other)
+    });
+    receiver
+        .run(
+            &mut server,
+            &mut store,
+            83,
+            Some(StudioRequest::Read { target: other }),
+        )
+        .unwrap();
+    assert!(prepared(&server, &store, stuck));
+    assert_eq!(
+        receiver.replay_state_for_test(),
+        (false, 0),
+        "replay had already taken the other document up, so this proves nothing"
+    );
+    let epoch = receiver
+        .watches
+        .iter()
+        .find(|(w, _)| w.target == stuck)
+        .map(|(_, e)| *e)
+        .expect("the stuck document is watched");
+    receiver.begin_replay_pass_for_test(stuck, epoch);
+
+    // Past replay's own one-second pacing, then exactly one replay turn. One message for both
+    // ways it can fail: keeping the pass, or reaching the refusal and escaping as an error.
+    clock.advance_ms(1_500);
+    let stalled = "an active pass on a Prepared document stalled replay of the others";
+    receiver
+        .replay_step_for_test(&mut server, &mut store, 83)
+        .expect(stalled);
+    assert_eq!(receiver.replay_state_for_test(), (false, 1), "{stalled}");
+    assert!(prepared(&server, &store, stuck));
+}

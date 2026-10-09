@@ -49,9 +49,9 @@ jobs:
     # 17dd54fc until 528f0d2e); with every entry running, that run was cancelled in its last phase.
     # F2's five handoff-priority entries add about 20 more (17 locally, 2026-10-09): four of them
     # run an actor-level test, about two minutes per run, once mutated and once restored. Step
-    # A's three base-coverage entries add about two in all, and the PR #27 review's four
-    # `reconcile-*` entries about three (half a minute each mutated, plus the restored runs), so
-    # about 80. The limit is 120 for headroom: a 55-minute run was cancelled at the old 45, and CI
+    # A's three base-coverage entries add about two in all, and the PR #27 review's six
+    # `reconcile-*` entries about four (half a minute each mutated, plus the restored runs), so
+    # about 81. The limit is 120 for headroom: a 55-minute run was cancelled at the old 45, and CI
     # runners can be slower than these local timings.
     timeout-minutes: 120
     steps:
@@ -74,7 +74,7 @@ jobs:
             logs/gate4-handoff-restored-*.log
           if-no-files-found: ignore
   # Flow R, the staged resolution of an interrupted handoff (design 6.4.2). Its own job, because
-  # its 17 mutants would push the handoff job past its limit: each rebuilds the crate and runs a
+  # its 18 mutants would push the handoff job past its limit: each rebuilds the crate and runs a
   # store or actor test once mutated and once restored, about 60 minutes in all locally.
   resolution:
     runs-on: ubuntu-latest
@@ -87,7 +87,8 @@ jobs:
         run: >-
           cargo test --locked -j 4 --config 'profile.test.package.catcoms-app.debug=0'
           -p catcoms-app --lib -- resolution:: flow_r a_resolve_ _skips_a_prepared_document
-          replay_waits_for_a_prepared_document --test-threads=4
+          replay_waits_for_a_prepared_document an_active_replay_pass_on_a_prepared_document
+          --test-threads=4
       - name: Verify isolated mutations and restored regressions
         run: python3 .github/scripts/check-studio-resolution-mutations.py
       - name: Preserve mutation and restoration evidence

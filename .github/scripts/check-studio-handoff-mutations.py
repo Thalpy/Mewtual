@@ -227,6 +227,19 @@ MUTATIONS = [
      "if unwatched.len() > MAX_UNWATCHED_HOLDS && false {",
      HANDOFF_UNIT + "live_unwatched_holds_are_capped_soonest_expiry_first",
      "unwatched live holds were not capped"),
+    # The keep rule's two halves (the re-review of `d1c1f80c`, MEDIUM-1, which found both
+    # unpinned): rail membership, without which a watched target's doubling is erased once each
+    # hold expires, and the live job's exemption.
+    ("reconcile-rail", RECEIVER_HANDOFF,
+     "let kept = |target: &StudioTarget| rail.contains(target) || live == Some(*target);",
+     "let kept = |target: &StudioTarget| live == Some(*target);",
+     HANDOFF_UNIT + "a_watched_target_keeps_its_doubling_after_its_hold_expires",
+     "reconciling reset a watched target's backoff"),
+    ("reconcile-live", RECEIVER_HANDOFF,
+     "let kept = |target: &StudioTarget| rail.contains(target) || live == Some(*target);",
+     "let kept = |target: &StudioTarget| rail.contains(target) || (false && live == Some(*target));",
+     HANDOFF_UNIT + "the_live_jobs_target_keeps_its_pacing_off_the_rail",
+     "reconciling dropped the live job's pacing"),
     ("reconcile-call", RECEIVER_HANDOFF,
      "        self.handoff.reconcile(&rail, now);\n",
      "",

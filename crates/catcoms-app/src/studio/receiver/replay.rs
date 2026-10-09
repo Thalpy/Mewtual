@@ -101,6 +101,19 @@ impl StudioReceiver {
     pub(crate) fn replay_state_for_test(&self) -> (bool, usize) {
         (self.replay.active.is_some(), self.replay.completed.len())
     }
+    /// Make an empty pass active for `target` at `epoch`, as though replay had begun it. A real
+    /// pass needs own intents staged for the document, which no receiver fixture writes.
+    #[cfg(test)]
+    pub(crate) fn begin_replay_pass_for_test(&mut self, target: StudioTarget, epoch: u128) {
+        self.replay.active = Some(Pass {
+            target,
+            epoch,
+            order: VecDeque::new(),
+            manual: BTreeSet::new(),
+            history_ids: Vec::new(),
+            inventory_since: None,
+        });
+    }
     /// Which state the shared inventory job is in.
     #[cfg(test)]
     pub(crate) fn inventory_state_for_test(&self) -> &'static str {
@@ -179,9 +192,21 @@ impl StudioReceiver {
         // Replay re-applies this device's own intents, and an ordinary Apply is refused while
         // Prepared, with an error that would pause all of receive; its preparation of a cold
         // source would also hold `replay_ready()` false and keep R2 from detaching. Its resolution
-        // is already scheduled (see `CatchupRuntime::handoff_prepared`). An active pass on such a
-        // document waits without completing, and a new one is chosen among the others, so one
-        // stuck document does not stop replay of the rest.
+        // is already scheduled (see `CatchupRuntime::handoff_prepared`).
+        //
+        // An active pass on such a document is dropped, not kept waiting. While a pass is active
+        // it is the only candidate, so waiting would stop replay of every other watched document
+        // for as long as the record stays Prepared, which under a Hold is indefinitely (the
+        // re-review of `d1c1f80c`, LOW-1). Dropping is what a watch eviction above and a history
+        // change below already do, and is as safe: a later pass screens every own intent again,
+        // and those already applied are current and are not applied again. The new pass is then
+        // chosen among the documents that are not Prepared, so nothing past this point needs to
+        // check again.
+        if self.replay.active.as_ref().is_some_and(|p| {
+            super::catchup::CatchupRuntime::handoff_prepared(server, store, id, p.target)
+        }) {
+            self.replay.active = None;
+        }
         let target = self
             .replay
             .active
@@ -196,9 +221,6 @@ impl StudioReceiver {
         let Some((target, epoch)) = target else {
             return Ok(None);
         };
-        if super::catchup::CatchupRuntime::handoff_prepared(server, store, id, target) {
-            return Ok(None);
-        }
         if !self.catchup.prepare(server, store, id, target)? {
             return Ok(None);
         }

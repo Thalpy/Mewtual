@@ -2592,7 +2592,9 @@ the busy and empty-rail exit:
   first;
 - the live job's target is always kept.
 
-**Tests, each broken on purpose.** Each mutant fails only its own test:
+**Tests, each broken on purpose.** Each guard has a test that fails when that guard alone is
+removed. As first committed (`d1c1f80c`) this covered four of the six; the re-review below found
+the keep rule's two halves unpinned, and two tests were added.
 
 | mutant | fails |
 |---|---|
@@ -2600,9 +2602,24 @@ the busy and empty-rail exit:
 | expired-or-not, off-rail pacing is dropped | `a_target_rewatched_before_its_hold_expires_keeps_its_cooldown` |
 | the cap is disabled | `live_unwatched_holds_are_capped_soonest_expiry_first` |
 | the call is removed from the probe | `the_probe_forgets_an_unwatched_target_once_its_hold_expires` (receiver level: the unit tests call `reconcile` directly, so they cannot see this) |
+| rail membership dropped from the keep rule | `a_watched_target_keeps_its_doubling_after_its_hold_expires`, and now the churn test, whose final checks were vacuous |
+| the live job's exemption dropped | `the_live_jobs_target_keeps_its_pacing_off_the_rail` |
 
-All four are entries in the handoff harness (`reconcile-quiet`, `reconcile-expiry`,
-`reconcile-cap`, `reconcile-call`).
+All six are entries in the handoff harness: `reconcile-quiet`, `reconcile-expiry`,
+`reconcile-cap`, `reconcile-call`, `reconcile-rail` and `reconcile-live`.
+
+**Re-review of the merge and LOW-1 (2026-10-09, Opus, static, at `d1c1f80c`): no blocker or
+high.** It rebuilt the merge from base `59027150`. Both sides' blocks survive byte for byte in
+the two conflicted files, and the auto-merged files match. Both job kinds are routed through
+every match. Every anchor in all ten mutation harnesses is unique.
+
+| finding | what | disposition |
+|---|---|---|
+| MEDIUM-1 | two of `reconcile`'s guards (rail membership and the live job's exemption) failed no test, while the commit and the table above claimed one test per guard. Without rail membership, a watched target's expired hold was erased on every probe, so design 7.3's 30 s to 300 s escalation never got past 30 s | **fixed:** two unit tests, a non-vacuous check in the churn test, two harness entries, and the claim corrected above |
+| LOW-1 | an active replay pass on a document that became Prepared waited there, and an active pass is replay's only candidate, so one stuck document stopped replay of every other. The comment claimed the opposite | **fixed:** replay drops the active pass, as it already does for a watch eviction or a history change; the now-redundant later check is removed. Test: `an_active_replay_pass_on_a_prepared_document_does_not_stall_the_rest`, with a test hook beginning the pass at the document's real watch epoch. Harness: `replay-skip` and `replay-active-drop`, each half alone, so the resolution harness now has 18 entries |
+| LOW-1, second half | Registry maintenance skips a Prepared document before resuming a held owner decision for its pointer bucket, which is shared, so a stuck Hold reaches past its own document | **docs:** THREAT-MODEL and HANDOVER now say so. Reordering Registry maintenance is Agent 3's call |
+| LOW-2 | watch churn resets the doubling: once an off-rail hold expires it is dropped with its doubling, so evict, wait and rewatch starts again at 30 s | **recorded, as designed:** only the user's own UI churn drives it, and it needs the document evicted from a 16-watch rail for longer than its hold. Keeping off-rail entries until `at + hold_ms` is an option if it matters |
+| LOW-3 | HANDOVER's "repair first, then Prepared" is wrong for Registry maintenance, which checks the Prepared document first and then the repair claim on its bucket. Separately, `repair_job.rs` says every path that would install into a claimed source consults the claim, but H5 and R3 do not | **HANDOVER fixed.** The claim gap is **recorded as a follow-up**: nothing is corrupted, because S3's digest recheck and R3's stamp fallback catch the conflict, and the cost is wasted work and a 5 s repair retry. The likely fix is a `repair_claimed` skip at the probe's selection, with a hold at `handoff_commit`, and the comment is Agent 3's |
 
 ## Design 18.3 bounded implementation review (2026-10-09, Opus, static): PASS WITH FINDINGS
 

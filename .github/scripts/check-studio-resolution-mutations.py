@@ -124,25 +124,23 @@ MUTATIONS = [
      RECEIVER + "registry_maintenance_skips_a_prepared_document_instead_of_pausing_receive",
      "a background turn failed while a watched document's handoff was Prepared"),
     # The re-review's MEDIUM-1: replay is a fourth such rail, through Apply rather than a read. Its
-    # skip has two halves, the new-pass filter and the active-pass check, so the mutant removes
-    # both in one span.
+    # skip has two halves, each removed alone. The new-pass filter keeps replay from beginning a
+    # pass on a Prepared document.
     ("replay-skip", REPLAY,
-     "                        && !super::catchup::CatchupRuntime::handoff_prepared(server, store, id, b.0)\n"
-     "                })\n"
-     "            });\n"
-     "        let Some((target, epoch)) = target else {\n"
-     "            return Ok(None);\n"
-     "        };\n"
-     "        if super::catchup::CatchupRuntime::handoff_prepared(server, store, id, target) {\n",
-     "                        && !(false && super::catchup::CatchupRuntime::handoff_prepared(server, store, id, b.0))\n"
-     "                })\n"
-     "            });\n"
-     "        let Some((target, epoch)) = target else {\n"
-     "            return Ok(None);\n"
-     "        };\n"
-     "        if false && super::catchup::CatchupRuntime::handoff_prepared(server, store, id, target) {\n",
+     "                        && !super::catchup::CatchupRuntime::handoff_prepared(server, store, id, b.0)\n",
+     "                        && !(false && super::catchup::CatchupRuntime::handoff_prepared(server, store, id, b.0))\n",
      RECEIVER + "replay_waits_for_a_prepared_document_to_be_resolved",
      "replay took up a document whose handoff was Prepared"),
+    # The other half drops an active pass on a Prepared document (the re-review of `d1c1f80c`,
+    # LOW-1). It used to wait there, and an active pass is replay's only candidate, so one stuck
+    # document stopped replay of every other.
+    ("replay-active-drop", REPLAY,
+     "        if self.replay.active.as_ref().is_some_and(|p| {\n"
+     "            super::catchup::CatchupRuntime::handoff_prepared(server, store, id, p.target)\n",
+     "        if false && self.replay.active.as_ref().is_some_and(|p| {\n"
+     "            super::catchup::CatchupRuntime::handoff_prepared(server, store, id, p.target)\n",
+     RECEIVER + "an_active_replay_pass_on_a_prepared_document_does_not_stall_the_rest",
+     "an active pass on a Prepared document stalled replay of the others"),
     # MEDIUM-1: a resolve job whose budget will not build releases its permit and admission.
     ("budget-release", RUNTIME,
      "            if matches!(\n"

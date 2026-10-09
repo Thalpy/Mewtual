@@ -450,16 +450,14 @@ impl HandoffRuntime {
         }
     }
 
-    /// Whether the rail scan ran. It advances the cursor, and nothing else does, so an unchanged
-    /// cursor means the probe returned before reading any intent body.
-    /// The raw capacity retry. `wake_in` cannot witness it once a job exists, because that takes
-    /// the live-job branch and never looks here.
     /// Record the per-target pacing a refused probe records, without contriving a refusal.
     #[cfg(test)]
     pub(super) fn hold_target_for_test(&mut self, target: StudioTarget, now: u64) {
         self.hold_target(target, now);
     }
 
+    /// The raw capacity retry. `wake_in` cannot witness it once a job exists, because that takes
+    /// the live-job branch and never looks here.
     #[cfg(test)]
     pub(super) fn probe_retry_for_test(&self) -> Option<u64> {
         self.probe_retry_at
@@ -473,6 +471,8 @@ impl HandoffRuntime {
             || self.hold_ms.contains_key(&target)
     }
 
+    /// Whether the rail scan ran. It advances the cursor, and nothing else does, so an unchanged
+    /// cursor means the probe returned before reading any intent body.
     #[cfg(test)]
     pub(super) fn selection_for_test(&self) -> usize {
         self.selection
@@ -1144,7 +1144,9 @@ fn probe_tenure(live: Option<u64>, prepared: bool) -> Option<Option<u64>> {
 
 #[cfg(test)]
 mod tests {
-    use super::{probe_tenure, HandoffRuntime, FIRST_HOLD_MS, MAX_UNWATCHED_HOLDS};
+    use super::{
+        probe_tenure, HandoffJob, HandoffRuntime, HandoffStage, FIRST_HOLD_MS, MAX_UNWATCHED_HOLDS,
+    };
     use catcoms_replication::studio::StudioTarget;
     use std::sync::Arc;
 
@@ -1183,6 +1185,55 @@ mod tests {
             "an evicted target's expired hold was kept"
         );
         assert!(runtime.hold_ms.keys().all(|t| rail.contains(t)));
+        // Not vacuous: the rail's own expired holds are all still there.
+        assert_eq!(runtime.next_at.len(), rail.len());
+    }
+
+    /// A watched target's expired hold is kept, so its next refusal doubles (design 7.3's 30 s to
+    /// 300 s escalation) instead of starting again at 30 s. The re-review of `d1c1f80c`,
+    /// MEDIUM-1: with rail membership dropped from `reconcile`'s keep rule, every probe erased a
+    /// watched target's pacing once its hold expired, and nothing failed.
+    #[test]
+    fn a_watched_target_keeps_its_doubling_after_its_hold_expires() {
+        let mut runtime = HandoffRuntime::default();
+        runtime.hold_target(target(7), 0);
+        let expired = FIRST_HOLD_MS + 1;
+        runtime.reconcile(&[target(7)], expired);
+        runtime.hold_target(target(7), expired);
+        assert!(
+            runtime.held(target(7), expired + 2 * FIRST_HOLD_MS - 1),
+            "reconciling reset a watched target's backoff"
+        );
+    }
+
+    /// The live job's target keeps its pacing whatever the rail says (the same re-review). Off
+    /// the rail and past its hold, the doubling an abandon will resume from is kept; and the cap
+    /// never drops the job's hold, even when it expires before every other.
+    #[test]
+    fn the_live_jobs_target_keeps_its_pacing_off_the_rail() {
+        let lost = "reconciling dropped the live job's pacing";
+        let mut runtime = HandoffRuntime::default();
+        let live = target(200);
+        runtime.hold_target(live, 0);
+        runtime.job = Some(HandoffJob {
+            target: live,
+            stage: HandoffStage::Detached,
+            token: 0,
+            authority: None,
+        });
+        let now = FIRST_HOLD_MS + 1;
+        runtime.reconcile(&[], now);
+        assert!(runtime.hold_ms.contains_key(&live), "{lost}");
+
+        // The job's hold, now doubled, expires before any of the cap's worth of others, and the
+        // cap drops the soonest first.
+        runtime.hold_target(live, now);
+        for n in 0..=MAX_UNWATCHED_HOLDS as u8 {
+            runtime.hold_target(target(n), now + 3 * FIRST_HOLD_MS + u64::from(n));
+        }
+        runtime.reconcile(&[], now);
+        assert!(runtime.held(live, now), "{lost}");
+        assert_eq!(runtime.next_at.len(), MAX_UNWATCHED_HOLDS + 1);
     }
 
     /// Reconciling must not erase a live cooldown: a target evicted while held, and rewatched
