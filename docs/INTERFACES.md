@@ -2091,10 +2091,12 @@ a rebuilt draft would report. It is flush-only and does **not** rebuild the draf
 branch's whole depth. A caller that wants the projection reads it explicitly, through
 `local_draft()` or the overlay read path.
 
-Until 2026-10-09 an exact retry returned `Local` with a full draft, rebuilt under custody (design
-18.3 review, F1). A request naming a branch no admission would open is refused as stale. A handoff is
-shared pending history, not receipt finality. No actor/native overlay command or automatic
-promotion/disposition is enabled by these internal adapters.
+A request naming a branch no admission would open is refused as stale. A handoff is shared pending
+history, not receipt finality. No actor/native overlay command or automatic promotion/disposition
+is enabled by these internal adapters.
+
+(Until 2026-10-09 an exact retry returned `Local` with a full draft, rebuilt under custody; design
+18.3 review, F1.)
 
 `EpochIntentState::overlay()` exposes immutable acceptance metadata and `local_draft()` rebuilds
 the local projection. The existing ledger's encoding is unchanged. Its enclosing record is
