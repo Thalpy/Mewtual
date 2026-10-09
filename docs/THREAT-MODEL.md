@@ -330,6 +330,39 @@ table with the commit that closed it.
   also covers owner journals. Each result reports its fixed coverage, and its metadata becomes stale
   if the future coordinator permits writes after the scan. A malicious local process concurrently
   replacing filesystem paths is outside the mounted-store exclusion guarantee.
+- **An inventory issued from a scan is checked against the vault as it is now, not only as the
+  scan saw it.** Every five-family write rotates `inventory_generation` before its first I/O
+  (I-4), and an owned scan cursor rechecks that token when it resumes, installs a detached
+  validation and finishes, and the Studio budget mint checks it again. The type-level write guard
+  does not cover a raw `std::fs` call, so `scripts/check-store-raw-fs.sh` in CI refuses raw
+  filesystem mutation in non-test store code. A cursor held across custody visits also holds its
+  directory stream while unrelated files in the same directory change, and some filesystems a
+  vault can sit on (certain SMB and FUSE backends) do not keep a stream stable under that churn.
+  Every finished inventory, budget or reference, is therefore confirmed against one fresh
+  names-only listing and refused on any mismatch: an inventory job restarts, and a synchronous
+  scan's caller gets an error, which pauses background receive. On such a filesystem Studio
+  storage work can be refused, never budgeted from an undercount. No production path keeps a
+  cursor across visits yet; replay's manual move (C-3 step 2) is the first.
+- **A budgeted scan holds custody for a bounded validation only, and a memoized validation is
+  reused only for identical bytes.** Under a deadline, `validation_fits` admits a fresh validation
+  inline only in accounting mode, and only for four families:
+  - Recovery, to 64 KiB;
+  - Intents, to 384 KiB, where the 25 ms cap binds;
+  - OwnerReceipts, to 747 bytes;
+  - DraftArchive, whose accounting does no size-dependent work.
+
+  It also requires a measured worst rate, times four, to fit in what remains of the slice and in
+  25 ms. Every other fresh validation detaches, including every fresh Registry and Studio
+  validation; a memo hit is reused instead. The rates are from one host, in a release build, on
+  the shapes measured. A peer able to make a much denser record than those shapes, or a much
+  slower machine, lengthens an inline hold in proportion. For Recovery and OwnerReceipts the size
+  envelopes keep it small; for Intents, the cap does. The validation memo holds only Registry and Studio accounting
+  records, keyed by filename hash, physical size and the blake3 digest of the authenticated
+  plaintext, and a hit needs all three to match bytes a scan has just read. **One deliberate
+  relaxation:** a detached result refused because a write overtook it is still memoized, unless
+  the memo already holds that record, so the restarted scan need not validate it again. The result
+  never reaches an inventory, and validation is a pure function of those bytes, so a memo entry
+  for bytes since rewritten is only a miss. A read evicts any entry its bytes contradict.
 - **Recovery staging cleanup deletes unpublished attempts, never saved recovery versions.** Only
   strict canonical temporary sibling names under the mounted store's fixed parent are eligible,
   with regular/non-reparse checks and exclusive access for the whole bounded pass. No caller can
@@ -798,6 +831,24 @@ table with the commit that closed it.
   a sole coordinator remains required. Blobs/legacy snapshots are outside this inventory. No
   network snapshot authority, completed Studio settlement, live publication, retention guarantee
   or actor/native Save/Load follows from these store APIs alone.
+  Awaiting-tenure overlay authoring is likewise an internal local-draft capability, not source or
+  signing authority. New work requires checked source absence plus a current complete prepared
+  preview at both authorization and commit; detached plans bind mount, numeric server, complete
+  target, member key, owner, MLS epoch and exact authenticated Intents bytes. A parked request also
+  binds target, provenance, basis, branch and a domain-separated digest of the full canonical
+  operation, including its body. A mismatched request may finish the plan to release the bounded
+  actor slot, but it receives only `Busy` and cannot claim another request's outcome.
+  Unconfirmed history is excluded from automatic handoff and is capped at three live branches per
+  numeric server, 8 MiB of authenticated physical Intents bytes per vault and 64 accepted
+  operations per branch. Exact
+  retry is classified before preview expiry, while any new operation after expiry refuses.
+  Accounting changes only after a durable replacement and terminal disposal releases the live
+  quota; fresh complete inventory reconstructs it. The common `EpochIntentBudget` writer tracks
+  ordinary and Flow S replacements alike. The 8 MiB share is an admission limit on Unconfirmed
+  growth, not a hard vault invariant: an ordinary edit can take the tally over the share, after
+  which new Unconfirmed growth refuses until headroom returns. The
+  internal actor path and native result types exist, but no native command or UI exposes them;
+  this slice grants no permission to promote P5.
   The new explicit native Index/art transactions lend the sole mounted store only AFTER the
   actor's Ready rendezvous. Numeric-server persistence, UI commit and exact registry-incarnation
   locks are acquired without awaiting; a busy fence drops Ready and writes nothing. The blocking

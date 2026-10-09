@@ -33,7 +33,7 @@ pub(crate) use handoff_capture::{
 mod overlay;
 pub(crate) use overlay::StudioOverlayStart;
 mod overlay_capture;
-pub(crate) use overlay_capture::{StudioOverlayCapture, StudioOverlayPlan};
+pub(crate) use overlay_capture::{StudioOverlayCapture, StudioOverlayMint, StudioOverlayPlan};
 mod preparation;
 mod recovery_disposition;
 mod registry;
@@ -79,6 +79,22 @@ impl EpochStudioBudget {
     /// Accounted physical P1 bytes for this server, excluding blobs/legacy snapshot families.
     pub fn usage(&self) -> Footprint {
         self.storage.usage()
+    }
+    /// Test-only: occupy design 8.3's Unconfirmed rails; see the intent budget's own hook.
+    #[cfg(test)]
+    pub(crate) fn occupy_unconfirmed_rails_for_test(
+        &mut self,
+        server: u64,
+        branches: u8,
+        room: u64,
+    ) {
+        self.intents
+            .occupy_unconfirmed_for_test(server, branches, room);
+    }
+    /// Test-only: the Unconfirmed tally this budget holds, as (server, bytes) per record.
+    #[cfg(test)]
+    pub(crate) fn unconfirmed_tally_for_test(&self) -> Vec<(u64, u64)> {
+        self.intents.unconfirmed_for_test()
     }
     /// Reports uncertain accounting, not whether a newer mint superseded this wrapper. Every
     /// mutation independently checks the store's live generation before spending any bytes.
@@ -158,6 +174,11 @@ impl ServerStore {
     }
     /// Mint once from a completed CURRENT five-family scan. Minting again requires a new scan
     /// and supersedes the previous wrapper; reopening the vault invalidates all old handles.
+    ///
+    /// "Current" includes the inventory generation (C-3 runtime design, S-2): an inventory
+    /// finished before any five-family write cannot mint after it. Within one visit the finish and
+    /// the mint are adjacent, so this changes nothing there; it is what keeps a finish in one
+    /// visit and a mint in a later one from minting a budget for a vault that has since changed.
     pub fn studio_storage_budget(
         &mut self,
         server: u64,
@@ -168,6 +189,7 @@ impl ServerStore {
             != EpochInventoryCoverage::RecoveryOwnerReceiptsIntentsRegistryAndStudio
             || !Arc::ptr_eq(&inventory.studio_generation, &self.studio_generation)
             || !Arc::ptr_eq(&inventory.intent_generation, &self.intent_generation)
+            || !Arc::ptr_eq(&inventory.inventory_generation, &self.inventory_generation)
         {
             return Err(invalid("fresh five-family inventory required"));
         }

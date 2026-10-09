@@ -283,11 +283,13 @@ fn an_unconfirmed_branch_keeps_its_identity_across_a_reload() {
     }
 }
 
-/// Review (ii) change 4: admission takes its provenance from the basis, and a label that disagrees
-/// is refused in BOTH directions. The dangerous one is an Unconfirmed base labelled Closing, which
-/// the handoff guard (keyed on the label) would otherwise let through to signing.
+/// Review (ii) change 4: admission takes its provenance from the basis, and from nothing else. The
+/// dangerous mislabel is an Unconfirmed base recorded as Closing, which the handoff guard (keyed on
+/// the label) would let through to signing. Admission used to take a label as well, and refused one
+/// that disagreed with the basis in either direction. That argument is gone, so the disagreement can
+/// no longer be expressed. What is left to pin is that each basis yields its own provenance.
 #[test]
-fn admission_refuses_a_basis_under_the_other_provenance() {
+fn admission_takes_its_provenance_from_the_basis() {
     let mut f = Fixture::new(true);
     let b = bases(&mut f);
     let owner = f.owner.device_id();
@@ -310,28 +312,19 @@ fn admission_refuses_a_basis_under_the_other_provenance() {
         .unwrap();
     let next = StudioOverlayAdmission::New { generation: 2 };
 
-    assert!(matches!(
-        vacant.new_admitted(&unconfirmed, next, StudioOverlayProvenance::Closing),
-        Err(ReplError::IntentConflict)
-    ));
-    assert!(matches!(
-        vacant.new_admitted(&b.closing, next, unconfirmed.provenance()),
-        Err(ReplError::IntentConflict)
-    ));
-    // Each under its own label is admitted, so the refusals are the label check and nothing else.
-    assert_eq!(
-        vacant
-            .new_admitted(&unconfirmed, next, unconfirmed.provenance())
-            .unwrap()
-            .provenance(),
-        unconfirmed.provenance()
+    let admitted = vacant.new_admitted(&unconfirmed, next).unwrap();
+    assert!(
+        matches!(
+            admitted.provenance(),
+            StudioOverlayProvenance::Unconfirmed { .. }
+        ),
+        "a branch opened on a preview's basis is recorded as Unconfirmed"
     );
+    assert_eq!(admitted.provenance(), unconfirmed.provenance());
     assert_eq!(
-        vacant
-            .new_admitted(&b.closing, next, StudioOverlayProvenance::Closing)
-            .unwrap()
-            .provenance(),
-        StudioOverlayProvenance::Closing
+        vacant.new_admitted(&b.closing, next).unwrap().provenance(),
+        StudioOverlayProvenance::Closing,
+        "a branch opened on a Closing basis is recorded as Closing"
     );
 }
 
@@ -392,11 +385,7 @@ fn a_generation_two_preview_record_relabelled_closing_is_refused() {
     let op = f.domain(body);
     let id = revived.prepare(owner, op).unwrap();
     let mut g2 = transferred
-        .new_admitted(
-            &preview,
-            StudioOverlayAdmission::New { generation: 2 },
-            preview.provenance(),
-        )
+        .new_admitted(&preview, StudioOverlayAdmission::New { generation: 2 })
         .unwrap();
     g2.append(&preview, &revived, id, 900)
         .expect("precondition: the generation-2 preview branch accepts its first Save");
@@ -494,13 +483,241 @@ fn an_unconfirmed_branch_archives_and_disposes_under_its_own_basis() {
     ));
     assert_eq!(
         after
-            .new_admitted(
-                &b.closing,
-                StudioOverlayAdmission::New { generation: 2 },
-                StudioOverlayProvenance::Closing
-            )
+            .new_admitted(&b.closing, StudioOverlayAdmission::New { generation: 2 })
             .unwrap()
             .provenance(),
         StudioOverlayProvenance::Closing
     );
+}
+
+/// Design 8.3's per-branch rail: an Unconfirmed branch accepts 64 operations and refuses the 65th,
+/// before staging, so the refused Save changes nothing. A Closing branch over the same seed and the
+/// same ledger takes the 65th, so the refusal is the Unconfirmed rail, not the overall cap and not
+/// something about the 65th operation.
+#[test]
+fn an_unconfirmed_branch_accepts_sixty_four_operations_and_refuses_the_sixty_fifth() {
+    use crate::studio::MAX_STUDIO_UNCONFIRMED_OVERLAY_OPS as RAIL;
+    let mut f = Fixture::new(false);
+    let b = bases(&mut f);
+    let owner = f.owner.device_id();
+    let basis = mint(&b, owner, owner, 1, 1_700_000_000_000);
+    let mut ledger = IntentLedger::new(f.source.document().clone());
+    let ids: Vec<[u8; 32]> = (0..=RAIL)
+        .map(|n| {
+            let body = f.title_body(&format!("rail {n}"));
+            let op = f.domain(body);
+            ledger.prepare(owner, op).unwrap()
+        })
+        .collect();
+    let mut unconfirmed = StudioOverlayState::new(&basis);
+    let mut closing = StudioOverlayState::new(&b.closing);
+    for (n, id) in ids[..RAIL].iter().enumerate() {
+        unconfirmed
+            .append(&basis, &ledger, *id, n as u64 + 1)
+            .unwrap();
+        closing
+            .append(&b.closing, &ledger, *id, n as u64 + 1)
+            .unwrap();
+    }
+    let last = ids[RAIL];
+    let before = unconfirmed.encode_vault(&ledger).unwrap();
+    assert!(
+        matches!(
+            unconfirmed.append(&basis, &ledger, last, RAIL as u64 + 1),
+            Err(ReplError::EpochBound)
+        ),
+        "the Unconfirmed rail refuses operation {}",
+        RAIL + 1
+    );
+    assert_eq!(
+        unconfirmed.encode_vault(&ledger).unwrap(),
+        before,
+        "a refused Save changes nothing"
+    );
+    closing
+        .append(&b.closing, &ledger, last, RAIL as u64 + 1)
+        .unwrap();
+    assert_eq!(closing.overlay().unwrap().accepted(), RAIL + 1);
+
+    // The read-side half (review of f3ce1758, MEDIUM-2). An over-long Unconfirmed branch cannot be
+    // appended, but a crafted record could hold one, and every read and every decode-then-validate
+    // goes through `checked_entries`. Built past the rail in memory, it refuses to read. The same
+    // entries relabelled Closing read, so the refusal is the Unconfirmed cap and nothing else.
+    let mut over = unconfirmed.overlay().unwrap().clone();
+    over.append_unchecked_for_test(&ledger, last, RAIL as u64 + 1);
+    assert!(
+        matches!(over.read(&ledger), Err(ReplError::Malformed)),
+        "an Unconfirmed branch past the rail refuses to read"
+    );
+    over.set_basis_kind(crate::studio::overlay::BasisKind::Closing);
+    assert_eq!(over.read(&ledger).unwrap().accepted(), RAIL + 1);
+}
+
+/// Design 8.6's predicate on its own, over every combination. Design M21 asks that document identity
+/// and seed identity differ independently, so that dropping either half of the comparison fails on
+/// that half: the two mixed cases below are those, one per half.
+#[test]
+fn reconciliation_confirms_the_base_only_when_both_the_document_and_the_seed_agree() {
+    use crate::studio::epoch::handoff::unconfirmed_base_confirmed as confirmed;
+    let seed = [5; 32];
+    assert!(confirmed(true, Some(seed), seed), "both agree");
+    assert!(
+        !confirmed(true, Some([6; 32]), seed),
+        "the base document id with another seed is superseded"
+    );
+    assert!(
+        !confirmed(false, Some(seed), seed),
+        "the same seed under another document id is superseded"
+    );
+    assert!(
+        !confirmed(true, None, seed),
+        "a source that opened from no checkpoint is superseded"
+    );
+}
+
+/// Design 8.6 through the vault bytes production reads, header only. The installed successor of
+/// the very receipt an Unconfirmed branch was based on confirms its base. The same source after it
+/// moves on supersedes it. A Closing branch is not reconciled at all.
+#[test]
+fn reconciliation_reads_the_installed_source_header_against_the_branch_base() {
+    use crate::studio::StudioOverlayUnconfirmedState as U;
+    for art in [false, true] {
+        let mut f = Fixture::new(art);
+        let (closing, _, _) = transferable_branch(&mut f, 1);
+        let overlay = closing.overlay().unwrap();
+        let receipt = overlay.receipt().clone();
+        let seed =
+            UnconfirmedStudioSeed::parse_live_transfer(overlay.target(), &receipt, overlay.seed())
+                .unwrap();
+        let owner = f.owner.device_id();
+        let basis = StudioUnconfirmedOverlayBasis::mint_from_live_preview(
+            &seed,
+            &receipt,
+            owner,
+            owner,
+            1,
+            1_700_000_000_000,
+        )
+        .unwrap();
+        let (ledger, id) = one_intent(&mut f, "preview work");
+        let mut unconfirmed = StudioOverlayState::new(&basis);
+        unconfirmed.append(&basis, &ledger, id, 1).unwrap();
+        // `StudioEpoch::snapshot` takes `&mut self`, hence `&mut Fixture`.
+        let state = |f: &mut Fixture, branch: &StudioOverlayState| {
+            StudioEpoch::unconfirmed_base_state_in_vault(
+                &f.source.snapshot().unwrap(),
+                branch.overlay().unwrap(),
+            )
+        };
+
+        // The successor the receipt's close selected, opened by that very receipt.
+        assert_eq!((f.source.epoch(), f.source.op_count()), (1, 0));
+        assert_eq!(state(&mut f, &unconfirmed).unwrap(), U::BaseConfirmed);
+        // Work landing on it does not change which checkpoint it opened from.
+        f.edit(f.title_body("someone's edit on the confirmed base"));
+        assert_eq!(state(&mut f, &unconfirmed).unwrap(), U::BaseConfirmed);
+        // A Closing branch is P2's to classify, not reconciliation's.
+        assert!(matches!(
+            state(&mut f, &closing),
+            Err(ReplError::EpochScope)
+        ));
+
+        // The source moves past the base: another document id and another opening checkpoint.
+        f.fill();
+        let decision = f.decide(Some(&receipt));
+        let plan = f.plan(&decision);
+        f.source = f.source.checkpoint_successor(&plan, &f.group, 0).unwrap();
+        assert_eq!(f.source.epoch(), 2);
+        assert_eq!(state(&mut f, &unconfirmed).unwrap(), U::BaseSuperseded);
+    }
+}
+
+/// Review of f3ce1758, MEDIUM-1: the reader production calls, held to each half on its own.
+///
+/// No honest source differs in only one half: an installed checkpoint's seed hash already depends
+/// on its close. So each fixture re-frames the real confirmed source's bytes with exactly one field
+/// replaced. Either the opening receipt changes (the same close, another seed), or the gate does
+/// (another document id, the same opening). That is the crafted-record or writer-bug case "BOTH
+/// must agree" exists for.
+#[test]
+fn reconciliation_supersedes_a_source_that_differs_in_only_the_document_or_only_the_seed() {
+    use crate::studio::epoch::handoff::reframe_vault_for_test as reframe;
+    use crate::studio::StudioOverlayUnconfirmedState as U;
+    let mut f = Fixture::new(false);
+    let (closing, _, _) = transferable_branch(&mut f, 1);
+    let overlay = closing.overlay().unwrap();
+    let receipt = overlay.receipt().clone();
+    let seed =
+        UnconfirmedStudioSeed::parse_live_transfer(overlay.target(), &receipt, overlay.seed())
+            .unwrap();
+    let owner = f.owner.device_id();
+    let basis = StudioUnconfirmedOverlayBasis::mint_from_live_preview(
+        &seed,
+        &receipt,
+        owner,
+        owner,
+        1,
+        1_700_000_000_000,
+    )
+    .unwrap();
+    let (ledger, id) = one_intent(&mut f, "preview work");
+    let mut unconfirmed = StudioOverlayState::new(&basis);
+    unconfirmed.append(&basis, &ledger, id, 1).unwrap();
+    let branch = unconfirmed.overlay().unwrap();
+    let confirmed = f.source.snapshot().unwrap();
+    let state = |bytes: &[u8]| StudioEpoch::unconfirmed_base_state_in_vault(bytes, branch).unwrap();
+    assert_eq!(
+        state(&confirmed),
+        U::BaseConfirmed,
+        "precondition: the unmodified source confirms"
+    );
+    assert_eq!(
+        state(&reframe(&confirmed, None, None)),
+        U::BaseConfirmed,
+        "re-framing alone changes nothing"
+    );
+
+    // The base document id, but an opening checkpoint with another seed under the same close.
+    let other_seed = Receipt::sign(
+        receipt.document.clone(),
+        receipt.closed_epoch,
+        receipt.close_record_hash,
+        [0xEE; 32],
+        receipt.tenure_start_group_epoch,
+        receipt.inherited.clone(),
+        &f.owner,
+    )
+    .unwrap();
+    assert_eq!(
+        state(&reframe(&confirmed, Some(&other_seed.encode()), None)),
+        U::BaseSuperseded,
+        "the base document id with another opening seed is superseded"
+    );
+
+    // The same opening checkpoint, but a gate naming another document id.
+    let gate = crate::EpochGate::new(receipt.document.clone(), 0xD0C, f.source.epoch(), owner)
+        .encode()
+        .unwrap();
+    assert_eq!(
+        state(&reframe(&confirmed, None, Some(&gate))),
+        U::BaseSuperseded,
+        "the opening seed under another document id is superseded"
+    );
+}
+
+/// Agent 1's Flow S review, L1: the basis exposes the author and document a Save stage needs to
+/// refuse a basis for another author or group before any media work. Each is the mint's input.
+#[test]
+fn the_basis_names_the_author_and_document_it_was_minted_for() {
+    let mut f = Fixture::new(true);
+    let b = bases(&mut f);
+    let owner = f.owner.device_id();
+    let other = DeviceId::from_public_key_bytes(&[9; 32]);
+    let basis = mint(&b, other, owner, 1, 1_700_000_000_000);
+    let view = StudioOverlayBasis::from(&basis);
+    assert_eq!(view.author(), other, "the author, not the provider");
+    assert_eq!(view.document(), &b.receipt.document);
+    let closing = StudioOverlayBasis::from(&b.closing);
+    assert_eq!(closing.author(), owner);
+    assert_eq!(closing.document(), &b.receipt.document);
 }

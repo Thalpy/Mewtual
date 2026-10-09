@@ -21,6 +21,71 @@ fn parse_mode(value: Value) -> Result<StudioDisposalRequestMode, String> {
         .checked()
 }
 
+/// Design 8.7's native shape. A saved Unconfirmed draft says it is local, provisional and on
+/// unconfirmed history, and carries no content. `pending` and `busy` both say to resend the same
+/// request, and stay distinguishable. The ticket says it is a preview basis.
+#[test]
+fn an_unconfirmed_save_crosses_as_local_unconfirmed_work_with_no_content() {
+    let target = StudioTarget::Flipnote {
+        channel: 7u128.to_be_bytes(),
+        object: [9; 16],
+    };
+    let saved = response_value(Response::UnconfirmedOverlaySaved {
+        target,
+        outcome: StudioUnconfirmedSaveOutcome::Saved {
+            basis: [3; 32],
+            accepted: 2,
+        },
+    })
+    .unwrap();
+    assert_eq!(saved["kind"], "unconfirmedOverlaySave");
+    assert_eq!(saved["state"], "saved");
+    assert_eq!(saved["channel"], "7");
+    assert_eq!(saved["object"], hex::encode([9; 16]));
+    assert_eq!(saved["accepted"], 2);
+    assert_eq!(saved["basis"], hex::encode([3; 32]));
+    assert_eq!(
+        (
+            &saved["localOnly"],
+            &saved["provisional"],
+            &saved["provenance"]
+        ),
+        (&json!(true), &json!(true), &json!("unconfirmed"))
+    );
+    assert!(
+        saved.get("content").is_none() && saved.get("contentId").is_none(),
+        "a Save result carries no document content: {saved}"
+    );
+
+    for (outcome, state) in [
+        (StudioUnconfirmedSaveOutcome::Scheduled, "pending"),
+        (StudioUnconfirmedSaveOutcome::Busy, "busy"),
+    ] {
+        let value = response_value(Response::UnconfirmedOverlaySaved { target, outcome }).unwrap();
+        assert_eq!(
+            (&value["state"], &value["retry"]),
+            (&json!(state), &json!("sameRequest"))
+        );
+        assert!(
+            value.get("localOnly").is_none(),
+            "nothing was saved: {value}"
+        );
+    }
+
+    let ticket = response_value(Response::UnconfirmedOverlaySaveTicket {
+        target,
+        basis: [4; 32],
+        branch: [5; 32],
+    })
+    .unwrap();
+    assert_eq!(ticket["kind"], "unconfirmedOverlaySaveTicket");
+    assert_eq!(ticket["provenance"], "unconfirmed");
+    assert_eq!(
+        (&ticket["basis"], &ticket["branch"]),
+        (&json!(hex::encode([4; 32])), &json!(hex::encode([5; 32])))
+    );
+}
+
 #[test]
 fn releasing_needs_the_exact_literal_the_user_typed() {
     let token = StudioReleaseConfirmation::TOKEN;
@@ -132,6 +197,23 @@ fn a_disposal_that_meant_to_preserve_and_lost_its_kind_is_refused_not_guessed() 
 /// **One-sided today.** No frontend code consumes `manualReason` yet (the commands are unregistered
 /// and section 11's TypeScript union is Agent 4's to apply), so this pins only the native side.
 /// Whoever adds the renderer needs a matching test on the TypeScript side.
+/// Design 8.6's `unconfirmedState`: each state under its section 11 name, plus `sourceUnreadable`,
+/// and null for a Closing branch or no branch. One function serves the lifecycle row and the
+/// inspection, so they cannot disagree.
+#[test]
+fn every_unconfirmed_state_crosses_under_its_name() {
+    use catcoms_app::studio::types::StudioOverlayUnconfirmedState as U;
+    for (state, name) in [
+        (U::AwaitingSource, "awaitingSource"),
+        (U::BaseConfirmed, "baseConfirmed"),
+        (U::BaseSuperseded, "baseSuperseded"),
+        (U::SourceUnreadable, "sourceUnreadable"),
+    ] {
+        assert_eq!(unconfirmed_state_value(Some(state)), json!(name));
+    }
+    assert_eq!(unconfirmed_state_value(None), Value::Null);
+}
+
 #[test]
 fn every_manual_reason_crosses_under_its_section_11_name() {
     use catcoms_app::studio::types::{
@@ -310,6 +392,11 @@ async fn lifecycle_classifies_a_live_branch_without_writing_to_the_vault() {
             value["manualReason"].is_string(),
             eligibility == "manual",
             "a reason exactly when manual, got {value}"
+        );
+        // Design 8.6 is about preview-based work; this fixture's branch is a Closing one.
+        assert!(
+            value["unconfirmedState"].is_null(),
+            "a Closing branch has no unconfirmed state, got {value}"
         );
         assert!(value["archive"].is_null(), "nothing has been preserved yet");
         assert!(value["disposed"].is_null(), "nothing has been disposed yet");

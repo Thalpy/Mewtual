@@ -13,11 +13,57 @@ use super::*;
 use crate::studio::StudioOwnerTenure;
 use catcoms_replication::studio::{
     IndexOp, StudioEpoch, StudioHandoffEvidence, StudioOverlayEligibility,
-    StudioOverlayManualReason as R, StudioOverlayProvenance,
+    StudioOverlayManualReason as R, StudioOverlayProvenance, StudioOverlayUnconfirmedState,
 };
 use catcoms_replication::ReplError;
 
 impl ServerStore {
+    /// Design 8.6, computed on read: how the live Unconfirmed branch's base relates to the
+    /// installed source. Nothing is written, so there is no reconciliation crash window.
+    ///
+    /// `None` when the document has no live branch, or its branch is a Closing one (P2 classifies
+    /// that). Otherwise `AwaitingSource` with no source record, the header-only comparison when
+    /// there is one, and `SourceUnreadable` when there is one that cannot be read. Never a
+    /// promotion: `BaseConfirmed` says two hashes agree, and confers no tenure, signing or
+    /// provider authority.
+    ///
+    /// Two things the caller must combine it with, both recorded in design 8.6:
+    /// - the source's phase, since a faulted or adopting source at the base can read
+    ///   `BaseConfirmed`, and copy into it needs it Open (copy's C3 checks that);
+    /// - the interval when catch-up has installed the epoch the receipt closes, before the
+    ///   successor arrives, which reads `BaseSuperseded`.
+    pub(crate) fn studio_overlay_unconfirmed_state(
+        &self,
+        server: u64,
+        group: &ServerGroup,
+        target: StudioTarget,
+    ) -> Result<Option<StudioOverlayUnconfirmedState>, AppError> {
+        let document = target.document(&group.group_id()).map_err(invalid)?;
+        let state = self.load_epoch_intents_structural(server, &document)?;
+        let Some(metadata) = state.handoff_metadata() else {
+            return Ok(None);
+        };
+        metadata.check_target(target).map_err(invalid)?;
+        let Some(overlay) = metadata.overlay() else {
+            return Ok(None);
+        };
+        if !matches!(
+            metadata.provenance(),
+            StudioOverlayProvenance::Unconfirmed { .. }
+        ) {
+            return Ok(None);
+        }
+        Ok(Some(
+            match self.with_vault_source(server, group, target, |bytes| {
+                StudioEpoch::unconfirmed_base_state_in_vault(bytes, overlay)
+            }) {
+                Ok(None) => StudioOverlayUnconfirmedState::AwaitingSource,
+                Ok(Some(state)) => state,
+                Err(_) => StudioOverlayUnconfirmedState::SourceUnreadable,
+            },
+        ))
+    }
+
     /// `None` when the document has no live branch. Otherwise the most permanent applicable reason
     /// first: provenance, authorship, a Prepared branch's resolution evidence, then (unless that
     /// resolution settles the branch outright) the installed source against the branch's basis,
@@ -121,10 +167,11 @@ impl ServerStore {
             }
             for object in objects {
                 let flipnote = StudioTarget::Flipnote { channel, object };
-                let holds_work = self.with_vault_source(server, group, flipnote, |bytes| {
-                    StudioEpoch::vault_holds_work(bytes, flipnote)
-                });
-                if !matches!(holds_work, Ok(Some(true))) {
+                // An unreadable record is as unusable to the handoff as an absent one.
+                if !matches!(
+                    self.studio_object_holds_work(server, group, flipnote),
+                    Ok(true)
+                ) {
                     return manual(R::ObjectMissing);
                 }
             }
@@ -148,6 +195,50 @@ impl ServerStore {
             return manual(R::ReceiptChanged);
         }
         Ok(Some(StudioOverlayEligibility::Transferable))
+    }
+
+    /// Whether the Flipnote `object` names exists **in `object`'s channel** and holds work: an
+    /// operation, or an epoch past zero. The same predicate the handoff's Index object check
+    /// applies after a full load (`op_count() > 0 || epoch() > 0`), answered here from the record's
+    /// header with no restore, so it is cheap enough to run under custody per object.
+    ///
+    /// `false` for no record. `false` too for a record stored under **another channel's label**:
+    /// a Flipnote's logical key omits its channel, so one record answers for every label of that
+    /// object id, and an Index entry in this channel naming another channel's object would name
+    /// nothing here. Copy's probe reports that as a missing target rather than failing the whole
+    /// preview (the review's wrong-object-channel Low), and P2 calls it `ObjectMissing`. An
+    /// unreadable record is an error, for the caller to classify.
+    ///
+    /// **Header-only, so it does not prove the body restorable.** An authenticated record whose
+    /// header counts operations its body cannot yield passes here, where a full load would refuse.
+    /// Only a writer bug produces that shape: the record is AEAD-sealed and scope-checked. And the
+    /// handoff's own check at H1 (`check_index_object_sources`) still full-loads, so a publication
+    /// that relies on the object meets the restore there. H5 rechecks the same rule, inlined in
+    /// `check_index_objects_at_commit` so one read serves it and the intent link (design 9.1.1
+    /// A1). **Keep the two in step.** By then the object passed H1's full load, and can only have
+    /// changed through a writer of this build.
+    ///
+    /// **Copy has no such later load.** A copy into an Open Index is an ordinary Apply, not a
+    /// handoff, so on that path this probe is the only object-existence guard. That is accepted on
+    /// the same ground: only a writer bug makes the header and body disagree. A copy that names such
+    /// an object would land an Index entry for an object whose body cannot be read, which the Index
+    /// already has to tolerate for an object deleted after the entry was written.
+    pub(crate) fn studio_object_holds_work(
+        &self,
+        server: u64,
+        group: &ServerGroup,
+        object: StudioTarget,
+    ) -> Result<bool, AppError> {
+        let logical = object.document(&group.group_id()).map_err(invalid)?;
+        let scope = scope_bytes(server, &logical)?;
+        let Some(record) = self.read_studio_record(&scope)? else {
+            return Ok(false);
+        };
+        let (stored, snapshot) = decode_record(&record.plain, &scope, &logical)?;
+        if stored != object {
+            return Ok(false);
+        }
+        StudioEpoch::vault_holds_work(snapshot, object).map_err(invalid)
     }
 
     /// Run `read` over `target`'s authenticated vault source bytes, unsealed but not restored.

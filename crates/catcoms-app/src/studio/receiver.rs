@@ -12,6 +12,7 @@ mod catchup;
 pub(crate) use catchup::PreviewHarness;
 mod handoff;
 mod replay;
+mod unconfirmed;
 pub(crate) use catchup::{HandoffCompletion, StudioBackgroundJob, StudioBackgroundResult};
 
 /// Recently accessed targets, bounded by the existing sync watch rail. Reopening the same exact
@@ -27,9 +28,17 @@ pub(crate) struct StudioReceiver {
     replay: replay::ReplayRuntime,
     replay_turn: bool,
     handoff: handoff::HandoffRuntime,
+    /// Which Unconfirmed Save request scheduled the plan now parked, if one did (design 8.7). A plan
+    /// does not record its request, and the overlay slot holds one plan for a target whichever
+    /// request made it. So a later visit must know whether that plan is its own before reporting
+    /// it saved.
+    unconfirmed_scheduled: Option<[u8; 32]>,
+    /// The exact Closing request that owns the one overlay job/plan slot. The target alone is not
+    /// enough: two operations can name the same document, and neither may report the other's
+    /// detached plan as its own successful Save.
+    closing_scheduled: Option<[u8; 32]>,
 }
 /// What one custody visit of the scheduled Flow S concluded.
-#[allow(dead_code)]
 pub(crate) enum StudioOverlaySaveVisit {
     /// Terminal and already durable: an acknowledgement, an exact retry, or a commit that this
     /// visit completed from a plan an earlier visit left ready.
@@ -42,9 +51,42 @@ pub(crate) enum StudioOverlaySaveVisit {
     Busy,
 }
 
+/// Correlate a detached Flow S result with the complete bounded request envelope.
+///
+/// `DomainOp::id` intentionally omits the body because it identifies an idempotency slot. That is
+/// too weak here: conflicting bodies with one nonce must not claim each other's parked work. The
+/// canonical operation encoding covers nonce, document type, logical key and body; the remaining
+/// fields distinguish the two basis kinds and the exact branch ticket presented by the caller.
+fn overlay_request_fingerprint(
+    provenance: u8,
+    target: StudioTarget,
+    basis: &[u8; 32],
+    branch: &[u8; 32],
+    operation: &catcoms_replication::DomainOp,
+) -> Result<[u8; 32], AppError> {
+    let encoded = operation.encode().map_err(invalid)?;
+    let mut hash = blake3::Hasher::new_derive_key("mewtual/studio-flow-s-request/v1");
+    hash.update(&[provenance]);
+    hash.update(&target.channel());
+    match target {
+        StudioTarget::Index { .. } => {
+            hash.update(&[0]);
+        }
+        StudioTarget::Flipnote { object, .. } => {
+            hash.update(&[1]);
+            hash.update(&object);
+        }
+    }
+    hash.update(basis);
+    hash.update(branch);
+    hash.update(&(encoded.len() as u64).to_be_bytes());
+    hash.update(&encoded);
+    Ok(*hash.finalize().as_bytes())
+}
+
 impl StudioReceiver {
     pub(crate) fn clear_previews(&mut self) {
-        self.catchup.preview = Default::default();
+        self.catchup.preview.reset();
     }
 
     /// Scheduled local Save (Flow S), under the actor's custody lease.
@@ -76,12 +118,19 @@ impl StudioReceiver {
         operation: catcoms_replication::DomainOp,
         budget: &mut crate::store::EpochStudioBudget,
     ) -> Result<StudioOverlaySaveVisit, AppError> {
+        let request = overlay_request_fingerprint(0, target, &basis, &branch, &operation)?;
         // Read, never required here: S1b and S3 require it at their own points, and everything
         // before them - retries and acknowledgements - must keep working without it (V8).
         let tenure = server.observed_owner_tenure();
         // A plan this actor already produced is finished first. Its transient hold is the only
         // thing protecting its pixels, and it occupies admission until it is consumed.
         if let Some((plan, ownership)) = self.catchup.take_planned_overlay(target) {
+            // Whatever plan this takes is no longer another request's to claim. Commit it to
+            // release its transient media hold and shared slot, but only its exact scheduling
+            // request may receive the outcome as its own.
+            let ours = self.closing_scheduled == Some(request);
+            self.closing_scheduled = None;
+            self.unconfirmed_scheduled = None;
             let committed = server.sync.with_registry_context(|group, device, _, rng| {
                 store.commit_studio_overlay(
                     id, group, target, device, close, tenure, *plan, rng, budget,
@@ -90,6 +139,12 @@ impl StudioReceiver {
             // Explicit: admission and the shared slot are released only after the commit attempt
             // returns, on success and on error alike.
             drop(ownership);
+            if !ours {
+                if let Err(error) = committed {
+                    tracing::warn!(%error, "a parked overlay plan of another request did not commit");
+                }
+                return Ok(StudioOverlaySaveVisit::Busy);
+            }
             return committed.map(|draft| {
                 StudioOverlaySaveVisit::Saved(Box::new(
                     catcoms_replication::studio::StudioOverlaySave::Local(draft),
@@ -99,7 +154,11 @@ impl StudioReceiver {
         // 7.2. Reserve before the first bounded read, and release by dropping if there is nothing
         // to schedule. Nothing below this line reaches a blob until S1b.
         let Some(ownership) = self.catchup.reserve_overlay() else {
-            return Ok(StudioOverlaySaveVisit::Busy);
+            return Ok(if self.closing_scheduled == Some(request) {
+                StudioOverlaySaveVisit::Scheduled
+            } else {
+                StudioOverlaySaveVisit::Busy
+            });
         };
         let started = server
             .sync
@@ -126,6 +185,7 @@ impl StudioReceiver {
             }
             crate::store::StudioOverlayStart::Captured(capture) => {
                 self.catchup.schedule_overlay(*capture, ownership, target);
+                self.closing_scheduled = Some(request);
                 Ok(StudioOverlaySaveVisit::Scheduled)
             }
         }
@@ -203,12 +263,20 @@ impl StudioReceiver {
             Ok((
                 saved,
                 updated,
-                Some(StudioControlResponse::Applied {
+                Some(StudioControlResponse::OverlayCopyApplied {
                     // The destination is what changed, so it is what the caller is told about.
-                    target: destination,
+                    destination,
                     already_saved,
                 }),
             ))
+        } else if matches!(
+            request.action,
+            StudioControlAction::BeginUnconfirmedOverlaySave
+                | StudioControlAction::SaveUnconfirmedOverlay(_)
+        ) {
+            // Design 8.7. Only the receiver holds the ready preview each stage mints from.
+            let response = self.unconfirmed_save_control(server, store, id, request)?;
+            Ok((StudioSavedTransaction::empty(), None, Some(response)))
         } else {
             let target = request.target;
             // Every action that can leave the vault different from what the renderer last read.
@@ -485,7 +553,7 @@ impl StudioReceiver {
         server: &Server<T, R>,
         now: u64,
     ) -> bool {
-        !self.paused
+        (!self.paused
             && ((self.catchup.replay_ready()
                 && self
                     .replay
@@ -514,7 +582,11 @@ impl StudioReceiver {
                 // never schedules that visit, so the thirty-second bound the code claims is not
                 // a bound at all: four such actors strand the whole pool indefinitely.
                 || self.catchup.registry_expiry_due(now)
-                || self.catchup.pending(server, &self.watches))
+                || self.catchup.pending(server, &self.watches)))
+            // A parked Save plan past its deadline (design 8.7), outside the pause gate: a paused
+            // receiver must still release the admission and process-wide permit a plan holds,
+            // and `run` drops it before it honours the pause (review of `265b0756`, LOW-1).
+            || self.catchup.overlay_park_expiry_due(now)
     }
     /// Milliseconds until this receiver has time-gated work to do, if any.
     ///
@@ -532,19 +604,22 @@ impl StudioReceiver {
     }
 
     fn wake_in_at(&self, now: u64) -> Option<u64> {
+        // A parked plan's deadline is published even while paused, for the reason its pending
+        // term sits outside the pause gate.
         if self.paused {
-            return None;
+            return self.catchup.overlay_park_wake_in(now);
         }
-        // Both deadlines, from the one sample the caller took. They are independent resources,
+        // Every deadline, from the one sample the caller took. They are independent resources,
         // so the earliest wins; nothing here dominates anything else the way the capacity gate
         // dominates per-target pacing.
-        match (
+        [
             self.handoff.wake_in(now, &self.rail()),
             self.catchup.registry_wake_in(now),
-        ) {
-            (Some(a), Some(b)) => Some(a.min(b)),
-            (only, None) | (None, only) => only,
-        }
+            self.catchup.overlay_park_wake_in(now),
+        ]
+        .into_iter()
+        .flatten()
+        .min()
     }
 
     /// The watched targets, which is the only set a handoff deadline may speak for. A deadline
@@ -552,6 +627,16 @@ impl StudioReceiver {
     fn rail(&self) -> Vec<StudioTarget> {
         self.watches.iter().map(|(w, _)| w.target).collect()
     }
+    /// A private preparation pool for this receiver, so a test that parks plans does not contend
+    /// with every other test in the process on the one global four-slot semaphore.
+    #[cfg(test)]
+    pub(crate) fn inject_overlay_pool_for_test(
+        &mut self,
+        permits: usize,
+    ) -> Arc<tokio::sync::Semaphore> {
+        self.catchup.inject_overlay_pool_for_test(permits)
+    }
+
     /// Put the receiver in the state a storage fault leaves it in.
     ///
     /// Only the precondition is simulated. What a completion arriving in that state does, and
@@ -658,6 +743,16 @@ impl StudioReceiver {
             return Err(invalid("Studio receive mount or numeric server changed"));
         }
         self.catchup.lifecycle(server, store, id);
+        // A parked Save plan whose caller never came back holds this actor's admission and a
+        // process-wide preparation permit; only a Save visit consumes it. Bounded like the
+        // retained Registry source, and its request forgotten with it (design 8.7).
+        if self
+            .catchup
+            .expire_parked_overlay(server.runtime_clock().monotonic_ms())
+        {
+            self.closing_scheduled = None;
+            self.unconfirmed_scheduled = None;
+        }
         self.catchup.preview.maintain(server, store, id);
         let mls = server.sync.with_registry_context(|g, _, _, _| g.epoch());
         self.replay.lifecycle(store, id, mls);

@@ -16,6 +16,10 @@ use catcoms_rt::{Hub, ManualClock, MemNetwork, PeerId};
 use rand_chacha::ChaCha20Rng;
 use rand_core::SeedableRng;
 
+/// Copy between two Flipnotes: the source and destination holds told apart (L-2), and a Save
+/// landing on the source mid-copy (L-1).
+mod cross;
+
 const SERVER: u64 = 7;
 const OBJECT: [u8; 16] = [6; 16];
 
@@ -33,6 +37,142 @@ fn budget(store: &mut ServerStore, server: &mut Node) -> EpochStudioBudget {
         .sync
         .with_registry_context(|g, _, _, _| store.studio_storage_budget(SERVER, g, &inventory))
         .unwrap()
+}
+
+/// One document's epoch 0, made large enough to reach the production rotation threshold, sealed,
+/// and given `accepted` as a real Closing-overlay entry. Returns the close the overlay is on.
+///
+/// The successor is NOT installed, so the branch is still live and further Closing-overlay Saves
+/// can land on it. [`install_successor`] makes the document Open with the branch retained.
+///
+/// `seed` opens the history. `padding` is applied ten times, under nonces 10 to 19, each change
+/// carrying a 220 KB message, which is what crosses the threshold. `accepted` lands under nonce 3.
+fn closing_branch(
+    server: &mut Node,
+    store: &mut ServerStore,
+    target: StudioTarget,
+    seed: Vec<u8>,
+    padding: Vec<u8>,
+    accepted: Vec<u8>,
+) -> catcoms_replication::CloseRecord {
+    let logical = target.document(&server.group_id()).unwrap();
+    let domain = |body: Vec<u8>, nonce: u8| DomainOp {
+        body,
+        nonce: [nonce; 16],
+        doc_type: logical.doc_type,
+        logical_key: logical.logical_key.clone(),
+    };
+    let mut b = budget(store, server);
+    let close = server
+        .sync
+        .with_registry_context(|g, d, _, r| {
+            let mut source =
+                catcoms_replication::studio::StudioEpoch::new(g, target, d.device_id()).unwrap();
+            let packet = source
+                .edit_or_reseal(d, g, r, &domain(seed, 1), 100)
+                .unwrap();
+            store.ingest_studio_epoch(SERVER, g, target, d, &packet, r, &mut b)?;
+            for n in 10..20u8 {
+                let op = domain(padding.clone(), n);
+                let mut copy = catcoms_replication::studio::StudioEpoch::restore(
+                    &source.snapshot().unwrap(),
+                    g,
+                    target,
+                    d.device_id(),
+                )
+                .unwrap();
+                let packet = copy.edit_or_reseal(d, g, r, &op, 100).unwrap();
+                let opened = packet
+                    .open(&g.channel_secret(d, packet.doc_type, packet.doc_id).unwrap())
+                    .unwrap();
+                let mut change = automerge::Change::from_bytes(opened.delta)
+                    .unwrap()
+                    .decode();
+                change.message = Some("x".repeat(220_000));
+                let change = automerge::Change::from(change);
+                let signed = catcoms_replication::SignedOp::sign_domain(
+                    d,
+                    logical.doc_type,
+                    source.doc_id(),
+                    change.raw_bytes().to_vec(),
+                    &op,
+                )
+                .unwrap();
+                let packet = catcoms_replication::SealedOp::seal(&signed, g, d, r).unwrap();
+                source.ingest(&packet, g, d).unwrap();
+                store.ingest_studio_epoch(SERVER, g, target, d, &packet, r, &mut b)?;
+            }
+            let decision = source.new_owner_decision(g, d, 0, None).unwrap();
+            store.seal_studio_epoch(
+                SERVER,
+                g,
+                target,
+                d,
+                decision.receipt().clone(),
+                0,
+                r,
+                &mut b,
+            )?;
+            Ok::<_, AppError>(decision.close().clone())
+        })
+        .unwrap();
+    closing_save(server, store, target, &close, domain(accepted, 3));
+    close
+}
+
+/// A real Closing-overlay Save of `operation` onto `target`'s live branch.
+fn closing_save(
+    server: &mut Node,
+    store: &mut ServerStore,
+    target: StudioTarget,
+    close: &catcoms_replication::CloseRecord,
+    operation: DomainOp,
+) {
+    let mut b = budget(store, server);
+    let ticket = server
+        .prepare_studio_closing_overlay(store, SERVER, target, close, &mut b)
+        .unwrap();
+    let StudioOverlaySave::Local(_) = server
+        .save_studio_closing_overlay(
+            store,
+            SERVER,
+            target,
+            close,
+            ticket.basis.fingerprint(),
+            ticket.branch,
+            operation,
+            &mut b,
+        )
+        .unwrap()
+    else {
+        panic!("expected actual local acceptance")
+    };
+}
+
+/// Install `target`'s pristine successor, so the document is Open and its branch is retained.
+fn install_successor(
+    server: &mut Node,
+    store: &mut ServerStore,
+    target: StudioTarget,
+    close: &catcoms_replication::CloseRecord,
+) {
+    let capture = server
+        .sync
+        .with_registry_context(|g, d, _, _| store.capture_studio_source(SERVER, g, target, d))
+        .unwrap()
+        .expect("the installed source is present");
+    let prepared = capture.rebuild().unwrap();
+    assert!(server
+        .sync
+        .with_registry_context(|g, d, _, _| store.install_prepared_studio_source(g, d, prepared))
+        .unwrap());
+    let mut b = budget(store, server);
+    server
+        .sync
+        .with_registry_context(|g, d, _, r| {
+            store.install_sealed_studio_successor_for_test(SERVER, g, target, d, close, r, &mut b)
+        })
+        .unwrap();
 }
 
 /// An Index Closing overlay holding one accepted `PutObject` for `OBJECT`, retained across an
@@ -67,14 +207,8 @@ impl Fixture {
         };
         let root = tempfile::tempdir().unwrap();
         let mut store = ServerStore::open(root.path(), b"copy-probe", &mut rng()).unwrap();
-        let logical = index.document(&server.group_id()).unwrap();
-        let domain = |body: Vec<u8>, nonce: u8| DomainOp {
-            body,
-            nonce: [nonce; 16],
-            doc_type: logical.doc_type,
-            logical_key: logical.logical_key.clone(),
-        };
-        let put = |object: [u8; 16], title: &str, device: crate::DeviceId| {
+        let device = server.device_id();
+        let put = |object: [u8; 16], title: &str| {
             IndexOp::PutObject {
                 object,
                 kind: StudioKind::Flipnote,
@@ -86,117 +220,22 @@ impl Fixture {
             .encode()
             .unwrap()
         };
-
-        let mut b = budget(&mut store, &mut server);
-        let close = server
-            .sync
-            .with_registry_context(|g, d, _, r| {
-                let mut source =
-                    catcoms_replication::studio::StudioEpoch::new(g, index, d.device_id()).unwrap();
-                let seed = domain(put([4; 16], "shared seed", d.device_id()), 1);
-                let packet = source.edit_or_reseal(d, g, r, &seed, 100).unwrap();
-                store.ingest_studio_epoch(SERVER, g, index, d, &packet, r, &mut b)?;
-                let title = domain(
-                    IndexOp::SetTitle {
-                        object: [4; 16],
-                        title: "padding".into(),
-                    }
-                    .encode()
-                    .unwrap(),
-                    9,
-                );
-                for n in 10..20u8 {
-                    let mut op = title.clone();
-                    op.nonce = [n; 16];
-                    let mut copy = catcoms_replication::studio::StudioEpoch::restore(
-                        &source.snapshot().unwrap(),
-                        g,
-                        index,
-                        d.device_id(),
-                    )
-                    .unwrap();
-                    let packet = copy.edit_or_reseal(d, g, r, &op, 100).unwrap();
-                    let opened = packet
-                        .open(&g.channel_secret(d, packet.doc_type, packet.doc_id).unwrap())
-                        .unwrap();
-                    let mut change = automerge::Change::from_bytes(opened.delta)
-                        .unwrap()
-                        .decode();
-                    change.message = Some("x".repeat(220_000));
-                    let change = automerge::Change::from(change);
-                    let signed = catcoms_replication::SignedOp::sign_domain(
-                        d,
-                        logical.doc_type,
-                        source.doc_id(),
-                        change.raw_bytes().to_vec(),
-                        &op,
-                    )
-                    .unwrap();
-                    let packet = catcoms_replication::SealedOp::seal(&signed, g, d, r).unwrap();
-                    source.ingest(&packet, g, d).unwrap();
-                    store.ingest_studio_epoch(SERVER, g, index, d, &packet, r, &mut b)?;
-                }
-                let decision = source.new_owner_decision(g, d, 0, None).unwrap();
-                store.seal_studio_epoch(
-                    SERVER,
-                    g,
-                    index,
-                    d,
-                    decision.receipt().clone(),
-                    0,
-                    r,
-                    &mut b,
-                )?;
-                Ok::<_, AppError>(decision.close().clone())
-            })
-            .unwrap();
-
         // The overlay entry the copy will take: a PutObject naming a Flipnote nobody created.
-        let accepted = domain(put(OBJECT, "accepted overlay", server.device_id()), 3);
-        let mut b = budget(&mut store, &mut server);
-        let ticket = server
-            .prepare_studio_closing_overlay(&mut store, SERVER, index, &close, &mut b)
-            .unwrap();
-        let StudioOverlaySave::Local(_) = server
-            .save_studio_closing_overlay(
-                &mut store,
-                SERVER,
-                index,
-                &close,
-                ticket.basis.fingerprint(),
-                ticket.branch,
-                accepted,
-                &mut b,
-            )
-            .unwrap()
-        else {
-            panic!("expected actual local acceptance")
-        };
-
-        // Install the pristine successor so the destination is Open.
-        let capture = server
-            .sync
-            .with_registry_context(|g, d, _, _| store.capture_studio_source(SERVER, g, index, d))
-            .unwrap()
-            .expect("the installed source is present");
-        let prepared = capture.rebuild().unwrap();
-        assert!(
-            server
-                .sync
-                .with_registry_context(
-                    |g, d, _, _| store.install_prepared_studio_source(g, d, prepared)
-                )
-                .unwrap()
+        let close = closing_branch(
+            &mut server,
+            &mut store,
+            index,
+            put([4; 16], "shared seed"),
+            IndexOp::SetTitle {
+                object: [4; 16],
+                title: "padding".into(),
+            }
+            .encode()
+            .unwrap(),
+            put(OBJECT, "accepted overlay"),
         );
-        let mut b = budget(&mut store, &mut server);
-        server
-            .sync
-            .with_registry_context(|g, d, _, r| {
-                store.install_sealed_studio_successor_for_test(
-                    SERVER, g, index, d, &close, r, &mut b,
-                )
-            })
-            .unwrap();
+        // Install the pristine successor so the destination is Open.
+        install_successor(&mut server, &mut store, index, &close);
 
         Self {
             _hub: hub,
@@ -363,6 +402,88 @@ async fn the_copy_probe_refuses_an_object_that_is_missing_or_disappears_before_a
 }
 
 impl Fixture {
+    fn logical(&self) -> catcoms_replication::LogicalDocument {
+        self.index.document(&self.server.group_id()).unwrap()
+    }
+
+    /// The branch the copies read from, as everything that records it.
+    fn branch_identity(&self) -> ([u8; 32], [u8; 32], usize, Vec<u8>) {
+        self.store
+            .studio_branch_identity_for_test(SERVER, &self.logical())
+    }
+
+    /// Operations in the destination's installed source.
+    fn destination_ops(&mut self) -> usize {
+        let (store, index) = (&mut self.store, self.index);
+        self.server
+            .sync
+            .with_registry_context(|g, d, _, _| {
+                store.with_studio_source(SERVER, g, index, d, |s| Ok(s.op_count()))
+            })
+            .unwrap()
+            .expect("the destination is installed")
+    }
+
+    /// What the actor does with C4's request: the ordinary Apply publication into the destination.
+    fn publish(&mut self, request: StudioRequest) {
+        self.server
+            .studio_transaction(&mut self.store, SERVER, request)
+            .unwrap();
+    }
+
+    /// A store restart: the same vault reopened. The previous handle is dropped first.
+    fn restart(&mut self) {
+        let placeholder_root = tempfile::tempdir().unwrap();
+        let placeholder =
+            ServerStore::open(placeholder_root.path(), b"placeholder", &mut rng()).unwrap();
+        drop(std::mem::replace(&mut self.store, placeholder));
+        self.store = ServerStore::open(self._root.path(), b"copy-probe", &mut rng()).unwrap();
+    }
+
+    /// A durable transfer hold on the index document, staged through the real handoff.
+    fn stage_transfer_hold(&mut self) {
+        let mut b = budget(&mut self.store, &mut self.server);
+        let (store, index) = (&mut self.store, self.index);
+        self.server
+            .sync
+            .with_registry_context(|g, d, _, r| {
+                store.stage_studio_transfer_hold_for_test(SERVER, g, index, d, 0, r, &mut b);
+                Ok::<_, AppError>(())
+            })
+            .unwrap();
+    }
+
+    /// The overlay entry's object, created for real but under ANOTHER channel's label. A
+    /// Flipnote's logical key omits its channel, so this is the very record the probe reads for
+    /// `OBJECT`, stored under a label that is not the copy's.
+    fn create_object_under(&mut self, channel: [u8; 16]) {
+        let target = StudioTarget::Flipnote {
+            channel,
+            object: OBJECT,
+        };
+        let mut b = budget(&mut self.store, &mut self.server);
+        let store = &mut self.store;
+        self.server
+            .sync
+            .with_registry_context(|g, d, _, r| {
+                let logical = target.document(&g.group_id()).unwrap();
+                let mut source =
+                    catcoms_replication::studio::StudioEpoch::new(g, target, d.device_id())
+                        .unwrap();
+                let op = DomainOp {
+                    body: FlipnoteOp::SetHeader(FlipnoteHeader::Title("elsewhere".into()))
+                        .encode()
+                        .unwrap(),
+                    nonce: [0x44; 16],
+                    doc_type: logical.doc_type,
+                    logical_key: logical.logical_key,
+                };
+                let packet = source.edit_or_reseal(d, g, r, &op, 100).unwrap();
+                store.ingest_studio_epoch(SERVER, g, target, d, &packet, r, &mut b)
+            })
+            .unwrap();
+    }
+
     /// A second copy of an echo, since the request is consumed by value.
     fn echo_for(&self, echo: &StudioOverlayCopyApply) -> StudioOverlayCopyApply {
         StudioOverlayCopyApply {
@@ -485,4 +606,289 @@ async fn export_archive_and_copy_preview_keep_their_slot_and_fence_through_deliv
         );
         drop(handoff);
     }
+}
+
+/// M3's missing half, N6 for a same-document copy, and the same retry across a store restart.
+///
+/// The copy is carried all the way through: C4's request is published exactly as the actor
+/// publishes it, so "landed" is an operation in the destination rather than an accepted echo.
+/// Then the identical echo is sent again, as a renderer does after an uncertain result. It must
+/// be acknowledged as already saved rather than refused, and it must write nothing. The same
+/// holds after the store is reopened. Throughout, the branch the value came from is untouched in
+/// everything that records it (N6): its id, its content, its accepted count and its metadata
+/// bytes.
+#[tokio::test]
+async fn a_copy_lands_once_and_its_exact_retry_is_acknowledged_without_a_second_operation() {
+    let mut f = Fixture::new().await;
+    f.create_object();
+    let branch = f.branch_identity();
+
+    let prepared = f.plan().await;
+    let echo = f.echo(&prepared.plan);
+    let preview = f
+        .server
+        .finish_studio_copy_preview(&mut f.store, SERVER, f.index, prepared)
+        .unwrap();
+    assert_eq!(
+        preview.value().disposition,
+        StudioRecoveryDisposition::Ready
+    );
+    drop(preview);
+
+    let before = f.destination_ops();
+    let (request, already) = f.apply(f.echo_for(&echo)).unwrap();
+    assert!(!already, "nothing has landed yet");
+    f.publish(request);
+    assert_eq!(
+        f.destination_ops(),
+        before + 1,
+        "the copy lands as exactly one operation"
+    );
+    assert_eq!(
+        f.branch_identity(),
+        branch,
+        "N6: a same-document copy changes nothing that records the branch"
+    );
+
+    let (request, already) = f
+        .apply(f.echo_for(&echo))
+        .expect("an exact retry is acknowledged, not refused as stale");
+    assert!(already, "the retry must say the copy already landed");
+    f.publish(request);
+    assert_eq!(
+        f.destination_ops(),
+        before + 1,
+        "and publishing the retry writes nothing"
+    );
+
+    f.restart();
+    let (_, already) = f
+        .apply(f.echo_for(&echo))
+        .expect("the exact retry is acknowledged after a restart too");
+    assert!(already);
+    assert_eq!(f.branch_identity(), branch);
+}
+
+/// L4: an ordinary Save is never reported as this copy having landed.
+///
+/// The ordinary Save here carries the copy's exact body under the renderer's exact nonce. That is
+/// the one shape that used to be byte-identical to the copy's own operation, so C4's exact-retry
+/// shortcut answered `already_saved` for work the copy never did. Copies now publish under their
+/// own nonce domain. So the echo is re-planned instead: the ordinary Save moved the destination, so
+/// the plan's projection no longer matches the preview's, and the echo is refused as stale. That is
+/// what is actually true.
+#[tokio::test]
+async fn an_ordinary_save_of_the_same_bytes_is_never_reported_as_this_copy() {
+    let mut f = Fixture::new().await;
+    f.create_object();
+    let prepared = f.plan().await;
+    let echo = f.echo(&prepared.plan);
+    drop(prepared);
+
+    f.publish(StudioRequest::Apply {
+        target: f.index,
+        epoch_id: echo.epoch_id,
+        nonce: echo.nonce,
+        body: echo.body.clone(),
+    });
+    let result = f.apply(f.echo_for(&echo));
+    assert!(
+        !matches!(result, Ok((_, true))),
+        "an ordinary Save must not be acknowledged as this copy having landed"
+    );
+    let refused = result.unwrap_err().to_string();
+    assert!(
+        refused.contains("copy preview is stale"),
+        "the echo must be re-planned against the destination the Save moved: {refused}"
+    );
+}
+
+/// M4 / design 6.3 C1': a transfer hold on the destination refuses the copy at C1, at C3 when it
+/// was staged after C1, and at C4 when it was staged after the preview. Every refusal is by
+/// message, so neither the publication path's own guard nor the source-stamp currency check can
+/// stand in for the hold check. At C4 that publication guard would otherwise answer after a full
+/// re-plan, with a generic reason instead of this copy's retryable one (the review's M1).
+#[tokio::test]
+async fn a_transfer_hold_on_the_destination_refuses_the_copy_at_c1_c3_and_c4() {
+    let mut f = Fixture::new().await;
+    f.create_object();
+
+    let prepared = f.plan().await;
+    let echo = f.echo(&prepared.plan);
+    let before = f.destination_ops();
+    f.stage_transfer_hold();
+    let refused = f
+        .server
+        .finish_studio_copy_preview(&mut f.store, SERVER, f.index, prepared)
+        .expect_err("a hold staged since C1 must refuse the preview")
+        .to_string();
+    assert!(refused.contains("transfer hold"), "C3 refusal: {refused}");
+
+    let (choice, pool) = (f.choice(), f.pool.clone());
+    let refused = f
+        .server
+        .begin_copy_with_pool(&f.store, SERVER, f.index, choice, &pool)
+        .expect_err("C1 must refuse while the destination is held")
+        .to_string();
+    assert!(refused.contains("transfer hold"), "C1 refusal: {refused}");
+
+    let refused = f
+        .apply(echo)
+        .expect_err("C4 must refuse while the destination is held")
+        .to_string();
+    assert!(refused.contains("transfer hold"), "C4 refusal: {refused}");
+    assert_eq!(f.destination_ops(), before, "a refused apply wrote nothing");
+    assert_eq!(
+        pool.available_permits(),
+        4,
+        "a refused begin keeps no preparation slot"
+    );
+}
+
+/// The wrong-object-channel Low: an object stored under another channel's label is a missing
+/// target in this channel, not an error that fails the preview. C3 downgrades it like an absent
+/// object, and C4 refuses the echo with the probe's own message.
+#[tokio::test]
+async fn an_object_stored_under_another_channel_label_is_missing_here_not_an_error() {
+    let mut f = Fixture::new().await;
+    f.create_object_under([0x77; 16]);
+
+    let prepared = f.plan().await;
+    assert_eq!(
+        prepared.plan.disposition(),
+        StudioRecoveryDisposition::Ready,
+        "the planner cannot see the store, so only the probe can downgrade this"
+    );
+    let echo = f.echo(&prepared.plan);
+    let preview = f
+        .server
+        .finish_studio_copy_preview(&mut f.store, SERVER, f.index, prepared)
+        .expect("a wrong-channel object is a missing target, not a failed preview");
+    assert_eq!(
+        preview.value().disposition,
+        StudioRecoveryDisposition::MissingTarget
+    );
+    drop(preview);
+    let refused = f.apply(echo).unwrap_err().to_string();
+    assert!(
+        refused.contains("no longer exists in this channel"),
+        "the C4 refusal must be the probe's: {refused}"
+    );
+}
+
+/// Review of `b35e23d2`, MEDIUM-1: a Closing draft's accepted operation resent through the
+/// Unconfirmed Save action is refused, never answered as saved Unconfirmed work.
+///
+/// This fixture's live branch is a Closing one with one accepted operation. The store's exact-retry
+/// acknowledgement is kind-blind: it compares the request's basis and branch, and never reaches the
+/// mint. The oracle shows that the store alone, given that request and a failed Unconfirmed mint,
+/// does acknowledge it as `Local`, which the receiver would have reported as
+/// `provenance:"unconfirmed"`. So the refusal is the receiver's guard.
+#[tokio::test]
+async fn a_closing_drafts_operation_resent_as_an_unconfirmed_save_is_refused() {
+    let mut f = Fixture::new().await;
+    let logical = f.logical();
+    let state = f
+        .store
+        .load_epoch_intents_structural(SERVER, &logical)
+        .unwrap();
+    let metadata = state.handoff_metadata().unwrap();
+    let basis = metadata.overlay().unwrap().basis();
+    let branch = metadata.branch_id().unwrap();
+    let device = f.server.device_id();
+    let body = IndexOp::PutObject {
+        object: OBJECT,
+        kind: StudioKind::Flipnote,
+        title: "accepted overlay".into(),
+        created_by: device,
+        ts: 100,
+        expiry: StudioExpiry::Never,
+    }
+    .encode()
+    .unwrap();
+
+    // The oracle: the store acknowledges the resend.
+    let mut b = budget(&mut f.store, &mut f.server);
+    let store = &mut f.store;
+    let index = f.index;
+    let acknowledged = f
+        .server
+        .sync
+        .with_registry_context(|g, d, clock, rng| {
+            store.start_studio_overlay(
+                SERVER,
+                g,
+                index,
+                d,
+                crate::store::StudioOverlayMint::unconfirmed(Err(invalid("no preview"))),
+                basis,
+                branch,
+                crate::studio::domain(index, [3; 16], body.clone()),
+                clock.now_ms(),
+                rng,
+                &mut b,
+            )
+        })
+        .unwrap();
+    assert!(
+        matches!(
+            acknowledged,
+            crate::store::StudioOverlayStart::Settled(ref saved)
+                if matches!(**saved, StudioOverlaySave::Local(_))
+        ),
+        "precondition: the store alone acknowledges the resend"
+    );
+
+    let mut receiver = crate::studio::PreviewHarness::default().into_receiver(Vec::new());
+    let answered = receiver
+        .control(
+            &mut f.server,
+            &mut f.store,
+            SERVER,
+            crate::studio::StudioControlRequest {
+                target: f.index,
+                action: crate::studio::StudioControlAction::SaveUnconfirmedOverlay(Box::new(
+                    crate::studio::StudioUnconfirmedOverlaySaveRequest {
+                        basis,
+                        branch,
+                        nonce: [3; 16],
+                        body,
+                    },
+                )),
+            },
+        )
+        .map(|(_, _, response)| response);
+    let refused = match answered {
+        Err(error) => error.to_string(),
+        Ok(response) => {
+            panic!("a Closing draft must be refused by the Unconfirmed Save, got {response:?}")
+        }
+    };
+    assert!(
+        refused.contains("was not made on a preview"),
+        "a Closing draft is refused by the receiver, not reported as Unconfirmed work: {refused}"
+    );
+
+    // The ticket names the same reason, and names it first. This receiver has no preview, so a
+    // ticket that minted before checking would be refused for that instead (review of
+    // `265b0756`, LOW-3).
+    let ticket = receiver
+        .control(
+            &mut f.server,
+            &mut f.store,
+            SERVER,
+            crate::studio::StudioControlRequest {
+                target: f.index,
+                action: crate::studio::StudioControlAction::BeginUnconfirmedOverlaySave,
+            },
+        )
+        .map(|(_, _, response)| response);
+    let refused = match ticket {
+        Err(error) => error.to_string(),
+        Ok(response) => panic!("a ticket for a Closing draft must be refused, got {response:?}"),
+    };
+    assert!(
+        refused.contains("was not made on a preview"),
+        "the ticket names the Closing draft before it mints: {refused}"
+    );
 }

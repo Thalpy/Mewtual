@@ -144,7 +144,9 @@ impl ServerStore {
         }
         let document = target.document(&group.group_id()).map_err(invalid)?;
         let observer = device.device_id();
-        self.resolve_studio_handoff_with_io(server, group, target, device, rng, budget, hooks)?;
+        self.resolve_studio_handoff_with_io(
+            server, group, target, device, None, rng, budget, hooks,
+        )?;
         let source = self.checked_studio_receive_source(server, group, target, device, budget)?;
         if source.observed.is_none() {
             return Err(invalid("a repair never creates a source"));
@@ -311,7 +313,9 @@ impl ServerStore {
             .verify_current_owner(group, tenure)
             .map_err(invalid)?;
         repair.check_evidence(&pair[0], &pair[1]).map_err(invalid)?;
-        self.resolve_studio_handoff_with_io(server, group, target, device, rng, budget, hooks)?;
+        self.resolve_studio_handoff_with_io(
+            server, group, target, device, None, rng, budget, hooks,
+        )?;
         let source = self.checked_studio_receive_source(server, group, target, device, budget)?;
         if source.observed.is_none() {
             return Err(invalid("a repair never creates a source"));

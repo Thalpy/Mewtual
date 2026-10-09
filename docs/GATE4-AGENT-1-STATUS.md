@@ -1502,6 +1502,108 @@ So a budgeted scan currently does one record per visit. That is the safe directi
 cheap record costs a visit, inlining an expensive one costs an unbounded custody hold - but it
 means **13.7 is now load-bearing for throughput, not just a reporting obligation**.
 
+### The runtime half: designed in `GATE4-AGENT-1-C3-RUNTIME.md`, step 1 in progress
+
+The runtime adoption has its own design document, `GATE4-AGENT-1-C3-RUNTIME.md`, reviewed twice
+before any runtime code. Revision 1 (the scratch draft) was **not ready**: two blockers (a queue
+head gated on `replay_ready()` could wait on catch-up forever; a second pool permit for overlay
+jobs could wedge the four-slot pool) and five highs, among them that the job API silently dropped
+the receive limits and that the throughput premise was false (every uncached record parks, one per
+visit). Revision 2 answered all 22 findings; its re-review closed both blockers in principle and
+found four new highs, all in the later conversion steps. Revision 3 records the decisions for those
+steps, and **step 1, the storage prerequisites, was accepted for implementation**.
+
+The list of sites below is the historical one. The current, complete table (about thirty sites,
+classified explicit or background, with profile and what each retains when not ready) is in the
+design document's section 5.
+
+**Step 1, the storage prerequisites, is implemented** (no runtime owner converted yet):
+
+| piece | what it does | test | mutation, killed |
+|---|---|---|---|
+| S-1 `EpochInventoryProfile` | coverage plus the four limits as one value; every scan is built through `scan_epoch_files_with(profile)`; `receive()` is exactly the old receive rail; a job keeps its profile on both restart paths | `an_inventory_job_keeps_its_profile_across_a_restart`: 65 records, restart from a step and from finish, both still refuse at the 65th | widening either restart path to `full()` |
+| S-2 generation stamp | the issued inventory carries the `inventory_generation` it was finished under; the Studio budget mint refuses a mismatch | `an_inventory_finished_before_a_five_family_write_cannot_mint_after_it` | dropping the new comparison: the stale inventory minted |
+| S-3 `drive_epoch_inventory_job` | one visit's drive against an absolute deadline, through a cursor step that takes the deadline as given (`step_until`); never begins a step with no time left; reports an already-parked body as `Parked` | `driving_a_job_respects_the_visit_deadline_and_stops_at_a_park`, `..._treats_its_deadline_as_absolute`, `..._loops_several_one_record_steps_in_one_visit` | dropping the pre-check (8 entries instead of 0); calling the relative step (traversal completed past the deadline); stepping once (stopped after one record); dropping the parked check |
+| S-4 held cursor beside non-family files | pins that creating, replacing and removing `.bin`/`.net` siblings, and a real `save_server`, between steps neither faults nor changes records or authenticated bytes | `a_held_cursor_tolerates_non_family_files_changing_beside_it` | (pins platform behaviour; no guard to break) |
+
+**Its review: one high, fixed.** An Opus adversarial review of the first cut found that
+`drive_epoch_inventory_job` passed its **absolute** deadline to the step's **relative** form,
+which adds it to the current time. A step's own expiry was therefore disabled, one step could run
+every non-family name to the next record, and the classifier was handed an enormous remaining
+budget, harmless only while `validation_fits` refuses everything. Nothing called it yet; step 2
+would have built on it. My test missed it because it used only a deadline already past and
+`u64::MAX`, where the two readings coincide. Fixed with a cursor step that takes an absolute
+deadline, plus the regression above. Also from that review: a test that `drive` really loops (M1),
+an inventory that starts with a token matching nothing so only the finish stamp makes it mintable
+(L2), the parked report (L3), a real server write in the S-4 test (L4), a doc warning on the
+vault-wide job constructor (L5), and the misplaced test doc comment (L1). The re-review closed
+H1 and found nothing new. One residual, recorded rather than changed: with a body taken but not
+yet installed, `drive` reports `Stepped` when out of time and an error when time remains. The
+planned runtime cannot reach that state, because a job whose body is out for validation is not
+stepped (design section 4).
+
+### Step 2 (replay's manual move): staged in a private worktree, reviewed, not yet shipped
+
+Built and reviewed as `GATE4-AGENT-1-C3-RUNTIME.md` section 12 records: the shared,
+turn-based `InventoryRuntime`, its detached validation through the receiver's background-job
+machinery, N-M1's own-write accounting, and replay's manual move taking its budget from it with
+a synchronous fallback (on `Unstable`, or after 60 s of patience). Its adversarial review found no
+blocker and one high, a liveness stall under ordinary writes, which the fallback answers. It ships
+once Agent 2 confirms the two shared receiver files are free; until then no production path parks
+a cursor across visits. Step 2 is the runtime and its tests, ready for 13.7's classifier, more than
+a custody improvement for busy vaults today: with every uncached record parking, a busy or large
+vault ends in the same synchronous scan as before.
+
+### I-4 writer audit at C-3 step 2 (2026-10-06, Opus, static, at `2df3564f`)
+
+Section 8 of the runtime design requires the audit to be re-run before the first production code
+that parks a cursor, because only then does an under-rotating writer become unsafe. No blocker or
+high. Findings and their dispositions are in the runtime design's section 12 (M-1 raw `std::fs`
+now refused by `scripts/check-store-raw-fs.sh` in CI; M-2 a finish-time names-only listing check;
+M-3 read-path rotations recorded, the completed-handoff serve memoised and its three sibling
+sites a follow-up; L-1 fixed; L-2 and L-3 follow-ups). The
+audited writer list, which is what proves coverage beside the type-level guard:
+
+| writer | kinds touched | rotates before first mutating I/O | evidence |
+|---|---|---|---|
+| Recovery accounted, incl. eviction settle | Recovery + temp | yes | `epoch_recovery.rs:374→376`; `:411` delegates |
+| Recovery unaccounted / tooling | Recovery + temp | yes | `epoch_recovery.rs:485→487` |
+| Owner journal (all owner writers, fault/repair resave, publication) | OwnerReceipts + temp | yes | `epoch_owner.rs:642→644`, the only write in the family |
+| Intents replace (ordinary, overlay accept, handoff stages) | Intents + temp | yes | `epoch_intents.rs:752→754` |
+| Intents exact-retry sync | Intents | yes | `epoch_intents.rs:712→714` |
+| `flush_checked_epoch_intents` | Intents | yes | `epoch_intents.rs:568` |
+| Retirement replace / zero-removal sync | Intents | yes | `retirement.rs:352→354`, `312→314` |
+| Handoff completed sync (source precheck) | Intents | yes | `epoch_studio/handoff.rs:702` |
+| Handoff publication sync (read-only serve) | Intents | yes; a repeat of a flush this mount already made, with no five-family write since, is now skipped with no I/O (M-3) | `handoff.rs:749` (now `:751`) via `source.rs:158`, through `sync_intent_unless_durable` |
+| `sync_intent_unless_durable` (added for M-3) | Intents | yes, through its own guard, when it flushes at all | store `epoch_recovery/inventory.rs`, `RepeatSyncMemo` beside it |
+| Draft archive write | DraftArchive + temp | yes | `epoch_draft_archive.rs:255→257` |
+| Draft archive exact-retry sync | DraftArchive | yes | `epoch_draft_archive.rs:209→211` |
+| Draft archive release (unlink + parent sync) | DraftArchive | yes | `epoch_draft_archive.rs:370→372,379` |
+| Registry epoch replace / unchanged sync | Registry + temp | yes | `epoch_registry.rs:492→494`, `457→459` |
+| Registry head proof sync / repair barrier | Registry | yes | `epoch_registry/head.rs:343→345`, `383→385` |
+| Registry maintenance hint | Registry, Intents | yes | `epoch_registry/page_source.rs:60,71` |
+| Registry page receive sync | Registry | yes | `epoch_registry/receive.rs:201→203` |
+| Studio source (seal, rotate, adopt, overlay commit, ingest, handoff) replace / unchanged sync | Studio + temp | yes | `epoch_studio.rs:688→690`, `643→645`, the only write in the family |
+| Studio discovery proof sync / repair barrier | Studio | yes | `epoch_studio/discovery.rs:400→402`, `439→441` |
+| Cleanup unlink batch + directory sync (test-only callers) | all temps | yes, per step before the loop | `epoch_recovery/cleanup.rs:164→197,215` |
+| Failed-write staging unlink (`StagingPath::drop`) | any, inside a guarded write | yes (the caller's guard) | `store.rs:567-587,1256-1263` |
+| Non-family savers (`.bin`, `.net`, `.cache`, ui-state, pairing, `registry.bin`) | none; same directory, hence M-2 | no, correctly | `store.rs:1203-1228` |
+| `remove_server` | none (`servers/` non-family files) | no, correctly | `store.rs:1608-1619` |
+| `ServerStore::open` (creates `servers/`, root sync) | directory, before mount | n/a (fresh token) | `store.rs:1383,1390,1401` |
+| Vault session lock, passphrase rewrap | vault root only | n/a | `catcoms-storage/src/vault.rs:118-122`; `store.rs:1448` |
+| Blob stores | `blobs/` only | n/a | `store.rs:1635-1659` |
+| `WriteHooks` seams | decide only, no I/O; `None` is the only production value | n/a | `store.rs:869-894` |
+| Test-only raw writers | any | no (`cfg(test)`) | `store.rs:681-684,1162-1179`; `epoch_draft_archive.rs:533,562` |
+| catcomsctl, Tauri bridge | nothing in `servers/` outside tests | n/a | `bins/catcomsctl/src/main.rs`; `admission_storage.rs` tests from `:382` |
+| Budget mint / scope entry | none | correctly does not rotate | `epoch_studio.rs:187,222` |
+
+Line numbers are as audited at `2df3564f`. The readers' side was confirmed sound: step, install,
+finish, mint and reference finish all recheck the token, and `Arc::ptr_eq` against live clones
+cannot suffer ABA. Residual risks the audit named, not defects: the token is per `ServerStore`
+instance and exclusivity rests on the vault's file lock (weak on Linux NFS); the `servers/` parent
+is checked as a non-link directory only at begin; crash-orphaned `.bin` staging files could
+exhaust the 1024-entry receive limit, which fails closed.
+
 ### What remains, and why it is a separate checkpoint
 
 The runtime still drives scans the old way at six sites: `studio/control.rs` (x2),
@@ -1976,7 +2078,7 @@ four this ledger should have been distinguishing all along:
 | 13.4 | **complete as the arithmetic 13.4 asks for; not a measurement** | scope declared (one permit, sum of accounted bounds), stage/lifetime table with moves distinguished from clones, **64.18 MiB** over 13.4's eight items plus 18.09 MiB retained beyond its list. The largest simultaneous accounted set is H5's source write at 59.52 MiB under a declared document proxy; H4 is the smallest of the three priced stages. Five earlier attempts at this section were each refuted by review |
 | 13.5 | **source-correct fixture on the operation-count axis; one clause uncovered** | the three real production seams are timed at every depth 1 to 255, with custody separated from the detached plan, depth read back through `local_draft()` and the 255/256 premise asserted. "Against a maximal Closing source and seed" is **not** covered - the source is at rotation eligibility, not the byte ceiling - and S3's I-3 hold is bracketed rather than measured |
 | 13.6 | **executed measurement; obligation partly unaddressed** | `checked_epoch_replay_state` and the five-family inventory over several large retained branches, both named by 13.6. What exists measures the decoder pair and the two load entry points |
-| 13.7 | **source-correct fixtures, executed measurements, narrower conclusions** | accepted-ceiling runs for each family; DraftArchive entirely; a largest-single-step figure at a ceiling rather than at fixture sizes; restart behaviour under a real workload rather than a deterministic guard rotation. OwnerReceipts and Intents are measured only at trivial sizes |
+| 13.7 | **source-correct fixtures, executed measurements, narrower conclusions** | accepted-ceiling runs for each family; DraftArchive entirely; a largest-single-step figure at a ceiling rather than at fixture sizes; restart behaviour under a real workload rather than a deterministic guard rotation. **2026-10-08:** Intents now at its ceilings in both modes and DraftArchive at its ceiling in accounting mode; still missing are OwnerReceipts at its cap, DraftArchive in reference mode, and Recovery above 4 MiB |
 | 13.8 | **synchronous component evidence** | scheduled end-to-end wall clock and the visit count. `256 x max_turn_ms` is not the sum of the signature durations, and the direct loop excludes receive cadence and queued visits |
 
 **13.2 and 13.5 have nothing at all**, and are the same kind of work: custody per stage at shapes
@@ -2279,11 +2381,749 @@ and are marked accordingly; 13.7 is re-run in the next checkpoint rather than be
 arithmetic here. `a_well_resolved_batch_is_not_reported_as_unresolved` pins all three rules this
 predicate has had wrong in sequence: the raw-sum rule, the zero-median rule and the per-unit rule.
 
+## CI: the handoff mutation harness was red from `17dd54fc` to `fee9b993`, and that was mine
+
+**What failed.** The "Studio Closing overlay handoff" workflow failed on all three pushes since
+9.1, at the `index-commit` entry, which 9.1 added. Its mutant replaced the call to
+`check_index_objects_at_commit` at H5's call site. That left the helper dead, and the workflow
+builds with `RUSTFLAGS='-D warnings'`, so the build failed before the test ran.
+
+**Why I didn't see it.** Locally the harness ran without that flag, so the mutant compiled and
+read as DETECTED. Worse, the harness stops at its first failure, so in CI none of the entries
+after it ever ran: `verified-evidence`, `proof-generation`, and this checkpoint's `proof-digest`,
+`plan-intent-digest`, `plan-source-digest` and `successor-probe`.
+
+**The fix.** The mutant now empties the helper's per-object loop from inside the helper
+(`.into_iter().filter(|_| false)`), so every item stays used.
+
+**Evidence.** Run locally with `RUSTFLAGS='-D warnings'`, `index-commit` and every entry after it
+were DETECTED at their named assertions and passed once restored (2026-10-09).
+
+**A separate, pre-existing CI timeout, not addressed here.** The "Studio Closing overlay
+foundation" workflow's `lifecycle-mutations` job has been cancelled at its 60-minute limit on
+every push back to at least `83328240`. That harness is shared with Agent 2, so splitting it
+across jobs is a decision for both of us; it is listed in next actions.
+
+## Design 18.3 bounded implementation review (2026-10-09, Opus, static): PASS WITH FINDINGS
+
+**No blocker, no high.** Three mediums and five lows. The review covered Agent 1's runtime
+boundary at `524315a7` against base `5a899c22`, and is checkpoint 1 of design 18.3 only. It is
+**not Gate 4 acceptance**, which stays with Agent 4, and Gate 5 stays closed. F1 to F3 had to be
+fixed or explicitly accepted before native Save registers.
+
+Per-item verdicts:
+- **PASS:** I-4 and its writer audit; C-3's storage half with the classifier and refused-result
+  memo; C-1 (closure preserved); C-4 (closure preserved).
+- **PASS WITH FINDINGS:** the runtime (Flows S and H as scheduled jobs, admission, scheduling,
+  commit seams, 9.1's no-restore commit).
+
+What the reviewer executed:
+- `check-store-raw-fs.sh` and `check-no-ambient.sh`: both passed.
+- Four baseline tests: passed.
+- Three hand mutations:
+  - M5a (turn cap disabled): detected;
+  - M5b (deadline disabled): detected;
+  - the priority predicate forced to `false`: **survived** (F2).
+
+Everything else, including the classifier's 14 mutations, was checked by inspection.
+
+| finding | what | disposition |
+|---|---|---|
+| F1 MEDIUM | S1a's exact-retry acknowledgement replayed the whole branch under custody (`overlay.read`) to return a projection no caller used | **fixed locally, not pushed:** the last two commits of the local line, the change and its review follow-up, since they edit four of Agent 2's files (below). Their SHAs change whenever that line is rebased, so they are not cited here |
+| F2 MEDIUM | N31 is not the accepted actor-level test, and `handoff_priority` is unpinned | **open.** Needs a receiver-level test in a file shared with Agent 2; asked |
+| F3 MEDIUM | H5's custody terms are understated, and bounded custody is not established | **measured, deviation recorded**; see "H5's repeated terms, priced" below |
+| F4 LOW | a Save captured while the receiver is paused strands admission, a pool slot and a media hold | **open.** The fix sits in Agent 2's Save entry point; two shapes offered to them |
+| F5 LOW | the refused-result memo tests never checked what the memo returned | **fixed, `e01113a5`** |
+| F6 LOW | the raw-fs gate's allowlist counted lines per file | **fixed, `c61a8560`** |
+| F7 LOW | "each check redundant by construction" was untrue at the link byte | **fixed, `7258b525`**, with a correction of the finding itself (below) |
+| F8 LOW | no executed evidence for design M1, M2 and M6, and no fixture for them | **fixed, `e5bb38ef`**, and M6's guard turned out to be unbuilt (below) |
+
+### F1: S1a acknowledges without rebuilding (local, held)
+
+`StudioOverlaySave` gains `Acknowledged { basis, accepted }`. Both fields are structural facts of
+the stored branch, and S1a returns them with no replay. Agent 2's Unconfirmed receiver maps the
+new variant to the `Saved { basis, accepted }` it already reported, so their outcome is unchanged.
+
+**Contract change, recorded:** an exact retry no longer returns `StudioOverlaySave::Local`. Seven
+tests asserted the retry's projection. They now take the acknowledgement and compare the stored
+draft, read back through `local_draft`, which checks the same property (the retry left the
+authored draft as it was) against what is on disk.
+
+The regression is `studio_overlay_store_exact_retry_rebuilds_no_draft`:
+- it counts draft rebuilds through a test-only counter in `local_draft`;
+- its control reads the draft and must move the counter;
+- it failed before the fix;
+- CI's overlay harness gains `retry-rebuild`, which puts the rebuild back beside the
+  acknowledgement, so only the counter can catch it. DETECTED locally.
+
+Held because it touches Agent 2's `receiver/unconfirmed.rs` (one match arm), two of their
+Unconfirmed Save test files and `studio/copy/tests.rs`. It is ordered last in the local line, so
+everything else ships without it.
+
+**13.5's 426 ms retry figure at depth 255 is attributed to this replay by reading the code, not
+by re-measurement.** No measurement has been taken since the fix. The retry still does two
+structural decodes of the intent record and one more authenticated read for the flush.
+
+### F3: H5's repeated terms, priced
+
+The release stage profile now times one of each repeated H5 term on the commit before H5
+consumes it, and asserts that H4's carried bytes equal the candidate's encoding. Upper medians of
+5 trials, release, **on a host shared with two other agents' builds**:
+
+| shape | H5 commit | one snapshot encode | one `blob_cids` | one seed graph |
+|---|---|---|---|---|
+| Index, 1 op | 27 ms | < 1 ms | < 1 ms | 1 ms |
+| Index, 256 title ops | 83 ms | < 1 ms | 2 ms | < 1 ms |
+| Flipnote, 256 title ops | 82 ms | < 1 ms | 1 ms | < 1 ms |
+| Flipnote, 32 frames | 35 ms | < 1 ms | 1 ms | 1 ms |
+| Flipnote, 128 frames | 64 ms | < 1 ms | 4 ms | < 1 ms |
+| **Flipnote, 256 frames** | **113 ms** (max 248) | < 1 ms | 7 ms | < 1 ms |
+| Index, 16 PutObjects | 34 ms | < 1 ms | < 1 ms | < 1 ms |
+| Index, 63 PutObjects (the cap less the base's one) | 45 ms | < 1 ms | 1 ms | < 1 ms |
+
+"< 1 ms" means every one of the five samples read zero at the clock's millisecond resolution.
+
+What it settles:
+- **Reusing H4's snapshot bytes is not worth its boundary change.** Each encode measured under a
+  millisecond, at the clock's resolution, at every shape, so three are bounded by about 3 ms.
+  Reuse would have the writer trust caller-supplied snapshot bytes. **Deviation recorded:** H5
+  keeps re-encoding. (These sources are small: see the source-axis gap in C-3 runtime 15.9.)
+- **The projections are the larger repeated term, and at a full frame branch they matter:** three
+  `blob_cids` cost about 21 ms at 256 frames. Computing it once would recover about 14 ms. This
+  is now a prerequisite of C-3 step 3, not an option (C-3 runtime 15.8).
+- **Most of H5's growth with branch length is neither.** 27 to 83 ms from 1 to 256 title
+  operations, and 35 to 113 ms from 32 to 256 frames, is not encodes, projections or seed loads.
+  What remains is unattributed: barrier 2's evidence comparison, the Prepared and Completed
+  intent-record encodes, and larger durable writes. The 1-op floor of about 25 ms is presumably
+  mostly the three durable writes with their flushes. That was not measured separately.
+
+So the scan's share in C-3 runtime design 15.1, 125 ms less the commit, depends on the branch:
+
+| branch | commit | share left |
+|---|---|---|
+| short (1 op) | 25 ms | about 100 ms |
+| full title branch | 83 ms | about 40 ms |
+| Index at its object cap | 45 ms | about 80 ms |
+| full frame branch | 113 ms | **about 12 ms** |
+
+That is less than the 16 ms traversal of an 8 MiB vault.
+
+Two other figures from the same run:
+- **H1 costs 29 ms with 63 PutObjects.** It still restores once per referenced object, the "H1
+  still restores per PutObject" item under 9.1.
+- **The full-profile inventory for that 64-record vault costs 11 ms.**
+
+The full run took 52 minutes, most of it building the 256-frame fixtures, whose Saves are
+quadratic in branch length.
+
+### F7: the finding was right about the proof, not about the record
+
+Within the post-write proof, only the size-and-digest comparison sees the trailing link byte:
+- `check_studio_intent_link` accepts an unlinked record;
+- dropping the link leaves the snapshot hash unchanged.
+
+The new test lands the candidate's own plaintext with its link dropped, and H5 refuses at the
+proof. But removing the comparison does not let that record through. The encoding is canonical
+(a link is a trailing `1`), so a dropped link always shrinks the record, and resolve's flush-only
+fence checks the file length and refuses it later, as "retry file changed". So the CI entry
+`proof-digest` pins the refusal **to the proof**, the designed point that spends the budget before
+resolve reads anything. It does not pin the refusal itself.
+
+The earlier claim below, "the proof's digest and its field checks are each redundant with the
+others by construction", is corrected to: the digest overlaps the field checks except at the link
+byte.
+
+### F8: M1, M2 executed; M6's guard built, then executed
+
+- **M1 and M2** (the plan's currency check keeps only the size of the intent, then the source,
+  wrapper): `studio_overlay_handoff_plan_is_stale_after_a_same_size_wrapper_replacement` reseals
+  each record with one plaintext byte changed at the same size, between H2 and a signing turn. The
+  plan must stop being current. CI entries `plan-intent-digest` and `plan-source-digest`, both
+  DETECTED at "a stale plan reached a signing turn".
+  - **M1 was not in fact redundant** until the review of these fixes (M-1, below). H5's step 6
+    compared two of its own reads.
+- **M6's guard did not exist.** H1 captured whatever successor was installed, so a missing,
+  Faulted, replaced or already-edited successor was refused only by H2's
+  `check_overlay_successor`, detached, after the reconstruction the probe exists to spare, every
+  probe period. H1 now runs the header classification the eligibility view already uses
+  (`overlay_successor_hold_in_vault`: a bounded authenticated read, no restore) and refuses
+  before capture. H2's check stays authoritative.
+  - **Ordering, as finally placed:** after the live authority mint and before the Index object
+    check.
+    - A first placement before the authority mint broke
+      `..._old_owner_receipt_refuses_even_when_original_author_is_current`, because the probe
+      pre-empted the `verify_current_owner` refusal that test isolates.
+    - A second, after the Index check, made a non-pristine Index successor pay that check's
+      restores every probe period (review LOW-1, below).
+    - The move also put the Index object check after the authority mint. So an Index branch
+      with both a missing object and a stale receipt now refuses at the mint instead of with
+      "unavailable Flipnote", which the eligibility row reports. That affects diagnostics only:
+      no test depends on it, and the receiver discards H1's error. It also means a device with
+      stale authority no longer pays for the restores.
+  - **Contract change, recorded:** a Prepared branch over a faulted source is now refused at H1
+    as "successor is not transferable: Fault", the reason the lifecycle row already gave, instead
+    of at H2 as "epoch does not accept operations".
+  - Pinned by `studio_overlay_handoff_h1_refuses_a_non_pristine_successor_before_capture`; CI
+    entry `successor-probe`, DETECTED at "H2 started for a non-pristine successor".
+
+### Review of the 18.3 fixes (2026-10-09, Opus, static): no blocker or high
+
+Reviewed at `0808f5a2..fcda06cd`, static only, because the release profile was running. It found
+two mediums and five lows.
+
+**What it checked and found sound:**
+- S1a's acknowledgement equals what a reconstruction reports;
+- the probe never refuses what H2 would accept, and does not pre-empt the Prepared resolution;
+- every new harness anchor is unique and every mutant compiles;
+- the raw-fs gate's awk is mawk-safe;
+- 15.8's census of 24 guard sites.
+
+| finding | disposition |
+|---|---|
+| M-1 MEDIUM: M1 was the only guard, since H5's step 6 compared its own two reads | **fixed, `505b3a24`** (below) |
+| M-2 MEDIUM: F1's rebuild counter misses a direct `StudioOverlay::read` and the full intent decode's replay | **open, in F1's held commit**; F1 waits on Agent 2 anyway |
+| LOW-1: the probe ran after the Index check's restores | **fixed, `505b3a24`**: the probe now precedes it, and a new test counts zero restores |
+| LOW-2: `INTERFACES.md` and `HANDOVER.md` still describe a retry returning the draft | **open, with F1**: they change in F1's held follow-up commit, so they ship with the contract |
+| LOW-3: STATUS and doc-comment truthfulness | **fixed here**, except the stale test name in F1's own doc comment, which goes with F1 |
+| LOW-4: test level differs from the design (M6 and M1/M2 are store-level, not actor-level) | **recorded** below; the M6 test now requires `SuccessorNotPristine` |
+| LOW-5: the raw-fs gate keyed only the matched line of an open chain | **fixed, `505b3a24`**: the open flags that change a file are matched too |
+
+**M-1 in detail.**
+- **The gap:** design 9.3 step 6 compares the intent record with the captured values, and the
+  design's M1 row calls the digest check redundant on that basis. H5 instead compared its pre-write
+  re-read with its own first read, under one exclusive borrow, which cannot fail.
+- **The fix:** H5's first read must now be the stamp's intent
+  (`StudioHandoffStamp::captured_intent`).
+- **The regression:** `studio_overlay_handoff_plan_is_stale_after_a_same_size_wrapper_replacement`
+  now also drives the stale plan through signing, assembly and H5, and requires the changed record
+  to survive with no Prepared.
+- **Executed both ways, at first only by hand.** The two runs made at `505b3a24` both had the
+  test's gate assertion temporarily disabled:
+  - with the M1 mutant and the fix, the test passed, because step 6 refused alone;
+  - with the M1 mutant and the old step 6, it failed at "H5 committed a plan whose intent record
+    changed at the same size".
+
+  As committed there, the gate assertion came first, so neither CI nor any test could notice step
+  6 being removed. The re-review of these fixes found that (MEDIUM-1). The committed test now
+  asserts the intent's gate **last**, after H5, so the CI entry `plan-intent-digest` itself pins
+  both guards:
+  - DETECTED at the gate's assertion with step 6 present;
+  - "did not fail at its intended assertion" with step 6 also removed, since the test then fails
+    at "H5 committed a plan".
+
+  Both were executed through the harness on 2026-10-09.
+- **What this means for M1:** it is now redundant as the design says. Its entry observes the early
+  refusal, and through the reordered test it also guards step 6.
+
+**LOW-4, recorded rather than closed.** Three of these tests sit below the level the design names:
+- M6's evidence is store-level: a `Captured` start is what the receiver schedules H2 from.
+- M1 and M2 observe the H3 gate's return value, not a counted signing turn.
+- Both are the same class as F2: actor-level N31 coverage needs the receiver.
+
+**Re-review of those fixes (2026-10-09, Opus, static plus `cargo tree`): no blocker or high.**
+- **Confirmed sound:**
+  - step 6's placement: nothing can bypass it, and it changes no legitimate outcome;
+  - the probe move;
+  - the `test-counters` feature's hygiene: it is absent from every non-test build, catcomsctl
+    and the src-tauri workspace included, and `Cargo.lock` and `cargo deny` are unaffected;
+  - every harness anchor and mutant.
+- **MEDIUM-1:** step 6 had no automatic regression, and these notes overstated the evidence.
+  **Fixed,** as described under M-1 above.
+- **LOW-1:** the Index check's move was unrecorded. **Recorded** under F8's ordering.
+- **LOW-2:** documentation nits. Fixed here; the `INTERFACES.md` placement goes with F1.
+- **Residual risks, as it lists them:**
+  - a reconstruction moved onto another thread would escape the thread-local counter;
+  - seed-only graph loads are not counted;
+  - the raw-fs gate cannot see open flags passed as variables.
+
+## Design 9.1, no graph restore on the commit path, built (2026-10-08)
+
+This builds 9.1 as its implementation plan, 9.1.1 revision 2, specifies. That plan's design review
+found no blocker; its one high was the repair-prefix defect, fixed first in `904e447f`. It is the
+first prerequisite C-3 runtime design 15.7 names for C-3 step 3.
+
+### What changed in H5 (`commit_studio_handoff_with_io`)
+
+- **Before the write: no restore.** H2 now carries `HandoffFacts`: the blake3 of the source
+  plaintext it decoded, the stamped physical size, and the restored source's protocol bytes. The
+  stamp check H5 already ran proves the source on disk is those bytes. `stamped_studio_source`
+  requires the facts to match the stamp, builds the accounting record and runs the fresh budget's
+  `verify_record`. The second full read only to hash the source is gone too. The writer always
+  replaces: the before-snapshot fact was dropped, because at H5 the candidate always differs.
+- **After the write: a proof, not a restore.** `VerifiedPersistedSource` (new
+  `epoch_studio/source/persisted.rs`) has private fields and one constructor. That constructor
+  re-reads what landed, bounded by the family's sealed cap rather than the 8 MiB retained bound,
+  and requires:
+  - the writer's version: mount, server, target, physical size and plaintext digest;
+  - the landed channel, and a snapshot hash equal to the candidate's;
+  - a valid intent link.
+
+  Any failure, including a re-read that does not authenticate, refuses the commit with Prepared
+  retained and the budget spent.
+- **Resolve takes `Option<VerifiedPersistedSource>`.** `Some` replaces resolve's one restore, and
+  `into_checked` rechecks mount, server, target, group and the inventory generation. A verified
+  source with anything but Complete evidence refuses without writing. Every other caller passes
+  `None` and is unchanged: H1, adoption, rotation, and repair's two calls (Agent 3's file, a
+  mechanical edit).
+- **The Index object check at H5 is header-only** (`check_index_objects_at_commit`, amendment A1).
+  Per distinct referenced Flipnote it checks that the object holds work, plus its intent link.
+  H1 keeps the full load.
+- **The probe resolves a Prepared branch without a tenure** (step 4b). H1 already resolved before
+  it asked for one. So a Prepared record left by a refused H5 no longer holds the target's service
+  until a fence runs, when tenure is Unknown or Imported.
+
+### Tests, each broken on purpose
+
+Ten new tests in `tests/rotation/overlay/handoff/persisted.rs`:
+
+- zero restores during H5, for a Flipnote and for an Index with two references;
+- a facts oracle against a real restore, extended past the write: the persisted bytes restore to
+  the candidate's blob CIDs and snapshot;
+- M17's post-write substitution, which flips a receipt-book byte. That substitute clears barrier
+  2's fence (asserted as a precondition), so without the proof Completed would be written;
+- a written source that does not authenticate is a proof failure, and the budget is spent;
+- a stamp refusal with zero restores;
+- an Index reference edited between H1 and H5 still committing;
+- an Index reference made pristine, relabelled under another channel, or linked to intent
+  metadata that does not exist, between H1 and H5, refused at H5 (added after the re-review,
+  which found the link check had no test);
+- the restart path still restoring exactly once;
+- the proof's bindings: target, candidate hash, and generation;
+- the verified arm accepting only Complete evidence.
+
+Plus `the_probe_enters_h1_without_a_tenure_only_to_resolve_a_prepared_branch`, a decision table
+for step 4b in `studio/receiver/handoff.rs`. All 126 existing overlay tests pass unchanged.
+
+Eight mutations were run by hand, each killed. The files were confirmed byte-exact after the
+first six, and restored by hand after the last two:
+
+- the verified arm forced to restore;
+- the pre-write restore put back;
+- the H5 Index check dropped (killed by the existing
+  `studio_overlay_handoff_rechecks_index_object_sources_at_commit_not_only_at_capture`);
+- the whole re-read removed;
+- the Complete-only rule dropped;
+- the generation binding dropped;
+- after the review, the H5 Index rule forced to accept, killed by the pristine-and-relabelled
+  test;
+- after the re-review, the H5 intent-link check deleted, killed by that test's unlinked case.
+
+Four of them are now CI entries in `check-studio-handoff-mutations.py`, each DETECTED locally.
+
+**Two things no mutation can show, and why:**
+
+- **The proof's digest overlaps its field checks, except at the link byte** (corrected after the
+  design 18.3 review, F7; this said "each redundant with the others by construction"). The
+  plaintext is scope, channel, snapshot and link. The field checks see the first three, but the
+  link check accepts an unlinked record, so a dropped link is seen only by the size-and-digest
+  comparison, and later by resolve's flush-only length fence. `proof-digest` now pins it. M17
+  remains the whole re-read removed.
+- **The facts-to-stamp equality cannot be reached from the tests.** `HandoffFacts`' fields are
+  private to the capture module, and in normal flows they always agree.
+
+### Implementation review (2026-10-08, Opus, static): no blocker or high
+
+The review confirmed each of these:
+
+- `stamped_studio_source` produces exactly `checked_studio_source`'s `observed`;
+- the empty `before` skips no check;
+- the writer's returned unit is the one whose snapshot landed;
+- the landed snapshot makes resolve's flush-only save equivalent, and an independent fence;
+- invalidating the budget is sufficient;
+- the probe cannot loop or spin.
+
+Its findings and what happened to them:
+
+- **M1, the post-write test was killed only by its message.** Its link-byte substitute failed an
+  earlier decode, so the test did not show the proof was load-bearing. It now flips a
+  receipt-book byte, which the fence skips, and asserts that precondition. The docstring and the
+  14.2 M17 row were corrected.
+- **M2, the "built as specified" claim overstated.** The cheap missing regressions were added:
+  - a write that does not authenticate, with the budget spent;
+  - pristine and relabelled references at H5;
+  - the facts oracle past the write.
+
+  The rest are listed below as not done, and the design header now says so.
+- **LOW-1:** the proof's doc claimed it "cannot be paired with another unit". It now says how the
+  unit is tied to the bytes, and by what.
+- **LOW-2:** the refusal message said "is not the written candidate" even for an I/O failure. It
+  now says "could not be proved to be".
+- **LOW-3:** H5 read each referenced object twice. It now reads it once.
+- **LOW-4:** step 4b's steady-state cost and pacing are recorded in design 9.1.1.
+- **LOW-5:** the facts-to-stamp check is half tautological. Recorded, not changed.
+
+**Re-review of those fixes:** no blocker or high. It confirmed that the inline Index rule matches
+`studio_object_holds_work` in every case: missing, wrong channel, unreadable and pristine.
+
+- **Its medium:** the H5 intent-link check still had no test. Now covered by the unlinked case,
+  and breaking the check fails it.
+- **Its lows, all fixed:**
+  - the test comment now says what the setup models;
+  - the proof's doc names its third builder and says "at construction";
+  - `eligibility.rs` says the rule is inlined and must be kept in step;
+  - the duplicate-PutObject claim cites the observed refusal.
+
+### What is not done, and what it leaves expensive
+
+- **Regressions the plan listed and this does not have:**
+  - **a successor between 8 MiB and `MAX_SEALED_BYTES`**, which needs an 8 MiB Studio fixture;
+  - **a repaired destination or repaired reference through H5**, which needs Agent 3's repair
+    fixtures;
+  - **the probe resolving after a refusal at receiver level, with tenure Unknown**: no receiver
+    fixture produces an actor without an observed tenure, and only the decision table covers it;
+  - **duplicate PutObjects:** the Save path refuses a second PutObject for an object already in
+    the branch as a malformed op. This was observed while writing these tests: a fixture that
+    saved two PutObjects for one object failed in the Save helper with "epoch studio: malformed
+    op". So the deduplication is defensive.
+- **Still expensive:** H5 still does two seed `graph()` loads and several candidate `blob_cids`
+  projections, and for an Index one authenticated read per referenced object. H1 still restores
+  per PutObject and for an interrupted Prepared record.
+- **Not measured:** the commit phase on its own (C-3 15.7, step 2).
+
+### The commit phase, a first look (debug build, 2026-10-08)
+
+`profile_studio_overlay_handoff_stages` (`tests/rotation/overlay/handoff/performance.rs`, opt-in)
+times each stage separately, on a fresh vault per trial: H1, H2, H3, H4, the H5 budget's
+inventory, and H5 itself. Its smoke run was a **debug** build on a machine that was not quiet. So
+these numbers show shape only; the gate needs a release run in a quiet window. Upper medians of 5
+trials, in milliseconds:
+
+| target | branch ops | H1 | H3 signing | H5 inventory | H5 commit | H2, H4 (detached) |
+|---|---|---|---|---|---|---|
+| Index | 1 | 7 | 11 | 1 | 53 | 44, 20 |
+| Index | 32 | 12 | 184 | 3 | 100 | 390, 280 |
+| Index | 256 | 47 | 1 455 | 15 | 888 | 9 188, 4 410 |
+| Flipnote | 1 | 7 | 11 | 1 | 54 | 52, 22 |
+| Flipnote | 32 | 11 | 183 | 3 | 97 | 534, 317 |
+| Flipnote | 256 | 41 | 1 437 | 15 | 851 | 12 004, 5 639 |
+
+What it already says:
+
+- **H5's commit still scales with branch length** after 9.1: about 0.9 s for 256 operations, in
+  debug. Its remaining costs are listed above: the seed graph loads, the candidate's `blob_cids`,
+  and three durable writes with flushes.
+- **H3's signing is paged across visits by design**, so its total is not one custody hold.
+- **These sources are small.** At most 0.2 MB of title-only history, and no frames.
+
+So the release run must add a frame-heavy source, and an Index with many PutObjects, before C-3
+15.7 can price what remains of the 125 ms share. **Done 2026-10-09, in release:** see "H5's
+repeated terms, priced" under the design 18.3 review, and the full table below.
+
+## Fix: the Studio header readers refused repaired records (2026-10-08)
+
+Found by the design review of 9.1.1 (H-1), in code that predates it. A Flipnote that has been
+through a bound repair keeps the repair-bound snapshot prefix (form 3) on every successor, and
+`StudioEpoch::restore` reads it through `RepairBinding::decode_prefix`. Two header-only readers in
+`crates/catcoms-replication/src/studio/epoch/handoff.rs` accepted only forms 1 and 2:
+`VaultShape::read` and `preserves_vault_source`. The effects, all while a full restore of the
+same bytes succeeded:
+
+- **A handoff into a repaired destination wedged.** Barrier 2 (`preserves_vault_source`) refused
+  as Malformed after Prepared was written. The Prepared resolution's flush, and every ordinary
+  write, cross that fence too. So nothing could write that document while Prepared stood, and
+  every retry redid all the signing.
+- P2's structural checks (`vault_holds_work`, `overlay_successor_hold_in_vault`, and
+  `evidence_in_vault`'s read) and copy's probe reported a repaired object as missing or
+  unreadable.
+
+**The fix.** Both readers now decode the prefix with `RepairBinding::decode_prefix` and discard
+the binding, which neither compares; `preserves_vault_source` already ignored the adopting flag.
+The review confirmed the fence need not compare the binding:
+- on the handoff path the bytes are already pinned exactly by the write capability;
+- on every other path no legitimate write changes the binding while Prepared stands;
+- comparing the binding alone would be half a check, since the fence also ignores the receipt
+  book and the phase.
+
+`reframe_vault_for_test`, a test-only helper that copies a one-byte prefix, now asserts it is not
+given a form-3 source.
+
+**Test.** `studio::epoch::owner::tests::studio_vault_header_readers_accept_a_repair_bound_source`
+fails before the fix, and fails with either half reverted. Its review (Opus, static) found no
+blocker or high.
+
+**Checks.**
+- fmt, clippy, the two gate scripts and `cargo deny` passed.
+- The root suite with `--no-fail-fast` passed: 43 binaries, 2 180 tests.
+- The tauri `cargo check` passed.
+- The frontend suite passed: 1 282 tests.
+- The tauri suite passed every binary except six-client at `six_client_recovery.rs:416`. That test
+  failed again run alone, twice. A control at `06526bd9`, which does not have this fix, failed
+  twice too. The assertion is a 90 s real-clock wait for chat history to converge after a
+  partition, which touches no Studio code. So it is the host's known flake, failing more often
+  tonight, not this change.
+
+**Open, from the review:**
+- **Follow-up tests:** form-3 cases in `owner/tests/eligibility.rs::classify`, holding the
+  structural hold, the full hold and `check_overlay_successor` together on a repaired source;
+  `evidence_in_vault` and `unconfirmed_base_state_in_vault` on form 3; and an app-level handoff
+  into a repaired Flipnote, asserting Completed and P2 eligibility.
+- **A design question for Agents 1 and 3:** `check_overlay_successor` and both holds never ask
+  whether the overlay's receipt is a repaired loser (`ReceiptBook::is_repaired_loser`).
+  Same-tenure repairs are covered, but a cross-tenure Transitioned repair whose source opening is
+  the losing receipt appears restorable, and would then accept a handoff of work based on the
+  loser. Not confirmed against the design.
+
+## C-3 classifier and refused-result memo, built (2026-10-08)
+
+This builds parts A and B of `GATE4-AGENT-1-C3-RUNTIME.md` section 14. Revision 2 of that section
+passed a design review and a re-review with no blocker or high. Store code only; no runtime site
+changes. **Step 3 stays gated** (14.5).
+
+### What is built
+
+- **`validation_fits` is calibrated** (`store/epoch_recovery/inventory.rs`).
+  - The rule: `(100 us + rate x KiB) x 4` must fit in `min(remaining - 1 ms, 25 ms)`.
+  - Families admitted, in accounting mode only: Recovery to 64 KiB at 3 us per KiB; Intents at
+    16 us per KiB; OwnerReceipts to 747 bytes; DraftArchive to its sealed cap at no
+    size-dependent rate.
+  - Never inline: Registry, Studio, and every family in reference mode.
+  - The constants and the reasoning behind each envelope are in `inline_calibration`.
+- **The validation memo** (`inventory/cache.rs`) gains two operations:
+  - `evict_mismatch`, run on every Registry or Studio read: an entry the bytes just read
+    contradict is removed;
+  - `put_if_vacant`.
+
+  Everything that enters the memo now goes through one helper, `memoize`. Its comment says why
+  extending the memo to Intents must carry the intent facts.
+- **A detached Registry or Studio result refused as `Invalidated` is memoized.** This happens in
+  `install_validated` before the job restarts, and never over an entry already present.
+  `ServerStore::memoize_overtaken_inventory_result` is the same entry point for a runtime that
+  discards a result itself. Each memoized result is checked against:
+  - the job's own cursor (scan identity, mount, awaited record);
+  - the store's current mount.
+- **A test-only switch, `detach_every_validation_for_test`, is on `ServerStore`**, so a job's
+  restarted cursors keep it.
+
+### Tests whose contract changed, recorded
+
+These plant small records that the calibrated classifier now inlines. They are switched to detach
+every validation, because their subject is the detached stage. They now assert "a record the
+classifier detaches parks"; what it detaches is the classifier's own tests' job. Each already
+asserted that something parked, which is what stops one from passing after it stops exercising
+the path.
+
+- `a_budgeted_cursor_parks_each_record_and_completes_through_the_detached_stage`
+- `a_budgeted_scan_produces_the_same_inventory_as_an_unbudgeted_one`
+- `a_rail_violation_still_refuses_after_a_record_has_been_parked_and_installed`
+- `the_aggregate_byte_rail_still_refuses_after_a_record_has_been_parked_and_installed`
+- `a_detached_validation_is_refused_by_the_wrong_scan_record_or_generation`
+- `driving_a_job_respects_the_visit_deadline_and_stops_at_a_park`
+- the 13.7 harness, through `case()`, which covers `c3_visit_profile_smoke` and
+  `c3_multi_family_scan_parks_records_from_several_families`
+
+Running the inventory tests with the classifier on and no switch failed exactly these eight, which
+matches the review's enumeration (seven tests plus the harness).
+
+### New tests, each broken on purpose
+
+Thirteen mutations were applied, and each was killed. The first twelve were killed by the new
+tests; the last by the switched tests and `the_detach_switch_survives_a_job_restart`:
+
+- `INLINE_SAFETY` set to 1;
+- the 25 ms cap removed;
+- the 1 ms floor removed;
+- the envelope check removed;
+- Studio admitted;
+- `references` ignored;
+- eviction on mismatch removed;
+- the vacancy check removed;
+- the store-mount check removed;
+- no memo on the `Invalidated` exits;
+- an unchecked memo on a fault exit;
+- the remaining time not sampled per record (run again after a formatting restructure of that
+  block);
+- the test switch ignored, which fails `the_detach_switch_survives_a_job_restart` and the switched
+  tests.
+
+After the implementation review, a fourteenth mutation removed `memoize`'s family gate. It was
+killed by `a_budgeted_scan_memoizes_only_registry_and_studio_records`. Both files were confirmed
+byte-identical to their pre-mutation hashes after each round.
+
+### Checks run
+
+The full run was on the reviewed tree:
+
+- fmt, clippy `-D warnings`, `check-no-ambient`, `check-store-raw-fs` and `cargo deny` passed;
+- the root suite with `--no-fail-fast` ran all 43 binaries: 2 178 passed, 0 failed;
+- the tauri workspace's `cargo check` passed;
+- the tauri suite with `--no-fail-fast` passed every binary except the known six-client flake at
+  `six_client_recovery.rs:416`. It failed at the same line in all three full runs today, including
+  the run on the test-only harness commit. On this branch no production inventory scan passes a
+  deadline, so part A has no production caller yet; part B's production effect is limited to the
+  eviction;
+- the frontend suite passed: 1 282 tests.
+
+The review's fixes are test code, comments and docs, all in catcoms-app or the docs. For those,
+fmt, clippy, the whole catcoms-app lib suite and the six-client test on its own were run again.
+
+| test | what it pins |
+|---|---|
+| `the_inline_classifier_admits_only_measured_families_inside_their_envelopes` | the rule as a table: each family and mode, envelope edges, the floor, the exact threshold, the cap, and `u64::MAX` |
+| `a_small_recovery_record_validates_inline_while_a_cold_studio_record_parks` | inlining through a real cursor; the budgeted inventory equals the unbudgeted one |
+| `the_slice_running_down_turns_an_inline_validation_into_a_park` | remaining time sampled per record against a visit's absolute deadline, with exact clock arithmetic |
+| `the_detach_switch_survives_a_job_restart` | the switch's placement (re-review MEDIUM-1) |
+| `a_refused_studio_result_warms_the_cache_for_the_restarted_job` | part B: the restarted job parks no Studio record and reuses one |
+| `a_stale_entry_is_evicted_so_a_refused_result_still_warms` | piece 1 (review HIGH-2a) |
+| `a_refused_result_never_displaces_an_entry_put_since_the_read` | piece 3 |
+| `an_overtaken_result_from_another_scan_mount_store_or_record_warms_nothing` | piece 2's bindings, fault exits, and vacancy on a second call |
+| `a_record_rewritten_after_its_validation_misses_the_warmed_entry` | a rewrite evicts the warmed entry and misses |
+| `a_budgeted_scan_memoizes_only_registry_and_studio_records` | `memoize`'s family gate: inlined Recovery and DraftArchive records leave no entry |
+| `a_vacant_only_put_never_displaces_an_existing_version`, `eviction_removes_only_a_contradicted_version_of_the_same_record` | the two cache operations directly |
+
+One branch is defensive and unreached by any test: the second `Invalidated` exit, where the
+cursor's generation differs from the result's. A result with a matching scan identity cannot reach
+it without forging. It memoizes the same way as the first exit.
+
+### What is not done
+
+- **Part B's runtime half lands with step 2** (`ccd00dbc`). Until then
+  `memoize_overtaken_inventory_result` has no production caller and carries a dead-code allowance
+  in non-test builds. Its implementation review (M-1) pointed out that nothing makes step 2 use
+  it: a port that keeps the uncharged restart as it is would drop every own-write result again,
+  which is exactly the gossip case. So **two conditions gate step 2's merge**:
+  - the store's uncharged restart takes the pending result and memoizes it before replacing the
+    cursor, for example `restart_epoch_inventory_job_uncharged(job, pending)`, so discarding
+    through that path cannot skip the memo;
+  - the own-write storm test asserts that `reused_records` rises after an uncharged refresh.
+- **Part C and step 3 are not built.** The follow-up measurements are in design 14.7: structured
+  Recovery shapes, and version-2 owner journals at their cap.
+
+### Implementation review (2026-10-08, Opus, static): no blocker or high
+
+The review confirmed the code matches design 14.2 and 14.3. It found:
+
+- **M-1, step 2's integration:** recorded above as a gate for step 2.
+- **L-1:** the docstring of `a_record_rewritten_after_its_validation_misses_the_warmed_entry` now
+  says it pins "a rewrite evicts and misses", not the digest check alone.
+- **L-2:** the slice test's docstring now says what it cannot catch: a sample taken at step entry
+  rather than at the record.
+- **L-3, doc wording:** fixed in the threat model, design 9.2, C-3 section 7 and this entry.
+- **L-4:** the cache comments now say what actually keeps a hit correct.
+- **L-5:** `memoize` takes the record rather than the whole body, as the design specified. Its
+  family gate is now pinned by `a_budgeted_scan_memoizes_only_registry_and_studio_records`. The
+  deviation from 14.3 is recorded there.
+
+Its residual gap was that `canonical()` ignored the Intents facts, so a budgeted-versus-unbudgeted
+comparison could not see lost Unconfirmed facts. It now compares them too.
+
+### Documentation updated
+
+- Design 9.2, consequence 2: the memo relaxation.
+- L6: what "sustained" means, priced.
+- The threat model: a new bullet after the I-4 one.
+- C-3 runtime: sections 1 and 14.
+
 ## Design 13.7, partially delivered: the first measurement in this design
 
 Until now every measurement obligation in design 13 was outstanding and the ledger said so. This
 is the first one with numbers behind it. It is **partial**, and the boundaries are stated below
 rather than left to be discovered.
+
+### The uncached families at their ceilings (2026-10-08)
+
+This closes the gap section 13 of `GATE4-AGENT-1-C3-RUNTIME.md` names: OwnerReceipts and Intents
+had been measured only at trivial sizes, and DraftArchive not at all. With Recovery, these are the
+four families `validation_fits` could ever admit inline. Studio and Registry are driven by
+structure, not bytes, so no byte threshold is safe for them (see "Registry and Studio measured"
+below).
+
+**Conditions.** The user cleared the machine for this window: no other agent was building.
+Isolated worktree at `a62a7f80` plus the harness added for this (`profile_c3_uncached_families` in
+`inventory/tests/performance.rs`, committed with this entry). Release build,
+`RUST_MIN_STACK=33554432`, `SystemClock`, 8 interleaved trials, 64 validation repetitions per
+record per trial, validation cache cleared before every trial, page cache warm. Runs 2 and 3 are
+the same case set (138.98 s and 141.05 s). Run 4 adds the retained-branch rows in reference mode
+(247.03 s), with the rest of the set interleaved alongside them as before.
+Run 1 is not a measurement: it panicked in reference mode on a fixture defect. The generic
+`document` helper's keys are not a Studio document's, and a reference scan decodes each intent as
+a Studio operation. `flipnote_document` is the fix.
+
+**Units.** Validation is the upper median of the 8 per-trial means. Each mean is over a 64-repetition
+batch timed on a 1 ms clock, so the resolution is about 15.6 us and "0" means a batch shorter than
+one tick. Read-and-park is one sample per trial, so it resolves only to 1 ms; the column shows run 3,
+or run 4 for the rows only run 4 has.
+"Per KiB" is the run 3 validation figure over physical bytes.
+
+| family, shape | physical bytes | mode | read-and-park | validation, runs 2 / 3 / 4 | per KiB |
+|---|---|---|---|---|---|
+| Recovery | 1 195 | accounting | 0 us | 0 / 0 / 0 us | - |
+| Recovery | 262 315 | accounting | 1 000 us | 171 / 171 / 171 us | 0.7 us |
+| Recovery | 1 048 747 | accounting | 2 000 us | 2 359 / 2 406 / 2 468 us | 2.3 us |
+| Recovery | 4 194 475 | accounting | 8 000 us | 9 031 / 9 171 / 9 156 us | 2.2 us |
+| Intents, 100 intents | 13 556 | accounting | 0 us | 93 / 93 / 93 us | 7.0 us |
+| Intents, 1 000 intents | 134 156 | accounting | 0 us | 1 015 / 1 015 / 1 000 us | 7.7 us |
+| Intents, 10 000 intents (count ceiling) | 1 340 156 | accounting | 3 000 us | 11 390 / 11 406 / 11 296 us | 8.7 us |
+| Intents, 100 intents | 13 556 | references | 0 us | 218 / 218 / 218 us | 16.5 us |
+| Intents, 1 000 intents | 134 156 | references | 1 000 us | 2 250 / 2 250 / 2 234 us | 17.2 us |
+| Intents, 10 000 intents (count ceiling) | 1 340 156 | references | 3 000 us | 23 781 / 23 937 / 24 093 us | 18.3 us |
+| Intents, 64 KiB bodies | 1 049 372 | accounting | 2 000 us | 484 / 500 / 500 us | 0.5 us |
+| Intents, 64 KiB bodies (byte ceiling) | 4 197 020 | accounting | 8 000 us | 2 796 / 3 062 / 2 906 us | 0.7 us |
+| Intents, Closing branch of 64 ops | 16 330 | accounting | 0 us | 187 / 187 / 187 us | 11.7 us |
+| Intents, Closing branch of 256 ops (op ceiling) | 62 218 | accounting | 0 us | 765 / 781 / 781 us | 12.9 us |
+| Intents, Closing branch of 1 op | 1 273 | references | 0 us | - / - / 218 us | **175 us** |
+| Intents, Closing branch of 64 ops | 16 330 | references | 0 us | - / - / 500 us | 31 us |
+| Intents, Closing branch of 256 ops (op ceiling) | 62 218 | references | 0 us | - / - / 1 375 us | 23 us |
+| OwnerReceipts, one receipt | 513 | accounting | 0 us | 0 / 0 / 0 us | - |
+| OwnerReceipts, receipt and decision close | 747 | accounting | 0 us | 0 / 0 / 0 us | - |
+| DraftArchive | 1 048 696 | accounting | 2 000 us | 0 / 0 / 0 us | 0 |
+| DraftArchive (payload ceiling, less 1 KiB) | 6 334 584 | accounting | 10 000 us | 0 / 0 / 0 us | 0 |
+| Studio, title history, in the branch vaults | 1 359 | accounting | 0 us | 500 / 500 / 468 us | not a byte rate |
+| Studio, title history, in the branch vaults | 1 359 | references | 0 us | - / - / 500 us | not a byte rate |
+
+The branch rows in reference mode use run 4's figure for "per KiB". Every reference-mode branch case
+was checked against its oracle on every trial: the fixture's operations are title edits, so the
+collected set must be empty, and it was.
+
+**What this establishes.**
+
+1. **Intents cost tracks entries, not bytes.** At the byte ceiling, the 64 KiB opaque bodies cost
+   0.7 us per KiB. At the count ceiling, minimal title intents cost 8.7 us. A retained Closing
+   branch costs 12.9 us at the operation ceiling, which makes it the densest shape per byte. So a
+   byte threshold for Intents in accounting mode is safe only at the branch's rate. The
+   accounting decode copies a branch's seed as opaque bytes and reads its entries as fixed-size
+   fields (`decode_vault_structural`), so a larger seed adds bytes at the opaque rate, not
+   structure.
+2. **In reference mode, Intents is driven by structure, like Studio.** A one-operation branch
+   costs 218 us with references against under 15 us without, which is 175 us per KiB. The cause is
+   `base_blob_cids`, which rebuilds the seed's graph (`self.base.graph()`) to enumerate its CIDs.
+   This fixture's seed is a title-only history, so its graph is trivial. A dense flipnote seed would
+   cost what the same graph costs as a Studio record, and that has been measured at about 240 ms for
+   128 frames. So no byte threshold is safe for Intents in reference mode. Without a branch,
+   reference collection roughly doubles the count shape's rate (8.7 to 18.3 us per KiB), because it
+   decodes every pending intent as a Studio operation.
+3. **The most expensive Intents record measured costs 11.4 ms to validate for accounting and
+   23.9 ms with references.** That is 10 000 intents with no branch. It is the most expensive
+   record of any uncached family measured so far, and it is still an order of magnitude below a
+   dense Studio record. Point 2 says why a branch with a dense seed could cost more in reference
+   mode.
+4. **Recovery repeats the earlier profile.** 9.0 to 9.2 ms at 4 MiB, against 11.0 ms in the first
+   profile on a contended machine. Recovery's own ceiling is 18 MiB plus 2 088 bytes, and **it is
+   not measured above 4 MiB**. **These Recovery records are opaque projections** (`stage_sized`:
+   filler projection; empty tombstones, elements, conflicts and applied operations). The
+   accounting decode does work per item, so a structured record can cost more per byte, and that
+   is unmeasured. So 2.3 us per KiB is the cost of Recovery's bytes, not a bound on its structure
+   (design review of C-3 section 14, HIGH-3).
+5. **DraftArchive accounting does no work that grows with size.** The accounting arm calls
+   `storage_record` and never decodes the payload (`validate_record_body`). It stays below
+   resolution all the way to the payload ceiling. Reading and authenticating the record, which
+   takes 10 ms at the ceiling, is the record's whole cost, and no classifier moves it.
+   **DraftArchive reference mode is not measured.** The test writer seals opaque bodies, and
+   reference mode needs a canonical archive whose payload decodes.
+6. **OwnerReceipts is measured only on small journals.** The two journals measured (513 and 747
+   bytes) are below resolution. The family's sealed cap is about 27 KiB (journal, close, nine
+   receipts, attestations). No fixture builds a journal at that cap, so the cap itself is
+   unmeasured. Only accounting mode was run. The decode does not branch on `references`
+   (`validate_record_body`), so reference mode does the same work; that is read from the code,
+   not measured.
+7. **Read-and-park is about 2 us per KiB for every family.** That is 8 ms at 4 MiB and 10 ms at
+   6.3 MB. It is paid inline whatever the classifier decides.
+8. **The three runs agree within 10% on every resolved validation row.** The largest gap is the
+   Intents byte ceiling, 2.80 against 3.06 ms. Contended runs earlier in this ledger moved by up to
+   86% on identical fixtures. So treat this as the quiet-machine figure, from one host, in a
+   release build only.
+
+These are the **worst rates over the shapes measured**, not a proven worst case for each family.
+The classifier proposal in section 14 of `GATE4-AGENT-1-C3-RUNTIME.md` uses them on those terms.
 
 ### The result established so far, stated at its actual width
 
@@ -2673,7 +3513,7 @@ measured, and an earlier version of this sentence claimed the latter.** Withdraw
 | 13.7 item | what exists |
 |---|---|
 | maximum continuous custody per scan slice | measured, at fixture sizes |
-| largest single-record step per family, with and without reference collection | measured for Recovery, Registry and Studio **at fixture sizes, not at accepted ceilings**; OwnerReceipts and Intents only at trivial sizes; **DraftArchive not at all** |
+| largest single-record step per family, with and without reference collection | Registry and Studio **at fixture sizes, not at accepted ceilings**. Recovery to 4 MiB, against an 18 MiB ceiling. **Updated 2026-10-08** (see "The uncached families at their ceilings"): Intents at its count, byte and branch-operation ceilings, in both modes; DraftArchive at its payload ceiling, accounting mode only; OwnerReceipts on small journals only, not at its 27 KiB cap |
 | how often detached validation is needed | trivially always, since `validation_fits` returns false. Not a measurement of anything |
 | visits per full scan | measured, and on one multi-family vault rather than a realistic one |
 | restart rate under concurrent writes | a **deterministic liveness test**, not a rate - see below |
@@ -4266,6 +5106,184 @@ a statement about *safety* it is right. What it is not is V8-neutral, and I took
 safety argument as covering availability without checking. The old basis-keyed check already gave
 the acknowledgement, so restoring it costs nothing in the namespace and needs no layout change.
 
+## G4-A1-S: Flow S over either basis (store seam)
+
+Flow S is now one algorithm for both provenances, as design 8.7 of Agent 2's design asks ("Agent 1's
+Flow S unchanged", with the mint substituted). Only the mint differs, and it is consumed at exactly
+two points, S1b and S3, both reached only by new authoring.
+
+| piece | where | what it does |
+|---|---|---|
+| `StudioOverlayMint` | `store/epoch_studio/overlay_capture.rs` | `Closing { close, tenure }`, minted by the store from the installed source exactly as before; or `Unconfirmed(Result<StudioUnconfirmedOverlayBasis, AppError>)`, the caller's live-preview mint **attempt**, failed or not |
+| `mint_studio_overlay_basis` | same | the one place S1b and S3 obtain the fresh basis, so the two cannot drift |
+| `OwnedOverlayBasis` | same | what the capture and plan carry: an owned basis, never the preview's seed handle |
+| `start_studio_overlay`, `commit_studio_overlay_with`, `save_studio_overlay` | `store/epoch_studio/overlay.rs` | the general entry points; every `*_closing_*` entry point is now a thin `Closing` wrapper with its exact old signature |
+| `Server::mint_unconfirmed_overlay_basis` | `studio_exchange/provisional/seed.rs` (Agent 2's file) | seed-scope recheck, then sync's sanctioned mint; the app's only route to an Unconfirmed basis |
+| `StudioOverlayBasis::target()` | `catcoms-replication/src/studio/overlay.rs` (Agent 2's file) | widened to `pub` for the target check below |
+
+**What the store enforces for Unconfirmed, at S1b and again at S3:**
+
+1. **No stored source** for the document, probed under custody. Sync's mint cannot see the store.
+   It is a metadata probe, not a source read: any entry at the record's path refuses, including a
+   corrupt or non-regular one, and absence must also agree with the budget, so a record unlinked
+   while still accounted refuses. This comes before the mint result is opened, so "installed
+   source" is the answer even when the preview has also expired. (The first cut used
+   `checked_studio_source`, which restored the whole source on the actor just to refuse; review L4.)
+2. **The mint attempt**, surfaced verbatim.
+3. **The basis is for exactly this target**, else `EpochScope`. Not cosmetic, and found by
+   mutation: a Flipnote's logical key omits its channel, and with the check removed a basis
+   minted for one channel opened a branch for a request naming another.
+4. **The mint is of this MLS epoch**: it recorded the current MLS epoch, and its provider is still
+   a member. The sanctioned mint cannot fail this in the visit it was made. It refuses a basis
+   kept across an MLS-epoch change (review L2), and nothing more: a basis kept **within** one MLS
+   epoch, past its hint's expiry or its preview's eviction, still passes. Minting in the same
+   custody visit as the stage that consumes it is therefore a caller obligation, and
+   G4-A2-PREVIEW must enforce it. The membership half cannot fire alone, since any membership
+   change advances the epoch; it is defence in depth.
+5. Fingerprint equal to the request's basis, then branch admission, exactly as for Closing.
+
+A commit refuses a mint of the other kind than its plan, by name, before anything reads the store
+(review L3).
+
+No tenure is consulted anywhere on the Unconfirmed path (Agent 2 design 8.5).
+
+**The ordering property, both kinds.** Classification, `Transferred` and `Disposed`
+acknowledgements, `completed_retry`, exact retries and the ordinary-pending refusal all run before
+the mint is looked at. For Closing that is V8 unchanged. For Unconfirmed it is the analogue: a
+preview that expired, was evicted or vanished on restart blocks new authoring and nothing else.
+
+**S3 re-enters the live check.** The commit takes a mint attempt made in the commit visit, never
+one parked with the plan. The fingerprint is stable across a preview refresh (provider, MLS epoch
+and time are admission facts, not fingerprinted), so a refreshed mint still commits. The stamp
+covers only the Intents record, so **a confirmed source received over the network while the plan
+is detached is caught only by S3's installed-source check**, not by the stamp. That is the case the
+re-run exists for, and it is tested directly.
+
+**Closing is unchanged.** Error text is byte-identical. The provenance a new branch records now
+comes from `basis.provenance()` instead of a hard-coded `Closing`, which agrees by construction.
+
+**One check I added and then removed.** A "live draft of the other kind" refusal in S1b changed
+only the error text. Fingerprint domains differ per provenance, so a cross-kind request can never
+equal the live basis: it is refused as `EpochScope` when it names the live branch, and `Stale`
+otherwise, because `admit_new_branch` never admits beside a live branch. An untestable guard that
+only rewords an existing refusal belongs in G4-A1-MAP, not here.
+
+**Not wired in production.** The general entry points, the `Unconfirmed` variant and the Server
+mint carry `#[cfg_attr(not(test), allow(dead_code))]`, each commented as waiting for G4-A2-PREVIEW
+(Agent 2's preview Save: Server/actor Save, rails, reconciliation, native results). That work, and
+G4-A1-MAP's structured reasons, are not part of this change.
+
+### Tests, on a real fetched preview, each guard broken on purpose
+
+`studio_exchange/tests/provisional/seed/tail/unconfirmed_save.rs`. Every basis comes from the
+production mint over a preview fetched, parsed and tail-completed over the wire. The saving member
+is a plain joiner, asserted `Unknown` as a precondition.
+
+| test | proves |
+|---|---|
+| `..._first_append_joins_survives_refresh_and_retries_without_a_preview` | Index and Flipnote first append; the recorded provenance is the mint's own provider, MLS epoch and time; no source written; a mint one second later names the same basis and joins the live branch; after a restart the mint fails, yet the exact retry is answered from the reconstructed branch; new authoring surfaces the mint's own error and changes nothing |
+| `..._refuses_beside_an_installed_source` | refused at S1b with the preview still live; the ordinary Apply's own Intents row is left byte-identical |
+| `..._commit_reruns_the_live_check_after_the_detached_plan` | staged form: a source **received** during the detach (stamp unmoved, precondition asserted), a **local** Apply (the stamp answers first) and **expiry** all refuse at S3 and write nothing |
+| `..._refuses_stale_requests_and_a_basis_for_another_channel` | Unconfirmed wording for a changed basis and a stale branch; a basis for another channel of the same Flipnote object refuses `EpochScope` |
+| `..._exact_retry_is_answered_beside_a_newly_received_source` (review M1) | accept, receive the confirmed epoch over the network, retry exactly: acknowledged, nothing opened; new work beside the source refuses |
+| `..._refuses_a_corrupt_or_unlinked_source_rather_than_reading_it_as_absent` (M2) | a corrupt record refuses as an installed source; one unlinked while the budget accounts it refuses with `BudgetError::Inventory`; a sentinel mint failure is never what comes back |
+| `..._commits_from_a_replacement_preview_and_after_restart` (M3) | staged success: S1b from preview A, commit from a separately fetched preview B; the branch keeps A's admission facts; after a restart a third preview appends |
+| `..._refuses_a_basis_minted_under_an_earlier_mls_epoch` (L2) | a basis kept across a real membership commit refuses at S1b |
+| `unconfirmed_plan_refuses_a_closing_commit_mint_by_name` (L3) | an Unconfirmed plan given a Closing mint refuses with that reason, not an unrelated one |
+
+| mutation (applied in the isolated worktree, restored after) | killed by |
+|---|---|
+| drop the installed-source refusal | `refuses_beside_an_installed_source` and the S3 `received` case: both Saves succeeded |
+| drop the target check | the cross-channel Save succeeded |
+| refuse a failed mint before classification | the exact retry after restart |
+| skip the Unconfirmed re-mint at S3 | the S3 `received` and `expiry` cases |
+| ignore the budget's absence check (`verify_record(None)`) | the unlinked case heard the sentinel |
+| treat a present but unreadable record as absent | the corrupt case got `Inventory` instead of "installed source" (the budget still refused: two layers) |
+| drop the MLS-epoch/member guard | the kept basis was accepted |
+| drop the plan/mint kind check | the commit failed with an unrelated tenure refusal instead |
+
+### Review of the first cut: no blocker or high; three mediums and six lows, dispositioned
+
+An Opus adversarial review (Fable was rate-limited), read-only against the isolated worktree's diff
+at `e5a52386`, with the focused tests executed. It verified: the Closing wrappers are exact
+equivalents; the mint is consumed only after classification, exact retry and the pending check;
+cross-kind requests are refused without the removed check; provenance always comes from the basis;
+the cross-channel test pins the target check and nothing else; no new construction path; and every
+anchor in the six mutation harnesses still matches exactly once.
+
+| # | finding | disposition |
+|---|---|---|
+| M1 | no test of an exact retry after a confirmed source arrives; moving the presence check ahead of classification would pass every test | **fixed**: `unconfirmed_save_exact_retry_is_answered_beside_a_newly_received_source` |
+| M2 | "a corrupt or unreadable source refuses" was claimed, not tested | **fixed, and the check itself changed** (see L4): `..._refuses_a_corrupt_or_unlinked_source_rather_than_reading_it_as_absent`, with a sentinel mint failure that must not be what comes back |
+| M3 | replacement and restart-append untested; the commit doc overclaimed ("survives the ready entry being replaced"); the acceptance row and Agent 2's 8.1 "not yet built" note are stale | **fixed**: `..._commits_from_a_replacement_preview_and_after_restart`; the doc now says exactly what holds (same seed and receipt match; another candidate does not); acceptance row corrected; Agent 2 asked to update their own 8.1 note |
+| L1 | S1b binds the target only; a basis with another author or group passes S1b and is refused at S2 after media work | **fixed** once Agent 2 added `author()` and `document()` (`f3ce1758`): the Unconfirmed mint now refuses a basis naming another group's document, then one minted for another device, before media work. `unconfirmed_save_refuses_a_basis_for_another_device_or_group_at_s1b`: the provider offers the store the saver's basis, and a second independent group's basis is offered to the first. Dropping the document check lets the author check answer; dropping the author check moves the refusal to S2 as `EpochAuthority` |
+| L2 | the store has no evidence the mint attempt is fresh; a kept basis would skip every live recheck | **fixed**: the basis must record the current MLS epoch and a provider still in the group; `..._refuses_a_basis_minted_under_an_earlier_mls_epoch` hands the store a kept basis after a real membership commit |
+| L3 | the plan does not record its kind; a wrong-kind commit mint fails closed with misleading text | **fixed**: refused first, by name; `unconfirmed_plan_refuses_a_closing_commit_mint_by_name` |
+| L4 | the presence check ran a full `restore_unit` on the actor just to refuse | **fixed**: a metadata probe. Any entry at the record path refuses; absence must also agree with the budget, so a record unlinked while accounted refuses |
+| L4b | eager minting copies up to 2 MiB of seed bytes per attempt, even for retries that never use it | **follow-up for G4-A2-PREVIEW**: the mint needs `&sync` while the store runs inside `with_registry_context(&mut)`, so laziness needs the caller's design |
+| L5 | provenance-stays, a generation-2 Unconfirmed branch over an existing record, and the staged success path were untested | provenance-stays and staged success **fixed** (first and replacement tests). Generation 2 after a disposal is a **follow-up**: it needs the disposal flow, and a regression to hard-coded `Closing` there fails safe at `new_admitted`'s own agreement check |
+| L6 | `seed.rs` said the store adds "the one check"; `EpochScope` now covers three cases G4-A1-MAP must tell apart | doc **fixed**; the mapping note is carried into G4-A1-MAP |
+
+### Re-review of the fixes: M1-M3 closed; no blocker, high or medium; eight lows
+
+A second Opus pass, read-only and static, against the same worktree. It confirmed each new test
+reaches the guard it names, that the metadata probe cannot miss a real record (symlinks, case,
+temporaries and orphans all considered), that `verify_record(None)` cannot refuse a legitimate
+first append, that the MLS guard compares the fresh mint with the current group rather than with
+the branch's recorded epoch, so a live branch is not stranded by a membership change, and that no
+mutation-harness anchor moved.
+
+| # | finding | disposition |
+|---|---|---|
+| 1 | the freshness wording overclaimed: the guard catches a basis kept across an MLS-epoch change, not one kept within an epoch past expiry | wording **fixed** here; the same-visit mint is recorded as a G4-A2-PREVIEW obligation |
+| 2 | the membership half of the guard cannot fire alone | labelled defence in depth |
+| 3 | no test that a live Unconfirmed branch accepts a fresh mint's append after an MLS-epoch change; tightening the guard to the branch's recorded epoch would strand every branch unnoticed | **fixed** in the follow-up commit: `unconfirmed_branch_accepts_a_fresh_mint_after_an_mls_epoch_change` (third member joins, preview refetched, append accepted, provenance unchanged) |
+| 4 | a failed parent-directory probe does not invalidate the budget, though the comment implies parity with `checked_studio_source` | **fixed**: every probe failure invalidates the budget; a present record is not a failure. No test: it needs an IO fault on the vault directory |
+| 5 | the kind check's position before the store reads is not pinned, and the reverse pairing is untested | **fixed**: the Unconfirmed-plan test now hands the commit a stale budget, and `closing_plan_refuses_an_unconfirmed_commit_mint_by_name` is the reverse pairing on a real Closing capture. Moving the check after budget entry fails both with "Studio budget is stale" |
+| 6 | this section's tables and executed-checks line were stale | **fixed** here |
+| 7 | `catcoms-sync/.../provisional/seed.rs:229-230` (Agent 2's) says the app checks before minting; it checks after the attempt, before opening it | passed to Agent 2 |
+| 8 | no S3 test with a real preview of a different candidate | follow-up: the fixture's candidates are deterministic, so a different candidate needs a second fixture |
+
+**Executed** at `e5a52386` plus this change, in `M:/catcoms-a1-verify`: see the commit message for
+the final run; the first cut's run at `c6f7fea0` passed 838 app and 344 replication library tests
+with every integration binary green, and frontend `npm test` passed 1282 of 1282.
+
+## Agent 2's asks after Flow S (2026-10-07)
+
+From Agent 2's reply to the Flow S note. Each row says where it stands.
+
+| ask | state |
+|---|---|
+| M1: the H1 handoff probe must skip non-Closing branches | **done**: the probe selects only a live branch this device authored whose `live_overlay_provenance()` is `Closing`; an Unconfirmed one is memoised quiet (design 7.2), so it takes no reservation, no backoff, no capture. Regression `the_handoff_probe_leaves_an_unconfirmed_branch_alone`, before and after a confirmed source arrives, with the mutation (any provenance) executed and failing. Reviewed (Opus, static): no blocker, high or medium; the review's LOWs (comment precision, the installed-source variant, `live_overlay_provenance`, 7.2) are taken. Still untested: an Unconfirmed target ahead of an own Closing one on the same rail, which needs a member with tenure on that fixture |
+| `new_admitted`'s redundant `provenance` parameter | **done by Agent 2** in `30194a40`, by agreement: the provenance is the basis variant's own, and their test now pins that each basis yields its own |
+| where the 8.3 per-server and vault-wide rails are called | **done by Agent 2** in `30194a40`, at the points named: S1b (after the branch half, before media admission) and S3 (after the fresh mint's fingerprint check, before pixels, holds and the write), from the budget entered in that call |
+| `save_overlay` reports another request's plan as `Saved`, and only takes its own target's plan | **agreed, waiting**: mirrors Agent 2's Unconfirmed fix (`Busy`, never `Saved`; take any parked plan); in `studio/receiver.rs`, so it lands with C-3 step 2 |
+| the `cfg_attr(not(test), allow(dead_code))` markers | **removed** where the preview Save is now the production caller, with their "until G4-A2-PREVIEW" comments |
+| a refused S2 plan is dropped, so a deterministic refusal leaves the Save answering `Scheduled` indefinitely (found by the G4-A1-MAP inventory) | **sent to Agent 2** as a likely HIGH in their live Unconfirmed path, with a proposed fix and regression; mirrored in the Closing `save_overlay` with its other two fixes |
+| L4b lazy minting | deferred; the API is mine |
+
+## G4-A1-CORE: the core signing review, and its two test findings
+
+The SHA-pinned review of `8190dc4..e65bfd8` returned a **bounded PASS for the production code**
+with two medium test-coverage findings; the verdict, findings and what was executed are recorded in
+`GATE4-HANDOFF-SIGNING-REVIEW.md`. A finding re-review then closed SIGN-TEST-002 and narrowed
+SIGN-TEST-001.
+
+- **SIGN-TEST-002, closed**: the authority/receipt binding, pinned through a real second close
+  cycle, with the `receipt` mutant.
+- **SIGN-TEST-001, editor-cap and aggregate halves closed**: `local_policy` through a structurally
+  decoded over-cap branch (`local-policy` mutant), and the probe gate through an **honest**
+  branch (`probe-gate` mutant).
+- **SIGN-TEST-001b, submitted**: a positive handoff by a non-owner member, and the per-device cap
+  pinned in both directions (owner exempt, member charged), with three mutants
+  (`author-is-owner`, `owner-charged`, `device-exempt`); short re-review outstanding. Residual and
+  not part of the correction: no isolated mutant for the per-operation preflight or the framing
+  probe, neither of which is the first refusal for any cheap input.
+- **A product gap, for Agent 2**: the honest over-gate branch is valid local work that can never be
+  handed off automatically. For a non-owner author the binding limit is the 1 MiB per-device cap,
+  a quarter of the epoch budget; P2's classifier reports such a branch as Transferable; and no 8.3
+  rail bounds signed size. The handoff refuses it safely before signing.
+
 ## A verification-scope failure of mine, recorded because the fix alone would hide it
 
 **`origin/gate4-agent1-runtime` was red for six of my commits and I did not notice.**
@@ -4526,16 +5544,43 @@ makes that more important, not less.
    signature change. Get that before converting call sites, not after.
    **Status: the storage half is done.** See the C-3 section above. What remains is the runtime
    adoption of the cursor at six call sites, which is its own checkpoint.
+
+   **Status, 2026-10-08:**
+   - **Step 2** (replay's manual move) is built and tested locally as `06526bd9`, rebased onto
+     `6a79e6f8`, with both of the implementation review's M-1 gates. It lands once Agent 2 confirms
+     `studio/receiver.rs` and `receiver/catchup.rs` are free.
+   - **The classifier and refused-result memo** (C-3 runtime 14, parts A and B) are built at
+     `6a79e6f8`.
+   - **Step 3, and Flow R after it, need more than the classifier.** Design 9.1 is built
+     (`17dd54fc`), and the commit phase is measured on its own (2026-10-09, release, shared
+     host). The route's revision 2 is C-3 runtime 15.8, and its design review is 15.9: no
+     blocker, one high. **The order of work is 15.9's:**
+     1. H5's source-growing terms computed once, with a source-axis measurement (base sources of
+        256, 512 and 999 frames). 15.9 HIGH-1: no measurement yet varies the source, and the
+        commit may consume the visit for a large flipnote even at one operation;
+     2. the indexed, pruned memo (M2);
+     3. the all-family memo with warms at all eight writers, behind a forced-warm token;
+     4. the restart progress rule, with per-key credit and a ceiling;
+     5. the rule that divides a visit between scan and commit;
+     6. the traversal measurements;
+     7. the H5 write-every-turn test;
+     8. the touched-path cursor decision, which moves into step 3 if item 1 leaves no margined
+        share.
+   - **Steps 4 and 5** still need section 7's measurements.
 2. Then **Flow R**, which needs no media and is independent. It was deliberately sequenced after
    this boundary so it is not built on the unbounded inventory path and then split again.
 3. Produce design 13's eight measurements as each item lands; C-1's before-and-after is cheap,
-   since the opt-in profile already exists. **13.7 is partially done** - Recovery, accounting
-   and reference-collecting - and found that for these fixtures the read-and-park and validation
-   phases are of comparable magnitude at megabyte scale, with `validation_fits` able to move
-   only the latter. **Next, in this order: Registry and Studio** (the families whose expensive
-   typed reconstruction motivated the design, both scan modes, real histories at their largest
-   accepted shapes), then OwnerReceipts, Intents and DraftArchive, varying structure and not
-   only encoded size; then realistic full scans and the restart rate under concurrent writes.
+   since the opt-in profile already exists. **13.7 (updated 2026-10-08):** Recovery, Registry
+   and Studio were measured earlier. Intents, OwnerReceipts and DraftArchive were measured on
+   2026-10-08 (see "The uncached families at their ceilings"), and the classifier proposal that
+   follows from them is section 14 of `GATE4-AGENT-1-C3-RUNTIME.md`, awaiting design review.
+   Still outstanding:
+   - OwnerReceipts at its 27 KiB cap;
+   - DraftArchive in reference mode;
+   - Recovery above 4 MiB;
+   - realistic full scans;
+   - the restart rate under concurrent writes.
+
    The remaining seven measurements have no numbers.
 4. R4-TEST-001 stays open until the reviewer can inspect `079e59a` on GitHub. C-1's call-site table
    in design 5.1 still has no test asserting that no moved call site needs a projection.
@@ -4547,8 +5592,17 @@ makes that more important, not less.
    land" clause is an integration alternative, not an opt-out from a deployed cursor's discipline.
 7. Keep native Save unregistered and out of FLIPNOTE-UI-HOOKS until Agent 2's manual lifecycle
    passes its own review and their status note says so. Agent 2's P5 is still false.
-8. Do not send the design 18.3 implementation review until the scope it names has real evidence. A
-   partial branch is not a checkpoint.
+8. **Design 18.3's implementation review is back** (2026-10-09): a bounded PASS WITH FINDINGS, no
+   blocker or high. See its section above. Still open, and both needing files Agent 2 works in:
+   - **F2:** the actor-level N31, plus a mutation entry for `handoff_priority`;
+   - **F4:** pause stranding a queued Save capture.
+
+   F1 is fixed locally and waits on the same files. Native Save must not register until F2 and
+   F4 are closed, besides Agent 2's P5.
+
+   **Also with Agent 2:** the shared overlay-lifecycle harness exceeds its 60-minute CI job on
+   every push, and should be split across two jobs. F1's two overlay harness entries also still
+   need a run under `RUSTFLAGS='-D warnings'` before they land.
 9. **Reconcile the landed archive code with its review status.** This item was stale and is
    rewritten. At this head `epoch_draft_archive.rs` already contains
    `write_studio_draft_archive_with_io`, `release_studio_draft_archive_with_io` and

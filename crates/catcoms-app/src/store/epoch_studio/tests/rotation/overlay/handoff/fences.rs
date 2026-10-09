@@ -468,3 +468,207 @@ fn studio_overlay_handoff_all_exact_resolution_in_fault_does_not_clear_fault() {
         .unwrap()
         .is_some());
 }
+
+/// Reseal a record's plaintext with its last byte flipped: the same size, still authenticating,
+/// a different digest. Only a digest comparison tells it from the original.
+fn replace_at_the_same_size(store: &ServerStore, path: &Path) {
+    let key = store.keys.db_key().unwrap();
+    let framed = fs::read(path).unwrap();
+    let mut plain = catcoms_crypto::unseal(&key, &unframe(&framed).unwrap()).unwrap();
+    *plain.last_mut().unwrap() ^= 1;
+    let replaced = frame(&seal(&key, &plain, &mut rng()).unwrap());
+    assert_eq!(replaced.len(), framed.len(), "the replacement changed size");
+    fs::write(path, replaced).unwrap();
+}
+
+/// Design mutations M1 and M2 (design 18.3 review, F8, which found no fixture for them): the plan's
+/// currency check compares the intent and source wrappers by plaintext digest, not by size alone.
+/// A same-size authenticated replacement of either between H2 and a signing turn makes the plan
+/// stale, so no turn spends the device's signing authority on it.
+///
+/// Each comparison is redundant by design with a later H5 check against the **captured** stamp:
+/// the source's with barrier 2's capability, and the intent's with step 6. Step 6 used to compare
+/// its own two reads with each other, under one borrow, so for the intent this was in fact the only
+/// guard until the review of these fixes found it (M-1). What the comparisons add is that nothing
+/// is signed first, which the gate assertion observes: `studio_handoff_plan_is_current` is the
+/// receiver's gate before every signing slice. The second half drives the stale plan through H5
+/// anyway and requires the changed record to survive untouched.
+///
+/// **For the intent, the gate is asserted last, after H5,** so that one CI entry pins both
+/// guards. `plan-intent-digest` reduces the shared comparison to size, which disables H5's own
+/// currency check as well as the gate. Then:
+/// - with step 6 present, H5 still refuses, and the test fails at the gate's assertion, which is
+///   the one the entry names;
+/// - with step 6 removed, it fails earlier, at "H5 committed a plan whose intent record changed",
+///   which the harness rejects as the wrong assertion.
+///
+/// For the source the gate stays first, because without its comparison barrier 1 writes Prepared
+/// before barrier 2's capability refuses. `plan-source-digest` is the other entry; it fails at the
+/// gate (re-review of these fixes, MEDIUM-1).
+#[test]
+fn studio_overlay_handoff_plan_is_stale_after_a_same_size_wrapper_replacement() {
+    for intent in [true, false] {
+        let which = if intent { "intent" } else { "source" };
+        let root = tempfile::tempdir().unwrap();
+        let f = Fixture::new(true);
+        let mut store = open(root.path());
+        let (_, basis, _) = prepare(&f, &mut store);
+        let mut b = budget(&mut store, &f);
+        let Ok(crate::store::StudioHandoffStart::Captured(capture)) = store
+            .start_studio_handoff_with_io(
+                SERVER,
+                &f.group,
+                f.target,
+                &f.device,
+                basis,
+                Some(0),
+                &mut rng(),
+                &mut b,
+                &mut WriteHooks::None,
+            )
+        else {
+            panic!("H1 did not capture the fixture's branch");
+        };
+        let mut plan = capture.prepare().unwrap();
+        assert!(
+            store
+                .studio_handoff_plan_is_current(&f.group, &f.device, Some(0), &plan)
+                .unwrap(),
+            "precondition: the plan is current before the replacement"
+        );
+
+        let path = if intent {
+            let scope = crate::store::epoch_intents::scope_bytes(SERVER, &f.logical).unwrap();
+            store.epoch_intent_path(&scope)
+        } else {
+            f.path(&store)
+        };
+        // H5's budget is minted first: minting scans the vault, and the replacement below does not
+        // decode. A test write rotates no generation, so the budget stays spendable, and the test
+        // is about H5's checks rather than the inventory's.
+        let mut b = budget(&mut store, &f);
+        replace_at_the_same_size(&store, &path);
+        // Observed now, before any signing; asserted now for the source, after H5 for the intent.
+        let gate_refused = !store
+            .studio_handoff_plan_is_current(&f.group, &f.device, Some(0), &plan)
+            .unwrap();
+        let gate =
+            "a stale plan reached a signing turn: the {which} wrapper changed at the same size";
+        if !intent {
+            assert!(gate_refused, "{}", gate.replace("{which}", which));
+        }
+
+        // The durable half: the stale plan is signed and assembled anyway, as if the gate had let
+        // it through, and H5 must still refuse with nothing written.
+        let replaced = fs::read(&path).unwrap();
+        assert!(plan
+            .sign_slice(&f.device, &f.group, 0, false, usize::MAX, None)
+            .unwrap()
+            .complete());
+        let commit = plan.assemble().unwrap();
+        let committed = store.commit_studio_handoff_with_io(
+            SERVER,
+            &f.group,
+            f.target,
+            &f.device,
+            commit,
+            Some(0),
+            &mut rng(),
+            &mut b,
+            &mut WriteHooks::None,
+        );
+        assert!(
+            committed.is_err(),
+            "H5 committed a plan whose {which} record changed at the same size"
+        );
+        // For the intent this byte comparison is the durable check: Prepared would replace the
+        // record. The Prepared check below is vacuous there, since the replaced record does not
+        // decode, and it is meaningful for the source.
+        assert_eq!(
+            fs::read(&path).unwrap(),
+            replaced,
+            "H5 overwrote the changed {which} record"
+        );
+        assert!(
+            !store
+                .load_epoch_intents_structural(SERVER, &f.logical)
+                .map(|state| state.handoff_prepared())
+                .unwrap_or(false),
+            "H5 wrote Prepared over the changed {which} record"
+        );
+        if intent {
+            assert!(gate_refused, "{}", gate.replace("{which}", which));
+        }
+    }
+}
+
+/// N5's negative variant, for the guard design M6 removes: H1 probes the successor from its record
+/// header and refuses a non-pristine one before capturing, so H2's detached reconstruction is
+/// never started for it. The design 18.3 review (F8) found the probe unbuilt: H1 captured, and
+/// only H2's `check_overlay_successor` refused, detached, after the reconstruction it exists to
+/// spare. The successor here took one ordinary operation after it was installed.
+///
+/// Observed at the boundary the mutation crosses: a `Captured` start is exactly "H2 started", since
+/// the receiver schedules the plan job from it. CI's handoff harness (`successor-probe`) removes
+/// the probe and requires this test to fail there.
+#[test]
+fn studio_overlay_handoff_h1_refuses_a_non_pristine_successor_before_capture() {
+    for art in [false, true] {
+        let root = tempfile::tempdir().unwrap();
+        let f = Fixture::new(art);
+        let mut store = open(root.path());
+        let (_, basis, _) = prepare(&f, &mut store);
+        let mut successor = f.load(&store).unwrap().unit;
+        let mut ordinary = f.title();
+        ordinary.nonce = [78; 16];
+        let packet = successor
+            .edit_or_reseal(&f.device, &f.group, &mut rng(), &ordinary, 556)
+            .unwrap();
+        let mut b = budget(&mut store, &f);
+        store
+            .ingest_studio_epoch(
+                SERVER,
+                &f.group,
+                f.target,
+                &f.device,
+                &packet,
+                &mut rng(),
+                &mut b,
+            )
+            .unwrap();
+        assert_eq!(
+            f.load(&store).unwrap().op_count(),
+            1,
+            "precondition: the successor holds an ordinary operation"
+        );
+        let original = canonical(&store);
+
+        let mut b = budget(&mut store, &f);
+        let started = store.start_studio_handoff_with_io(
+            SERVER,
+            &f.group,
+            f.target,
+            &f.device,
+            basis,
+            Some(0),
+            &mut rng(),
+            &mut b,
+            &mut WriteHooks::None,
+        );
+        match started {
+            Err(error) => assert!(
+                error
+                    .to_string()
+                    .contains("successor is not transferable: SuccessorNotPristine"),
+                "refused for another reason (art {art}): {error}"
+            ),
+            Ok(crate::store::StudioHandoffStart::Captured(_)) => {
+                panic!("H2 started for a non-pristine successor (art {art})")
+            }
+            Ok(crate::store::StudioHandoffStart::Settled(_)) => {
+                panic!("a non-pristine successor settled the branch (art {art})")
+            }
+        }
+        assert_eq!(canonical(&store), original, "H1's refusal wrote something");
+    }
+}

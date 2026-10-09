@@ -15,6 +15,7 @@ fn intent_retirement_shrink_still_needs_physical_replacement_headroom() {
         bytes: MAX_VAULT_INTENT_BYTES,
         // This case is about the class total at its cap; no archive is involved.
         archive_bytes: 0,
+        unconfirmed: BTreeMap::new(),
         ready: true,
     };
     assert!(budget
@@ -55,6 +56,7 @@ fn draft_archive_sub_cap_covers_the_physical_replacement_peak() {
         // below is attributable to the sub-cap.
         bytes: near,
         archive_bytes: near,
+        unconfirmed: BTreeMap::new(),
         ready: true,
     };
     assert!(
@@ -107,6 +109,7 @@ fn an_over_cap_archive_inventory_still_yields_a_usable_budget() {
         record_slots: 2,
         bytes: over + 2048,
         archive_bytes: over,
+        unconfirmed: BTreeMap::new(),
         ready: true,
     };
     // The premise: over the archive policy, comfortably under the class rail.

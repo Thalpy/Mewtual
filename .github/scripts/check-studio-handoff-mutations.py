@@ -70,6 +70,74 @@ MUTATIONS = [
      "collected.check_dependencies()?;", "let _ = collected.check_dependencies();",
      "references::studio_overlay_handoff_reference_scan_keeps_overlay_only_pixels_when_metadata_is_missing",
      "missing handoff metadata completed a reference scan"),
+    # Design 9.1: H5 resolves from the verified candidate, never by restoring the source it just
+    # wrote. Forcing the restore back must be seen as a restore.
+    ("verified-restore", STORE,
+     "verified.into_checked(self, server, group, target, &mut budget.storage)?",
+     "{ let _ = verified; self.checked_studio_source(server, group, target, device, false, &mut budget.storage)? }",
+     "persisted::studio_overlay_handoff_commit_restores_nothing",
+     "H5 restored a source"),
+    # 9.1.1 A1: H5's header-only Index object check is the only thing between a referenced
+    # Flipnote cleaned up after H1 and a durable Index entry naming nothing. The mutant empties
+    # the check's loop from inside the helper. It used to replace the call site, which left
+    # `check_index_objects_at_commit` dead, so under CI's `-D warnings` the build failed before
+    # the test ran and this entry failed CI from 17dd54fc to fee9b993 without testing anything.
+    ("index-commit", STORE,
+     "        for object in objects {\n            let flipnote = StudioTarget::Flipnote { channel, object };\n            let logical = flipnote.document(&group.group_id()).map_err(invalid)?;\n            let scope = scope_bytes(server, &logical)?;\n            let record = self.read_studio_record(&scope)?.ok_or_else(unavailable)?;",
+     "        for object in objects.into_iter().filter(|_| false) {\n            let flipnote = StudioTarget::Flipnote { channel, object };\n            let logical = flipnote.document(&group.group_id()).map_err(invalid)?;\n            let scope = scope_bytes(server, &logical)?;\n            let record = self.read_studio_record(&scope)?.ok_or_else(unavailable)?;",
+     "eligibility::studio_overlay_handoff_rechecks_index_object_sources_at_commit_not_only_at_capture",
+     "H5 committed an Index entry pointing at a source"),
+    # 9.1.1 step 5: a proof whose evidence is not Complete must never be resolved, in particular
+    # never returned to Active from a candidate.
+    ("verified-evidence", STORE,
+     "if from_candidate && evidence != StudioHandoffEvidence::Complete {",
+     "if false && from_candidate && evidence != StudioHandoffEvidence::Complete {",
+     "persisted::studio_overlay_handoff_verified_resolution_accepts_only_complete_evidence",
+     "a proof with Absent evidence was resolved"),
+    # Design 18.3 review, F7: of the proof's checks, the size-and-digest comparison is the only one
+    # that sees the trailing link byte. A record with it dropped decodes unlinked with the
+    # candidate's own snapshot, so the snapshot hash and the link check both pass. The mutant
+    # removes the comparison. The record is then still refused, later, by resolve's flush-only
+    # length fence ("retry file changed"), so the assertion this entry names is the one that pins
+    # the refusal to the proof. The field checks themselves (channel, snapshot hash, link) have no
+    # entries: each is covered by the digest, so removing one alone is undetectable.
+    ("proof-digest", "crates/catcoms-app/src/store/epoch_studio/source/persisted.rs",
+     "if landed.physical_bytes != version.bytes || blake3::hash(&landed.plain) != version.digest {",
+     "if false && (landed.physical_bytes != version.bytes"
+     " || blake3::hash(&landed.plain) != version.digest) {",
+     "persisted::studio_overlay_handoff_refuses_a_persisted_source_whose_link_was_dropped",
+     "refused by something other than the post-write proof"),
+    # Design M1 and M2 (design 18.3 review, F8): the plan's currency check keeps only the size of
+    # the intent, then of the source wrapper. Redundant by design with H5, so the observation is
+    # the early one the design names: a stale plan would reach a signing turn. For the intent the
+    # test asserts that gate only after driving the plan through H5, so this entry also pins H5's
+    # step 6: with step 6 removed as well, the test fails earlier, at "H5 committed a plan", and
+    # this entry reports the wrong assertion (verified 2026-10-09).
+    ("plan-intent-digest", "crates/catcoms-app/src/store/epoch_studio/handoff_capture.rs",
+     "if (blake3::hash(&intent.plain), intent.physical_bytes) != stamp.intent {",
+     "if intent.physical_bytes != stamp.intent.1 {",
+     "fences::studio_overlay_handoff_plan_is_stale_after_a_same_size_wrapper_replacement",
+     "a stale plan reached a signing turn: the intent wrapper"),
+    ("plan-source-digest", "crates/catcoms-app/src/store/epoch_studio/handoff_capture.rs",
+     "Ok((blake3::hash(&source.plain), source.physical_bytes) == stamp.source)",
+     "Ok(source.physical_bytes == stamp.source.1)",
+     "fences::studio_overlay_handoff_plan_is_stale_after_a_same_size_wrapper_replacement",
+     "a stale plan reached a signing turn: the source wrapper"),
+    # Design M6 (design 18.3 review, F8, which found the probe unbuilt): H1's pristine-successor
+    # probe answers "transferable" whatever the header says. Redundant by design with H2's
+    # check_overlay_successor, so the observation is that H2 would start.
+    ("successor-probe", "crates/catcoms-app/src/store/epoch_studio/handoff.rs",
+     "StudioEpoch::overlay_successor_hold_in_vault(bytes, target, owner, overlay)",
+     "StudioEpoch::overlay_successor_hold_in_vault(bytes, target, owner, overlay)"
+     ".map(|hold| hold.filter(|_| false))",
+     "fences::studio_overlay_handoff_h1_refuses_a_non_pristine_successor_before_capture",
+     "H2 started for a non-pristine successor"),
+    # 9.1.1 A3: a proof cannot be spent after a five-family write landed since verification.
+    ("proof-generation", "crates/catcoms-app/src/store/epoch_studio/source/persisted.rs",
+     "&& Arc::ptr_eq(&self.generation, &store.inventory_generation);",
+     "&& { let _ = &self.generation; true };",
+     "persisted::studio_overlay_handoff_verified_source_binds_target_candidate_and_generation",
+     "a proof was spent after a write landed"),
 ]
 
 

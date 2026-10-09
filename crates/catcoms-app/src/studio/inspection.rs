@@ -36,11 +36,11 @@ struct Retained {
 }
 /// What a read may say about a retained draft: design section 11's `OverlayInspection`.
 ///
-/// `eligibility` carries P2's `eligibility` and `manualReason` together. `unconfirmedState` is not
-/// here because no unconfirmed branch can exist yet: preview-local work is not implemented, and a
-/// field that is always null would read as an answer. `archived` is not here either, because the
-/// inspection capture deliberately holds one record and the archive is a different one;
-/// `studio_overlay_lifecycle` answers that question from the record that actually knows.
+/// `eligibility` carries P2's `eligibility` and `manualReason` together, and `unconfirmed` design
+/// 8.6's `unconfirmedState`, which is `None` exactly for a Closing branch or no branch. `archived`
+/// is not here, because the inspection capture deliberately holds one record and the archive is a
+/// different one; `studio_overlay_lifecycle` answers that question from the record that actually
+/// knows.
 ///
 /// A struct rather than a widening tuple because these are eight values of four types, and a
 /// caller destructuring them positionally would be one reordering away from reporting a branch id
@@ -69,6 +69,9 @@ pub struct StudioOverlayInspected<'a> {
     /// no branch is live. A branch that did not reconstruct is `Manual(NotReplayable)` whatever
     /// else holds, because that is the one condition no amount of waiting changes.
     pub eligibility: Option<types::StudioOverlayEligibility>,
+    /// Design 8.6: how an Unconfirmed branch's base relates to the installed source, derived on
+    /// read. `None` for a Closing branch or no branch.
+    pub unconfirmed: Option<types::StudioOverlayUnconfirmedState>,
 }
 
 #[derive(Debug)]
@@ -76,6 +79,7 @@ pub struct StudioOverlayInspection {
     read: Arc<Retained>,
     delivery: Option<StudioInspectionDelivery>,
     eligibility: Option<types::StudioOverlayEligibility>,
+    unconfirmed: Option<types::StudioOverlayUnconfirmedState>,
 }
 #[derive(Clone, Debug)]
 pub struct StudioInspectionDelivery(Arc<Delivery>);
@@ -253,7 +257,17 @@ impl StudioOverlayInspection {
             disposed: value.disposed.as_ref(),
             replayable: value.replayable.is_ok(),
             eligibility: self.eligibility,
+            unconfirmed: self.unconfirmed,
         }))
+    }
+    /// Attach design 8.6's reconciliation, computed under the same custody visit that finished this
+    /// read, for the same reason as [`Self::with_eligibility`].
+    pub(crate) fn with_unconfirmed(
+        mut self,
+        unconfirmed: Option<types::StudioOverlayUnconfirmedState>,
+    ) -> Self {
+        self.unconfirmed = unconfirmed;
+        self
     }
     /// Attach P2's classification, computed under the same custody visit that finished this read.
     ///
@@ -394,6 +408,7 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
             read: prepared.read,
             delivery: None,
             eligibility: None,
+            unconfirmed: None,
         })
     }
 }

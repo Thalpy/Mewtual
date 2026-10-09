@@ -278,6 +278,88 @@ async fn an_apply_with_a_stale_echo_is_refused_and_writes_nothing() {
     f.shutdown().await;
 }
 
+/// A copy that lands crosses as a **copy**, never as a recovery, and says outright that it
+/// preserves nothing; its exact retry crosses as already saved and adds nothing.
+///
+/// Through the actor's real receiver path, C4 and then the ordinary publication. It used to come
+/// back as `Applied` and cross as `recoveryApplied`, so a renderer could not tell a copy out of a
+/// draft from a recovery. And the result never said a copy is not preservation, which design 6.3
+/// C-P requires of every copy result.
+///
+/// "Adds nothing" is not "touches no byte". The ordinary Apply path answers an exact retry by
+/// resealing the operation it already holds (`edit_or_reseal`) and persisting the unit again, so an
+/// uncertain first write becomes durable. That re-seal changes the sealed record's bytes. So the
+/// retry is held to no new record and an unchanged destination; the app-level copy test pins the
+/// operation count.
+#[tokio::test]
+async fn an_applied_copy_crosses_as_a_copy_and_its_exact_retry_as_already_saved() {
+    let f = InspectionFixture::new(true).await;
+    let state = state(&f).await;
+    let into = open_destination(&f, &state).await;
+    let title = title_op(&f).await;
+    let value = preview(
+        &state,
+        f.target,
+        destination(into),
+        json!({"kind":"title","value": title}),
+        "copy",
+    )
+    .await
+    .unwrap();
+    let apply = || {
+        let edit = serde_json::from_value::<CopyApplyInput>(json!({
+            "destination": destination(into),
+            "choice": {"kind":"title","value": title},
+            "mode": "copy",
+            "epochId": value["epochId"],
+            "expectedProjection": value["expectedProjection"],
+            "nonce": HEX[..32].to_string(),
+            "body": value["body"],
+        }))
+        .expect("a well-formed payload")
+        .checked()
+        .expect("a well-formed payload");
+        Action::ApplyOverlayCopy(Box::new(edit))
+    };
+
+    let before = f.records();
+    let landed = recovery::invoke_control(&state, fixture::SERVER, f.target, apply())
+        .await
+        .expect("the previewed copy applies");
+    assert_eq!(landed["kind"], "overlayCopyApplied");
+    assert_eq!(landed["alreadySaved"], false);
+    assert_eq!(landed["contentSaved"], true);
+    assert_eq!(landed["branchPreserved"], false);
+    assert_eq!(landed["object"], destination(into)["object"]);
+    let after = f.records();
+    assert_ne!(after, before, "the copy wrote into the destination");
+    let read = || {
+        super::super::invoke(
+            &state,
+            fixture::SERVER,
+            StudioRequest::Read { target: into },
+        )
+    };
+    let landed_view = read().await.unwrap();
+
+    let retried = recovery::invoke_control(&state, fixture::SERVER, f.target, apply())
+        .await
+        .expect("an exact retry is acknowledged, not refused as stale");
+    assert_eq!(retried["kind"], "overlayCopyApplied");
+    assert_eq!(retried["alreadySaved"], true);
+    assert_eq!(
+        f.records().keys().collect::<Vec<_>>(),
+        after.keys().collect::<Vec<_>>(),
+        "an exact retry created a record"
+    );
+    assert_eq!(
+        read().await.unwrap(),
+        landed_view,
+        "an exact retry changed the destination"
+    );
+    f.shutdown().await;
+}
+
 /// The op id of the draft's own title, which is what a title copy has to name.
 async fn title_op(f: &InspectionFixture) -> String {
     projected(f, |p| {

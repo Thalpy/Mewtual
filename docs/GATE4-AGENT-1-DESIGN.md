@@ -276,6 +276,12 @@ preparation.
 
 ### 5.3 Store: capture, stamp and plan
 
+**Superseded in shape (recorded 2026-10-08, 9.1.1).** The built types are `StudioHandoffStamp`,
+`StudioHandoffCapture`, `StudioHandoffPlan` and `StudioHandoffCommit`, in
+`store/epoch_studio/handoff_capture.rs`. H2's facts (`HandoffFacts`) travel in the plan and the
+commit, not in a `StudioOverlayPlanned::HandoffPrepared` variant. The sketch below is kept as the
+reviewed intent.
+
 ```rust
 pub(crate) struct StudioOverlayStamp {
     mount: Arc<()>, server: u64, document: LogicalDocument, target: StudioTarget,
@@ -631,7 +637,10 @@ consequences that matter:
 Admission and the shared permit are acquired before the first bounded read in both flows, and are
 released immediately when the probe or classification finds no work to schedule. A target with no
 overlay is memoised in `no_overlay` against the store's `intent_generation`, so a quiescent vault is
-not re-probed each turn.
+not re-probed each turn. So is a target whose live branch is another device's or is Unconfirmed:
+an Unconfirmed branch is never transferable (8.5 of Agent 2's design), its provenance never
+changes during its life, and a transferable branch on that document needs a disposal and a
+Closing Save, both Intents writes that rotate the token (Agent 2's review M1).
 
 ### 7.3 Scheduling
 
@@ -767,6 +776,177 @@ checkpoint.
   candidate. The decision table, barriers, accounting generations, write fences and publication hold
   are identical in both.
 
+#### 9.1.1 Implementation plan, and four amendments (revision 2, 2026-10-08; built)
+
+**Built (2026-10-08)** as revision 2 below specifies, except for four of step 7's regressions.
+Those are the 8 MiB successor, a repaired destination through H5, the receiver-level probe after
+a refusal, and duplicate PutObjects. The status ledger entry "Design 9.1, no graph restore on the
+commit path, built" lists them with the reasons, and records the tests and mutations.
+
+**Step 4b's cost, recorded from the implementation review.** For a Prepared branch stuck on Hold
+evidence on a device without a tenure, each backoff expiry now pays a five-family inventory and a
+full source restore under custody, where it used to be held for free. That is bounded by the
+backoff, and it is what a tenure-live device already paid. An Absent resolution is durable
+progress but is still paced as a failure, so the next probe holds the target without entering
+H1.
+
+This section maps 9.1 onto the code as it stood at `83328240`, and records where the code
+makes the text above ambiguous or incomplete. C-3 runtime design 15.7 makes 9.1 the first
+prerequisite of C-3 step 3, because the H5 visit restores the source graph twice today.
+
+**Today's H5 restores** (`commit_studio_handoff_with_io`, `store/epoch_studio/handoff.rs`):
+- `checked_studio_source` before the write, whose unit is then thrown away;
+- a second full read of the source, only to hash it;
+- `check_index_object_sources`, which restores once per Index PutObject;
+- `checked_studio_source` again inside `resolve_studio_handoff_with_io`, after the write.
+
+**What the code already gives.** The H1 stamp (`handoff_capture.rs`) binds mount, server,
+document, target, actor and key, owner, MLS epoch, tenure, and the source's (plaintext blake3,
+physical size). H2's detached restore (`prepare_vault_source`) calls the same `restore_scoped`
+with the same inputs that `checked_studio_source` uses. So everything the pre-write half of H5
+needs is a deterministic function of facts H2 already has, behind a stamp H5 already checks.
+
+**Steps:**
+
+1. **H2 facts.** `HandoffFacts { source: (blake3::Hash, u64), storage_protocol_bytes,
+   before_snapshot }` is computed in `StudioHandoffCapture::prepare` from the restored source
+   before `prepare_handoff_detached` consumes it. It is carried through `StudioHandoffPlan` and
+   `StudioHandoffCommit`; the runtime is unchanged. A store method `stamped_studio_source`
+   requires `facts.source == stamp.source`, builds `observed` from the stamped size and the
+   protocol bytes, and runs the fresh budget's `verify_record`.
+2. **The pre-write half of H5** replaces the first restore and the extra read with
+   `stamped_studio_source`. A stamp mismatch still refuses, with no fallback.
+3. **`VerifiedPersistedSource`** lives in a new child module `epoch_studio/source/persisted.rs`.
+   Its private fields mean only that module's one comparison can construct it. That comparison
+   re-reads the written record and requires the `SourceVersion` that `save_studio_source_checked`
+   returned to match: mount, server, target, physical size, plaintext digest, and the intent link.
+   It carries the candidate unit and its snapshot. `into_checked` rechecks the bindings and the
+   budget record before resolve uses it.
+4. **The post-write half of H5** keeps the writer's return value and verifies it.
+   - If verification fails, the Prepared record is kept and the storage budget is invalidated.
+     The commit is refused rather than resolved in the same call; the next H1, or a fence,
+     resolves from the actual bytes with `None`.
+   - If it succeeds, resolve runs with `Some`.
+5. **Resolve** takes `Option<VerifiedPersistedSource>`, and its one restore becomes a match on
+   it. The decision table, the flush-only save, the barriers and the generations are unchanged.
+   Every other caller passes `None`: H1's Prepared resolution, adoption, rotation, repair and the
+   tests.
+6. **The Index check at H5** becomes header-only. See amendment A1.
+7. **Tests**, named `studio_overlay_handoff_*` so the CI filter runs them:
+   - **zero restores** over H5, for a Flipnote and for an Index with duplicate PutObjects;
+   - **a facts oracle:** the facts equal what `checked_studio_source` produces, and the
+     candidate's evidence and blob CIDs equal the restored persisted bytes';
+   - **a same-size digest mismatch after the write:** refused, Prepared retained, no Completed,
+     zero restores; then resolve with `None` classifies from the actual bytes;
+   - **a same-size stamp mismatch between H4 and H5:** refused, zero restores, records unchanged;
+   - **Index objects** that went pristine, moved channel, or were edited between H1 and H5;
+   - **the restart path** still restores exactly once.
+
+   Three mutations go into `check-studio-handoff-mutations.py`: the persisted digest comparison
+   removed, the `Some` arm forced to restore, and the H5 object check dropped.
+
+**Amendments to 9.1's text:**
+
+- **A1, the Index object check (new).** 9.1 is silent on it, but it restores once per PutObject.
+  At H5 it becomes the header-only check `studio_object_holds_work` already performs, plus the
+  intent link, over the deduplicated set of referenced objects. That check covers existence,
+  channel, link and holding work. The residual is a record whose header and body disagree, which
+  only a writer bug produces; copy already accepts it. The alternative is stamping the referenced
+  object records at H1, which is stronger but kills the job on any write to a referenced Flipnote
+  between H1 and H5, the livelock C-3 15.7 HIGH-1 describes. H1 keeps its full check for now.
+- **A2, what the facts name.** "source_snapshot_digest" and "source_physical_bytes" mean the
+  stamp's (plaintext digest, physical size), not a hash of the snapshot alone. H2 cannot know the
+  physical size by itself.
+- **A3, what the struct binds.** It carries the candidate unit, so a verified version cannot be
+  paired with a different unit, and the inventory generation it was verified under. 5.4 lists
+  neither.
+- **A4, "resolve through Flow R" on mismatch.** Flow R is unbuilt, so today this means the next
+  H1's restore, or a fence, both of which take the `None` path.
+
+**What it leaves expensive** (to be measured with the commit phase, C-3 15.7 step 2):
+- two seed `graph()` loads;
+- several candidate `blob_cids` projections;
+- up to 256 header unseals for an Index;
+- two snapshots held per job.
+
+H1 still restores for each PutObject and for an interrupted Prepared record.
+
+**Hazards for the implementation.** The re-read must use the family's `MAX_SEALED_BYTES` bound,
+not the 8 MiB retained-source bound, or every successor over 8 MiB would be refused. Four CI
+mutation anchors in `handoff.rs` must stay unique, and new code must not add another `if linked {`
+there.
+
+**Design review of revision 1 (2026-10-08, Opus, static): no blocker; one high, which is a
+defect already in the code.** The review confirmed that using H2's facts is sound. The stamp
+binds every input of the restore: the plaintext, and through it the snapshot, channel and link;
+the server; the target; and the owner, the only non-byte input that changes normalized output.
+No check `checked_studio_source` makes is lost, because barrier 2 rechecks the link and the
+channel and `verify_record` stays. Revision 2 changes the plan as follows.
+
+- **H-1, the header readers refused repaired records (fixed separately, first).**
+  `VaultShape::read` and `preserves_vault_source` accepted only snapshot prefixes 1 and 2.
+  `restore` also accepts 3, the repair-bound form a once-repaired Flipnote keeps on every
+  successor. So A1's check would have refused such an object and looped. Barrier 2 already did:
+  a handoff into a repaired destination wrote Prepared, then failed and looped. P2 and copy
+  reported repaired objects as missing. Both readers now use `RepairBinding::decode_prefix`.
+- **Step 1.** `facts.source`'s digest is computed by the worker from the bytes it decoded, never
+  copied from the stamp; copying would make the check prove nothing. **`before_snapshot` is
+  dropped.** It only steers the writer's flush branch, and at H5 the candidate always differs. So
+  H5 always replaces, and a writer that returns no `SourceVersion` is a refusal.
+- **Steps 3 and 4.**
+  - The re-read is also checked against the candidate: its snapshot hash must equal the
+    capability's `source`, which barrier 2 already proved equal to the hash of
+    `candidate.snapshot()`. Channel and link byte are checked too. A3 is then enforced by a
+    check, not by convention.
+  - A failed re-read (I/O, authentication, missing file) counts as a verification failure. The
+    budget is invalidated before any error returns.
+- **Step 5.** The `Some` arm accepts only Complete evidence. Anything else refuses without writing.
+  Absent must never be classified, and written as Active, from the candidate.
+- **Step 4b, added: liveness after a refusal (M-2).** After any H5 error the runtime backs off,
+  30 s doubling to 300 s, and the probe requires a live tenure before it runs H1. So a Prepared
+  record left by a refusal holds that target's page and tail service for at least the backoff.
+  With tenure Unknown or Imported, the hold lasts until a fence runs. The probe will therefore run
+  a resolution-only H1 for a Prepared branch without a tenure. Resolution needs only current
+  membership (`resolve_studio_handoff_with_io` checks `current_member`), not tenure. Tests cover
+  a refusal followed by the next probe's resolution, and the same with tenure Unknown.
+- **Step 6 (A1).** The cost is a full authenticated read per referenced object, up to
+  `MAX_SEALED_BYTES` (about 9 MiB) each, plus a structural read of each object's intent record
+  for the link. That is 256 times 9 MiB in the worst case, and the commit-phase measurement must
+  use large referenced Flipnotes. The residual is wider than writer bugs: it also covers records
+  written by an older build that a newer restore would refuse. H1's full check catches those, so
+  H1 keeps it. The link check sits at the H5 call site, not inside `studio_object_holds_work`,
+  whose other callers (copy, P2) must not change.
+- **Step 7, tests.**
+  - **The zero-restore claim is narrowed (M-4).** `FULL_RESTORES` counts `restore_unit` only, and
+    a test-only counter in the replication crate is not compiled into app tests. The test claims
+    no `restore_unit` and no `load_studio_epoch` during H5, using a ready budget so
+    `enter_studio_budget` does not reconcile.
+  - **M17's substitute must pass the fence (M-1).** It is built from the candidate's plaintext
+    with a same-length change in bytes `preserves_vault_source` does not compare (the receipt
+    book), resealed. The test asserts that precondition. Otherwise the later fence would refuse
+    by itself, and a mutant that skipped the digest check would survive.
+  - **Added regressions:**
+    - a repaired destination and a repaired referenced object;
+    - a re-read that fails authentication;
+    - an Index object removed, or linked to missing or other-target intent metadata;
+    - the facts oracle extended to `complete()`'s output, the protocol bytes and the snapshot
+      round trip;
+    - a successor between 8 MiB and `MAX_SEALED_BYTES`.
+  - **Placement.** Tests live under `tests/rotation/overlay/handoff/`, inside the harness's
+    prefix, not in `persisted.rs`.
+- **Text to amend when built:**
+  - 9.3 step 8: the capability's `before` now comes from the stamp's digest. That is equivalent,
+    since barrier 2 still compares the actual bytes.
+  - 9.3: where the Index object check sits.
+  - Section 10: the step-9 mismatch row.
+  - 14.2: M-numbers for the new mutations; the digest one is M17.
+  - 14.3: names a harness that does not exist; the plan uses `check-studio-handoff-mutations.py`.
+  - 5.3 and 5.5: superseded by `StudioHandoffPlan` and `StudioHandoffCommit`.
+  - The comments at `eligibility.rs` 212-216 and `handoff.rs` 49-55.
+- **CI anchors.** The H1 and H5 calls to `check_index_object_sources` are textually identical, so
+  the H5 check gets its own function name. The lifecycle harness's `copy-wrong-channel` anchor in
+  `eligibility.rs` must stay byte-identical.
+
 ### 9.2 C-3: a vault inventory generation and a resumable cursor
 
 R10 shows that neither existing token can serve. C-3 therefore introduces one.
@@ -800,7 +980,11 @@ impl EpochMutation<'_> {
 ```
 
 The bare `atomic_write`, `sync_*` and unlink helpers stop being reachable for five-family paths, so
-a bypass is a compile error rather than a missing convention. A failed or panicking write still
+a bypass **through them** is a compile error rather than a missing convention. A raw `std::fs` call
+is outside what the type system can see, so it is refused mechanically instead:
+`scripts/check-store-raw-fs.sh`, run in CI, rejects raw filesystem mutation in non-test store code
+outside `mod persistence` and three reviewed per-family sync helpers that take `&EpochMutation`
+(I-4 writer audit, 2026-10-06, finding M-1). A failed or panicking write still
 leaves the token rotated, because rotation happens in `epoch_mutation_guard` before the guard is
 handed out and is never restored.
 
@@ -874,6 +1058,12 @@ Three consequences, from the revision-3 answer, that the implementation must hon
    hold the same `OverlayOwnership`: no second overlay pool, no capacity released when only the
    waiter is cancelled. The returned validation is bound to the original cursor identity, mount,
    record id and `inventory_generation`, and all four are rechecked before it is consumed.
+   **Relaxed for the validation memo only (2026-10-08, C-3 runtime design 14.3).** A Registry or
+   Studio result whose generation check fails is still never installed into an inventory. If it
+   passes the other three checks and the store's current mount, its accounting record is memoized
+   unless the memo already holds any version of that record. That is sound because the memo is keyed by the
+   bytes the result was computed from and validation is pure. It lets a restarted scan skip a
+   validation that a write overtook.
 3. **Parking bypasses no bound.** A genuine per-family or aggregate size-limit violation still
    refuses; scan poisoning, the cardinality and byte rails and the reference-cache exclusion are
    unchanged. At most one parked body exists at a time, which is the existing one-body-per-step
@@ -886,9 +1076,22 @@ maximal-record measurement in 13.7 remain required.
 `MAX_INVENTORY_RESTARTS = 3` times per commit attempt, then returns `InventoryUnstable` and applies
 backoff. It does **not** fall back to a single-visit unbounded scan. A commit completes when no
 `inventory_generation` rotation occurs for the duration of one scan. Because the token rotates only
-on durable five-family mutation, and specifically **not** on budget mint or entry, on reads, or on
-the runtime's own bookkeeping, a vault with no writes in progress satisfies that condition; the
+on durable five-family mutation, and specifically **not** on budget mint or entry or on the
+runtime's own bookkeeping, a vault with no writes in progress satisfies that condition; the
 design does not self-invalidate.
+
+**Correction (I-4 writer audit, 2026-10-06, finding M-3).** An earlier wording also excluded
+"reads". That is false: several read-only and duplicate paths rotate, because they sync-repair a
+file before relying on it. They are a page serve for a target whose handoff has completed
+(`check_studio_handoff_publication` via `with_prepared_studio_source`), duplicate or empty Studio
+page ingest, the Registry page receive sync, and the Registry maintenance flush. Over-rotation is
+the safe direction and stays allowed, but once a job spans visits it costs liveness, so a peer
+polling pages can keep restarting a job. No owner may therefore depend on quiescence alone; the
+runtime document's section 12 records how replay's manual move does not. Memoising the
+already-durable sync-repairs per mount is done for the completed-handoff publication check, the
+site a polling peer drives (`sync_intent_unless_durable`); the duplicate page ingest (which a peer
+drives by pushing pages), Registry
+receive sync and maintenance flush sites remain a recorded follow-up.
 
 Changing the scanner from an exclusive borrow to an owned cursor is a **semantic consistency
 change**, not a mechanical signature change: it is the introduction of I-4 that makes cross-visit
@@ -902,12 +1105,15 @@ for a coordinated verdict on it.
 3. Complete-target comparison and `completed_branch` short-circuit, before source lookup,
    acknowledgement or sync reservation (HANDOFF-001).
 4. `check_handoff_references`: candidate plus pending coverage of the branch's base CIDs (R9).
+   Then, for an Index, the header-only object check at commit (9.1.1, A1).
 5. Preflight all three replacement peaks and the intent accounting.
 6. Re-read the actual intent record and compare its complete authenticated plaintext digest and
    physical size with the captured values (C-2).
 7. Barrier 1: write Prepared, retaining the complete branch and ledger.
 8. Barrier 2: `save_studio_source_checked` with the `CheckedHandoffWrite` capability minted from the
-   actual re-read bytes.
+   actual re-read bytes. **As built (9.1.1):** the capability's `before` is the stamp's source
+   digest, which step 2 proved equal to the bytes on disk under this borrow, and the writer still
+   compares it with the actual record. The writer always replaces.
 9. Verify the persisted source per 9.1 and construct `VerifiedPersistedSource`; barrier 3 through
    `resolve_studio_handoff_with_io`.
 10. Return the outcome. Publication becomes eligible only now.
@@ -925,7 +1131,7 @@ the source-required metadata link, and HANDOFF-002's inventory dependency.
 | Before barrier 1 | No handoff happened. Active, original source. |
 | Between barriers 1 and 2 | Prepared with the exact recorded source-before and no branch ids: durably return to Active with the full draft. |
 | Between barriers 2 and 3 | Prepared with all exact envelopes and signed-operation digests: flush and complete without reapplying. |
-| Step 9 digest mismatch | Do not complete; retain Prepared and resolve from actual bytes. |
+| Step 9 proof failure | Do not complete; retain Prepared and resolve from actual bytes. **As built (9.1.1):** any failure of the post-write proof refuses the commit and spends the budget. That covers size, digest, snapshot hash, channel or link, and a re-read that is missing or does not authenticate. Nothing is resolved in that call. The next H1 resolves from the actual bytes, even without a live tenure (step 4b), or a fence does. |
 | Partial or conflicting evidence | Retain the full branch, report a hold, guess nothing. Export remains available (12.1). |
 | S3 interrupted after I-3's holds | One accounted atomic replacement with the existing exact-retry flush; the new references are protected by the ordinary mechanism regardless of the outcome; an exact retry is recognised at S1 with no fresh basis and no media work. |
 
@@ -1029,6 +1235,18 @@ Limits:
   progress conditional on no five-family mutation for the duration of one scan. Under sustained
   writes a commit is held and retried. I-4's coverage is an audit obligation, and an under-rotating
   writer is the only unsafe direction.
+  **What "sustained" means, priced (2026-10-08, C-3 runtime design 14.5).** Ordinary gossip writes
+  between nearly every pair of turns, so an overlay commit completes only if its whole scan
+  finishes in one visit, within the overlay's 125 ms share, with no park. The calibrated classifier
+  and the refused-result memo still leave these to park on every pass:
+  - Recovery above 64 KiB, Intents above 384 KiB, or OwnerReceipts above 747 bytes;
+  - the commit's own Intents record when its seed is large;
+  - a record reached late in the slice;
+  - cold Studio and Registry records beyond the memo's 64 entries.
+
+  Traversal alone also exceeds 125 ms past roughly 60 MiB. A job warms about three records before
+  it backs off for 30 s, doubling to 300 s. So C-3 step 3 stays unbuilt, and until it is built the
+  handoff keeps completing in one expensive visit.
 - **L7.** Idle-only scheduling does not promise starvation-free overlay completion under sustained
   catch-up.
 
@@ -1142,7 +1360,7 @@ expensive operations landing on opposite sides of a wall-clock threshold.
 | M14 | **I-3's ordinary holds in S3** (release the transient owner without transferring) | N12(b) | "newly accepted pixels were deleted after a successful Save and before the next scan". |
 | M15 | The S3 pixel possession revalidation | N12(d) | "a new acceptance named absent pixels". |
 | M16 | Media admission placed before classification (restore revision 2's S0) | N30 | "a completed retry was refused because its pixels were reclaimed". |
-| M17 | The step 9 persisted-source digest comparison | N7 | "completion proceeded without authenticating what landed". |
+| M17 | The step 9 persisted-source digest comparison | N7 | "completion proceeded without authenticating what landed". **As built (9.1.1):** the proof's digest and its field checks (scope, channel, snapshot hash, link) are each redundant with the others by construction, so M17 is the whole re-read removed. `persisted::studio_overlay_handoff_refuses_a_persisted_source_that_is_not_the_candidate` kills it. The CI harness carries the proof's generation binding, the verified arm's Complete-only rule, the restore-free resolution and the H5 Index check instead. |
 | M18 | The all-or-nothing requirement in the assemble stage | N7 | "a durable signed prefix escaped". |
 | M19 | The transfer-hold versus live-hold split | N20 | "export of an unresolved Prepared branch was refused with no live worker". |
 | M20 | `inventory_generation` rotation in **one** writer at a time: recovery, owner, Registry, Studio source, intent, cleanup unlink | N17, the matching family case | "a spanning scan finished across a real write to that family". |
@@ -1243,7 +1461,9 @@ From revision 3, all three answers adopted with their attached consequences:
 
 5. **Choke point backed by an audited writer list, not one or the other.** 9.2 makes the guard a
    type-level prerequisite, so a five-family write, rename, sync-repair or unlink cannot be
-   expressed without it and a bypass is a compile error rather than a forgotten convention. The
+   expressed **through the store's primitives** without it, and that bypass is a compile error
+   rather than a forgotten convention (a raw `std::fs` call is caught by the CI gate instead; see
+   9.2 and I-4 audit M-1). The
    writer list still proves coverage, and N17 with M20 keeps per-family evidence. I-4 stays separate
    from budget ownership in both directions: a budget mint or entry alone must not invalidate, and
    an operation that may have changed files must invalidate even when it returns an error.

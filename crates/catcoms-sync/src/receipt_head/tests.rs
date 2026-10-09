@@ -10,6 +10,7 @@ mod fault_report;
 mod provisional;
 mod service;
 mod studio;
+mod tenure;
 fn node() -> (Node, ManualClock) {
     let device = MlsDevice::generate().unwrap();
     let group = ServerGroup::create(&device).unwrap();

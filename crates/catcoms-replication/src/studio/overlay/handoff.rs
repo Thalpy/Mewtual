@@ -183,24 +183,18 @@ impl StudioOverlayState {
     /// Any retained terminal manifest is preserved: a new branch does not erase the acknowledgement
     /// owed for the previous one.
     ///
-    /// **`provenance` is checked, never trusted** (design review (ii) change 4). It used to be
-    /// stored as given beside a Closing basis, so nothing tied the label to the base. `validate`
+    /// **The provenance is the basis variant's own** (design review (ii) change 4). It used to be
+    /// a separate argument stored as given, so nothing tied the label to the base. `validate`
     /// caught a Closing basis labelled Unconfirmed, because its source identity is nonzero. It did
     /// not catch the dangerous direction: an Unconfirmed basis labelled Closing, which
-    /// `prepare_handoff`'s guard (keyed on the label) would then let become signed history. The
-    /// provenance is now the basis variant's own, and an argument that disagrees with it is
-    /// refused. The argument stays only so Agent 1's call site compiles unchanged. It is redundant,
-    /// and removing it is a coordinated change.
+    /// `prepare_handoff`'s guard (keyed on the label) would then let become signed history. A
+    /// checked argument followed; it is now removed, so no caller can name a provenance at all.
     pub fn new_admitted<'a>(
         &self,
         basis: impl Into<StudioOverlayBasis<'a>>,
         admission: StudioOverlayAdmission,
-        provenance: StudioOverlayProvenance,
     ) -> Result<Self, ReplError> {
         let basis = basis.into();
-        if provenance != basis.provenance() {
-            return Err(ReplError::IntentConflict);
-        }
         let StudioOverlayAdmission::New { generation } = admission else {
             return Err(ReplError::IntentConflict);
         };

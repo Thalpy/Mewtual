@@ -55,11 +55,10 @@ impl<'a> VaultShape<'a> {
             return Err(ReplError::EpochBound);
         }
         let mut d = Decoder::new(bytes);
-        let adopting = match d.get_u8().map_err(|_| ReplError::Malformed)? {
-            1 => false,
-            2 => true,
-            _ => return Err(ReplError::Malformed),
-        };
+        // The same prefix decoder `restore` uses, so a repair-bound source (form 3), which a
+        // once-repaired Flipnote keeps on every successor, reads here as it restores. The binding
+        // itself is not part of any shape this reader reports.
+        let (adopting, _) = crate::epoch::repair_transition::RepairBinding::decode_prefix(&mut d)?;
         if d.get_bytes().map_err(|_| ReplError::Malformed)? != target.channel() {
             return Err(ReplError::EpochScope);
         }
@@ -83,6 +82,44 @@ impl<'a> VaultShape<'a> {
     }
 }
 
+/// Re-frame authenticated vault bytes with the opening receipt or the gate replaced, every other
+/// byte identical. Test-only, for fixtures that must differ in exactly one field: design M21 asks
+/// that reconciliation's document and seed halves be tested apart, and no honest source differs in
+/// only one of them.
+#[cfg(test)]
+pub(in crate::studio) fn reframe_vault_for_test(
+    bytes: &[u8],
+    opening: Option<&[u8]>,
+    gate: Option<&[u8]>,
+) -> Vec<u8> {
+    let mut d = Decoder::new(bytes);
+    let prefix = d.get_u8().unwrap();
+    // Forms 1 and 2 only: the repair-bound form 3 carries binding bytes after the prefix byte,
+    // which this one-byte copy would misread as a field length. No fixture reframes a repaired
+    // source; one that needs to must copy the prefix through `RepairBinding::decode_prefix`.
+    assert!(
+        prefix <= 2,
+        "reframe_vault_for_test does not handle a repair-bound source"
+    );
+    let mut fields: Vec<Vec<u8>> = (0..5).map(|_| d.get_bytes().unwrap().to_vec()).collect();
+    // Field order as `StudioEpoch::snapshot` writes it: channel, opening, seed, book, gate.
+    if let Some(opening) = opening {
+        fields[1] = opening.to_vec();
+    }
+    if let Some(gate) = gate {
+        fields[4] = gate.to_vec();
+    }
+    let rest = &bytes[bytes.len() - d.remaining()..];
+    let mut e = Encoder::new();
+    e.put_u8(prefix);
+    for field in &fields {
+        e.put_bytes(field).unwrap();
+    }
+    let mut out = e.finish();
+    out.extend_from_slice(rest);
+    out
+}
+
 impl StudioEpoch {
     pub(in crate::studio) fn copy_handoff_source(
         &mut self,
@@ -101,9 +138,10 @@ impl StudioEpoch {
             return Err(ReplError::EpochBound);
         }
         let mut d = Decoder::new(bytes);
-        if !matches!(d.get_u8().map_err(|_| ReplError::Malformed)?, 1 | 2) {
-            return Err(ReplError::Malformed);
-        }
+        // `restore`'s own prefix decoder, so a repaired destination's form-3 prefix is read rather
+        // than refused as Malformed after Prepared was written (review of design 9.1.1, H-1).
+        // Like the adopting flag, the repair binding is not part of the history this compares.
+        crate::epoch::repair_transition::RepairBinding::decode_prefix(&mut d)?;
         if d.get_bytes().map_err(|_| ReplError::Malformed)? != self.target.channel() {
             return Ok(false);
         }
@@ -224,6 +262,45 @@ impl StudioEpoch {
             return Ok(Some(R::SuccessorNotPristine));
         }
         Ok(None)
+    }
+
+    /// Design 8.6, from authenticated vault bytes and the header only: whether this installed
+    /// source is the checkpoint an Unconfirmed `overlay` was based on. Never `AwaitingSource`:
+    /// absence is the caller's to report, since there are no bytes to pass.
+    ///
+    /// Refuses a Closing branch (`EpochScope`). Reconciliation is a statement about preview-based
+    /// work, and a Closing branch's relation to its source is P2's successor classification.
+    pub fn unconfirmed_base_state_in_vault(
+        bytes: &[u8],
+        overlay: &StudioOverlay,
+    ) -> Result<StudioOverlayUnconfirmedState, ReplError> {
+        if overlay.basis_kind() != super::super::overlay::BasisKind::Unconfirmed {
+            return Err(ReplError::EpochScope);
+        }
+        let shape = VaultShape::read(bytes, overlay.target())?;
+        let opening = (!shape.opening.is_empty())
+            .then(|| Receipt::decode(shape.opening))
+            .transpose()?;
+        let base = overlay.receipt();
+        let base_doc_id = crate::epoch_id(
+            base.document.doc_type,
+            &base.document.logical_key,
+            base.closed_epoch
+                .checked_add(1)
+                .ok_or(ReplError::EpochBound)?,
+            &base.close_record_hash,
+        );
+        Ok(
+            if unconfirmed_base_confirmed(
+                shape.is_document(&base.document, base_doc_id),
+                opening.as_ref().map(|r| r.seed_change_hash),
+                base.seed_change_hash,
+            ) {
+                StudioOverlayUnconfirmedState::BaseConfirmed
+            } else {
+                StudioOverlayUnconfirmedState::BaseSuperseded
+            },
+        )
     }
 
     /// Whether authenticated vault bytes hold any work: a later epoch or at least one operation.
@@ -351,6 +428,22 @@ pub(in crate::studio) fn overlay_signed_hash_in(
 ) -> Result<Option<[u8; 32]>, ReplError> {
     Ok(held_in(operations, intent.author, &intent.operation)?
         .map(|op| blake3::derive_key("catcoms/studio-overlay-signed-operation/v1", &op.encode())))
+}
+
+/// Design 8.6's predicate, alone, so each half can be tested apart from the other (design M21:
+/// document identity and seed identity must differ independently in the fixtures).
+///
+/// `same_document`: the installed source's gate names the branch's base document id, the
+/// successor id its receipt's close selected. `opening_seed`: the installed source's opening
+/// checkpoint's seed change hash, `None` when the source opened from no checkpoint. BOTH must
+/// agree. A source at the base id but with another seed opened from a different checkpoint under
+/// the same close, and the branch's seed-only base would misdescribe it.
+pub(in crate::studio) fn unconfirmed_base_confirmed(
+    same_document: bool,
+    opening_seed: Option<[u8; 32]>,
+    branch_seed: [u8; 32],
+) -> bool {
+    same_document && opening_seed == Some(branch_seed)
 }
 
 /// The signed operation `author` saved for `domain`'s id, if any; an id held with a DIFFERENT body

@@ -131,6 +131,58 @@ fn a_transferred_branch_is_still_acknowledged_after_a_newer_branch_is_admitted()
     );
 }
 
+/// I-4 audit M-3. Every page serve of a target whose handoff completed runs the publication
+/// check, which flushes the completed record. The flush stays a mutation for inventory purposes,
+/// but repeating one this mount already made, of a file nothing has written since, rotated the
+/// token on every serve, so a peer polling pages could restart any inventory job spanning visits
+/// for as long as it polled. In a quiet vault the second check must not rotate; after any
+/// five-family write the next one flushes, and rotates, again.
+#[test]
+fn a_completed_handoff_is_flushed_once_per_quiet_period_not_on_every_serve() {
+    let root = tempfile::tempdir().unwrap();
+    let f = Fixture::new(true);
+    let mut store = open(root.path());
+    let (close, basis) = closing(&f, &mut store);
+    let _ = request_branch(&f, &mut store, &close);
+    save(&f, &mut store, &close, basis.fingerprint(), f.title(), 123);
+    install(&f, &mut store, &close);
+    transfer(&f, &mut store, basis.fingerprint());
+    {
+        let state = store.load_epoch_intents(SERVER, &f.logical).unwrap();
+        let metadata = state.handoff_metadata().unwrap();
+        assert!(
+            metadata.has_completed() && !metadata.is_prepared(),
+            "precondition: a completed handoff that is not prepared, which is what flushes"
+        );
+    }
+    let check = |store: &mut ServerStore| {
+        store
+            .check_studio_handoff_publication(SERVER, &f.group, f.target)
+            .unwrap()
+    };
+    let before = store.inventory_generation();
+    check(&mut store);
+    let quiet = store.inventory_generation();
+    assert!(
+        !std::sync::Arc::ptr_eq(&before, &quiet),
+        "the first check skipped a flush this mount had never made"
+    );
+    check(&mut store);
+    assert!(
+        std::sync::Arc::ptr_eq(&quiet, &store.inventory_generation()),
+        "a repeat flush of an unchanged record rotated the token"
+    );
+    // Any five-family write (here the mutation guard alone, which is what rotates) makes the memo
+    // stale.
+    let _ = store.epoch_mutation_guard();
+    let moved = store.inventory_generation();
+    check(&mut store);
+    assert!(
+        !std::sync::Arc::ptr_eq(&moved, &store.inventory_generation()),
+        "the flush after a five-family write was skipped"
+    );
+}
+
 #[test]
 fn studio_overlay_handoff_rollover_floor_rejects_forgotten_retry_after_rewind() {
     let root = tempfile::tempdir().unwrap();

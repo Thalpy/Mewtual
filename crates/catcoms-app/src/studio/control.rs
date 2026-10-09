@@ -29,8 +29,61 @@ impl StudioControlRequest {
             }
             .validate()?;
         }
+        if let StudioControlAction::SaveUnconfirmedOverlay(save) = &self.action {
+            if save.body.len() > catcoms_replication::epoch::MAX_DOMAIN_OP_BYTES {
+                return Err(invalid("draft body exceeds the operation bound"));
+            }
+        }
         Ok(())
     }
+}
+
+/// Design 8.7: one Save of local work on an awaiting-tenure preview.
+///
+/// `basis` and `branch` come from the ticket the renderer was given
+/// (`BeginUnconfirmedOverlaySave`), or from the original request on a retry. The operation is
+/// built from the request's target, `nonce` and `body`. A renderer cannot name its own author,
+/// provenance or seed: all of those come from the live preview at each stage.
+pub struct StudioUnconfirmedOverlaySaveRequest {
+    pub basis: [u8; 32],
+    pub branch: [u8; 32],
+    pub nonce: [u8; 16],
+    pub body: Vec<u8>,
+}
+impl std::fmt::Debug for StudioUnconfirmedOverlaySaveRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("StudioUnconfirmedOverlaySaveRequest { .. }")
+    }
+}
+
+/// What one custody visit of an Unconfirmed Save concluded.
+///
+/// No projection is carried. The draft's content is read through the inspection, which has a
+/// delivery fence; a Save result has none and so carries no document content.
+#[derive(Debug)]
+pub enum StudioUnconfirmedSaveOutcome {
+    /// Durably accepted as local draft data on unconfirmed history, or an exact retry of work
+    /// already accepted. `accepted` is the branch's count after this visit.
+    Saved { basis: [u8; 32], accepted: usize },
+    /// A retry named an operation of the most recently disposed branch. Nothing was accepted;
+    /// the manifest says what happened to that work.
+    Disposed(Box<StudioOverlayDisposal>),
+    /// The store answered with a completed transfer. An Unconfirmed branch is never handed off
+    /// (design 8.5), so this means the request named a Closing branch's transferred work. It is
+    /// reported as it is rather than relabelled.
+    HandedOff(catcoms_replication::studio::StudioHandoffOutcome),
+    /// New authoring was captured and scheduled. Ask again with the identical request.
+    Scheduled,
+    /// Nothing of THIS request was saved; send the identical request again. Either admission or
+    /// the shared preparation pool was full, or this visit finished another request's scheduled
+    /// work first (that work's outcome belongs to its own caller's retry).
+    ///
+    /// Never `Saved` for another request's work. The overlay slot holds one plan for the whole
+    /// actor, whichever request and target made it, and a visit finishes whatever is parked before
+    /// its own work so that an absent caller cannot hold the slot. Reporting that plan as saved
+    /// would tell this caller an edit landed when it did not. A retry while this request's own plan
+    /// is in flight is `Scheduled`, not `Busy`.
+    Busy,
 }
 
 pub struct StudioRecoveryApply {
@@ -98,6 +151,14 @@ pub enum StudioControlAction {
     /// Drop the live branch, preserving or discarding its bodies. The archive for a preserving
     /// disposal must already be durable: evidence first, removal second.
     DisposeOverlay(Box<StudioOverlayDisposalRequest>),
+    /// Design 8.7: the ticket for a Save of local work on an awaiting-tenure preview, minted from
+    /// this actor's current ready preview. Intercepted by the receiver, which holds the preview.
+    /// Distinct from any Closing Save, so neither path can be reached with the other's request.
+    BeginUnconfirmedOverlaySave,
+    /// One custody visit of that Save. The caller repeats the identical request until it is
+    /// `Saved`; it stays retryable and byte-stable in between. Intercepted by the receiver, like
+    /// the ticket. Local draft data only: never published, never a receipt, never ownership.
+    SaveUnconfirmedOverlay(Box<StudioUnconfirmedOverlaySaveRequest>),
     /// Separately retryable discoverability step after restoring content; never guesses an
     /// epoch from the UI or rewinds a pointer to a newer checkpoint.
     RestorePointer,
@@ -213,6 +274,10 @@ pub struct StudioOverlayLifecycle {
     /// exactly when `branch` is. Structural: `NotReplayable` is only known after a rebuild, so it
     /// appears on an inspection and never here.
     pub eligibility: Option<types::StudioOverlayEligibility>,
+    /// Design 8.6: how an Unconfirmed branch's base relates to the installed source, derived on
+    /// read from the source's header. `None` for a Closing branch or no branch. Cheap enough for
+    /// this row, which is why it is here as well as on the inspection.
+    pub unconfirmed: Option<types::StudioOverlayUnconfirmedState>,
     /// The preserved archive, if this document has one. It is evidence for the branch it names,
     /// which need not be the live one.
     pub archive: Option<StudioLifecycleArchive>,
@@ -309,6 +374,28 @@ pub enum StudioControlResponse {
         target: StudioTarget,
         already_saved: bool,
     },
+    /// A copy out of a local draft was saved into `destination`, or its exact retry found it
+    /// already there. Its own variant rather than `Applied`, which native reports as a recovery:
+    /// a copy is an ordinary provisional content Save of a value taken from a draft, and the
+    /// renderer must be able to tell the two apart. As with `Applied`, neither delivery,
+    /// settlement nor pointer restoration is implied. And no copy, nor any count of copies, is a
+    /// preservation claim for the branch (design 6.3 C-P); only an archive is.
+    OverlayCopyApplied {
+        destination: StudioTarget,
+        already_saved: bool,
+    },
+    /// Design 8.7: the ticket for an Unconfirmed Save, both values from one fresh mint in one
+    /// custody visit. Never authority: the Save mints again at each of its own stages.
+    UnconfirmedOverlaySaveTicket {
+        target: StudioTarget,
+        basis: [u8; 32],
+        branch: [u8; 32],
+    },
+    /// One visit of an Unconfirmed Save. See [`StudioUnconfirmedSaveOutcome`].
+    UnconfirmedOverlaySaved {
+        target: StudioTarget,
+        outcome: StudioUnconfirmedSaveOutcome,
+    },
     List(StudioRecoveryListing),
     Version(StudioRecoveryVersion),
     Export {
@@ -349,6 +436,9 @@ impl std::fmt::Debug for StudioControlResponse {
             Self::PointerRestored { .. } => "PointerRestored { .. }",
             Self::Preview(_) => "Preview { .. }",
             Self::Applied { .. } => "Applied { .. }",
+            Self::OverlayCopyApplied { .. } => "OverlayCopyApplied { .. }",
+            Self::UnconfirmedOverlaySaveTicket { .. } => "UnconfirmedOverlaySaveTicket { .. }",
+            Self::UnconfirmedOverlaySaved { .. } => "UnconfirmedOverlaySaved { .. }",
             Self::List(_) => "List { .. }",
             Self::Version(_) => "Version { .. }",
             Self::Export { .. } => "Export { .. }",
@@ -382,6 +472,10 @@ impl StudioControlResponse {
             | Self::PointerRestored { .. }
             | Self::Preview(_)
             | Self::Applied { .. }
+            | Self::OverlayCopyApplied { .. }
+            // Produced entirely in the custody visit, and carrying no document content.
+            | Self::UnconfirmedOverlaySaveTicket { .. }
+            | Self::UnconfirmedOverlaySaved { .. }
             | Self::List(_)
             | Self::Version(_)
             | Self::Export { .. }
@@ -416,6 +510,9 @@ impl StudioControlResponse {
             | Self::PointerRestored { .. }
             | Self::Preview(_)
             | Self::Applied { .. }
+            | Self::OverlayCopyApplied { .. }
+            | Self::UnconfirmedOverlaySaveTicket { .. }
+            | Self::UnconfirmedOverlaySaved { .. }
             | Self::List(_)
             | Self::Version(_)
             | Self::Export { .. }
@@ -537,13 +634,21 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
             }
             StudioControlAction::FinishOverlayInspection(prepared) => {
                 let inspection = self.finish_studio_inspection(store, server, target, *prepared)?;
-                // P2, in the same custody visit that just proved the read current.
+                // P2 and design 8.6, in the same custody visit that just proved the read current.
                 let tenure = self.observed_owner_tenure();
-                let eligibility = self.sync.with_registry_context(|group, device, _, _| {
-                    store.studio_overlay_eligibility(server, group, target, device, tenure)
-                })?;
+                let (eligibility, unconfirmed) =
+                    self.sync.with_registry_context(|group, device, _, _| {
+                        Ok::<_, AppError>((
+                            store.studio_overlay_eligibility(
+                                server, group, target, device, tenure,
+                            )?,
+                            store.studio_overlay_unconfirmed_state(server, group, target)?,
+                        ))
+                    })?;
                 return Ok(StudioControlResponse::OverlayInspection(
-                    inspection.with_eligibility(eligibility),
+                    inspection
+                        .with_eligibility(eligibility)
+                        .with_unconfirmed(unconfirmed),
                 ));
             }
             // Archiving takes the same two visits as inspection and the same capture; only the
@@ -584,6 +689,13 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
             StudioControlAction::RepairFault(_) | StudioControlAction::RepairRegistryFault(_) => {
                 return Err(invalid(
                     "a fault repair requires the owner's durable snapshot",
+                ))
+            }
+            // The receiver intercepts both: only it holds the ready preview each stage mints from.
+            StudioControlAction::BeginUnconfirmedOverlaySave
+            | StudioControlAction::SaveUnconfirmedOverlay(_) => {
+                return Err(invalid(
+                    "an unconfirmed draft Save requires the actor's live preview",
                 ))
             }
             StudioControlAction::ExportOverlay => {
@@ -661,6 +773,12 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
                     | StudioControlAction::RepairRegistryFault(_) => {
                         unreachable!("fault read and repair route before recovery decoding")
                     }
+                    StudioControlAction::BeginUnconfirmedOverlaySave
+                    | StudioControlAction::SaveUnconfirmedOverlay(_) => {
+                        unreachable!(
+                            "an unconfirmed draft Save is refused before recovery decoding"
+                        )
+                    }
                     // Read-only. It deliberately does NOT rebuild the branch: the whole point is to
                     // tell a caller what it is looking at cheaply enough to do before deciding
                     // whether to pay for an inspection.
@@ -692,12 +810,15 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
                             device,
                             observed_tenure,
                         )?;
+                        let unconfirmed =
+                            store.studio_overlay_unconfirmed_state(server, group, target)?;
                         return Ok(StudioControlResponse::OverlayLifecycle(Box::new(
                             StudioOverlayLifecycle {
                                 target,
                                 branch,
                                 prepared: metadata.is_some_and(|m| m.is_prepared()),
                                 eligibility,
+                                unconfirmed,
                                 archive,
                                 disposed: metadata.and_then(|m| m.disposed()).map(|d| {
                                     StudioLifecycleDisposal {

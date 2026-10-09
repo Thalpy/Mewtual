@@ -163,8 +163,9 @@ impl StudioOverlayCopyCapture {
     ///
     /// Everything it needs is public context captured under custody: the group id from the
     /// destination document, the actor, and the designated owner that a vault snapshot is scoped
-    /// to. The result is a proposal and nothing more; C3 and C4 revalidate every stamp before
-    /// anything durable happens.
+    /// to. The result is a proposal and nothing more. C3 revalidates every stamp. C4 compares no
+    /// stamp: it re-plans from the records it reads then and requires the same epoch, destination
+    /// projection, a `Ready` disposition and the same body before anything durable happens.
     pub(crate) fn plan(
         self,
         choice: StudioOverlayCopyChoice,
@@ -242,11 +243,14 @@ impl StudioOverlayCopyCapture {
             choice,
             plan,
         })
-        // No branch identity is carried, deliberately. The source stamp already requires the
-        // branch's intent record to be byte-identical at C3 and C4, which covers every way the
-        // branch could move; a second branch check would be a second representation of the same
-        // fact, and the kind that drifts. Copy is also not a preservation claim (C-P), so binding
-        // it to a branch generation would suggest an accounting relationship it does not have.
+        // No branch identity is carried, deliberately. At C3 the source stamp already requires the
+        // branch's intent record to be byte-identical, which covers every way the branch could
+        // move. A second branch check would be a second representation of the same fact, and the
+        // kind that drifts. At C4 there is no stamp. A branch that moved is refused only if the
+        // re-plan no longer resolves the named value or rebuilds a different body; otherwise the
+        // copy carries the value the branch holds then (design C1'). Copy is also not a
+        // preservation claim (C-P), so binding it to a branch generation would suggest an
+        // accounting relationship it does not have.
     }
 }
 
@@ -273,6 +277,31 @@ impl ServerStore {
             )?,
             destination: self.capture_studio_destination(server, group, destination, device)?,
         })
+    }
+
+    /// Whether the copy destination's document is under a **transfer hold**: a staged (Prepared)
+    /// handoff of its branch (design 6.3 C1').
+    ///
+    /// A copy is an ordinary Apply into the destination, and the publication path already refuses
+    /// one while the destination is Prepared. Without this check the refusal came only at C4,
+    /// after C3 had told the user the copy was Ready (the review's M4). Asked at C1 and again at
+    /// C3, since a hold can be staged in between. Retryable: the hold ends when its handoff
+    /// resolves.
+    ///
+    /// The destination's document is derived from its target, so another channel label for the
+    /// same Flipnote names the same record and the same hold (C-0). A hold on the *source* is
+    /// deliberately not asked about: copying out of a branch whose handoff is staged is permitted,
+    /// and neither clears `Prepared` nor counts as evidence that the handoff completed.
+    pub(crate) fn studio_copy_destination_held(
+        &self,
+        server: u64,
+        group: &ServerGroup,
+        destination: StudioTarget,
+    ) -> Result<bool, AppError> {
+        let document = destination.document(&group.group_id()).map_err(invalid)?;
+        Ok(self
+            .load_epoch_intents_structural(server, &document)?
+            .handoff_prepared())
     }
 
     /// All three records a copy proposal rests on, rechecked together.
@@ -353,9 +382,10 @@ impl ServerStore {
 
     /// Re-read **both** destination records and compare digest and physical size.
     ///
-    /// Run at C3 and again at C4, alongside the source capture's own
-    /// `studio_inspection_is_current`. Three records have to be unchanged for a copy proposal to
-    /// still describe reality: the branch it came from, and the destination's two.
+    /// Run at C3, alongside the source capture's own `studio_inspection_is_current`. Three records
+    /// have to be unchanged for a copy proposal to still describe reality: the branch it came from,
+    /// and the destination's two. C4 does not call it: it re-captures and re-plans, and a changed
+    /// destination is refused there on its `epoch_id`, projection fingerprint, disposition or body.
     pub(crate) fn studio_destination_is_current(
         &self,
         server: u64,
@@ -390,5 +420,97 @@ impl ServerStore {
             .read_scoped_recovery_plain(&epoch_recovery::scope_bytes(server, &stamp.document)?)?
             .map(|r| (blake3::hash(&r.plain), r.physical_bytes));
         Ok(recovery == stamp.recovery)
+    }
+}
+
+/// Test seams for the Server-level copy tests, which cannot reach the store's write hooks or the
+/// intent ledger (both deliberately private to the store).
+#[cfg(test)]
+impl ServerStore {
+    /// Stage a durable transfer hold on `target`'s live branch: the state a handoff leaves when it
+    /// is interrupted after its Prepared record and before its Source write. Driven through the
+    /// real handoff with a refusal injected at the Source write, so nothing is synthesised.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn stage_studio_transfer_hold_for_test(
+        &mut self,
+        server: u64,
+        group: &ServerGroup,
+        target: StudioTarget,
+        device: &MlsDevice,
+        tenure: u64,
+        rng: &mut impl catcoms_rt::CryptoRngCore,
+        budget: &mut EpochStudioBudget,
+    ) {
+        let document = target.document(&group.group_id()).unwrap();
+        let basis = self
+            .load_epoch_intents_structural(server, &document)
+            .unwrap()
+            .handoff_metadata()
+            .and_then(|m| m.overlay())
+            .expect("a live branch to stage a transfer hold on")
+            .basis();
+        let error = self
+            .handoff_studio_overlay_with_io(
+                server,
+                group,
+                target,
+                device,
+                basis,
+                Some(tenure),
+                rng,
+                budget,
+                &mut WriteHooks::Hooked {
+                    before: Some(&mut |at: WriteTag, _: &std::path::Path, _: &[u8]| {
+                        if at == WriteTag::Source {
+                            return Intercept::Fail(invalid("staged transfer hold"));
+                        }
+                        Intercept::Continue
+                    }),
+                    before_sync: None,
+                    before_unlink: None,
+                    after: None,
+                },
+            )
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("staged transfer hold"),
+            "the handoff must stop at the injected Source refusal, got: {error}"
+        );
+        assert!(self
+            .load_epoch_intents_structural(server, &document)
+            .unwrap()
+            .handoff_prepared());
+    }
+
+    /// The live branch of `document`, as everything that records it: its id, its content hash, its
+    /// accepted count and the overlay metadata's own canonical bytes.
+    pub(crate) fn studio_branch_identity_for_test(
+        &self,
+        server: u64,
+        document: &LogicalDocument,
+    ) -> ([u8; 32], [u8; 32], usize, Vec<u8>) {
+        let state = self.load_epoch_intents(server, document).unwrap();
+        let metadata = state.handoff_metadata().expect("a live branch");
+        (
+            metadata.branch_id().expect("a live branch"),
+            metadata.branch_content(&state.ledger).unwrap(),
+            metadata.overlay().expect("a live branch").accepted(),
+            metadata.encode_vault(&state.ledger).unwrap(),
+        )
+    }
+
+    /// `document`'s whole intent ledger, encoded. The branch identity above covers the branch's own
+    /// entries and handoff; this covers every other intent too, so a test can show that a copy
+    /// retired or added nothing anywhere in the source's record.
+    pub(crate) fn studio_intent_ledger_for_test(
+        &self,
+        server: u64,
+        document: &LogicalDocument,
+    ) -> Vec<u8> {
+        self.load_epoch_intents(server, document)
+            .unwrap()
+            .ledger
+            .encode()
+            .unwrap()
     }
 }
