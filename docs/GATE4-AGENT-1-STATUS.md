@@ -2381,6 +2381,29 @@ and are marked accordingly; 13.7 is re-run in the next checkpoint rather than be
 arithmetic here. `a_well_resolved_batch_is_not_reported_as_unresolved` pins all three rules this
 predicate has had wrong in sequence: the raw-sum rule, the zero-median rule and the per-unit rule.
 
+## CI: the handoff mutation harness was red from `17dd54fc` to `fee9b993`, and that was mine
+
+**What failed.** The "Studio Closing overlay handoff" workflow failed on all three pushes since
+9.1, at the `index-commit` entry, which 9.1 added. Its mutant replaced the call to
+`check_index_objects_at_commit` at H5's call site. That left the helper dead, and the workflow
+builds with `RUSTFLAGS='-D warnings'`, so the build failed before the test ran.
+
+**Why I didn't see it.** Locally the harness ran without that flag, so the mutant compiled and
+read as DETECTED. Worse, the harness stops at its first failure, so in CI none of the entries
+after it ever ran: `verified-evidence`, `proof-generation`, and this checkpoint's `proof-digest`,
+`plan-intent-digest`, `plan-source-digest` and `successor-probe`.
+
+**The fix.** The mutant now empties the helper's per-object loop from inside the helper
+(`.into_iter().filter(|_| false)`), so every item stays used.
+
+**Evidence.** Run locally with `RUSTFLAGS='-D warnings'`, `index-commit` and every entry after it
+were DETECTED at their named assertions and passed once restored (2026-10-09).
+
+**A separate, pre-existing CI timeout, not addressed here.** The "Studio Closing overlay
+foundation" workflow's `lifecycle-mutations` job has been cancelled at its 60-minute limit on
+every push back to at least `83328240`. That harness is shared with Agent 2, so splitting it
+across jobs is a decision for both of us; it is listed in next actions.
+
 ## Design 18.3 bounded implementation review (2026-10-09, Opus, static): PASS WITH FINDINGS
 
 **No blocker, no high.** Three mediums and five lows. The review covered Agent 1's runtime
@@ -5576,6 +5599,10 @@ makes that more important, not less.
 
    F1 is fixed locally and waits on the same files. Native Save must not register until F2 and
    F4 are closed, besides Agent 2's P5.
+
+   **Also with Agent 2:** the shared overlay-lifecycle harness exceeds its 60-minute CI job on
+   every push, and should be split across two jobs. F1's two overlay harness entries also still
+   need a run under `RUSTFLAGS='-D warnings'` before they land.
 9. **Reconcile the landed archive code with its review status.** This item was stale and is
    rewritten. At this head `epoch_draft_archive.rs` already contains
    `write_studio_draft_archive_with_io`, `release_studio_draft_archive_with_io` and

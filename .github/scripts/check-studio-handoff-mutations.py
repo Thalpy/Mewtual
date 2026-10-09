@@ -78,10 +78,13 @@ MUTATIONS = [
      "persisted::studio_overlay_handoff_commit_restores_nothing",
      "H5 restored a source"),
     # 9.1.1 A1: H5's header-only Index object check is the only thing between a referenced
-    # Flipnote cleaned up after H1 and a durable Index entry naming nothing.
+    # Flipnote cleaned up after H1 and a durable Index entry naming nothing. The mutant empties
+    # the check's loop from inside the helper. It used to replace the call site, which left
+    # `check_index_objects_at_commit` dead, so under CI's `-D warnings` the build failed before
+    # the test ran and this entry failed CI from 17dd54fc to fee9b993 without testing anything.
     ("index-commit", STORE,
-     "self.check_index_objects_at_commit(server, group, target, &document, &state)?;",
-     "let _ = (&document, &state);",
+     "        for object in objects {\n            let flipnote = StudioTarget::Flipnote { channel, object };\n            let logical = flipnote.document(&group.group_id()).map_err(invalid)?;\n            let scope = scope_bytes(server, &logical)?;\n            let record = self.read_studio_record(&scope)?.ok_or_else(unavailable)?;",
+     "        for object in objects.into_iter().filter(|_| false) {\n            let flipnote = StudioTarget::Flipnote { channel, object };\n            let logical = flipnote.document(&group.group_id()).map_err(invalid)?;\n            let scope = scope_bytes(server, &logical)?;\n            let record = self.read_studio_record(&scope)?.ok_or_else(unavailable)?;",
      "eligibility::studio_overlay_handoff_rechecks_index_object_sources_at_commit_not_only_at_capture",
      "H5 committed an Index entry pointing at a source"),
     # 9.1.1 step 5: a proof whose evidence is not Complete must never be resolved, in particular
