@@ -158,12 +158,24 @@ impl CatchupRuntime {
     /// keep a target's legitimate replacement from ever being fetched (review MEDIUM-1). The hold
     /// expires rather than becoming terminal, since each of those may change.
     pub(super) fn hold_offer(&mut self, scope: CheckpointTarget, repair: [u8; 32], now: u64) {
+        self.hold_offer_for(scope, repair, now, REPAIR_HOLD_BACKOFF_MS);
+    }
+
+    /// `hold_offer` for a chosen wait: a stale rebuild holds its offer only as long as it would
+    /// have held the target (see `repair_stale`).
+    pub(super) fn hold_offer_for(
+        &mut self,
+        scope: CheckpointTarget,
+        repair: [u8; 32],
+        now: u64,
+        wait_ms: u64,
+    ) {
         self.repair_unverifiable.retain(|_, until| now < *until);
         if self.repair_unverifiable.len() >= MAX_REMEMBERED_REPAIRS {
             self.repair_unverifiable.clear();
         }
         self.repair_unverifiable
-            .insert((scope, repair), now.saturating_add(REPAIR_HOLD_BACKOFF_MS));
+            .insert((scope, repair), now.saturating_add(wait_ms));
     }
 
     fn hold_unverifiable(&mut self, scope: CheckpointTarget, repair: &ReceiptRepair, now: u64) {
@@ -680,7 +692,11 @@ impl CatchupRuntime {
             // resumed, and an owner alone could not recycle an install already on its own disk
             // (PR #36 review HIGH-1). Resume instead: the job classifies exactly at S3, and a
             // scheduled job defers this target like a started fetch, so this costs at most one
-            // job per deferral window.
+            // job per deferral window. Known cost (PR #36 residual LOW-2): an owner alone whose
+            // seed really is still owed, and whose source keeps being evicted, reruns this whole
+            // rebuild once per window (decaying to every 15 min) although nothing has changed. A
+            // later fix could remember the exact `AwaitingSeed` until the peers or the source
+            // change.
         }
         self.schedule_resume(server, store, id, scope, Some(target), now);
         Ok(None)

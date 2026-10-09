@@ -4,6 +4,18 @@ Owner: Agent 3 ([assignment](GATE4-AGENT-HANDOFFS.md#agent-3-runtime-signed-faul
 Proposal: [GATE4-AGENT-3-DESIGN](GATE4-AGENT-3-DESIGN.md), revision 16 follow-up.
 Review preamble: 3. Current entries override older ones.
 
+## PR #36 residual findings: dispositions, 2026-10-09
+
+The same external review, on `c9858396`, raised two LOW residuals and one test refinement.
+
+| Finding | Disposition |
+|---|---|
+| LOW-1: a stale S3 rebuild still backed off the whole target for 5 s, even for an offered repair. | **Fixed.** `repair_stale` holds the offered repair for the same 5 s instead (`hold_offer_for`); only the device's own work holds the target. Test: `two_peer::a_stale_rebuild_of_an_offer_holds_only_that_offer` (Carol's source changes during S2; another repair is taken at once). Mutant `RUNTIME-stale-offer-holds-offer`. |
+| LOW-2: an owner alone whose seed really is still owed reruns a full rebuild once per deferral window while its source keeps being evicted, though nothing has changed. | **Accepted as a documented limitation**, as the review recommends. It is bounded by the doubling deferral (to one per 15 min) and the shared pool. A later fix could remember the exact `AwaitingSeed` until the peers or the source change. Recorded in the code at the fallback and in THREAT-MODEL. |
+| Test refinement: the Registry zero-peer regression stopped at "a job is scheduled". | **Done.** It now starts from the bucket's crash between install and recycle (a shared `crash_after_bucket_install` helper), removes Bob, clears the provider, and drives the resume through S3 to `AlreadyRepaired` and the recycled owner record, matching the Studio test. |
+
+The runtime harness has 32 mutants.
+
 ## PR #36 review: dispositions, 2026-10-09
 
 An external adversarial review of `0ad625e0`, the PR head after merging `gate4-agent1-runtime`,

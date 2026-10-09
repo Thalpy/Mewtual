@@ -64,11 +64,12 @@ table with the commit that closed it.
   refusal for Flow A, and `verify_current_owner`. Offered bucket repairs pass the same owner and
   authoring-tenure pre-check before capture as Studio's. Every failure or held outcome of an
   offered repair, Studio or Registry, at any stage (no local copy, a failed capture or rebuild, a
-  held outcome, a failed commit), holds that repair rather than its target, so a replayed older
-  repair cannot keep a target's legitimate replacement from being fetched. An offered repair that
-  was applied and now needs the user (a recovery warning, a storage refusal) holds the document,
-  since that hold is this device's own state. The same repair offered again while its
-  job runs may complete that job's evidence; it is never trusted beyond what S3 verifies.
+  rebuild gone stale, a held outcome, a failed commit), holds that repair rather than its target,
+  so a replayed older repair cannot keep a target's legitimate replacement from being fetched. An
+  offered repair that was applied and now needs the user (a recovery warning, a storage refusal)
+  holds the document, since that hold is this device's own state. The same repair offered again
+  while its job runs may complete that job's evidence; it is never trusted beyond what S3
+  verifies.
   The router still classifies a pending replacement only from the exact-current verified source
   already retained by the bounded preparation boundary; a held owner decision is read from the
   bounded owner record. Missing, cold, stale, retargeted or unreadable preparation is unknown and
@@ -100,7 +101,9 @@ table with the commit that closed it.
   decision as soon as it finds the source owing nothing behind it. If no fetch can start (an
   owner alone has no peer at all), the owner resumes at once, and if a fetch comes to nothing,
   its next visit resumes, so recovering an install already on the owner's disk never needs
-  another device.
+  another device. The cost of that: an owner alone whose seed really is still owed, with its
+  source evicted between visits, reruns a full detached rebuild once per deferral window (down to
+  one per 15 min) although nothing has changed. It is bounded by the deferral and the shared pool.
 
 - **Automatic recovery is conservative and author-local.** Studio replay checks the complete
   own envelope, every retained/staged historical selection and the fresh current projection.

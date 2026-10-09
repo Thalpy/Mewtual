@@ -1500,6 +1500,88 @@ async fn a_repeated_offer_brings_the_receipt_its_running_job_lacked() {
         .contains_key(&(scope, repair.hash())));
 }
 
+/// PR #36 residual LOW-1: an offered repair whose rebuild went stale (the source changed during
+/// S2) holds that repair for the short stale wait, never the document, so another legitimate
+/// repair is taken at once.
+#[tokio::test]
+async fn a_stale_rebuild_of_an_offer_holds_only_that_offer() {
+    let Cast {
+        clock,
+        mut bob,
+        mut carol,
+        ..
+    } = cast().await;
+    let target = index_target();
+    let scope = CheckpointTarget::Studio(target);
+    let (bob_root, carol_root) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let mut bob_store = store_at(&bob_root, 271);
+    let mut carol_store = store_at(&carol_root, 272);
+    let ([chosen, rival], chosen_seed) = fork(&mut bob, &mut bob_store, target);
+    assert_eq!(
+        adopt(
+            &mut carol,
+            &mut carol_store,
+            target,
+            &chosen,
+            Some(&chosen_seed)
+        ),
+        StudioAdoptionOutcome::Installed
+    );
+    let first = sign_repair(&mut bob, [&chosen, &rival], &rival, 1);
+    let mut runtime = peer_runtime(target);
+    assert!(runtime.offer_repair(
+        &mut carol,
+        &mut carol_store,
+        SERVER,
+        target,
+        &first,
+        Some(&rival),
+        false
+    ));
+    let job = runtime
+        .repair_detach::<MemNetwork>()
+        .expect("its rebuild detaches");
+    // Carol's source changes while the rebuild runs, so S3 finds it stale.
+    edit_index(&mut carol, &mut carol_store, target, 7);
+    let StudioBackgroundResult::Repair(completion) = job.run(None).await else {
+        panic!("a repair result")
+    };
+    runtime.repair_complete(completion, clock.monotonic_ms());
+    runtime
+        .repair_commit(&mut carol, &mut carol_store, SERVER)
+        .unwrap();
+    assert!(
+        matches!(
+            runtime.repair_report(scope),
+            Some(StudioRepairReport::Failed(ref why)) if why.contains("changed")
+        ),
+        "{:?}",
+        runtime.repair_report(scope)
+    );
+    assert_eq!(
+        runtime.repair_unverifiable.get(&(scope, first.hash())),
+        Some(&(clock.monotonic_ms() + 5_000)),
+        "the stale offer waits the short stale retry"
+    );
+    assert!(
+        !runtime.repair_backoff.contains_key(&scope),
+        "the document does not wait behind a stale offer"
+    );
+    let second = sign_repair(&mut bob, [&chosen, &rival], &rival, 2);
+    assert!(
+        runtime.offer_repair(
+            &mut carol,
+            &mut carol_store,
+            SERVER,
+            target,
+            &second,
+            Some(&rival),
+            false
+        ),
+        "another repair is taken at once"
+    );
+}
+
 /// PR #36 review MEDIUM-2: an offered repair for a document this peer holds no copy of holds that
 /// repair, never the document. Once a copy arrives, another legitimate repair of it is taken at
 /// once; a document-wide hold kept that one waiting a minute.

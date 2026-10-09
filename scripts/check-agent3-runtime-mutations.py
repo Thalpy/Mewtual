@@ -253,6 +253,17 @@ core.MUTATIONS = [
         "that offer is held",
     ),
     (
+        # PR #36 residual LOW-1: a stale rebuild of an offer holds the offer, not the document.
+        "RUNTIME-stale-offer-holds-offer", JOB,
+        "            Some(repair) => self.hold_offer_for(target, repair, now, REPAIR_STALE_RETRY_MS),\n",
+        "            Some(_) => {\n"
+        "                self.repair_backoff\n"
+        "                    .insert(target, now.saturating_add(REPAIR_STALE_RETRY_MS));\n"
+        "            }\n",
+        TWO_PEER + "a_stale_rebuild_of_an_offer_holds_only_that_offer",
+        "the stale offer waits the short stale retry",
+    ),
+    (
         # Re-review LOW-2: the router's resume needs a current durable snapshot.
         "RUNTIME-landed-install-needs-snapshot", REPAIR,
         "        if self.current_owner_snapshot(server, store, id).is_err() {\n",

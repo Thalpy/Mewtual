@@ -607,7 +607,9 @@ impl CatchupRuntime {
     }
 
     /// The source moved during S2. Nothing was written; automatic work captures afresh after a
-    /// short wait, and an explicit decision is reported for its person to repeat.
+    /// short wait, and an explicit decision is reported for its person to repeat. The wait is the
+    /// offered repair's alone when the job applied one, so another offer or the target's owed
+    /// seed never waits behind it (PR #36 residual LOW-1); otherwise it is the target's.
     fn repair_stale<T: MeshTransport, R: CryptoRngCore>(
         &mut self,
         server: &mut Server<T, R>,
@@ -615,8 +617,13 @@ impl CatchupRuntime {
         input: &RepairInput,
     ) -> Option<StudioTarget> {
         let now = server.runtime_clock().monotonic_ms();
-        self.repair_backoff
-            .insert(target, now.saturating_add(REPAIR_STALE_RETRY_MS));
+        match input.offered_repair() {
+            Some(repair) => self.hold_offer_for(target, repair, now, REPAIR_STALE_RETRY_MS),
+            None => {
+                self.repair_backoff
+                    .insert(target, now.saturating_add(REPAIR_STALE_RETRY_MS));
+            }
+        }
         let stale = abandoned(input.explicit(), "the document changed during the repair");
         self.report_repair(target, Err(&stale));
         None

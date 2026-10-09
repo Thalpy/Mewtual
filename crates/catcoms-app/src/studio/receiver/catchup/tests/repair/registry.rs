@@ -440,24 +440,31 @@ async fn an_owner_whose_bucket_owes_only_its_seed_fetches_it_without_a_job() {
     assert_eq!(minted.inner.selected_receipt(), &fault.chosen);
 }
 
-/// PR #36 review HIGH-1, for buckets: with the provider unknown, the record's B3 flag alone says
-/// only the seed is missing. If that seed fetch cannot even start (here no peer at all), the
-/// resume runs instead, which classifies exactly at S3, rather than the same guess every turn.
+/// PR #36 review HIGH-1, for buckets, the counterpart of
+/// `an_owner_alone_after_a_crash_between_install_and_recycle_still_recycles`. After a crash
+/// between the bucket's install and its record's recycle, the owner restarts alone, with the
+/// provider unknown, so the record's B3 flag alone says only the seed is missing. That seed fetch
+/// cannot even start with no peer, so the resume runs instead, classifies exactly at S3, finds the
+/// install landed and recycles, with no network at all.
 #[tokio::test]
 async fn an_owner_alone_whose_bucket_seed_cannot_be_fetched_resumes_instead() {
     let mut owed = Owed::new(false).await;
     let fault = Bucket::new(&mut owed, true);
-    fault.decide_directly(&mut owed);
+    let (mut runtime, _pool) = owed.runtime(4);
+    let (scope, target) = (fault.scope(), owed.target);
+    crash_after_bucket_install(&mut owed, &mut runtime, &fault).await;
+    // Restarted alone: no peer, and no provider, so only B3 speaks.
     let bob = owed._bob.my_fingerprint();
     owed.alice.remove_member(&bob).await.unwrap();
     assert!(owed.alice.sync.studio_page_peers().is_empty());
-    let (mut runtime, _pool) = owed.runtime(4);
+    runtime.registry_provider = None;
+    runtime.owner_snapshot = Some(owed.snapshot());
     let resumed = runtime
         .resume_registry_repair(
             &mut owed.alice,
             &mut owed.store,
             SERVER,
-            owed.target,
+            target,
             fault.bucket,
         )
         .unwrap();
@@ -465,8 +472,22 @@ async fn an_owner_alone_whose_bucket_seed_cannot_be_fetched_resumes_instead() {
     assert!(runtime.checkpoint.is_none(), "no peer, so no fetch");
     assert_eq!(
         runtime.repair_job_target(),
-        Some(fault.scope()),
+        Some(scope),
         "a guessed seed that cannot be fetched resumes"
+    );
+    commit(&mut runtime, &mut owed).await;
+    assert_eq!(
+        runtime.repair_report(scope),
+        Some(StudioRepairReport::Completed(
+            StudioRepairOutcome::AlreadyRepaired
+        ))
+    );
+    let logical = registry_document(&owed.alice.group_id(), fault.bucket).unwrap();
+    assert!(
+        owed.store
+            .load_epoch_owner_receipts(SERVER, &logical)
+            .is_ok(),
+        "the owner record is recycled with no peer at all"
     );
 }
 
@@ -587,19 +608,13 @@ async fn commit(runtime: &mut CatchupRuntime, owed: &mut Owed) {
         .unwrap();
 }
 
-/// Review HIGH-1. The owner's replacement install and its record's recycle are separate writes.
-/// After a crash between them, the record still holds the decision with B3 set although the
-/// bucket owes nothing. Classifying from B3 alone fetched a seed the router then deferred behind
-/// that held decision forever, and nothing else recycles an owner's record. The provider's exact
-/// classification resumes instead, and that resume recycles.
-#[tokio::test]
-async fn an_owner_that_crashed_between_install_and_recycle_resumes_and_recycles() {
-    let mut owed = Owed::new(false).await;
-    let fault = Bucket::new(&mut owed, true);
-    let (mut runtime, _pool) = owed.runtime(4);
+/// The owner decides the bucket, installs its owed replacement through a job, then crashes before
+/// its record's recycle: the bucket keeps the install, and the record still holds the decision
+/// with B3 set although the bucket owes nothing.
+async fn crash_after_bucket_install(owed: &mut Owed, runtime: &mut CatchupRuntime, fault: &Bucket) {
     let (scope, target) = (fault.scope(), owed.target);
-    fault.decide(&mut runtime, &mut owed);
-    commit(&mut runtime, &mut owed).await;
+    fault.decide(runtime, owed);
+    commit(runtime, owed).await;
     let repair = runtime
         .checkpoint
         .take()
@@ -620,7 +635,7 @@ async fn an_owner_that_crashed_between_install_and_recycle_resumes_and_recycles(
         Some(target),
         input,
     );
-    commit(&mut runtime, &mut owed).await;
+    commit(runtime, owed).await;
     assert_eq!(
         runtime.repair_report(scope),
         Some(StudioRepairReport::Completed(
@@ -641,7 +656,21 @@ async fn an_owner_that_crashed_between_install_and_recycle_resumes_and_recycles(
             .unwrap(),
         "the record still says only the seed is missing"
     );
-    assert_eq!(fault.phase(&mut owed), EpochPhase::Open);
+    assert_eq!(fault.phase(owed), EpochPhase::Open);
+}
+
+/// Review HIGH-1. The owner's replacement install and its record's recycle are separate writes.
+/// After a crash between them, the record still holds the decision with B3 set although the
+/// bucket owes nothing. Classifying from B3 alone fetched a seed the router then deferred behind
+/// that held decision forever, and nothing else recycles an owner's record. The provider's exact
+/// classification resumes instead, and that resume recycles.
+#[tokio::test]
+async fn an_owner_that_crashed_between_install_and_recycle_resumes_and_recycles() {
+    let mut owed = Owed::new(false).await;
+    let fault = Bucket::new(&mut owed, true);
+    let (mut runtime, _pool) = owed.runtime(4);
+    let (scope, target) = (fault.scope(), owed.target);
+    crash_after_bucket_install(&mut owed, &mut runtime, &fault).await;
     runtime.owner_snapshot = Some(owed.snapshot());
 
     // A restarted owner's Registry turn: the provider is warm and current for this bucket.
