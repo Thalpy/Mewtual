@@ -646,7 +646,10 @@ and ranks the live hazards in that path.
   snapshot/quarantine, unchanged source identity, receipt, close, expected seed and owner-tenure
   input, successful fresh preparation, a different basis, and exact stale-basis refusal with
   unchanged intent bytes. Already accepted exact retry still returns the same complete draft
-  with its original timestamp/count. First acceptance has a positive control using the fresh basis.
+  with its original timestamp/count. *(Superseded on 2026-10-09. An exact retry now returns
+  `StudioOverlaySave::Acknowledged { basis, accepted }` without rebuilding the draft, and these
+  tests compare the stored draft read back instead; see `docs/INTERFACES.md` and the F1 entry of
+  `docs/GATE4-AGENT-1-STATUS.md`.)* First acceptance has a positive control using the fresh basis.
   The harness now tests the reviewer's constant-source-version mutation independently against
   both regressions. The focused pair passes (2 tests, 64.20s). Each constant-version mutation
   fails at `overlay basis ignored changed persisted Closing source version` with exactly one

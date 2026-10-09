@@ -10,7 +10,8 @@ impl ServerStore {
     /// An earlier version returned `overlay.read(..)`, which loads the seed graph and replays every
     /// accepted entry, so a retry cost the branch's whole depth under custody, and every retry of
     /// an Unconfirmed Save paid it (design 18.3 review, F1). No caller used the projection.
-    /// `an_exact_overlay_retry_is_acknowledged_without_rebuilding_the_draft` pins this.
+    /// `studio_overlay_store_exact_retry_rebuilds_no_draft` pins this, counting reconstructions in
+    /// the replication crate, so a full decode or a direct `StudioOverlay::read` here is caught too.
     ///
     /// This used to be the new-authoring writer as well, minting a branch with
     /// `unwrap_or_else(StudioOverlayState::new)` and `append`. New authoring moved to the staged

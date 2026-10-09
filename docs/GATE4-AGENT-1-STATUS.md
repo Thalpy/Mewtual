@@ -2450,11 +2450,15 @@ draft, read back through `local_draft`, which checks the same property (the retr
 authored draft as it was) against what is on disk.
 
 The regression is `studio_overlay_store_exact_retry_rebuilds_no_draft`:
-- it counts draft rebuilds through a test-only counter in `local_draft`;
+- **it counts every reconstruction.** The counter sits inside `StudioOverlay::read`, behind the
+  replication crate's test-only `test-counters` feature, which only `catcoms-app`'s
+  dev-dependency enables. A first version counted only `local_draft` calls, which missed a direct
+  `overlay.read` and the full decode's replay (review of these fixes, M-2);
 - its control reads the draft and must move the counter;
 - it failed before the fix;
-- CI's overlay harness gains `retry-rebuild`, which puts the rebuild back beside the
-  acknowledgement, so only the counter can catch it. DETECTED locally.
+- CI's overlay harness gains `retry-rebuild` (through `local_draft`) and `retry-read` (a direct
+  `overlay.read`, the defect's own form). Each puts the rebuild back beside the
+  acknowledgement, so only the counter can catch it. Both DETECTED locally.
 
 Held because it touches Agent 2's `receiver/unconfirmed.rs` (one match arm), two of their
 Unconfirmed Save test files and `studio/copy/tests.rs`. It is ordered last in the local line, so
@@ -2581,9 +2585,9 @@ two mediums and five lows.
 | finding | disposition |
 |---|---|
 | M-1 MEDIUM: M1 was the only guard, since H5's step 6 compared its own two reads | **fixed, `505b3a24`** (below) |
-| M-2 MEDIUM: F1's rebuild counter misses a direct `StudioOverlay::read` and the full intent decode's replay | **open, in F1's held commit**; F1 waits on Agent 2 anyway |
+| M-2 MEDIUM: F1's rebuild counter misses a direct `StudioOverlay::read` and the full intent decode's replay | **fixed, with F1 (held)**: the counter moved into `StudioOverlay::read`, plus a second harness entry |
 | LOW-1: the probe ran after the Index check's restores | **fixed, `505b3a24`**: the probe now precedes it, and a new test counts zero restores |
-| LOW-2: `INTERFACES.md` and `HANDOVER.md` still describe a retry returning the draft | **open, with F1**: they change in F1's held follow-up commit, so they ship with the contract |
+| LOW-2: `INTERFACES.md` and `HANDOVER.md` still describe a retry returning the draft | **fixed, with F1 (held)**: in F1's follow-up commit, so they ship with the contract |
 | LOW-3: STATUS and doc-comment truthfulness | **fixed here**, except the stale test name in F1's own doc comment, which goes with F1 |
 | LOW-4: test level differs from the design (M6 and M1/M2 are store-level, not actor-level) | **recorded** below; the M6 test now requires `SuccessorNotPristine` |
 | LOW-5: the raw-fs gate keyed only the matched line of an open chain | **fixed, `505b3a24`**: the open flags that change a file are matched too |

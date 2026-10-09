@@ -53,17 +53,6 @@ pub(super) mod inspection;
 pub(super) mod overlay;
 mod retirement;
 
-#[cfg(test)]
-thread_local! {
-    static DRAFT_REBUILDS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
-}
-/// How many overlay drafts this thread has rebuilt through [`EpochIntentState::local_draft`], for
-/// tests that pin a path as reconstruction-free, as `studio_full_restores_for_test` does restores.
-#[cfg(test)]
-pub(crate) fn overlay_draft_rebuilds_for_test() -> usize {
-    DRAFT_REBUILDS.get()
-}
-
 /// Read-only replay data, not authority to edit or proof an intent is final. There is deliberately
 /// no public constructor, mutation/retirement method, or content-bearing Debug implementation.
 #[derive(Clone)]
@@ -137,8 +126,6 @@ impl EpochIntentState {
     pub fn local_draft(
         &self,
     ) -> Result<Option<catcoms_replication::studio::StudioLocalDraft>, AppError> {
-        #[cfg(test)]
-        DRAFT_REBUILDS.set(DRAFT_REBUILDS.get() + 1);
         self.overlay()
             .map(|o| o.read(&self.ledger).map_err(invalid))
             .transpose()

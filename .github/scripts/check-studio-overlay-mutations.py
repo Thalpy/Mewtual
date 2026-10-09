@@ -56,6 +56,16 @@ MUTATIONS = [
         "        let acknowledged = StudioOverlaySave::Acknowledged {",
         "exact_retry_rebuilds_no_draft", "an exact retry rebuilt the draft",
     ),
+    # The same, in the form the defect actually had: a direct `overlay.read`, which bypasses the
+    # app's draft reader. Caught only because the counter sits inside `StudioOverlay::read` in the
+    # replication crate (implementation review of the 18.3 fixes, M-2).
+    (
+        "retry-read", "crates/catcoms-app/src/store/epoch_intents/overlay.rs",
+        "        let acknowledged = StudioOverlaySave::Acknowledged {",
+        "        let _ = overlay.read(&state.ledger).map_err(invalid)?;\n"
+        "        let acknowledged = StudioOverlaySave::Acknowledged {",
+        "exact_retry_rebuilds_no_draft", "an exact retry rebuilt the draft",
+    ),
     (
         "seed-refs", "crates/catcoms-app/src/store/epoch_recovery/inventory.rs",
         "overlay.base_blob_cids().map_err(invalid)?", "{ let _ = overlay; Vec::<[u8; 32]>::new() }",

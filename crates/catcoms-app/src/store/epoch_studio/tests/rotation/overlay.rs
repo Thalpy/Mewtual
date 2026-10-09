@@ -339,13 +339,19 @@ fn studio_overlay_store_restart_exact_retry_and_source_separation() {
 /// basis and count, and leaves the intent record's bytes as they were.
 ///
 /// Before the fix the retry replayed the whole branch under custody to return a projection that no
-/// caller used. That replay is the cost 13.5 measured, 426 ms at depth 255, without attributing it.
-/// The control reads the draft explicitly afterwards, which must still work and must move the
-/// counter, so a counter that never moves cannot make this pass. CI's overlay mutation harness
-/// (`retry-rebuild`) puts the rebuild back and requires this to fail at the counter.
+/// caller used. By reading the code, that replay is the cost 13.5 measured, 426 ms at depth 255,
+/// without attributing it. The control reads the draft explicitly afterwards, which must still
+/// work and must move the counter, so a counter that never moves cannot make this pass.
+///
+/// The counter is the replication crate's (`test-counters`), inside `StudioOverlay::read`, so it
+/// sees every reconstruction: the app's draft reader, a full intent decode that replays the branch,
+/// or a direct call. An app-side counter saw only the first (implementation review of the 18.3
+/// fixes, M-2). CI's overlay harness puts the rebuild back in two forms, `retry-rebuild` (through
+/// `local_draft`) and `retry-read` (a direct `overlay.read`), and requires this to fail at the
+/// counter.
 #[test]
 fn studio_overlay_store_exact_retry_rebuilds_no_draft() {
-    use crate::store::epoch_intents::overlay_draft_rebuilds_for_test as rebuilds;
+    use catcoms_replication::studio::overlay_reconstructions_on_this_thread as rebuilds;
     let op = |f: &Fixture, nonce: u8| {
         let mut op = f.title();
         op.nonce = [nonce; 16];
@@ -390,7 +396,8 @@ fn studio_overlay_store_exact_retry_rebuilds_no_draft() {
         // The control: the draft is still readable on request, and reading it is counted.
         let draft = stored_draft(&f, &store);
         assert_eq!((draft.basis(), draft.accepted()), (basis, 3));
-        assert_eq!(rebuilds(), before + 1, "the counter did not see a rebuild");
+        // Two, in fact: `stored_draft`'s full decode replays the branch, then `local_draft` does.
+        assert!(rebuilds() > before, "the counter did not see a rebuild");
     }
 }
 
