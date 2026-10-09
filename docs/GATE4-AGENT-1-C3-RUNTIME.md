@@ -5,7 +5,9 @@ section 11 reviewed before each is built. Section 14 proposes the classifier fro
 it is at revision 2 after its design review and re-review, A and B are built, and step 3 stays
 gated (14.5). Section 15 proposes a route to step 3; its design review found it not yet ready,
 and 15.7 lists what step 3 needs, starting with design 9.1. 9.1 is built and the commit phase is
-measured, so 15.8 is revision 2 of that route, awaiting its design review.** It extends
+measured, so 15.8 is revision 2 of that route. Its design review (15.9) found no blocker and one
+high: H5's cost grows with the source, which nothing has measured yet. 15.9's order of work
+replaces 15.8's, and starts there.** It extends
 `GATE4-AGENT-1-DESIGN.md` section 9.2 (the cursor and I-4) and 5.5 (the overlay job). The storage
 half of C-3 is implemented and reviewed; this is the runtime half, ledger row G4-A1-C3.
 
@@ -952,7 +954,7 @@ ready to build once its two mediums are answered.
 hardware at once, so re-derive it per component once those measurements exist. Debug builds can
 hold an inline validation for about 63 ms.
 
-## 15. A route to step 3 (revision 1 reviewed, not ready; revision 2 in 15.8, 2026-10-09)
+## 15. A route to step 3 (revision 2 in 15.8, reviewed in 15.9: no blocker, one high)
 
 **Nothing here is built.** Section 14.5 said what step 3 needs. This section proposes how to get
 it, says what no proposal of this kind can get, and lists the measurements that decide whether
@@ -1252,7 +1254,9 @@ the design 18.3 review's F5), because a plain accounting scan consults the same 
   - Their traversal is at most 8 MiB, about 16 ms at 2 us per KiB, before any per-file cost,
     which 15.5 still has to measure. That fits the share at a title branch (about 40 ms).
   - **It does not fit at a full frame branch** (about 12 ms). Even with `blob_cids` computed once
-    (about 26 ms), it fits only in vaults of under about 5 MiB of five-family bytes. So until
+    (about 26 ms), it fits only in vaults of under about 3 MiB of five-family bytes, with the
+    classifier's factor of 4 as margin (corrected by 15.9 from "about 5 MiB", which matched no
+    convention). So until
     item 0's attribution finds more, a full frame branch in a vault near the receive limit is held
     under gossip until a quiet gap, as L6 says.
   - With M1 and the writer warms, every record but the one just written is a hit, and that one
@@ -1343,3 +1347,130 @@ What it needs:
 3. Is MEDIUM-3's rule, charged only when nothing cold was memoized, sound and bounded as argued?
 4. Does any of the seven writer sites warm bytes that are not, or were not, on disk? Each warm
    follows its write's success, but `CommittedButNotDurable` is the edge.
+
+### 15.9 Design review of revision 2 (2026-10-09, Opus, static): no blocker; one high
+
+Reviewed against `fcda06cd` and the revised share at `751046a3`. **No path was found where a warm
+weakens I-4:**
+- the guard rotates the token before the write;
+- the warm comes after it;
+- `finish_with` checks the token and the listing whatever the memo holds.
+
+**The four questions, answered:**
+1. **Validator at write: yes, and better than the writer-facts form for Intents.** Intents'
+   accounting record does not depend on content, so the facts form would save only the decode, and
+   the decode is the validity check a hit would otherwise skip for good. The conditions are M4's
+   contract below, and stating Recovery's real ceiling (L2).
+2. **L6 per regime: not as stated** (HIGH-1, M1, M5).
+3. **MEDIUM-3: sound in direction, not bounded as argued** (M2).
+4. **No bytes that are not on disk, in production.** The one non-test `WriteHooks` returns its
+   input unchanged. `CommittedButNotDurable` needs a decision (M4).
+
+**HIGH-1: the share is not a bound, because H5's terms grow with the whole source, which no
+measurement varies.**
+- `blob_cids` walks the projection, the seed's CIDs and every signed operation, and
+  `base_blob_cids` rebuilds the seed's graph.
+- The profile's frame branches start from a source with **one** frame. Its 1, 4 and 7 ms
+  projections at 32, 128 and 256 frames extrapolate to about 27 ms each at `FLIPNOTE_MAX_FRAMES`
+  (999), **for a one-operation branch**. With three candidate projections and the base one, the
+  commit then takes most of the visit.
+- **The commit has no margin.** One sample read 248 ms against a 113 ms upper median, while the
+  traversal gets the classifier's factor of 4.
+- **The per-file cost is already measured but not subtracted:** 11 ms for a 64-record vault in
+  the same run, about the whole full-frame share before any bytes.
+- **The margins are applied inconsistently.** The regime-1 claim uses none. The post-step-5 bounds
+  use 4. The 15.8 "under about 5 MiB" matches neither convention: about 12.7 MiB unmargined, about
+  3.2 MiB with the margin. **Corrected here to about 3 MiB.**
+- **The consequence:** "wait for a quiet gap" covers handoffs of *large* flipnotes, whatever the
+  branch length, in exactly the channels where drawing keeps gossip going. Today such a handoff
+  completes in one long visit, so as stated step 3 would be a user-visible regression for them.
+
+**Mediums:**
+- **M1, nothing divides the visit between scan and commit.**
+  - **The problem:** the commit cannot be paused, and 15.8 names a share without saying how the
+    runtime enforces it.
+  - **The fix:** derive the scan's deadline from the share less a conservative prediction of the
+    commit (from the branch's operations and kinds and the source's frames), times a margin. Or
+    accept the overrun and price it in L6.
+- **M2, MEDIUM-3's bound.**
+  - **Order:** the rule was ordered before M2. With the 64-entry LRU, a vault of more than 64
+    memoizable records meets evicted records cold on every pass, so every pass "memoized something
+    cold" and is never charged.
+  - **Weak premises:** the claim that every writer warms is false (M3) and fragile. Stale entries
+    for deleted records also survive until a complete scan prunes them.
+  - **Scale:** up to 65 536 uncharged restarts, while an H5 job in `Ready` holds a pool permit.
+  - **The fix:** credit each key at most once per attempt, add a hard ceiling on uncharged
+    restarts, and land the rule after M2.
+- **M3, eight byte-replacing writers, not seven.** `update_epoch_recovery_with_writer`
+  (`epoch_recovery.rs:485`) is reached from the public `update_epoch_recovery`, which has no
+  production caller but backs the inventory tests' `stage` helper and the src-tauri tests. The
+  24-site count is right: 8 writes, 14 syncs, 2 removes.
+  - **The fix:** warm there too.
+  - **Better:** make a forgotten warm impossible. `EpochMutation::write` returns a `#[must_use]`
+    token that must be passed to the warm or skipped with a reason, as I-4 does with the guard.
+- **M4, the warm's contract.**
+  1. **It never fails the writer.** On a validator error after a durable write it skips and
+     `debug_assert`s. At H5's barrier 1 a propagated error would strand a Prepared record.
+  2. **It derives key, scope, server and document from the plaintext**, through one helper
+     shared with `step_inner`, not from the writer's arguments.
+  3. **It skips bytes a test hook substituted.**
+  4. **The writer-facts warms (Registry, Studio) are cross-checked** against
+     `validate_record_body` on every warm under `cfg(any(test, debug_assertions))`, not by one
+     fixture per writer, since a hit is never contradicted by a fresh validation afterwards. And
+     "Registry already warms this way" was inaccurate. `remember_installed_registry` re-reads the
+     file. The new warm would be the first built from the live, just-mutated unit.
+  5. **`CommittedButNotDurable` warms:** the bytes are visible. As structured, the `?` skips it,
+     and the exact retry's sync branch never warms.
+- **M5, regime 2's premise is wrong.** Every local edit writes the intent and then the source
+  (`epoch_studio.rs:402-429`), whatever the receive pause says. So large vaults see writes at
+  editing rate in active use, and the traversal bound binds today, not only after step 5. The H5
+  test needs a local-edit writer variant.
+
+**Lows:**
+- **L1:** MEDIUM-2's test contract is reworded to "memoized in both modes, consulted only in
+  accounting mode". `install_body` memoizes during reference scans, which 14.3 piece 1 relies on.
+- **L2:** Recovery's ceiling is 18 MiB plus 2 088 bytes, unmeasured above 4 MiB: about 40 ms or
+  more at write time, extrapolated. That is on the rotation, adoption and settlement paths, which
+  are not gossip-rate. Acceptable, but stated.
+- **L3:** the write-every-turn test needs a clock that advances with work, since a frozen
+  `ManualClock` proves nothing about "one visit". It also needs more variants:
+  - an Intents record over 384 KiB;
+  - OwnerReceipts over 747 bytes;
+  - a Registry write;
+  - a local edit;
+  - a cold memo after remount.
+- **L4:** text M1 makes stale must change with it:
+  - `THREAT-MODEL.md` around 303-309 and 869-874 (the memo would hold provider ids and timestamps);
+  - design 9.2 consequence 2;
+  - `cache.rs`'s module comment;
+  - the doc comments on `memoize` and `memoize_overtaken_inventory_result`.
+- **L5:** the test helper `validated_clone` sets `intent: None`, and would plant fact-less Intents
+  entries.
+- **L6:** H5's own intent writes would pay the write-time validation too, about 0.8 ms at a full
+  Closing branch.
+- **L7:** "a write that makes it cold again" cannot come from any production writer once all
+  warm. Use a remount, which is also the real case.
+
+**The order of work, as the review leaves it.** This replaces 15.8's list:
+1. **Item 0, widened to every term that grows with the source**, with the source-axis
+   measurement.
+   - Measure: base sources of 256, 512 and 999 frames, crossed with one-operation and full
+     branches, plus a long signed history.
+   - Fix: compute every candidate projection once, plus `base_blob_cids` and the snapshot
+     encodes.
+   - State the share as a function of source and branch, with a margin on the commit.
+2. **M2**, the indexed and pruned memo.
+3. **M1 with writer warms at all eight writers**: the forced-warm token, and M4's contract.
+4. **MEDIUM-3** with per-key credit and a ceiling.
+5. **The rule that divides the visit** (M1 of this review).
+6. **The traversal measurements** of 15.5.
+7. **The H5 write-every-turn test**, with L3's clock and variants.
+8. **The touched-path cursor decision.** If item 1 cannot leave a margined share for regime 1's
+   traversal (about 11 ms of per-file cost plus 2 us per KiB), the cursor moves into step 3
+   rather than step 5.
+9. **Step 3**, then Flow R.
+
+**Residual risks:**
+- a writer-facts warm that diverges from validation, which M4's cross-check mitigates;
+- pruning only after a complete full scan;
+- the memo resident for the mount's life, UI lock included.

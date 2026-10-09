@@ -2406,7 +2406,7 @@ Everything else, including the classifier's 14 mutations, was checked by inspect
 
 | finding | what | disposition |
 |---|---|---|
-| F1 MEDIUM | S1a's exact-retry acknowledgement replayed the whole branch under custody (`overlay.read`) to return a projection no caller used | **fixed locally, `7af4fdca`, not pushed:** it edits four of Agent 2's files (below) |
+| F1 MEDIUM | S1a's exact-retry acknowledgement replayed the whole branch under custody (`overlay.read`) to return a projection no caller used | **fixed locally, not pushed:** the last commit of the local line, since it edits four of Agent 2's files (below). Its SHA changes whenever that line is rebased, so it is not cited here |
 | F2 MEDIUM | N31 is not the accepted actor-level test, and `handoff_priority` is unpinned | **open.** Needs a receiver-level test in a file shared with Agent 2; asked |
 | F3 MEDIUM | H5's custody terms are understated, and bounded custody is not established | **measured, deviation recorded**; see "H5's repeated terms, priced" below |
 | F4 LOW | a Save captured while the receiver is paused strands admission, a pool slot and a media hold | **open.** The fix sits in Agent 2's Save entry point; two shapes offered to them |
@@ -2415,7 +2415,7 @@ Everything else, including the classifier's 14 mutations, was checked by inspect
 | F7 LOW | "each check redundant by construction" was untrue at the link byte | **fixed, `7258b525`**, with a correction of the finding itself (below) |
 | F8 LOW | no executed evidence for design M1, M2 and M6, and no fixture for them | **fixed, `e5bb38ef`**, and M6's guard turned out to be unbuilt (below) |
 
-### F1: S1a acknowledges without rebuilding (local `7af4fdca`)
+### F1: S1a acknowledges without rebuilding (local, held)
 
 `StudioOverlaySave` gains `Acknowledged { basis, accepted }`. Both fields are structural facts of
 the stored branch, and S1a returns them with no replay. Agent 2's Unconfirmed receiver maps the
@@ -2435,8 +2435,11 @@ The regression is `studio_overlay_store_exact_retry_rebuilds_no_draft`:
 
 Held because it touches Agent 2's `receiver/unconfirmed.rs` (one match arm), two of their
 Unconfirmed Save test files and `studio/copy/tests.rs`. It is ordered last in the local line, so
-everything else ships without it. 13.5's 426 ms retry figure at depth 255 is now attributed: it
-was this replay.
+everything else ships without it.
+
+**13.5's 426 ms retry figure at depth 255 is attributed to this replay by reading the code, not
+by re-measurement.** No measurement has been taken since the fix. The retry still does two
+structural decodes of the intent record and one more authenticated read for the flush.
 
 ### F3: H5's repeated terms, priced
 
@@ -2458,17 +2461,18 @@ consumes it, and asserts that H4's carried bytes equal the candidate's encoding.
 "< 1 ms" means every one of the five samples read zero at the clock's millisecond resolution.
 
 What it settles:
-- **Reusing H4's snapshot bytes is not worth its boundary change.** Three encodes cost under a
-  millisecond together at every shape measured, and reuse would have the writer trust
-  caller-supplied snapshot bytes. **Deviation recorded:** H5 keeps re-encoding.
+- **Reusing H4's snapshot bytes is not worth its boundary change.** Each encode measured under a
+  millisecond, at the clock's resolution, at every shape, so three are bounded by about 3 ms.
+  Reuse would have the writer trust caller-supplied snapshot bytes. **Deviation recorded:** H5
+  keeps re-encoding. (These sources are small: see the source-axis gap in C-3 runtime 15.9.)
 - **The projections are the larger repeated term, and at a full frame branch they matter:** three
   `blob_cids` cost about 21 ms at 256 frames. Computing it once would recover about 14 ms. This
   is now a prerequisite of C-3 step 3, not an option (C-3 runtime 15.8).
 - **Most of H5's growth with branch length is neither.** 27 to 83 ms from 1 to 256 title
   operations, and 35 to 113 ms from 32 to 256 frames, is not encodes, projections or seed loads.
   What remains is unattributed: barrier 2's evidence comparison, the Prepared and Completed
-  intent-record encodes, and larger durable writes. The 1-op floor of about 25 ms is three durable
-  writes with flushes.
+  intent-record encodes, and larger durable writes. The 1-op floor of about 25 ms is presumably
+  mostly the three durable writes with their flushes. That was not measured separately.
 
 So the scan's share in C-3 runtime design 15.1, 125 ms less the commit, depends on the branch:
 
@@ -2513,21 +2517,69 @@ byte.
   each record with one plaintext byte changed at the same size, between H2 and a signing turn. The
   plan must stop being current. CI entries `plan-intent-digest` and `plan-source-digest`, both
   DETECTED at "a stale plan reached a signing turn".
+  - **M1 was not in fact redundant** until the review of these fixes (M-1, below). H5's step 6
+    compared two of its own reads.
 - **M6's guard did not exist.** H1 captured whatever successor was installed, so a missing,
   Faulted, replaced or already-edited successor was refused only by H2's
   `check_overlay_successor`, detached, after the reconstruction the probe exists to spare, every
   probe period. H1 now runs the header classification the eligibility view already uses
   (`overlay_successor_hold_in_vault`: a bounded authenticated read, no restore) and refuses
   before capture. H2's check stays authoritative.
-  - **Ordering:** the probe runs last, after the live authority mint, so every earlier refusal
-    keeps its own check and message. A first placement before the Index check broke
-    `..._old_owner_receipt_refuses_even_when_original_author_is_current`, because the probe
-    pre-empted the `verify_current_owner` refusal that test isolates.
+  - **Ordering, as finally placed:** after the live authority mint and before the Index object
+    check.
+    - A first placement before the authority mint broke
+      `..._old_owner_receipt_refuses_even_when_original_author_is_current`, because the probe
+      pre-empted the `verify_current_owner` refusal that test isolates.
+    - A second, after the Index check, made a non-pristine Index successor pay that check's
+      restores every probe period (review LOW-1, below).
   - **Contract change, recorded:** a Prepared branch over a faulted source is now refused at H1
     as "successor is not transferable: Fault", the reason the lifecycle row already gave, instead
     of at H2 as "epoch does not accept operations".
   - Pinned by `studio_overlay_handoff_h1_refuses_a_non_pristine_successor_before_capture`; CI
     entry `successor-probe`, DETECTED at "H2 started for a non-pristine successor".
+
+### Review of the 18.3 fixes (2026-10-09, Opus, static): no blocker or high
+
+Reviewed at `0808f5a2..fcda06cd`, static only, because the release profile was running. It found
+two mediums and five lows.
+
+**What it checked and found sound:**
+- S1a's acknowledgement equals what a reconstruction reports;
+- the probe never refuses what H2 would accept, and does not pre-empt the Prepared resolution;
+- every new harness anchor is unique and every mutant compiles;
+- the raw-fs gate's awk is mawk-safe;
+- 15.8's census of 24 guard sites.
+
+| finding | disposition |
+|---|---|
+| M-1 MEDIUM: M1 was the only guard, since H5's step 6 compared its own two reads | **fixed, `505b3a24`** (below) |
+| M-2 MEDIUM: F1's rebuild counter misses a direct `StudioOverlay::read` and the full intent decode's replay | **open, in F1's held commit**; F1 waits on Agent 2 anyway |
+| LOW-1: the probe ran after the Index check's restores | **fixed, `505b3a24`**: the probe now precedes it, and a new test counts zero restores |
+| LOW-2: `INTERFACES.md` and `HANDOVER.md` still describe a retry returning the draft | **open, with F1**: they change in the same commit as the contract |
+| LOW-3: STATUS and doc-comment truthfulness | **fixed here**, except the stale test name in F1's own doc comment, which goes with F1 |
+| LOW-4: test level differs from the design (M6 and M1/M2 are store-level, not actor-level) | **recorded** below; the M6 test now requires `SuccessorNotPristine` |
+| LOW-5: the raw-fs gate keyed only the matched line of an open chain | **fixed, `505b3a24`**: the open flags that change a file are matched too |
+
+**M-1 in detail.**
+- **The gap:** design 9.3 step 6 compares the intent record with the captured values, and the
+  design's M1 row calls the digest check redundant on that basis. H5 instead compared its pre-write
+  re-read with its own first read, under one exclusive borrow, which cannot fail.
+- **The fix:** H5's first read must now be the stamp's intent
+  (`StudioHandoffStamp::captured_intent`).
+- **The regression:** `studio_overlay_handoff_plan_is_stale_after_a_same_size_wrapper_replacement`
+  now also drives the stale plan through signing, assembly and H5, and requires the changed record
+  to survive with no Prepared.
+- **Executed both ways:**
+  - with the M1 mutant and the fix, it passes, because step 6 refuses alone;
+  - with the M1 mutant and the old step 6, it fails at "H5 committed a plan whose intent record
+    changed at the same size".
+- **What this means for M1:** it is now redundant as the design says. So its CI entry observes
+  the early refusal, which is all a redundant guard can show.
+
+**LOW-4, recorded rather than closed.** Three of these tests sit below the level the design names:
+- M6's evidence is store-level: a `Captured` start is what the receiver schedules H2 from.
+- M1 and M2 observe the H3 gate's return value, not a counted signing turn.
+- Both are the same class as F2: actor-level N31 coverage needs the receiver.
 
 ## Design 9.1, no graph restore on the commit path, built (2026-10-08)
 
@@ -5444,16 +5496,21 @@ makes that more important, not less.
      `studio/receiver.rs` and `receiver/catchup.rs` are free.
    - **The classifier and refused-result memo** (C-3 runtime 14, parts A and B) are built at
      `6a79e6f8`.
-   - **Step 3, and Flow R after it, need more than the classifier** (C-3 runtime 15.7). In order:
-     - design 9.1 built, so H5 commits without a graph restore;
-     - the commit phase measured on its own: **done 2026-10-09** (release, shared host). It leaves
-       about 40 ms of the 125 ms share at a full title branch, but **about 12 ms at a full frame
-       branch** (113 ms commit), so H5's repeated `blob_cids` must be computed once first
-       (C-3 runtime 15.8);
-     - an all-family memo with writer warms;
-     - an indexed, pruned memo;
-     - traversal measurements, or a touched-path cursor;
-     - the H5 write-every-turn test.
+   - **Step 3, and Flow R after it, need more than the classifier.** Design 9.1 is built
+     (`17dd54fc`), and the commit phase is measured on its own (2026-10-09, release, shared
+     host). The route's revision 2 is C-3 runtime 15.8, and its design review is 15.9: no
+     blocker, one high. **The order of work is 15.9's:**
+     1. H5's source-growing terms computed once, with a source-axis measurement (base sources of
+        256, 512 and 999 frames). 15.9 HIGH-1: no measurement yet varies the source, and the
+        commit may consume the visit for a large flipnote even at one operation;
+     2. the indexed, pruned memo (M2);
+     3. the all-family memo with warms at all eight writers, behind a forced-warm token;
+     4. the restart progress rule, with per-key credit and a ceiling;
+     5. the rule that divides a visit between scan and commit;
+     6. the traversal measurements;
+     7. the H5 write-every-turn test;
+     8. the touched-path cursor decision, which moves into step 3 if item 1 leaves no margined
+        share.
    - **Steps 4 and 5** still need section 7's measurements.
 2. Then **Flow R**, which needs no media and is independent. It was deliberately sequenced after
    this boundary so it is not built on the unbounded inventory path and then split again.
