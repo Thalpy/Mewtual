@@ -470,6 +470,13 @@ pub struct EpochStorageCursor {
     /// with nothing having failed. An inventory that silently omits a record is worse than one
     /// that refuses, because a budget built from it looks usable.
     awaiting: Option<(EpochRecordKind, [u8; 32])>,
+    /// The records this cursor found cold and memoized itself: a fresh inline validation, an
+    /// installed detached one, or a detached result refused because a write overtook it. Not a
+    /// hit, which was warm already, and not a writer's warm, which never passes through a cursor.
+    /// This is what makes an overtaken attempt progress rather than waste (C-3 runtime 15.8,
+    /// MEDIUM-3): the next cursor finds these records warm. Each key at most once, since a
+    /// traversal reads a record once.
+    warmed: Vec<(EpochRecordKind, [u8; 32])>,
 }
 
 /// A record whose authenticated plaintext has been read, but whose typed validation the cursor
@@ -733,6 +740,7 @@ impl ServerStore {
                 mount: self.registry_mount(),
                 parked: None,
                 awaiting: None,
+                warmed: Vec::new(),
             },
             store: self,
         })
@@ -805,6 +813,8 @@ impl ServerStore {
             cursor: self.begin_epoch_storage_scan_with(profile)?,
             profile,
             restarts: 0,
+            credited: std::collections::BTreeSet::new(),
+            progress_restarts: 0,
         })
     }
 
@@ -866,7 +876,7 @@ impl ServerStore {
     #[cfg(test)]
     pub(crate) fn memoize_overtaken_inventory_result(
         &mut self,
-        job: &EpochInventoryJob,
+        job: &mut EpochInventoryJob,
         validated: &ValidatedEpochRecord,
     ) -> bool {
         job.cursor.memoize_refused(self, validated)
@@ -903,24 +913,33 @@ impl ServerStore {
         // directory it does not need. Replacing the cursor in place cost a `read_dir` on every
         // finish, and could turn a completed scan into an error if that open happened to fail.
         let EpochInventoryJob {
-            cursor,
+            mut cursor,
             profile,
-            restarts,
+            mut restarts,
+            mut credited,
+            mut progress_restarts,
         } = job;
+        // Taken before `finish_with` consumes the cursor, for the restart decision below.
+        let warmed = std::mem::take(&mut cursor.warmed);
         match cursor.finish_with(self) {
             Ok(inventory) => {
                 self.prune_inventory_cache(&inventory);
                 Ok(EpochInventoryOutcome::Complete(Box::new(inventory)))
             }
             Err(CursorFailure::Invalidated(_)) => {
-                if restarts >= MAX_INVENTORY_RESTARTS {
-                    return Ok(EpochInventoryOutcome::Unstable);
+                if !excused_as_progress(&mut credited, &mut progress_restarts, warmed) {
+                    if restarts >= MAX_INVENTORY_RESTARTS {
+                        return Ok(EpochInventoryOutcome::Unstable);
+                    }
+                    restarts += 1;
                 }
                 Ok(EpochInventoryOutcome::Restarted(Box::new(
                     EpochInventoryJob {
                         cursor: self.begin_epoch_storage_scan_with(profile)?,
                         profile,
-                        restarts: restarts + 1,
+                        restarts,
+                        credited,
+                        progress_restarts,
                     },
                 )))
             }
@@ -928,12 +947,16 @@ impl ServerStore {
         }
     }
 
-    /// Replace an overtaken cursor, or report the budget spent.
+    /// Replace an overtaken cursor, or report the budget spent. The restart is charged unless the
+    /// overtaken attempt warmed a record not yet credited (C-3 runtime 15.8, MEDIUM-3).
     fn restart_job(&mut self, job: &mut EpochInventoryJob) -> Result<EpochInventoryStep, AppError> {
-        if job.restarts >= MAX_INVENTORY_RESTARTS {
-            return Ok(EpochInventoryStep::Unstable);
+        let warmed = std::mem::take(&mut job.cursor.warmed);
+        if !excused_as_progress(&mut job.credited, &mut job.progress_restarts, warmed) {
+            if job.restarts >= MAX_INVENTORY_RESTARTS {
+                return Ok(EpochInventoryStep::Unstable);
+            }
+            job.restarts += 1;
         }
-        job.restarts += 1;
         job.cursor = self.begin_epoch_storage_scan_with(job.profile)?;
         Ok(EpochInventoryStep::Restarted)
     }
@@ -1017,12 +1040,17 @@ impl ServerStore {
         if let Some(validated) = pending {
             job.cursor.memoize_refused(self, validated);
         }
+        // Credited even though this restart is not charged anyway: a record's warm excuses at
+        // most one restart in the job's life (C-3 runtime 15.8, MEDIUM-3).
+        let warmed = std::mem::take(&mut job.cursor.warmed);
+        job.credited.extend(warmed);
         job.cursor = self.begin_epoch_storage_scan_with(job.profile)?;
         Ok(true)
     }
 
-    /// If a write has overtaken this job, replace its cursor and charge its restart budget, exactly
-    /// as an overtaken install does; `None` if the job is current.
+    /// If a write has overtaken this job, replace its cursor and charge its restart budget, or
+    /// excuse the restart as progress, exactly as an overtaken install does; `None` if the job is
+    /// current.
     ///
     /// For a detached validation that came back as an error. The error is about the bytes the
     /// worker read, and a later write may have replaced them, so it says nothing about the vault
@@ -1259,6 +1287,9 @@ impl EpochStorageCursor {
     /// Shared by the inline path and by the install of a detached validation, so a parked record
     /// cannot accumulate different accounting from an unparked one. That is the whole reason it
     /// is a method rather than two copies.
+    ///
+    /// `fresh` says the body came from a validation this cursor ran (inline or detached), not a
+    /// memo hit. Only then does memoizing it count as this cursor having warmed the record.
     #[allow(clippy::too_many_arguments)]
     fn install_body(
         &mut self,
@@ -1269,6 +1300,7 @@ impl EpochStorageCursor {
         size: u64,
         digest: blake3::Hash,
         body: ValidatedRecordBody,
+        fresh: bool,
     ) -> Result<(), AppError> {
         let (family, hash) = key;
         if let Some(collected) = self.references.as_mut() {
@@ -1286,7 +1318,7 @@ impl EpochStorageCursor {
         }
         // Even an explicit reference scan may warm pure validation metadata, but a later
         // reference scan must still enumerate the actual CIDs.
-        memoize(
+        let memoized = memoize(
             store,
             key,
             size,
@@ -1295,6 +1327,9 @@ impl EpochStorageCursor {
             body.intent,
             Memoize::Replace,
         );
+        if fresh && memoized {
+            self.warmed.push(key);
+        }
         if self
             .inventory
             .records
@@ -1371,6 +1406,7 @@ impl EpochStorageCursor {
             validated.size,
             validated.digest,
             validated.body,
+            true,
         )
         .map_err(CursorFailure::Fault)?;
         // Only now: a failed merge leaves the record outstanding rather than quietly dropped.
@@ -1388,13 +1424,18 @@ impl EpochStorageCursor {
     /// deliberately not checked: the result is memoized for the bytes it was computed from,
     /// which a later read must match exactly, and it never reaches an inventory.
     ///
-    /// Returns whether the cache was warmed.
-    fn memoize_refused(&self, store: &mut ServerStore, validated: &ValidatedEpochRecord) -> bool {
+    /// Returns whether the cache was warmed, and if it was, the record counts as one this cursor
+    /// warmed (C-3 runtime 15.8, MEDIUM-3): the validation was this cursor's own.
+    fn memoize_refused(
+        &mut self,
+        store: &mut ServerStore,
+        validated: &ValidatedEpochRecord,
+    ) -> bool {
         let bound = std::sync::Arc::ptr_eq(&self.identity, &validated.identity)
             && std::sync::Arc::ptr_eq(&self.mount, &validated.mount)
             && std::sync::Arc::ptr_eq(&validated.mount, &store.registry_mount())
             && self.awaiting == Some(validated.key);
-        bound
+        let warmed = bound
             && memoize(
                 store,
                 validated.key,
@@ -1403,7 +1444,11 @@ impl EpochStorageCursor {
                 validated.body.record,
                 validated.body.intent,
                 Memoize::IfVacant,
-            )
+            );
+        if warmed {
+            self.warmed.push(validated.key);
+        }
+        warmed
     }
 
     fn step_with(
@@ -1603,6 +1648,7 @@ impl EpochStorageCursor {
                     let cached = cacheable
                         .then(|| store.inventory_cache.get((family, hash), size, digest))
                         .flatten();
+                    let fresh = cached.is_none();
                     let body = if let Some((record, intent)) = cached {
                         // A cache hit is cheap by construction, so it is never a parking
                         // candidate: the expensive thing is exactly what the cache avoided.
@@ -1679,6 +1725,7 @@ impl EpochStorageCursor {
                         size,
                         digest,
                         body,
+                        fresh,
                     )?;
                     break;
                 }
@@ -2085,7 +2132,25 @@ pub struct EpochInventoryJob {
     /// Reused by every restart, so a restarted job scans under exactly the limits it began with.
     profile: EpochInventoryProfile,
     restarts: usize,
+    /// Every record one of this job's cursors has warmed and been credited for (C-3 runtime
+    /// 15.8, MEDIUM-3, with 15.9's M2). A record's warm excuses at most one restart in the job's
+    /// life, so a record evicted and warmed again cannot excuse restarts for ever. Bounded by the
+    /// vault's record count.
+    credited: std::collections::BTreeSet<(EpochRecordKind, [u8; 32])>,
+    /// Restarts excused as progress so far, capped at [`MAX_PROGRESS_RESTARTS`].
+    progress_restarts: usize,
 }
+
+/// The most restarts one job may have excused as progress (C-3 runtime 15.9, M2's ceiling).
+///
+/// A restart whose attempt warmed a record it found cold is progress: the next cursor finds that
+/// record warm, so the attempt's validation work is kept, not lost (15.8, MEDIUM-3). Each such
+/// restart warms at least one record not credited before, so this ceiling is reached only by a
+/// vault with more cold records than it, under writes between turns. Past it, restarts are charged
+/// against [`MAX_INVENTORY_RESTARTS`] as before, and the job backs off. 64 is the receive profile's
+/// record limit, so a background job, which scans under that profile, can warm its whole vault
+/// without being charged.
+pub(crate) const MAX_PROGRESS_RESTARTS: usize = 64;
 
 impl EpochInventoryJob {
     /// How many charged restarts this job has used, for tests that tell a charged restart from an
@@ -2093,6 +2158,33 @@ impl EpochInventoryJob {
     #[cfg(test)]
     pub(crate) fn restarts_for_test(&self) -> usize {
         self.restarts
+    }
+
+    /// How many restarts this job has had excused as progress.
+    #[cfg(test)]
+    pub(crate) fn progress_restarts_for_test(&self) -> usize {
+        self.progress_restarts
+    }
+}
+
+/// Whether an overtaken attempt's restart is excused as progress, crediting what it warmed either
+/// way (C-3 runtime 15.8, MEDIUM-3). `warmed` is what the overtaken cursor itself memoized from
+/// cold; only a record not yet credited in this job counts, and only while the job is under
+/// [`MAX_PROGRESS_RESTARTS`]. The one rule every restart point applies, so they cannot disagree.
+fn excused_as_progress(
+    credited: &mut std::collections::BTreeSet<(EpochRecordKind, [u8; 32])>,
+    progress_restarts: &mut usize,
+    warmed: Vec<(EpochRecordKind, [u8; 32])>,
+) -> bool {
+    let mut progressed = false;
+    for key in warmed {
+        progressed |= credited.insert(key);
+    }
+    if progressed && *progress_restarts < MAX_PROGRESS_RESTARTS {
+        *progress_restarts += 1;
+        true
+    } else {
+        false
     }
 }
 
@@ -2193,6 +2285,7 @@ impl std::fmt::Debug for EpochInventoryJob {
         f.debug_struct("EpochInventoryJob")
             .field("profile", &self.profile)
             .field("restarts", &self.restarts)
+            .field("progress_restarts", &self.progress_restarts)
             .finish_non_exhaustive()
     }
 }
@@ -5806,19 +5899,19 @@ mod tests {
         // Another scan: a second job's cursor, parked on the same record.
         let mut other_job = store.begin_epoch_inventory_job(full).unwrap();
         let _ = park_studio(&mut store, &mut other_job, &clock);
-        assert!(!store.memoize_overtaken_inventory_result(&other_job, &validated));
+        assert!(!store.memoize_overtaken_inventory_result(&mut other_job, &validated));
         // Another record: this job's own result, renamed to a record the cursor is not awaiting.
         let mut forged = validated_clone(&validated);
         forged.key.1 = [0xAB; 32];
-        assert!(!store.memoize_overtaken_inventory_result(&job, &forged));
+        assert!(!store.memoize_overtaken_inventory_result(&mut job, &forged));
         // Another mount, carried by the result.
         let mut forged = validated_clone(&validated);
         forged.mount = std::sync::Arc::new(());
-        assert!(!store.memoize_overtaken_inventory_result(&job, &forged));
+        assert!(!store.memoize_overtaken_inventory_result(&mut job, &forged));
         // Another store: the cursor and result agree with each other, but not with this store.
         let other_root = tempfile::tempdir().unwrap();
         let mut other_store = open(other_root.path());
-        assert!(!other_store.memoize_overtaken_inventory_result(&job, &validated));
+        assert!(!other_store.memoize_overtaken_inventory_result(&mut job, &validated));
         assert!(cold(&mut store), "a mismatched result warmed the cache");
 
         // A fault exit: installing into a job that did not park it.
@@ -5831,8 +5924,8 @@ mod tests {
         );
 
         // The control: the job's own result warms once, and the vacancy rule refuses a second.
-        assert!(store.memoize_overtaken_inventory_result(&job, &validated));
-        assert!(!store.memoize_overtaken_inventory_result(&job, &validated));
+        assert!(store.memoize_overtaken_inventory_result(&mut job, &validated));
+        assert!(!store.memoize_overtaken_inventory_result(&mut job, &validated));
         assert!(!cold(&mut store));
     }
 
@@ -5866,7 +5959,7 @@ mod tests {
         let validated = park_studio(&mut store, &mut job, &clock)
             .validate()
             .unwrap();
-        assert!(store.memoize_overtaken_inventory_result(&job, &validated));
+        assert!(store.memoize_overtaken_inventory_result(&mut job, &validated));
         drop(job);
 
         // Rewrite the record without warming the cache, keeping the warmed entry for the old
@@ -6023,6 +6116,199 @@ mod tests {
             "a warm record was validated again: the memo thrashed"
         );
         assert_matches_fresh(&mut store, job);
+    }
+
+    /// Step `job` to its end, installing every parked body. When `overtake` holds, a write lands
+    /// while each body is out, so its install is refused and the job restarts. Panics if the job
+    /// goes `Unstable`. Returns how many restarts the installs reported.
+    fn drive_with_writes(
+        store: &mut ServerStore,
+        job: &mut EpochInventoryJob,
+        overtake: bool,
+    ) -> usize {
+        let clock = ManualClock::new(0);
+        let mut restarts = 0;
+        loop {
+            match store
+                .step_epoch_inventory_job(job, ENTRIES_PER_STEP, Some((&clock, 250)))
+                .unwrap()
+            {
+                EpochInventoryStep::Parked => {
+                    let validated = store
+                        .take_parked_job_record(job)
+                        .unwrap()
+                        .validate()
+                        .unwrap();
+                    if overtake {
+                        store.epoch_mutation_guard();
+                    }
+                    match store.install_validated_job_record(job, validated).unwrap() {
+                        EpochInventoryStep::Restarted => restarts += 1,
+                        EpochInventoryStep::Unstable => {
+                            panic!("the job went unstable after {restarts} restarts")
+                        }
+                        _ => {}
+                    }
+                }
+                EpochInventoryStep::Stepped(progress) if progress.complete => return restarts,
+                EpochInventoryStep::Unstable => panic!("the job went unstable"),
+                _ => {}
+            }
+        }
+    }
+
+    /// C-3 runtime 15.8, MEDIUM-3: a restart whose attempt warmed a record it found cold is
+    /// progress, and is not charged. Five cold Studio records, and a write overtakes every
+    /// detached validation. Each refused result is memoized, so each restarted cursor finds one
+    /// more record warm, and the job completes having been charged nothing. Without the rule its
+    /// fourth restart would have spent `MAX_INVENTORY_RESTARTS` and gone `Unstable`.
+    #[test]
+    fn a_job_warmed_record_by_record_across_restarts_is_never_charged() {
+        const RECORDS: u8 = 5;
+        let root = tempfile::tempdir().unwrap();
+        let mut store = open(root.path());
+        for object in 0..RECORDS {
+            kept_studio_source(&mut store, object);
+        }
+        store.inventory_cache.clear_for_test();
+        let full = EpochInventoryCoverage::RecoveryOwnerReceiptsIntentsRegistryAndStudio;
+        let mut job = store.begin_epoch_inventory_job(full).unwrap();
+        let restarts = drive_with_writes(&mut store, &mut job, true);
+        assert!(
+            restarts > MAX_INVENTORY_RESTARTS,
+            "precondition: more restarts than the budget allows"
+        );
+        assert_eq!(
+            job.restarts_for_test(),
+            0,
+            "a restart that warmed a record was charged"
+        );
+        assert_eq!(job.progress_restarts_for_test(), restarts);
+        assert_matches_fresh(&mut store, job);
+    }
+
+    /// The other direction: an attempt that warmed nothing is charged as before, so a vault that
+    /// will not hold still still reaches `Unstable`. Every record is warm, so each attempt reads
+    /// its records as memo hits, which are not warming, and a write lands before each finish.
+    /// A hit counted as warming would excuse every one of these restarts.
+    #[test]
+    fn an_attempt_that_warmed_nothing_is_charged() {
+        let root = tempfile::tempdir().unwrap();
+        let mut store = open(root.path());
+        kept_studio_source(&mut store, 1);
+        let full = EpochInventoryCoverage::RecoveryOwnerReceiptsIntentsRegistryAndStudio;
+        collect_with(&mut store, full);
+        let mut job = store.begin_epoch_inventory_job(full).unwrap();
+        for round in 0..=MAX_INVENTORY_RESTARTS {
+            drive_with_writes(&mut store, &mut job, false);
+            assert_eq!(
+                job.progress_restarts_for_test(),
+                0,
+                "a restart whose attempt only hit the memo was excused"
+            );
+            assert_eq!(job.restarts_for_test(), round);
+            store.epoch_mutation_guard();
+            match store.finish_epoch_inventory_job(job).unwrap() {
+                EpochInventoryOutcome::Restarted(next) => job = *next,
+                EpochInventoryOutcome::Unstable => {
+                    assert_eq!(
+                        round, MAX_INVENTORY_RESTARTS,
+                        "the job went unstable before its budget was spent"
+                    );
+                    return;
+                }
+                EpochInventoryOutcome::Complete(_) => panic!("an overtaken finish completed"),
+            }
+        }
+        panic!("restarts that warmed nothing never spent the budget");
+    }
+
+    /// A record's warm excuses at most one restart in a job's life (15.9, M2): one evicted from
+    /// the memo and warmed again by a later cursor is not new progress, so that restart is charged.
+    #[test]
+    fn a_record_warmed_again_after_eviction_excuses_no_second_restart() {
+        let root = tempfile::tempdir().unwrap();
+        let mut store = open(root.path());
+        kept_studio_source(&mut store, 1);
+        store.inventory_cache.clear_for_test();
+        let clock = ManualClock::new(0);
+        let full = EpochInventoryCoverage::RecoveryOwnerReceiptsIntentsRegistryAndStudio;
+        let mut job = store.begin_epoch_inventory_job(full).unwrap();
+        let overtaken_park = |store: &mut ServerStore, job: &mut EpochInventoryJob| {
+            let validated = park_studio(store, job, &clock).validate().unwrap();
+            store.epoch_mutation_guard();
+            assert!(matches!(
+                store.install_validated_job_record(job, validated).unwrap(),
+                EpochInventoryStep::Restarted
+            ));
+        };
+        overtaken_park(&mut store, &mut job);
+        assert_eq!(
+            (job.progress_restarts_for_test(), job.restarts_for_test()),
+            (1, 0),
+            "precondition: the first warm was excused"
+        );
+        // As if the entry had been evicted, so the next cursor finds the record cold again.
+        store.inventory_cache.clear_for_test();
+        overtaken_park(&mut store, &mut job);
+        assert_eq!(
+            (job.progress_restarts_for_test(), job.restarts_for_test()),
+            (1, 1),
+            "the same record's second warm excused a second restart"
+        );
+    }
+
+    /// The finish path applies the same rule. A write that lands after the traversal reached its
+    /// end, but before the inventory is issued, is excused if the attempt warmed a record, here
+    /// the one cold Studio record it validated and installed.
+    #[test]
+    fn an_overtaken_finish_whose_attempt_warmed_a_record_is_excused() {
+        let root = tempfile::tempdir().unwrap();
+        let mut store = open(root.path());
+        kept_studio_source(&mut store, 1);
+        store.inventory_cache.clear_for_test();
+        let full = EpochInventoryCoverage::RecoveryOwnerReceiptsIntentsRegistryAndStudio;
+        let mut job = store.begin_epoch_inventory_job(full).unwrap();
+        drive_with_writes(&mut store, &mut job, false);
+        store.epoch_mutation_guard();
+        let EpochInventoryOutcome::Restarted(job) = store.finish_epoch_inventory_job(job).unwrap()
+        else {
+            panic!("an overtaken finish did not restart");
+        };
+        assert_eq!(
+            (job.progress_restarts_for_test(), job.restarts_for_test()),
+            (1, 0),
+            "an overtaken finish whose attempt warmed a record was charged"
+        );
+    }
+
+    /// The ceiling (15.9, M2), on the rule itself: once a job has had `MAX_PROGRESS_RESTARTS`
+    /// restarts excused, a restart is charged even if its attempt warmed a new record. Reaching
+    /// the ceiling through a real vault would take that many cold records.
+    #[test]
+    fn progress_excuses_stop_at_the_ceiling() {
+        let mut credited = std::collections::BTreeSet::new();
+        let mut progress = MAX_PROGRESS_RESTARTS - 1;
+        let key = |n: u8| (EpochRecordKind::Studio, [n; 32]);
+        assert!(excused_as_progress(
+            &mut credited,
+            &mut progress,
+            vec![key(1)]
+        ));
+        assert_eq!(progress, MAX_PROGRESS_RESTARTS);
+        assert!(
+            !excused_as_progress(&mut credited, &mut progress, vec![key(2)]),
+            "a restart past the ceiling was excused"
+        );
+        assert!(
+            credited.contains(&key(2)),
+            "a warm past the ceiling was not credited"
+        );
+        assert!(!excused_as_progress(
+            &mut std::collections::BTreeSet::new(),
+            &mut 0,
+            Vec::new()
+        ));
     }
 
     /// The three ways a scan issues its inventory, each of which must prune.

@@ -363,7 +363,12 @@ table with the commit that closed it.
     released at pause, at the lock reset and on context change. The job takes permits from the
     same four-slot process pool as catch-up preparation.
   - **Under writes:** a write by another actor charges the job's restart budget, and an exhausted
-    budget backs off; this actor's own writes refresh it uncharged, within a cap.
+    budget backs off; this actor's own writes refresh it uncharged, within a cap. **Except a
+    restart whose attempt warmed a record it found cold** (C-3 runtime 16.3): that is progress,
+    since the next attempt finds the record warm, so it is not charged. Each record excuses at most
+    one restart in a job's life, and a job has at most 64 restarts excused, so a peer writing
+    between every turn still drives the job to back off once it has nothing cold left to warm.
+    Each excused restart did at most one visit's bounded validation work, which the memo keeps.
   - **Errors:** a detached validation's error pauses background receive only if it is about bytes
     still current. An error about bytes a later write replaced restarts the job.
   - **Fallback:** a move that the job cannot serve within 60 s falls back to the synchronous scan

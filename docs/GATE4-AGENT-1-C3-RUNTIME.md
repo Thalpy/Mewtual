@@ -1900,3 +1900,45 @@ that a remount-cold large record still meets the cold rail, that reference scans
 bytes, and that the detached/performance fixtures explicitly clear the process-local memo when
 they intend to model cold startup. The complete suite and independent bounded review remain part of
 the combined checkpoint rather than being claimed by this implementation entry.
+
+### 16.4 MEDIUM-3, the restart progress rule, integrated after M1 (2026-10-11)
+
+15.8's MEDIUM-3 with 15.9's M2 corrections, landed after M2 as 15.9 required. **An overtaken
+attempt's restart is charged against `MAX_INVENTORY_RESTARTS` only if the attempt warmed no
+record it found cold.**
+- **What counts as warming:** the cursor's own memoizing of a record it validated, either inline
+  or as an installed detached result, or of a detached result refused because a write overtook
+  it (`EpochStorageCursor::warmed`). A memo hit does not count, since the record was warm already.
+  Neither does a writer's warm, which never passes through a cursor.
+- **Per-key credit, per job:** `EpochInventoryJob::credited` holds every record already credited.
+  A record's warm excuses at most one restart in the job's life, so a record evicted and warmed
+  again cannot excuse restarts for ever (15.9 M2's LRU concern; M2 makes eviction rare, and this
+  makes it harmless).
+- **A ceiling:** `MAX_PROGRESS_RESTARTS` (64), the receive profile's record limit, so a background
+  job can warm its whole vault without being charged. Past it, restarts are charged as before.
+- **One rule, every restart point:** `excused_as_progress` is applied by `restart_job`, which
+  covers a step and an install overtaken, and by the finish path. The runtime's uncharged
+  own-write refresh credits what its old cursor warmed, so those records cannot excuse a later
+  restart either.
+
+**Why it is bounded** (15.9's M2): every excused restart credits at least one record not credited
+before, and credits are capped by the ceiling and by the vault's record count. Each excused
+attempt did at most one visit's bounded validation work, and the memo keeps that work.
+
+**Tests, each guard broken on purpose:**
+
+| test | guards; the mutants that fail it |
+|---|---|
+| `a_job_warmed_record_by_record_across_restarts_is_never_charged` (five cold Studio records, a write overtaking every detached validation) | the job completes with no charged restart and five excused, where before it went `Unstable` at the fourth. Fails with excuses disabled, or with a refused result's warm unrecorded |
+| `an_attempt_that_warmed_nothing_is_charged` (a warm vault, each attempt reading its records as hits, overtaken at finish) | restarts are charged and the job goes `Unstable` once the budget is spent. Fails with excuses always granted, or with hits counted as warming. Its first draft wrote before every step, so no attempt read a record at all and the hits mutant survived; it was rewritten |
+| `a_record_warmed_again_after_eviction_excuses_no_second_restart` | per-key credit. Fails with the credit set ignored |
+| `an_overtaken_finish_whose_attempt_warmed_a_record_is_excused` | the finish path applies the rule. Fails with excuses disabled |
+| `progress_excuses_stop_at_the_ceiling` (on the rule function) | the ceiling, and that a warm past it is still credited. Fails with the ceiling removed |
+
+The original held checkpoint's store tests passed before integration. Its required review
+additions and the complete combined suites are tracked at this integration head rather than
+inherited from that earlier result. THREAT-MODEL's replay-move paragraph states the exception.
+
+**M1's writer half is now built.** Once the review additions and combined verification pass, the
+next C-3 step is section 7's measurement, from which each remaining owner is converted or recorded
+as debt.
