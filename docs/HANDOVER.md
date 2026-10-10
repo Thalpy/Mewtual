@@ -10,6 +10,14 @@ and ranks the live hazards in that path.
 
 ## Status (latest entry: 2026-10-10)
 
+- **Gate 4 core signing coverage closed (2026-10-10).** The short re-review of SIGN-TEST-001b
+  found no issue. A real non-owner member completes Index and Flipnote handoffs of its own work;
+  an identical signed-size shape above the device cap is accepted for the owner and refused before
+  signing for the member. Three isolated mutants pin the owner/author distinction and both cap
+  directions. The production boundary's earlier bounded PASS stands. The separate preflight/
+  framing mutation gap and manual-reason product gap remain non-blocking residuals; see
+  `GATE4-HANDOFF-SIGNING-REVIEW.md`.
+
 - **Gate 4 repair: PR #27 review MEDIUM-1 and two interface points (2026-10-10).** A repair job's
   S3 now builds its storage budget only after installing (or, for a bucket, memoizing) the rebuild,
   so a cold source over the receive scan's 256 KiB cold-byte limit commits instead of being
