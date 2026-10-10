@@ -410,9 +410,12 @@ table with the commit that closed it.
   validation; a memo hit is reused instead. The rates are from one host, in a release build, on
   the shapes measured. A peer able to make a much denser record than those shapes, or a much
   slower machine, lengthens an inline hold in proportion. For Recovery and OwnerReceipts the size
-  envelopes keep it small; for Intents, the cap does. The validation memo holds only Registry and Studio accounting
-  records, keyed by filename hash, physical size and the blake3 digest of the authenticated
-  plaintext, and a hit needs all three to match bytes a scan has just read. **One deliberate
+  envelopes keep it small; for Intents, the cap does. The validation memo holds every family's
+  accounting record (C-3 runtime 15.2, M1), and for an Intents record its inventory facts too,
+  keyed by filename hash, physical size and the blake3 digest of the authenticated plaintext, and
+  a hit needs all three to match bytes a scan has just read. Validation is a pure function of
+  those bytes for every family (OwnerReceipts verifies signatures over keys its own bytes carry),
+  so a hit is what a fresh validation of the same bytes returns. **One deliberate
   relaxation:** a detached result refused because a write overtook it is still memoized, unless
   the memo already holds that record, so the restarted scan need not validate it again. The result
   never reaches an inventory, and validation is a pure function of those bytes, so a memo entry
@@ -978,10 +981,20 @@ table with the commit that closed it.
   emitted under a replacement numeric server id; the UI/incarnation fence lasts through emission.
   Automatic inventory uses LOCAL limits of 1024 visited entries, 64 records, 8 MiB aggregate
   authenticated reads and 256 KiB aggregate cold validation bytes, including unrelated saved P1
-  sources. Its mount-local LRU stores only context-free Registry/Studio footprint
-  validation. Every hit still authenticates the actual file and binds its scope/filename,
+  sources. Its mount-local LRU stores every family's context-free accounting validation
+  (C-3 runtime 15.2, M1). Every hit still authenticates the actual file and binds its scope/filename,
   full plaintext-wrapper digest and physical size, including gate/receipts/quarantine/history.
   That metadata LRU stores no key/plaintext/doc, completed inventory, membership decision or budget authority.
+  **What it does hold beyond accounting:** for each Intents record, its inventory facts. For an
+  Unconfirmed branch these include the preview provider's device id, the observed MLS epoch and
+  the observation time. The same facts are in that record on this device's disk, and decrypted
+  into memory by every scan of it, but the memo keeps them resident for the mount's life, UI
+  lock included. That is a residual, not a new disclosure: nothing leaves the device.
+  **Admission depends on history** (15.9, MEDIUM-4): warm bytes do not count against the cold
+  rail for any family, so a vault receive refuses cold is admitted once its records are warm. A
+  refused scan warms what it validated before reaching the rail, so a later attempt does less
+  fresh work, and a remount makes the vault cold again. The rail still bounds each scan's fresh
+  validation, which is its purpose.
   It holds up to `MAX_ACCOUNTED_RECORDS` (65 536) entries, so a complete scan never thrashes it,
   and every inventory-issuing scan, once complete, prunes the entries of records it did not find,
   within its own coverage (C-3 runtime design 15.3). About 300 bytes an entry, so about 20 MiB at

@@ -1566,10 +1566,11 @@ Three consequences, from the revision-3 answer, that the implementation must hon
    hold the same `OverlayOwnership`: no second overlay pool, no capacity released when only the
    waiter is cancelled. The returned validation is bound to the original cursor identity, mount,
    record id and `inventory_generation`, and all four are rechecked before it is consumed.
-   **Relaxed for the validation memo only (2026-10-08, C-3 runtime design 14.3).** A Registry or
-   Studio result whose generation check fails is still never installed into an inventory. If it
-   passes the other three checks and the store's current mount, its accounting record is memoized
-   unless the memo already holds any version of that record. That is sound because the memo is keyed by the
+   **Relaxed for the validation memo only (2026-10-08, C-3 runtime design 14.3).** A result whose
+   generation check fails is still never installed into an inventory. If it passes the other three
+   checks and the store's current mount, its accounting record (with an Intents record's inventory
+   facts) is memoized unless the memo already holds any version of that record. Since 2026-10-10
+   (C-3 runtime 15.2, M1) that applies to every family's result, not only Registry's and Studio's. That is sound because the memo is keyed by the
    bytes the result was computed from and validation is pure. It lets a restarted scan skip a
    validation that a write overtook.
 3. **Parking bypasses no bound.** A genuine per-family or aggregate size-limit violation still

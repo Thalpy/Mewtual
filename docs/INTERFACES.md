@@ -1066,8 +1066,9 @@ pending false/true churn cannot bypass it. Locked/busy native custody retains qu
 
 Automatic inventory has LOCAL service rails of 1024 visited directory entries, 64 P1 records,
 8 MiB aggregate authenticated record bytes and 256 KiB aggregate cold validation bytes. A
-mount-local LRU of up to 65 536 entries (`MAX_ACCOUNTED_RECORDS`) memoizes only pure
-Registry/Studio footprint validation; an inventory-issuing finish (`EpochStorageScan::finish`,
+mount-local LRU of up to 65 536 entries (`MAX_ACCOUNTED_RECORDS`) memoizes every family's pure
+accounting validation, with an Intents record's inventory facts, so a hit's
+`EpochStorageInventoryEntry::intent_facts()` equals a fresh scan's; an inventory-issuing finish (`EpochStorageScan::finish`,
 `finish_epoch_inventory_job`, `finish_epoch_storage_scan`) prunes entries for records the scan did
 not find, within its own coverage. The reference-scan finish does not prune. A hit needs a
 fresh bounded read/unseal, scope/filename binding, and exact complete-wrapper digest plus size;

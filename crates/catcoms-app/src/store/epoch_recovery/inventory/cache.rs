@@ -23,8 +23,15 @@
 //!
 //! It is indexed (a keyed map plus an access order), so get, put and eviction are logarithmic:
 //! the linear scan the 64-entry form used would make a scan of 65 536 records quadratic.
+//!
+//! **Every family's accounting validation is memoized** (C-3 runtime design 15.2, M1), not only
+//! Registry's and Studio's. Each entry holds what a hit must restore: the accounting record, and
+//! for an Intents record its inventory facts too, which `EpochIntentBudget::from_inventory` builds
+//! the Unconfirmed tally from. **An Intents entry always carries its facts, and no other family's
+//! entry has any**; [`RecordCache::put_validated`] refuses anything else, because a fact-less
+//! Intents hit would undercount live branches and mint too generous a budget.
 
-use super::{EpochRecordKind, StorageRecord};
+use super::{EpochIntentInventoryFacts, EpochRecordKind, StorageRecord};
 use crate::store::epoch_budget::MAX_ACCOUNTED_RECORDS;
 use std::collections::BTreeMap;
 
@@ -35,8 +42,18 @@ struct Verified {
     digest: blake3::Hash,
     physical_bytes: u64,
     record: StorageRecord,
+    /// Present exactly when the key's family is Intents.
+    intent: Option<EpochIntentInventoryFacts>,
     /// Position in [`RecordCache::order`]: the entry with the smallest tick is evicted first.
     tick: u64,
+}
+
+/// What a hit restores: the accounting record and, for an Intents record, its inventory facts.
+pub(in crate::store) type Memoized = (StorageRecord, Option<EpochIntentInventoryFacts>);
+
+/// Whether `intent` is the right shape for `family`: facts for Intents, none otherwise.
+fn facts_fit(family: EpochRecordKind, intent: &Option<EpochIntentInventoryFacts>) -> bool {
+    (family == EpochRecordKind::Intents) == intent.is_some()
 }
 
 /// Mount-local metadata only: no plaintext, mutable CRDT, authority key or scan budget survives.
@@ -58,12 +75,7 @@ impl RecordCache {
             .get(&key)
             .is_some_and(|v| v.physical_bytes == size)
     }
-    pub(super) fn get(
-        &mut self,
-        key: Key,
-        size: u64,
-        digest: blake3::Hash,
-    ) -> Option<StorageRecord> {
+    pub(super) fn get(&mut self, key: Key, size: u64, digest: blake3::Hash) -> Option<Memoized> {
         self.entries
             .get(&key)
             .filter(|v| v.physical_bytes == size && v.digest == digest)?;
@@ -72,8 +84,13 @@ impl RecordCache {
         self.order.remove(&value.tick);
         value.tick = tick;
         self.order.insert(tick, key);
-        Some(value.record)
+        Some((value.record, value.intent))
     }
+
+    /// Memoize a family's accounting record, for a family with no inventory facts. The writer
+    /// paths' form: Registry and Studio writers establish their own record and carry no facts.
+    /// An Intents record must go through [`Self::put_validated`] with its facts, and is refused
+    /// here (see the module documentation).
     pub(in crate::store) fn put(
         &mut self,
         key: Key,
@@ -81,6 +98,30 @@ impl RecordCache {
         digest: blake3::Hash,
         record: StorageRecord,
     ) {
+        self.put_validated(key, size, digest, record, None);
+    }
+
+    /// Memoize a validation result: the accounting record, and the inventory facts that come with
+    /// it, which must be present exactly for an Intents record. A result of the wrong shape is a
+    /// caller error. It is refused, so a later hit can never return an Intents record without its
+    /// facts, and it fails a debug build loudly. Returns whether it stored; a refusal leaves any
+    /// version already cached for the record in place.
+    pub(in crate::store) fn put_validated(
+        &mut self,
+        key: Key,
+        size: u64,
+        digest: blake3::Hash,
+        record: StorageRecord,
+        intent: Option<EpochIntentInventoryFacts>,
+    ) -> bool {
+        if !facts_fit(key.0, &intent) {
+            debug_assert!(
+                false,
+                "a {:?} memo entry with the wrong inventory facts",
+                key.0
+            );
+            return false;
+        }
         self.remove(&key);
         // Evict until there is room, rather than once. With `entries` and `order` in step one
         // eviction always suffices, but the bound is what keeps this memo's memory finite, so it
@@ -100,10 +141,12 @@ impl RecordCache {
                 digest,
                 physical_bytes: size,
                 record,
+                intent,
                 tick,
             },
         );
         self.debug_check();
+        true
     }
 
     /// `entries` and `order` name the same keys, each exactly once. Checked after every mutation
@@ -154,7 +197,8 @@ impl RecordCache {
         tick
     }
 
-    /// [`Self::put`], unless any version of `key` is already cached. Returns whether it stored.
+    /// [`Self::put_validated`], unless any version of `key` is already cached. Returns whether it
+    /// stored.
     ///
     /// For a result whose job was overtaken (C-3 runtime design 14.3, piece 3). The read evicted
     /// any version its bytes contradicted ([`Self::evict_mismatch`]), so an entry present now is
@@ -170,12 +214,9 @@ impl RecordCache {
         size: u64,
         digest: blake3::Hash,
         record: StorageRecord,
+        intent: Option<EpochIntentInventoryFacts>,
     ) -> bool {
-        if self.entries.contains_key(&key) {
-            return false;
-        }
-        self.put(key, size, digest, record);
-        true
+        !self.entries.contains_key(&key) && self.put_validated(key, size, digest, record, intent)
     }
 
     /// How many entries belong to `family`. Test-only, for checking what the memo admits.
@@ -209,8 +250,9 @@ impl RecordCache {
 
     /// Drop every memoized validation.
     ///
-    /// Only design 13.7's measurement needs this. Registry and Studio are the two cacheable
-    /// families, so a repeated-trial profile of them measures one fresh validation and then
+    /// Design 13.7's measurement needs this, and so does any test that needs a record cold after a
+    /// scan has read it. Every family is cacheable (C-3 runtime 15.2), so a repeated-trial profile
+    /// measures one fresh validation and then
     /// seven cache hits unless the cache is cleared between trials - and a cache hit is never
     /// parked, so those seven trials would contribute no validation sample at all while the
     /// mean silently divided by the wrong count. Clearing makes "fresh validation" repeatable;
@@ -309,6 +351,33 @@ mod tests {
         assert!(consistent(&cache));
     }
 
+    /// An Intents entry without its inventory facts is refused: a later hit would return the
+    /// record without them, and the Unconfirmed tally built from them would undercount (C-3
+    /// runtime 15.2). A debug build fails loudly; a release build refuses and reports it.
+    #[test]
+    #[cfg_attr(debug_assertions, should_panic(expected = "wrong inventory facts"))]
+    fn an_intents_entry_without_its_facts_is_refused() {
+        let mut cache = RecordCache::default();
+        let key = (EpochRecordKind::Intents, hash(1));
+        assert!(!cache.put_validated(key, 10, blake3::hash(b"v"), record(), None));
+        assert!(!cache.holds_for_test(key));
+    }
+
+    /// And the converse: facts on any other family's entry are refused too, since no other
+    /// family's validation produces them.
+    #[test]
+    #[cfg_attr(debug_assertions, should_panic(expected = "wrong inventory facts"))]
+    fn facts_on_another_familys_entry_are_refused() {
+        let mut cache = RecordCache::default();
+        let key = (EpochRecordKind::Studio, hash(1));
+        let facts = EpochIntentInventoryFacts {
+            provenance: None,
+            charged_bytes: 10,
+        };
+        assert!(!cache.put_validated(key, 10, blake3::hash(b"v"), record(), Some(facts)));
+        assert!(!cache.holds_for_test(key));
+    }
+
     /// The bound holds after an eviction on mismatch, which removes an entry outside `put`'s own
     /// path (review of M2, LOW-1). Had the eviction left its access-order entry behind, a later
     /// put at the bound would pop that dangling tick and let the memo grow past its bound.
@@ -358,7 +427,7 @@ mod tests {
         );
         assert!(consistent(&cache));
         // The pruned record can be cached again, with a vacant-only put.
-        assert!(cache.put_if_vacant(gone, 10, digest, record()));
+        assert!(cache.put_if_vacant(gone, 10, digest, record(), None));
         assert!(consistent(&cache));
     }
 
@@ -376,15 +445,21 @@ mod tests {
         let mut cache = RecordCache::default();
         let key = (EpochRecordKind::Studio, [3; 32]);
         let (old, new) = (blake3::hash(b"v1"), blake3::hash(b"v2"));
-        assert!(cache.put_if_vacant(key, 10, old, record()));
+        assert!(cache.put_if_vacant(key, 10, old, record(), None));
         assert!(
-            !cache.put_if_vacant(key, 10, new, record()),
+            !cache.put_if_vacant(key, 10, new, record(), None),
             "a vacant-only put replaced the version already cached"
         );
         assert!(cache.get(key, 10, old).is_some());
         assert!(cache.get(key, 10, new).is_none());
         // Another record's key is unaffected by this one's entry.
-        assert!(cache.put_if_vacant((EpochRecordKind::Registry, [3; 32]), 10, new, record()));
+        assert!(cache.put_if_vacant(
+            (EpochRecordKind::Registry, [3; 32]),
+            10,
+            new,
+            record(),
+            None
+        ));
     }
 
     /// Eviction removes only a version of the same record that the bytes just read contradict:
@@ -423,6 +498,6 @@ mod tests {
             "evicting one record removed another"
         );
         // With the contradicted version gone, a vacant-only put for the bytes just read stores.
-        assert!(cache.put_if_vacant(key, 10, v2, record()));
+        assert!(cache.put_if_vacant(key, 10, v2, record(), None));
     }
 }

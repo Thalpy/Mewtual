@@ -41,6 +41,24 @@ and ranks the live hazards in that path.
   its document. Still open: a peer's repaired-seed refetch is not paced (pre-existing), hosted
   CI on PR #36 and a bounded repair verdict. Details are in `GATE4-AGENT-3-STATUS.md`.
 
+- **Gate 4 Agent 1: C-3's prerequisite, the validation memo (2026-10-10).** The project owner
+  decided the remaining C-3 owners wait for writer-side warms and then a measurement, after which
+  each is converted or recorded as debt (`GATE4-AGENT-1-C3-RUNTIME.md` 16).
+  - **M2, landed:** the memo is indexed, holds up to 65 536 entries and is pruned by every
+    inventory-issuing scan, so a vault of more than 64 memoizable records no longer revalidates
+    every record on every scan.
+  - **M1's memo half, built:** every family's accounting validation is memoized, an Intents
+    record's inventory facts included, so unchanged Recovery, Intents and OwnerReceipts records
+    are no longer revalidated under custody either. The writer warms, M1's other half, wait on
+    Agent 2 and Agent 3, since five of the eight writer files are theirs.
+  - **Changed limitation, user-visible:** whether automatic receive refuses a vault at its
+    256 KiB cold rail now depends on history for every family, not only Registry and Studio. A
+    vault refused cold is admitted once its records are warm, a refused attempt warms what it
+    validated, and a remount makes the vault cold again.
+  - **Residual:** the memo keeps an Unconfirmed branch's provider device id, MLS epoch and
+    observation time resident for the mount's life, UI lock included. The same facts are in the
+    record on this device's disk.
+
 - **Gate 4 Agent 1: C-3 step 2, F1 and F4 (2026-10-09).**
   - **C-3 step 2:** replay's manual move now takes its storage budget from a shared, turn-based
     inventory job that keeps a cursor across custody visits, the first production path to do so.

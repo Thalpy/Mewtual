@@ -1806,3 +1806,54 @@ All 128 inventory tests pass.
 forced-warm token, M4's contract, MEDIUM-2's three gates and 15.9's L1, L4 and L5. Its residual
 risk from this review: each writer warm must land after its write's rename, in the same custody
 visit, or a scan completing between the two could prune the new record's warm entry.
+
+### 16.2 M1's memo half, built (2026-10-10)
+
+M1 has two halves.
+- **The memo half, here:** entirely in `inventory.rs` and `inventory/cache.rs`. 15.7 judged
+  memoizing every family sound on its own, without the warms.
+- **The writer half:** the warms at the eight writers, the forced-warm token and 15.9's M4
+  contract. Five of the eight writer files are Agent 2's or Agent 3's, so it waits on their
+  go-ahead.
+
+**What changed:**
+- **The value carries the facts.** A memo entry is the accounting record plus, for an Intents
+  record, its `EpochIntentInventoryFacts`; `get` returns both and `accounting_only` restores
+  both. `put_validated` (and `put_if_vacant`) take the facts and **refuse an entry of the wrong
+  shape**: an Intents entry without facts, or another family's with them. The refusal
+  `debug_assert`s and returns false. A fact-less Intents hit would undercount the Unconfirmed
+  tally and mint too generous a budget. `put` keeps its signature for the facts-less writer
+  paths (Registry and Studio, Agent 3's new `warm_registry_repair_inventory` included), so no
+  other agent's file changed.
+- **MEDIUM-2's three gates widened together:** the scan's `cacheable` (every family, accounting
+  mode only), `memoize`'s family gate (removed) and `evict_mismatch` on every family's read.
+- **L5:** the test helper `validated_clone` copies the facts.
+- **L4:** stale text corrected in THREAT-MODEL (twice), ARCHITECTURE, INTERFACES,
+  BACKEND-IMPLEMENTATION, design 9.2 consequence 2, `cache.rs`, and the docs of `memoize` and
+  `memoize_overtaken_inventory_result`.
+- **MEDIUM-4:** HANDOVER and THREAT-MODEL state that receive admission is history-dependent for
+  every family.
+
+**Tests, each guard broken on purpose:**
+
+| test | guards; the mutant that fails it |
+|---|---|
+| `c3_every_family_is_memoized_and_a_hit_restores_a_fresh_validation` (`performance.rs`; the five-family vault, and one with a Closing overlay branch whose facts carry provenance) | a second scan reuses every record, and its inventory (identity, accounting, Intents facts) equals a cold scan's; a reference scan reuses nothing. The lookup gate narrowed back to Registry and Studio fails it ("a record was validated again"); a hit that drops the facts trips the cache's shape refusal first, at the re-memoize; the old family gate fails it |
+| `a_budgeted_scan_memoizes_every_family` (renamed from `a_budgeted_scan_memoizes_only_registry_and_studio_records`, a recorded contract change) | a budgeted scan memoizes its Recovery, DraftArchive and Studio records, and a second reuses all three. The old family gate fails it |
+| `an_intents_entry_without_its_facts_is_refused`, `facts_on_another_familys_entry_are_refused` (`cache.rs`; `should_panic` under `debug_assertions`, a returned `false` otherwise) | the shape refusal; removing it fails both |
+| `a_stale_recovery_entry_is_evicted_so_a_refused_result_still_warms` | eviction on read for a family other than Registry and Studio; the old eviction gate fails it |
+| `c3_receive_admission_depends_on_what_is_warm_and_a_remount_resets_it` (three 100 KiB Recovery records) | MEDIUM-4's both directions: refused cold at the rail, admitted on the next attempt (the refused scan warmed what it validated), refused again after a remount. Before M1 the second step fails |
+
+**Two existing tests needed a cold scan restored**, a recorded precondition change rather than a
+loosening. `a_budgeted_scan_produces_the_same_inventory_as_an_unbudgeted_one` and
+`the_aggregate_byte_rail_still_refuses_after_a_record_has_been_parked_and_installed` each
+require every record cold, and an earlier scan in the same test now warms Recovery records too.
+Each empties the memo first, so each runs exactly the scan it was written for. A third,
+`studio_inventory_cache_never_skips_reference_enumeration`, asserted that a warm scan reused
+exactly one record, its Studio wrapper, when that was the only memoizable one. It now asserts that
+the warm scan reuses every record, the Studio wrapper among them (a recorded contract change); its
+reference-scan half, which reuses nothing, is unchanged.
+
+**Residual, recorded in THREAT-MODEL:** the memo keeps an Unconfirmed branch's provider device
+id, observed MLS epoch and observation time resident for the mount's life, UI lock included.
+The same facts are in that record on this device's disk; nothing leaves the device.

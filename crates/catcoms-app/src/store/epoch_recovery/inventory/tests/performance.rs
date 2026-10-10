@@ -1644,6 +1644,149 @@ fn c3_multi_family_scan_parks_records_from_several_families() {
     );
 }
 
+/// What an inventory says about each record, everything a memo hit must reproduce: identity,
+/// accounting, and Intents' inventory facts, which `EpochIntentBudget::from_inventory` builds the
+/// Unconfirmed tally from. Sorted, with the scan's reuse count.
+type Observed = (
+    EpochRecordKind,
+    u64,
+    [u8; 32],
+    [u8; 32],
+    (u64, u64, u64),
+    Option<crate::store::epoch_recovery::inventory::EpochIntentInventoryFacts>,
+);
+
+fn observe(store: &mut ServerStore, references: bool) -> (Vec<Observed>, usize) {
+    let mut scan = store.scan_epoch_files(REFERENCE_COVERAGE).unwrap();
+    if references {
+        scan.collect_creative_references().unwrap();
+    }
+    let mut progress = scan.step().unwrap();
+    while !progress.complete {
+        progress = scan.step().unwrap();
+    }
+    if references {
+        scan.finish_creative_references().unwrap();
+        return (Vec::new(), progress.reused_records);
+    }
+    let inventory = scan.finish().unwrap();
+    let mut observed: Vec<Observed> = inventory
+        .records()
+        .map(|entry| {
+            (
+                entry.kind,
+                entry.server,
+                entry.record.id,
+                entry.record.document,
+                (
+                    entry.record.footprint.content,
+                    entry.record.footprint.protocol,
+                    entry.record.footprint.settlement,
+                ),
+                entry.intent_facts(),
+            )
+        })
+        .collect();
+    observed.sort_by_key(|(kind, server, id, ..)| (*kind, *server, *id));
+    (observed, progress.reused_records)
+}
+
+/// C-3 runtime 15.2 (M1): every family's accounting validation is memoized, a second scan reuses
+/// every record, and what a hit restores is exactly what a fresh validation produced, Intents'
+/// facts included. Two vaults: the five-family one, and one holding a Closing overlay branch,
+/// whose Intents facts carry provenance, so a hit that dropped only that would be caught too.
+///
+/// And a reference scan memoizes but never consults the memo (15.9, L1): it must enumerate the
+/// actual CIDs, which no entry holds. Contract change, recorded: until M1 only Registry and
+/// Studio were memoized (see `a_budgeted_scan_memoizes_every_family`).
+#[test]
+fn c3_every_family_is_memoized_and_a_hit_restores_a_fresh_validation() {
+    let mut cases = vec![multi_family_case(CachePolicy::Fresh, false)];
+    cases.extend(intents_branch_cases(&[1], false));
+    for case in &mut cases {
+        let store = &mut case.store;
+        store.inventory_cache.clear_for_test();
+        let (fresh, cold_reuse) = observe(store, false);
+        assert_eq!(cold_reuse, 0, "{}: precondition: a cold scan", case.label);
+        assert!(
+            fresh
+                .iter()
+                .any(|(kind, .., facts)| *kind == EpochRecordKind::Intents && facts.is_some()),
+            "{}: precondition: an Intents record with its facts",
+            case.label
+        );
+        let families: std::collections::BTreeSet<_> = fresh.iter().map(|o| o.0).collect();
+        for family in &families {
+            assert!(
+                store.inventory_cache.entries_for_test(*family) >= 1,
+                "{}: no {family:?} record was memoized",
+                case.label
+            );
+        }
+
+        let (warm, reused) = observe(store, false);
+        assert_eq!(
+            reused,
+            fresh.len(),
+            "{}: a record was validated again",
+            case.label
+        );
+        assert_eq!(
+            warm, fresh,
+            "{}: a memo hit restored something other than a fresh validation",
+            case.label
+        );
+
+        let (_, reference_reuse) = observe(store, true);
+        assert_eq!(
+            reference_reuse, 0,
+            "{}: a reference scan consulted the memo",
+            case.label
+        );
+    }
+}
+
+/// C-3 runtime 15.9, MEDIUM-4: since M1, receive admission depends on history for every family.
+/// Warm bytes do not count against the receive profile's 256 KiB cold rail, which bounds the
+/// fresh validation one scan does, so a vault receive refuses cold is admitted once its records
+/// are warm. The refused scan itself warms what it validated before reaching the rail, so the next
+/// attempt has less fresh work. A remount starts the memo empty, so it refuses again.
+#[test]
+fn c3_receive_admission_depends_on_what_is_warm_and_a_remount_resets_it() {
+    let root = tempfile::tempdir().unwrap();
+    let mut store = open(root.path());
+    // Three Recovery records of about 100 KiB: under every receive rail but the cold one.
+    for n in 0..3 {
+        let key = format!("cold-{n}");
+        stage_sized(
+            &mut store,
+            7,
+            &document(b"group", key.as_bytes()),
+            100 * 1024,
+        );
+    }
+    store.inventory_cache.clear_for_test();
+    let receive = |store: &mut ServerStore| -> Result<(), AppError> {
+        let mut scan = store.scan_studio_receive_inventory()?;
+        while !scan.step()?.complete {}
+        scan.finish().map(|_| ())
+    };
+    let refused = |store: &mut ServerStore, when: &str| {
+        let error = receive(store).expect_err(when);
+        assert!(
+            error.to_string().contains("cold byte limit"),
+            "{when}: refused for another reason: {error}"
+        );
+    };
+
+    refused(&mut store, "a cold vault over the rail was admitted");
+    receive(&mut store).expect("the records the refused scan validated were not reused");
+
+    drop(store);
+    let mut store = open(root.path());
+    refused(&mut store, "a remount kept the memo");
+}
+
 /// 13.7's restart rate under concurrent writes - what an `EpochInventoryJob` does when the vault
 /// will not hold still.
 ///
