@@ -743,3 +743,27 @@ Nothing here is blocking, and none of it is a defect in the data plane. In rough
 4. **The presentation surfaces downstream of the timestamp sort**, which the clock-skew test
    deliberately stopped short of.
 5. **Correct `sync_frontier`'s ordering comment**, per above.
+
+### 11.1 Post-Gate-4 reuse and chat-hardening note
+
+Music, shared drawing and other live creative tools should not invent a second group protocol.
+They can reuse chat's MLS membership, signed transport envelopes, Automerge/gossip and paged
+catch-up for small live collaboration events. Large mutable projects, rendered assets and durable
+recovery should reuse Studio's bounded blobs, checkpoints, ownership/tenure rules and repair
+machinery. In other words: chat supplies the live room; Studio supplies the durable project.
+
+A higher-resolution Draw Together mode is therefore a format, chunking and resource-bound change,
+not a reason to duplicate identity or networking. It still needs explicit pixel/blob ceilings,
+bounded decode/render work and checkpoint/recovery tests before those larger limits are enabled.
+
+That reuse does not mean chat already has Studio's semantic depth. Keep these post-Gate-4 items
+explicit:
+
+- `THREAT-MODEL.md` R6: a modified client can still forge displayed message authors or raw
+  edit/delete/react/pin semantics because the signed delta is not yet bound to those meanings;
+- membership changes made independently on both sides of a partition remain untraced (section 8,
+  P2); and
+- a stranded membership chain is detected but has no desktop surface or safe repair/rejoin flow.
+
+These are later chat-hardening/product items. They are not retroactive Gate 4 blockers and should
+not be folded into native Studio exposure merely to make this gate larger.
