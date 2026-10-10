@@ -147,6 +147,22 @@ impl CatchupRuntime {
         // Its maintenance read refuses a Prepared destination with an error that pauses all of
         // receive; its resolution is already scheduled (see `handoff_prepared`). Move on.
         if Self::handoff_prepared(server, store, id, target) {
+            // But first resume the bucket's held owner decision, if any. That resume reads only
+            // the bucket and its owner record, never this document's source. A record stuck on
+            // Hold is never resolved, so skipping it here stranded the bucket's decision for as
+            // long as this was the only watched document in that bucket (Agent 1's note on the
+            // merge of PR #36). An error is recorded, never returned: this skip exists so that
+            // nothing here pauses receive.
+            if let Ok(key) = pointer(target, &server.group_id()) {
+                let bucket = key.bucket();
+                if !self.repair_claimed(CheckpointTarget::Registry(bucket)) {
+                    if let Err(error) =
+                        self.resume_registry_repair(server, store, id, target, bucket)
+                    {
+                        self.note_repair_failure_for(Some(target), &error);
+                    }
+                }
+            }
             self.registry_target = None;
             self.registry_selection = self.registry_selection.wrapping_add(1);
             return Ok(false);

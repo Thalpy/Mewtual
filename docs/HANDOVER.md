@@ -8,7 +8,17 @@ the protocol- vs honest-client-enforced boundary and the hardening backlog.
 [`MESSAGE-FLOW.md`](MESSAGE-FLOW.md) traces one message end to end (send, gossip, catch-up)
 and ranks the live hazards in that path.
 
-## Status (latest entry: 2026-10-09)
+## Status (latest entry: 2026-10-10)
+
+- **Gate 4 repair: PR #27 review MEDIUM-1 and two interface points (2026-10-10).** A repair job's
+  S3 now builds its storage budget only after installing (or, for a bucket, memoizing) the rebuild,
+  so a cold source over the receive scan's 256 KiB cold-byte limit commits instead of being
+  refused and discarded. A held Registry owner decision now resumes even while its bucket's only
+  watched document is stuck in a Prepared handoff, and (after the PR #37 review) a bucket whose
+  B3 guess already came to nothing resumes rather than refetching, so a landed install recycles
+  without the seed. The repair claim's comment and THREAT-MODEL
+  now name the writers that do not consult it (H5, Flow R's R3, Flow S, warm gossip ingest); S3's
+  digest recheck still catches them. Details are in `GATE4-AGENT-3-STATUS.md`.
 
 - **Gate 4 repair: real-peer Registry Flow D and plan D (2026-10-09).** A peer now takes a bucket
   repair from a real discovery answer and installs its network-fetched replacement through the

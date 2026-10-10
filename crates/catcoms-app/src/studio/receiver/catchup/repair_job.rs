@@ -58,8 +58,16 @@ impl RepairClaims {
         Some(claim)
     }
 
-    /// Whether a live repair job owns `target`. Consulted by every path that would otherwise
-    /// install into, receive into or rotate that source while the job is between S1 and S4.
+    /// Whether a live repair job owns `target` between S1 and S4. Consulted by ordinary installs,
+    /// page receive, owner rotation, preparation, foreground Apply and Registry maintenance.
+    ///
+    /// Not every writer consults it. Gossip ingest into an already warm source, Flow S, and the
+    /// handoff's commit (H5) and Flow R's commit (R3) write the Studio source without asking.
+    /// Nothing is corrupted: S3 rechecks the source's digest against disk, so any of those
+    /// writes makes the rebuild stale and the job writes nothing (`repair_stale`, a 5 s retry),
+    /// and R3 has its own stamp fallback. The cost is the wasted rebuild. Agent 1 records a
+    /// `repair_claimed` skip at the handoff probe's selection, and a hold at `handoff_commit`,
+    /// as a follow-up on its side.
     pub(super) fn claimed(&self, target: CheckpointTarget) -> bool {
         self.live
             .iter()
@@ -476,9 +484,10 @@ impl CatchupRuntime {
         }
     }
 
-    /// S3 and S4. Budget first, then install the rebuild, run the transaction, and drop the
-    /// ownership after the attempt. A failure holds this target only, or for an offered repair
-    /// only that repair: an offer is untrusted input and must not hold the target it names.
+    /// S3 and S4. Install the rebuild (or, for a bucket, recheck and memoize it), then build the
+    /// budget, run the transaction, and drop the ownership after the attempt. A failure holds this
+    /// target only, or for an offered repair only that repair: an offer is untrusted input and
+    /// must not hold the target it names.
     pub(super) fn repair_commit<T: MeshTransport, R: CryptoRngCore>(
         &mut self,
         server: &mut Server<T, R>,
@@ -489,16 +498,6 @@ impl CatchupRuntime {
             return Ok(None);
         }
         let now = server.runtime_clock().monotonic_ms();
-        let replace = self
-            .repair_job
-            .as_ref()
-            .is_some_and(|job| matches!(job.input, RepairInput::Replace { .. }));
-        // The install route keeps its existing budget, which saves the server snapshot first.
-        let budget = if replace {
-            Self::budget(server, store, id)
-        } else {
-            Self::inventory_budget(server, store, id)
-        };
         let RepairJob {
             target,
             failure_target,
@@ -510,23 +509,7 @@ impl CatchupRuntime {
             unreachable!("checked by repair_parked")
         };
         let offered = input.offered_repair();
-        let mut budget = match budget {
-            Ok(budget) => budget,
-            Err(error) => {
-                self.end_repair_job(target, failure_target, offered, &error, now);
-                return Ok(None);
-            }
-        };
-        let result = self.repair_execute(
-            server,
-            store,
-            id,
-            target,
-            failure_target,
-            input,
-            rebuilt,
-            &mut budget,
-        );
+        let result = self.repair_execute(server, store, id, target, failure_target, input, rebuilt);
         // S4: released only after the commit attempt returned, on success and error alike.
         drop(ownership);
         let Err(error) = result else {
@@ -541,6 +524,29 @@ impl CatchupRuntime {
         Ok(None)
     }
 
+    /// The commit's budget. The install route keeps its existing budget, which saves the server
+    /// snapshot first; every other route scans the inventory.
+    ///
+    /// Called only after the rebuild is installed (Studio) or memoized (a bucket), never before:
+    /// its inventory scan must find this job's record warm. S1's capture evicted the warm Studio
+    /// copy, so a budget built first validated that record inline, which the receive scan
+    /// refuses for a cold record over its cold-byte limit (`STUDIO_RECEIVE_COLD_BYTES`). The
+    /// rebuild S2 had already validated was then discarded and the target held (PR #27 review
+    /// MEDIUM-1, the ordering Flow R's design review raised as HIGH-2). A budget that fails after
+    /// the install leaves only the warm source behind, which is a cache: nothing relies on it.
+    fn commit_budget<T: MeshTransport, R: CryptoRngCore>(
+        server: &mut Server<T, R>,
+        store: &mut ServerStore,
+        id: u64,
+        input: &RepairInput,
+    ) -> Result<crate::store::EpochStudioBudget, AppError> {
+        if matches!(input, RepairInput::Replace { .. }) {
+            Self::budget(server, store, id)
+        } else {
+            Self::inventory_budget(server, store, id)
+        }
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn repair_execute<T: MeshTransport, R: CryptoRngCore>(
         &mut self,
@@ -551,7 +557,6 @@ impl CatchupRuntime {
         failure_target: Option<StudioTarget>,
         input: RepairInput,
         rebuilt: RepairRebuilt,
-        budget: &mut crate::store::EpochStudioBudget,
     ) -> Result<Option<StudioTarget>, AppError> {
         match (target, rebuilt) {
             (CheckpointTarget::Studio(studio), RepairRebuilt::Studio(prepared)) => {
@@ -561,6 +566,7 @@ impl CatchupRuntime {
                 if !installed {
                     return Ok(self.repair_stale(server, target, &input));
                 }
+                let budget = &mut Self::commit_budget(server, store, id, &input)?;
                 self.settlement
                     .note(studio, StudioSettlementState::RefreshRequired);
                 match input {
@@ -583,14 +589,16 @@ impl CatchupRuntime {
             }
             (CheckpointTarget::Registry(bucket), RepairRebuilt::Registry(prepared)) => {
                 // A bucket has no warm cache to install into: the rebuild itself goes to the
-                // transaction, which rechecks it again under this same custody. This read only
-                // tells a stale rebuild (ordinary, rerun soon) from a failure (held for 60 s).
+                // transaction, which rechecks it again under this same custody. This read tells a
+                // stale rebuild (ordinary, rerun soon) from a failure (held for 60 s), and memoizes
+                // the current rebuild's inventory footprint for the budget below.
                 let current = server.sync.with_registry_context(|g, d, _, _| {
-                    store.registry_repair_source_is_current(id, g, bucket, d, &prepared)
+                    store.warm_registry_repair_inventory(id, g, bucket, d, &prepared)
                 })?;
                 if !current {
                     return Ok(self.repair_stale(server, target, &input));
                 }
+                let budget = &mut Self::commit_budget(server, store, id, &input)?;
                 self.execute_registry(
                     server,
                     store,

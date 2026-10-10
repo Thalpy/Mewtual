@@ -575,6 +575,15 @@ impl CatchupRuntime {
             }),
         };
         match owes_only_seed {
+            // A guess from B3 already tried once (its fetch, or anything else, came to nothing)
+            // is not trusted again, exactly as for a cold Studio source: resume, and S3 classifies
+            // exactly. A bucket whose only watched document is Prepared never gets its provider
+            // prepared, so with a peer that never serves the seed it refetched forever, and an
+            // install already on disk was never recycled (PR #37 review MEDIUM-1). Reaching here,
+            // any deferral this bucket has has already run out.
+            Ok(true) if guessed && self.repair_visits.contains_key(&scope) => {
+                self.schedule_resume(server, store, id, scope, Some(target), now);
+            }
             Ok(true) => {
                 // B2 already crossed: a resume would only flush the same bucket again. Fetch the
                 // seed instead; only this bucket's own started fetch defers its next visit.
